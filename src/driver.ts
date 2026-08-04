@@ -24,6 +24,11 @@ import { NTError } from "./diagnostics.ts";
 // Embed the C runtime as text so a `bun build --compile` single executable is
 // self-contained (no runtime/runtime.c on disk needed at run time).
 import runtimeSource from "../runtime/runtime.c" with { type: "text" };
+// The v0 actor runtime (BEAM-style spawn/send/receive/self). Compiled + linked
+// into EVERY binary (libc + ucontext only, so it cross-links unchanged). Its
+// header is embedded alongside so the `#include "nt_actor.h"` resolves in temp.
+import actorSource from "../runtime/nt_actor.c" with { type: "text" };
+import actorHeader from "../runtime/nt_actor.h" with { type: "text" };
 
 export type Target = "host" | "ios" | "ios-sim" | "android";
 
@@ -76,13 +81,24 @@ function toolchainFor(target: Target): Toolchain {
   }
 }
 
-function writeIR(source: string): { dir: string; ll: string; rt: string } {
+function writeIR(source: string): { dir: string; ll: string; rt: string; actor: string | null } {
   const dir = mkdtempSync(join(tmpdir(), "nativets-build-"));
   const ll = join(dir, "module.ll");
-  writeFileSync(ll, sourceToIR(source));
+  const ir = sourceToIR(source);
+  writeFileSync(ll, ir);
   const rt = join(dir, "runtime.c");
   writeFileSync(rt, runtimeSource); // embedded runtime → self-contained executable
-  return { dir, ll, rt };
+  // Link the v0 actor runtime ONLY when the program uses actors (codegen emits the
+  // nt_sched_init prologue exactly then). It relies on ucontext (makecontext/
+  // swapcontext), which the Android NDK's Bionic does not declare at low API levels,
+  // so pulling it into every non-actor binary would break the Android cross-build.
+  let actor: string | null = null;
+  if (ir.includes("call void @nt_sched_init()")) {
+    actor = join(dir, "nt_actor.c");
+    writeFileSync(actor, actorSource);
+    writeFileSync(join(dir, "nt_actor.h"), actorHeader); // its header (quote-included)
+  }
+  return { dir, ll, rt, actor };
 }
 
 function run(cc: string, args: string[]): void {
@@ -92,10 +108,10 @@ function run(cc: string, args: string[]): void {
 
 export async function buildBinary(source: string, outPath: string, opts: { target?: Target } = {}): Promise<void> {
   const { cc, flags } = toolchainFor(opts.target ?? "host");
-  const { dir, ll, rt } = writeIR(source);
+  const { dir, ll, rt, actor } = writeIR(source);
   try {
     // -lm: libm is separate on Android NDK (fmod/floor/...); harmless on macOS/iOS.
-    run(cc, [...flags, ll, rt, "-lm", "-o", outPath]);
+    run(cc, [...flags, ll, rt, ...(actor ? [actor] : []), "-lm", "-o", outPath]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

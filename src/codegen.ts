@@ -25,6 +25,21 @@ export function llvmDouble(n: number): string {
   return "0x" + hex.toUpperCase();
 }
 
+const ACTOR_BUILTINS = new Set(["spawn", "send", "receive", "self", "__drain"]);
+
+/** Does the program call any actor builtin? (Drives the nt_sched_init prologue in
+ *  @main.) A structural walk over the plain-object AST — order/shape-agnostic. */
+function scanUsesActors(node: unknown): boolean {
+  if (node === null || typeof node !== "object") return false;
+  const n = node as Record<string, unknown>;
+  if (n.kind === "CallExpr") {
+    const callee = n.callee as Record<string, unknown> | undefined;
+    if (callee?.kind === "Identifier" && ACTOR_BUILTINS.has(callee.name as string)) return true;
+  }
+  for (const k in n) if (scanUsesActors(n[k])) return true;
+  return false;
+}
+
 function llvmTy(ty: Ty): string {
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty)) return "ptr";
   switch (ty) {
@@ -142,6 +157,13 @@ const DECLARES = [
   "declare ptr @nt_exc_message()",
   "declare void @nt_exc_clear()",
   "declare void @nt_exc_abort()",
+  // --- B3 v0 actors (spawn/send/receive/self) ---
+  "declare void @nt_sched_init()",
+  "declare i64 @nt_spawn_closure(ptr, ptr, i64)",
+  "declare void @nt_send_slot(i64, i64)",
+  "declare i64 @nt_receive_slot()",
+  "declare i64 @nt_self()",
+  "declare void @nt_drain()",
 ];
 
 interface Val { v: string; ty: Ty; }
@@ -162,6 +184,40 @@ class ModuleGen {
     return name;
   }
 
+  /** True if the program uses the actor surface (spawn/send/receive/self/__drain).
+   *  When set, @main is prefixed with nt_sched_init() so actor 0 (main) exists. */
+  usesActors = false;
+  private actorEntries = new Map<string, string>();
+
+  /** Lazily emit a generic actor-entry trampoline for a message of LLVM-arg type
+   *  `argTy` and return its symbol. It reads the closure fn ptr from env slot 0
+   *  and calls `body(env, arg)`, converting the raw i64 slot to the param type —
+   *  decoupling the actor ABI (void(ptr,i64)) from the arrow ABI. */
+  actorEntry(argTy: Ty): string {
+    const key = llvmTy(argTy);
+    const existing = this.actorEntries.get(key);
+    if (existing) return existing;
+    const name = `nt_actor_entry_${this.actorEntries.size}`;
+    this.actorEntries.set(key, name);
+    // slot(i64) -> param: number is a bit-cast double; heap types are inttoptr.
+    const conv = argTy === "number"
+      ? `%arg = bitcast i64 %slot to double`
+      : `%arg = inttoptr i64 %slot to ptr`;
+    this.liftedFns.push(
+      [
+        `define void @${name}(ptr %env, i64 %slot) {`,
+        `L:`,
+        `  %fpi = load i64, ptr %env`,
+        `  %fp = inttoptr i64 %fpi to ptr`,
+        `  ${conv}`,
+        `  call void %fp(ptr %env, ${llvmTy(argTy)} %arg)`,
+        `  ret void`,
+        `}`,
+      ].join("\n"),
+    );
+    return name;
+  }
+
   intern(s: string): string {
     const existing = this.strings.get(s);
     if (existing) return existing;
@@ -173,6 +229,7 @@ class ModuleGen {
   }
 
   build(program: CheckedProgram["program"]): string {
+    this.usesActors = scanUsesActors(program);
     const fns: string[] = [];
     for (const s of program.body) {
       if (s.kind === "FuncDecl") fns.push(new FnGen(this).genFunction(s));
@@ -365,6 +422,8 @@ class FnGen {
     this.collectLocals(body);
     const b0 = this.block(this.label("L"));
     this.to(b0);
+    // Bring up the v0 actor scheduler + actor 0 (main) before any actor call.
+    if (this.mod.usesActors) this.emit(`call void @nt_sched_init()`);
     this.genStmts(body);
     if (!this.terminated) { this.emitDrops(endDrops); this.terminate("ret i32 0"); }
     return this.assemble("define i32 @main()", b0);
@@ -1631,6 +1690,42 @@ class FnGen {
       case "move": return this.genExpr(args[0]!); // ownership marker; runtime identity
       case "__arrLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_live()`); return { v: t, ty: "number" }; }
       case "__objLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_obj_live()`); return { v: t, ty: "number" }; }
+
+      // --- B3 v0 actors ---
+      case "spawn": {
+        // spawn(body, arg): body is a closure value; message rides in an i64 slot.
+        const fn = this.genExpr(args[0]!);              // ptr: [fn_ptr, caps...]
+        const argTy = funcParams(fn.ty)[0] ?? "number"; // the body's message type
+        const entry = this.mod.actorEntry(argTy);
+        const slot = this.toSlot(this.genExpr(args[1]!));
+        const pidI = this.fresh();
+        this.emit(`${pidI} = call i64 @nt_spawn_closure(ptr @${entry}, ptr ${fn.v}, i64 ${slot})`);
+        const pid = this.fresh();
+        this.emit(`${pid} = sitofp i64 ${pidI} to double`);
+        return { v: pid, ty: "number" };
+      }
+      case "send": {
+        const pidV = this.genExpr(args[0]!).v;          // double
+        const pidI = this.fresh();
+        this.emit(`${pidI} = fptosi double ${pidV} to i64`);
+        const slot = this.toSlot(this.genExpr(args[1]!));
+        this.emit(`call void @nt_send_slot(i64 ${pidI}, i64 ${slot})`);
+        return { v: "", ty: "void" };
+      }
+      case "receive": {
+        const slot = this.fresh();
+        this.emit(`${slot} = call i64 @nt_receive_slot()`);
+        return { v: this.fromSlot(slot, "number"), ty: "number" }; // v0: number messages
+      }
+      case "self": {
+        const p = this.fresh();
+        this.emit(`${p} = call i64 @nt_self()`);
+        const d = this.fresh();
+        this.emit(`${d} = sitofp i64 ${p} to double`);
+        return { v: d, ty: "number" };
+      }
+      case "__drain": { this.emit(`call void @nt_drain()`); return { v: "", ty: "void" }; }
+
       default: return null;
     }
   }
