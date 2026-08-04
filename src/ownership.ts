@@ -14,9 +14,12 @@
  * as moved at the loop head (a re-move on the next iteration is flagged).
  *
  * Error codes (NT16xx band, mapping to Rust's E-codes):
- *   NT1601  use of moved value            (≈ E0382)
- * Deferred to phase 2: NT1602 move-while-borrowed (E0505), NT1603 borrow
- * exclusivity (E0499/E0502), and move-out-of-borrow/array/Drop (E0507/8/9).
+ *   NT1601  use of moved value               (≈ E0382)
+ *   NT1602  move while borrowed               (≈ E0505)
+ *   NT1603  mutate while borrowed / iter-inval(≈ E0502)
+ *   NT1604  move out of borrowed content      (≈ E0507) — a for-of element or by-borrow param
+ *   NT1605  move out of a linear array element(≈ E0508) — `arr[i]` where the element is linear
+ * Deferred: move-out-of-borrow for the general (non-for-of) borrow, and Drop-typed moves (E0509).
  */
 
 import type { CheckedProgram } from "./checker.ts";
@@ -30,6 +33,8 @@ export const OWN_CODES = {
   USE_AFTER_MOVE: "NT1601",      // ≈ E0382
   MOVE_WHILE_BORROWED: "NT1602", // ≈ E0505
   MUTATE_WHILE_BORROWED: "NT1603", // ≈ E0502 (iterator invalidation)
+  MOVE_OUT_OF_BORROW: "NT1604",  // ≈ E0507 (move out of a for-of element / by-borrow param)
+  MOVE_OUT_OF_ARRAY: "NT1605",   // ≈ E0508 (move out of a linear array element `arr[i]`)
 } as const;
 
 /** Methods that mutate an array in place (so they conflict with a live borrow). */
@@ -57,6 +62,16 @@ function sameMoves(a: State, b: State): boolean {
 }
 function assignInto(dst: State, src: State): void { dst.clear(); for (const [k, v] of src) dst.set(k, v); }
 
+/** Best-effort source line of an expression (dig through member/index/call to a located leaf). */
+function lineOf(e: Expr): number {
+  switch (e.kind) {
+    case "Identifier": return e.loc?.line ?? 0;
+    case "MemberExpr": case "IndexExpr": return lineOf(e.object);
+    case "CallExpr": return lineOf(e.callee);
+    default: return 0;
+  }
+}
+
 function isMoveCall(e: Expr): boolean {
   return e.kind === "CallExpr" && e.callee.kind === "Identifier" && e.callee.name === "move";
 }
@@ -64,7 +79,13 @@ function isMoveCall(e: Expr): boolean {
 class Analyzer {
   readonly diags: OwnDiag[] = [];
   private collecting = true;
-  constructor(private linear: Set<string>, private topLevel: string[]) {}
+  constructor(private linear: Set<string>, private topLevel: string[], paramBorrows: string[] = []) {
+    for (const p of paramBorrows) this.borrowBindings.add(p);
+  }
+
+  /** Names bound to a BORROW rather than owned: by-borrow params (whole scope) and for-of
+   *  loop variables over a LINEAR element (loop body). Moving out of any is E0507 (NT1604). */
+  private borrowBindings = new Set<string>();
 
   /** Arrays currently borrowed by an enclosing for-of (lexical, count for nesting). */
   private borrowed = new Map<string, number>();
@@ -123,7 +144,12 @@ class Analyzer {
         // for-of holds a borrow of a linear array for the whole loop body.
         const bv = s.iterable.kind === "Identifier" && this.linear.has(s.iterable.name) ? s.iterable.name : null;
         if (bv) this.pushBorrow(bv);
+        // If the element type is linear, the loop var only BORROWS each element —
+        // moving it out of the loop is E0507 (NT1604).
+        const elemBorrow = s.elemTy !== undefined && isLinearTy(s.elemTy);
+        if (elemBorrow) this.borrowBindings.add(s.name);
         this.loop(state, (st) => { this.seq(s.body, st); });
+        if (elemBorrow) this.borrowBindings.delete(s.name);
         if (bv) this.popBorrow(bv);
         return;
       }
@@ -174,6 +200,11 @@ class Analyzer {
   private expr(e: Expr, state: State, consume: boolean): void {
     switch (e.kind) {
       case "Identifier": {
+        // Moving out of a borrowed binding (by-borrow param / for-of element) is E0507.
+        if (consume && this.borrowBindings.has(e.name)) {
+          this.report({ code: OWN_CODES.MOVE_OUT_OF_BORROW, message: `cannot move out of \`${e.name}\`: it is borrowed (the owner is elsewhere)`, line: e.loc?.line ?? 0 });
+          return;
+        }
         if (!this.linear.has(e.name)) return;
         const st = state.get(e.name);
         if (st?.moved) {
@@ -207,7 +238,15 @@ class Analyzer {
         if (this.linear.has(e.target)) state.set(e.target, { moved: false }); // reassignment revives
         return;
       case "MemberExpr": this.expr(e.object, state, false); return;
-      case "IndexExpr": this.expr(e.object, state, false); this.expr(e.index, state, false); return;
+      case "IndexExpr":
+        // Reading `arr[i]` in a CONSUMING position (binding / return / move) when the element
+        // type is LINEAR would move an element out of the array, leaving a hole — E0508.
+        // A Copy element (number[]/string[]) is a plain read; a field/method access through the
+        // index is a borrow (consume=false) — both stay legal.
+        if (consume && e.ty !== undefined && isLinearTy(e.ty)) {
+          this.report({ code: OWN_CODES.MOVE_OUT_OF_ARRAY, message: `cannot move out of array element (its element type is linear)`, line: lineOf(e.object) });
+        }
+        this.expr(e.object, state, false); this.expr(e.index, state, false); return;
       case "BinaryExpr": this.expr(e.left, state, false); this.expr(e.right, state, false); return;
       case "LogicalExpr": this.expr(e.left, state, false); this.expr(e.right, state, false); return;
       case "UnaryExpr": this.expr(e.operand, state, false); return;
@@ -258,7 +297,9 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     // are borrowed, the caller owns them).
     const topLevel: string[] = [];
     for (const s of body) if (s.kind === "VarDecl") for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) topLevel.push(d.name);
-    const a = new Analyzer(linear, topLevel);
+    // Linear params are BORROWED (the caller owns + drops them) — moving one out is E0507.
+    const paramBorrows = params.filter((p) => isLinearTy(p.ty)).map((p) => p.name);
+    const a = new Analyzer(linear, topLevel, paramBorrows);
     const st: State = new Map(params.filter((p) => isLinearTy(p.ty)).map((p) => [p.name, { moved: false }]));
     a.seq(body, st);
     diags.push(...a.diags);
