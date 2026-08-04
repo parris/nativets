@@ -135,6 +135,8 @@ const DECLARES = [
   "declare i32 @nt_dyn_require_array(ptr)",
   "declare double @nt_dyn_len(ptr)",
   "declare ptr @nt_dyn_elem(ptr, double)",
+  "declare ptr @nt_dyn_get_field(ptr, ptr)",
+  "declare void @nt_dyn_print(ptr)",
   "declare i32 @nt_exc_pending()",
   "declare ptr @nt_exc_message()",
   "declare void @nt_exc_clear()",
@@ -805,6 +807,17 @@ class FnGen {
 
       case "IndexExpr": {
         const obj = this.genExpr(e.object);
+        if (obj.ty === "Dyn") { // dynamic element (numeric) or field (string literal) -> Dyn
+          if (e.index.kind === "StringLiteral") {
+            const t = this.fresh();
+            this.emit(`${t} = call ptr @nt_dyn_get_field(ptr ${obj.v}, ptr ${this.mod.intern(e.index.value)})`);
+            return { v: t, ty: "Dyn" };
+          }
+          const idx = this.genExpr(e.index);
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @nt_dyn_elem(ptr ${obj.v}, double ${idx.v})`);
+          return { v: t, ty: "Dyn" };
+        }
         if (isObjectTy(obj.ty)) {
           // object["key"] — string-literal index is a static field (checker-enforced)
           const key = (e.index as Extract<Expr, { kind: "StringLiteral" }>).value;
@@ -901,6 +914,11 @@ class FnGen {
 
       case "MemberExpr": {
         const obj = this.genExpr(e.object);
+        if (obj.ty === "Dyn") { // dynamic field access: nt_dyn_get_field returns a Dyn
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @nt_dyn_get_field(ptr ${obj.v}, ptr ${this.mod.intern(e.property)})`);
+          return { v: t, ty: "Dyn" };
+        }
         if (e.property === "length" && (obj.ty === "string" || isArrayTy(obj.ty))) {
           const t = this.fresh();
           if (obj.ty === "string") this.emit(`${t} = call double @js_str_len(ptr ${obj.v})`);
@@ -1291,6 +1309,7 @@ class FnGen {
         this.emit(`call void @js_print_bool(i32 ${z})`);
       } else if (val.ty === "undefined") this.emit(`call void @js_print_str(ptr ${this.mod.intern("undefined")})`);
       else if (val.ty === "null") this.emit(`call void @js_print_str(ptr ${this.mod.intern("null")})`);
+      else if (val.ty === "Dyn") this.emit(`call void @nt_dyn_print(ptr ${val.v})`);
       else this.emit(`call void @js_print_str(ptr ${val.v})`);
     });
     this.emit(`call void @js_print_newline()`);

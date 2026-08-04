@@ -620,7 +620,7 @@ int32_t nt_dyn_require_object(NtDyn *d) {
   if (!d || d->tag != DYN_OBJ) { nt_exc_raise("TypeError: expected object"); return 0; }
   return 1;
 }
-static NtDyn *dyn_get_field(NtDyn *d, const char *key) {
+NtDyn *nt_dyn_get_field(NtDyn *d, const char *key) {
   if (!d || d->tag != DYN_OBJ) return NULL;
   NtDynObj *o = (NtDynObj *)d->obj;
   NtDyn *found = NULL;
@@ -628,7 +628,7 @@ static NtDyn *dyn_get_field(NtDyn *d, const char *key) {
   return found;
 }
 NtDyn *nt_dyn_require_field(NtDyn *d, const char *key) {
-  NtDyn *f = dyn_get_field(d, key);
+  NtDyn *f = nt_dyn_get_field(d, key);
   if (!f) { nt_exc_raise("TypeError: missing or wrong-typed field"); return NULL; }
   return f;
 }
@@ -645,4 +645,17 @@ double nt_dyn_len(NtDyn *d) {
 NtDyn *nt_dyn_elem(NtDyn *d, double i) {
   if (!d || d->tag != DYN_ARR) return NULL;
   return (NtDyn *)(intptr_t)nt_arr_get((NtArray *)d->arr, i);
+}
+
+/* console.log of an un-narrowed Dyn: scalars print like node; compound values
+ * (arrays/objects) would need util.inspect emulation (deferred, danger zone D5). */
+void nt_dyn_print(NtDyn *d) {
+  if (!d) { fputs("undefined", stdout); return; }
+  switch (d->tag) {
+    case DYN_NUM:  fputs(js_num_to_str(d->num), stdout); break;
+    case DYN_BOOL: fputs(d->boolean ? "true" : "false", stdout); break;
+    case DYN_STR:  fputs(d->str, stdout); break;
+    case DYN_NULL: fputs("null", stdout); break;
+    default:       fputs("[object]", stdout); break;
+  }
 }

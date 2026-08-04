@@ -270,6 +270,7 @@ class Checker {
         if ((e as any).optional) throw nyi(NYI.OPTIONAL_CHAIN, "optional chaining (?.)");
         const ot = this.type(e.object, scope);
         if ((ot === "string" || isArrayTy(ot)) && e.property === "length") return "number";
+        if (ot === "Dyn") return "Dyn"; // dynamic field access — runtime tag check
         if (isObjectTy(ot)) {
           const ft = fieldType(ot, e.property);
           if (!ft) throw typeError(`Property '${e.property}' does not exist on ${ot}`);
@@ -279,6 +280,7 @@ class Checker {
       }
       case "IndexExpr": {
         const ot = this.type(e.object, scope);
+        if (ot === "Dyn") { this.type(e.index, scope); return "Dyn"; } // dynamic element/field — runtime tag check
         if (isObjectTy(ot)) {
           if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
           const ft = fieldType(ot, e.index.value);

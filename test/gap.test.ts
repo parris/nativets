@@ -28,7 +28,6 @@ const KNOWN_UNSUPPORTED = new Set([
   // first-class functions + closures supported ✅ except nested function types:
   "higher-order-compose",
   "optional-chaining", // needs nested objects + optional fields
-  "json-roundtrip", // JSON.parse (dynamic)
 ]);
 const MIN_SUPPORTED = cases.length - KNOWN_UNSUPPORTED.size;
 
