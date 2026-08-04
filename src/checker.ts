@@ -55,6 +55,8 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   String: { min: 1, max: 1, argTys: [null], ret: "string" },
   __arrLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live array count
 };
+/** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
+const ACTOR_BUILTINS = new Set(["spawn", "send", "receive", "self", "__drain"]);
 
 export function check(program: Program): CheckedProgram {
   const functions = new Map<string, Sig>();
@@ -423,6 +425,38 @@ class Checker {
     if (e.callee.kind === "Identifier" && e.callee.name === "move") {
       if (e.args.length !== 1) throw typeError("move() takes exactly one argument");
       return this.type(e.args[0]!, scope);
+    }
+
+    // B3 v0 actor surface — spawn / send / receive / self / __drain.
+    // v0 messages are `number` (the future `Dyn` grows this). Not shadowable by a
+    // user binding of the same name (these are recognized like Math.*/console.log).
+    if (e.callee.kind === "Identifier" && ACTOR_BUILTINS.has(e.callee.name) && !scope.lookup(e.callee.name)) {
+      const name = e.callee.name;
+      if (name === "receive" || name === "self") {
+        if (e.args.length !== 0) throw typeError(`${name}() takes no arguments`);
+        return name === "self" ? "number" : "number"; // v0: number pid / message
+      }
+      if (name === "__drain") {
+        if (e.args.length !== 0) throw typeError("__drain() takes no arguments");
+        return "void";
+      }
+      if (name === "send") {
+        if (e.args.length !== 2) throw typeError("send(to, msg) takes two arguments");
+        if (this.type(e.args[0]!, scope) !== "number") throw typeError("send: pid must be a number");
+        if (this.type(e.args[1]!, scope) !== "number") throw nyi(NYI.CLOSURE, "send of a non-number message (v0 actors carry number messages)");
+        return "void";
+      }
+      // spawn(body, arg): body is (msg) => void; returns the new pid (number).
+      const expected = makeFuncTy(["number"], "void"); // v0 message type
+      const bodyTy = this.typeArg(e.args[0]!, expected, scope);
+      if (!isFuncTy(bodyTy) || funcParams(bodyTy).length !== 1) throw typeError("spawn: body must be a one-argument function");
+      // The body's return value is ignored (the actor entry trampoline discards it),
+      // so any inferred return type is fine — nativets defaults empty blocks to number.
+      const msgTy = funcParams(bodyTy)[0]!;
+      if (msgTy !== "number") throw nyi(NYI.CLOSURE, "spawn body with a non-number message (v0 actors carry number messages)");
+      if (e.args.length !== 2) throw typeError("spawn(body, arg) takes two arguments");
+      if (this.type(e.args[1]!, scope) !== msgTy) throw typeError(`spawn: arg type must match the body's parameter (${msgTy})`);
+      return "number"; // pid
     }
 
     // JSON.stringify(x) / JSON.parse(s): Dyn

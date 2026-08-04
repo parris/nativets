@@ -52,6 +52,11 @@ typedef struct NtActor {
   NtStatus    status;
   NtActorFn   entry;
   NtMsg       entry_arg;
+  /* compiler-facing closure entry (see nt_spawn_closure); is_closure selects it */
+  int         is_closure;
+  NtClosureFn centry;
+  void       *cenv;
+  int64_t     carg;
   ucontext_t  ctx;
   char       *stack;
   NtMboxNode *mbox_head, *mbox_tail;   /* FIFO mailbox */
@@ -165,7 +170,8 @@ static NtActor *actor_alloc(int with_stack) {
 /* actor entry trampoline: runs the body, marks the actor dead, returns to sched */
 static void actor_trampoline(void) {
   NtActor *self = g_current;
-  self->entry(self->entry_arg);
+  if (self->is_closure) self->centry(self->cenv, self->carg);  /* compiler ABI */
+  else                  self->entry(self->entry_arg);          /* NtMsg ABI */
   self->status = NT_DEAD;
   /* hand control back to the scheduler; we never resume */
   swapcontext(&self->ctx, &g_sched_ctx);
@@ -275,4 +281,39 @@ NtPid nt_whereis(const char *name) {
   for (int i = 0; i < g_nreg; i++)
     if (strcmp(g_reg[i].name, name) == 0) return g_reg[i].pid;
   return 0;   /* absent */
+}
+
+/* ======================= compiler-facing ABI ======================= */
+/* Same scheduler as above; a spawned body is a closure `body(env, arg)` and
+ * messages are raw i64 slots. For v0 (number messages) the slot carries a bit-
+ * cast double and needs no deep copy; when `Dyn` messages land the compiler
+ * deep-copies the value before nt_send_slot (reusing the JSON.stringify-style
+ * walk / nt_dyn_deepcopy), preserving the isolation contract. */
+
+NtPid nt_spawn_closure(NtClosureFn body, void *env, int64_t arg) {
+  NtActor *a = actor_alloc(/*with_stack=*/1);
+  a->is_closure = 1;
+  a->centry = body;
+  a->cenv = env;
+  a->carg = arg;                    /* v0: raw slot, no copy needed */
+  a->status = NT_RUNNABLE;
+
+  getcontext(&a->ctx);
+  a->ctx.uc_stack.ss_sp = a->stack;
+  a->ctx.uc_stack.ss_size = NT_STACK_SIZE;
+  a->ctx.uc_link = &g_sched_ctx;
+  makecontext(&a->ctx, actor_trampoline, 0);
+
+  rq_push(a->pid);
+  return a->pid;
+}
+
+void nt_send_slot(NtPid to, int64_t slot) {
+  /* route through nt_send so the wake / FIFO logic stays in one place; the slot
+   * rides in an NT_INT whose deep-copy is identity. */
+  nt_send(to, nt_int(slot));
+}
+
+int64_t nt_receive_slot(void) {
+  return nt_receive().u.i;
 }

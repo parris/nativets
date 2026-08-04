@@ -69,4 +69,24 @@ void   nt_drain(void);                      /* run scheduler until the run queue
 void  nt_register(const char *name, NtPid pid);
 NtPid nt_whereis(const char *name);         /* 0 if absent (pid 0 == main is never registered) */
 
+/* ============================================================================
+ * Compiler-facing ABI (added by the language-wiring lane, B3 v0).
+ *
+ * The nativets compiler lambda-lifts arrows to `@arrow_N(ptr env, params)` and
+ * represents a message as its universal 8-byte slot (an i64: a `double` bit-cast
+ * for numbers, a pointer-as-int for heap values / the future `Dyn`). These entry
+ * points expose the SAME v0 scheduler above to codegen without disturbing the
+ * NtMsg struct API (which the C-level test harness still exercises):
+ *
+ *   - a spawned body is a closure `void body(void *env, int64_t arg)` — codegen
+ *     passes a small generic trampoline plus the closure block as `env`;
+ *   - send/receive move raw i64 slots (deep-copy is a no-op for v0 number
+ *     messages; for `Dyn` the compiler copies before send — see the .c FLAG).
+ * ========================================================================== */
+typedef void (*NtClosureFn)(void *env, int64_t arg);
+
+NtPid   nt_spawn_closure(NtClosureFn body, void *env, int64_t arg); /* returns new pid */
+void    nt_send_slot(NtPid to, int64_t slot);                        /* enqueue a raw slot */
+int64_t nt_receive_slot(void);                                        /* block; FIFO dequeue slot */
+
 #endif /* NT_ACTOR_H */
