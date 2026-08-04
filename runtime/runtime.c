@@ -464,12 +464,66 @@ static NtDyn *json_number(JP *j) {
   return d;
 }
 
+/* Parse a JSON string (cursor at the opening quote). Handles the eight two-char
+ * escapes and \uXXXX BMP code points (UTF-8-encoded). Surrogate pairs and embedded
+ * NUL are deferred danger zones (D2/D6). Rejects unescaped controls / bad escapes. */
+static NtDyn *json_string(JP *j) {
+  j->p++; /* opening quote */
+  SB sb; sb_init(&sb);
+  for (;;) {
+    unsigned char c = (unsigned char)*j->p;
+    if (c == '"') { j->p++; break; }
+    if (c == '\0') { json_fail(); return NULL; }        /* unterminated */
+    if (c < 0x20) { json_fail(); return NULL; }         /* unescaped control char */
+    if (c == '\\') {
+      char e = *(++j->p);
+      switch (e) {
+        case '"':  sb_append(&sb, "\"", 1); j->p++; break;
+        case '\\': sb_append(&sb, "\\", 1); j->p++; break;
+        case '/':  sb_append(&sb, "/", 1);  j->p++; break;
+        case 'b':  sb_append(&sb, "\b", 1); j->p++; break;
+        case 'f':  sb_append(&sb, "\f", 1); j->p++; break;
+        case 'n':  sb_append(&sb, "\n", 1); j->p++; break;
+        case 'r':  sb_append(&sb, "\r", 1); j->p++; break;
+        case 't':  sb_append(&sb, "\t", 1); j->p++; break;
+        case 'u': {
+          j->p++;
+          int cp = 0;
+          for (int i = 0; i < 4; i++) {
+            char h = *j->p, v;
+            if (h >= '0' && h <= '9') v = h - '0';
+            else if (h >= 'a' && h <= 'f') v = h - 'a' + 10;
+            else if (h >= 'A' && h <= 'F') v = h - 'A' + 10;
+            else { json_fail(); return NULL; }
+            cp = cp * 16 + v; j->p++;
+          }
+          if (cp < 0x80) { char b = (char)cp; sb_append(&sb, &b, 1); }
+          else if (cp < 0x800) { char b[2] = {(char)(0xC0 | (cp >> 6)), (char)(0x80 | (cp & 0x3F))}; sb_append(&sb, b, 2); }
+          else { char b[3] = {(char)(0xE0 | (cp >> 12)), (char)(0x80 | ((cp >> 6) & 0x3F)), (char)(0x80 | (cp & 0x3F))}; sb_append(&sb, b, 3); }
+          break;
+        }
+        default: json_fail(); return NULL;              /* unknown escape */
+      }
+    } else {
+      sb_append(&sb, (const char *)&c, 1);
+      j->p++;
+    }
+  }
+  NtDyn *d = dyn_new(DYN_STR);
+  d->str = (char *)sb_finish(&sb);
+  return d;
+}
+
 static NtDyn *json_value(JP *j) {
   json_ws(j);
   char c = *j->p;
   if (c == '-' || (c >= '0' && c <= '9')) return json_number(j);
+  if (c == '"') return json_string(j);
+  if (c == 't') { if (strncmp(j->p, "true", 4) == 0)  { j->p += 4; NtDyn *d = dyn_new(DYN_BOOL); d->boolean = 1; return d; } json_fail(); return NULL; }
+  if (c == 'f') { if (strncmp(j->p, "false", 5) == 0) { j->p += 5; NtDyn *d = dyn_new(DYN_BOOL); d->boolean = 0; return d; } json_fail(); return NULL; }
+  if (c == 'n') { if (strncmp(j->p, "null", 4) == 0)  { j->p += 4; return dyn_new(DYN_NULL); } json_fail(); return NULL; }
   json_fail();
-  return NULL; /* unreachable */
+  return NULL;
 }
 
 NtDyn *nt_json_parse(const char *s) {
@@ -484,4 +538,14 @@ NtDyn *nt_json_parse(const char *s) {
 double nt_dyn_as_number(NtDyn *d) {
   if (!d || d->tag != DYN_NUM) { nt_exc_raise("TypeError: expected number"); return 0.0; }
   return d->num;
+}
+
+int32_t nt_dyn_as_bool(NtDyn *d) {
+  if (!d || d->tag != DYN_BOOL) { nt_exc_raise("TypeError: expected boolean"); return 0; }
+  return d->boolean;
+}
+
+const char *nt_dyn_as_string(NtDyn *d) {
+  if (!d || d->tag != DYN_STR) { nt_exc_raise("TypeError: expected string"); return ""; }
+  return d->str;
 }

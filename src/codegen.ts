@@ -128,6 +128,8 @@ const DECLARES = [
   "declare ptr @js_json_quote(ptr)",
   "declare ptr @nt_json_parse(ptr)",
   "declare double @nt_dyn_as_number(ptr)",
+  "declare i32 @nt_dyn_as_bool(ptr)",
+  "declare ptr @nt_dyn_as_string(ptr)",
   "declare i32 @nt_exc_pending()",
   "declare ptr @nt_exc_message()",
   "declare void @nt_exc_clear()",
@@ -1157,6 +1159,20 @@ class FnGen {
       this.emit(`${t} = call double @nt_dyn_as_number(ptr ${dyn})`);
       this.emitExcCheck();
       return { v: t, ty: "number" };
+    }
+    if (target === "boolean") {
+      const t = this.fresh();
+      this.emit(`${t} = call i32 @nt_dyn_as_bool(ptr ${dyn})`);
+      this.emitExcCheck();
+      const b = this.fresh();
+      this.emit(`${b} = trunc i32 ${t} to i1`);
+      return { v: b, ty: "boolean" };
+    }
+    if (target === "string") {
+      const t = this.fresh();
+      this.emit(`${t} = call ptr @nt_dyn_as_string(ptr ${dyn})`);
+      this.emitExcCheck();
+      return { v: t, ty: "string" };
     }
     throw nyi(NYI.JSON, `narrowing a dynamic value to ${target}`);
   }
