@@ -54,6 +54,7 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   Number: { min: 1, max: 1, argTys: [null], ret: "number" },
   String: { min: 1, max: 1, argTys: [null], ret: "string" },
   __arrLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live array count
+  __objLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live object count
 };
 
 export function check(program: Program): CheckedProgram {

@@ -121,6 +121,7 @@ const DECLARES = [
   "declare double @nt_arr_live()",
   "declare ptr @nt_obj_new(double)",
   "declare void @nt_obj_free(ptr)",
+  "declare double @nt_obj_live()",
   "declare ptr @nt_str_split(ptr, ptr)",
   "declare ptr @nt_arr_reverse(ptr)",
   "declare ptr @nt_arr_slice(ptr, double, double)",
@@ -282,7 +283,9 @@ class FnGen {
     for (const n of names) {
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr %${n}.addr`);
-      this.emit(`call void @nt_arr_free(ptr ${p})`);
+      // Move-aware RAII: objects free via nt_obj_free, arrays via nt_arr_free.
+      const free = isObjectTy(this.varTypes.get(n) ?? "number") ? "nt_obj_free" : "nt_arr_free";
+      this.emit(`call void @${free}(ptr ${p})`);
     }
   }
 
@@ -1627,6 +1630,7 @@ class FnGen {
       case "String": return { v: this.coerceToString(this.genExpr(args[0]!)), ty: "string" };
       case "move": return this.genExpr(args[0]!); // ownership marker; runtime identity
       case "__arrLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_live()`); return { v: t, ty: "number" }; }
+      case "__objLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_obj_live()`); return { v: t, ty: "number" }; }
       default: return null;
     }
   }

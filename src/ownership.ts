@@ -21,7 +21,10 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
-import { isArrayTy } from "./ast.ts";
+import { isArrayTy, isObjectTy } from "./ast.ts";
+
+/** The linear (single-owner, move-checked + dropped) types: heap aggregates. */
+function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t); }
 
 export const OWN_CODES = {
   USE_AFTER_MOVE: "NT1601",      // ≈ E0382
@@ -83,7 +86,7 @@ class Analyzer {
       case "VarDecl":
         for (const d of s.decls) {
           this.expr(d.init, state, true);
-          if (isArrayTy(d.ty ?? "number")) state.set(d.name, { moved: false });
+          if (isLinearTy(d.ty ?? "number")) state.set(d.name, { moved: false });
         }
         return;
       case "ExprStmt": this.expr(s.expr, state, false); return;
@@ -231,7 +234,7 @@ class Analyzer {
 function collectLinear(stmts: Stmt[], out: Set<string>): void {
   for (const s of stmts) {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) if (isArrayTy(d.ty ?? "number")) out.add(d.name); break;
+      case "VarDecl": for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out.add(d.name); break;
       case "IfStmt": collectLinear(s.consequent, out); if (s.alternate) collectLinear(s.alternate, out); break;
       case "WhileStmt": case "DoWhileStmt": collectLinear(s.body, out); break;
       case "ForStmt": if (s.init && (s.init as any).kind === "VarDecl") collectLinear([s.init as Stmt], out); collectLinear(s.body, out); break;
@@ -249,14 +252,14 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
 
   const runScope = (body: Stmt[], params: { name: string; ty: import("./ast.ts").Ty }[]): string[] => {
     const linear = new Set<string>();
-    for (const p of params) if (isArrayTy(p.ty)) linear.add(p.name);
+    for (const p of params) if (isLinearTy(p.ty)) linear.add(p.name);
     collectLinear(body, linear);
     // Droppable = linear locals declared directly in this scope (NOT params — those
     // are borrowed, the caller owns them).
     const topLevel: string[] = [];
-    for (const s of body) if (s.kind === "VarDecl") for (const d of s.decls) if (isArrayTy(d.ty ?? "number")) topLevel.push(d.name);
+    for (const s of body) if (s.kind === "VarDecl") for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) topLevel.push(d.name);
     const a = new Analyzer(linear, topLevel);
-    const st: State = new Map(params.filter((p) => isArrayTy(p.ty)).map((p) => [p.name, { moved: false }]));
+    const st: State = new Map(params.filter((p) => isLinearTy(p.ty)).map((p) => [p.name, { moved: false }]));
     a.seq(body, st);
     diags.push(...a.diags);
     return a.ownedTopLevel(st);
