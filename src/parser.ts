@@ -411,12 +411,38 @@ class Parser {
 
   private parseAssign(): Expr {
     if (this.looksLikeArrow()) return this.parseArrow();
-    const left = this.parseConditional();
+    const left = this.parsePipe();
     const t = this.peek();
     if (t.type === "punct" && ASSIGN_OPS.has(t.value)) {
       if (left.kind !== "Identifier") throw parseError("Invalid assignment target");
       const op = this.next().value as any;
       return { kind: "AssignExpr", op, target: left.name, value: this.parseAssign() };
+    }
+    return left;
+  }
+
+  // Pipeline `|>` — the LOOSEST expression operator (below assignment's RHS,
+  // looser than `?:`/logical/comparison/bitwise/arithmetic). Left-associative.
+  // Pure desugar (Elixir semantics): `x |> f(a)` ≡ `f(x, a)` — the left operand
+  // is threaded as the FIRST argument of the right-hand CALL. So:
+  //   `a + b |> f()`        → f(a + b)      (arithmetic on the LHS groups first)
+  //   `a |> f(b) |> g(c)`   → g(f(a, b), c) (left-assoc: value flows left→right)
+  // The RHS must be a call whose callee is a plain function (named fn or a
+  // function-typed value) — a non-call RHS, or a member-callee (`obj.m()`), is a
+  // parse error rather than a guess.
+  private parsePipe(): Expr {
+    let left = this.parseConditional();
+    while (this.at("|>")) {
+      const op = this.next();
+      const rhs = this.parseConditional();
+      if (rhs.kind !== "CallExpr") {
+        throw parseError(`Right side of '|>' must be a call (e.g. \`x |> f()\`) at ${op.line}:${op.col}`);
+      }
+      if (rhs.callee.kind !== "Identifier") {
+        throw parseError(`'|>' target must be a named function or function-valued variable (member/method callees are unsupported) at ${op.line}:${op.col}`);
+      }
+      // Thread the piped value into argument slot 0; written args shift right.
+      left = { ...rhs, args: [left, ...rhs.args] };
     }
     return left;
   }
