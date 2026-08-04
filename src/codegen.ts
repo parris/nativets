@@ -15,6 +15,7 @@ import { isConsoleLog } from "./checker.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
+import { nyi, NYI } from "./diagnostics.ts";
 
 export function llvmDouble(n: number): string {
   const dv = new DataView(new ArrayBuffer(8));
@@ -30,6 +31,7 @@ function llvmTy(ty: Ty): string {
     case "number": return "double";
     case "boolean": return "i1";
     case "string": return "ptr";
+    case "Dyn": return "ptr"; // heap-boxed tagged value from JSON.parse
     case "void": return "void";
     default: return "i8"; // undefined | null — unit value; the static type carries meaning
   }
@@ -124,6 +126,8 @@ const DECLARES = [
   "declare ptr @nt_arr_slice(ptr, double, double)",
   "declare void @nt_arr_extend(ptr, ptr)",
   "declare ptr @js_json_quote(ptr)",
+  "declare ptr @nt_json_parse(ptr)",
+  "declare double @nt_dyn_as_number(ptr)",
 ];
 
 interface Val { v: string; ty: Ty; }
@@ -1069,7 +1073,12 @@ class FnGen {
         return { v: t, ty: "number" };
       }
 
-      case "AsExpr": return { v: this.genExpr(e.expr).v, ty: e.ty }; // identity retype
+      case "AsExpr": {
+        // Narrowing a dynamic value (`dyn as T`) emits a runtime validator that
+        // checks the tag and unboxes; a plain `expr as Type` is an identity retype.
+        if (e.expr.ty === "Dyn") return this.genDynNarrow(this.genExpr(e.expr).v, e.ty);
+        return { v: this.genExpr(e.expr).v, ty: e.ty };
+      }
       case "NewExpr": {
         // new Error(msg) → object { message: msg }
         const msg = this.genExpr(e.args[0]!);
@@ -1088,7 +1097,14 @@ class FnGen {
     if (isConsoleLog(e)) return this.genConsoleLog(e.args);
 
     // JSON.stringify(x) — serialization generated from x's static type.
+    // JSON.parse(s) — runtime recursive-descent parser producing a tagged Dyn box.
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "JSON") {
+      if (e.callee.property === "parse") {
+        const s = this.genExpr(e.args[0]!);
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_json_parse(ptr ${s.v})`);
+        return { v: t, ty: "Dyn" };
+      }
       return this.genJsonStringify(this.genExpr(e.args[0]!));
     }
 
@@ -1123,6 +1139,20 @@ class FnGen {
     const ct = e.callee.ty;
     if (ct && isFuncTy(ct)) return this.genCallValueFrom(this.genExpr(e.callee).v, ct, e.args);
     throw new Error("Unsupported call target in codegen");
+  }
+
+  /**
+   * Narrow a Dyn box (ptr) to a static type `target`, emitting a runtime validator
+   * that throws (native TypeError) on a tag/shape mismatch and hands back a value of
+   * `target`'s LLVM type. io-ts/zod semantics generated from the static type.
+   */
+  private genDynNarrow(dyn: string, target: Ty): Val {
+    if (target === "number") {
+      const t = this.fresh();
+      this.emit(`${t} = call double @nt_dyn_as_number(ptr ${dyn})`);
+      return { v: t, ty: "number" };
+    }
+    throw nyi(NYI.JSON, `narrowing a dynamic value to ${target}`);
   }
 
   /** Call a function VALUE (closure ptr already computed): indirect call through slot 0. */

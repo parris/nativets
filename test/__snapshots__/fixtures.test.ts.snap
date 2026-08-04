@@ -61,6 +61,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -134,6 +136,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -211,6 +215,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -285,6 +291,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -359,6 +367,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -434,6 +444,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -510,6 +522,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -589,6 +603,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define double @dbl(double %n) {
 entry:
@@ -677,6 +693,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -751,6 +769,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define double @arrow_0(ptr %__clo, double %n) {
 entry:
@@ -968,6 +988,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define double @arrow_0(ptr %__clo) {
 entry:
@@ -1114,6 +1136,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [6 x i8] c"a,b,c\\00"
 @.str.1 = private unnamed_addr constant [2 x i8] c",\\00"
@@ -1228,6 +1252,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"Bob\\00"
@@ -1424,6 +1450,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
 
@@ -1616,6 +1644,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [4 x i8] c"Ada\\00"
 @.str.1 = private unnamed_addr constant [2 x i8] c"x\\00"
@@ -1818,6 +1848,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [9 x i8] c"hi there\\00"
 @.str.1 = private unnamed_addr constant [2 x i8] c"[\\00"
@@ -2107,6 +2139,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [4 x i8] c"neg\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"ok \\00"
@@ -2254,6 +2288,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define double @arrow_1(ptr %__clo, double %x) {
 entry:
@@ -2454,6 +2490,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -2541,6 +2579,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define double @fib(double %n) {
 entry:
@@ -2644,6 +2684,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [5 x i8] c"even\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"odd\\00"
@@ -2733,6 +2775,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -2843,6 +2887,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -2936,6 +2982,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -2962,6 +3010,88 @@ body2:
 endwhile3:
   %t7 = load double, ptr %sum.addr
   call void @js_print_num(double %t7)
+  call void @js_print_newline()
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures stage20/json-parse-number.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+
+@.str.0 = private unnamed_addr constant [2 x i8] c"5\\00"
+
+define i32 @main() {
+entry:
+  %n.addr = alloca double
+  br label %L0
+L0:
+  %t0 = call ptr @nt_json_parse(ptr @.str.0)
+  %t1 = call double @nt_dyn_as_number(ptr %t0)
+  store double %t1, ptr %n.addr
+  %t2 = load double, ptr %n.addr
+  call void @js_print_num(double %t2)
   call void @js_print_newline()
   ret i32 0
 }
@@ -3029,6 +3159,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [4 x i8] c"foo\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"bar\\00"
@@ -3108,6 +3240,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [6 x i8] c"hello\\00"
 
@@ -3184,6 +3318,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [6 x i8] c"world\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"hi \\00"
@@ -3274,6 +3410,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -3359,6 +3497,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -3454,6 +3594,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -3540,6 +3682,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [7 x i8] c"number\\00"
 @.str.1 = private unnamed_addr constant [7 x i8] c"string\\00"
@@ -3621,6 +3765,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -3722,6 +3868,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -3824,6 +3972,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 define i32 @main() {
 entry:
@@ -3915,6 +4065,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [2 x i8] c"-\\00"
 @.str.1 = private unnamed_addr constant [3 x i8] c"hi\\00"
@@ -4085,6 +4237,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [4 x i8] c"Ada\\00"
 @.str.1 = private unnamed_addr constant [2 x i8] c"x\\00"
@@ -4266,6 +4420,8 @@ declare ptr @nt_arr_reverse(ptr)
 declare ptr @nt_arr_slice(ptr, double, double)
 declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
 
 @.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
 

@@ -5,7 +5,7 @@
  * fills in; codegen reads it to choose LLVM types/instructions.
  */
 
-export type ScalarTy = "number" | "boolean" | "string" | "void" | "undefined" | "null";
+export type ScalarTy = "number" | "boolean" | "string" | "void" | "undefined" | "null" | "Dyn";
 /**
  * Array types: `${elem}[]` (e.g. "number[]").
  * Object types: `{k1:t1,k2:t2}` in field-insertion order (e.g. "{name:string,age:number}").

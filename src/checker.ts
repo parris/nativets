@@ -423,8 +423,12 @@ class Checker {
       return this.type(e.args[0]!, scope);
     }
 
-    // JSON.stringify(x)
+    // JSON.stringify(x) / JSON.parse(s): Dyn
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "JSON") {
+      if (e.callee.property === "parse") {
+        if (e.args.length !== 1 || this.type(e.args[0]!, scope) !== "string") throw typeError("JSON.parse(text: string)");
+        return "Dyn";
+      }
       if (e.callee.property !== "stringify") throw nyi(NYI.JSON, `JSON.${e.callee.property}`);
       if (e.args.length !== 1) throw typeError("JSON.stringify expects 1 argument");
       this.type(e.args[0]!, scope);

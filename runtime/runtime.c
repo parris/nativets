@@ -393,3 +393,81 @@ const char *js_json_quote(const char *s) {
   sb_append(&sb, "\"", 1);
   return sb_finish(&sb);
 }
+
+/* ---- JSON.parse -> tagged dynamic value (Dyn) ----
+ *
+ * A Dyn is a heap-boxed tagged value. `nt_json_parse` is a recursive-descent
+ * parser over RFC 8259 JSON; on any syntax error it exits non-zero with empty
+ * stdout (node throws SyntaxError uncaught → exit 1; the stderr message text is a
+ * documented divergence — we match exit code + empty stdout). A `dyn as T`
+ * narrowing calls one of the nt_dyn_as_* validators, which throw (exit 1) on a
+ * tag mismatch. Grown red-green in JSONTestSuite order: scalars first.
+ */
+enum { DYN_NULL = 0, DYN_BOOL = 1, DYN_NUM = 2, DYN_STR = 3, DYN_ARR = 4, DYN_OBJ = 5 };
+typedef struct NtDyn {
+  int32_t tag;
+  double num;      /* DYN_NUM */
+  int32_t boolean; /* DYN_BOOL */
+  char *str;       /* DYN_STR */
+  void *arr;       /* DYN_ARR (NtArray* of NtDyn*) */
+  void *obj;       /* DYN_OBJ */
+} NtDyn;
+
+typedef struct { const char *p; } JP;
+
+static void json_fail(void) {
+  fputs("nativets: SyntaxError: invalid JSON\n", stderr);
+  exit(1);
+}
+
+static void json_ws(JP *j) {
+  while (*j->p == ' ' || *j->p == '\t' || *j->p == '\n' || *j->p == '\r') j->p++;
+}
+
+static NtDyn *dyn_new(int tag) {
+  NtDyn *d = (NtDyn *)nativets_alloc(sizeof(NtDyn));
+  d->tag = tag; d->num = 0; d->boolean = 0; d->str = NULL; d->arr = NULL; d->obj = NULL;
+  return d;
+}
+
+static NtDyn *json_number(JP *j) {
+  const char *start = j->p;
+  if (*j->p == '-') j->p++;
+  if (*j->p == '0') j->p++;                                    /* 0 — no leading-zero run */
+  else if (*j->p >= '1' && *j->p <= '9') { while (*j->p >= '0' && *j->p <= '9') j->p++; }
+  else json_fail();                                            /* -foo, -, +1, .5 */
+  if (*j->p == '.') { j->p++; if (!(*j->p >= '0' && *j->p <= '9')) json_fail(); while (*j->p >= '0' && *j->p <= '9') j->p++; }
+  if (*j->p == 'e' || *j->p == 'E') {
+    j->p++;
+    if (*j->p == '+' || *j->p == '-') j->p++;
+    if (!(*j->p >= '0' && *j->p <= '9')) json_fail();
+    while (*j->p >= '0' && *j->p <= '9') j->p++;
+  }
+  NtDyn *d = dyn_new(DYN_NUM);
+  d->num = strtod(start, NULL);                                /* ±overflow → ±Inf, matches node */
+  return d;
+}
+
+static NtDyn *json_value(JP *j) {
+  json_ws(j);
+  char c = *j->p;
+  if (c == '-' || (c >= '0' && c <= '9')) return json_number(j);
+  json_fail();
+  return NULL; /* unreachable */
+}
+
+NtDyn *nt_json_parse(const char *s) {
+  JP j; j.p = s;
+  NtDyn *d = json_value(&j);
+  json_ws(&j);
+  if (*j.p != '\0') json_fail();                               /* trailing garbage / second value */
+  return d;
+}
+
+double nt_dyn_as_number(NtDyn *d) {
+  if (!d || d->tag != DYN_NUM) {
+    fputs("nativets: TypeError: expected number\n", stderr);
+    exit(1);
+  }
+  return d->num;
+}

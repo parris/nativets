@@ -11,3 +11,6 @@ bun.lockb
 
 # compiled single-executable
 /nativets
+
+# git worktrees for parallel agents (managed by git, not tracked)
+.claude/worktrees/
