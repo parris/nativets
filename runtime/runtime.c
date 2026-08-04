@@ -514,11 +514,55 @@ static NtDyn *json_string(JP *j) {
   return d;
 }
 
+/* A parsed JSON object: insertion-ordered key/value pairs (duplicate keys allowed;
+ * lookup returns the last, matching node). Backs DYN_OBJ via d->obj. */
+typedef struct { int32_t len; char **keys; NtDyn **vals; } NtDynObj;
+
+static NtDyn *json_value(JP *j); /* forward decl (json_object recurses through it) */
+
+static NtDyn *json_object(JP *j) {
+  j->p++; /* { */
+  json_ws(j);
+  int cap = 4, len = 0;
+  char **keys = (char **)nativets_alloc(cap * sizeof(char *));
+  NtDyn **vals = (NtDyn **)nativets_alloc(cap * sizeof(NtDyn *));
+  if (*j->p == '}') { j->p++; }
+  else for (;;) {
+    json_ws(j);
+    if (*j->p != '"') { json_fail(); return NULL; }            /* key must be a string */
+    NtDyn *k = json_string(j);
+    if (g_exc_set) return NULL;
+    json_ws(j);
+    if (*j->p != ':') { json_fail(); return NULL; }
+    j->p++;
+    NtDyn *v = json_value(j);
+    if (g_exc_set) return NULL;
+    if (len == cap) {
+      cap *= 2;
+      char **nk = (char **)nativets_alloc(cap * sizeof(char *));
+      NtDyn **nv = (NtDyn **)nativets_alloc(cap * sizeof(NtDyn *));
+      memcpy(nk, keys, len * sizeof(char *)); memcpy(nv, vals, len * sizeof(NtDyn *));
+      keys = nk; vals = nv;
+    }
+    keys[len] = k->str; vals[len] = v; len++;
+    json_ws(j);
+    if (*j->p == ',') { j->p++; continue; }
+    if (*j->p == '}') { j->p++; break; }
+    json_fail(); return NULL;                                   /* missing comma / bad separator */
+  }
+  NtDynObj *o = (NtDynObj *)nativets_alloc(sizeof(NtDynObj));
+  o->len = len; o->keys = keys; o->vals = vals;
+  NtDyn *d = dyn_new(DYN_OBJ);
+  d->obj = o;
+  return d;
+}
+
 static NtDyn *json_value(JP *j) {
   json_ws(j);
   char c = *j->p;
   if (c == '-' || (c >= '0' && c <= '9')) return json_number(j);
   if (c == '"') return json_string(j);
+  if (c == '{') return json_object(j);
   if (c == 't') { if (strncmp(j->p, "true", 4) == 0)  { j->p += 4; NtDyn *d = dyn_new(DYN_BOOL); d->boolean = 1; return d; } json_fail(); return NULL; }
   if (c == 'f') { if (strncmp(j->p, "false", 5) == 0) { j->p += 5; NtDyn *d = dyn_new(DYN_BOOL); d->boolean = 0; return d; } json_fail(); return NULL; }
   if (c == 'n') { if (strncmp(j->p, "null", 4) == 0)  { j->p += 4; return dyn_new(DYN_NULL); } json_fail(); return NULL; }
@@ -548,4 +592,23 @@ int32_t nt_dyn_as_bool(NtDyn *d) {
 const char *nt_dyn_as_string(NtDyn *d) {
   if (!d || d->tag != DYN_STR) { nt_exc_raise("TypeError: expected string"); return ""; }
   return d->str;
+}
+
+/* Object validators (NULL-safe: a raised pending exception makes later calls
+ * return sentinels harmlessly; the generated `as T` does one exc check at the end). */
+int32_t nt_dyn_require_object(NtDyn *d) {
+  if (!d || d->tag != DYN_OBJ) { nt_exc_raise("TypeError: expected object"); return 0; }
+  return 1;
+}
+static NtDyn *dyn_get_field(NtDyn *d, const char *key) {
+  if (!d || d->tag != DYN_OBJ) return NULL;
+  NtDynObj *o = (NtDynObj *)d->obj;
+  NtDyn *found = NULL;
+  for (int i = 0; i < o->len; i++) if (strcmp(o->keys[i], key) == 0) found = o->vals[i]; /* last wins */
+  return found;
+}
+NtDyn *nt_dyn_require_field(NtDyn *d, const char *key) {
+  NtDyn *f = dyn_get_field(d, key);
+  if (!f) { nt_exc_raise("TypeError: missing or wrong-typed field"); return NULL; }
+  return f;
 }

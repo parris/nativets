@@ -130,6 +130,8 @@ const DECLARES = [
   "declare double @nt_dyn_as_number(ptr)",
   "declare i32 @nt_dyn_as_bool(ptr)",
   "declare ptr @nt_dyn_as_string(ptr)",
+  "declare i32 @nt_dyn_require_object(ptr)",
+  "declare ptr @nt_dyn_require_field(ptr, ptr)",
   "declare i32 @nt_exc_pending()",
   "declare ptr @nt_exc_message()",
   "declare void @nt_exc_clear()",
@@ -1154,16 +1156,26 @@ class FnGen {
    * `target`'s LLVM type. io-ts/zod semantics generated from the static type.
    */
   private genDynNarrow(dyn: string, target: Ty): Val {
+    const v = this.genDynValidate(dyn, target);
+    this.emitExcCheck(); // one check after the whole (possibly nested) validation
+    return v;
+  }
+
+  /**
+   * Recursively emit the validator for `target` against the Dyn `dyn`, producing a
+   * value in `target`'s normal representation. Emits NO exception check — the
+   * runtime validators are NULL-safe and raise a sticky pending flag on mismatch,
+   * so genDynNarrow checks once at the end (before any use of the result).
+   */
+  private genDynValidate(dyn: string, target: Ty): Val {
     if (target === "number") {
       const t = this.fresh();
       this.emit(`${t} = call double @nt_dyn_as_number(ptr ${dyn})`);
-      this.emitExcCheck();
       return { v: t, ty: "number" };
     }
     if (target === "boolean") {
       const t = this.fresh();
       this.emit(`${t} = call i32 @nt_dyn_as_bool(ptr ${dyn})`);
-      this.emitExcCheck();
       const b = this.fresh();
       this.emit(`${b} = trunc i32 ${t} to i1`);
       return { v: b, ty: "boolean" };
@@ -1171,8 +1183,22 @@ class FnGen {
     if (target === "string") {
       const t = this.fresh();
       this.emit(`${t} = call ptr @nt_dyn_as_string(ptr ${dyn})`);
-      this.emitExcCheck();
       return { v: t, ty: "string" };
+    }
+    if (isObjectTy(target)) {
+      const fields = objectFields(target);
+      this.emit(`${this.fresh()} = call i32 @nt_dyn_require_object(ptr ${dyn})`);
+      const obj = this.fresh();
+      this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(Math.max(fields.length, 1))})`);
+      fields.forEach((f, i) => {
+        const fd = this.fresh();
+        this.emit(`${fd} = call ptr @nt_dyn_require_field(ptr ${dyn}, ptr ${this.mod.intern(f.key)})`);
+        const fv = this.genDynValidate(fd, f.ty);
+        const gep = this.fresh();
+        this.emit(`${gep} = getelementptr i64, ptr ${obj}, i64 ${i}`);
+        this.emit(`store i64 ${this.toSlot(fv)}, ptr ${gep}`);
+      });
+      return { v: obj, ty: target };
     }
     throw nyi(NYI.JSON, `narrowing a dynamic value to ${target}`);
   }
