@@ -72,6 +72,21 @@ export function funcParams(t: Ty): Ty[] {
 export function funcRet(t: Ty): Ty { return t.slice(topArrow(t) + 2) as Ty; }
 export function makeFuncTy(params: Ty[], ret: Ty): Ty { return `(${params.join(",")})=>${ret}` as Ty; }
 
+/**
+ * Immutable collection encodings (B2). Kept DISTINCT from object/array/func/
+ * nullable: `Map<K,V>` and `Set<T>` start with `Map<`/`Set<` and end with `>`,
+ * so none of `isObjectTy` (`{`), `isArrayTy` (`[]`), `isFuncTy` (`(`…`=>`),
+ * `isNullableTy` (`?U`/`?N`) ever match them. Both are heap handles (`NtMap*`),
+ * lowered to `ptr`; their ops are immutable (return a NEW handle).
+ */
+export function isMapTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("Map<") && t.endsWith(">"); }
+export function isSetTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("Set<") && t.endsWith(">"); }
+export function makeMapTy(k: Ty, v: Ty): Ty { return `Map<${k},${v}>` as Ty; }
+export function makeSetTy(el: Ty): Ty { return `Set<${el}>` as Ty; }
+export function mapKeyTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[0] as Ty; }
+export function mapValTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[1] as Ty; }
+export function setElemTy(t: Ty): Ty { return t.slice(4, -1) as Ty; }
+
 export function isObjectTy(t: Ty): boolean { return typeof t === "string" && !isNullableTy(t) && t.startsWith("{") && !t.endsWith("[]"); }
 /** Parse an object type into ordered [key, type] fields (nesting-aware). */
 export function objectFields(t: Ty): { key: string; ty: Ty }[] {
@@ -209,7 +224,7 @@ export interface AssignExpr {
 export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
 
 export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; ty?: Ty; }
-export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; ty?: Ty; }
+export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
 
 /** Arrow function. `captures` (filled by the checker) are free vars closed over. */

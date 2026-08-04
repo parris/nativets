@@ -93,10 +93,24 @@ class Parser {
     if (this.at("(")) base = this.parseFuncType();
     else if (this.at("{")) base = this.parseObjectType();
     else if (this.at("[")) base = this.parseTupleType();
-    else { const id = this.expectIdent(); base = (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty; }
+    else {
+      const id = this.expectIdent();
+      if ((id === "Map" || id === "Set") && this.at("<")) {
+        const a = this.parseTypeArgs();
+        base = (id === "Map" ? `Map<${a[0] ?? "string"},${a[1] ?? "number"}>` : `Set<${a[0] ?? "string"}>`) as Ty;
+      } else base = (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty;
+    }
     let suffix = "";
     while (this.at("[")) { this.eat("["); this.eat("]"); suffix += "[]"; } // T[], T[][]
     return (base + suffix) as Ty;
+  }
+  // generic type-argument list `<T, U>` (Map/Set only in this subset)
+  private parseTypeArgs(): Ty[] {
+    this.eat("<");
+    const tys: Ty[] = [];
+    if (!this.at(">")) { do { tys.push(this.parseType()); } while (this.at(",") && (this.eat(","), true)); }
+    this.eat(">");
+    return tys;
   }
   // tuple type `[T, U, ...]` — modeled as an array of the first element type
   private parseTupleType(): Ty {
@@ -502,11 +516,14 @@ class Parser {
     if (this.at("new")) {
       this.eat("new");
       const callee = this.expectIdent();
+      const typeArgs = this.at("<") ? this.parseTypeArgs() : undefined; // new Map<K,V>() / new Set<T>()
       this.eat("(");
       const args: Expr[] = [];
       if (!this.at(")")) { args.push(this.parseAssign()); while (this.at(",")) { this.eat(","); args.push(this.parseAssign()); } }
       this.eat(")");
-      return { kind: "NewExpr", callee, args };
+      // Route the constructed value through postfix so `new Map().set(...)`,
+      // `new Set().add(x).has(x)`, `err.message`, etc. chain like any primary.
+      return this.parsePostfix({ kind: "NewExpr", callee, args, typeArgs });
     }
     if (this.at("++") || this.at("--")) {
       const op = this.next().value as "++" | "--";
@@ -517,8 +534,8 @@ class Parser {
     return this.parsePostfix();
   }
 
-  private parsePostfix(): Expr {
-    let expr = this.parsePrimary();
+  private parsePostfix(start?: Expr): Expr {
+    let expr = start ?? this.parsePrimary();
     for (;;) {
       if (this.at(".")) {
         this.eat(".");

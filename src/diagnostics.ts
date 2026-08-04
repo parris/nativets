@@ -43,6 +43,7 @@ export const NYI = {
   FOR_OF_NONSTRING: { code: "NT1011", milestone: "M1", hint: "for-of currently supports strings only" },
   CLASS: { code: "NT1012", milestone: "M3", hint: "classes are not implemented" },
   GENERIC: { code: "NT1013", milestone: "M3", hint: "generics need monomorphization" },
+  COLLECTION: { code: "NT1014", milestone: "M3", hint: "immutable Map/Set support string keys + number values (Map) / string|number elems (Set)" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
