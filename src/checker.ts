@@ -300,7 +300,7 @@ class Checker {
         });
         const first = tys[0]!;
         if (!tys.every((t) => t === first)) throw typeError(`array elements must share a type (got ${[...new Set(tys)].join(", ")})`);
-        if (first !== "number" && first !== "string" && first !== "boolean") throw nyi(NYI.ARRAY, `arrays of ${first}`);
+        if (first !== "number" && first !== "string" && first !== "boolean" && !isObjectTy(first) && !isArrayTy(first)) throw nyi(NYI.ARRAY, `arrays of ${first}`);
         return `${first}[]`;
       }
       case "ObjectLiteral": {
@@ -678,7 +678,7 @@ class Checker {
       if (bodyTy !== "boolean") throw typeError(".filter callback must return boolean");
       return `${el}[]`;
     }
-    if (bodyTy !== "number" && bodyTy !== "string" && bodyTy !== "boolean") throw nyi(NYI.ARRAY, `.map producing ${bodyTy}`);
+    if (bodyTy !== "number" && bodyTy !== "string" && bodyTy !== "boolean" && !isObjectTy(bodyTy) && !isArrayTy(bodyTy)) throw nyi(NYI.ARRAY, `.map producing ${bodyTy}`);
     return `${bodyTy}[]`;
   }
 
