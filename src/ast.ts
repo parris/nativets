@@ -52,7 +52,7 @@ export function funcParams(t: Ty): Ty[] {
 export function funcRet(t: Ty): Ty { return t.slice(topArrow(t) + 2) as Ty; }
 export function makeFuncTy(params: Ty[], ret: Ty): Ty { return `(${params.join(",")})=>${ret}` as Ty; }
 
-export function isObjectTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("{"); }
+export function isObjectTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("{") && !t.endsWith("[]"); }
 /** Parse an object type into ordered [key, type] fields (nesting-aware). */
 export function objectFields(t: Ty): { key: string; ty: Ty }[] {
   const inner = t.slice(1, -1);

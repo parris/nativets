@@ -557,12 +557,32 @@ static NtDyn *json_object(JP *j) {
   return d;
 }
 
+static NtDyn *json_array(JP *j) {
+  j->p++; /* [ */
+  json_ws(j);
+  NtArray *a = nt_arr_new(4);
+  if (*j->p == ']') { j->p++; }
+  else for (;;) {
+    NtDyn *v = json_value(j);
+    if (g_exc_set) return NULL;
+    nt_arr_push(a, (int64_t)(intptr_t)v);                      /* element Dyn ptr in the slot */
+    json_ws(j);
+    if (*j->p == ',') { j->p++; continue; }
+    if (*j->p == ']') { j->p++; break; }
+    json_fail(); return NULL;                                   /* missing comma / bad separator */
+  }
+  NtDyn *d = dyn_new(DYN_ARR);
+  d->arr = a;
+  return d;
+}
+
 static NtDyn *json_value(JP *j) {
   json_ws(j);
   char c = *j->p;
   if (c == '-' || (c >= '0' && c <= '9')) return json_number(j);
   if (c == '"') return json_string(j);
   if (c == '{') return json_object(j);
+  if (c == '[') return json_array(j);
   if (c == 't') { if (strncmp(j->p, "true", 4) == 0)  { j->p += 4; NtDyn *d = dyn_new(DYN_BOOL); d->boolean = 1; return d; } json_fail(); return NULL; }
   if (c == 'f') { if (strncmp(j->p, "false", 5) == 0) { j->p += 5; NtDyn *d = dyn_new(DYN_BOOL); d->boolean = 0; return d; } json_fail(); return NULL; }
   if (c == 'n') { if (strncmp(j->p, "null", 4) == 0)  { j->p += 4; return dyn_new(DYN_NULL); } json_fail(); return NULL; }
@@ -611,4 +631,18 @@ NtDyn *nt_dyn_require_field(NtDyn *d, const char *key) {
   NtDyn *f = dyn_get_field(d, key);
   if (!f) { nt_exc_raise("TypeError: missing or wrong-typed field"); return NULL; }
   return f;
+}
+
+/* Array validators (NULL-safe, same sticky-raise contract as the object ones). */
+int32_t nt_dyn_require_array(NtDyn *d) {
+  if (!d || d->tag != DYN_ARR) { nt_exc_raise("TypeError: expected array"); return 0; }
+  return 1;
+}
+double nt_dyn_len(NtDyn *d) {
+  if (!d || d->tag != DYN_ARR) return 0;
+  return nt_arr_len((NtArray *)d->arr);
+}
+NtDyn *nt_dyn_elem(NtDyn *d, double i) {
+  if (!d || d->tag != DYN_ARR) return NULL;
+  return (NtDyn *)(intptr_t)nt_arr_get((NtArray *)d->arr, i);
 }

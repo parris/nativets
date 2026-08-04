@@ -132,6 +132,9 @@ const DECLARES = [
   "declare ptr @nt_dyn_as_string(ptr)",
   "declare i32 @nt_dyn_require_object(ptr)",
   "declare ptr @nt_dyn_require_field(ptr, ptr)",
+  "declare i32 @nt_dyn_require_array(ptr)",
+  "declare double @nt_dyn_len(ptr)",
+  "declare ptr @nt_dyn_elem(ptr, double)",
   "declare i32 @nt_exc_pending()",
   "declare ptr @nt_exc_message()",
   "declare void @nt_exc_clear()",
@@ -1199,6 +1202,32 @@ class FnGen {
         this.emit(`store i64 ${this.toSlot(fv)}, ptr ${gep}`);
       });
       return { v: obj, ty: target };
+    }
+    if (isArrayTy(target)) {
+      const el = elemTy(target);
+      this.emit(`${this.fresh()} = call i32 @nt_dyn_require_array(ptr ${dyn})`);
+      const len = this.fresh();
+      this.emit(`${len} = call double @nt_dyn_len(ptr ${dyn})`);
+      const arr = this.fresh();
+      this.emit(`${arr} = call ptr @nt_arr_new(double ${len})`);
+      const idx = this.slot("number");
+      this.emit(`store double ${llvmDouble(0)}, ptr ${idx}`);
+      const cond = this.label("dvc"), body = this.label("dvb"), end = this.label("dve");
+      this.terminate(`br label %${cond}`);
+      this.to(this.block(cond));
+      const iC = this.fresh(); this.emit(`${iC} = load double, ptr ${idx}`);
+      const cmp = this.fresh(); this.emit(`${cmp} = fcmp olt double ${iC}, ${len}`);
+      this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
+      this.to(this.block(body));
+      const iB = this.fresh(); this.emit(`${iB} = load double, ptr ${idx}`);
+      const ed = this.fresh(); this.emit(`${ed} = call ptr @nt_dyn_elem(ptr ${dyn}, double ${iB})`);
+      const ev = this.genDynValidate(ed, el);
+      this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(ev)})`);
+      const iN = this.fresh(); this.emit(`${iN} = fadd double ${iB}, ${llvmDouble(1)}`);
+      this.emit(`store double ${iN}, ptr ${idx}`);
+      this.terminate(`br label %${cond}`);
+      this.to(this.block(end));
+      return { v: arr, ty: target };
     }
     throw nyi(NYI.JSON, `narrowing a dynamic value to ${target}`);
   }

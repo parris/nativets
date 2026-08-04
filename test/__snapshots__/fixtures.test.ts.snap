@@ -67,6 +67,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -150,6 +153,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -237,6 +243,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -321,6 +330,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -405,6 +417,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -490,6 +505,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -576,6 +594,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -665,6 +686,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -763,6 +787,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -847,6 +874,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -1074,6 +1104,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -1230,6 +1263,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -1354,6 +1390,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -1560,6 +1599,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -1762,6 +1804,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -1974,6 +2019,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -2273,6 +2321,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -2430,6 +2481,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -2640,6 +2694,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -2737,6 +2794,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -2850,6 +2910,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -2949,6 +3012,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -3069,6 +3135,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -3172,6 +3241,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -3203,6 +3275,311 @@ endwhile3:
   %t7 = load double, ptr %sum.addr
   call void @js_print_num(double %t7)
   call void @js_print_newline()
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures stage20/json-parse-array.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+
+@.str.0 = private unnamed_addr constant [8 x i8] c"[1,2,3]\\00"
+@.str.1 = private unnamed_addr constant [3 x i8] c"[]\\00"
+@.str.2 = private unnamed_addr constant [14 x i8] c"[[1,2],[3,4]]\\00"
+@.str.3 = private unnamed_addr constant [30 x i8] c"[{\\22x\\22:1,\\22y\\22:2},{\\22x\\22:3,\\22y\\22:4}]\\00"
+@.str.4 = private unnamed_addr constant [2 x i8] c"x\\00"
+@.str.5 = private unnamed_addr constant [2 x i8] c"y\\00"
+
+define i32 @main() {
+entry:
+  %a.addr = alloca ptr
+  %e.addr = alloca ptr
+  %g.addr = alloca ptr
+  %ps.addr = alloca ptr
+  %s3 = alloca double
+  %s11 = alloca double
+  %s19 = alloca double
+  %s23 = alloca double
+  %s31 = alloca double
+  br label %L0
+L0:
+  %t0 = call ptr @nt_json_parse(ptr @.str.0)
+  %t1 = call i32 @nt_exc_pending()
+  %t2 = icmp ne i32 %t1, 0
+  br i1 %t2, label %exc1, label %cont2
+exc1:
+  call void @nt_exc_abort()
+  unreachable
+cont2:
+  %t3 = call i32 @nt_dyn_require_array(ptr %t0)
+  %t4 = call double @nt_dyn_len(ptr %t0)
+  %t5 = call ptr @nt_arr_new(double %t4)
+  store double 0x0000000000000000, ptr %s3
+  br label %dvc4
+dvc4:
+  %t6 = load double, ptr %s3
+  %t7 = fcmp olt double %t6, %t4
+  br i1 %t7, label %dvb5, label %dve6
+dvb5:
+  %t8 = load double, ptr %s3
+  %t9 = call ptr @nt_dyn_elem(ptr %t0, double %t8)
+  %t10 = call double @nt_dyn_as_number(ptr %t9)
+  %t11 = bitcast double %t10 to i64
+  call double @nt_arr_push(ptr %t5, i64 %t11)
+  %t12 = fadd double %t8, 0x3FF0000000000000
+  store double %t12, ptr %s3
+  br label %dvc4
+dve6:
+  %t13 = call i32 @nt_exc_pending()
+  %t14 = icmp ne i32 %t13, 0
+  br i1 %t14, label %exc7, label %cont8
+exc7:
+  call void @nt_exc_abort()
+  unreachable
+cont8:
+  store ptr %t5, ptr %a.addr
+  %t15 = load ptr, ptr %a.addr
+  %t16 = call double @nt_arr_len(ptr %t15)
+  call void @js_print_num(double %t16)
+  %t17 = load ptr, ptr %a.addr
+  %t18 = call i64 @nt_arr_get(ptr %t17, double 0x4000000000000000)
+  %t19 = bitcast i64 %t18 to double
+  call void @js_print_sep()
+  call void @js_print_num(double %t19)
+  call void @js_print_newline()
+  %t20 = call ptr @nt_json_parse(ptr @.str.1)
+  %t21 = call i32 @nt_exc_pending()
+  %t22 = icmp ne i32 %t21, 0
+  br i1 %t22, label %exc9, label %cont10
+exc9:
+  call void @nt_exc_abort()
+  unreachable
+cont10:
+  %t23 = call i32 @nt_dyn_require_array(ptr %t20)
+  %t24 = call double @nt_dyn_len(ptr %t20)
+  %t25 = call ptr @nt_arr_new(double %t24)
+  store double 0x0000000000000000, ptr %s11
+  br label %dvc12
+dvc12:
+  %t26 = load double, ptr %s11
+  %t27 = fcmp olt double %t26, %t24
+  br i1 %t27, label %dvb13, label %dve14
+dvb13:
+  %t28 = load double, ptr %s11
+  %t29 = call ptr @nt_dyn_elem(ptr %t20, double %t28)
+  %t30 = call double @nt_dyn_as_number(ptr %t29)
+  %t31 = bitcast double %t30 to i64
+  call double @nt_arr_push(ptr %t25, i64 %t31)
+  %t32 = fadd double %t28, 0x3FF0000000000000
+  store double %t32, ptr %s11
+  br label %dvc12
+dve14:
+  %t33 = call i32 @nt_exc_pending()
+  %t34 = icmp ne i32 %t33, 0
+  br i1 %t34, label %exc15, label %cont16
+exc15:
+  call void @nt_exc_abort()
+  unreachable
+cont16:
+  store ptr %t25, ptr %e.addr
+  %t35 = load ptr, ptr %e.addr
+  %t36 = call double @nt_arr_len(ptr %t35)
+  call void @js_print_num(double %t36)
+  call void @js_print_newline()
+  %t37 = call ptr @nt_json_parse(ptr @.str.2)
+  %t38 = call i32 @nt_exc_pending()
+  %t39 = icmp ne i32 %t38, 0
+  br i1 %t39, label %exc17, label %cont18
+exc17:
+  call void @nt_exc_abort()
+  unreachable
+cont18:
+  %t40 = call i32 @nt_dyn_require_array(ptr %t37)
+  %t41 = call double @nt_dyn_len(ptr %t37)
+  %t42 = call ptr @nt_arr_new(double %t41)
+  store double 0x0000000000000000, ptr %s19
+  br label %dvc20
+dvc20:
+  %t43 = load double, ptr %s19
+  %t44 = fcmp olt double %t43, %t41
+  br i1 %t44, label %dvb21, label %dve22
+dvb21:
+  %t45 = load double, ptr %s19
+  %t46 = call ptr @nt_dyn_elem(ptr %t37, double %t45)
+  %t47 = call i32 @nt_dyn_require_array(ptr %t46)
+  %t48 = call double @nt_dyn_len(ptr %t46)
+  %t49 = call ptr @nt_arr_new(double %t48)
+  store double 0x0000000000000000, ptr %s23
+  br label %dvc24
+dvc24:
+  %t50 = load double, ptr %s23
+  %t51 = fcmp olt double %t50, %t48
+  br i1 %t51, label %dvb25, label %dve26
+dvb25:
+  %t52 = load double, ptr %s23
+  %t53 = call ptr @nt_dyn_elem(ptr %t46, double %t52)
+  %t54 = call double @nt_dyn_as_number(ptr %t53)
+  %t55 = bitcast double %t54 to i64
+  call double @nt_arr_push(ptr %t49, i64 %t55)
+  %t56 = fadd double %t52, 0x3FF0000000000000
+  store double %t56, ptr %s23
+  br label %dvc24
+dve26:
+  %t57 = ptrtoint ptr %t49 to i64
+  call double @nt_arr_push(ptr %t42, i64 %t57)
+  %t58 = fadd double %t45, 0x3FF0000000000000
+  store double %t58, ptr %s19
+  br label %dvc20
+dve22:
+  %t59 = call i32 @nt_exc_pending()
+  %t60 = icmp ne i32 %t59, 0
+  br i1 %t60, label %exc27, label %cont28
+exc27:
+  call void @nt_exc_abort()
+  unreachable
+cont28:
+  store ptr %t42, ptr %g.addr
+  %t61 = load ptr, ptr %g.addr
+  %t62 = call i64 @nt_arr_get(ptr %t61, double 0x3FF0000000000000)
+  %t63 = inttoptr i64 %t62 to ptr
+  %t64 = call i64 @nt_arr_get(ptr %t63, double 0x0000000000000000)
+  %t65 = bitcast i64 %t64 to double
+  call void @js_print_num(double %t65)
+  call void @js_print_newline()
+  %t66 = call ptr @nt_json_parse(ptr @.str.3)
+  %t67 = call i32 @nt_exc_pending()
+  %t68 = icmp ne i32 %t67, 0
+  br i1 %t68, label %exc29, label %cont30
+exc29:
+  call void @nt_exc_abort()
+  unreachable
+cont30:
+  %t69 = call i32 @nt_dyn_require_array(ptr %t66)
+  %t70 = call double @nt_dyn_len(ptr %t66)
+  %t71 = call ptr @nt_arr_new(double %t70)
+  store double 0x0000000000000000, ptr %s31
+  br label %dvc32
+dvc32:
+  %t72 = load double, ptr %s31
+  %t73 = fcmp olt double %t72, %t70
+  br i1 %t73, label %dvb33, label %dve34
+dvb33:
+  %t74 = load double, ptr %s31
+  %t75 = call ptr @nt_dyn_elem(ptr %t66, double %t74)
+  %t76 = call i32 @nt_dyn_require_object(ptr %t75)
+  %t77 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t78 = call ptr @nt_dyn_require_field(ptr %t75, ptr @.str.4)
+  %t79 = call double @nt_dyn_as_number(ptr %t78)
+  %t80 = getelementptr i64, ptr %t77, i64 0
+  %t81 = bitcast double %t79 to i64
+  store i64 %t81, ptr %t80
+  %t82 = call ptr @nt_dyn_require_field(ptr %t75, ptr @.str.5)
+  %t83 = call double @nt_dyn_as_number(ptr %t82)
+  %t84 = getelementptr i64, ptr %t77, i64 1
+  %t85 = bitcast double %t83 to i64
+  store i64 %t85, ptr %t84
+  %t86 = ptrtoint ptr %t77 to i64
+  call double @nt_arr_push(ptr %t71, i64 %t86)
+  %t87 = fadd double %t74, 0x3FF0000000000000
+  store double %t87, ptr %s31
+  br label %dvc32
+dve34:
+  %t88 = call i32 @nt_exc_pending()
+  %t89 = icmp ne i32 %t88, 0
+  br i1 %t89, label %exc35, label %cont36
+exc35:
+  call void @nt_exc_abort()
+  unreachable
+cont36:
+  store ptr %t71, ptr %ps.addr
+  %t90 = load ptr, ptr %ps.addr
+  %t91 = call i64 @nt_arr_get(ptr %t90, double 0x3FF0000000000000)
+  %t92 = inttoptr i64 %t91 to ptr
+  %t93 = getelementptr i64, ptr %t92, i64 1
+  %t94 = load i64, ptr %t93
+  %t95 = bitcast i64 %t94 to double
+  call void @js_print_num(double %t95)
+  call void @js_print_newline()
+  %t96 = load ptr, ptr %a.addr
+  call void @nt_arr_free(ptr %t96)
+  %t97 = load ptr, ptr %e.addr
+  call void @nt_arr_free(ptr %t97)
+  %t98 = load ptr, ptr %g.addr
+  call void @nt_arr_free(ptr %t98)
+  %t99 = load ptr, ptr %ps.addr
+  call void @nt_arr_free(ptr %t99)
   ret i32 0
 }
 "
@@ -3275,6 +3652,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -3399,6 +3779,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -3516,6 +3899,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -3693,6 +4079,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -3797,6 +4186,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -4074,6 +4466,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -4168,6 +4563,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -4347,6 +4745,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -4436,6 +4837,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -4522,6 +4926,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -4622,6 +5029,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -4717,6 +5127,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -4822,6 +5235,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -4918,6 +5334,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -5009,6 +5428,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -5120,6 +5542,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -5232,6 +5657,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -5333,6 +5761,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -5513,6 +5944,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
@@ -5704,6 +6138,9 @@ declare i32 @nt_dyn_as_bool(ptr)
 declare ptr @nt_dyn_as_string(ptr)
 declare i32 @nt_dyn_require_object(ptr)
 declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
 declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
