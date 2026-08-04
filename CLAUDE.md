@@ -335,6 +335,21 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   stay node-compatible (mutating) — the full immutable-by-default switch + structural sharing +
   refcounting (B2 step 2/4) are deferred. Fixed a latent heap `===`/`!==` miscompile (arrays/objects
   were compared via `strcmp` on pointers → now pointer comparison).
+- **Stage 27 ✅ (B3 v2+v3: links/monitors + supervision)** `link`/`monitor`/`trapExit` + exit-signal
+  propagation + fault injection (`__kill`/`__crash`), and a `one_for_one` **supervisor** — the
+  canonical OTP **kill-and-assert-restart**: a supervised child crashes, the supervisor restarts it
+  to known-good state (new pid, state reset), and **restart intensity** escalation (too many
+  restarts in the window → supervisor exits). Modeled on the v0 cooperative scheduler (the
+  supervisor is itself a trapping actor); one FIFO run queue keeps pids + stdout byte-stable, so
+  the OTP tests assert exact output. Crash records (pid, reason, restart decision) to stderr.
+  Messages stay numbers (reason tracked in C, drives supervision but not surfaced to TS without
+  Dyn/tuples). Behavioral tests in `test/actors/` + `test/supervise.test.ts`.
+- **Stage 28 ✅ (Phase C: move-out checks E0507/E0508)** `NT1604` move-out-of-borrow (`move()` of a
+  `for-of` element or a borrowed param) and `NT1605` move-out-of-array-element (`const x = objArr[i]`
+  consuming a linear element). Analysis-only in `src/ownership.ts` (a `borrowBindings` set + an
+  `IndexExpr`-in-consuming-position check for linear element types); reading a Copy element
+  (`number[]`/`string[]`) or a field (`arr[i].x`) is fine. **Params are borrows** (the caller owns
+  them). rustc-compiletest cases in `test/ownership/`. String-element variant waits on strings-linear.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
