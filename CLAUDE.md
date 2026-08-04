@@ -290,14 +290,34 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   so `try/catch` works like node under the lexical CFG model. Un-narrowed `Dyn` field/index
   access (`back.arr[1]`) via runtime tag checks; `console.log(dyn)` prints scalars (compound =
   `util.inspect`, deferred). Also **`|>`** (Stage B1) landed in parallel.
+- **Stage 21 ✅ (A2: nullable/optional + optional chaining → closes `optional-chaining`, gap 55/55)**
+  Runtime-nullable values (`T | undefined`, `T | null`, optional fields `{a?:T}`) use the
+  **tagged-pair encoding** — a 2-slot heap block `[tag, value]` (tag 0=undefined, 1=null,
+  2=present), `is_nullish = tag < 2` (tag-based, NEVER truthiness, so `0`/`""`/`false` pass
+  through). Ty encoded `?U<base>`/`?N<base>`, kept distinct from object/array/func (predicates
+  guard). `?.` short-circuits the **whole rest of the chain** to a shared `undefined` join;
+  runtime `??` on nullable operands. Restricted to the two nullable shapes; general/>2-arm unions,
+  `?.()`, `?.[]` → `NT1009`. (Also extended `||`/`&&` to value-returning for matching number/string
+  operands, per the `??`-vs-`||` test vectors.)
+- **Stage 22 ✅ (B3 v0: actors wired into the language)** `spawn(body, msg)`/`send`/`receive`/
+  `self` compiled natively on the merged `nt_actor` runtime. A spawned closure becomes an actor
+  via a **trampoline** `@nt_actor_entry_N(ptr env, i64 slot)` (reuses the lambda-lift/closure
+  machinery; decouples the actor ABI `void(ptr,i64)` from the arrow ABI). `nt_sched_init` prologue
+  + `nt_actor.c` linking are **emitted only when a program uses actors** (keeps the Android
+  non-actor cross-build working — `ucontext` is absent in NDK API 24). Number messages (v0); the
+  `Dyn` deep-copy-on-send path is designed but deferred. Behavioral tests in `test/actors/`
+  (native run + exact stdout — not node-differential; the single cooperative scheduler is
+  deterministic). v1 preemption / v2 links / v3 supervision still to come.
+- **Stage 23 ✅ (Phase C part 1: objects are linear)** Objects join arrays as a linear type:
+  `NT1601` use-after-move (control-flow-merge + loop-fixpoint aware) and **deterministic drop**
+  (`nt_obj_free` at scope exit, move-aware — freed exactly once by the final owner). Verified via
+  `__objLive()` (`test/drops-obj.test.ts`). Strings-linear + move-out-of-borrow (`E0507`/`E0508`,
+  NT1604/1605) still deferred — the latter needs `object[]` support first.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
-Coverage: base corpus **37/39**; gap corpus **54/55** (A1 closed `json-roundtrip`). Only 1 left:
-**`optional-chaining`** (A2 — nullable/optional types). *(historical note below predates A1.)*
-Only 2 left, both needing type-system
-extensions that dovetail with Phase 2: **`JSON.parse`** (dynamic/`any` value → pairs with the
-requested **runtime typechecking**) and **optional chaining `?.`** (nullable/optional unions).
+Coverage: base corpus **37/39**; **gap corpus 55/55** (A1 closed `json-roundtrip`, A2 closed
+`optional-chaining`) — the whole gap corpus now compiles + matches node.
 Everything else is rejected with an `NT1xxx` diagnostic — see `docs/divergences.md`.
 **Phase 2 (immutable data, `|>`, BEAM actors, runtime typecheck) design is in `docs/phase2-design.md`.**
 
