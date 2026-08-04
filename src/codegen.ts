@@ -13,7 +13,8 @@
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { isConsoleLog } from "./checker.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind } from "./ast.ts";
+import { isOptChainExpr } from "./checker.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
 
@@ -26,7 +27,7 @@ export function llvmDouble(n: number): string {
 }
 
 function llvmTy(ty: Ty): string {
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty)) return "ptr";
+  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty)) return "ptr"; // nullable = ptr to [tag,val]
   switch (ty) {
     case "number": return "double";
     case "boolean": return "i1";
@@ -38,7 +39,7 @@ function llvmTy(ty: Ty): string {
 }
 
 function defaultZero(ty: Ty): string {
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty)) return "null";
+  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty)) return "null";
   switch (ty) {
     case "number": return "0x0000000000000000";
     case "boolean": return "false";
@@ -406,8 +407,9 @@ class FnGen {
     switch (s.kind) {
       case "VarDecl": {
         for (const d of s.decls) {
-          const val = this.genExpr(d.init);
-          this.emit(`store ${llvmTy(d.ty ?? "number")} ${val.v}, ptr %${d.name}.addr`);
+          const ty = d.ty ?? "number";
+          const val = this.coerce(this.genExpr(d.init), ty);
+          this.emit(`store ${llvmTy(ty)} ${val.v}, ptr %${d.name}.addr`);
         }
         return;
       }
@@ -687,11 +689,15 @@ class FnGen {
 
   /** Lower an expression to an i1 truthiness value. */
   private genCond(e: Expr): string {
-    const val = this.genExpr(e);
+    return this.truthyOf(this.genExpr(e));
+  }
+
+  /** i1 truthiness of an already-evaluated value (JS ToBoolean for the supported types). */
+  private truthyOf(val: Val): string {
     if (val.ty === "boolean") return val.v;
     if (val.ty === "number") {
       const t = this.fresh();
-      this.emit(`${t} = fcmp one double ${val.v}, 0.0`);
+      this.emit(`${t} = fcmp one double ${val.v}, 0.0`); // NaN and 0 are falsy
       return t;
     }
     // string: truthy iff non-empty
@@ -739,7 +745,7 @@ class FnGen {
   private toSlot(val: Val): string {
     const t = this.fresh();
     if (val.ty === "number") this.emit(`${t} = bitcast double ${val.v} to i64`);
-    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -748,10 +754,60 @@ class FnGen {
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
     if (ty === "number") this.emit(`${t} = bitcast i64 ${slot} to double`);
-    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
+  }
+
+  // ---- nullable tagged pair [tag, value] (A2) ----
+  // tag 0 = undefined, 1 = null, 2 = present. is_nullish = tag < 2. The nullish
+  // predicate is TAG-based, never truthiness, so 0 / "" / false pass through.
+  /** Allocate a nullable box with the given tag (i64 literal/reg) and packed value slot. */
+  private nullBox(tag: string, valSlot: string): string {
+    const p = this.fresh();
+    this.emit(`${p} = call ptr @nt_obj_new(double ${llvmDouble(2)})`);
+    const g0 = this.fresh();
+    this.emit(`${g0} = getelementptr i64, ptr ${p}, i64 0`);
+    this.emit(`store i64 ${tag}, ptr ${g0}`);
+    const g1 = this.fresh();
+    this.emit(`${g1} = getelementptr i64, ptr ${p}, i64 1`);
+    this.emit(`store i64 ${valSlot}, ptr ${g1}`);
+    return p;
+  }
+  /** Load the tag (i64) of a nullable box. */
+  private nullTag(ptr: string): string {
+    const g0 = this.fresh();
+    this.emit(`${g0} = getelementptr i64, ptr ${ptr}, i64 0`);
+    const t = this.fresh();
+    this.emit(`${t} = load i64, ptr ${g0}`);
+    return t;
+  }
+  /** Load the raw value slot (i64) of a nullable box. */
+  private nullVal(ptr: string): string {
+    const g1 = this.fresh();
+    this.emit(`${g1} = getelementptr i64, ptr ${ptr}, i64 1`);
+    const t = this.fresh();
+    this.emit(`${t} = load i64, ptr ${g1}`);
+    return t;
+  }
+  /** i1: is this nullable box nullish (tag < 2)? */
+  private isNullish(ptr: string): string {
+    const t = this.fresh();
+    this.emit(`${t} = icmp ult i64 ${this.nullTag(ptr)}, 2`);
+    return t;
+  }
+  /** Box a value into a nullable of type `target`. undefined/null carry their tag. */
+  private coerceNullable(val: Val, target: Ty): Val {
+    if (isNullableTy(val.ty)) return { v: val.v, ty: target };
+    if (val.ty === "undefined" || val.ty === "void") return { v: this.nullBox("0", "0"), ty: target };
+    if (val.ty === "null") return { v: this.nullBox("1", "0"), ty: target };
+    return { v: this.nullBox("2", this.toSlot(val)), ty: target }; // present value
+  }
+  /** Coerce a value to `target` at a store/assign boundary — boxes into a nullable if needed. */
+  private coerce(val: Val, target: Ty): Val {
+    if (isNullableTy(target) && !isNullableTy(val.ty)) return this.coerceNullable(val, target);
+    return val;
   }
 
   /** i1 result of `a === b` for same-typed operands. */
@@ -845,6 +901,7 @@ class FnGen {
         const nfields = objectFields(ty).length;
         const obj = this.fresh();
         this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(nfields)})`);
+        const written = new Set<string>();
         // store by MERGED field index (spread + overrides mean property order != slot order)
         for (const p of e.properties) {
           if (p.spread) {
@@ -858,13 +915,25 @@ class FnGen {
               const dg = this.fresh();
               this.emit(`${dg} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, f.key)}`);
               this.emit(`store i64 ${val}, ptr ${dg}`);
+              written.add(f.key);
             }
           } else {
-            const slot = this.toSlot(this.genExpr(p.value));
+            const ft = fieldType(ty, p.key) ?? (p.value.ty as Ty);
+            const slot = this.toSlot(this.coerce(this.genExpr(p.value), ft)); // box into a nullable field
             const g = this.fresh();
             this.emit(`${g} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, p.key)}`);
             this.emit(`store i64 ${slot}, ptr ${g}`);
+            written.add(p.key);
           }
+        }
+        // An OMITTED optional field must still hold a valid `undefined` box so a later
+        // read is defined (not a null-pointer deref). Initialize any such field.
+        for (const f of objectFields(ty)) {
+          if (written.has(f.key) || !isNullableTy(f.ty)) continue;
+          const box = this.nullBox("0", "0");
+          const g = this.fresh();
+          this.emit(`${g} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, f.key)}`);
+          this.emit(`store i64 ${this.toSlot({ v: box, ty: f.ty })}, ptr ${g}`);
         }
         return { v: obj, ty };
       }
@@ -913,6 +982,9 @@ class FnGen {
       }
 
       case "MemberExpr": {
+        // An optional chain whose result is nullable is lowered as a unit: guard at
+        // each `?.`, short-circuiting the WHOLE rest of the chain to `undefined`.
+        if (isNullableTy(e.ty ?? "") && isOptChainExpr(e)) return this.genOptChain(e);
         const obj = this.genExpr(e.object);
         if (obj.ty === "Dyn") { // dynamic field access: nt_dyn_get_field returns a Dyn
           const t = this.fresh();
@@ -939,7 +1011,15 @@ class FnGen {
 
       case "TypeofExpr": {
         const inner = e.operand.ty ?? "number";
-        const name = inner === "undefined" || inner === "void" ? "undefined" : inner === "null" ? "object" : inner;
+        // A runtime-nullable value's typeof depends on its tag: undefined→"undefined",
+        // null→"object", present→typeof(base). Branch at runtime.
+        if (isNullableTy(inner)) return this.genTypeofNullable(this.genExpr(e.operand).v, baseTy(inner));
+        const name =
+          inner === "undefined" || inner === "void" ? "undefined" :
+          inner === "null" ? "object" :
+          isFuncTy(inner) ? "function" :
+          isObjectTy(inner) || isArrayTy(inner) ? "object" :
+          inner; // number | boolean | string
         return { v: this.mod.intern(name), ty: "string" };
       }
 
@@ -1021,25 +1101,47 @@ class FnGen {
 
       case "LogicalExpr": {
         if (e.op === "??") {
-          // statically resolved: left is either definitely-nullish or definitely not
           const lt = e.left.ty ?? "number";
-          return (lt === "null" || lt === "undefined") ? this.genExpr(e.right) : this.genExpr(e.left);
+          if (lt === "null" || lt === "undefined") return this.genExpr(e.right); // statically nullish → right
+          if (!isNullableTy(lt)) return this.genExpr(e.left);                     // statically present → left
+          // runtime-nullable left: TAG-based branch (never truthiness), collapse to base.
+          const base = baseTy(lt);
+          const box = this.genExpr(e.left);
+          const slot = this.slot(base);
+          const isN = this.isNullish(box.v);
+          const rLbl = this.label("nc"), lLbl = this.label("ncl"), endLbl = this.label("nce");
+          this.terminate(`br i1 ${isN}, label %${rLbl}, label %${lLbl}`);
+          this.to(this.block(rLbl));
+          const rv = this.genExpr(e.right);
+          this.emit(`store ${llvmTy(base)} ${rv.v}, ptr ${slot}`);
+          this.terminate(`br label %${endLbl}`);
+          this.to(this.block(lLbl));
+          const lv = this.fromSlot(this.nullVal(box.v), base); // unbox the present value
+          this.emit(`store ${llvmTy(base)} ${lv}, ptr ${slot}`);
+          this.terminate(`br label %${endLbl}`);
+          this.to(this.block(endLbl));
+          const t = this.fresh();
+          this.emit(`${t} = load ${llvmTy(base)}, ptr ${slot}`);
+          return { v: t, ty: base };
         }
-        const slot = this.slot("boolean");
+        // `&&` / `||` — value-returning short-circuit (result type = operand type).
+        const ty = (e.ty ?? "boolean") as Ty;
+        const slot = this.slot(ty);
         const l = this.genExpr(e.left);
-        this.emit(`store i1 ${l.v}, ptr ${slot}`);
+        this.emit(`store ${llvmTy(ty)} ${l.v}, ptr ${slot}`);
+        const cond = this.truthyOf(l);
         const evalLbl = this.label("rhs");
         const endLbl = this.label("logend");
-        if (e.op === "&&") this.terminate(`br i1 ${l.v}, label %${evalLbl}, label %${endLbl}`);
-        else this.terminate(`br i1 ${l.v}, label %${endLbl}, label %${evalLbl}`);
+        if (e.op === "&&") this.terminate(`br i1 ${cond}, label %${evalLbl}, label %${endLbl}`);
+        else this.terminate(`br i1 ${cond}, label %${endLbl}, label %${evalLbl}`);
         this.to(this.block(evalLbl));
         const r = this.genExpr(e.right);
-        this.emit(`store i1 ${r.v}, ptr ${slot}`);
+        this.emit(`store ${llvmTy(ty)} ${r.v}, ptr ${slot}`);
         this.terminate(`br label %${endLbl}`);
         this.to(this.block(endLbl));
         const t = this.fresh();
-        this.emit(`${t} = load i1, ptr ${slot}`);
-        return { v: t, ty: "boolean" };
+        this.emit(`${t} = load ${llvmTy(ty)}, ptr ${slot}`);
+        return { v: t, ty };
       }
 
       case "ConditionalExpr": {
@@ -1079,7 +1181,7 @@ class FnGen {
         }
         const ty = this.varTypes.get(e.target) ?? "number";
         if (e.op === "=") {
-          const val = this.genExpr(e.value);
+          const val = this.coerce(this.genExpr(e.value), ty); // box into a nullable slot if needed
           this.emit(`store ${llvmTy(ty)} ${val.v}, ptr %${e.target}.addr`);
           return { v: val.v, ty };
         }
@@ -1302,18 +1404,117 @@ class FnGen {
     args.forEach((a, i) => {
       const val = this.genExpr(a);
       if (i > 0) this.emit(`call void @js_print_sep()`);
-      if (val.ty === "number") this.emit(`call void @js_print_num(double ${val.v})`);
-      else if (val.ty === "boolean") {
-        const z = this.fresh();
-        this.emit(`${z} = zext i1 ${val.v} to i32`);
-        this.emit(`call void @js_print_bool(i32 ${z})`);
-      } else if (val.ty === "undefined") this.emit(`call void @js_print_str(ptr ${this.mod.intern("undefined")})`);
-      else if (val.ty === "null") this.emit(`call void @js_print_str(ptr ${this.mod.intern("null")})`);
-      else if (val.ty === "Dyn") this.emit(`call void @nt_dyn_print(ptr ${val.v})`);
-      else this.emit(`call void @js_print_str(ptr ${val.v})`);
+      this.emitPrint(val);
     });
     this.emit(`call void @js_print_newline()`);
     return { v: "0", ty: "void" };
+  }
+
+  /** Print one value per its static type (used by console.log, incl. nullable unbox). */
+  private emitPrint(val: Val): void {
+    if (val.ty === "number") { this.emit(`call void @js_print_num(double ${val.v})`); return; }
+    if (val.ty === "boolean") {
+      const z = this.fresh();
+      this.emit(`${z} = zext i1 ${val.v} to i32`);
+      this.emit(`call void @js_print_bool(i32 ${z})`);
+      return;
+    }
+    if (val.ty === "undefined" || val.ty === "void") { this.emit(`call void @js_print_str(ptr ${this.mod.intern("undefined")})`); return; }
+    if (val.ty === "null") { this.emit(`call void @js_print_str(ptr ${this.mod.intern("null")})`); return; }
+    if (val.ty === "Dyn") { this.emit(`call void @nt_dyn_print(ptr ${val.v})`); return; }
+    if (isNullableTy(val.ty)) { this.emitPrintNullable(val.v, baseTy(val.ty)); return; }
+    this.emit(`call void @js_print_str(ptr ${val.v})`);
+  }
+
+  /** Print a nullable box: tag 0 → `undefined`, 1 → `null`, else unbox and print the base value. */
+  private emitPrintNullable(ptr: string, base: Ty): void {
+    const tag = this.nullTag(ptr);
+    const isU = this.fresh(); this.emit(`${isU} = icmp eq i64 ${tag}, 0`);
+    const uLbl = this.label("pu"), nChk = this.label("pnc"), nLbl = this.label("pn"), pLbl = this.label("pp"), end = this.label("pe");
+    this.terminate(`br i1 ${isU}, label %${uLbl}, label %${nChk}`);
+    this.to(this.block(uLbl)); this.emit(`call void @js_print_str(ptr ${this.mod.intern("undefined")})`); this.terminate(`br label %${end}`);
+    this.to(this.block(nChk));
+    const isN = this.fresh(); this.emit(`${isN} = icmp eq i64 ${tag}, 1`);
+    this.terminate(`br i1 ${isN}, label %${nLbl}, label %${pLbl}`);
+    this.to(this.block(nLbl)); this.emit(`call void @js_print_str(ptr ${this.mod.intern("null")})`); this.terminate(`br label %${end}`);
+    this.to(this.block(pLbl)); this.emitPrint({ v: this.fromSlot(this.nullVal(ptr), base), ty: base }); this.terminate(`br label %${end}`);
+    this.to(this.block(end));
+  }
+
+  /** Runtime typeof of a nullable box: tag 0→"undefined", 1→"object" (null), else typeof(base). */
+  private genTypeofNullable(ptr: string, base: Ty): Val {
+    const baseName = base === "undefined" || base === "void" ? "undefined" : isFuncTy(base) ? "function" : isObjectTy(base) || isArrayTy(base) ? "object" : base;
+    const slot = this.slot("string");
+    const tag = this.nullTag(ptr);
+    const isU = this.fresh(); this.emit(`${isU} = icmp eq i64 ${tag}, 0`);
+    const uLbl = this.label("tu"), nChk = this.label("tnc"), nLbl = this.label("tn"), pLbl = this.label("tp"), end = this.label("te");
+    this.terminate(`br i1 ${isU}, label %${uLbl}, label %${nChk}`);
+    this.to(this.block(uLbl)); this.emit(`store ptr ${this.mod.intern("undefined")}, ptr ${slot}`); this.terminate(`br label %${end}`);
+    this.to(this.block(nChk));
+    const isN = this.fresh(); this.emit(`${isN} = icmp eq i64 ${tag}, 1`);
+    this.terminate(`br i1 ${isN}, label %${nLbl}, label %${pLbl}`);
+    this.to(this.block(nLbl)); this.emit(`store ptr ${this.mod.intern("object")}, ptr ${slot}`); this.terminate(`br label %${end}`);
+    this.to(this.block(pLbl)); this.emit(`store ptr ${this.mod.intern(baseName)}, ptr ${slot}`); this.terminate(`br label %${end}`);
+    this.to(this.block(end));
+    const t = this.fresh(); this.emit(`${t} = load ptr, ptr ${slot}`);
+    return { v: t, ty: "string" };
+  }
+
+  /** Read `.prop` from a NON-nullable object/string/array value (object slot, or `.length`). */
+  private genFieldRead(obj: Val, prop: string): Val {
+    if (prop === "length" && (obj.ty === "string" || isArrayTy(obj.ty))) {
+      const t = this.fresh();
+      if (obj.ty === "string") this.emit(`${t} = call double @js_str_len(ptr ${obj.v})`);
+      else this.emit(`${t} = call double @nt_arr_len(ptr ${obj.v})`);
+      return { v: t, ty: "number" };
+    }
+    const ft = fieldType(obj.ty, prop)!;
+    const gep = this.fresh();
+    this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, prop)}`);
+    const slot = this.fresh();
+    this.emit(`${slot} = load i64, ptr ${gep}`);
+    return { v: this.fromSlot(slot, ft), ty: ft };
+  }
+
+  /**
+   * Lower an optional chain to a single unit. Flatten `head .m1 .m2 …` into ordered
+   * links; walk them, and at every step where the current value is nullable, guard:
+   * if nullish, branch to a SHARED `undefined`-result join (short-circuiting the rest
+   * of the chain — no trailing member is evaluated); otherwise unbox and read on.
+   * The result is always a nullable box (tag 0 on any short-circuit, else present).
+   */
+  private genOptChain(e: Extract<Expr, { kind: "MemberExpr" }>): Val {
+    const links: { prop: string }[] = [];
+    let node: Expr = e;
+    while (node.kind === "MemberExpr") { links.unshift({ prop: node.property }); node = node.object; }
+    const resultSlot = this.slot(e.ty!); // holds the resulting nullable box (ptr)
+    const nullJoin = this.label("ocnull");
+    const endLbl = this.label("ocend");
+    let cur = this.genExpr(node); // chain head
+    for (const link of links) {
+      if (isNullableTy(cur.ty)) {
+        const isN = this.isNullish(cur.v);
+        const contLbl = this.label("occ");
+        this.terminate(`br i1 ${isN}, label %${nullJoin}, label %${contLbl}`);
+        this.to(this.block(contLbl));
+        const base = baseTy(cur.ty);
+        cur = { v: this.fromSlot(this.nullVal(cur.v), base), ty: base }; // unbox the present value
+      }
+      cur = this.genFieldRead(cur, link.prop);
+    }
+    // Fall-through: every link read. Box the final value as present (or keep it if
+    // the final field type is itself nullable).
+    const present = isNullableTy(cur.ty) ? cur.v : this.nullBox("2", this.toSlot(cur));
+    this.emit(`store ptr ${present}, ptr ${resultSlot}`);
+    this.terminate(`br label %${endLbl}`);
+    // Shared short-circuit target: result = undefined.
+    this.to(this.block(nullJoin));
+    this.emit(`store ptr ${this.nullBox("0", "0")}, ptr ${resultSlot}`);
+    this.terminate(`br label %${endLbl}`);
+    this.to(this.block(endLbl));
+    const t = this.fresh();
+    this.emit(`${t} = load ptr, ptr ${resultSlot}`);
+    return { v: t, ty: e.ty! };
   }
 
   private genMath(method: string, args: Expr[]): Val {

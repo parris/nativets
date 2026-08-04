@@ -8,7 +8,7 @@
  */
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError } from "./diagnostics.ts";
 
@@ -107,14 +107,74 @@ class Checker {
     for (const s of body) this.checkStmt(s, scope, ret);
   }
 
+  /**
+   * Structural, optional-aware assignability (A2). A source type is assignable to
+   * a target when it is identical, when a non-nullable value flows into a nullable
+   * `T | undefined` / `T | null` (or the matching bare `undefined`/`null`), or —
+   * for object types — when every REQUIRED target field is present and assignable
+   * and every absent target field is optional (nullable). Extra source fields are
+   * tolerated (a widening on assignment; excess-property linting is out of scope).
+   */
+  private assignable(target: Ty, source: Ty): boolean {
+    if (target === source) return true;
+    if (isNullableTy(target)) {
+      const which = nullishKind(target);
+      if (source === which) return true;                 // undefined→?U / null→?N
+      if (isNullableTy(source)) return this.assignable(baseTy(target), baseTy(source));
+      return this.assignable(baseTy(target), source);    // a present value of the base type
+    }
+    if (isObjectTy(target) && isObjectTy(source)) {
+      for (const tf of objectFields(target)) {
+        const sf = fieldType(source, tf.key);
+        if (sf === undefined) { if (!isNullableTy(tf.ty)) return false; continue; } // absent → must be optional
+        if (!this.assignable(tf.ty, sf)) return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Retype an object/array literal (recursively) to the annotated target shape so
+   * codegen builds the declared slot layout — filling optional fields the literal
+   * omits and boxing scalar field values into their nullable field type. Only
+   * reshapes when the literal is assignable to the target.
+   */
+  private retypeLiteral(e: Expr, target: Ty): void {
+    const base = baseTy(target);
+    if (e.kind === "ObjectLiteral" && isObjectTy(base)) {
+      e.ty = base;
+      for (const p of e.properties) {
+        if (p.spread) continue;
+        const ft = fieldType(base, p.key);
+        if (ft) this.retypeLiteral(p.value, ft);
+      }
+    }
+  }
+
+  /** Resolve `.prop` on a NON-nullable base (object field, or string/array `.length`). */
+  private fieldOnBase(base: Ty, prop: string): Ty {
+    if ((base === "string" || isArrayTy(base)) && prop === "length") return "number";
+    if (isObjectTy(base)) {
+      const ft = fieldType(base, prop);
+      if (!ft) throw typeError(`Property '${prop}' does not exist on ${base}`);
+      return ft;
+    }
+    throw typeError(`Property '${prop}' does not exist on ${base}`);
+  }
+
   private checkStmt(s: Stmt, scope: Scope, ret: Ty): void {
     switch (s.kind) {
       case "VarDecl":
         for (const d of s.decls) {
           const t = this.type(d.init, scope);
-          if (d.annot && d.annot !== t && !(d.init.kind === "UndefinedLiteral")) {
+          if (d.annot && d.annot !== t && !this.assignable(d.annot, t)) {
             throw typeError(`'${d.name}' declared ${d.annot} but initialized with ${t}`);
           }
+          // Reshape the initializer literal to the declared slot layout (fill omitted
+          // optional fields, box scalars into nullable fields) — runs AFTER inference,
+          // which sets the literal's own inferred `.ty`, so it must overwrite here.
+          if (d.annot) this.retypeLiteral(d.init, d.annot);
           d.ty = d.annot ?? t;
           scope.declare(d.name, d.ty, s.declKind === "const");
         }
@@ -267,14 +327,24 @@ class Checker {
         return b.ty;
       }
       case "MemberExpr": {
-        if ((e as any).optional) throw nyi(NYI.OPTIONAL_CHAIN, "optional chaining (?.)");
         const ot = this.type(e.object, scope);
+        // Accessing a member of a possibly-nullish object: the result is nullable
+        // (the whole chain short-circuits to `undefined` if the object is nullish).
+        // Legal only when THIS link is `?.`, or the object is itself an ongoing
+        // optional chain (a trailing non-optional member after a `?.`).
+        if (isNullableTy(ot)) {
+          if (!e.optional && !isOptChainExpr(e.object)) {
+            throw typeError(`'${(e.object as any).name ?? "value"}' is possibly ${nullishKind(ot)}; use '?.'`);
+          }
+          const ft = this.fieldOnBase(baseTy(ot), e.property);
+          return makeNullable("undefined", baseTy(ft));
+        }
         if ((ot === "string" || isArrayTy(ot)) && e.property === "length") return "number";
         if (ot === "Dyn") return "Dyn"; // dynamic field access — runtime tag check
         if (isObjectTy(ot)) {
           const ft = fieldType(ot, e.property);
           if (!ft) throw typeError(`Property '${e.property}' does not exist on ${ot}`);
-          return ft;
+          return ft; // a redundant `?.` on a non-nullable object is allowed (result unchanged)
         }
         throw typeError(`Property '${e.property}' does not exist on ${ot}`);
       }
@@ -331,18 +401,26 @@ class Checker {
         return "number";
       }
       case "LogicalExpr": {
-        if (e.op === "??") {
-          // Statically resolvable: a value is either definitely-nullish or definitely not.
-          const l = this.type(e.left, scope);
-          const r = this.type(e.right, scope);
-          if (l === "null" || l === "undefined") return r; // left always nullish → right
-          if (l !== r) throw typeError(`?? branches differ: ${l} vs ${r}`);
-          return l; // left is non-nullable → always left
-        }
         const l = this.type(e.left, scope);
         const r = this.type(e.right, scope);
-        if (l !== "boolean" || r !== "boolean") throw typeError(`'${e.op}' operands must be boolean in this subset (got ${l}, ${r})`);
-        return "boolean";
+        if (e.op === "??") {
+          // `??` collapses to the non-nullish arm. Left may be definitely-nullish
+          // (static → right), a runtime-nullable `T | ...` (runtime tag branch →
+          // base ⊔ right), or definitely non-nullish (static → left).
+          if (l === "null" || l === "undefined") return r;
+          if (isNullableTy(l)) {
+            const base = baseTy(l);
+            if (base !== r && !this.assignable(base, r) && !this.assignable(r, base)) throw typeError(`?? branches differ: ${base} vs ${r}`);
+            return base;
+          }
+          if (l !== r) throw typeError(`?? branches differ: ${l} vs ${r}`);
+          return l;
+        }
+        // `&&` / `||`: boolean short-circuit, or JS value-returning truthiness for
+        // matching number/string operands (`0 || 5` → 5, `"" || "x"` → "x").
+        if (l === "boolean" && r === "boolean") return "boolean";
+        if (l === r && (l === "number" || l === "string")) return l;
+        throw typeError(`'${e.op}' operands must be matching boolean/number/string (got ${l}, ${r})`);
       }
       case "ConditionalExpr": {
         this.type(e.test, scope);
@@ -357,7 +435,7 @@ class Checker {
         if (b.constant) throw typeError(`Cannot assign to const '${e.target}'`);
         const vt = this.type(e.value, scope);
         if (e.op === "=") {
-          if (vt !== b.ty) throw typeError(`Cannot assign ${vt} to ${b.ty} '${e.target}'`);
+          if (vt !== b.ty && !this.assignable(b.ty, vt)) throw typeError(`Cannot assign ${vt} to ${b.ty} '${e.target}'`);
         } else if (e.op === "+=" && b.ty === "string") {
           if (vt !== "string" && vt !== "number") throw typeError(`Cannot += ${vt} to string`);
         } else if (b.ty !== "number" || vt !== "number") {
@@ -687,6 +765,11 @@ function collectIdentsStmt(s: Stmt, out: Set<string>): void {
 function collectBlockLocals(s: Stmt, out: Set<string>): void {
   if (s.kind === "VarDecl") for (const d of s.decls) out.add(d.name);
   else if (s.kind === "ForOfStmt" || s.kind === "ForInStmt") out.add(s.name);
+}
+
+/** True if `e` is a member access that is part of an optional chain (some `?.` to its left). */
+export function isOptChainExpr(e: Expr): boolean {
+  return e.kind === "MemberExpr" && (!!e.optional || isOptChainExpr(e.object));
 }
 
 export function isConsoleLog(e: Expr): boolean {
