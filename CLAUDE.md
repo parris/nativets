@@ -313,6 +313,28 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   (`nt_obj_free` at scope exit, move-aware — freed exactly once by the final owner). Verified via
   `__objLive()` (`test/drops-obj.test.ts`). Strings-linear + move-out-of-borrow (`E0507`/`E0508`,
   NT1604/1605) still deferred — the latter needs `object[]` support first.
+- **Stage 24 ✅ (arrays of objects, first-class)** Object array literals + `T[]` where `T` is an
+  object type work like any other array (node-compatible; codegen already routed object elements
+  through the generic 8-byte slot path — only two `number|string|boolean`-only checker guards
+  needed lifting). Object arrays are linear (drop-once via `nt_arr_free`; `NT1601` move-check).
+  Note: array element *objects* aren't recursively dropped yet (safe leak, like heap values in
+  arrays generally).
+- **Stage 25 ✅ (B2 step 3: immutable `Map`/`Set`)** `new Map<K,V>()`/`new Set<T>()` +
+  `set`/`get`/`has`/`delete`/`add`/`size`, **immutable/persistent** (ops return a new handle via
+  the merged HAMT with structural sharing; the source is unchanged). `nt_mapset.c` wraps `nt_hamt`
+  with a **flat scalar ABI** (hand-written IR can't emit the by-value `NtKey` struct); string
+  (`NT_K_STR`) + number (`NT_K_NUM`) keys, SameValueZero normalization in the HAMT. `Map<..>`/
+  `Set<..>` Ty encodings kept distinct from object/array/func/nullable. Linked only when used.
+  Divergences (by design, Phase B): old-version-unchanged is behavioral-tested not node; `.delete`
+  returns a new collection (node: boolean); `.get` of an absent key returns `0` (node: `undefined`)
+  until Map values gain the A2 nullable machinery.
+- **Stage 26 ✅ (B2 step 1: copy-on-write `.with`)** `arr.with(i, v)` → a NEW array (full
+  independent copy, original unchanged; `Array.prototype.with` is real ES2023 so node is the
+  oracle). Object spread `{...o, k:v}` already gave non-mutating copy semantics — the ownership
+  pass now **borrows** (not moves) a spread source, fixing a use-after-move + a leak. `.push`/`.pop`
+  stay node-compatible (mutating) — the full immutable-by-default switch + structural sharing +
+  refcounting (B2 step 2/4) are deferred. Fixed a latent heap `===`/`!==` miscompile (arrays/objects
+  were compared via `strcmp` on pointers → now pointer comparison).
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
