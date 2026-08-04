@@ -1,0 +1,6 @@
+42
+"hi there"
+true
+[1,2,3]
+{"a":1,"b":"x","c":[true,false]}
+{"nested":{"id":5,"items":["p","q"]}}

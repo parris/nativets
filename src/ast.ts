@@ -1,0 +1,250 @@
+/*
+ * AST for the growing TypeScript subset.
+ *
+ * Types are tracked statically. Every Expr carries an optional `ty` the checker
+ * fills in; codegen reads it to choose LLVM types/instructions.
+ */
+
+export type ScalarTy = "number" | "boolean" | "string" | "void" | "undefined" | "null";
+/**
+ * Array types: `${elem}[]` (e.g. "number[]").
+ * Object types: `{k1:t1,k2:t2}` in field-insertion order (e.g. "{name:string,age:number}").
+ * Both encodings keep `===` type comparison working as plain string equality.
+ */
+export type Ty = ScalarTy | `${string}[]` | `{${string}}`;
+
+export function isArrayTy(t: Ty): boolean { return typeof t === "string" && t.endsWith("[]"); }
+export function elemTy(t: Ty): Ty { return t.slice(0, -2) as Ty; }
+
+/** Split on `sep` at nesting depth 0 (respecting (), [], {}) — for nested types. */
+export function splitTopLevel(s: string, sep: string): string[] {
+  const out: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === sep && depth === 0) { out.push(s.slice(start, i)); start = i + 1; }
+  }
+  out.push(s.slice(start));
+  return out;
+}
+/** Index of the top-level `=>` (depth 0). -1 if none. */
+function topArrow(s: string): number {
+  let depth = 0;
+  for (let i = 0; i < s.length - 1; i++) {
+    const c = s[i]!;
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (depth === 0 && c === "=" && s[i + 1] === ">") return i;
+  }
+  return -1;
+}
+
+/** Function types are encoded `(t1,t2)=>tr` (supports nested via depth-aware splitting). */
+export function isFuncTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("(") && topArrow(t) >= 0; }
+export function funcParams(t: Ty): Ty[] {
+  const arrow = topArrow(t);
+  const inner = t.slice(1, arrow - 1).trimEnd(); // between "(" and ")" before "=>"
+  const body = inner.endsWith(")") ? inner.slice(0, -1) : inner;
+  return body === "" ? [] : (splitTopLevel(body, ",") as Ty[]);
+}
+export function funcRet(t: Ty): Ty { return t.slice(topArrow(t) + 2) as Ty; }
+export function makeFuncTy(params: Ty[], ret: Ty): Ty { return `(${params.join(",")})=>${ret}` as Ty; }
+
+export function isObjectTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("{"); }
+/** Parse an object type into ordered [key, type] fields (nesting-aware). */
+export function objectFields(t: Ty): { key: string; ty: Ty }[] {
+  const inner = t.slice(1, -1);
+  if (inner === "") return [];
+  return splitTopLevel(inner, ",").map((part) => {
+    const i = part.indexOf(":");
+    return { key: part.slice(0, i), ty: part.slice(i + 1) as Ty };
+  });
+}
+export function fieldIndex(t: Ty, key: string): number { return objectFields(t).findIndex((f) => f.key === key); }
+export function fieldType(t: Ty, key: string): Ty | undefined { return objectFields(t).find((f) => f.key === key)?.ty; }
+export function objectType(fields: { key: string; ty: Ty }[]): Ty {
+  return `{${fields.map((f) => `${f.key}:${f.ty}`).join(",")}}`;
+}
+
+export type Expr =
+  | NumberLiteral
+  | BooleanLiteral
+  | StringLiteral
+  | TemplateLiteral
+  | UndefinedLiteral
+  | NullLiteral
+  | ArrayLiteral
+  | ObjectLiteral
+  | Identifier
+  | MemberExpr
+  | IndexExpr
+  | UnaryExpr
+  | UpdateExpr
+  | BinaryExpr
+  | LogicalExpr
+  | ConditionalExpr
+  | SequenceExpr
+  | AssignExpr
+  | TypeofExpr
+  | SpreadExpr
+  | ArrowFunction
+  | NewExpr
+  | AsExpr
+  | CallExpr;
+
+export type Stmt =
+  | VarDecl
+  | FuncDecl
+  | ReturnStmt
+  | IfStmt
+  | WhileStmt
+  | DoWhileStmt
+  | ForStmt
+  | ForOfStmt
+  | ForInStmt
+  | SwitchStmt
+  | ThrowStmt
+  | TryStmt
+  | ExprStmt
+  | BlockStmt
+  | MultiStmt
+  | BreakStmt
+  | ContinueStmt;
+
+export interface NumberLiteral { kind: "NumberLiteral"; value: number; ty?: Ty; }
+export interface BooleanLiteral { kind: "BooleanLiteral"; value: boolean; ty?: Ty; }
+export interface StringLiteral { kind: "StringLiteral"; value: string; ty?: Ty; }
+
+/** `hi ${x} there` — quasis.length === exprs.length + 1 */
+export interface TemplateLiteral {
+  kind: "TemplateLiteral";
+  quasis: string[];
+  exprs: Expr[];
+  ty?: Ty;
+}
+
+export interface UndefinedLiteral { kind: "UndefinedLiteral"; ty?: Ty; }
+export interface NullLiteral { kind: "NullLiteral"; ty?: Ty; }
+export interface ArrayLiteral { kind: "ArrayLiteral"; elements: Expr[]; ty?: Ty; }
+export interface ObjectProperty { key: string; value: Expr; spread?: boolean; }
+export interface ObjectLiteral { kind: "ObjectLiteral"; properties: ObjectProperty[]; ty?: Ty; }
+export interface SpreadExpr { kind: "SpreadExpr"; argument: Expr; ty?: Ty; }
+
+export interface Loc { line: number; col: number; }
+export interface Identifier { kind: "Identifier"; name: string; ty?: Ty; loc?: Loc; }
+
+export interface MemberExpr {
+  kind: "MemberExpr";
+  object: Expr;
+  property: string;
+  ty?: Ty;
+}
+
+/** obj[expr] element access */
+export interface IndexExpr { kind: "IndexExpr"; object: Expr; index: Expr; ty?: Ty; }
+
+export type UnaryOp = "-" | "+" | "!" | "~" | "void";
+export interface UnaryExpr { kind: "UnaryExpr"; op: UnaryOp; operand: Expr; ty?: Ty; }
+
+/** ++x / x++ / --x / x-- */
+export interface UpdateExpr {
+  kind: "UpdateExpr";
+  op: "++" | "--";
+  prefix: boolean;
+  target: string;
+  ty?: Ty;
+}
+
+export type BinaryOp =
+  | "+" | "-" | "*" | "/" | "%" | "**"
+  | "<" | "<=" | ">" | ">=" | "===" | "!==" | "==" | "!="
+  | "&" | "|" | "^" | "<<" | ">>" | ">>>";
+export interface BinaryExpr { kind: "BinaryExpr"; op: BinaryOp; left: Expr; right: Expr; ty?: Ty; }
+
+export interface LogicalExpr { kind: "LogicalExpr"; op: "&&" | "||" | "??"; left: Expr; right: Expr; ty?: Ty; }
+
+export interface SequenceExpr { kind: "SequenceExpr"; exprs: Expr[]; ty?: Ty; }
+
+export interface ConditionalExpr {
+  kind: "ConditionalExpr";
+  test: Expr;
+  consequent: Expr;
+  alternate: Expr;
+  ty?: Ty;
+}
+
+/** simple assignment or compound (+= -= *= /= %= &= |= ^= <<= >>= >>>=) */
+export type AssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=";
+export interface AssignExpr {
+  kind: "AssignExpr";
+  op: AssignOp;
+  target: string;
+  value: Expr;
+  ty?: Ty;
+}
+
+export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
+
+export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; ty?: Ty; }
+export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; ty?: Ty; }
+export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
+
+/** Arrow function. `captures` (filled by the checker) are free vars closed over. */
+export interface ArrowFunction {
+  kind: "ArrowFunction";
+  params: Param[];
+  body: Expr | Stmt[];
+  exprBody: boolean;
+  ty?: Ty;
+  paramTys?: Ty[]; // resolved param types (from annotations or context)
+  retTy?: Ty;
+  captures?: { name: string; ty: Ty }[];
+  liftedName?: string; // @arrow_N assigned during codegen
+}
+
+export interface Param { name: string; annot?: Ty; default?: Expr; rest?: boolean; }
+
+export interface Declarator { name: string; annot?: Ty; init: Expr; ty?: Ty; }
+export interface VarDecl {
+  kind: "VarDecl";
+  declKind: "let" | "const";
+  decls: Declarator[];
+}
+
+export interface FuncDecl {
+  kind: "FuncDecl";
+  name: string;
+  params: Param[];
+  returnAnnot?: Ty;
+  body: Stmt[];
+  returnTy?: Ty; // resolved
+  endDrops?: string[]; // owned linear locals to free at fall-through exit
+}
+
+export interface ReturnStmt { kind: "ReturnStmt"; argument: Expr | null; drops?: string[]; }
+export interface IfStmt { kind: "IfStmt"; test: Expr; consequent: Stmt[]; alternate: Stmt[] | null; }
+export interface WhileStmt { kind: "WhileStmt"; test: Expr; body: Stmt[]; }
+export interface DoWhileStmt { kind: "DoWhileStmt"; body: Stmt[]; test: Expr; }
+export interface ForStmt {
+  kind: "ForStmt";
+  init: VarDecl | Expr | null;
+  test: Expr | null;
+  update: Expr | null;
+  body: Stmt[];
+}
+export interface ForOfStmt { kind: "ForOfStmt"; name: string; annot?: Ty; iterable: Expr; body: Stmt[]; elemTy?: Ty; }
+export interface ForInStmt { kind: "ForInStmt"; name: string; object: Expr; body: Stmt[]; }
+export interface SwitchCase { test: Expr | null; body: Stmt[]; } // test null === default
+export interface SwitchStmt { kind: "SwitchStmt"; discriminant: Expr; cases: SwitchCase[]; }
+export interface ThrowStmt { kind: "ThrowStmt"; argument: Expr; }
+export interface TryStmt { kind: "TryStmt"; block: Stmt[]; param: string | null; handler: Stmt[] | null; finalizer: Stmt[] | null; catchTy?: Ty; }
+export interface ExprStmt { kind: "ExprStmt"; expr: Expr; }
+export interface BlockStmt { kind: "BlockStmt"; body: Stmt[]; }
+/** Transparent group (NOT a scope) — flattened inline. Used for desugaring. */
+export interface MultiStmt { kind: "MultiStmt"; stmts: Stmt[]; }
+export interface BreakStmt { kind: "BreakStmt"; }
+export interface ContinueStmt { kind: "ContinueStmt"; }
+
+export interface Program { kind: "Program"; body: Stmt[]; endDrops?: string[]; }

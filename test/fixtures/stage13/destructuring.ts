@@ -1,0 +1,10 @@
+const [first, second, ...rest] = [10, 20, 30, 40, 50];
+console.log(first, second, rest.join(","));
+const { name, age } = { name: "Bob", age: 42 };
+console.log(name, age);
+const { x: px, y: py } = { x: 1, y: 2 };
+console.log(px, py);
+let a: number = 1;
+let b: number = 2;
+[a, b] = [b, a];
+console.log(a, b);

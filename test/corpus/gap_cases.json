@@ -1,0 +1,332 @@
+[
+  {
+    "name": "bitwise-and-or-xor",
+    "feature": "bitwise",
+    "code": "const a = 12, b = 10;\nconsole.log(a & b);\nconsole.log(a | b);\nconsole.log(a ^ b);",
+    "expectedStdout": "8\n14\n6\n"
+  },
+  {
+    "name": "bitwise-not",
+    "feature": "bitwise",
+    "code": "const x = 5;\nconsole.log(~x);\nconsole.log(~0);",
+    "expectedStdout": "-6\n-1\n"
+  },
+  {
+    "name": "bitwise-shifts",
+    "feature": "bitwise",
+    "code": "console.log(1 << 4);\nconsole.log(256 >> 2);\nconsole.log(-1 >>> 28);",
+    "expectedStdout": "16\n64\n15\n"
+  },
+  {
+    "name": "bitwise-mask",
+    "feature": "bitwise",
+    "code": "let flags = 0;\nflags |= 1;\nflags |= 4;\nconsole.log(flags);\nconsole.log((flags & 4) !== 0);",
+    "expectedStdout": "5\ntrue\n"
+  },
+  {
+    "name": "unary-void",
+    "feature": "unary",
+    "code": "console.log(void 0);\nconsole.log(void \"hello\");",
+    "expectedStdout": "undefined\nundefined\n"
+  },
+  {
+    "name": "unary-plus",
+    "feature": "unary",
+    "code": "console.log(+\"42\");\nconsole.log(+true);\nconsole.log(+\"3.14\");",
+    "expectedStdout": "42\n1\n3.14\n"
+  },
+  {
+    "name": "unary-negate",
+    "feature": "unary",
+    "code": "const n = 7;\nconsole.log(-n);\nconsole.log(-(-n));",
+    "expectedStdout": "-7\n7\n"
+  },
+  {
+    "name": "switch-basic",
+    "feature": "switch",
+    "code": "function name(d: number): string {\n  switch (d) {\n    case 1: return \"one\";\n    case 2: return \"two\";\n    default: return \"many\";\n  }\n}\nconsole.log(name(1));\nconsole.log(name(2));\nconsole.log(name(9));",
+    "expectedStdout": "one\ntwo\nmany\n"
+  },
+  {
+    "name": "switch-fallthrough",
+    "feature": "switch",
+    "code": "let out = \"\";\nfor (let i = 0; i < 4; i++) {\n  switch (i) {\n    case 0:\n    case 1:\n      out += \"low \";\n      break;\n    case 2:\n      out += \"mid \";\n    default:\n      out += \"hi \";\n  }\n}\nconsole.log(out.trim());",
+    "expectedStdout": "low low mid hi hi\n"
+  },
+  {
+    "name": "do-while",
+    "feature": "do-while",
+    "code": "let i = 0, sum = 0;\ndo {\n  sum += i;\n  i++;\n} while (i < 5);\nconsole.log(sum);",
+    "expectedStdout": "10\n"
+  },
+  {
+    "name": "do-while-once",
+    "feature": "do-while",
+    "code": "let n = 100;\ndo {\n  console.log(\"ran\", n);\n} while (n < 0);",
+    "expectedStdout": "ran 100\n"
+  },
+  {
+    "name": "for-of-array",
+    "feature": "for-of",
+    "code": "const nums = [3, 6, 9];\nlet total = 0;\nfor (const n of nums) total += n;\nconsole.log(total);",
+    "expectedStdout": "18\n"
+  },
+  {
+    "name": "for-of-string",
+    "feature": "for-of",
+    "code": "let out = \"\";\nfor (const ch of \"abc\") out += ch + \"-\";\nconsole.log(out);",
+    "expectedStdout": "a-b-c-\n"
+  },
+  {
+    "name": "for-in-object",
+    "feature": "for-in",
+    "code": "const obj = { a: 1, b: 2, c: 3 };\nlet keys = \"\";\nfor (const k in obj) keys += k;\nconsole.log(keys);",
+    "expectedStdout": "abc\n"
+  },
+  {
+    "name": "array-basics",
+    "feature": "array",
+    "code": "const arr = [10, 20, 30];\nconsole.log(arr[0]);\nconsole.log(arr[2]);\nconsole.log(arr.length);",
+    "expectedStdout": "10\n30\n3\n"
+  },
+  {
+    "name": "array-push-pop",
+    "feature": "array",
+    "code": "const arr: number[] = [1, 2];\narr.push(3);\narr.push(4);\nconsole.log(arr.pop());\nconsole.log(arr.length);\nconsole.log(arr.join(\",\"));",
+    "expectedStdout": "4\n3\n1,2,3\n"
+  },
+  {
+    "name": "array-includes-indexof",
+    "feature": "array",
+    "code": "const arr = [5, 10, 15];\nconsole.log(arr.includes(10));\nconsole.log(arr.includes(99));\nconsole.log(arr.indexOf(15));\nconsole.log(arr.indexOf(1));",
+    "expectedStdout": "true\nfalse\n2\n-1\n"
+  },
+  {
+    "name": "array-join",
+    "feature": "array",
+    "code": "const parts = [\"a\", \"b\", \"c\"];\nconsole.log(parts.join(\"-\"));\nconsole.log(parts.join(\"\"));\nconsole.log([1, 2, 3].join(\", \"));",
+    "expectedStdout": "a-b-c\nabc\n1, 2, 3\n"
+  },
+  {
+    "name": "array-map",
+    "feature": "array-hof",
+    "code": "const nums = [1, 2, 3, 4];\nconst doubled = nums.map((x) => x * 2);\nconsole.log(doubled.join(\",\"));",
+    "expectedStdout": "2,4,6,8\n"
+  },
+  {
+    "name": "array-filter",
+    "feature": "array-hof",
+    "code": "const nums = [1, 2, 3, 4, 5, 6];\nconst evens = nums.filter((x) => x % 2 === 0);\nconsole.log(evens.join(\",\"));",
+    "expectedStdout": "2,4,6\n"
+  },
+  {
+    "name": "array-reduce",
+    "feature": "array-hof",
+    "code": "const nums = [1, 2, 3, 4, 5];\nconst sum = nums.reduce((acc, x) => acc + x, 0);\nconst product = nums.reduce((acc, x) => acc * x, 1);\nconsole.log(sum);\nconsole.log(product);",
+    "expectedStdout": "15\n120\n"
+  },
+  {
+    "name": "array-map-filter-reduce-chain",
+    "feature": "array-hof",
+    "code": "const result = [1, 2, 3, 4, 5, 6]\n  .filter((x) => x % 2 === 0)\n  .map((x) => x * x)\n  .reduce((a, b) => a + b, 0);\nconsole.log(result);",
+    "expectedStdout": "56\n"
+  },
+  {
+    "name": "object-access",
+    "feature": "object",
+    "code": "const p = { name: \"Ada\", age: 36 };\nconsole.log(p.name);\nconsole.log(p[\"age\"]);",
+    "expectedStdout": "Ada\n36\n"
+  },
+  {
+    "name": "object-keys",
+    "feature": "object",
+    "code": "const o = { x: 1, y: 2, z: 3 };\nconst keys = Object.keys(o);\nconsole.log(keys.join(\",\"));\nconsole.log(keys.length);",
+    "expectedStdout": "x,y,z\n3\n"
+  },
+  {
+    "name": "object-nested",
+    "feature": "object",
+    "code": "const data = { user: { id: 7, tags: [\"a\", \"b\"] } };\nconsole.log(data.user.id);\nconsole.log(data.user.tags[1]);",
+    "expectedStdout": "7\nb\n"
+  },
+  {
+    "name": "arrow-closure-counter",
+    "feature": "closure",
+    "code": "function makeCounter() {\n  let count = 0;\n  return () => {\n    count++;\n    return count;\n  };\n}\nconst c = makeCounter();\nconsole.log(c());\nconsole.log(c());\nconsole.log(c());",
+    "expectedStdout": "1\n2\n3\n"
+  },
+  {
+    "name": "closure-capture",
+    "feature": "closure",
+    "code": "const base = 100;\nconst add = (x: number) => base + x;\nconsole.log(add(5));\nconsole.log(add(23));",
+    "expectedStdout": "105\n123\n"
+  },
+  {
+    "name": "higher-order-fn",
+    "feature": "higher-order",
+    "code": "function applyTwice(f: (n: number) => number, x: number): number {\n  return f(f(x));\n}\nconsole.log(applyTwice((n) => n + 3, 10));\nconsole.log(applyTwice((n) => n * 2, 5));",
+    "expectedStdout": "16\n20\n"
+  },
+  {
+    "name": "higher-order-compose",
+    "feature": "higher-order",
+    "code": "const compose = (f: (n: number) => number, g: (n: number) => number) =>\n  (x: number) => f(g(x));\nconst inc = (n: number) => n + 1;\nconst dbl = (n: number) => n * 2;\nconsole.log(compose(inc, dbl)(10));",
+    "expectedStdout": "21\n"
+  },
+  {
+    "name": "default-params",
+    "feature": "default-params",
+    "code": "function greet(name: string = \"world\", n: number = 1): string {\n  return (name + \"!\").repeat(n);\n}\nconsole.log(greet());\nconsole.log(greet(\"hi\", 3));",
+    "expectedStdout": "world!\nhi!hi!hi!\n"
+  },
+  {
+    "name": "rest-params",
+    "feature": "rest-params",
+    "code": "function sum(...nums: number[]): number {\n  let t = 0;\n  for (const n of nums) t += n;\n  return t;\n}\nconsole.log(sum(1, 2, 3));\nconsole.log(sum(10, 20, 30, 40));\nconsole.log(sum());",
+    "expectedStdout": "6\n100\n0\n"
+  },
+  {
+    "name": "spread-in-array",
+    "feature": "spread",
+    "code": "const a = [1, 2, 3];\nconst b = [0, ...a, 4];\nconsole.log(b.join(\",\"));",
+    "expectedStdout": "0,1,2,3,4\n"
+  },
+  {
+    "name": "spread-in-call",
+    "feature": "spread",
+    "code": "function add3(x: number, y: number, z: number): number {\n  return x + y + z;\n}\nconst args: [number, number, number] = [4, 5, 6];\nconsole.log(add3(...args));\nconsole.log(Math.max(...[3, 9, 2, 7]));",
+    "expectedStdout": "15\n9\n"
+  },
+  {
+    "name": "spread-object",
+    "feature": "spread",
+    "code": "const base = { a: 1, b: 2 };\nconst merged = { ...base, c: 3, b: 9 };\nconsole.log(merged.a, merged.b, merged.c);",
+    "expectedStdout": "1 9 3\n"
+  },
+  {
+    "name": "array-destructure",
+    "feature": "destructuring",
+    "code": "const [first, second, ...rest] = [10, 20, 30, 40, 50];\nconsole.log(first);\nconsole.log(second);\nconsole.log(rest.join(\",\"));",
+    "expectedStdout": "10\n20\n30,40,50\n"
+  },
+  {
+    "name": "object-destructure",
+    "feature": "destructuring",
+    "code": "const { name, age } = { name: \"Bob\", age: 42 };\nconsole.log(name);\nconsole.log(age);",
+    "expectedStdout": "Bob\n42\n"
+  },
+  {
+    "name": "swap-destructure",
+    "feature": "destructuring",
+    "code": "let a = 1, b = 2;\n[a, b] = [b, a];\nconsole.log(a, b);",
+    "expectedStdout": "2 1\n"
+  },
+  {
+    "name": "null-undefined-typeof",
+    "feature": "null-undefined",
+    "code": "const a = null;\nlet b;\nconsole.log(a);\nconsole.log(b);\nconsole.log(typeof a);\nconsole.log(typeof b);",
+    "expectedStdout": "null\nundefined\nobject\nundefined\n"
+  },
+  {
+    "name": "null-undefined-print",
+    "feature": "null-undefined",
+    "code": "console.log(null, undefined);\nconsole.log(\"x=\" + null);\nconsole.log(\"y=\" + undefined);",
+    "expectedStdout": "null undefined\nx=null\ny=undefined\n"
+  },
+  {
+    "name": "optional-chaining",
+    "feature": "optional-nullish",
+    "code": "const o: { a?: { b?: number } } = { a: {} };\nconsole.log(o.a?.b);\nconsole.log(o.a?.b ?? -1);\nconst empty: { a?: { b?: number } } = {};\nconsole.log(empty.a?.b ?? -2);",
+    "expectedStdout": "undefined\n-1\n-2\n"
+  },
+  {
+    "name": "nullish-coalescing",
+    "feature": "optional-nullish",
+    "code": "const x = 0;\nconst y = null;\nconsole.log(x ?? 99);\nconsole.log(y ?? 99);\nconsole.log(undefined ?? \"fallback\");",
+    "expectedStdout": "0\n99\nfallback\n"
+  },
+  {
+    "name": "try-catch-finally",
+    "feature": "exceptions",
+    "code": "function risky(n: number): string {\n  try {\n    if (n < 0) throw new Error(\"neg\");\n    return \"ok \" + n;\n  } catch (e) {\n    return \"caught: \" + (e as Error).message;\n  } finally {\n    console.log(\"cleanup\");\n  }\n}\nconsole.log(risky(5));\nconsole.log(risky(-1));",
+    "expectedStdout": "cleanup\nok 5\ncleanup\ncaught: neg\n"
+  },
+  {
+    "name": "throw-custom",
+    "feature": "exceptions",
+    "code": "try {\n  throw \"boom\";\n} catch (e) {\n  console.log(\"got\", e);\n}\nconsole.log(\"after\");",
+    "expectedStdout": "got boom\nafter\n"
+  },
+  {
+    "name": "math-rounding",
+    "feature": "math",
+    "code": "console.log(Math.floor(3.7));\nconsole.log(Math.ceil(3.2));\nconsole.log(Math.round(3.5));\nconsole.log(Math.abs(-8));",
+    "expectedStdout": "3\n4\n4\n8\n"
+  },
+  {
+    "name": "math-minmax-sqrt-pow",
+    "feature": "math",
+    "code": "console.log(Math.max(3, 9, 1));\nconsole.log(Math.min(3, 9, 1));\nconsole.log(Math.sqrt(144));\nconsole.log(Math.pow(2, 10));",
+    "expectedStdout": "9\n1\n12\n1024\n"
+  },
+  {
+    "name": "parse-int-float",
+    "feature": "number-parsing",
+    "code": "console.log(parseInt(\"42px\", 10));\nconsole.log(parseFloat(\"3.14xyz\"));\nconsole.log(parseInt(\"100\", 2));",
+    "expectedStdout": "42\n3.14\n4\n"
+  },
+  {
+    "name": "number-isnan",
+    "feature": "number-parsing",
+    "code": "console.log(Number(\"56\"));\nconsole.log(isNaN(NaN));\nconsole.log(isNaN(5));\nconsole.log(Number(\"abc\"));",
+    "expectedStdout": "56\ntrue\nfalse\nNaN\n"
+  },
+  {
+    "name": "string-slice-substring",
+    "feature": "string-methods",
+    "code": "const s = \"hello world\";\nconsole.log(s.slice(0, 5));\nconsole.log(s.slice(-5));\nconsole.log(s.substring(6, 11));",
+    "expectedStdout": "hello\nworld\nworld\n"
+  },
+  {
+    "name": "string-case",
+    "feature": "string-methods",
+    "code": "console.log(\"Hello\".toUpperCase());\nconsole.log(\"Hello\".toLowerCase());\nconsole.log(\"banana\".charAt(2));",
+    "expectedStdout": "HELLO\nhello\nn\n"
+  },
+  {
+    "name": "string-split-repeat",
+    "feature": "string-methods",
+    "code": "console.log(\"a,b,c\".split(\",\").join(\"|\"));\nconsole.log(\"ab\".repeat(3));\nconsole.log(\"hi\".split(\"\").reverse().join(\"\"));",
+    "expectedStdout": "a|b|c\nababab\nih\n"
+  },
+  {
+    "name": "string-trim-pad",
+    "feature": "string-methods",
+    "code": "console.log(\"  spaced  \".trim() + \"!\");\nconsole.log(\"7\".padStart(3, \"0\"));\nconsole.log(\"5\".padStart(4, \"*\"));",
+    "expectedStdout": "spaced!\n007\n***5\n"
+  },
+  {
+    "name": "json-stringify",
+    "feature": "json",
+    "code": "console.log(JSON.stringify(42));\nconsole.log(JSON.stringify(\"hi\"));\nconsole.log(JSON.stringify(true));\nconsole.log(JSON.stringify([1, 2, 3]));\nconsole.log(JSON.stringify({ a: 1, b: \"x\" }));",
+    "expectedStdout": "42\n\"hi\"\ntrue\n[1,2,3]\n{\"a\":1,\"b\":\"x\"}\n"
+  },
+  {
+    "name": "json-roundtrip",
+    "feature": "json",
+    "code": "const obj = { n: 5, arr: [1, 2] };\nconst s = JSON.stringify(obj);\nconst back = JSON.parse(s);\nconsole.log(s);\nconsole.log(back.arr[1]);",
+    "expectedStdout": "{\"n\":5,\"arr\":[1,2]}\n2\n"
+  },
+  {
+    "name": "increment-in-expr",
+    "feature": "increment-expr",
+    "code": "let i = 5;\nconsole.log(i++);\nconsole.log(i);\nconsole.log(++i);\nconsole.log(i--);\nconsole.log(i);",
+    "expectedStdout": "5\n6\n7\n7\n6\n"
+  },
+  {
+    "name": "comma-operator",
+    "feature": "comma",
+    "code": "let x = (1, 2, 3);\nconsole.log(x);\nlet a = 0, b = 0;\nfor (let i = 0, j = 10; i < j; i++, j--) {\n  a = i; b = j;\n}\nconsole.log(a, b);",
+    "expectedStdout": "3\n4 6\n"
+  }
+]

@@ -1,0 +1,6 @@
+cleanup
+ok 5
+cleanup
+caught: neg
+got boom
+after
