@@ -277,10 +277,25 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
 - **Stage 19 ✅ (nested closures / general function-value calls)** Calling a closure that is
   itself the result of a call (`compose(f,g)(x)`) or a captured function value — generalized
   `genCallValueFrom`. Nested function types work via the depth-aware splitter.
+- **Stage 20 ✅ (A1: dynamic value + runtime typechecking → closes `json-roundtrip`)**
+  `JSON.parse(s): Dyn` — a runtime recursive-descent parser (scalars, strings incl. escapes +
+  `\uXXXX` BMP, objects, arrays; JSONTestSuite-ordered) producing a **tagged heap box** (`NtDyn`).
+  Narrowing `dyn as T` emits a **validator generated from the static type** (io-ts/zod semantics):
+  scalars unbox with a tag check; objects `require_object` + per-field `require_field` + recurse
+  (extra keys stripped); arrays loop-validate each element — building the value in the normal
+  repr (nt_obj slot block / NtArray). On a shape mismatch it **throws** (deliberate node
+  divergence, `test/typecheck.test.ts`). **Catchable throws**: JSON syntax errors + validator
+  failures use a **pending-exception protocol** (raise a flag + message, unwind via sentinel;
+  codegen checks `nt_exc_pending()` after fallible calls → branch to the nearest catch or abort),
+  so `try/catch` works like node under the lexical CFG model. Un-narrowed `Dyn` field/index
+  access (`back.arr[1]`) via runtime tag checks; `console.log(dyn)` prints scalars (compound =
+  `util.inspect`, deferred). Also **`|>`** (Stage B1) landed in parallel.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
-Coverage: base corpus **37/39**; gap corpus **53/55**. Only 2 left, both needing type-system
+Coverage: base corpus **37/39**; gap corpus **54/55** (A1 closed `json-roundtrip`). Only 1 left:
+**`optional-chaining`** (A2 — nullable/optional types). *(historical note below predates A1.)*
+Only 2 left, both needing type-system
 extensions that dovetail with Phase 2: **`JSON.parse`** (dynamic/`any` value → pairs with the
 requested **runtime typechecking**) and **optional chaining `?.`** (nullable/optional unions).
 Everything else is rejected with an `NT1xxx` diagnostic — see `docs/divergences.md`.
