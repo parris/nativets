@@ -415,10 +415,26 @@ typedef struct NtDyn {
 
 typedef struct { const char *p; } JP;
 
-static void json_fail(void) {
-  fputs("nativets: SyntaxError: invalid JSON\n", stderr);
+/* ---- pending-exception protocol ----
+ * Runtime failures (JSON syntax errors, `as T` typecheck mismatches) do NOT exit;
+ * they RAISE (set a pending flag + message) and unwind by returning a sentinel.
+ * Generated IR checks nt_exc_pending() after each fallible call and branches to the
+ * nearest catch (clearing the flag) or, if uncaught, calls nt_exc_abort() → exit 1.
+ * This makes throws catchable via try/catch, matching node, with the lexical
+ * structured-control-flow model (no unwinder). */
+static int32_t g_exc_set = 0;
+static const char *g_exc_msg = NULL;
+
+static void nt_exc_raise(const char *msg) { g_exc_set = 1; g_exc_msg = msg; }
+int32_t nt_exc_pending(void) { return g_exc_set; }
+const char *nt_exc_message(void) { return g_exc_msg ? g_exc_msg : ""; }
+void nt_exc_clear(void) { g_exc_set = 0; g_exc_msg = NULL; }
+void nt_exc_abort(void) {
+  fprintf(stderr, "nativets: uncaught %s\n", g_exc_msg ? g_exc_msg : "exception");
   exit(1);
 }
+
+static void json_fail(void) { nt_exc_raise("SyntaxError: Unexpected token in JSON"); }
 
 static void json_ws(JP *j) {
   while (*j->p == ' ' || *j->p == '\t' || *j->p == '\n' || *j->p == '\r') j->p++;
@@ -435,12 +451,12 @@ static NtDyn *json_number(JP *j) {
   if (*j->p == '-') j->p++;
   if (*j->p == '0') j->p++;                                    /* 0 — no leading-zero run */
   else if (*j->p >= '1' && *j->p <= '9') { while (*j->p >= '0' && *j->p <= '9') j->p++; }
-  else json_fail();                                            /* -foo, -, +1, .5 */
-  if (*j->p == '.') { j->p++; if (!(*j->p >= '0' && *j->p <= '9')) json_fail(); while (*j->p >= '0' && *j->p <= '9') j->p++; }
+  else { json_fail(); return NULL; }                           /* -foo, -, +1, .5 */
+  if (*j->p == '.') { j->p++; if (!(*j->p >= '0' && *j->p <= '9')) { json_fail(); return NULL; } while (*j->p >= '0' && *j->p <= '9') j->p++; }
   if (*j->p == 'e' || *j->p == 'E') {
     j->p++;
     if (*j->p == '+' || *j->p == '-') j->p++;
-    if (!(*j->p >= '0' && *j->p <= '9')) json_fail();
+    if (!(*j->p >= '0' && *j->p <= '9')) { json_fail(); return NULL; }
     while (*j->p >= '0' && *j->p <= '9') j->p++;
   }
   NtDyn *d = dyn_new(DYN_NUM);
@@ -459,15 +475,13 @@ static NtDyn *json_value(JP *j) {
 NtDyn *nt_json_parse(const char *s) {
   JP j; j.p = s;
   NtDyn *d = json_value(&j);
+  if (g_exc_set) return NULL;                                  /* parse error already raised */
   json_ws(&j);
-  if (*j.p != '\0') json_fail();                               /* trailing garbage / second value */
+  if (*j.p != '\0') { json_fail(); return NULL; }              /* trailing garbage / second value */
   return d;
 }
 
 double nt_dyn_as_number(NtDyn *d) {
-  if (!d || d->tag != DYN_NUM) {
-    fputs("nativets: TypeError: expected number\n", stderr);
-    exit(1);
-  }
+  if (!d || d->tag != DYN_NUM) { nt_exc_raise("TypeError: expected number"); return 0.0; }
   return d->num;
 }

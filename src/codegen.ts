@@ -128,6 +128,10 @@ const DECLARES = [
   "declare ptr @js_json_quote(ptr)",
   "declare ptr @nt_json_parse(ptr)",
   "declare double @nt_dyn_as_number(ptr)",
+  "declare i32 @nt_exc_pending()",
+  "declare ptr @nt_exc_message()",
+  "declare void @nt_exc_clear()",
+  "declare void @nt_exc_abort()",
 ];
 
 interface Val { v: string; ty: Ty; }
@@ -1103,6 +1107,7 @@ class FnGen {
         const s = this.genExpr(e.args[0]!);
         const t = this.fresh();
         this.emit(`${t} = call ptr @nt_json_parse(ptr ${s.v})`);
+        this.emitExcCheck();
         return { v: t, ty: "Dyn" };
       }
       return this.genJsonStringify(this.genExpr(e.args[0]!));
@@ -1150,9 +1155,40 @@ class FnGen {
     if (target === "number") {
       const t = this.fresh();
       this.emit(`${t} = call double @nt_dyn_as_number(ptr ${dyn})`);
+      this.emitExcCheck();
       return { v: t, ty: "number" };
     }
     throw nyi(NYI.JSON, `narrowing a dynamic value to ${target}`);
+  }
+
+  /**
+   * After a fallible runtime call, branch to the innermost catch (clearing the
+   * pending flag) if an exception was raised; at top level, abort (exit 1). Keeps
+   * the lexical throw model — no unwinder — while making runtime throws catchable.
+   */
+  private emitExcCheck(): void {
+    const p = this.fresh();
+    this.emit(`${p} = call i32 @nt_exc_pending()`);
+    const cond = this.fresh();
+    this.emit(`${cond} = icmp ne i32 ${p}, 0`);
+    const throwLbl = this.label("exc");
+    const contLbl = this.label("cont");
+    this.terminate(`br i1 ${cond}, label %${throwLbl}, label %${contLbl}`);
+    this.to(this.block(throwLbl));
+    const h = this.tryHandlers[this.tryHandlers.length - 1];
+    if (h) {
+      if (h.excVar && h.eType === "string") {
+        const m = this.fresh();
+        this.emit(`${m} = call ptr @nt_exc_message()`);
+        this.emit(`store ptr ${m}, ptr %${h.excVar}.addr`);
+      }
+      this.emit(`call void @nt_exc_clear()`);
+      this.terminate(`br label %${h.catchLbl}`);
+    } else {
+      this.emit(`call void @nt_exc_abort()`);
+      this.terminate(`unreachable`);
+    }
+    this.to(this.block(contLbl));
   }
 
   /** Call a function VALUE (closure ptr already computed): indirect call through slot 0. */

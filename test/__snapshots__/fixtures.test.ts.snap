@@ -63,6 +63,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -138,6 +142,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -217,6 +225,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -293,6 +305,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -369,6 +385,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -446,6 +466,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -524,6 +548,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -605,6 +633,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define double @dbl(double %n) {
 entry:
@@ -695,6 +727,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -771,6 +807,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define double @arrow_0(ptr %__clo, double %n) {
 entry:
@@ -990,6 +1030,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define double @arrow_0(ptr %__clo) {
 entry:
@@ -1138,6 +1182,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [6 x i8] c"a,b,c\\00"
 @.str.1 = private unnamed_addr constant [2 x i8] c",\\00"
@@ -1254,6 +1302,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"Bob\\00"
@@ -1452,6 +1504,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
 
@@ -1646,6 +1702,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [4 x i8] c"Ada\\00"
 @.str.1 = private unnamed_addr constant [2 x i8] c"x\\00"
@@ -1850,6 +1910,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [9 x i8] c"hi there\\00"
 @.str.1 = private unnamed_addr constant [2 x i8] c"[\\00"
@@ -2141,6 +2205,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [4 x i8] c"neg\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"ok \\00"
@@ -2290,6 +2358,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define double @arrow_1(ptr %__clo, double %x) {
 entry:
@@ -2492,6 +2564,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -2581,6 +2657,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define double @fib(double %n) {
 entry:
@@ -2686,6 +2766,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [5 x i8] c"even\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"odd\\00"
@@ -2777,6 +2861,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -2889,6 +2977,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -2984,6 +3076,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -3010,6 +3106,292 @@ body2:
 endwhile3:
   %t7 = load double, ptr %sum.addr
   call void @js_print_num(double %t7)
+  call void @js_print_newline()
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures stage20/json-parse-catch.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+
+@.str.0 = private unnamed_addr constant [3 x i8] c"OK\\00"
+@.str.1 = private unnamed_addr constant [6 x i8] c"THROW\\00"
+@.str.2 = private unnamed_addr constant [10 x i8] c"{bad json\\00"
+@.str.3 = private unnamed_addr constant [3 x i8] c"42\\00"
+
+define ptr @p(ptr %s) {
+entry:
+  %s.addr = alloca ptr
+  %e.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %s, ptr %s.addr
+  %t0 = load ptr, ptr %s.addr
+  %t1 = call ptr @nt_json_parse(ptr %t0)
+  %t2 = call i32 @nt_exc_pending()
+  %t3 = icmp ne i32 %t2, 0
+  br i1 %t3, label %exc3, label %cont4
+exc3:
+  %t4 = call ptr @nt_exc_message()
+  store ptr %t4, ptr %e.addr
+  call void @nt_exc_clear()
+  br label %catch1
+cont4:
+  ret ptr @.str.0
+catch1:
+  ret ptr @.str.1
+endtry2:
+  ret ptr null
+}
+
+define i32 @main() {
+entry:
+  br label %L0
+L0:
+  %t0 = call ptr @p(ptr @.str.2)
+  call void @js_print_str(ptr %t0)
+  call void @js_print_newline()
+  %t1 = call ptr @p(ptr @.str.3)
+  call void @js_print_str(ptr %t1)
+  call void @js_print_newline()
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures stage20/json-parse-number-forms.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+
+@.str.0 = private unnamed_addr constant [5 x i8] c"-123\\00"
+@.str.1 = private unnamed_addr constant [4 x i8] c"1.5\\00"
+@.str.2 = private unnamed_addr constant [7 x i8] c"6.02e2\\00"
+@.str.3 = private unnamed_addr constant [5 x i8] c"0e+1\\00"
+@.str.4 = private unnamed_addr constant [6 x i8] c"1e400\\00"
+
+define i32 @main() {
+entry:
+  br label %L0
+L0:
+  %t0 = call ptr @nt_json_parse(ptr @.str.0)
+  %t1 = call i32 @nt_exc_pending()
+  %t2 = icmp ne i32 %t1, 0
+  br i1 %t2, label %exc1, label %cont2
+exc1:
+  call void @nt_exc_abort()
+  unreachable
+cont2:
+  %t3 = call double @nt_dyn_as_number(ptr %t0)
+  %t4 = call i32 @nt_exc_pending()
+  %t5 = icmp ne i32 %t4, 0
+  br i1 %t5, label %exc3, label %cont4
+exc3:
+  call void @nt_exc_abort()
+  unreachable
+cont4:
+  call void @js_print_num(double %t3)
+  call void @js_print_newline()
+  %t6 = call ptr @nt_json_parse(ptr @.str.1)
+  %t7 = call i32 @nt_exc_pending()
+  %t8 = icmp ne i32 %t7, 0
+  br i1 %t8, label %exc5, label %cont6
+exc5:
+  call void @nt_exc_abort()
+  unreachable
+cont6:
+  %t9 = call double @nt_dyn_as_number(ptr %t6)
+  %t10 = call i32 @nt_exc_pending()
+  %t11 = icmp ne i32 %t10, 0
+  br i1 %t11, label %exc7, label %cont8
+exc7:
+  call void @nt_exc_abort()
+  unreachable
+cont8:
+  call void @js_print_num(double %t9)
+  call void @js_print_newline()
+  %t12 = call ptr @nt_json_parse(ptr @.str.2)
+  %t13 = call i32 @nt_exc_pending()
+  %t14 = icmp ne i32 %t13, 0
+  br i1 %t14, label %exc9, label %cont10
+exc9:
+  call void @nt_exc_abort()
+  unreachable
+cont10:
+  %t15 = call double @nt_dyn_as_number(ptr %t12)
+  %t16 = call i32 @nt_exc_pending()
+  %t17 = icmp ne i32 %t16, 0
+  br i1 %t17, label %exc11, label %cont12
+exc11:
+  call void @nt_exc_abort()
+  unreachable
+cont12:
+  call void @js_print_num(double %t15)
+  call void @js_print_newline()
+  %t18 = call ptr @nt_json_parse(ptr @.str.3)
+  %t19 = call i32 @nt_exc_pending()
+  %t20 = icmp ne i32 %t19, 0
+  br i1 %t20, label %exc13, label %cont14
+exc13:
+  call void @nt_exc_abort()
+  unreachable
+cont14:
+  %t21 = call double @nt_dyn_as_number(ptr %t18)
+  %t22 = call i32 @nt_exc_pending()
+  %t23 = icmp ne i32 %t22, 0
+  br i1 %t23, label %exc15, label %cont16
+exc15:
+  call void @nt_exc_abort()
+  unreachable
+cont16:
+  call void @js_print_num(double %t21)
+  call void @js_print_newline()
+  %t24 = call ptr @nt_json_parse(ptr @.str.4)
+  %t25 = call i32 @nt_exc_pending()
+  %t26 = icmp ne i32 %t25, 0
+  br i1 %t26, label %exc17, label %cont18
+exc17:
+  call void @nt_exc_abort()
+  unreachable
+cont18:
+  %t27 = call double @nt_dyn_as_number(ptr %t24)
+  %t28 = call i32 @nt_exc_pending()
+  %t29 = icmp ne i32 %t28, 0
+  br i1 %t29, label %exc19, label %cont20
+exc19:
+  call void @nt_exc_abort()
+  unreachable
+cont20:
+  call void @js_print_num(double %t27)
   call void @js_print_newline()
   ret i32 0
 }
@@ -3079,6 +3461,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [2 x i8] c"5\\00"
 
@@ -3088,10 +3474,114 @@ entry:
   br label %L0
 L0:
   %t0 = call ptr @nt_json_parse(ptr @.str.0)
-  %t1 = call double @nt_dyn_as_number(ptr %t0)
-  store double %t1, ptr %n.addr
-  %t2 = load double, ptr %n.addr
-  call void @js_print_num(double %t2)
+  %t1 = call i32 @nt_exc_pending()
+  %t2 = icmp ne i32 %t1, 0
+  br i1 %t2, label %exc1, label %cont2
+exc1:
+  call void @nt_exc_abort()
+  unreachable
+cont2:
+  %t3 = call double @nt_dyn_as_number(ptr %t0)
+  %t4 = call i32 @nt_exc_pending()
+  %t5 = icmp ne i32 %t4, 0
+  br i1 %t5, label %exc3, label %cont4
+exc3:
+  call void @nt_exc_abort()
+  unreachable
+cont4:
+  store double %t3, ptr %n.addr
+  %t6 = load double, ptr %n.addr
+  call void @js_print_num(double %t6)
+  call void @js_print_newline()
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures stage20/json-parse-reject.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+
+@.str.0 = private unnamed_addr constant [10 x i8] c"{bad json\\00"
+@.str.1 = private unnamed_addr constant [10 x i8] c"unreached\\00"
+
+define i32 @main() {
+entry:
+  br label %L0
+L0:
+  %t0 = call ptr @nt_json_parse(ptr @.str.0)
+  %t1 = call i32 @nt_exc_pending()
+  %t2 = icmp ne i32 %t1, 0
+  br i1 %t2, label %exc1, label %cont2
+exc1:
+  call void @nt_exc_abort()
+  unreachable
+cont2:
+  call void @js_print_str(ptr @.str.1)
   call void @js_print_newline()
   ret i32 0
 }
@@ -3161,6 +3651,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [4 x i8] c"foo\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"bar\\00"
@@ -3242,6 +3736,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [6 x i8] c"hello\\00"
 
@@ -3320,6 +3818,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [6 x i8] c"world\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"hi \\00"
@@ -3412,6 +3914,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -3499,6 +4005,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -3596,6 +4106,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -3684,6 +4198,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [7 x i8] c"number\\00"
 @.str.1 = private unnamed_addr constant [7 x i8] c"string\\00"
@@ -3767,6 +4285,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -3870,6 +4392,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -3974,6 +4500,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 define i32 @main() {
 entry:
@@ -4067,6 +4597,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [2 x i8] c"-\\00"
 @.str.1 = private unnamed_addr constant [3 x i8] c"hi\\00"
@@ -4239,6 +4773,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [4 x i8] c"Ada\\00"
 @.str.1 = private unnamed_addr constant [2 x i8] c"x\\00"
@@ -4422,6 +4960,10 @@ declare void @nt_arr_extend(ptr, ptr)
 declare ptr @js_json_quote(ptr)
 declare ptr @nt_json_parse(ptr)
 declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
 
 @.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
 
@@ -4635,184 +5177,6 @@ rede32:
   call void @js_print_newline()
   %t93 = load ptr, ptr %nums.addr
   call void @nt_arr_free(ptr %t93)
-  ret i32 0
-}
-"
-`;
-
-exports[`fixtures stage20/json-parse-reject.ts emits stable LLVM IR (snapshot) 1`] = `
-"; ModuleID = 'nativets'
-declare void @js_print_num(double)
-declare void @js_print_bool(i32)
-declare void @js_print_str(ptr)
-declare void @js_print_sep()
-declare void @js_print_newline()
-declare double @pow(double, double)
-declare ptr @js_str_concat(ptr, ptr)
-declare double @js_str_len(ptr)
-declare i32 @js_str_eq(ptr, ptr)
-declare ptr @js_num_to_str(double)
-declare ptr @js_bool_to_str(i32)
-declare double @js_bit_and(double, double)
-declare double @js_bit_or(double, double)
-declare double @js_bit_xor(double, double)
-declare double @js_bit_not(double)
-declare double @js_shl(double, double)
-declare double @js_shr(double, double)
-declare double @js_ushr(double, double)
-declare double @js_str_to_num(ptr)
-declare double @js_math_round(double)
-declare double @js_parse_int(ptr, double)
-declare double @js_parse_float(ptr)
-declare double @floor(double)
-declare double @ceil(double)
-declare double @sqrt(double)
-declare double @trunc(double)
-declare double @fabs(double)
-declare double @fmax(double, double)
-declare double @fmin(double, double)
-declare ptr @js_str_upper(ptr)
-declare ptr @js_str_lower(ptr)
-declare ptr @js_str_trim(ptr)
-declare ptr @js_str_char_at(ptr, double)
-declare ptr @js_str_slice(ptr, double, double)
-declare ptr @js_str_substring(ptr, double, double)
-declare ptr @js_str_repeat(ptr, double)
-declare ptr @js_str_pad_start(ptr, double, ptr)
-declare i32 @js_str_includes(ptr, ptr)
-declare double @js_str_index_of(ptr, ptr)
-declare ptr @nt_arr_new(double)
-declare double @nt_arr_push(ptr, i64)
-declare i64 @nt_arr_get(ptr, double)
-declare i64 @nt_arr_pop(ptr)
-declare double @nt_arr_len(ptr)
-declare ptr @nt_arr_join_num(ptr, ptr)
-declare ptr @nt_arr_join_str(ptr, ptr)
-declare i32 @nt_arr_includes_num(ptr, double)
-declare i32 @nt_arr_includes_str(ptr, ptr)
-declare double @nt_arr_indexof_num(ptr, double)
-declare double @nt_arr_indexof_str(ptr, ptr)
-declare void @nt_arr_free(ptr)
-declare double @nt_arr_live()
-declare ptr @nt_obj_new(double)
-declare void @nt_obj_free(ptr)
-declare ptr @nt_str_split(ptr, ptr)
-declare ptr @nt_arr_reverse(ptr)
-declare ptr @nt_arr_slice(ptr, double, double)
-declare void @nt_arr_extend(ptr, ptr)
-declare ptr @js_json_quote(ptr)
-declare ptr @nt_json_parse(ptr)
-declare double @nt_dyn_as_number(ptr)
-
-@.str.0 = private unnamed_addr constant [10 x i8] c"{bad json\\00"
-@.str.1 = private unnamed_addr constant [10 x i8] c"unreached\\00"
-
-define i32 @main() {
-entry:
-  br label %L0
-L0:
-  %t0 = call ptr @nt_json_parse(ptr @.str.0)
-  call void @js_print_str(ptr @.str.1)
-  call void @js_print_newline()
-  ret i32 0
-}
-"
-`;
-
-exports[`fixtures stage20/json-parse-number-forms.ts emits stable LLVM IR (snapshot) 1`] = `
-"; ModuleID = 'nativets'
-declare void @js_print_num(double)
-declare void @js_print_bool(i32)
-declare void @js_print_str(ptr)
-declare void @js_print_sep()
-declare void @js_print_newline()
-declare double @pow(double, double)
-declare ptr @js_str_concat(ptr, ptr)
-declare double @js_str_len(ptr)
-declare i32 @js_str_eq(ptr, ptr)
-declare ptr @js_num_to_str(double)
-declare ptr @js_bool_to_str(i32)
-declare double @js_bit_and(double, double)
-declare double @js_bit_or(double, double)
-declare double @js_bit_xor(double, double)
-declare double @js_bit_not(double)
-declare double @js_shl(double, double)
-declare double @js_shr(double, double)
-declare double @js_ushr(double, double)
-declare double @js_str_to_num(ptr)
-declare double @js_math_round(double)
-declare double @js_parse_int(ptr, double)
-declare double @js_parse_float(ptr)
-declare double @floor(double)
-declare double @ceil(double)
-declare double @sqrt(double)
-declare double @trunc(double)
-declare double @fabs(double)
-declare double @fmax(double, double)
-declare double @fmin(double, double)
-declare ptr @js_str_upper(ptr)
-declare ptr @js_str_lower(ptr)
-declare ptr @js_str_trim(ptr)
-declare ptr @js_str_char_at(ptr, double)
-declare ptr @js_str_slice(ptr, double, double)
-declare ptr @js_str_substring(ptr, double, double)
-declare ptr @js_str_repeat(ptr, double)
-declare ptr @js_str_pad_start(ptr, double, ptr)
-declare i32 @js_str_includes(ptr, ptr)
-declare double @js_str_index_of(ptr, ptr)
-declare ptr @nt_arr_new(double)
-declare double @nt_arr_push(ptr, i64)
-declare i64 @nt_arr_get(ptr, double)
-declare i64 @nt_arr_pop(ptr)
-declare double @nt_arr_len(ptr)
-declare ptr @nt_arr_join_num(ptr, ptr)
-declare ptr @nt_arr_join_str(ptr, ptr)
-declare i32 @nt_arr_includes_num(ptr, double)
-declare i32 @nt_arr_includes_str(ptr, ptr)
-declare double @nt_arr_indexof_num(ptr, double)
-declare double @nt_arr_indexof_str(ptr, ptr)
-declare void @nt_arr_free(ptr)
-declare double @nt_arr_live()
-declare ptr @nt_obj_new(double)
-declare void @nt_obj_free(ptr)
-declare ptr @nt_str_split(ptr, ptr)
-declare ptr @nt_arr_reverse(ptr)
-declare ptr @nt_arr_slice(ptr, double, double)
-declare void @nt_arr_extend(ptr, ptr)
-declare ptr @js_json_quote(ptr)
-declare ptr @nt_json_parse(ptr)
-declare double @nt_dyn_as_number(ptr)
-
-@.str.0 = private unnamed_addr constant [5 x i8] c"-123\\00"
-@.str.1 = private unnamed_addr constant [4 x i8] c"1.5\\00"
-@.str.2 = private unnamed_addr constant [7 x i8] c"6.02e2\\00"
-@.str.3 = private unnamed_addr constant [5 x i8] c"0e+1\\00"
-@.str.4 = private unnamed_addr constant [6 x i8] c"1e400\\00"
-
-define i32 @main() {
-entry:
-  br label %L0
-L0:
-  %t0 = call ptr @nt_json_parse(ptr @.str.0)
-  %t1 = call double @nt_dyn_as_number(ptr %t0)
-  call void @js_print_num(double %t1)
-  call void @js_print_newline()
-  %t2 = call ptr @nt_json_parse(ptr @.str.1)
-  %t3 = call double @nt_dyn_as_number(ptr %t2)
-  call void @js_print_num(double %t3)
-  call void @js_print_newline()
-  %t4 = call ptr @nt_json_parse(ptr @.str.2)
-  %t5 = call double @nt_dyn_as_number(ptr %t4)
-  call void @js_print_num(double %t5)
-  call void @js_print_newline()
-  %t6 = call ptr @nt_json_parse(ptr @.str.3)
-  %t7 = call double @nt_dyn_as_number(ptr %t6)
-  call void @js_print_num(double %t7)
-  call void @js_print_newline()
-  %t8 = call ptr @nt_json_parse(ptr @.str.4)
-  %t9 = call double @nt_dyn_as_number(ptr %t8)
-  call void @js_print_num(double %t9)
-  call void @js_print_newline()
   ret i32 0
 }
 "
