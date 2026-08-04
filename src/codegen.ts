@@ -133,6 +133,8 @@ const DECLARES = [
   "declare i32 @nt_arr_includes_str(ptr, ptr)",
   "declare double @nt_arr_indexof_num(ptr, double)",
   "declare double @nt_arr_indexof_str(ptr, ptr)",
+  "declare ptr @nt_arr_copy(ptr)",
+  "declare ptr @nt_arr_with(ptr, double, i64)",
   "declare void @nt_arr_free(ptr)",
   "declare double @nt_arr_live()",
   "declare ptr @nt_obj_new(double)",
@@ -1134,6 +1136,10 @@ class FnGen {
             this.emit(`${t} = fcmp ${FCMP[op]} double ${l.v}, ${r.v}`);
           } else if (lt === "boolean") {
             this.emit(`${t} = icmp ${op === "===" || op === "==" ? "eq" : "ne"} i1 ${l.v}, ${r.v}`);
+          } else if (isArrayTy(lt) || isObjectTy(lt)) {
+            // Heap reference identity: arrays/objects compare by pointer (as node
+            // does for `===`), so a CoW copy is `!==` its source. NOT strcmp.
+            this.emit(`${t} = icmp ${op === "===" || op === "==" ? "eq" : "ne"} ptr ${l.v}, ${r.v}`);
           } else {
             const eq = this.fresh();
             this.emit(`${eq} = call i32 @js_str_eq(ptr ${l.v}, ptr ${r.v})`);
@@ -1686,6 +1692,15 @@ class FnGen {
         return { v: t, ty: "number" };
       }
       case "reverse": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_arr_reverse(ptr ${recv.v})`); return { v: t, ty: recv.ty }; }
+      case "with": {
+        // Immutable update (CoW): full copy of the flat block with slot i replaced.
+        // Receiver is borrowed + unchanged; result is a fresh owned array (drops once).
+        const idx = this.genExpr(args[0]!).v;
+        const slot = this.toSlot(this.genExpr(args[1]!));
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_arr_with(ptr ${recv.v}, double ${idx}, i64 ${slot})`);
+        return { v: t, ty: recv.ty };
+      }
       case "slice": {
         const a0 = this.genExpr(args[0]!).v;
         const a1 = args[1] ? this.genExpr(args[1]).v : POS_INF;
