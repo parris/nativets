@@ -8,7 +8,8 @@
  */
 
 import { lex, type Token } from "./lexer.ts";
-import { parseError } from "./diagnostics.ts";
+import { parseError, nyi, NYI } from "./diagnostics.ts";
+import { makeNullable } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty,
 } from "./ast.ts";
@@ -70,7 +71,24 @@ class Parser {
   }
 
   // ---- types (permissive; we only need scalars precisely) ----
+  // A type is a union of atoms. The only unions in the A2 subset are the two
+  // restricted NULLABLE shapes `T | undefined` / `T | null` (either arm order);
+  // a general union / intersection / >2-arm union is rejected with an NYI code
+  // (never miscompiled) — see the checker's §5 note and the Excluded table.
   private parseType(): Ty {
+    const arms: Ty[] = [this.parseTypeAtom()];
+    let sawIntersect = false;
+    while (this.at("|") || this.at("&")) { if (this.at("&")) sawIntersect = true; this.next(); arms.push(this.parseTypeAtom()); }
+    if (arms.length === 1) return arms[0]!;
+    if (!sawIntersect && arms.length === 2) {
+      const [a, b] = arms as [Ty, Ty];
+      if (a === "undefined" || a === "null") return makeNullable(a, b);
+      if (b === "undefined" || b === "null") return makeNullable(b, a);
+    }
+    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null' are supported)`);
+  }
+  // A single type atom: function / object / tuple / scalar-or-named, plus `[]` suffixes.
+  private parseTypeAtom(): Ty {
     let base: Ty;
     if (this.at("(")) base = this.parseFuncType();
     else if (this.at("{")) base = this.parseObjectType();
@@ -78,7 +96,6 @@ class Parser {
     else { const id = this.expectIdent(); base = (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty; }
     let suffix = "";
     while (this.at("[")) { this.eat("["); this.eat("]"); suffix += "[]"; } // T[], T[][]
-    while (this.at("|") || this.at("&")) { this.next(); this.parseTypeAtomLoose(); } // unions
     return (base + suffix) as Ty;
   }
   // tuple type `[T, U, ...]` — modeled as an array of the first element type
@@ -109,17 +126,16 @@ class Parser {
     if (!this.at("}")) {
       do {
         const key = this.expectIdent();
-        if (this.at("?")) this.eat("?"); // optional marker: ignored (treated as present)
+        const optional = this.at("?"); // `{ a?: T }` ≡ `{ a: T | undefined }`
+        if (optional) this.eat("?");
         this.eat(":");
-        fields.push(`${key}:${this.parseType()}`);
+        let ft = this.parseType();
+        if (optional) ft = makeNullable("undefined", ft);
+        fields.push(`${key}:${ft}`);
       } while ((this.at(",") || this.at(";")) && (this.next(), true));
     }
     this.eat("}");
     return `{${fields.join(",")}}` as Ty;
-  }
-  private parseTypeAtomLoose(): void {
-    this.expectIdent();
-    while (this.at("[")) { this.eat("["); this.eat("]"); }
   }
 
   // ---- statements ----
@@ -508,8 +524,11 @@ class Parser {
         this.eat(".");
         expr = { kind: "MemberExpr", object: expr, property: this.expectIdent() };
       } else if (this.at("?.")) {
-        this.eat("?.");
-        expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true } as any;
+        const t = this.eat("?.");
+        // Optional call `?.()` and optional index `?.[]` are out of the A2 subset.
+        if (this.at("(")) throw nyi(NYI.OPTIONAL_CHAIN, `optional call '?.()' at ${t.line}:${t.col}`);
+        if (this.at("[")) throw nyi(NYI.OPTIONAL_CHAIN, `optional element access '?.[]' at ${t.line}:${t.col}`);
+        expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true };
       } else if (this.at("[")) {
         this.eat("[");
         const index = this.parseExpression();

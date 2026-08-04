@@ -27,7 +27,7 @@ const KNOWN_UNSUPPORTED = new Set([
   // arrays, objects, Object.keys, for-in, and .map/.filter/.reduce (inline arrows) supported ✅.
   // first-class functions + closures supported ✅ except nested function types:
   "higher-order-compose",
-  "optional-chaining", // needs nested objects + optional fields
+  // optional-chaining ✅ closed by A2 (nullable/optional types + `?.`).
 ]);
 const MIN_SUPPORTED = cases.length - KNOWN_UNSUPPORTED.size;
 

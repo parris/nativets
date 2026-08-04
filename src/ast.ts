@@ -13,8 +13,28 @@ export type ScalarTy = "number" | "boolean" | "string" | "void" | "undefined" | 
  */
 export type Ty = ScalarTy | `${string}[]` | `{${string}}`;
 
-export function isArrayTy(t: Ty): boolean { return typeof t === "string" && t.endsWith("[]"); }
+export function isArrayTy(t: Ty): boolean { return typeof t === "string" && !isNullableTy(t) && t.endsWith("[]"); }
 export function elemTy(t: Ty): Ty { return t.slice(0, -2) as Ty; }
+
+/**
+ * Nullable / optional encoding (A2). A runtime-nullable value — `T | undefined`,
+ * `T | null`, and optional object fields `{ a?: T }` — is encoded `?U<base>`
+ * (undefined arm) or `?N<base>` (null arm). Kept DISTINCT from object/array/func
+ * encodings: a nullable never reports as object/array/func (the predicates guard
+ * against it), so `isObjectTy`/`isArrayTy`/`isFuncTy` still pattern-match the base
+ * shapes only. At runtime a nullable is a heap block of 2 i64 slots
+ * [tag, value] (tag 0=undefined, 1=null, 2=present); `is_nullish = tag < 2`.
+ */
+export function isNullableTy(t: Ty): boolean { return typeof t === "string" && (t.startsWith("?U") || t.startsWith("?N")); }
+/** The non-nullable base of a nullable type (identity on a non-nullable). */
+export function baseTy(t: Ty): Ty { return isNullableTy(t) ? (t.slice(2) as Ty) : t; }
+/** Which nullish arm a nullable type carries (`undefined` or `null`). */
+export function nullishKind(t: Ty): "undefined" | "null" { return typeof t === "string" && t.startsWith("?N") ? "null" : "undefined"; }
+/** Wrap `base` as nullable with the given nullish arm (idempotent on the base). */
+export function makeNullable(which: "undefined" | "null", base: Ty): Ty {
+  const b = isNullableTy(base) ? baseTy(base) : base; // no double-wrap
+  return `?${which === "null" ? "N" : "U"}${b}` as Ty;
+}
 
 /** Split on `sep` at nesting depth 0 (respecting (), [], {}) — for nested types. */
 export function splitTopLevel(s: string, sep: string): string[] {
@@ -52,7 +72,7 @@ export function funcParams(t: Ty): Ty[] {
 export function funcRet(t: Ty): Ty { return t.slice(topArrow(t) + 2) as Ty; }
 export function makeFuncTy(params: Ty[], ret: Ty): Ty { return `(${params.join(",")})=>${ret}` as Ty; }
 
-export function isObjectTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("{") && !t.endsWith("[]"); }
+export function isObjectTy(t: Ty): boolean { return typeof t === "string" && !isNullableTy(t) && t.startsWith("{") && !t.endsWith("[]"); }
 /** Parse an object type into ordered [key, type] fields (nesting-aware). */
 export function objectFields(t: Ty): { key: string; ty: Ty }[] {
   const inner = t.slice(1, -1);
@@ -139,6 +159,7 @@ export interface MemberExpr {
   kind: "MemberExpr";
   object: Expr;
   property: string;
+  optional?: boolean; // `?.` optional-chaining link (A2)
   ty?: Ty;
 }
 
