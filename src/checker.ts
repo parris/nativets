@@ -690,6 +690,11 @@ class Checker {
       case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
       case "indexOf": need(1); if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`); return "number";
       case "reverse": need(0); return recv;
+      case "with": // ES2023 immutable update: with(index, value) -> NEW array (CoW)
+        need(2);
+        if (argTys[0] !== "number") throw typeError(".with index must be a number");
+        if (argTys[1] !== el) throw typeError(`.with value expects ${el}`);
+        return recv;
       case "slice":
         if (args.length < 1 || args.length > 2) throw typeError(".slice expects 1..2 args");
         if (argTys.some((t) => t !== "number")) throw typeError(".slice args must be numbers");

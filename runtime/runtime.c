@@ -239,6 +239,31 @@ NtArray *nt_arr_new(double capd) {
   return a;
 }
 
+/* Copy-on-write primitive (B2 step 1): a FULL independent copy of the flat block
+ * — same len/cap, duplicated slot data. Counts as a fresh allocation so the copy
+ * is single-owner and drops exactly once (keeps __arrLive balanced). No structural
+ * sharing yet: element pointers are copied by value, but the block itself is new,
+ * so mutating/dropping the copy never touches the original. */
+NtArray *nt_arr_copy(NtArray *a) {
+  NtArray *c = (NtArray *)nativets_alloc(sizeof(NtArray));
+  int64_t cap = a->cap < 1 ? 1 : a->cap;
+  c->len = a->len; c->cap = cap;
+  c->data = (int64_t *)nativets_alloc(sizeof(int64_t) * (size_t)cap);
+  memcpy(c->data, a->data, sizeof(int64_t) * (size_t)a->len);
+  g_arr_allocs++;
+  return c;
+}
+
+/* Array.prototype.with(i, v) — pure: returns a NEW array (full CoW copy) with
+ * slot i replaced by `slot`; the receiver is unchanged. Out-of-range i leaves the
+ * copy untouched (fixtures stay in-bounds; node throws RangeError — not modeled). */
+NtArray *nt_arr_with(NtArray *a, double idxd, int64_t slot) {
+  NtArray *c = nt_arr_copy(a);
+  int64_t i = (int64_t)idxd;
+  if (i >= 0 && i < c->len) c->data[i] = slot;
+  return c;
+}
+
 /* Deterministic drop, inserted by the compiler at scope exit (RAII). This is the
  * ONLY place arrays are reclaimed — the ownership checker guarantees single-owner
  * so this frees exactly once and never a moved-out value. Element strings are
