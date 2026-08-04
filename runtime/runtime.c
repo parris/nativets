@@ -321,13 +321,26 @@ double nt_arr_indexof_str(NtArray *a, const char *x) {
  * (no hashmap). Codegen bitcasts field values into/out of slots.
  * ============================================================ */
 
+/* Live-object accounting (mirrors nt_arr_live) so compiler-inserted object drops
+ * are observable in tests. Every heap object block (object literals — and closure
+ * env blocks, which reuse nt_obj_new) is counted; owned objects are freed at scope
+ * exit via nt_obj_free (RAII), exactly once, never a moved-out value. */
+static long g_obj_allocs = 0;
+static long g_obj_frees = 0;
+
 void *nt_obj_new(double nfields) {
   size_t n = (size_t)nfields;
   int64_t *slots = (int64_t *)nativets_alloc((n ? n : 1) * sizeof(int64_t));
   for (size_t i = 0; i < n; i++) slots[i] = 0;
+  g_obj_allocs++;
   return slots;
 }
-void nt_obj_free(void *o) { free(o); }
+void nt_obj_free(void *o) {
+  if (!o) return;
+  free(o);
+  g_obj_frees++;
+}
+double nt_obj_live(void) { return (double)(g_obj_allocs - g_obj_frees); }
 
 /* ---- string split -> array, array reverse ---- */
 
