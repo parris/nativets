@@ -8,7 +8,7 @@
  */
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError } from "./diagnostics.ts";
 
@@ -343,6 +343,7 @@ class Checker {
           return makeNullable("undefined", baseTy(ft));
         }
         if ((ot === "string" || isArrayTy(ot)) && e.property === "length") return "number";
+        if ((isMapTy(ot) || isSetTy(ot)) && e.property === "size") return "number";
         if (ot === "Dyn") return "Dyn"; // dynamic field access — runtime tag check
         if (isObjectTy(ot)) {
           const ft = fieldType(ot, e.property);
@@ -447,6 +448,21 @@ class Checker {
         return b.ty;
       }
       case "NewExpr": {
+        // Immutable collections (B2). `new Map<K,V>()` / `new Set<T>()`; bare
+        // `new Map()`/`new Set()` default to Map<string,number> / Set<string>.
+        if (e.callee === "Map") {
+          if (e.args.length !== 0) throw nyi(NYI.COLLECTION, "new Map(iterable) (use .set)");
+          const k = e.typeArgs?.[0] ?? "string", v = e.typeArgs?.[1] ?? "number";
+          if (k !== "string") throw nyi(NYI.COLLECTION, `Map with ${k} keys`);
+          if (v !== "number") throw nyi(NYI.COLLECTION, `Map with ${v} values`);
+          return makeMapTy(k, v);
+        }
+        if (e.callee === "Set") {
+          if (e.args.length !== 0) throw nyi(NYI.COLLECTION, "new Set(iterable) (use .add)");
+          const el = e.typeArgs?.[0] ?? "string";
+          if (el !== "string" && el !== "number") throw nyi(NYI.COLLECTION, `Set of ${el}`);
+          return makeSetTy(el);
+        }
         if (e.callee !== "Error") throw nyi(NYI.CLASS, `new ${e.callee}(...)`);
         if (e.args.length !== 1 || this.type(e.args[0]!, scope) !== "string") throw typeError("new Error(message: string)");
         return "{message:string}";
@@ -571,6 +587,8 @@ class Checker {
     // receiver.method(...)
     if (e.callee.kind === "MemberExpr") {
       const recv = this.type(e.callee.object, scope);
+      if (isMapTy(recv)) return this.inferMapMethod(recv, e.callee.property, e.args, scope);
+      if (isSetTy(recv)) return this.inferSetMethod(recv, e.callee.property, e.args, scope);
       if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee.property, e.args, scope);
       if (recv === "string") {
         const sig = STRING_METHODS[e.callee.property];
@@ -629,6 +647,34 @@ class Checker {
       return funcRet(ct);
     }
     throw nyi(NYI.CLOSURE, "unsupported call target");
+  }
+
+  /** Immutable Map methods (B2): .set/.get/.has/.delete. `.set`/`.delete` return a NEW map. */
+  private inferMapMethod(recv: Ty, method: string, args: Expr[], scope: Scope): Ty {
+    const k = mapKeyTy(recv), v = mapValTy(recv);
+    const argTys = args.map((a) => this.type(a, scope));
+    const needKey = (i: number) => { if (argTys[i] !== k) throw typeError(`.${method} key expects ${k}, got ${argTys[i]}`); };
+    switch (method) {
+      case "set": if (args.length !== 2) throw typeError(".set expects (key, value)"); needKey(0);
+        if (argTys[1] !== v) throw typeError(`.set value expects ${v}, got ${argTys[1]}`); return recv; // NEW map
+      case "get": if (args.length !== 1) throw typeError(".get expects (key)"); needKey(0); return v;
+      case "has": if (args.length !== 1) throw typeError(".has expects (key)"); needKey(0); return "boolean";
+      case "delete": if (args.length !== 1) throw typeError(".delete expects (key)"); needKey(0); return recv; // NEW map
+      default: throw nyi(NYI.COLLECTION, `Map method '.${method}'`);
+    }
+  }
+
+  /** Immutable Set methods (B2): .add/.has/.delete. `.add`/`.delete` return a NEW set. */
+  private inferSetMethod(recv: Ty, method: string, args: Expr[], scope: Scope): Ty {
+    const el = setElemTy(recv);
+    const argTys = args.map((a) => this.type(a, scope));
+    const needEl = () => { if (args.length !== 1) throw typeError(`.${method} expects (value)`); if (argTys[0] !== el) throw typeError(`.${method} expects ${el}, got ${argTys[0]}`); };
+    switch (method) {
+      case "add": needEl(); return recv;      // NEW set
+      case "has": needEl(); return "boolean";
+      case "delete": needEl(); return recv;   // NEW set
+      default: throw nyi(NYI.COLLECTION, `Set method '.${method}'`);
+    }
   }
 
   private inferArrayMethod(recv: Ty, method: string, args: Expr[], scope: Scope): Ty {

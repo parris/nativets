@@ -29,6 +29,12 @@ import runtimeSource from "../runtime/runtime.c" with { type: "text" };
 // header is embedded alongside so the `#include "nt_actor.h"` resolves in temp.
 import actorSource from "../runtime/nt_actor.c" with { type: "text" };
 import actorHeader from "../runtime/nt_actor.h" with { type: "text" };
+// The B2 immutable Map/Set core (Bagwell HAMT + small-flat) and its scalar-ABI
+// wrappers. Linked ONLY when a program uses Map/Set (libc-only, so it would
+// cross-link fine everywhere, but conditional keeps non-map binaries minimal).
+import hamtSource from "../runtime/nt_hamt.c" with { type: "text" };
+import hamtHeader from "../runtime/nt_hamt.h" with { type: "text" };
+import mapsetSource from "../runtime/nt_mapset.c" with { type: "text" };
 
 export type Target = "host" | "ios" | "ios-sim" | "android";
 
@@ -81,13 +87,24 @@ function toolchainFor(target: Target): Toolchain {
   }
 }
 
-function writeIR(source: string): { dir: string; ll: string; rt: string; actor: string | null } {
+function writeIR(source: string): { dir: string; ll: string; rt: string; actor: string | null; extra: string[] } {
   const dir = mkdtempSync(join(tmpdir(), "nativets-build-"));
   const ll = join(dir, "module.ll");
   const ir = sourceToIR(source);
   writeFileSync(ll, ir);
   const rt = join(dir, "runtime.c");
   writeFileSync(rt, runtimeSource); // embedded runtime → self-contained executable
+  // B2 Map/Set: link the HAMT core + scalar-ABI wrappers only when used (codegen
+  // emits nt_map_new/nt_set_new exactly then). libc-only, so it cross-links unchanged.
+  const extra: string[] = [];
+  if (ir.includes("@nt_map_new(") || ir.includes("@nt_set_new(")) {
+    writeFileSync(join(dir, "nt_hamt.h"), hamtHeader); // quote-included by both .c files
+    const hamt = join(dir, "nt_hamt.c");
+    writeFileSync(hamt, hamtSource);
+    const mapset = join(dir, "nt_mapset.c");
+    writeFileSync(mapset, mapsetSource);
+    extra.push(hamt, mapset);
+  }
   // Link the v0 actor runtime ONLY when the program uses actors (codegen emits the
   // nt_sched_init prologue exactly then). It relies on ucontext (makecontext/
   // swapcontext), which the Android NDK's Bionic does not declare at low API levels,
@@ -98,7 +115,7 @@ function writeIR(source: string): { dir: string; ll: string; rt: string; actor: 
     writeFileSync(actor, actorSource);
     writeFileSync(join(dir, "nt_actor.h"), actorHeader); // its header (quote-included)
   }
-  return { dir, ll, rt, actor };
+  return { dir, ll, rt, actor, extra };
 }
 
 function run(cc: string, args: string[]): void {
@@ -108,10 +125,10 @@ function run(cc: string, args: string[]): void {
 
 export async function buildBinary(source: string, outPath: string, opts: { target?: Target } = {}): Promise<void> {
   const { cc, flags } = toolchainFor(opts.target ?? "host");
-  const { dir, ll, rt, actor } = writeIR(source);
+  const { dir, ll, rt, actor, extra } = writeIR(source);
   try {
     // -lm: libm is separate on Android NDK (fmod/floor/...); harmless on macOS/iOS.
-    run(cc, [...flags, ll, rt, ...(actor ? [actor] : []), "-lm", "-o", outPath]);
+    run(cc, [...flags, ll, rt, ...(actor ? [actor] : []), ...extra, "-lm", "-o", outPath]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

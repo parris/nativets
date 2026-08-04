@@ -13,7 +13,7 @@
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { isConsoleLog } from "./checker.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy } from "./ast.ts";
 import { isOptChainExpr } from "./checker.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
@@ -42,7 +42,7 @@ function scanUsesActors(node: unknown): boolean {
 }
 
 function llvmTy(ty: Ty): string {
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty)) return "ptr"; // nullable = ptr to [tag,val]
+  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*
   switch (ty) {
     case "number": return "double";
     case "boolean": return "i1";
@@ -54,7 +54,7 @@ function llvmTy(ty: Ty): string {
 }
 
 function defaultZero(ty: Ty): string {
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty)) return "null";
+  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty)) return "null";
   switch (ty) {
     case "number": return "0x0000000000000000";
     case "boolean": return "false";
@@ -158,6 +158,18 @@ const DECLARES = [
   "declare ptr @nt_exc_message()",
   "declare void @nt_exc_clear()",
   "declare void @nt_exc_abort()",
+  // --- B2 immutable Map/Set (nt_hamt via scalar-ABI wrappers in nt_mapset.c) ---
+  "declare ptr @nt_map_new()",
+  "declare ptr @nt_map_put_slot(ptr, i32, i64, i64)",
+  "declare i64 @nt_map_get_slot(ptr, i32, i64)",
+  "declare i32 @nt_map_has_slot(ptr, i32, i64)",
+  "declare ptr @nt_map_remove_slot(ptr, i32, i64)",
+  "declare i64 @nt_map_size(ptr)",
+  "declare ptr @nt_set_new()",
+  "declare ptr @nt_set_add_slot(ptr, i32, i64)",
+  "declare i32 @nt_set_has_slot(ptr, i32, i64)",
+  "declare ptr @nt_set_remove_slot(ptr, i32, i64)",
+  "declare i64 @nt_set_size(ptr)",
   // --- B3 v0 actors (spawn/send/receive/self) ---
   "declare void @nt_sched_init()",
   "declare i64 @nt_spawn_closure(ptr, ptr, i64)",
@@ -807,7 +819,7 @@ class FnGen {
   private toSlot(val: Val): string {
     const t = this.fresh();
     if (val.ty === "number") this.emit(`${t} = bitcast double ${val.v} to i64`);
-    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -816,7 +828,7 @@ class FnGen {
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
     if (ty === "number") this.emit(`${t} = bitcast i64 ${slot} to double`);
-    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
@@ -1059,6 +1071,13 @@ class FnGen {
           else this.emit(`${t} = call double @nt_arr_len(ptr ${obj.v})`);
           return { v: t, ty: "number" };
         }
+        if ((isMapTy(obj.ty) || isSetTy(obj.ty)) && e.property === "size") {
+          const sz = this.fresh();
+          this.emit(`${sz} = call i64 @${isMapTy(obj.ty) ? "nt_map_size" : "nt_set_size"}(ptr ${obj.v})`);
+          const d = this.fresh();
+          this.emit(`${d} = sitofp i64 ${sz} to double`);
+          return { v: d, ty: "number" };
+        }
         if (isObjectTy(obj.ty)) {
           const idx = fieldIndex(obj.ty, e.property);
           const ft = fieldType(obj.ty, e.property)!;
@@ -1273,6 +1292,9 @@ class FnGen {
         return { v: this.genExpr(e.expr).v, ty: e.ty };
       }
       case "NewExpr": {
+        // Immutable collections (B2): fresh empty handle from the nt_hamt runtime.
+        if (e.callee === "Map") { const m = this.fresh(); this.emit(`${m} = call ptr @nt_map_new()`); return { v: m, ty: e.ty! }; }
+        if (e.callee === "Set") { const s = this.fresh(); this.emit(`${s} = call ptr @nt_set_new()`); return { v: s, ty: e.ty! }; }
         // new Error(msg) → object { message: msg }
         const msg = this.genExpr(e.args[0]!);
         const obj = this.fresh();
@@ -1313,6 +1335,8 @@ class FnGen {
     }
     if (e.callee.kind === "MemberExpr") {
       const recv = this.genExpr(e.callee.object);
+      if (isMapTy(recv.ty)) return this.genMapMethod(e.callee.property, recv, e.args);
+      if (isSetTy(recv.ty)) return this.genSetMethod(e.callee.property, recv, e.args);
       if (isArrayTy(recv.ty)) return this.genArrayMethod(e.callee.property, recv, e.args);
       return this.genStringMethod(e.callee.property, recv, e.args);
     }
@@ -1646,6 +1670,74 @@ class FnGen {
       this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${slot})`);
     }
     return { v: arr, ty: "string[]" };
+  }
+
+  /** Key-type tag passed to the nt_hamt scalar wrappers: NT_K_NUM=0, NT_K_STR=1. */
+  private keyTag(ty: Ty): number { return ty === "string" ? 1 : 0; }
+
+  /** Immutable Map methods → nt_hamt scalar-ABI wrappers. `.set`/`.delete` return a NEW handle. */
+  private genMapMethod(method: string, recv: Val, args: Expr[]): Val {
+    const k = mapKeyTy(recv.ty), v = mapValTy(recv.ty);
+    const tag = this.keyTag(k);
+    const keySlot = () => this.toSlot(this.genExpr(args[0]!)); // arg[0] typed as k
+    switch (method) {
+      case "set": {
+        const ks = keySlot();
+        const vs = this.toSlot(this.genExpr(args[1]!));
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_map_put_slot(ptr ${recv.v}, i32 ${tag}, i64 ${ks}, i64 ${vs})`);
+        return { v: t, ty: recv.ty };
+      }
+      case "get": {
+        const ks = keySlot();
+        const slot = this.fresh();
+        this.emit(`${slot} = call i64 @nt_map_get_slot(ptr ${recv.v}, i32 ${tag}, i64 ${ks})`);
+        return { v: this.fromSlot(slot, v), ty: v };
+      }
+      case "has": {
+        const ks = keySlot();
+        const r = this.fresh(), b = this.fresh();
+        this.emit(`${r} = call i32 @nt_map_has_slot(ptr ${recv.v}, i32 ${tag}, i64 ${ks})`);
+        this.emit(`${b} = icmp ne i32 ${r}, 0`);
+        return { v: b, ty: "boolean" };
+      }
+      case "delete": {
+        const ks = keySlot();
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_map_remove_slot(ptr ${recv.v}, i32 ${tag}, i64 ${ks})`);
+        return { v: t, ty: recv.ty };
+      }
+      default: throw nyi(NYI.COLLECTION, `Map method '.${method}'`);
+    }
+  }
+
+  /** Immutable Set methods → nt_hamt scalar-ABI wrappers. `.add`/`.delete` return a NEW handle. */
+  private genSetMethod(method: string, recv: Val, args: Expr[]): Val {
+    const el = setElemTy(recv.ty);
+    const tag = this.keyTag(el);
+    const elSlot = () => this.toSlot(this.genExpr(args[0]!));
+    switch (method) {
+      case "add": {
+        const es = elSlot();
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_set_add_slot(ptr ${recv.v}, i32 ${tag}, i64 ${es})`);
+        return { v: t, ty: recv.ty };
+      }
+      case "has": {
+        const es = elSlot();
+        const r = this.fresh(), b = this.fresh();
+        this.emit(`${r} = call i32 @nt_set_has_slot(ptr ${recv.v}, i32 ${tag}, i64 ${es})`);
+        this.emit(`${b} = icmp ne i32 ${r}, 0`);
+        return { v: b, ty: "boolean" };
+      }
+      case "delete": {
+        const es = elSlot();
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_set_remove_slot(ptr ${recv.v}, i32 ${tag}, i64 ${es})`);
+        return { v: t, ty: recv.ty };
+      }
+      default: throw nyi(NYI.COLLECTION, `Set method '.${method}'`);
+    }
   }
 
   private genArrayMethod(method: string, recv: Val, args: Expr[]): Val {
