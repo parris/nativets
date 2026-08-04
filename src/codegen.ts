@@ -26,7 +26,11 @@ export function llvmDouble(n: number): string {
   return "0x" + hex.toUpperCase();
 }
 
-const ACTOR_BUILTINS = new Set(["spawn", "send", "receive", "self", "__drain"]);
+const ACTOR_BUILTINS = new Set([
+  "spawn", "send", "receive", "self", "__drain",
+  // v2 links/monitors/trap + fault injection; v3 supervision + registry
+  "register", "whereis", "link", "monitor", "trapExit", "exit", "__crash", "__kill", "supervise",
+]);
 
 /** Does the program call any actor builtin? (Drives the nt_sched_init prologue in
  *  @main.) A structural walk over the plain-object AST — order/shape-agnostic. */
@@ -179,6 +183,18 @@ const DECLARES = [
   "declare i64 @nt_receive_slot()",
   "declare i64 @nt_self()",
   "declare void @nt_drain()",
+  // --- B3 v2 links/monitors/trap + fault injection; v3 supervision ---
+  "declare void @nt_register(ptr, i64)",
+  "declare i64 @nt_whereis(ptr)",
+  "declare void @nt_link(i64)",
+  "declare i64 @nt_monitor(i64)",
+  "declare void @nt_trap_exit(i32)",
+  "declare void @nt_actor_exit(i64, i64)",
+  "declare void @nt_crash(i64)",
+  "declare void @nt_kill(i64)",
+  "declare i64 @nt_sup_new(i64, i64, i64)",
+  "declare void @nt_sup_add_child(i64, ptr, ptr, ptr)",
+  "declare i64 @nt_sup_start(i64)",
 ];
 
 interface Val { v: string; ty: Ty; }
@@ -2034,8 +2050,114 @@ class FnGen {
       }
       case "__drain": { this.emit(`call void @nt_drain()`); return { v: "", ty: "void" }; }
 
+      // --- B3 v2 registry / links / monitors / trap / fault injection ---
+      case "register": {
+        const namePtr = this.genExpr(args[0]!).v;
+        const pidI = this.fresh(); this.emit(`${pidI} = fptosi double ${this.genExpr(args[1]!).v} to i64`);
+        this.emit(`call void @nt_register(ptr ${namePtr}, i64 ${pidI})`);
+        return { v: "", ty: "void" };
+      }
+      case "whereis": {
+        const namePtr = this.genExpr(args[0]!).v;
+        const p = this.fresh(); this.emit(`${p} = call i64 @nt_whereis(ptr ${namePtr})`);
+        const d = this.fresh(); this.emit(`${d} = sitofp i64 ${p} to double`);
+        return { v: d, ty: "number" };
+      }
+      case "link": {
+        const pidI = this.fresh(); this.emit(`${pidI} = fptosi double ${this.genExpr(args[0]!).v} to i64`);
+        this.emit(`call void @nt_link(i64 ${pidI})`);
+        return { v: "", ty: "void" };
+      }
+      case "monitor": {
+        const pidI = this.fresh(); this.emit(`${pidI} = fptosi double ${this.genExpr(args[0]!).v} to i64`);
+        const ref = this.fresh(); this.emit(`${ref} = call i64 @nt_monitor(i64 ${pidI})`);
+        const d = this.fresh(); this.emit(`${d} = sitofp i64 ${ref} to double`);
+        return { v: d, ty: "number" }; // ref (opaque number)
+      }
+      case "trapExit": {
+        const b = this.fresh(); this.emit(`${b} = zext i1 ${this.genExpr(args[0]!).v} to i32`);
+        this.emit(`call void @nt_trap_exit(i32 ${b})`);
+        return { v: "", ty: "void" };
+      }
+      case "exit": {
+        const pidI = this.fresh(); this.emit(`${pidI} = fptosi double ${this.genExpr(args[0]!).v} to i64`);
+        const rI = this.fresh(); this.emit(`${rI} = fptosi double ${this.genExpr(args[1]!).v} to i64`);
+        this.emit(`call void @nt_actor_exit(i64 ${pidI}, i64 ${rI})`);
+        return { v: "", ty: "void" };
+      }
+      case "__crash": {
+        const rI = this.fresh(); this.emit(`${rI} = fptosi double ${this.genExpr(args[0]!).v} to i64`);
+        this.emit(`call void @nt_crash(i64 ${rI})`);
+        return { v: "", ty: "void" };
+      }
+      case "__kill": {
+        const pidI = this.fresh(); this.emit(`${pidI} = fptosi double ${this.genExpr(args[0]!).v} to i64`);
+        this.emit(`call void @nt_kill(i64 ${pidI})`);
+        return { v: "", ty: "void" };
+      }
+
+      // --- B3 v3 supervision: build a spec, add each child, start the supervisor ---
+      case "supervise": return this.genSupervise(args[0]!, args[1]!);
+
       default: return null;
     }
+  }
+
+  /** B3 v3: lower supervise(children, opts) — build a C supervisor spec (one child
+   *  at a time, reading the ChildSpec object's static slots), then start the
+   *  supervisor actor. Children/opts are ordinary linear values; this borrows them. */
+  private genSupervise(children: Expr, opts: Expr): Val {
+    const optsV = this.genExpr(opts);
+    const readNum = (field: string): string => {
+      const g = this.fresh();
+      this.emit(`${g} = getelementptr i64, ptr ${optsV.v}, i64 ${fieldIndex(optsV.ty, field)}`);
+      const s = this.fresh(); this.emit(`${s} = load i64, ptr ${g}`);
+      const d = this.fromSlot(s, "number");    // slot -> double
+      const i = this.fresh(); this.emit(`${i} = fptosi double ${d} to i64`);
+      return i;
+    };
+    const maxR = readNum("maxRestarts");
+    const maxS = readNum("maxSeconds");
+    const handle = this.fresh();
+    this.emit(`${handle} = call i64 @nt_sup_new(i64 ${maxR}, i64 ${maxS}, i64 0)`); // one_for_one
+
+    const childrenV = this.genExpr(children);
+    const elem = elemTy(childrenV.ty);          // the ChildSpec object type
+    const idIx = fieldIndex(elem, "id");
+    const startIx = fieldIndex(elem, "start");
+    const restartIx = fieldIndex(elem, "restart");
+
+    // for (i = 0; i < len; i++) nt_sup_add_child(handle, id, start, restart)
+    const idxSlot = this.slot("number");
+    this.emit(`store double 0x0000000000000000, ptr ${idxSlot}`);
+    const lenT = this.fresh();
+    this.emit(`${lenT} = call double @nt_arr_len(ptr ${childrenV.v})`);
+    const condLbl = this.label("sup"), bodyLbl = this.label("supb"), endLbl = this.label("supend");
+    this.terminate(`br label %${condLbl}`);
+    this.to(this.block(condLbl));
+    const iC = this.fresh(); this.emit(`${iC} = load double, ptr ${idxSlot}`);
+    const cmp = this.fresh(); this.emit(`${cmp} = fcmp olt double ${iC}, ${lenT}`);
+    this.terminate(`br i1 ${cmp}, label %${bodyLbl}, label %${endLbl}`);
+    this.to(this.block(bodyLbl));
+    const iB = this.fresh(); this.emit(`${iB} = load double, ptr ${idxSlot}`);
+    const slot = this.fresh(); this.emit(`${slot} = call i64 @nt_arr_get(ptr ${childrenV.v}, double ${iB})`);
+    const childObj = this.fresh(); this.emit(`${childObj} = inttoptr i64 ${slot} to ptr`);
+    const loadPtrField = (ix: number): string => {
+      const g = this.fresh(); this.emit(`${g} = getelementptr i64, ptr ${childObj}, i64 ${ix}`);
+      const s = this.fresh(); this.emit(`${s} = load i64, ptr ${g}`);
+      const p = this.fresh(); this.emit(`${p} = inttoptr i64 ${s} to ptr`);
+      return p;
+    };
+    const idP = loadPtrField(idIx), startP = loadPtrField(startIx), restartP = loadPtrField(restartIx);
+    this.emit(`call void @nt_sup_add_child(i64 ${handle}, ptr ${idP}, ptr ${startP}, ptr ${restartP})`);
+    const iN = this.fresh(); this.emit(`${iN} = fadd double ${iB}, 1.0`);
+    this.emit(`store double ${iN}, ptr ${idxSlot}`);
+    this.terminate(`br label %${condLbl}`);
+    this.to(this.block(endLbl));
+
+    const pidI = this.fresh(); this.emit(`${pidI} = call i64 @nt_sup_start(i64 ${handle})`);
+    const pid = this.fresh(); this.emit(`${pid} = sitofp i64 ${pidI} to double`);
+    return { v: pid, ty: "number" };
   }
 
   private genUserCall(name: string, args: Expr[]): Val {

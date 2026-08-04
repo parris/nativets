@@ -57,7 +57,11 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   __objLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live object count
 };
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
-const ACTOR_BUILTINS = new Set(["spawn", "send", "receive", "self", "__drain"]);
+const ACTOR_BUILTINS = new Set([
+  "spawn", "send", "receive", "self", "__drain",
+  // v2 registry / links / monitors / trap + fault injection; v3 supervision
+  "register", "whereis", "link", "monitor", "trapExit", "exit", "__crash", "__kill", "supervise",
+]);
 
 export function check(program: Program): CheckedProgram {
   const functions = new Map<string, Sig>();
@@ -534,6 +538,74 @@ class Checker {
       if (name === "__drain") {
         if (e.args.length !== 0) throw typeError("__drain() takes no arguments");
         return "void";
+      }
+      // v2/v3 surface — registry / links / monitors / trap / fault injection / supervision
+      if (name === "register") {
+        if (e.args.length !== 2) throw typeError("register(name, pid) takes two arguments");
+        if (this.type(e.args[0]!, scope) !== "string") throw typeError("register: name must be a string");
+        if (this.type(e.args[1]!, scope) !== "number") throw typeError("register: pid must be a number");
+        return "void";
+      }
+      if (name === "whereis") {
+        if (e.args.length !== 1) throw typeError("whereis(name) takes one argument");
+        if (this.type(e.args[0]!, scope) !== "string") throw typeError("whereis: name must be a string");
+        return "number"; // pid (0 if absent)
+      }
+      if (name === "link" || name === "__kill") {
+        if (e.args.length !== 1) throw typeError(`${name}(pid) takes one argument`);
+        if (this.type(e.args[0]!, scope) !== "number") throw typeError(`${name}: pid must be a number`);
+        return "void";
+      }
+      if (name === "monitor") {
+        if (e.args.length !== 1) throw typeError("monitor(pid) takes one argument");
+        if (this.type(e.args[0]!, scope) !== "number") throw typeError("monitor: pid must be a number");
+        return "number"; // ref
+      }
+      if (name === "trapExit") {
+        if (e.args.length !== 1) throw typeError("trapExit(on) takes one argument");
+        if (this.type(e.args[0]!, scope) !== "boolean") throw typeError("trapExit: on must be a boolean");
+        return "void";
+      }
+      if (name === "exit") {
+        if (e.args.length !== 2) throw typeError("exit(pid, reason) takes two arguments");
+        if (this.type(e.args[0]!, scope) !== "number") throw typeError("exit: pid must be a number");
+        if (this.type(e.args[1]!, scope) !== "number") throw typeError("exit: reason must be a number");
+        return "void";
+      }
+      if (name === "__crash") {
+        if (e.args.length !== 1) throw typeError("__crash(reason) takes one argument");
+        if (this.type(e.args[0]!, scope) !== "number") throw typeError("__crash: reason must be a number");
+        return "void";
+      }
+      if (name === "supervise") {
+        if (e.args.length !== 2) throw typeError("supervise(children, opts) takes two arguments");
+        // children is an array LITERAL of ChildSpec objects. General `object[]` is a
+        // deferred feature, so supervise types the literal here directly (each element
+        // + the array node get their `.ty` set for codegen) rather than routing through
+        // the array-of-scalars-only inference.
+        const childrenArg = e.args[0]!;
+        if (childrenArg.kind !== "ArrayLiteral" || childrenArg.elements.length === 0)
+          throw typeError("supervise: children must be a non-empty array literal of ChildSpec objects");
+        let child: Ty | null = null;
+        for (const el of childrenArg.elements) {
+          if (el.kind === "SpreadExpr") throw typeError("supervise: children may not use spread");
+          const et = this.type(el, scope); // sets el.ty
+          if (!isObjectTy(et)) throw typeError("supervise: each child must be a ChildSpec object");
+          if (child === null) child = et;
+          else if (et !== child) throw typeError("supervise: all children must share one ChildSpec shape");
+        }
+        childrenArg.ty = `${child}[]` as Ty; // array node type for codegen (reads e.ty)
+        if (fieldType(child!, "id") !== "string") throw typeError("supervise: ChildSpec.id must be a string");
+        const startTy = fieldType(child!, "start");
+        if (!startTy || !isFuncTy(startTy) || funcParams(startTy).length !== 0 || funcRet(startTy) !== "number")
+          throw typeError("supervise: ChildSpec.start must be a () => Pid");
+        if (fieldType(child!, "restart") !== "string") throw typeError("supervise: ChildSpec.restart must be a string");
+        const ot = this.type(e.args[1]!, scope);
+        if (!isObjectTy(ot)) throw typeError("supervise: opts must be an object");
+        if (fieldType(ot, "strategy") !== "string") throw typeError("supervise: opts.strategy must be a string");
+        if (fieldType(ot, "maxRestarts") !== "number") throw typeError("supervise: opts.maxRestarts must be a number");
+        if (fieldType(ot, "maxSeconds") !== "number") throw typeError("supervise: opts.maxSeconds must be a number");
+        return "number"; // supervisor pid
       }
       if (name === "send") {
         if (e.args.length !== 2) throw typeError("send(to, msg) takes two arguments");

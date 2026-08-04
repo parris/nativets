@@ -89,4 +89,46 @@ NtPid   nt_spawn_closure(NtClosureFn body, void *env, int64_t arg); /* returns n
 void    nt_send_slot(NtPid to, int64_t slot);                        /* enqueue a raw slot */
 int64_t nt_receive_slot(void);                                        /* block; FIFO dequeue slot */
 
+/* ============================================================================
+ * v2 — links / monitors / trap_exit + fault injection (B3-actors §2 v2.0–2.2).
+ *
+ * Exit signals propagate along links: when an actor dies, each linked peer that
+ * is NOT trapping dies too on an ABNORMAL exit (normal exits don't kill a linked
+ * peer); a peer that IS trapping receives the exit as a MESSAGE instead. Monitors
+ * are unidirectional and always deliver a DOWN message carrying the reason. An
+ * exit/down delivered to a plain TS actor surfaces via nt_receive_slot as the
+ * dead peer's pid (a number) — v0 messages are numbers, so the notification is a
+ * number too (the richer {tag,pid,reason} shape waits on Dyn). reason==0 is a
+ * NORMAL exit; any nonzero reason is abnormal and emits a crash record (stderr).
+ * ========================================================================== */
+#define NT_REASON_NORMAL 0
+#define NT_REASON_KILL   0x6b696c6c /* 'kill' — brutal __kill(pid) */
+
+void    nt_link(NtPid other);      /* bidirectional link between current actor and `other` */
+int64_t nt_monitor(NtPid target);  /* current actor monitors `target`; returns a monitor ref */
+void    nt_trap_exit(int on);      /* current actor traps exits (they arrive as messages) */
+void    nt_actor_exit(NtPid target, int64_t reason); /* send an exit signal to `target` */
+void    nt_crash(int64_t reason);  /* current actor dies abnormally; DOES NOT RETURN */
+void    nt_kill(NtPid target);     /* brutal external kill of `target` (abnormal) */
+
+/* ============================================================================
+ * v3 — one_for_one supervision (B3-actors §2 v3.0–3.2).
+ *
+ * A supervisor is a trapping actor that links its children and, on a child's
+ * abnormal exit, restarts it to known-good initial state by re-invoking the
+ * child's `start` closure (a TS `() => Pid`, called through slot 0). Children are
+ * auto-registered under their `id` so whereis(id) tracks the current pid across
+ * restarts. Restart intensity: more than maxRestarts restarts within maxSeconds
+ * makes the supervisor itself exit :shutdown (killing remaining children).
+ * Codegen builds a spec via nt_sup_new + nt_sup_add_child, then nt_sup_start.
+ * ========================================================================== */
+#define NT_RESTART_PERMANENT 0  /* always restart */
+#define NT_RESTART_TRANSIENT 1  /* restart only on abnormal exit */
+#define NT_RESTART_TEMPORARY 2  /* never restart */
+
+int64_t nt_sup_new(int64_t max_restarts, int64_t max_seconds, int64_t strategy);
+void    nt_sup_add_child(int64_t handle, const char *id, void *start_closure,
+                         const char *restart); /* restart string -> kind */
+NtPid   nt_sup_start(int64_t handle); /* spawn the supervisor actor; returns its pid */
+
 #endif /* NT_ACTOR_H */
