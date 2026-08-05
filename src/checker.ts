@@ -8,7 +8,7 @@
  */
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError } from "./diagnostics.ts";
 
@@ -265,7 +265,7 @@ class Checker {
       }
       case "ForOfStmt": {
         const it = this.type(s.iterable, scope);
-        const el: Ty = it === "string" ? "string" : isArrayTy(it) ? elemTy(it) : (() => { throw nyi(NYI.FOR_OF_NONSTRING, `for-of over ${it}`); })();
+        const el: Ty = it === "string" ? "string" : isArrayTy(it) ? elemTy(it) : isBytesTy(it) ? "number" : (() => { throw nyi(NYI.FOR_OF_NONSTRING, `for-of over ${it}`); })();
         s.elemTy = el;
         const inner = scope.child();
         inner.declare(s.name, el, false);
@@ -416,7 +416,7 @@ class Checker {
           const ft = this.fieldOnBase(baseTy(ot), e.property);
           return makeNullable("undefined", baseTy(ft));
         }
-        if ((ot === "string" || isArrayTy(ot)) && e.property === "length") return "number";
+        if ((ot === "string" || isArrayTy(ot) || isBytesTy(ot)) && e.property === "length") return "number";
         if ((isMapTy(ot) || isSetTy(ot)) && e.property === "size") return "number";
         if (ot === "Dyn") return "Dyn"; // dynamic field access — runtime tag check
         if (isObjectTy(ot)) {
@@ -439,6 +439,7 @@ class Checker {
         if (it !== "number") throw typeError("index must be number");
         if (isArrayTy(ot)) return elemTy(ot);
         if (ot === "string") return "string";
+        if (isBytesTy(ot)) return "number"; // Uint8Array element read -> 0..255
         throw nyi(NYI.ARRAY, `index access on ${ot}`);
       }
       case "TypeofExpr":
@@ -521,6 +522,23 @@ class Checker {
         }
         return b.ty;
       }
+      case "IndexAssign": {
+        // Element assignment `obj[i] = v` (+ compound). Immutable arrays/objects are
+        // rejected here (NT1606, the "sharp turn"); a mutable `Uint8Array` is allowed
+        // (node semantics — `u[i] = v` writes a byte with JS ToUint8 wrap).
+        const ot = this.type(e.object, scope);
+        if (isBytesTy(ot)) {
+          const it = this.type(e.index, scope);
+          if (it !== "number") throw typeError("Uint8Array index must be a number");
+          const vt = this.type(e.value, scope);
+          if (vt !== "number") throw typeError(`Uint8Array element must be a number, got ${vt}`);
+          e.ty = "number";
+          return "number";
+        }
+        if (isObjectTy(ot))
+          throw mutationError("objects are immutable: `o[i] = v` would mutate the object in place", "use `{ ...o, k: v }` — returns a NEW object; the original is unchanged");
+        throw mutationError("arrays are immutable: `arr[i] = v` would mutate the array in place", "use `arr.with(i, v)` — returns a NEW array; the original is unchanged");
+      }
       case "FieldAssign": {
         // `this.field = expr` inside a constructor — initialize one instance slot.
         const ot = this.type(e.object, scope);
@@ -550,6 +568,20 @@ class Checker {
           const el = e.typeArgs?.[0] ?? "string";
           if (el !== "string" && el !== "number") throw nyi(NYI.COLLECTION, `Set of ${el}`);
           return makeSetTy(el);
+        }
+        // Bytes (stdlib batch 2): `new Uint8Array(n)` (zero-filled length n) or
+        // `new Uint8Array([1,2,3])` (from a number array, each ToUint8). `new TextEncoder()`
+        // / `new TextDecoder()` are stateless singletons (no ctor args).
+        if (e.callee === "Uint8Array") {
+          if (e.args.length !== 1) throw typeError("new Uint8Array expects one argument: a length or a number[]");
+          const at = this.type(e.args[0]!, scope);
+          if (at !== "number" && !(isArrayTy(at) && elemTy(at) === "number"))
+            throw typeError(`new Uint8Array expects a number length or number[], got ${at}`);
+          return "Uint8Array";
+        }
+        if (e.callee === "TextEncoder" || e.callee === "TextDecoder") {
+          if (e.args.length !== 0) throw typeError(`new ${e.callee}() takes no arguments`);
+          return e.callee;
         }
         // `new C(args)` on a user class: the ctor lowered to `C.constructor(this, …)`,
         // so its sig carries the instance type (param 0 = `this`) and the ctor param types.
@@ -614,7 +646,14 @@ class Checker {
 
     // console.log(...)
     if (isConsoleLog(e)) {
-      for (const a of e.args) { const at = this.type(a, scope); if (isArrayTy(at)) throw nyi(NYI.ARRAY, "console.log of an array (node's array formatting)"); }
+      for (const a of e.args) {
+        const at = this.type(a, scope);
+        if (isArrayTy(at)) throw nyi(NYI.ARRAY, "console.log of an array (node's array formatting)");
+        // node prints a Uint8Array with a size-dependent, column-grouped multi-line
+        // layout for 7+ elements (not statically known here) — not cheap to match
+        // byte-for-byte, so reject rather than guess (reject-don't-miscompile).
+        if (isBytesTy(at)) throw nyi(NYI.BYTES, "console.log of a Uint8Array (node's column-grouped typed-array formatting)");
+      }
       return "void";
     }
 
@@ -833,6 +872,18 @@ class Checker {
       }
       if (isMapTy(recv)) return this.inferMapMethod(recv, e.callee.property, e.args, scope);
       if (isSetTy(recv)) return this.inferSetMethod(recv, e.callee.property, e.args, scope);
+      // Bytes (stdlib batch 2): TextEncoder#encode(string) -> Uint8Array (UTF-8);
+      // TextDecoder#decode(Uint8Array) -> string (UTF-8).
+      if (isTextEncoderTy(recv)) {
+        if (e.callee.property !== "encode") throw nyi(NYI.OBJECT, `TextEncoder method '${e.callee.property}'`);
+        if (e.args.length !== 1 || this.type(e.args[0]!, scope) !== "string") throw typeError("TextEncoder.encode expects (string)");
+        return "Uint8Array";
+      }
+      if (isTextDecoderTy(recv)) {
+        if (e.callee.property !== "decode") throw nyi(NYI.OBJECT, `TextDecoder method '${e.callee.property}'`);
+        if (e.args.length !== 1 || !isBytesTy(this.type(e.args[0]!, scope))) throw typeError("TextDecoder.decode expects (Uint8Array)");
+        return "string";
+      }
       if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee.property, e.args, scope);
       if (recv === "string") {
         const sig = STRING_METHODS[e.callee.property];
@@ -1082,6 +1133,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "LogicalExpr": collectIdents(e.left, out); collectIdents(e.right, out); return;
     case "ConditionalExpr": collectIdents(e.test, out); collectIdents(e.consequent, out); collectIdents(e.alternate, out); return;
     case "AssignExpr": out.add(e.target); collectIdents(e.value, out); return;
+    case "IndexAssign": collectIdents(e.object, out); collectIdents(e.index, out); collectIdents(e.value, out); return;
     case "FieldAssign": collectIdents(e.object, out); collectIdents(e.value, out); return;
     case "CallExpr": collectIdents(e.callee, out); e.args.forEach((a) => collectIdents(a, out)); return;
     case "ArrayLiteral": e.elements.forEach((x) => collectIdents(x, out)); return;

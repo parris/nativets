@@ -60,6 +60,17 @@ it can't do safely instead of miscompiling.
 `Uint8Array`/`ArrayBuffer` → then **`TextEncoder` / `TextDecoder`**, **`crypto.getRandomValues`**,
 **`crypto.randomUUID`**, **`crypto.subtle.digest`** (SHA-256), **`Blob`**.
 
+**Bytes ✅ (done).** `Uint8Array` (`new Uint8Array(n)` zero-filled / `new Uint8Array([..])` from a
+number array with JS ToUint8 wrap; index read/**write** — a genuinely mutable typed array, unlike
+our immutable `T[]`; `.length`; `for-of`) + `TextEncoder().encode(str)` / `TextDecoder().decode(u8)`
+(UTF-8 round-trip — trivial since nativets strings are already UTF-8). Backed by `runtime/nt_bytes.c`
+(compact 1-byte-per-element buffer, linked conditionally-on-usage like `nt_mapset`/`nt_http`). node is
+the oracle for every op (`test/bytes.test.ts`). **Divergence:** `console.log(u8)` is rejected
+(`NT1016`), not printed — node's size-dependent, column-grouped typed-array layout (7+ elements →
+multi-line) isn't cheap to match byte-for-byte, so reject-don't-miscompile. **Deferred:** `ArrayBuffer`
+/ `DataView`, other typed-array flavors, `.slice`/`.set`/`.subarray`, `crypto`, `Blob`. Bytes buffers
+are on the allocate-and-never-free placeholder (not linear/RC yet — safe, may leak).
+
 ### Batch 3 — needs new infrastructure (Tier C)
 **`URL` / `URLSearchParams`** (string-based, actually tractable soon), **`fetch`** (networking),
 **`RegExp`** (regex engine), **`Promise`/`async`** (event loop vs actors — decide), **`setTimeout`**

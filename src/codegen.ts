@@ -13,7 +13,7 @@
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { isConsoleLog } from "./checker.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy } from "./ast.ts";
 import { isOptChainExpr } from "./checker.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
@@ -46,7 +46,7 @@ function scanUsesActors(node: unknown): boolean {
 }
 
 function llvmTy(ty: Ty): string {
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*
+  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || isBytesRefTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*
   switch (ty) {
     case "number": return "double";
     case "boolean": return "i1";
@@ -58,7 +58,7 @@ function llvmTy(ty: Ty): string {
 }
 
 function defaultZero(ty: Ty): string {
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty)) return "null";
+  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || isBytesRefTy(ty)) return "null";
   switch (ty) {
     case "number": return "0x0000000000000000";
     case "boolean": return "false";
@@ -227,6 +227,14 @@ const DECLARES = [
   "declare i32 @nt_set_has_slot(ptr, i32, i64)",
   "declare ptr @nt_set_remove_slot(ptr, i32, i64)",
   "declare i64 @nt_set_size(ptr)",
+  // --- stdlib batch 2: bytes (Uint8Array + TextEncoder/TextDecoder, nt_bytes.c) ---
+  "declare ptr @nt_bytes_new(double)",
+  "declare ptr @nt_bytes_from_arr(ptr)",
+  "declare double @nt_bytes_get(ptr, double)",
+  "declare void @nt_bytes_set(ptr, double, double)",
+  "declare double @nt_bytes_len(ptr)",
+  "declare ptr @nt_bytes_encode(ptr)",
+  "declare ptr @nt_bytes_decode(ptr)",
   // --- B3 v0 actors (spawn/send/receive/self) ---
   "declare void @nt_sched_init()",
   "declare i64 @nt_spawn_closure(ptr, ptr, i64)",
@@ -749,11 +757,12 @@ class FnGen {
       case "ForOfStmt": {
         const src = this.genExpr(s.iterable);
         const isStr = src.ty === "string";
+        const isBytes = isBytesTy(src.ty);
         const el = s.elemTy ?? "string";
         const idx = this.slot("number");
         this.emit(`store double 0x0000000000000000, ptr ${idx}`);
         const lenT = this.fresh();
-        this.emit(`${lenT} = call double @${isStr ? "js_str_len" : "nt_arr_len"}(ptr ${src.v})`);
+        this.emit(`${lenT} = call double @${isStr ? "js_str_len" : isBytes ? "nt_bytes_len" : "nt_arr_len"}(ptr ${src.v})`);
         const condLbl = this.label("of");
         const bodyLbl = this.label("ofbody");
         const updLbl = this.label("ofupd");
@@ -773,6 +782,10 @@ class FnGen {
           const ch = this.fresh();
           this.emit(`${ch} = call ptr @js_str_char_at(ptr ${src.v}, double ${iB})`);
           this.emit(`store ptr ${ch}, ptr %${s.name}.addr`);
+        } else if (isBytes) {
+          const by = this.fresh();
+          this.emit(`${by} = call double @nt_bytes_get(ptr ${src.v}, double ${iB})`);
+          this.emit(`store double ${by}, ptr %${s.name}.addr`);
         } else {
           const slot = this.fresh();
           this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src.v}, double ${iB})`);
@@ -987,7 +1000,7 @@ class FnGen {
     if (val.ty === "string") this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
     const t = this.fresh();
     if (val.ty === "number") this.emit(`${t} = bitcast double ${val.v} to i64`);
-    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || isBytesRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -996,7 +1009,7 @@ class FnGen {
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
     if (ty === "number") this.emit(`${t} = bitcast i64 ${slot} to double`);
-    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || isBytesRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
@@ -1132,6 +1145,11 @@ class FnGen {
           this.emit(`${t} = call ptr @js_str_char_at(ptr ${obj.v}, double ${idx.v})`);
           return { v: t, ty: "string" };
         }
+        if (isBytesTy(obj.ty)) {
+          const t = this.fresh();
+          this.emit(`${t} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
+          return { v: t, ty: "number" };
+        }
         const el = elemTy(obj.ty);
         const slot = this.fresh();
         this.emit(`${slot} = call i64 @nt_arr_get(ptr ${obj.v}, double ${idx.v})`);
@@ -1250,9 +1268,10 @@ class FnGen {
           this.emit(`${t} = call ptr @nt_dyn_get_field(ptr ${obj.v}, ptr ${this.mod.intern(e.property)})`);
           return { v: t, ty: "Dyn" };
         }
-        if (e.property === "length" && (obj.ty === "string" || isArrayTy(obj.ty))) {
+        if (e.property === "length" && (obj.ty === "string" || isArrayTy(obj.ty) || isBytesTy(obj.ty))) {
           const t = this.fresh();
           if (obj.ty === "string") this.emit(`${t} = call double @js_str_len(ptr ${obj.v})`);
+          else if (isBytesTy(obj.ty)) this.emit(`${t} = call double @nt_bytes_len(ptr ${obj.v})`);
           else this.emit(`${t} = call double @nt_arr_len(ptr ${obj.v})`);
           return { v: t, ty: "number" };
         }
@@ -1484,6 +1503,27 @@ class FnGen {
         if (e.expr.ty === "Dyn") return this.genDynNarrow(this.genExpr(e.expr).v, e.ty);
         return { v: this.genExpr(e.expr).v, ty: e.ty };
       }
+      case "IndexAssign": {
+        // Element write `u[i] = v` (+ compound) — only Uint8Array reaches codegen (the
+        // checker rejects immutable array/object index-assign with NT1606). The store
+        // clamps/wraps to a byte in the runtime (JS ToUint8). Evaluate obj + index once.
+        const obj = this.genExpr(e.object);
+        const idx = this.genExpr(e.index);
+        let out: string;
+        if (e.op === "=") {
+          out = this.genExpr(e.value).v;
+        } else {
+          const cur = this.fresh();
+          this.emit(`${cur} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
+          const rv = this.genExpr(e.value);
+          const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
+          out = this.fresh();
+          if (bare in ARITH) this.emit(`${out} = ${ARITH[bare]} double ${cur}, ${rv.v}`);
+          else this.emit(`${out} = call double @${BITFN[bare]}(double ${cur}, double ${rv.v})`);
+        }
+        this.emit(`call void @nt_bytes_set(ptr ${obj.v}, double ${idx.v}, double ${out})`);
+        return { v: out, ty: "number" };
+      }
       case "FieldAssign": {
         // `this.field = value` — store one instance slot (constructor initialization).
         const obj = this.genExpr(e.object);
@@ -1498,6 +1538,17 @@ class FnGen {
         // Immutable collections (B2): fresh empty handle from the nt_hamt runtime.
         if (e.callee === "Map") { const m = this.fresh(); this.emit(`${m} = call ptr @nt_map_new()`); return { v: m, ty: e.ty! }; }
         if (e.callee === "Set") { const s = this.fresh(); this.emit(`${s} = call ptr @nt_set_new()`); return { v: s, ty: e.ty! }; }
+        // Bytes (stdlib batch 2): `new Uint8Array(n)` -> zero-filled; `new Uint8Array([..])`
+        // -> from the number array (each ToUint8). TextEncoder/TextDecoder are stateless
+        // (no runtime object), represented by a null sentinel ptr.
+        if (e.callee === "Uint8Array") {
+          const arg = this.genExpr(e.args[0]!);
+          const b = this.fresh();
+          if (isArrayTy(arg.ty)) this.emit(`${b} = call ptr @nt_bytes_from_arr(ptr ${arg.v})`);
+          else this.emit(`${b} = call ptr @nt_bytes_new(double ${arg.v})`);
+          return { v: b, ty: "Uint8Array" };
+        }
+        if (e.callee === "TextEncoder" || e.callee === "TextDecoder") return { v: "null", ty: e.callee };
         // `new C(args)` on a user class: allocate the field slot block, then run the
         // constructor (`C.constructor(this, …args)`), and hand back the instance ptr.
         const cls = classTag(e.ty ?? "");
@@ -1635,6 +1686,19 @@ class FnGen {
       const recv = this.genExpr(e.callee.object);
       if (isMapTy(recv.ty)) return this.genMapMethod(e.callee.property, recv, e.args);
       if (isSetTy(recv.ty)) return this.genSetMethod(e.callee.property, recv, e.args);
+      // Bytes (stdlib batch 2): TextEncoder#encode -> Uint8Array; TextDecoder#decode -> string.
+      if (isTextEncoderTy(recv.ty)) {
+        const s = this.genExpr(e.args[0]!);
+        const b = this.fresh();
+        this.emit(`${b} = call ptr @nt_bytes_encode(ptr ${s.v})`);
+        return { v: b, ty: "Uint8Array" };
+      }
+      if (isTextDecoderTy(recv.ty)) {
+        const u = this.genExpr(e.args[0]!);
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_bytes_decode(ptr ${u.v})`);
+        return { v: t, ty: "string" };
+      }
       if (isArrayTy(recv.ty)) return this.genArrayMethod(e.callee.property, recv, e.args);
       return this.genStringMethod(e.callee.property, recv, e.args);
     }
@@ -1847,9 +1911,10 @@ class FnGen {
 
   /** Read `.prop` from a NON-nullable object/string/array value (object slot, or `.length`). */
   private genFieldRead(obj: Val, prop: string): Val {
-    if (prop === "length" && (obj.ty === "string" || isArrayTy(obj.ty))) {
+    if (prop === "length" && (obj.ty === "string" || isArrayTy(obj.ty) || isBytesTy(obj.ty))) {
       const t = this.fresh();
       if (obj.ty === "string") this.emit(`${t} = call double @js_str_len(ptr ${obj.v})`);
+      else if (isBytesTy(obj.ty)) this.emit(`${t} = call double @nt_bytes_len(ptr ${obj.v})`);
       else this.emit(`${t} = call double @nt_arr_len(ptr ${obj.v})`);
       return { v: t, ty: "number" };
     }
@@ -2264,6 +2329,7 @@ class FnGen {
       case "SequenceExpr": for (const x of e.exprs) this.subExpr(x, map); return;
       case "ConditionalExpr": this.subExpr(e.test, map); this.subExpr(e.consequent, map); this.subExpr(e.alternate, map); return;
       case "FieldAssign": this.subExpr(e.object, map); this.subExpr(e.value, map); return;
+      case "IndexAssign": this.subExpr(e.object, map); this.subExpr(e.index, map); this.subExpr(e.value, map); return;
       case "TypeofExpr": this.subExpr(e.operand, map); return;
       case "CallExpr": this.subExpr(e.callee, map); for (const a of e.args) this.subExpr(a, map); return;
       case "NewExpr": for (const a of e.args) this.subExpr(a, map); return;

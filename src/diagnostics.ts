@@ -93,6 +93,11 @@ export const NYI = {
   // Everything beyond that plain shape — inheritance, static, getters/setters, access
   // modifiers, parameter properties, field initializers — is deferred with this code.
   CLASS_FEATURE: { code: "NT1015", milestone: "M3", hint: "minimal classes support only fields + a constructor + methods; this class feature is deferred" },
+  // Bytes (stdlib batch 2): Uint8Array + TextEncoder/TextDecoder ARE supported (construct,
+  // index read/write, .length, for-of, encode/decode). What is refused with this code is
+  // `console.log(u8)` — node's size-dependent column-grouped typed-array layout is not
+  // cheap to match byte-for-byte, so we reject rather than miscompile the format.
+  BYTES: { code: "NT1016", milestone: "M3", hint: "Uint8Array works (index/length/for-of/encode/decode); only console.log of one is deferred — inspect elements individually or decode to a string" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

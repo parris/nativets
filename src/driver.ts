@@ -35,6 +35,11 @@ import actorHeader from "../runtime/nt_actor.h" with { type: "text" };
 import hamtSource from "../runtime/nt_hamt.c" with { type: "text" };
 import hamtHeader from "../runtime/nt_hamt.h" with { type: "text" };
 import mapsetSource from "../runtime/nt_mapset.c" with { type: "text" };
+// The bytes value type (stdlib batch 2): Uint8Array + TextEncoder/TextDecoder (UTF-8).
+// libc-only, so it cross-links unchanged; linked ONLY when a program uses one of the
+// bytes builtins (codegen emits a `call … @nt_bytes_*` exactly then), like Map/Set.
+import bytesSource from "../runtime/nt_bytes.c" with { type: "text" };
+import bytesHeader from "../runtime/nt_bytes.h" with { type: "text" };
 // The HTTP(S) client primitive (networking tier, L-d), backed by libcurl. Linked (with
 // `-lcurl`) ONLY when a program uses httpGet/httpPost — so non-HTTP programs and their
 // iOS/Android cross-builds are unaffected. Networking is HOST/LINUX ONLY for now; iOS/
@@ -322,6 +327,15 @@ function writeIR(source: string): { dir: string; ll: string; rt: string; actor: 
     const mapset = join(dir, "nt_mapset.c");
     writeFileSync(mapset, mapsetSource);
     extra.push(hamt, mapset);
+  }
+  // Bytes (stdlib batch 2): link nt_bytes.c ONLY when a program uses Uint8Array /
+  // TextEncoder / TextDecoder (codegen emits `call … @nt_bytes_*` exactly then).
+  // libc-only, so it cross-links to every target unchanged.
+  if (/\bcall\b[^\n]*@nt_bytes_/.test(ir)) {
+    writeFileSync(join(dir, "nt_bytes.h"), bytesHeader); // quote-included by the .c
+    const bytes = join(dir, "nt_bytes.c");
+    writeFileSync(bytes, bytesSource);
+    extra.push(bytes);
   }
   // HTTP client (L-d): link nt_http.c + libcurl ONLY when a program calls httpGet/httpPost.
   // `-lcurl` follows nt_http.c in the link line (the .c references curl symbols), matching
