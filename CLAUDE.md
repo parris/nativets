@@ -469,7 +469,8 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   **`examples/router.ts`** (a supervised request router: priority dispatch via selective receive,
   reply timeouts, crash + restart under a stable registered name). Deferred: **structured/`Dyn`
   messages** (needs the type-driven deep-copy walk + a shape tag — a slot alone can't distinguish
-  two object types across actors), M:N OS threads, and the async-IO poller (v5).
+  two object types across actors) → **delivered in Stage 41**; M:N OS threads and the async-IO
+  poller remain open.
 - **Stage 36 ✅ (M3: generic functions by monomorphization — NT1013 cleared)** `function f<T>(x: T): T`
   is compiled, not erased. The parser RECORDS the type-parameter list (`FuncDecl.typeParams`) and
   resolves an in-scope `T` to the marker type `#T` (un-representable by construction, so it can
@@ -574,6 +575,44 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   (arrays are immutable, Stage 29 — `.sort` points at the ordering lane's `.toSorted()`); `toFixed`/`toString` require literal in-range arguments so
   node's `RangeError` is unreachable rather than emulated. Non-ASCII stays on the documented
   UTF-8-byte index space (§A.2), now pinned by a behavioral test.
+- **Stage 41 ✅ (B3 v5: STRUCTURED messages — the last blocker on actors being usable)** `send`/
+  `spawn`/`receive` now carry **records and arrays**, not just `number`/`string`. v4 refused
+  objects for a real reason: a message rides in ONE 8-byte slot plus a coarse kind tag, and sender
+  and receiver are typed **independently**, so a slot + a coarse tag cannot tell two record types
+  apart — shipping objects on that basis would be a soundness hole. v5 closes it with the two
+  pieces v4 named. **(1) Deep copy on send.** Codegen emits the type-driven walk at the send/spawn
+  site — literally the Stage-40 `structuredClone` walk (`genDeepClone`), extended with a
+  `copyStrings` mode so **string leaves** are copied into fresh RC-registered allocations too
+  (otherwise a receiver's record would point into the sender's releasable buffer). The receiver
+  shares nothing with the sender's heap; proved by dropping the sender's record before the
+  receiver runs (`__objLive()` delta = 1, `test/actors/struct_copy.ts`). **(2) A shape tag on the
+  wire.** Every structured message carries `shape` — the compiler's canonical type encoding
+  (`{kind:string,n:number}`), which IS structural identity here — plus a per-shape **renderer**.
+  `nt_recv_struct` compares shapes and, on a mismatch, aborts with a diagnostic naming BOTH
+  shapes (exit 70, the Stage-35 precedent), never a reinterpreted pointer; a **selective** receive
+  uses `nt_mbox_shape_ok`, so a foreign shape is *skipped and left queued in order* (the save
+  queue) rather than handed to a predicate compiled for other slots. **Tagged unions**
+  (`{kind:"work", …}` + `msg.kind === …` dispatch) work end to end — one record type per protocol
+  with a discriminator, which is how every real actor program dispatches. **Arrays** fell out of
+  the same machinery (`number[]`, `string[]`, `{…}[]`). **Crash records** name the structured
+  triggering message: the runtime has no types, so codegen emits `ptr @nt_msg_render_N(i64)` per
+  shape (the `JSON.stringify` walk, safepoint-free so it can never yield mid-record) and the
+  record prints `{"op":"boom","id":42}` + its shape. **Refused, never shared:** a message type with
+  no sound copy — a function value (it captures the SENDER's environment), a `Map`/`Set`/
+  `Uint8Array`/`Response` handle — is **`NT1021`** (recursive: a record with a function leaf too).
+  That check also closed a **pre-existing hole**: `send(pid, x)` where `x: T | undefined` used to
+  strip the nullable and put the two-slot tagged BOX pointer on the wire for a receiver expecting
+  a `T` (it compiled and printed garbage). A sent value is never nullable (`actorSendTy`) — a
+  message is always present; unwrap first. A receive *annotation* keeps its A2 "or a timeout"
+  meaning.
+  All v5 declares + calls stay behind the actor-usage gate, so **non-actor IR is byte-identical**
+  (diffed) and a v4 actor program differs only by the four new `declare`s. Verified running on the
+  **iOS simulator** (arm64); Android actor cross-builds remain blocked by NDK API 24's missing
+  `ucontext`, exactly as before. Tests: `test/actors-msg.test.ts` + `test/actors/struct_*.ts`,
+  and the example **`examples/jobs.ts`** — a supervised job router over a tagged-union record
+  protocol with the reply-to pid inside the message (GenServer-shaped), priority dispatch on a
+  record *field*, reply timeouts, and crash + restart under a stable name. **Deferred:** M:N OS
+  threads / work-stealing, lock-free MPSC mailboxes, and the async-IO poller (v6).
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 

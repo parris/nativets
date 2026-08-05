@@ -29,6 +29,35 @@ which are **refusals or already-documented consequences**, never approximations:
 - **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
   monotonic, whole milliseconds, plausible epoch range.
 
+### Actor messages (B3 v5) — structured messages are COPIES, and the shape is checked
+
+node has no actors, so the whole surface (`spawn`/`send`/`receive`) is behavioral, not
+node-differential (`test/actors*.test.ts` assert exact stdout under the deterministic
+cooperative scheduler). Within that surface, three deliberate rules:
+
+- **A sent record/array is DEEP-COPIED, always.** `send(pid, obj)` gives the receiver a
+  private value; the sender's object is untouched and unaliased (isolation is the actor
+  model's whole point, and immutability makes the copy semantically invisible — nothing can
+  observe the difference except identity, and `===` between actors is meaningless anyway).
+  The copy is the Stage-40 `structuredClone` walk, extended to copy **string leaves** too so
+  a receiver's record can never point into the sender's refcounted buffer.
+- **The shape is checked at runtime, and structurally — including FIELD ORDER.** A message
+  carries its canonical type encoding (`{kind:string,n:number}`); a receive compiled for a
+  different one aborts with a diagnostic naming both shapes and **exit 70**, rather than
+  reinterpreting the slots. Because our object types are insertion-ordered everywhere,
+  `{a:number,b:string}` and `{b:string,a:number}` are *different* shapes — TS would call them
+  the same type. This is conservative (it rejects a valid program, loudly, never miscompiles
+  it): write the receiver's annotation in the sender's field order. A **selective** receive
+  treats a foreign shape like a foreign kind — skipped, left queued in order (the save queue).
+- **Un-copyable message types are refused at compile time (`NT1021`).** A function value
+  captures the *sender's* environment; a `Map`/`Set`/`Uint8Array`/`Response` handle has no
+  deep-copy walk. Messages are `number`, `string`, or a record/array of those, recursively.
+  A **nullable** (`T | undefined`) is refused as a *sent* value too — it is a two-slot tagged
+  box, so sending one would put the box pointer on the wire for a receiver expecting a `T`
+  (this used to compile and print garbage). A message is always present: unwrap it first
+  (`send(pid, x ?? fallback)`). As a *receive annotation* `T | undefined` keeps its A2
+  meaning — "a `T`, or a timeout".
+
 ### Modules (SH1) — a whole-program link, and no import cycles
 
 `import`/`export` across `.ts` files are compiled by resolving the graph from the entry file and

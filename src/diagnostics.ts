@@ -110,6 +110,13 @@ export const NYI = {
   // src/modules.ts). What this code refuses is the module syntax outside that subset:
   // `export default`, `import * as ns`, `export * from`, dynamic `import()`, and
   // bare/node_modules specifiers.
+  // Actor messages (B3 v5). `number`, `string` and STRUCTURED records/arrays of those
+  // ARE sendable — a structured message is deep-copied on send (the structuredClone
+  // walk) and carries its shape, so the receiver can verify it. What this code refuses
+  // is a message type with no sound copy: a function value (it captures the SENDER's
+  // environment), a Map/Set/Uint8Array/Response handle, a `Dyn`, or a nullable box.
+  // Isolation is the actor model's whole point, so we reject rather than share a pointer.
+  ACTOR_MSG: { code: "NT1021", milestone: "later", hint: "actor messages are `number`, `string`, or a record/array of those (deep-copied on send). Send the data, not a handle — e.g. `{ id: number, name: string }` instead of a closure or a Map" },
   MODULE: { code: "NT1017", milestone: "M3", hint: "supported module syntax: `import { a, b as c } from \"./rel/path.ts\"`, `import type { T } from …`, `import \"./m.ts\"`, `export function|const|let|class|type|interface`, `export { a as b }`, `export { x } from \"./y.ts\"`" },
 } as const;
 
