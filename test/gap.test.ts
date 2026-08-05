@@ -28,6 +28,10 @@ const KNOWN_UNSUPPORTED = new Set([
   // first-class functions + closures supported ✅ except nested function types:
   "higher-order-compose",
   // optional-chaining ✅ closed by A2 (nullable/optional types + `?.`).
+  // Immutable-by-default (Phase B): in-place mutation is rejected (NT1606). `.push`/`.pop`
+  // mutate + return length/element (node semantics), which the immutable model refuses —
+  // use `[...a, x]` / `a.slice(0,-1)` / `a.with(i,v)` instead. Deliberate node divergence.
+  "array-push-pop",
 ]);
 const MIN_SUPPORTED = cases.length - KNOWN_UNSUPPORTED.size;
 

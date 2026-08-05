@@ -10,7 +10,7 @@
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
-import { NTError, NYI, nyi, typeError } from "./diagnostics.ts";
+import { NTError, NYI, nyi, typeError, mutationError } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
 export interface CheckedProgram { program: Program; functions: Map<string, Sig>; }
@@ -757,8 +757,11 @@ class Checker {
     const argTys = args.map((a) => this.type(a, scope));
     const need = (n: number) => { if (args.length !== n) throw typeError(`.${method} expects ${n} args`); };
     switch (method) {
-      case "push": need(1); if (argTys[0] !== el) throw typeError(`.push expects ${el}`); return "number";
-      case "pop": need(0); return el;
+      // Immutable-by-default (Phase B): `.push`/`.pop` mutate in place, which the
+      // model forbids. Reject with NT1606 pointing at the non-mutating replacement
+      // (rather than silently diverging from node's mutate-and-return semantics).
+      case "push": throw mutationError("arrays are immutable: `.push` would mutate the array in place", "build a new array instead: `[...arr, x]` — the original is unchanged");
+      case "pop": throw mutationError("arrays are immutable: `.pop` would mutate the array in place", "use `arr.slice(0, -1)` for the shorter array, or `arr[arr.length - 1]` for the last element");
       case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
       case "indexOf": need(1); if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`); return "number";
       case "reverse": need(0); return recv;

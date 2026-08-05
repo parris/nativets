@@ -8,7 +8,7 @@
  */
 
 import { lex, type Token } from "./lexer.ts";
-import { parseError, nyi, NYI } from "./diagnostics.ts";
+import { parseError, nyi, NYI, mutationError } from "./diagnostics.ts";
 import { makeNullable } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty,
@@ -444,6 +444,12 @@ class Parser {
     const left = this.parsePipe();
     const t = this.peek();
     if (t.type === "punct" && ASSIGN_OPS.has(t.value)) {
+      // Immutable-by-default (Phase B): element/field assignment mutates in place,
+      // which the model forbids. Reject with NT1606 pointing at the CoW replacement.
+      if (left.kind === "IndexExpr")
+        throw mutationError("arrays are immutable: `arr[i] = v` would mutate the array in place", "use `arr.with(i, v)` — returns a NEW array; the original is unchanged");
+      if (left.kind === "MemberExpr")
+        throw mutationError("objects are immutable: `o.f = v` would mutate the object in place", "use `{ ...o, f: v }` — returns a NEW object; the original is unchanged");
       if (left.kind !== "Identifier") throw parseError("Invalid assignment target");
       const op = this.next().value as any;
       return { kind: "AssignExpr", op, target: left.name, value: this.parseAssign() };
