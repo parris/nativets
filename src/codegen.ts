@@ -1554,7 +1554,7 @@ class FnGen {
         this.emitExcCheck();
         return { v: t, ty: "Dyn" };
       }
-      return this.genJsonStringify(this.genExpr(e.args[0]!));
+      return this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args[2]), 0);
     }
 
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
@@ -2368,8 +2368,27 @@ class FnGen {
     return { v: t, ty: A };
   }
 
-  /** JSON.stringify — generated recursively from the static type. */
-  private genJsonStringify(val: Val): Val {
+  /**
+   * The indent unit for JSON.stringify(value, null, space) from the literal 3rd arg.
+   * "" means compact (1-arg, byte-identical) output. Mirrors node: a number is
+   * ToInteger'd, clamped to [0,10] spaces; a string is truncated to 10 chars.
+   */
+  private jsonIndentUnit(space: Expr | undefined): string {
+    if (!space) return "";
+    if (space.kind === "NumberLiteral") {
+      const n = Math.max(0, Math.min(10, Math.trunc(space.value)));
+      return " ".repeat(n);
+    }
+    if (space.kind === "StringLiteral") return space.value.slice(0, 10);
+    return "";
+  }
+
+  /**
+   * JSON.stringify — generated recursively from the static type.
+   * `indent` is the (compile-time) indent unit ("" = compact); `depth` the current
+   * nesting level, so a pretty-printed line is prefixed with indent.repeat(depth).
+   */
+  private genJsonStringify(val: Val, indent = "", depth = 0): Val {
     const ty = val.ty;
     if (ty === "number") { const t = this.fresh(); this.emit(`${t} = call ptr @js_num_to_str(double ${val.v})`); return { v: t, ty: "string" }; }
     if (ty === "boolean") {
@@ -2378,36 +2397,47 @@ class FnGen {
       return { v: t, ty: "string" };
     }
     if (ty === "string") { const t = this.fresh(); this.emit(`${t} = call ptr @js_json_quote(ptr ${val.v})`); return { v: t, ty: "string" }; }
-    if (isArrayTy(ty)) return this.genJsonArray(val);
-    if (isObjectTy(ty)) return this.genJsonObject(val);
+    if (isArrayTy(ty)) return this.genJsonArray(val, indent, depth);
+    if (isObjectTy(ty)) return this.genJsonObject(val, indent, depth);
     return { v: this.mod.intern("null"), ty: "string" };
   }
 
-  private genJsonObject(val: Val): Val {
-    let acc = this.mod.intern("{");
-    objectFields(val.ty).forEach((f, i) => {
-      if (i > 0) acc = this.concat(acc, this.mod.intern(","));
-      acc = this.concat(acc, this.mod.intern(`"${f.key}":`));
+  private genJsonObject(val: Val, indent = "", depth = 0): Val {
+    const fields = objectFields(val.ty);
+    const pretty = indent !== "";
+    // node prints an empty object inline as `{}` even with an indent.
+    if (fields.length === 0) return { v: this.mod.intern("{}"), ty: "string" };
+    const inner = pretty ? indent.repeat(depth + 1) : "";
+    const close = pretty ? indent.repeat(depth) : "";
+    let acc = this.mod.intern(pretty ? `{\n${inner}` : "{");
+    fields.forEach((f, i) => {
+      if (i > 0) acc = this.concat(acc, this.mod.intern(pretty ? `,\n${inner}` : ","));
+      acc = this.concat(acc, this.mod.intern(pretty ? `"${f.key}": ` : `"${f.key}":`));
       const gep = this.fresh();
       this.emit(`${gep} = getelementptr i64, ptr ${val.v}, i64 ${fieldIndex(val.ty, f.key)}`);
       const slot = this.fresh();
       this.emit(`${slot} = load i64, ptr ${gep}`);
-      acc = this.concat(acc, this.genJsonStringify({ v: this.fromSlot(slot, f.ty), ty: f.ty }).v);
+      acc = this.concat(acc, this.genJsonStringify({ v: this.fromSlot(slot, f.ty), ty: f.ty }, indent, depth + 1).v);
     });
-    acc = this.concat(acc, this.mod.intern("}"));
+    acc = this.concat(acc, this.mod.intern(pretty ? `\n${close}}` : "}"));
     return { v: acc, ty: "string" };
   }
 
-  private genJsonArray(val: Val): Val {
+  private genJsonArray(val: Val, indent = "", depth = 0): Val {
     const el = elemTy(val.ty);
+    const pretty = indent !== "";
     const accSlot = this.slot("string");
     this.emit(`store ptr ${this.mod.intern("[")}, ptr ${accSlot}`);
     const idx = this.slot("number");
     this.emit(`store double 0x0000000000000000, ptr ${idx}`);
     const len = this.fresh();
     this.emit(`${len} = call double @nt_arr_len(ptr ${val.v})`);
+    // Pretty-print prefixes (compile-time known): each element is on its own line
+    // at depth+1; the closing `]` sits at the parent's depth.
+    const inner = pretty ? indent.repeat(depth + 1) : "";
+    const close = pretty ? indent.repeat(depth) : "";
     const cond = this.label("js"), body = this.label("jsb"), upd = this.label("jsu"), end = this.label("jse");
-    const comma = this.label("jsc"), after = this.label("jsa");
+    const comma = this.label("jsc"), firstL = this.label("jsf"), after = this.label("jsa");
     this.terminate(`br label %${cond}`);
     this.to(this.block(cond));
     const iC = this.fresh(); this.emit(`${iC} = load double, ptr ${idx}`);
@@ -2416,15 +2446,23 @@ class FnGen {
     this.to(this.block(body));
     const iB = this.fresh(); this.emit(`${iB} = load double, ptr ${idx}`);
     const first = this.fresh(); this.emit(`${first} = fcmp oeq double ${iB}, 0.0`);
-    this.terminate(`br i1 ${first}, label %${after}, label %${comma}`);
+    this.terminate(`br i1 ${first}, label %${firstL}, label %${comma}`);
+    // First element: pretty prints a leading newline + indent before it.
+    this.to(this.block(firstL));
+    if (pretty) {
+      const af0 = this.fresh(); this.emit(`${af0} = load ptr, ptr ${accSlot}`);
+      this.emit(`store ptr ${this.concat(af0, this.mod.intern(`\n${inner}`))}, ptr ${accSlot}`);
+    }
+    this.terminate(`br label %${after}`);
+    // Subsequent elements: separator (compact `,` or pretty `,\n<indent>`).
     this.to(this.block(comma));
     const a1 = this.fresh(); this.emit(`${a1} = load ptr, ptr ${accSlot}`);
-    this.emit(`store ptr ${this.concat(a1, this.mod.intern(","))}, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.concat(a1, this.mod.intern(pretty ? `,\n${inner}` : ","))}, ptr ${accSlot}`);
     this.terminate(`br label %${after}`);
     this.to(this.block(after));
     const iB2 = this.fresh(); this.emit(`${iB2} = load double, ptr ${idx}`);
     const slot = this.fresh(); this.emit(`${slot} = call i64 @nt_arr_get(ptr ${val.v}, double ${iB2})`);
-    const es = this.genJsonStringify({ v: this.fromSlot(slot, el), ty: el });
+    const es = this.genJsonStringify({ v: this.fromSlot(slot, el), ty: el }, indent, depth + 1);
     const a3 = this.fresh(); this.emit(`${a3} = load ptr, ptr ${accSlot}`);
     this.emit(`store ptr ${this.concat(a3, es.v)}, ptr ${accSlot}`);
     this.terminate(`br label %${upd}`);
@@ -2434,8 +2472,25 @@ class FnGen {
     this.emit(`store double ${iN}, ptr ${idx}`);
     this.terminate(`br label %${cond}`);
     this.to(this.block(end));
-    const af = this.fresh(); this.emit(`${af} = load ptr, ptr ${accSlot}`);
-    return { v: this.concat(af, this.mod.intern("]")), ty: "string" };
+    if (!pretty) {
+      const af = this.fresh(); this.emit(`${af} = load ptr, ptr ${accSlot}`);
+      return { v: this.concat(af, this.mod.intern("]")), ty: "string" };
+    }
+    // Pretty close: an empty array stays inline `[]`; a non-empty one gets `\n<close>]`.
+    const emptyL = this.label("jsE"), neL = this.label("jsN"), joinL = this.label("jsJ");
+    const isEmpty = this.fresh(); this.emit(`${isEmpty} = fcmp oeq double ${len}, 0.0`);
+    this.terminate(`br i1 ${isEmpty}, label %${emptyL}, label %${neL}`);
+    this.to(this.block(emptyL));
+    const ae = this.fresh(); this.emit(`${ae} = load ptr, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.concat(ae, this.mod.intern("]"))}, ptr ${accSlot}`);
+    this.terminate(`br label %${joinL}`);
+    this.to(this.block(neL));
+    const an = this.fresh(); this.emit(`${an} = load ptr, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.concat(an, this.mod.intern(`\n${close}]`))}, ptr ${accSlot}`);
+    this.terminate(`br label %${joinL}`);
+    this.to(this.block(joinL));
+    const afj = this.fresh(); this.emit(`${afj} = load ptr, ptr ${accSlot}`);
+    return { v: afj, ty: "string" };
   }
 
   /**
