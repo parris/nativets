@@ -50,7 +50,17 @@ const STRING_METHODS: Record<string, MethodSig> = {
   padStart: { min: 1, max: 2, argTys: ["number", "string"], ret: "string" },
   includes: { min: 1, max: 1, argTys: ["string"], ret: "boolean" },
   indexOf: { min: 1, max: 1, argTys: ["string"], ret: "number" },
-  split: { min: 1, max: 1, argTys: ["string"], ret: "string[]" },
+  split: { min: 1, max: 2, argTys: ["string", "number"], ret: "string[]" }, // 2nd arg = limit (stdlib batch 1)
+  // --- stdlib Batch 1 (part 2): string fills (byte-oriented, ASCII == node) ---
+  charCodeAt: { min: 0, max: 1, argTys: ["number"], ret: "number" },
+  codePointAt: { min: 0, max: 1, argTys: ["number"], ret: makeNullable("undefined", "number") },
+  at: { min: 1, max: 1, argTys: ["number"], ret: makeNullable("undefined", "string") }, // string | undefined
+  padEnd: { min: 1, max: 2, argTys: ["number", "string"], ret: "string" },
+  replace: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },     // string pattern only (no RegExp)
+  replaceAll: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },  // string pattern only (no RegExp)
+  startsWith: { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" },
+  endsWith: { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" },
+  lastIndexOf: { min: 1, max: 1, argTys: ["string"], ret: "number" }, // number | undefined (node: undefined out of range)
 };
 const GLOBAL_FUNCS: Record<string, MethodSig> = {
   parseInt: { min: 1, max: 2, argTys: ["string", "number"], ret: "number" },
@@ -898,6 +908,11 @@ class Checker {
       }
       if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee.property, e.args, scope);
       if (recv === "string") {
+        // .concat is VARIADIC (all-string args) — outside the fixed-arity table.
+        if (e.callee.property === "concat") {
+          for (const a of e.args) if (this.type(a, scope) !== "string") throw typeError(".concat expects strings");
+          return "string";
+        }
         const sig = STRING_METHODS[e.callee.property];
         if (!sig) throw nyi(NYI.OBJECT, `string method '${e.callee.property}'`);
         this.checkArgs(e.args, sig, scope, `'.${e.callee.property}'`);

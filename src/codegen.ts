@@ -69,6 +69,7 @@ function defaultZero(ty: Ty): string {
 }
 
 const POS_INF = "0x7FF0000000000000";
+const NAN_HEX = "0x7FF8000000000000"; // stdlib fills: "argument omitted" sentinel for optional numeric args
 
 function encodeCString(s: string): { body: string; len: number } {
   const bytes = new TextEncoder().encode(s);
@@ -160,6 +161,16 @@ const DECLARES = [
   "declare i32 @nt_num_is_integer(double)",
   "declare i32 @nt_num_is_safe_integer(double)",
   "declare ptr @nt_arr_from_str(ptr)",
+  // --- stdlib (web standards) Batch 1 PART 2: string/array/number fills ---
+  "declare double @js_str_char_code_at(ptr, double)",
+  "declare double @js_str_code_point_at(ptr, double)",
+  "declare ptr @js_str_at(ptr, double)",
+  "declare ptr @js_str_pad_end(ptr, double, ptr)",
+  "declare i32 @js_str_starts_with(ptr, ptr, double)",
+  "declare i32 @js_str_ends_with(ptr, ptr, double)",
+  "declare ptr @js_str_replace(ptr, ptr, ptr, i32)",
+  "declare double @js_str_last_index_of(ptr, ptr)",
+  "declare ptr @nt_str_split_n(ptr, ptr, double)",
   // --- stdlib: URL parsing (WHATWG URL functional subset) ---
   "declare ptr @nt_url_protocol(ptr)",
   "declare ptr @nt_url_host(ptr)",
@@ -1029,6 +1040,13 @@ class FnGen {
     this.emit(`${g1} = getelementptr i64, ptr ${p}, i64 1`);
     this.emit(`store i64 ${valSlot}, ptr ${g1}`);
     return p;
+  }
+  /** Nullable-box tag: 0 (undefined) when `absent` (an i1) holds, else 2 (present).
+   *  Used by the stdlib fills whose node result is `T | undefined` (`.at`, `.find`, …). */
+  private nullTagIf(absent: string): string {
+    const t = this.fresh();
+    this.emit(`${t} = select i1 ${absent}, i64 0, i64 2`);
+    return t;
   }
   /** Load the tag (i64) of a nullable box. */
   private nullTag(ptr: string): string {
@@ -2020,7 +2038,53 @@ class FnGen {
         this.emit(`${t} = call double @js_str_index_of(ptr ${recv.v}, ptr ${a[0]!.v})`);
         return { v: t, ty: "number" };
       }
-      case "split": return { v: call("nt_str_split", `ptr ${recv.v}, ptr ${a[0]!.v}`), ty: "string[]" };
+      case "split": // optional 2nd arg = limit (NaN when omitted)
+        return { v: call("nt_str_split_n", `ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1]?.v ?? NAN_HEX}`), ty: "string[]" };
+      // --- stdlib Batch 1 (part 2): string fills ---
+      case "concat": { // variadic: fold the arguments onto the receiver
+        let acc = recv.v;
+        for (const x of a) { const t = this.fresh(); this.emit(`${t} = call ptr @js_str_concat(ptr ${acc}, ptr ${x.v})`); acc = t; }
+        return { v: acc, ty: "string" };
+      }
+      case "lastIndexOf": {
+        const t = this.fresh();
+        this.emit(`${t} = call double @js_str_last_index_of(ptr ${recv.v}, ptr ${a[0]!.v})`);
+        return { v: t, ty: "number" };
+      }
+      case "replace": case "replaceAll":
+        return { v: call("js_str_replace", `ptr ${recv.v}, ptr ${a[0]!.v}, ptr ${a[1]!.v}, i32 ${method === "replaceAll" ? 1 : 0}`), ty: "string" };
+      case "startsWith": case "endsWith": {
+        // The optional position argument is NaN when omitted (runtime default).
+        const fn = method === "startsWith" ? "js_str_starts_with" : "js_str_ends_with";
+        const r = this.fresh();
+        this.emit(`${r} = call i32 @${fn}(ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1]?.v ?? NAN_HEX})`);
+        const t = this.fresh();
+        this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        return { v: t, ty: "boolean" };
+      }
+      case "padEnd": return { v: call("js_str_pad_end", `ptr ${recv.v}, double ${a[0]!.v}, ptr ${a[1]?.v ?? this.mod.intern(" ")}`), ty: "string" };
+      case "charCodeAt": {
+        const t = this.fresh();
+        this.emit(`${t} = call double @js_str_char_code_at(ptr ${recv.v}, double ${a[0]?.v ?? "0.0"})`);
+        return { v: t, ty: "number" };
+      }
+      case "codePointAt": {
+        // number | undefined — the runtime returns NaN for an out-of-range index
+        // (never a real code point), which becomes node's `undefined` box.
+        const r = this.fresh();
+        this.emit(`${r} = call double @js_str_code_point_at(ptr ${recv.v}, double ${a[0]?.v ?? "0.0"})`);
+        const oob = this.fresh();
+        this.emit(`${oob} = fcmp uno double ${r}, ${r}`); // NaN sentinel => out of range
+        return { v: this.nullBox(this.nullTagIf(oob), this.toSlot({ v: r, ty: "number" })), ty: makeNullable("undefined", "number") };
+      }
+      case "at": {
+        // string | undefined — NULL from the runtime is the out-of-range sentinel.
+        const r = this.fresh();
+        this.emit(`${r} = call ptr @js_str_at(ptr ${recv.v}, double ${a[0]?.v ?? "0.0"})`);
+        const oob = this.fresh();
+        this.emit(`${oob} = icmp eq ptr ${r}, null`);
+        return { v: this.nullBox(this.nullTagIf(oob), this.toSlot({ v: r, ty: "string" })), ty: makeNullable("undefined", "string") };
+      }
       default: throw new Error(`unsupported string method .${method}`);
     }
   }

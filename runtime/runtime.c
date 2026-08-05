@@ -1316,3 +1316,147 @@ const char *nt_url_search_param(const char *u, const char *key) {
   }
   return url_empty();
 }
+
+/* ============================================================
+ * stdlib Batch 1 (part 2) — the everyday string/array/number surface.
+ *
+ * Every function here is differential-tested against `node`
+ * (test/stdlib-batch1.test.ts). Strings stay UTF-8 BYTE-oriented, the
+ * pre-existing documented divergence (docs/divergences.md §A.2): indices,
+ * .charCodeAt and .at address BYTES, identical to node for ASCII.
+ * ============================================================ */
+
+/* String#charCodeAt(i) — the BYTE at index i (ASCII-identical to node's UTF-16
+ * code unit); NaN when out of range, exactly like node. */
+double js_str_char_code_at(const char *s, double id) {
+  long n = (long)strlen(s);
+  if (isnan(id)) id = 0;
+  long i = (long)id;
+  if (i < 0 || i >= n) return NAN;
+  return (double)(unsigned char)s[i];
+}
+
+/* String#codePointAt(i) — decodes the UTF-8 sequence starting at BYTE i, so an
+ * ASCII string matches node's UTF-16 code point exactly. NaN is the
+ * out-of-range sentinel, which codegen turns into node's `undefined`
+ * (a code point is never NaN, so the sentinel is unambiguous). */
+double js_str_code_point_at(const char *s, double id) {
+  long n = (long)strlen(s);
+  if (isnan(id)) id = 0;
+  long i = (long)id;
+  if (i < 0 || i >= n) return NAN;
+  const unsigned char *p = (const unsigned char *)s + i;
+  unsigned c = p[0];
+  long need = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+  if (need == 0 || i + need >= n) return (double)c; /* ASCII, or a truncated/continuation byte */
+  unsigned cp = c & (unsigned)(0x7F >> (need + 1));
+  for (long k = 1; k <= need; k++) cp = (cp << 6) | (p[k] & 0x3F);
+  return (double)cp;
+}
+
+/* String#at(i) — one BYTE as a string, negative indices count from the end;
+ * NULL is the out-of-range sentinel that codegen turns into `undefined`. */
+const char *js_str_at(const char *s, double id) {
+  long n = (long)strlen(s);
+  if (isnan(id)) id = 0;
+  long i = (long)id;
+  if (i < 0) i += n;
+  if (i < 0 || i >= n) return NULL;
+  char *o = alloc_str(1); o[0] = s[i]; o[1] = 0; return o;
+}
+
+/* String#padEnd(target, pad) — pad on the right, truncating the final pad
+ * repetition, and a no-op when the string is already long enough or the pad is
+ * empty (node's semantics exactly). */
+const char *js_str_pad_end(const char *s, double targetd, const char *pad) {
+  long target = (long)targetd; long n = (long)strlen(s); size_t pn = strlen(pad);
+  if (n >= target || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, (size_t)n); o[n] = 0; return o; }
+  char *o = alloc_str((size_t)target);
+  memcpy(o, s, (size_t)n);
+  for (long i = n; i < target; i++) o[i] = pad[(size_t)(i - n) % pn];
+  o[target] = 0; return o;
+}
+
+/* String#startsWith(search, pos) / String#endsWith(search, endPos). `pos` is
+ * NaN when omitted: startsWith defaults to 0, endsWith to the length. */
+int32_t js_str_starts_with(const char *s, const char *sub, double posd) {
+  long n = (long)strlen(s), m = (long)strlen(sub);
+  long pos = isnan(posd) ? 0 : (long)posd;
+  if (pos < 0) pos = 0;
+  if (pos > n || pos + m > n) return 0;
+  return memcmp(s + pos, sub, (size_t)m) == 0 ? 1 : 0;
+}
+int32_t js_str_ends_with(const char *s, const char *sub, double endd) {
+  long n = (long)strlen(s), m = (long)strlen(sub);
+  long end = isnan(endd) ? n : (long)endd;
+  if (end > n) end = n;
+  if (end < 0) end = 0;
+  if (m > end) return 0;
+  return memcmp(s + end - m, sub, (size_t)m) == 0 ? 1 : 0;
+}
+
+/* rc-tracked finish for the existing SB string builder: the fills below build
+ * their result incrementally, and the final buffer must be reference-counted
+ * like every other heap string producer. */
+static const char *sb_finish_rc(SB *s) { s->buf[s->len] = 0; nt_str_register(s->buf); return s->buf; }
+
+/* $-substitution in a replacement string (string pattern => no capture groups):
+ * `$$` -> "$", `$&` -> the match, "$`" -> prefix, `$'` -> suffix; anything else
+ * is literal, exactly like node. */
+static void sb_add_replacement(SB *b, const char *rep, const char *s, size_t mstart, size_t mlen) {
+  size_t n = strlen(s);
+  for (size_t i = 0; rep[i];) {
+    if (rep[i] == '$' && rep[i + 1]) {
+      char c = rep[i + 1];
+      if (c == '$')  { sb_append(b, "$", 1); i += 2; continue; }
+      if (c == '&')  { sb_append(b, s + mstart, mlen); i += 2; continue; }
+      if (c == '`')  { sb_append(b, s, mstart); i += 2; continue; }
+      if (c == '\'') { sb_append(b, s + mstart + mlen, n - mstart - mlen); i += 2; continue; }
+    }
+    sb_append(b, rep + i, 1); i++;
+  }
+}
+
+/* String#replace / String#replaceAll with a STRING pattern (no RegExp — regex
+ * literals are rejected by the frontend). `all` = 0 replaces the first match
+ * only. An empty pattern matches at every position, like node. */
+const char *js_str_replace(const char *s, const char *pat, const char *rep, int32_t all) {
+  size_t n = strlen(s), m = strlen(pat);
+  SB b; sb_init(&b);
+  size_t i = 0; int done = 0;
+  while (i <= n) {
+    int hit = !done && (m == 0 ? 1 : (i + m <= n && memcmp(s + i, pat, m) == 0));
+    if (hit) {
+      sb_add_replacement(&b, rep, s, i, m);
+      if (!all) done = 1;
+      if (m == 0) { if (i < n) sb_append(&b, s + i, 1); i++; }
+      else i += m;
+      continue;
+    }
+    if (i < n) sb_append(&b, s + i, 1);
+    i++;
+  }
+  return sb_finish_rc(&b);
+}
+
+/* String#lastIndexOf(sub) — last match position, -1 when absent; an empty
+ * needle matches at the end (node: "abc".lastIndexOf("") === 3). */
+double js_str_last_index_of(const char *s, const char *sub) {
+  size_t n = strlen(s), m = strlen(sub);
+  if (m == 0) return (double)n;
+  if (m > n) return -1.0;
+  for (size_t i = n - m + 1; i-- > 0;) if (memcmp(s + i, sub, m) == 0) return (double)i;
+  return -1.0;
+}
+
+/* String#split(sep, limit) — like nt_str_split but stops after `limit` pieces
+ * (NaN = no limit). node applies the limit AFTER splitting, i.e. it simply
+ * truncates: "a,b,c".split(",", 2) === ["a","b"], limit 0 === []. */
+NtArray *nt_str_split_n(const char *s, const char *sep, double limitd) {
+  NtArray *a = nt_str_split(s, sep);
+  if (!isnan(limitd)) {
+    long lim = (long)limitd; if (lim < 0) lim = 0;
+    if (lim < a->len) a->len = lim;
+  }
+  return a;
+}
