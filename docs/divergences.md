@@ -117,6 +117,71 @@ which are **refusals or already-documented consequences**, never approximations:
 - **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
   monotonic, whole milliseconds, plausible epoch range.
 
+### stdlib Batch 3 — `Date` (and the TIMEZONE decision), `URL`, URI encoding
+
+**The timezone decision: local time is REALLY local, and the tests pin `TZ`.**
+
+`getFullYear`/`getMonth`/`getDate`/`getHours`/`getMinutes`/`getSeconds`/`getDay`/
+`getMilliseconds` are LOCAL-time accessors in node, and they are local here too: the runtime
+breaks a time value down with `localtime_r` and converts a zoneless date-time string back with
+`mktime`, both of which read the same IANA zone (`TZ`, `/etc/localtime`) that node's ICU reads.
+So on one machine, in one zone, **we match node exactly** — including across DST transitions and
+in half-hour zones.
+
+The alternative — making the local accessors secretly UTC — was rejected: it would make
+`d.getHours()` disagree with node for most of the world, silently, which is the one thing this
+project does not do. The cost is that a Date fixture's *expected output* depends on the zone, so
+the local-time cases in `test/stdlib-batch3.test.ts` run with **`TZ` pinned identically on both
+sides** (`differentialTZ`, over `UTC`, `America/New_York` and `Asia/Kolkata`). The `getUTC*`
+aliases and `toISOString()` are zone-independent by specification and need no pinning; they go
+through pure civil-calendar arithmetic (no `time_t`), so the whole ±8.64e15 ms JS range works,
+including the extended-year form `+275760-09-13T00:00:00.000Z`.
+
+Everything else about Batch 3:
+
+- **`new Date()` is not node-differential** (a clock read), exactly like `Date.now()`: it is
+  tested behaviorally — non-decreasing, agrees with `Date.now()`, plausible epoch range.
+- **`new Date(string)` accepts the ECMAScript Date Time String Format ONLY**
+  (`YYYY-MM-DD`, `YYYY-MM-DDTHH:mm[:ss[.sss]]`, with `Z` / `±HH:MM`; a zoneless date-TIME is
+  local, a date-only string is UTC — node's rules). node additionally accepts
+  implementation-defined formats (`"March 15, 2020"`, RFC 2822); those are an **Invalid Date**
+  (`NaN`) here. A time value stays `NaN` rather than becoming a wrong instant, and every getter
+  on it returns `NaN`, like node.
+- **`toISOString()` of an Invalid Date THROWS** (node's `RangeError: Invalid time value`) —
+  catchably, through the pending-exception protocol. `console.log(date)` prints the ISO string
+  (node's `util.inspect` of a Date) and `Invalid Date` for `NaN`; `JSON.stringify` emits the
+  quoted ISO string, or `null` for an Invalid Date — all node-exact.
+- **A Date is an IMMUTABLE time value.** `setHours`/`setDate`/… are refused (**`NT1023`**),
+  pointing at reconstruction (`new Date(d.getTime() + ms)`). So is `Date#toString`/
+  `toLocaleDateString` — those are locale + zone-*display-name* formatting, which needs tables
+  we do not ship. `"" + date` is refused for the same reason.
+- **`new URL(u)` covers absolute `http(s)` URLs.** Out of subset: relative URLs, other schemes
+  (`file:`, `data:`), IPv6 bracket hosts, punycode/IDNA, and path/percent **normalization**
+  (input is assumed canonical; node re-normalizes). node throws a `TypeError` on a URL it cannot
+  parse and so do we — catchably — but for a *different set* of inputs: a `file:///x` that node
+  accepts throws here. `.href` and `URL#toString()` need the WHATWG serializer, so they are
+  refused (`NT1023`) rather than approximated; `console.log(url)` likewise (node inspects it as
+  `URL { … }`).
+- **`URLSearchParams` is read-only**: `.get`/`.has`/`.getAll`/`.toString`. `.append`/`.set`/
+  `.delete`/`.sort` mutate, so they are refused — consistent with immutable-by-default.
+- **Memory:** a `Date` allocates NOTHING (it is a `double`), so it is never a leak and never
+  needs a drop. A `URL`/`URLSearchParams` handle is an rc-registered string that codegen does
+  not release, so it is on the same conservative over-retention as other heap handles — a
+  bounded residual leak, never a dangling pointer (`__strLive()` will not return to 0 in a
+  program that builds URLs).
+- **`Object.freeze(o)` is the identity, and that is honest**: objects are already immutable
+  (Stage 29), so freezing changes nothing and node's contract (same object back, non-writable)
+  holds exactly; `Object.isFrozen` is therefore constant-`true`. `Object.assign`/
+  `defineProperty`/`setPrototypeOf` MUTATE their target and are refused with **`NT1606`**
+  pointing at object spread.
+- **`String#normalize` and `#localeCompare` are refused** (`NT1023`), not approximated:
+  normalization needs the Unicode character database and collation needs ICU
+  (`"a".localeCompare("B")` is `-1` in node but `+1` under any byte compare — §A on string
+  relational order).
+- **String concatenation with a `T | null` / `T | undefined` is now refused** (`NT1009`,
+  "unwrap it first"). It previously reached codegen and emitted invalid IR — a real defect, found
+  by this lane through `URLSearchParams#get`.
+
 ### Actor messages (B3 v5) — structured messages are COPIES, and the shape is checked
 
 node has no actors, so the whole surface (`spawn`/`send`/`receive`) is behavioral, not

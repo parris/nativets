@@ -110,6 +110,42 @@ export function isResponseTy(t: Ty): boolean { return t === "Response"; }
 export function isHeadersTy(t: Ty): boolean { return t === "Headers"; }
 export function isFetchRefTy(t: Ty): boolean { return t === "Response" || t === "Headers"; }
 
+/**
+ * stdlib Batch 3 — the object-shaped web APIs, as reserved type names (no
+ * `{`/`[]`/`(`/`<`/`?`, so no structural predicate matches them).
+ *
+ * `Date` is a VALUE type: its representation IS the epoch-ms `double` (the ES
+ * "time value"; NaN == Invalid Date), so `getTime()` is the identity and a Date
+ * costs no allocation and needs no drop. `URL` / `URLSearchParams` are string
+ * handles — the URL text and the raw query text respectively — so every accessor
+ * is a pure re-parse in the runtime and both are lowered to `ptr`.
+ */
+export function isDateTy(t: Ty): boolean { return t === "Date"; }
+export function isUrlTy(t: Ty): boolean { return t === "URL"; }
+export function isSearchParamsTy(t: Ty): boolean { return t === "URLSearchParams"; }
+export function isUrlRefTy(t: Ty): boolean { return t === "URL" || t === "URLSearchParams"; }
+
+/**
+ * Date component getters → `nt_date_field(t, which, utc)`. `which`: 0 fullYear,
+ * 1 month (0-based), 2 date, 3 hours, 4 minutes, 5 seconds, 6 ms, 7 day-of-week.
+ * `utc: 0` is the LOCAL breakdown (libc's zone, the same one node's ICU reads);
+ * the `getUTC*` aliases pass 1 and are zone-independent. `getTime()` is NOT here:
+ * a Date IS its time value, so it lowers to the identity.
+ */
+/* A Map, NOT a Record: a plain object would answer `DATE_GETTERS["toString"]`
+ * with `Object.prototype.toString` and accept `d.toString()` as a getter. */
+export const DATE_GETTERS = new Map<string, { which: number; utc: number }>([
+  ["getFullYear", { which: 0, utc: 0 }], ["getMonth", { which: 1, utc: 0 }], ["getDate", { which: 2, utc: 0 }],
+  ["getHours", { which: 3, utc: 0 }], ["getMinutes", { which: 4, utc: 0 }], ["getSeconds", { which: 5, utc: 0 }],
+  ["getMilliseconds", { which: 6, utc: 0 }], ["getDay", { which: 7, utc: 0 }],
+  ["getUTCFullYear", { which: 0, utc: 1 }], ["getUTCMonth", { which: 1, utc: 1 }], ["getUTCDate", { which: 2, utc: 1 }],
+  ["getUTCHours", { which: 3, utc: 1 }], ["getUTCMinutes", { which: 4, utc: 1 }], ["getUTCSeconds", { which: 5, utc: 1 }],
+  ["getUTCMilliseconds", { which: 6, utc: 1 }], ["getUTCDay", { which: 7, utc: 1 }],
+]);
+
+/** `new URL(u)` components, each a plain `string` → one `nt_url_<name>` call. */
+export const URL_COMPONENTS = ["protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"];
+
 export function mapKeyTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[0] as Ty; }
 export function mapValTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[1] as Ty; }
 export function setElemTy(t: Ty): Ty { return t.slice(4, -1) as Ty; }

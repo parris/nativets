@@ -4,5 +4,6 @@ example.com
 /path
 ?a=1&b=2
 #frag
+https://example.com
 1
 2

@@ -668,6 +668,7 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   any arrow body (a closure env holds a second pointer), module-level bindings promoted to globals
   (a function may have returned the pointer), temporaries in non-chain positions, and array/object
   **elements** (a container frees its handle, not what its slots point at).
+<<<<<<< HEAD
 - **Stage 45 ✅ (decorators: `@@` compile-time attributes + `@` runtime wrappers, and mutable
   classes)** Two sigils, two mechanisms (`docs/decorators.md`). **`@@name`** is a **compile-time
   ATTRIBUTE** the compiler reads — Rust's `#[derive]`, zero runtime footprint; an **unknown one is
@@ -705,6 +706,47 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   instance. Tests: `test/decorators.test.ts` (25) — node-differential wherever a mechanical
   desugaring exists (attribute-stripped source; hand-written explicit wrapper application),
   behavioral with exact stdout where it does not.
+=======
+- **Stage 45 ✅ (stdlib Batch 3 — the object-shaped web APIs, now that classes exist)**
+  `docs/stdlib.md` deferred these while nativets had no classes; SH3–SH3.6 removed that blocker,
+  so the functional workarounds became the real API and **node is the oracle DIRECTLY, with no
+  polyfill** (`test/stdlib-batch3.test.ts`, 56 cases). **`Date`:** `new Date()` / `new Date(ms)`
+  (ES `TimeClip`) / `new Date(isoString)`, `getTime`/`valueOf`, the eight component getters
+  (`getFullYear`…`getDay`) **plus their zone-independent `getUTC*` aliases**, `toISOString`/
+  `toJSON`, and `console.log(date)` (node's `util.inspect` of a Date IS the ISO string;
+  `Invalid Date` for NaN). A `Date` VALUE **is** the epoch-ms `double` — no allocation, no drop,
+  so `Date[]` is a `number[]` in every way that matters, and `Date` works as a parameter/return/
+  object-field type; `JSON.stringify` goes through `toJSON` (quoted ISO, `null` when invalid) and
+  `structuredClone` copies it. **The timezone decision: local time is REALLY local.** The runtime
+  breaks a time value down with `localtime_r` and inverts a zoneless date-time string with
+  `mktime`, both reading the same IANA zone node's ICU reads, so `getHours()` matches node on the
+  same machine — DST transitions and half-hour zones included. Secretly-UTC accessors were
+  rejected as a silent disagreement with node; instead the local-time tests **pin `TZ` on both
+  sides** (`differentialTZ` over `UTC`, `America/New_York`, `Asia/Kolkata`). `toISOString`/
+  `getUTC*` are UTC by specification via pure civil-calendar arithmetic (no `time_t`), so the full
+  ±8.64e15 ms range works incl. `+275760-09-13T00:00:00.000Z`; an Invalid Date `toISOString()`
+  **throws catchably** (node's `RangeError`). `new Date()` is a clock read, so — like `Date.now()`
+  — it is behavioral, never node-differential. **`URL` is a real class:** `.protocol`/`.host`/
+  `.hostname`/`.port`/`.pathname`/`.search`/`.hash`/`.origin`/`.searchParams` over the same
+  absolute-http(s) subset, and a URL outside it now **throws** like node's `TypeError` (the
+  obligation a class has that loose functions did not). **The old functional entry points
+  (`urlProtocol(u)`, …) were REMOVED** together with the `URL_POLYFILL` oracle in
+  `test/harness.ts`; `test/stdlib-url/*.ts` were migrated to `new URL(…)` and now run against
+  plain `runWithNode`. **`URLSearchParams`** (`url.searchParams` or standalone): `.get`
+  (`string | null`, node's exact shape), `.has`, `.getAll`, `.toString`. **`Object.freeze`** is
+  the identity and honestly so — objects are already immutable (Stage 29) — with `isFrozen`
+  constant-`true` and `getOwnPropertyNames` == `keys`; **`Object.assign`/`defineProperty`/
+  `setPrototypeOf` mutate → `NT1606`** pointing at spread. **`encodeURIComponent`/`decodeURIComponent`/
+  `encodeURI`/`decodeURI`** byte-exact per ECMAScript §19.2 (malformed `%` → a catchable
+  `URIError`). **Refused, never approximated — the new `NT1024`:** `String#normalize` (needs the
+  Unicode database), `localeCompare`/`toLocale*` (needs ICU), `Date#setX` (a Date is an immutable
+  time value), `Date#toString`/`toLocaleDateString` and `"" + date` (locale + zone-name tables),
+  `new Date(y,m,d)`, `new URL(rel, base)`, `URL#href`, `console.log(url)`, and the mutating
+  `URLSearchParams` methods. Three latent defects fell out and are fixed: string concatenation
+  with a `T | null` emitted **invalid IR** (now `NT1009`), `DATE_GETTERS` as a plain Record let
+  `d.toString()` resolve to `Object.prototype.toString` (now a `Map`), and `JSON.stringify` of a
+  Date field silently produced `null`.
+>>>>>>> worktree-agent-a7f6c8a3bfe44f4c0
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 

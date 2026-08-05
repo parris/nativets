@@ -70,9 +70,21 @@ describe("what parses is not what is ALLOWED — precise codes, never a guess", 
     expect(codeOf(`const o = { count: 1 }; o.count = 2;`)).toBe("NT1606");
   });
 
-  test("`this.f++` in a METHOD is NT1606 too (only the constructor may write fields)", () => {
-    const src = `class C {\n  private n = 0;\n  bump(): number { this.n++; return this.n; }\n}\nconsole.log(new C().bump());\n`;
-    expect(codeOf(src)).toBe("NT1606");
+  test("`this.f++` in a METHOD is allowed as of Stage 45 — but the copy must be handed back", () => {
+    // This rule CHANGED. It used to be a flat NT1606 ("only the constructor may write
+    // fields"). Stage 45 (decorators) made a field-assigning method legal in two flavors:
+    // an ordinary class rebinds `this` to a fresh copy and returns it (copy-on-write), and
+    // an `@@mutable` class mutates in place. What is still refused is a setter that would
+    // THROW THE COPY AWAY — it would look like a mutation and do nothing.
+    const returnsInstance = `class C {\n  private n = 0;\n  bump(): C { this.n++; return this; }\n  get(): number { return this.n; }\n}\nconsole.log(new C().bump().get());\n`;
+    expect(codeOf(returnsInstance)).toBe(null);
+
+    const discardsTheCopy = `class C {\n  private n = 0;\n  bump(): number { this.n++; return this.n; }\n}\nconsole.log(new C().bump());\n`;
+    expect(codeOf(discardsTheCopy)).toBe("NT1023");
+
+    // ...and the ordinary class really is copy-on-write: the receiver is unchanged.
+    const mutable = `@@mutable\nclass M {\n  private n = 0;\n  bump(): M { this.n++; return this; }\n  get(): number { return this.n; }\n}\nconst a = new M();\na.bump();\nconsole.log(a.get());\n`;
+    expect(codeOf(mutable)).toBe(null);
   });
 
   test("`arr[i]++` on an immutable array is NT1606, like `arr[i] = v`", () => {

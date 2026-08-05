@@ -119,6 +119,17 @@ function isMoveCall(e: Expr): boolean {
   return e.kind === "CallExpr" && e.callee.kind === "Identifier" && e.callee.name === "move";
 }
 
+/**
+ * stdlib Batch 3: `Object.freeze(o)` hands back the SAME pointer (objects are
+ * already immutable, so freezing is the identity — and node guarantees
+ * `Object.freeze(o) === o`). It therefore behaves like a bare `o` for ownership:
+ * transparent, so it consumes exactly when the surrounding position consumes.
+ */
+function isIdentityCall(e: Expr): boolean {
+  return e.kind === "CallExpr" && e.callee.kind === "MemberExpr" && e.callee.property === "freeze"
+    && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object" && e.args.length === 1;
+}
+
 class Analyzer {
   readonly diags: OwnDiag[] = [];
   private collecting = true;
@@ -358,6 +369,7 @@ class Analyzer {
       }
       case "CallExpr": {
         if (isMoveCall(e)) { this.expr(e.args[0]!, state, true); return; }
+        if (isIdentityCall(e)) { this.expr(e.args[0]!, state, consume); return; }
         // A method call on a `@@mutable` instance hands back the RECEIVER (`return this`),
         // which the caller still owns — so its result is a BORROW. Consuming it (returning
         // it out of this function, storing it in a container, `move`ing it) would create a

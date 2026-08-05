@@ -134,6 +134,7 @@ class Parser {
     if (alias) return alias;
     if (id === "Uint8Array" || id === "TextEncoder" || id === "TextDecoder") return id as Ty; // stdlib batch-2 bytes types
     if (id === "Response" || id === "Headers") return id as Ty; // networking tier: fetch's Response/Headers
+    if (id === "Date" || id === "URL" || id === "URLSearchParams") return id as Ty; // stdlib batch-3 web APIs
     return (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty;
   }
 
