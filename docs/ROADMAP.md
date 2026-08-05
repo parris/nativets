@@ -137,7 +137,11 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
 - **Diagnostics:** richer multi-span errors; more `NT####` coverage; a `coverage` gradient that
   also reports the % of statements that are static.
 - **Self-hosting (far horizon):** the frontend is hand-written with no `typescript` dep — a long-
-  term goal is to compile the compiler with itself once the language subset is rich enough.
+  term goal is to compile the compiler with itself once the language subset is rich enough. A
+  **grounded, staged plan is in [`docs/self-hosting.md`](self-hosting.md)** (SH0–SH7 + the 3-stage
+  bootstrap fixed point), based on running `nativets coverage` over `src/*.ts`: today the compiler
+  can't yet parse its own module syntax (`import`/`type`/classes/discriminated unions), so SH0 is
+  to turn that gap into a measurable gradient.
 
 ---
 
