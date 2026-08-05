@@ -68,6 +68,22 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   // list of "Name: Value" lines. Returns {status, body}; host/Linux only (see driver.ts).
   httpGet: { min: 2, max: 2, argTys: ["string", "string"], ret: "{status:number,body:string}" },
   httpPost: { min: 3, max: 3, argTys: ["string", "string", "string"], ret: "{status:number,body:string}" },
+  // --- GUI FFI (raylib-backed, north-star C-d): a minimal immediate-mode surface. Host
+  // desktop only; nt_gui.c + -lraylib are linked ONLY when one of these is called (see
+  // driver.ts), so non-GUI programs / cross-builds stay raylib-free. Colors are a small
+  // palette INDEX (number) resolved in the runtime — no raylib `Color` crosses the FFI.
+  initWindow: { min: 3, max: 3, argTys: ["number", "number", "string"], ret: "void" },
+  windowShouldClose: { min: 0, max: 0, argTys: [], ret: "boolean" },
+  beginDraw: { min: 0, max: 0, argTys: [], ret: "void" },
+  endDraw: { min: 0, max: 0, argTys: [], ret: "void" },
+  clearBackground: { min: 1, max: 1, argTys: ["number"], ret: "void" }, // palette index
+  drawText: { min: 5, max: 5, argTys: ["string", "number", "number", "number", "number"], ret: "void" }, // s,x,y,size,color
+  drawRect: { min: 5, max: 5, argTys: ["number", "number", "number", "number", "number"], ret: "void" }, // x,y,w,h,color
+  mouseX: { min: 0, max: 0, argTys: [], ret: "number" },
+  mouseY: { min: 0, max: 0, argTys: [], ret: "number" },
+  mousePressed: { min: 0, max: 0, argTys: [], ret: "boolean" }, // left button pressed this frame
+  pointInRect: { min: 6, max: 6, argTys: ["number", "number", "number", "number", "number", "number"], ret: "boolean" }, // px,py,x,y,w,h
+  setTargetFPS: { min: 1, max: 1, argTys: ["number"], ret: "void" },
 };
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 const ACTOR_BUILTINS = new Set([

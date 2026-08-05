@@ -191,6 +191,22 @@ const DECLARES = [
   "declare ptr @nt_read_key()",
   "declare void @nt_raw_mode(i32)",
   "declare void @nt_exit(double)",
+  // --- GUI FFI (raylib-backed, north-star C-d): flat scalar ABI, conditionally linked ---
+  // Booleans come back as i32 (0/1) and are lowered to i1 via `icmp ne`. nt_gui.c + -lraylib
+  // are pulled in ONLY when one of these is CALLED (see driver.ts) — non-GUI programs and
+  // every cross-build stay raylib-free.
+  "declare void @nt_gui_init_window(double, double, ptr)",
+  "declare i32 @nt_gui_window_should_close()",
+  "declare void @nt_gui_set_target_fps(double)",
+  "declare void @nt_gui_begin_draw()",
+  "declare void @nt_gui_end_draw()",
+  "declare void @nt_gui_clear_background(double)",
+  "declare void @nt_gui_draw_text(ptr, double, double, double, double)",
+  "declare void @nt_gui_draw_rect(double, double, double, double, double)",
+  "declare double @nt_gui_mouse_x()",
+  "declare double @nt_gui_mouse_y()",
+  "declare i32 @nt_gui_mouse_pressed()",
+  "declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)",
   // --- B2 immutable Map/Set (nt_hamt via scalar-ABI wrappers in nt_mapset.c) ---
   "declare ptr @nt_map_new()",
   "declare ptr @nt_map_put_slot(ptr, i32, i64, i64)",
@@ -2251,6 +2267,48 @@ class FnGen {
       // Networking tier (L-d): HTTP(S) client → {status:number, body:string}.
       case "httpGet": return this.genHttp("nt_http_get", args, false);
       case "httpPost": return this.genHttp("nt_http_post", args, true);
+
+      // --- GUI FFI (raylib-backed, north-star C-d) ---
+      // Flat scalar ABI: numbers pass as double, the title/text string as ptr; i32-returning
+      // predicates are lowered to boolean via `icmp ne i32 _, 0` (mirrors Number.isInteger).
+      // nt_gui.c + -lraylib are linked ONLY when one of these emits a call (see driver.ts).
+      case "initWindow": {
+        const w = this.genExpr(args[0]!).v, h = this.genExpr(args[1]!).v, title = this.genExpr(args[2]!).v;
+        this.emit(`call void @nt_gui_init_window(double ${w}, double ${h}, ptr ${title})`);
+        return { v: "", ty: "void" };
+      }
+      case "setTargetFPS": { this.emit(`call void @nt_gui_set_target_fps(double ${this.genExpr(args[0]!).v})`); return { v: "", ty: "void" }; }
+      case "beginDraw": { this.emit(`call void @nt_gui_begin_draw()`); return { v: "", ty: "void" }; }
+      case "endDraw": { this.emit(`call void @nt_gui_end_draw()`); return { v: "", ty: "void" }; }
+      case "clearBackground": { this.emit(`call void @nt_gui_clear_background(double ${this.genExpr(args[0]!).v})`); return { v: "", ty: "void" }; }
+      case "drawText": {
+        const s = this.genExpr(args[0]!).v, x = this.genExpr(args[1]!).v, y = this.genExpr(args[2]!).v;
+        const sz = this.genExpr(args[3]!).v, col = this.genExpr(args[4]!).v;
+        this.emit(`call void @nt_gui_draw_text(ptr ${s}, double ${x}, double ${y}, double ${sz}, double ${col})`);
+        return { v: "", ty: "void" };
+      }
+      case "drawRect": {
+        const x = this.genExpr(args[0]!).v, y = this.genExpr(args[1]!).v, w = this.genExpr(args[2]!).v;
+        const h = this.genExpr(args[3]!).v, col = this.genExpr(args[4]!).v;
+        this.emit(`call void @nt_gui_draw_rect(double ${x}, double ${y}, double ${w}, double ${h}, double ${col})`);
+        return { v: "", ty: "void" };
+      }
+      case "mouseX": { const t = this.fresh(); this.emit(`${t} = call double @nt_gui_mouse_x()`); return { v: t, ty: "number" }; }
+      case "mouseY": { const t = this.fresh(); this.emit(`${t} = call double @nt_gui_mouse_y()`); return { v: t, ty: "number" }; }
+      case "windowShouldClose": {
+        const r = this.fresh(); this.emit(`${r} = call i32 @nt_gui_window_should_close()`);
+        const t = this.fresh(); this.emit(`${t} = icmp ne i32 ${r}, 0`); return { v: t, ty: "boolean" };
+      }
+      case "mousePressed": {
+        const r = this.fresh(); this.emit(`${r} = call i32 @nt_gui_mouse_pressed()`);
+        const t = this.fresh(); this.emit(`${t} = icmp ne i32 ${r}, 0`); return { v: t, ty: "boolean" };
+      }
+      case "pointInRect": {
+        const a = args.map((e) => this.genExpr(e).v);
+        const r = this.fresh();
+        this.emit(`${r} = call i32 @nt_gui_point_in_rect(double ${a[0]}, double ${a[1]}, double ${a[2]}, double ${a[3]}, double ${a[4]}, double ${a[5]})`);
+        const t = this.fresh(); this.emit(`${t} = icmp ne i32 ${r}, 0`); return { v: t, ty: "boolean" };
+      }
 
       // --- B3 v0 actors ---
       case "spawn": {
