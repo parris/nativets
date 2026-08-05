@@ -171,6 +171,11 @@ const DECLARES = [
   "declare ptr @js_str_replace(ptr, ptr, ptr, i32)",
   "declare double @js_str_last_index_of(ptr, ptr)",
   "declare ptr @nt_str_split_n(ptr, ptr, double)",
+  "declare double @nt_arr_at_index(ptr, double)",
+  "declare double @nt_arr_last_indexof_num(ptr, double)",
+  "declare double @nt_arr_last_indexof_str(ptr, ptr)",
+  "declare ptr @nt_arr_concat(ptr, ptr)",
+  "declare ptr @nt_arr_flat1(ptr)",
   // --- stdlib: URL parsing (WHATWG URL functional subset) ---
   "declare ptr @nt_url_protocol(ptr)",
   "declare ptr @nt_url_host(ptr)",
@@ -1686,10 +1691,21 @@ class FnGen {
           return { v: isArrayTy(at) ? "true" : "false", ty: "boolean" };
         }
         if (p === "from") {
-          const s = this.genExpr(e.args[0]!).v;
+          const src = this.genExpr(e.args[0]!);
           const t = this.fresh();
-          this.emit(`${t} = call ptr @nt_arr_from_str(ptr ${s})`);
+          if (isArrayTy(src.ty)) { // shallow copy (node-compatible; also keeps single-ownership)
+            this.emit(`${t} = call ptr @nt_arr_copy(ptr ${src.v})`);
+            return { v: t, ty: src.ty };
+          }
+          this.emit(`${t} = call ptr @nt_arr_from_str(ptr ${src.v})`);
           return { v: t, ty: "string[]" };
+        }
+        if (p === "of") { // Array.of(...items) — build the array directly
+          const vals = e.args.map((x) => this.genExpr(x));
+          const arr = this.fresh();
+          this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(vals.length, 1))})`);
+          for (const v of vals) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(v)})`);
+          return { v: arr, ty: `${vals[0]!.ty}[]` as Ty };
         }
       }
     }
@@ -2216,6 +2232,33 @@ class FnGen {
         return { v: t, ty: "number" };
       }
       case "reverse": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_arr_reverse(ptr ${recv.v})`); return { v: t, ty: recv.ty }; }
+      // --- stdlib Batch 1 (part 2): array fills ---
+      case "lastIndexOf": {
+        const x = this.genExpr(args[0]!).v;
+        const t = this.fresh();
+        this.emit(`${t} = call double @${numeric ? "nt_arr_last_indexof_num" : "nt_arr_last_indexof_str"}(ptr ${recv.v}, ${numeric ? "double" : "ptr"} ${x})`);
+        return { v: t, ty: "number" };
+      }
+      case "concat": { // variadic: fold each argument array onto a fresh copy
+        let acc = recv.v;
+        for (const arg of args) {
+          const b = this.genExpr(arg).v;
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @nt_arr_concat(ptr ${acc}, ptr ${b})`);
+          acc = t;
+        }
+        return { v: acc, ty: recv.ty };
+      }
+      case "at": {
+        // T | undefined — the runtime normalizes the index and returns -1 out of range.
+        const i = this.fresh();
+        this.emit(`${i} = call double @nt_arr_at_index(ptr ${recv.v}, double ${this.genExpr(args[0]!).v})`);
+        const oob = this.fresh();
+        this.emit(`${oob} = fcmp olt double ${i}, 0x0000000000000000`);
+        const slot = this.fresh();
+        this.emit(`${slot} = call i64 @nt_arr_get(ptr ${recv.v}, double ${i})`);
+        return { v: this.nullBox(this.nullTagIf(oob), slot), ty: makeNullable("undefined", el) };
+      }
       case "with": {
         // Immutable update (CoW): full copy of the flat block with slot i replaced.
         // Receiver is borrowed + unchanged; result is a fresh owned array (drops once).
@@ -2232,6 +2275,10 @@ class FnGen {
         this.emit(`${t} = call ptr @nt_arr_slice(ptr ${recv.v}, double ${a0}, double ${a1})`);
         return { v: t, ty: recv.ty };
       }
+      case "flat": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_arr_flat1(ptr ${recv.v})`); return { v: t, ty: el }; }
+      case "flatMap": return this.genFlatMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
+      case "some": case "every": case "find": case "findIndex": case "findLast": case "findLastIndex":
+        return this.genSearchHof(method, recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "map": return this.genMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "filter": return this.genFilter(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "reduce": return this.genReduce(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, args[1]!);
@@ -2464,6 +2511,25 @@ class FnGen {
     return { v: out, ty: `${R}[]` as Ty };
   }
 
+  /** flatMap — map's loop, but each callback result (an array) is CONCATENATED
+   *  into the output instead of pushed, i.e. exactly one level of flattening. */
+  private genFlatMap(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+    this.freshenHofArrow(arrow);
+    const el = elemTy(recv.ty);
+    const R = this.hofRetTy(arrow); // an array type (checker-enforced)
+    const p = arrow.params[0]!.name;
+    this.addLocal(p, el);
+    this.prepHofLocals(arrow);
+    let out = "";
+    const L = this.hofLoop(recv, "fmap", () => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double 1.0)`); });
+    L.elem(el, p);
+    const rv = this.genHofBody(arrow, R);
+    this.emit(`call void @nt_arr_extend(ptr ${out}, ptr ${rv.v})`);
+    this.hofStep(L.idx, L.upd, L.cond);
+    this.to(this.block(L.end));
+    return { v: out, ty: R };
+  }
+
   private genFilter(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
     this.freshenHofArrow(arrow); // unique per-inlining slots — no cross-callback name collision
     const el = elemTy(recv.ty);
@@ -2484,6 +2550,81 @@ class FnGen {
     this.hofStep(L.idx, L.upd, L.cond);
     this.to(this.block(L.end));
     return { v: out, ty: `${el}[]` as Ty };
+  }
+
+  /** some/every/find/findIndex/findLast/findLastIndex — ONE inlined predicate loop.
+   *  Forward with early exit for some/every/find/findIndex (node's iteration order);
+   *  `findLast`/`findLastIndex` iterate BACKWARDS, also node's order, so a callback
+   *  with side effects still observes the same sequence. The hit index lives in a
+   *  slot; `.find*` then boxes it as `T | undefined`. */
+  private genSearchHof(method: string, recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+    this.freshenHofArrow(arrow);
+    const el = elemTy(recv.ty);
+    const p = arrow.params[0]!.name;
+    const backwards = method === "findLast" || method === "findLastIndex";
+    this.addLocal(p, el);
+    this.prepHofLocals(arrow);
+
+    const src = recv.v;
+    const len = this.fresh();
+    this.emit(`${len} = call double @nt_arr_len(ptr ${src})`);
+    const hit = this.slot("number"); // index of the first (last) match, -1 = none
+    this.emit(`store double 0xBFF0000000000000, ptr ${hit}`); // -1
+    const idx = this.slot("number");
+    if (backwards) { const st = this.fresh(); this.emit(`${st} = fsub double ${len}, 1.0`); this.emit(`store double ${st}, ptr ${idx}`); }
+    else this.emit(`store double 0x0000000000000000, ptr ${idx}`);
+
+    const cond = this.label("srch"), body = this.label("srchb"), upd = this.label("srchu"), end = this.label("srche");
+    this.terminate(`br label %${cond}`);
+    this.to(this.block(cond));
+    const iC = this.fresh();
+    this.emit(`${iC} = load double, ptr ${idx}`);
+    const cmp = this.fresh();
+    this.emit(`${cmp} = fcmp ${backwards ? "oge" : "olt"} double ${iC}, ${backwards ? "0x0000000000000000" : len}`);
+    this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
+
+    this.to(this.block(body));
+    const iB = this.fresh();
+    this.emit(`${iB} = load double, ptr ${idx}`);
+    const slot = this.fresh();
+    this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src}, double ${iB})`);
+    this.emit(`store ${llvmTy(el)} ${this.fromSlot(slot, el)}, ptr %${p}.addr`);
+    const keep = this.genHofBody(arrow, "boolean");
+    // `.every` short-circuits on the FIRST FALSE; everything else on the first true.
+    const stop = this.label("srchs"), go = this.label("srchg");
+    const take = this.fresh();
+    if (method === "every") this.emit(`${take} = xor i1 ${keep.v}, true`);
+    else this.emit(`${take} = or i1 ${keep.v}, false`);
+    this.terminate(`br i1 ${take}, label %${stop}, label %${go}`);
+    this.to(this.block(stop));
+    const iH = this.fresh();
+    this.emit(`${iH} = load double, ptr ${idx}`);
+    this.emit(`store double ${iH}, ptr ${hit}`);
+    this.terminate(`br label %${end}`);
+
+    this.to(this.block(go));
+    const iU = this.fresh();
+    this.emit(`${iU} = load double, ptr ${idx}`);
+    const iN = this.fresh();
+    this.emit(`${iN} = ${backwards ? "fsub" : "fadd"} double ${iU}, 1.0`);
+    this.emit(`store double ${iN}, ptr ${idx}`);
+    this.terminate(`br label %${upd}`);
+    this.to(this.block(upd));
+    this.terminate(`br label %${cond}`);
+
+    this.to(this.block(end));
+    const h = this.fresh();
+    this.emit(`${h} = load double, ptr ${hit}`);
+    const found = this.fresh();
+    this.emit(`${found} = fcmp oge double ${h}, 0x0000000000000000`);
+    if (method === "some") return { v: found, ty: "boolean" };
+    if (method === "every") { const t = this.fresh(); this.emit(`${t} = xor i1 ${found}, true`); return { v: t, ty: "boolean" }; }
+    if (method === "findIndex" || method === "findLastIndex") return { v: h, ty: "number" };
+    const es = this.fresh();
+    this.emit(`${es} = call i64 @nt_arr_get(ptr ${src}, double ${h})`);
+    const miss = this.fresh();
+    this.emit(`${miss} = xor i1 ${found}, true`);
+    return { v: this.nullBox(this.nullTagIf(miss), es), ty: makeNullable("undefined", el) };
   }
 
   private genReduce(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>, initExpr: Expr): Val {

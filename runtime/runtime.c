@@ -1460,3 +1460,46 @@ NtArray *nt_str_split_n(const char *s, const char *sep, double limitd) {
   }
   return a;
 }
+
+/* Array#at(i) — normalize a possibly-negative index; -1 means out of range
+ * (codegen turns that into node's `undefined`). */
+double nt_arr_at_index(NtArray *a, double id) {
+  long n = (long)a->len;
+  long i = isnan(id) ? 0 : (long)id;
+  if (i < 0) i += n;
+  if (i < 0 || i >= n) return -1.0;
+  return (double)i;
+}
+
+/* Array#lastIndexOf — last match, -1 when absent (number and string flavors,
+ * mirroring the existing nt_arr_indexof_* pair). */
+double nt_arr_last_indexof_num(NtArray *a, double x) {
+  for (int64_t i = a->len - 1; i >= 0; i--) if (slot_to_num(a->data[i]) == x) return (double)i;
+  return -1.0;
+}
+double nt_arr_last_indexof_str(NtArray *a, const char *x) {
+  for (int64_t i = a->len - 1; i >= 0; i--)
+    if (strcmp((const char *)(intptr_t)a->data[i], x) == 0) return (double)i;
+  return -1.0;
+}
+
+/* Array#concat(other) — a NEW array holding both inputs' slots; both sources
+ * are left untouched (node-compatible, and the immutable model's shape). */
+void *nt_arr_concat(NtArray *a, NtArray *b) {
+  NtArray *o = nt_arr_new((double)(a->len + b->len + 1));
+  for (int64_t i = 0; i < a->len; i++) nt_arr_push(o, a->data[i]);
+  for (int64_t i = 0; i < b->len; i++) nt_arr_push(o, b->data[i]);
+  return o;
+}
+
+/* Array#flat() — ONE level of flattening into a NEW array. Each element slot of
+ * a nested array is an NtArray*; the sub-arrays are left untouched. */
+void *nt_arr_flat1(NtArray *a) {
+  NtArray *o = nt_arr_new(1);
+  for (int64_t i = 0; i < a->len; i++) {
+    NtArray *sub = (NtArray *)(intptr_t)a->data[i];
+    if (!sub) continue;
+    for (int64_t j = 0; j < sub->len; j++) nt_arr_push(o, sub->data[j]);
+  }
+  return o;
+}

@@ -39,6 +39,8 @@ const MATH_METHODS: Record<string, number | "var"> = {
   floor: 1, ceil: 1, round: 1, abs: 1, sqrt: 1, trunc: 1, pow: 2, max: "var", min: "var",
 };
 interface MethodSig { min: number; max: number; argTys: (Ty | null)[]; ret: Ty; }
+/** stdlib Batch 1 (part 2): predicate HOFs — one inline arrow, boolean body. */
+const SEARCH_HOFS = new Set(["some", "every", "find", "findIndex", "findLast", "findLastIndex"]);
 const STRING_METHODS: Record<string, MethodSig> = {
   toUpperCase: { min: 0, max: 0, argTys: [], ret: "string" },
   toLowerCase: { min: 0, max: 0, argTys: [], ret: "string" },
@@ -850,8 +852,17 @@ class Checker {
       }
       if (p === "from") {
         if (e.args.length !== 1) throw typeError("Array.from expects 1 argument");
-        if (this.type(e.args[0]!, scope) !== "string") throw nyi(NYI.ARRAY, "Array.from of a non-string");
-        return "string[]";
+        const src = this.type(e.args[0]!, scope);
+        if (src === "string") return "string[]";
+        if (isArrayTy(src)) return src; // Array.from(arr) → a shallow COPY (node-compatible)
+        throw nyi(NYI.ARRAY, "Array.from of a non-string, non-array");
+      }
+      if (p === "of") { // Array.of(...items) ≡ an array literal of the arguments
+        if (e.args.length === 0) throw nyi(NYI.ARRAY, "Array.of() with no arguments (empty array literals need an element type)");
+        const ts = e.args.map((a) => this.type(a, scope));
+        if (ts.some((t) => t !== ts[0])) throw typeError("Array.of expects arguments of one type (arrays are homogeneous)");
+        if (ts[0] !== "number" && ts[0] !== "string" && ts[0] !== "boolean") throw nyi(NYI.ARRAY, `Array.of of ${ts[0]}`);
+        return `${ts[0]}[]` as Ty;
       }
       throw nyi(NYI.OBJECT, `Array.${p}`);
     }
@@ -1001,8 +1012,10 @@ class Checker {
 
   private inferArrayMethod(recv: Ty, method: string, args: Expr[], scope: Scope): Ty {
     const el = elemTy(recv);
-    if (method === "map" || method === "filter" || method === "reduce") return this.inferHof(el, method, args, scope);
-    if (["forEach", "some", "every", "find"].includes(method)) throw nyi(NYI.CLOSURE, `array .${method} (needs first-class function values)`);
+    if (method === "map" || method === "filter" || method === "reduce" || method === "flatMap") return this.inferHof(el, method, args, scope);
+    // stdlib Batch 1 (part 2): the predicate HOFs, same inline-arrow contract as map/filter.
+    if (SEARCH_HOFS.has(method)) return this.inferSearchHof(recv, el, method, args, scope);
+    if (["forEach"].includes(method)) throw nyi(NYI.CLOSURE, `array .${method} (needs first-class function values)`);
 
     const argTys = args.map((a) => this.type(a, scope));
     const need = (n: number) => { if (args.length !== n) throw typeError(`.${method} expects ${n} args`); };
@@ -1011,10 +1024,41 @@ class Checker {
       // model forbids. Reject with NT1606 pointing at the non-mutating replacement
       // (rather than silently diverging from node's mutate-and-return semantics).
       case "push": throw mutationError("arrays are immutable: `.push` would mutate the array in place", "build a new array instead: `[...arr, x]` — the original is unchanged");
+      // The rest of node's in-place mutators (stdlib Batch 1): same treatment as
+      // .push/.pop — refuse and name the immutable replacement.
+      case "fill": throw mutationError("arrays are immutable: `.fill` would overwrite the array in place", "build a new array instead, e.g. `arr.map(() => v)` for a same-length fill, or `arr.with(i, v)` for one slot");
+      case "sort": throw mutationError("arrays are immutable: `.sort` would reorder the array in place", "sorting must produce a NEW array — `.toSorted()` is not implemented yet; sort a copy you build yourself");
+      case "splice": throw mutationError("arrays are immutable: `.splice` would mutate the array in place", "use `.slice(0, i)` / `.slice(j)` plus spread — `[...a.slice(0, i), ...a.slice(j)]`");
+      case "shift": throw mutationError("arrays are immutable: `.shift` would mutate the array in place", "use `arr.slice(1)` for the shorter array, or `arr[0]` for the first element");
+      case "unshift": throw mutationError("arrays are immutable: `.unshift` would mutate the array in place", "build a new array instead: `[x, ...arr]`");
+      case "copyWithin": throw mutationError("arrays are immutable: `.copyWithin` would overwrite the array in place", "build a new array from `.slice` + spread instead");
       case "pop": throw mutationError("arrays are immutable: `.pop` would mutate the array in place", "use `arr.slice(0, -1)` for the shorter array, or `arr[arr.length - 1]` for the last element");
       case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
       case "indexOf": need(1); if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`); return "number";
       case "reverse": need(0); return recv;
+      // --- stdlib Batch 1 (part 2): array fills ---
+      case "flat": { // ONE level only (node's default depth); an explicit depth must be 1
+        if (args.length > 1) throw typeError(".flat expects 0..1 args");
+        if (args.length === 1 && !(args[0]!.kind === "NumberLiteral" && (args[0] as { value: number }).value === 1))
+          throw nyi(NYI.ARRAY, ".flat(depth) with a depth other than 1 (chain .flat().flat() instead)");
+        if (!isArrayTy(el)) throw typeError(".flat expects an array of arrays");
+        return el;
+      }
+      case "lastIndexOf":
+        need(1);
+        if (argTys[0] !== el) throw typeError(`.lastIndexOf expects ${el}`);
+        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.lastIndexOf on ${recv}`);
+        return "number";
+      case "concat": // variadic; every argument must be an array of the same element type
+        if (args.length < 1) throw typeError(".concat expects at least 1 array");
+        for (const t of argTys) if (t !== recv) throw typeError(`.concat expects ${recv}, got ${t}`);
+        return recv;
+      case "at": // T | undefined (node: out-of-range is undefined, negative counts from the end)
+        need(1);
+        if (argTys[0] !== "number") throw typeError(".at index must be a number");
+        if (el !== "number" && el !== "string" && el !== "boolean")
+          throw nyi(NYI.ARRAY, `.at on ${recv} (only number/string/boolean elements — a heap element would alias its owner)`);
+        return makeNullable("undefined", el);
       case "with": // ES2023 immutable update: with(index, value) -> NEW array (CoW)
         need(2);
         if (argTys[0] !== "number") throw typeError(".with index must be a number");
@@ -1033,6 +1077,22 @@ class Checker {
     }
   }
 
+  /** some/every/find/findIndex/findLast/findLastIndex — one inline boolean-returning
+   *  arrow over the elements. `.find`/`.findLast` return `T | undefined` like node. */
+  private inferSearchHof(recv: Ty, el: Ty, method: string, args: Expr[], scope: Scope): Ty {
+    const arrow = args[0];
+    if (!arrow || arrow.kind !== "ArrowFunction") throw nyi(NYI.CLOSURE, `array .${method} needs an inline arrow (function values are not inlined yet)`);
+    if (args.length !== 1) throw typeError(`.${method} expects 1 argument`);
+    if (arrow.params.length !== 1) throw typeError(`.${method} callback takes (elem)`);
+    const bodyTy = this.typeArrowBody(arrow, [el], scope);
+    if (bodyTy !== "boolean") throw typeError(`.${method} callback must return boolean`);
+    if (method === "some" || method === "every") return "boolean";
+    if (method === "findIndex" || method === "findLastIndex") return "number";
+    if (el !== "number" && el !== "string" && el !== "boolean")
+      throw nyi(NYI.ARRAY, `.${method} on ${recv} (only number/string/boolean elements — a heap element would alias its owner)`);
+    return makeNullable("undefined", el); // .find / .findLast → T | undefined
+  }
+
   /** map/filter/reduce with an INLINE arrow callback (contextually typed). */
   private inferHof(el: Ty, method: string, args: Expr[], scope: Scope): Ty {
     const arrow = args[0];
@@ -1049,6 +1109,10 @@ class Checker {
     if (args.length !== 1) throw typeError(`.${method} expects 1 argument`);
     if (arrow.params.length !== 1) throw typeError(`.${method} callback takes (elem)`);
     const bodyTy = this.typeArrowBody(arrow, [el], scope);
+    if (method === "flatMap") { // callback returns an array; the results are concatenated (one level)
+      if (!isArrayTy(bodyTy)) throw typeError(".flatMap callback must return an array");
+      return bodyTy;
+    }
     if (method === "filter") {
       if (bodyTy !== "boolean") throw typeError(".filter callback must return boolean");
       return `${el}[]`;
