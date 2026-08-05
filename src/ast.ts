@@ -149,6 +149,90 @@ export function objectType(fields: { key: string; ty: Ty }[]): Ty {
   return `{${fields.map((f) => `${f.key}:${f.ty}`).join(",")}}`;
 }
 
+/* ============================================================
+ * Generic type parameters (M3 — monomorphization).
+ *
+ * While parsing a generic function `function f<T>(x: T): T`, a use of an in-scope type
+ * parameter resolves to the MARKER type `#T` instead of erasing to `number`. The marker
+ * is deliberately un-representable — no other Ty starts with `#` and none of the
+ * structural predicates (`{`, `[]`, `(`…`=>`, `?U`/`?N`, `Map<`/`Set<`) match it — so a
+ * `#T` that survives to codegen is always a bug, never a silently wrong lowering.
+ *
+ * The checker never lets one survive: at every call site it UNIFIES the parameter
+ * patterns against the actual argument types, SUBSTITUTES the resulting bindings through
+ * a clone of the declaration, and emits that clone as an ordinary (fully concrete)
+ * function. `#` is not a legal TypeScript type character, so a marker can never collide
+ * with a user-written type name.
+ * ============================================================ */
+
+const TYPE_PARAM_RE = /^#[A-Za-z_$][\w$]*$/;
+/** The marker type for type parameter `name` (`T` → `#T`). */
+export function typeParamTy(name: string): Ty { return `#${name}` as Ty; }
+/** Is `t` EXACTLY a bare type parameter (`#T`, not `#T[]`)? */
+export function isTypeParamTy(t: Ty): boolean { return typeof t === "string" && TYPE_PARAM_RE.test(t); }
+/** Does `t` mention any type parameter anywhere (`#T[]`, `(#T)=>#U`, `{a:#T}`)? */
+export function hasTypeParam(t: Ty): boolean { return typeof t === "string" && t.includes("#"); }
+/** Substitute bound type parameters through `t`; unbound ones are left as markers. */
+export function substTypeParams(t: Ty, bindings: Map<string, Ty>): Ty {
+  if (!hasTypeParam(t)) return t;
+  return t.replace(/#([A-Za-z_$][\w$]*)/g, (m, n: string) => bindings.get(n) ?? m) as Ty;
+}
+/** Erase any REMAINING type parameters to `number` (the pre-M3 fallback, kept for
+ *  generic ARROWS, which are values and so have no instantiation site to specialize). */
+export function eraseTypeParams(t: Ty): Ty {
+  return hasTypeParam(t) ? (t.replace(/#[A-Za-z_$][\w$]*/g, "number") as Ty) : t;
+}
+/**
+ * Structural unification of a parameter PATTERN (which may mention `#T`) against a
+ * concrete ARGUMENT type, accumulating bindings. First binding wins (so `pair(a: T, b: T)`
+ * called as `pair(1, 2)` binds T=number once); a mismatch simply contributes nothing and
+ * is reported later as an ordinary argument type error against the substituted signature.
+ */
+export function unifyTypeParams(pattern: Ty, actual: Ty, out: Map<string, Ty>): void {
+  if (!hasTypeParam(pattern)) return;
+  if (isTypeParamTy(pattern)) {
+    const name = pattern.slice(1);
+    if (!out.has(name)) out.set(name, actual);
+    return;
+  }
+  if (isArrayTy(pattern) && isArrayTy(actual)) return unifyTypeParams(elemTy(pattern), elemTy(actual), out);
+  if (isNullableTy(pattern) && isNullableTy(actual)) return unifyTypeParams(baseTy(pattern), baseTy(actual), out);
+  if (isFuncTy(pattern) && isFuncTy(actual)) {
+    const pp = funcParams(pattern), ap = funcParams(actual);
+    pp.forEach((p, i) => { if (ap[i] !== undefined) unifyTypeParams(p, ap[i]!, out); });
+    return unifyTypeParams(funcRet(pattern), funcRet(actual), out);
+  }
+  if (isMapTy(pattern) && isMapTy(actual)) {
+    unifyTypeParams(mapKeyTy(pattern), mapKeyTy(actual), out);
+    return unifyTypeParams(mapValTy(pattern), mapValTy(actual), out);
+  }
+  if (isSetTy(pattern) && isSetTy(actual)) return unifyTypeParams(setElemTy(pattern), setElemTy(actual), out);
+  if (isObjectTy(pattern) && isObjectTy(actual)) {
+    for (const f of objectFields(pattern)) {
+      const af = fieldType(actual, f.key);
+      if (af !== undefined) unifyTypeParams(f.ty, af, out);
+    }
+  }
+}
+
+/* AST fields that hold a `Ty` (or a list of them). Deep rewrites touch exactly these —
+ * never a `name`/`property`/string-literal `value` — so a program that happens to contain
+ * the text "#T" in a string is untouched. */
+const TY_FIELDS = new Set(["annot", "ty", "returnAnnot", "retTy", "catchTy", "elemTy"]);
+const TY_LIST_FIELDS = new Set(["typeArgs", "paramTys"]);
+/** Deep-rewrite every type-bearing field of an AST subtree, in place. */
+export function mapTypesDeep(n: unknown, f: (t: Ty) => Ty): void {
+  if (Array.isArray(n)) { for (const x of n) mapTypesDeep(x, f); return; }
+  if (!n || typeof n !== "object") return;
+  const o = n as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    const v = o[k];
+    if (typeof v === "string") { if (TY_FIELDS.has(k)) o[k] = f(v as Ty); }
+    else if (Array.isArray(v) && TY_LIST_FIELDS.has(k)) o[k] = v.map((t) => (typeof t === "string" ? f(t as Ty) : t));
+    else mapTypesDeep(v, f);
+  }
+}
+
 export type Expr =
   | NumberLiteral
   | BooleanLiteral
@@ -296,7 +380,9 @@ export interface FieldAssign { kind: "FieldAssign"; object: Expr; field: string;
 
 export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
 
-export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; ty?: Ty; }
+// `typeArgs` are EXPLICIT call-site type arguments (`id<string>("x")`) — they pin the
+// instantiation of a generic callee instead of inferring it from the argument types.
+export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
 
@@ -332,6 +418,10 @@ export interface FuncDecl {
   body: Stmt[];
   returnTy?: Ty; // resolved
   endDrops?: string[]; // owned linear locals to free at fall-through exit
+  // M3: declared type parameters (`function f<T, U>(…)`). A decl carrying these is a
+  // TEMPLATE — it is never checked or emitted itself; the checker replaces it with one
+  // fully-concrete specialization per distinct instantiation (see `monomorphize`).
+  typeParams?: string[];
 }
 
 export interface ReturnStmt { kind: "ReturnStmt"; argument: Expr | null; drops?: string[]; }

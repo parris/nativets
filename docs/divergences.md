@@ -210,6 +210,32 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1009 | optional `?.()` call / `?.[]` index / general or >2-arm unions | M2 | `?.` on object fields, `??`, and restricted `T\|undefined`/`T\|null` are ✅ (A2); the reused code now rejects only the out-of-subset forms |
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
+| NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
+
+### Generics — what M3 deliberately does NOT do (all rejected, never miscompiled)
+
+Generic function definitions are compiled by **monomorphization**: one specialization per distinct
+type-argument tuple, resolved from explicit call-site type args or inferred structurally from the
+argument types. node runs the same source unchanged (it just strips annotations), so every
+supported case is node-differential — there is **no runtime divergence**. The refusals:
+
+- **Polymorphic recursion** — a generic whose self-call uses a *bigger* type argument
+  (`f<T>` → `f<T[]>`) has no finite monomorphization. Capped at 200 instantiations, then
+  `NT1013` (TypeScript itself accepts this; we reject rather than diverge).
+- **A generic used as a value** (`const g = id;`) — specialization happens at the CALL site, so a
+  generic has no single type to store. `NT1013`, with a hint to call it directly.
+- **Uninferrable type arguments** (a type parameter that appears in no parameter, e.g.
+  `function make<T>(): number`) — `NT1013`, with a hint to pass them explicitly (`make<string>()`),
+  which IS supported.
+- **Generic arrows are not monomorphized** — an arrow is a value, so `<T>(x: T) => …` takes its
+  *contextual* parameter type when used as an argument (this works at any type), and otherwise
+  falls back to the pre-M3 erasure of `T` to `number`. Using a standalone generic arrow at a
+  non-number type is therefore a plain `NT2001` type error, not a miscompile.
+- **Generic classes** (`class Box<T>`) — `NT1015` (classes are not monomorphized at all).
+- **Constraints and defaults are erased** — `T extends U` / `T = U` are parsed and dropped;
+  specialization is driven by the types that actually flow, so a constraint adds nothing, but it
+  is also **not enforced** (a bound violation surfaces as an ordinary error inside the
+  specialization, not as a constraint violation at the call site).
 | NT1020 | promises / concurrency: `Promise.*`, `new Promise`, `.then`/`.catch`/`.finally`, un-awaited `async` results | later | an event loop — or, the chosen answer, the **actor** model (`spawn`/`send`/`receive`). `async`/`await`/`fetch` themselves are ✅ supported (blocking; see §A) |
 
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
