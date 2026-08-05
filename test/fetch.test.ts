@@ -20,7 +20,7 @@
  * test/http.test.ts, which this file mirrors.)
  */
 
-import { test as _test, expect, afterEach } from "bun:test";
+import { test as _test, describe, expect, afterEach } from "bun:test";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 
@@ -34,7 +34,8 @@ const test = HAS_LIBCURL ? _test : _test.skip;
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildBinary } from "../src/driver.ts";
+import { buildBinary, sourceToIR } from "../src/driver.ts";
+import { NTError } from "../src/diagnostics.ts";
 
 let servers: Server[] = [];
 const tmpDirs: string[] = [];
@@ -207,4 +208,118 @@ main();
   expect(await expectMatchesNode(src)).toBe(
     "application/json\napplication/json\nabc-123\nnull\nnone\ntrue\nfalse\n",
   );
+});
+
+// ---------------------------------------------------------------------------
+// 5a. Non-2xx: a 404 is a normal Response (`ok === false`), NOT a throw — exactly
+//     like node. The body is still readable.
+// ---------------------------------------------------------------------------
+test("non-2xx: res.ok is false, status + body still readable (matches node)", async () => {
+  const port = await startServer((_req, res) => {
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end("no such thing");
+  });
+
+  const src = `
+async function main() {
+  const res = await fetch("http://127.0.0.1:${port}/missing");
+  console.log(res.status);
+  console.log(res.ok);
+  if (!res.ok) {
+    console.log("request failed: " + res.status);
+  }
+  console.log(await res.text());
+}
+main();
+`;
+  expect(await expectMatchesNode(src)).toBe("404\nfalse\nrequest failed: 404\nno such thing\n");
+});
+
+// ---------------------------------------------------------------------------
+// 5b. A connection failure is a CATCHABLE throw (the Stage-20 pending-exception
+//     protocol), mirroring node's fetch rejecting. Port 1 has nothing listening.
+// ---------------------------------------------------------------------------
+test("connection failure throws and is catchable (matches node)", async () => {
+  const src = `
+async function main() {
+  try {
+    const res = await fetch("http://127.0.0.1:1/nope");
+    console.log("unreachable " + res.status);
+  } catch (e) {
+    console.log("fetch failed");
+  }
+  console.log("still running");
+}
+main();
+`;
+  expect(await expectMatchesNode(src)).toBe("fetch failed\nstill running\n");
+});
+
+// ---------------------------------------------------------------------------
+// 6. `async function` declarations (incl. a `Promise<T>` return annotation), async
+//    arrows, and `await` on a NON-promise value — all identity pass-throughs.
+// ---------------------------------------------------------------------------
+test("async functions/arrows and await of a plain value (matches node)", async () => {
+  const port = await startServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("ok");
+  });
+
+  const src = `
+async function double(n: number): Promise<number> {
+  return n * 2;
+}
+async function main() {
+  console.log(await double(21));
+  console.log(await 5);
+  const shout = async (s: string) => { return s + "!"; };
+  console.log(await shout("hi"));
+  const res = await fetch("http://127.0.0.1:${port}/");
+  const body = await res.text();
+  console.log(body.toUpperCase());
+}
+main();
+`;
+  expect(await expectMatchesNode(src)).toBe("42\n5\nhi!\nOK\n");
+});
+
+// ---------------------------------------------------------------------------
+// The async DECISION, enforced: there is no concurrency, so every construct whose
+// meaning depends on real promises is REJECTED (NT1020) instead of being silently
+// serialized-but-claimed-parallel. See docs/divergences.md.
+// ---------------------------------------------------------------------------
+describe("no concurrency: promise plumbing is rejected (NT1020)", () => {
+  const rejects = (source: string) => {
+    let code: string | null = null;
+    try { sourceToIR(source); } catch (err) { code = err instanceof NTError ? err.diag.code : `unexpected: ${err}`; }
+    expect(code).toBe("NT1020");
+  };
+
+  _test("Promise.all", () => rejects(`
+async function one(): Promise<number> { return 1; }
+async function main() { const xs = await Promise.all([one(), one()]); console.log(xs[0]); }
+main();
+`));
+
+  _test("new Promise(...)", () => rejects(`
+const p = new Promise((resolve: number) => { return 1; });
+console.log(1);
+`));
+
+  _test("fetch(...).then(...)", () => rejects(`
+function go() { fetch("http://127.0.0.1:1/").then((r: Response) => { console.log(r.status); }); }
+go();
+`));
+
+  _test("un-awaited async call whose value is used", () => rejects(`
+async function one(): Promise<number> { return 1; }
+async function main() { const p = one(); console.log(1); }
+main();
+`));
+
+  _test("fire-and-forget async call with code after it", () => rejects(`
+async function one(): Promise<number> { return 1; }
+one();
+console.log("after");
+`));
 });
