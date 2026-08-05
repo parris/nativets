@@ -55,6 +55,7 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   String: { min: 1, max: 1, argTys: [null], ret: "string" },
   __arrLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live array count
   __objLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live object count
+  __strLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live heap-string count
 };
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 const ACTOR_BUILTINS = new Set([

@@ -33,6 +33,110 @@ void *nativets_alloc(size_t n) {
   return p;
 }
 
+/* ============================================================
+ * String reference counting (RC) — a pointer->refcount SIDE TABLE.
+ *
+ * Strings keep their bare `char*` representation (no header). HEAP strings
+ * (results of js_str_concat / methods / joins / split / num->str, etc.) are
+ * REGISTERED here at creation with rc=1. Binding/copying a string to a new
+ * owner RETAINs (rc++); an owner releases at scope exit (rc--), and the string
+ * is freed + removed exactly when rc hits 0. A pointer NOT in the table — a
+ * string LITERAL (`@.str` global) or any untracked value — makes retain/release
+ * NO-OPS, so literals are never freed.
+ *
+ * This is the shared-immutable (rc) model for value-semantics strings, distinct
+ * from the linear/move model used for arrays and objects. Open-addressed linear
+ * probe with backward-shift deletion (no tombstones). NOT thread-safe — fine for
+ * the v0 cooperative scheduler; an M:N runtime would need a lock here.
+ * ============================================================ */
+
+typedef struct { void *key; long rc; } NtStrEnt;
+static NtStrEnt *g_str_tab = NULL;
+static size_t g_str_cap = 0;    /* power of two, or 0 when unallocated */
+static size_t g_str_count = 0;  /* number of live entries */
+static long g_str_allocs = 0;   /* total registrations */
+static long g_str_frees = 0;    /* total frees */
+
+static size_t str_hash(void *p) {
+  uintptr_t x = (uintptr_t)p;
+  x ^= x >> 33; x *= 0xff51afd7ed558ccdULL; x ^= x >> 33;
+  return (size_t)x;
+}
+
+/* Slot for `key`: its index if present, else the empty slot where it belongs.
+ * The table is kept below 0.7 load so an empty slot always terminates the probe. */
+static size_t str_tab_slot(void *key) {
+  size_t mask = g_str_cap - 1;
+  size_t i = str_hash(key) & mask;
+  while (g_str_tab[i].key != NULL && g_str_tab[i].key != key) i = (i + 1) & mask;
+  return i;
+}
+
+static void str_tab_grow(void) {
+  size_t old_cap = g_str_cap;
+  NtStrEnt *old = g_str_tab;
+  g_str_cap = g_str_cap ? g_str_cap * 2 : 64;
+  g_str_tab = (NtStrEnt *)nativets_alloc(g_str_cap * sizeof(NtStrEnt));
+  for (size_t i = 0; i < g_str_cap; i++) { g_str_tab[i].key = NULL; g_str_tab[i].rc = 0; }
+  g_str_count = 0;
+  for (size_t i = 0; i < old_cap; i++) {
+    if (old[i].key) { size_t j = str_tab_slot(old[i].key); g_str_tab[j] = old[i]; g_str_count++; }
+  }
+  if (old) free(old);
+}
+
+/* Standard linear-probing backward-shift deletion (keeps probe chains intact). */
+static void str_tab_remove_at(size_t i) {
+  size_t mask = g_str_cap - 1;
+  for (;;) {
+    g_str_tab[i].key = NULL; g_str_tab[i].rc = 0;
+    size_t j = i;
+    for (;;) {
+      j = (j + 1) & mask;
+      if (g_str_tab[j].key == NULL) { g_str_count--; return; }
+      size_t k = str_hash(g_str_tab[j].key) & mask;
+      int in_range = (i <= j) ? (i < k && k <= j) : (i < k || k <= j);
+      if (!in_range) break; /* entry j can slide into the hole at i */
+    }
+    g_str_tab[i] = g_str_tab[j];
+    i = j;
+  }
+}
+
+/* Register a freshly-allocated heap string (rc=1). Called by every producer. */
+void nt_str_register(void *p) {
+  if (!p) return;
+  if (g_str_cap == 0 || (g_str_count + 1) * 10 >= g_str_cap * 7) str_tab_grow();
+  size_t i = str_tab_slot(p);
+  if (g_str_tab[i].key == NULL) { g_str_tab[i].key = p; g_str_count++; }
+  g_str_tab[i].rc = 1; /* a reused (previously-freed) address starts fresh */
+  g_str_allocs++;
+}
+
+/* Add an owner. No-op (returns p) for untracked pointers, e.g. literals. */
+void *nt_str_retain(void *p) {
+  if (!p || g_str_cap == 0) return p;
+  size_t i = str_tab_slot(p);
+  if (g_str_tab[i].key == p) g_str_tab[i].rc++;
+  return p;
+}
+
+/* Drop an owner; free + remove at rc 0. No-op for untracked pointers (literals)
+ * and NULL. Freeing is the ONLY place a heap string is reclaimed. */
+void nt_str_release(void *p) {
+  if (!p || g_str_cap == 0) return;
+  size_t i = str_tab_slot(p);
+  if (g_str_tab[i].key != p) return; /* literal / already freed / untracked */
+  if (--g_str_tab[i].rc <= 0) {
+    free(p);
+    str_tab_remove_at(i);
+    g_str_frees++;
+  }
+}
+
+/* Live heap-string count (registered - freed), for leak tests (cf. nt_arr_live). */
+double nt_str_live(void) { return (double)(g_str_allocs - g_str_frees); }
+
 /* ---- number -> string, matching JS Number#toString / node console.log ---- */
 
 static void js_number_to_string(double v, char *out, size_t out_len) {
@@ -82,6 +186,7 @@ const char *js_str_concat(const char *a, const char *b) {
   memcpy(out, a, la);
   memcpy(out + la, b, lb);
   out[la + lb] = '\0';
+  nt_str_register(out);
   return out;
 }
 
@@ -96,6 +201,7 @@ const char *js_num_to_str(double v) {
   size_t n = strlen(buf);
   char *out = (char *)nativets_alloc(n + 1);
   memcpy(out, buf, n + 1);
+  nt_str_register(out);
   return out;
 }
 
@@ -158,7 +264,10 @@ double js_parse_float(const char *s) {
 
 /* ---- string methods (byte-oriented; ASCII-correct) ---- */
 
-static char *alloc_str(size_t n) { return (char *)nativets_alloc(n + 1); }
+/* All string-method results flow through here; register each as a heap string so
+ * it is rc-tracked (slice/substring/upper/lower/trim/repeat/padStart/charAt, and
+ * the pieces produced by nt_str_split). */
+static char *alloc_str(size_t n) { char *p = (char *)nativets_alloc(n + 1); nt_str_register(p); return p; }
 
 const char *js_str_upper(const char *s) {
   size_t n = strlen(s); char *o = alloc_str(n);
@@ -312,7 +421,7 @@ const char *nt_arr_join_num(NtArray *a, const char *sep) {
     char num[64]; js_number_to_string(slot_to_num(a->data[i]), num, sizeof(num));
     sb_append(&sb, num, strlen(num));
   }
-  return sb_finish(&sb);
+  const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
 }
 const char *nt_arr_join_str(NtArray *a, const char *sep) {
   SB sb; sb_init(&sb); size_t sl = strlen(sep);
@@ -321,7 +430,7 @@ const char *nt_arr_join_str(NtArray *a, const char *sep) {
     const char *s = (const char *)a->data[i];
     sb_append(&sb, s, strlen(s));
   }
-  return sb_finish(&sb);
+  const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
 }
 int32_t nt_arr_includes_num(NtArray *a, double x) {
   for (int64_t i = 0; i < a->len; i++) if (slot_to_num(a->data[i]) == x) return 1;
@@ -429,7 +538,7 @@ const char *js_json_quote(const char *s) {
     }
   }
   sb_append(&sb, "\"", 1);
-  return sb_finish(&sb);
+  const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
 }
 
 /* ---- JSON.parse -> tagged dynamic value (Dyn) ----
