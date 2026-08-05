@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdint.h>
+#include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
+#include <termios.h>  /* tcgetattr/tcsetattr — raw-mode single-key input   */
 
 /* ---- allocation (never-free; see header comment) ---- */
 
@@ -893,5 +895,52 @@ const char *nt_read_line(void) {
   char *o = alloc_str(len);
   memcpy(o, g_stdin + start, len); o[len] = '\0';
   g_stdin_pos = (i < g_stdin_len) ? i + 1 : g_stdin_len; /* consume the '\n' */
+  return o;
+}
+
+/* ---- raw single-key input (the TUI unlock, docs/examples.md C-c) ----
+ * rawMode(on) puts the controlling terminal in non-canonical, no-echo mode via
+ * termios (~(ICANON|ECHO)) so keypresses arrive un-buffered and un-echoed, and
+ * restores the saved settings on off. readKey() returns the next single byte
+ * ("" at EOF).
+ *
+ * Graceful degradation when stdin is NOT a tty (e.g. piped in tests): rawMode is
+ * a no-op (tcsetattr on a non-tty would fail anyway) and readKey serves one byte
+ * from the SAME lazily-slurped stdin buffer + cursor that readLine/readStdin use,
+ * so a piped keystroke script is deterministic and matches the node oracle
+ * byte-for-byte. libc/termios only, so it cross-compiles unchanged. */
+static struct termios g_saved_termios;
+static int            g_raw_active = 0;
+
+void nt_raw_mode(int32_t on) {
+  if (on) {
+    if (g_raw_active) return;
+    if (!isatty(STDIN_FILENO)) return;                 /* piped: no-op */
+    if (tcgetattr(STDIN_FILENO, &g_saved_termios) != 0) return;
+    struct termios raw = g_saved_termios;
+    raw.c_lflag &= ~((tcflag_t)(ICANON | ECHO));
+    raw.c_cc[VMIN] = 1;                                /* block for 1 byte */
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0) g_raw_active = 1;
+  } else {
+    if (!g_raw_active) return;
+    tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_termios);
+    g_raw_active = 0;
+  }
+}
+
+const char *nt_read_key(void) {
+  if (isatty(STDIN_FILENO)) {
+    /* Live terminal: one un-buffered byte straight from fd 0. */
+    unsigned char c;
+    ssize_t n = read(STDIN_FILENO, &c, 1);
+    if (n <= 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+    char *o = alloc_str(1); o[0] = (char)c; o[1] = '\0'; return o;
+  }
+  /* Piped (not a tty): one byte from the shared slurp buffer + cursor. */
+  stdin_load();
+  if (g_stdin_pos >= g_stdin_len) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  char *o = alloc_str(1); o[0] = g_stdin[g_stdin_pos]; o[1] = '\0';
+  g_stdin_pos++;
   return o;
 }

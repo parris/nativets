@@ -174,6 +174,8 @@ const DECLARES = [
   "declare ptr @nt_getenv(ptr)",
   "declare ptr @nt_read_line()",
   "declare ptr @nt_read_stdin()",
+  "declare ptr @nt_read_key()",
+  "declare void @nt_raw_mode(i32)",
   "declare void @nt_exit(double)",
   // --- B2 immutable Map/Set (nt_hamt via scalar-ABI wrappers in nt_mapset.c) ---
   "declare ptr @nt_map_new()",
@@ -2138,6 +2140,8 @@ class FnGen {
       // Host I/O stdin builtins — return a fresh (rc-tracked) heap string.
       case "readLine": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_line()`); return { v: t, ty: "string" }; }
       case "readStdin": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_stdin()`); return { v: t, ty: "string" }; }
+      case "readKey": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_key()`); return { v: t, ty: "string" }; }
+      case "rawMode": { const b = this.fresh(); this.emit(`${b} = zext i1 ${this.genExpr(args[0]!).v} to i32`); this.emit(`call void @nt_raw_mode(i32 ${b})`); return { v: "", ty: "void" }; }
       case "__arrLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_live()`); return { v: t, ty: "number" }; }
       case "__objLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_obj_live()`); return { v: t, ty: "number" }; }
       case "__strLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_str_live()`); return { v: t, ty: "number" }; }
