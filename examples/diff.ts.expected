@@ -1,0 +1,19 @@
+== identical ==
+  alpha
+  beta
+  gamma
+== insertion ==
+  alpha
++ beta
+  gamma
+== deletion ==
+  alpha
+- beta
+  gamma
+== mixed ==
+  apple
+- banana
++ blueberry
+  cherry
+  date
++ elderberry
