@@ -1,0 +1,26 @@
+Analysis position (X to move):
+X|O|X
+-+-+-
+O|X| 
+-+-+-
+ | |O
+Best move for X: r2c0 (index 6)
+
+Self-play game (X and O both minimax):
+Move 1: X -> r0c0
+Move 2: O -> r1c1
+Move 3: X -> r0c1
+Move 4: O -> r0c2
+Move 5: X -> r2c0
+Move 6: O -> r1c0
+Move 7: X -> r1c2
+Move 8: O -> r2c1
+Move 9: X -> r2c2
+
+Final board:
+X|X|O
+-+-+-
+O|O|X
+-+-+-
+X|O|X
+Result: draw
