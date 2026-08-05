@@ -472,6 +472,10 @@ export interface FuncDecl {
    *  a "setter". For an `@@mutable` class that is real in-place mutation, so the
    *  ownership pass requires the receiver to be OWNED (Rust's `&mut self`). */
   setter?: boolean;
+  /** Decorators lane: `this` must not be move-tracked in this frame — it is either the
+   *  method's own private copy (copy-on-write setter) or a borrow it legitimately hands
+   *  straight back (`return this` from a decorated constructor / an `@@mutable` method). */
+  untrackThis?: boolean;
 }
 
 export interface ReturnStmt { kind: "ReturnStmt"; argument: Expr | null; drops?: string[]; }

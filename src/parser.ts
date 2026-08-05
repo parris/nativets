@@ -9,7 +9,7 @@
 
 import { lex, type Token } from "./lexer.ts";
 import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnostics.ts";
-import { makeNullable, makeMapTy, makeSetTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep } from "./ast.ts";
+import { makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
   ImportDecl, ExportTable,
@@ -840,11 +840,25 @@ class Parser {
     this.eat("{");
     const fields: { key: string; ty: Ty }[] = [];
     const fieldInits: { field: string; value: Expr }[] = []; // declared-and-initialized fields → ctor prelude
-    const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[]; setter: boolean }[] = [];
+    const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[]; setter: boolean; wrappers: string[] }[] = [];
     let ctorParams: Param[] | null = null;
     let ctorBody: Stmt[] = [];
     while (!this.at("}") && this.peek().type !== "eof") {
       if (this.at(";")) { this.eat(";"); continue; }
+      // `@wrapper` on a MEMBER (docs/decorators.md). `@@` attributes are class-level only.
+      const memberWrappers: string[] = [];
+      while (this.at("@") || this.at("@@")) {
+        const sig = this.next();
+        const dt = this.peek();
+        const dn = this.expectIdent();
+        if (sig.value === "@@") {
+          throw decoratorError(
+            `compile-time attribute '@@${dn}' on a class member at ${dt.line}:${dt.col}`,
+            "`@@` attributes describe a whole CLASS (put it on the `class` line); a member takes a runtime wrapper — the single-`@` form, `@wrapper m() { … }`",
+          );
+        }
+        memberWrappers.push(dn);
+      }
       // Erase access modifiers (`private`/`public`/`protected`/`readonly`) prefixing a member.
       // They're single-module type-level info; `readonly` is already enforced by the
       // immutability model (a field is only assignable as `this.f =` inside the ctor). A
@@ -861,6 +875,12 @@ class Parser {
       if (tok.type === "ident" && REJECTED_MEMBER_MODS.has(tok.value) && !nextIsMemberStart) throw nyi(NYI.CLASS_FEATURE, `class member modifier/accessor '${tok.value}' at ${tok.line}:${tok.col}`);
       if (this.at("[")) throw nyi(NYI.CLASS_FEATURE, `computed/index class member at ${tok.line}:${tok.col}`);
       const member = this.expectIdent();
+      if (memberWrappers.length && !(this.peek().value === "(" && member !== "constructor")) {
+        throw decoratorError(
+          `decorator on class member '${member}' at ${tok.line}:${tok.col}`,
+          "a `@wrapper` attaches to a METHOD. Decorate the whole class (`@wrapper class C { … }`) to wrap its constructor; fields cannot be decorated",
+        );
+      }
       if (member === "constructor" && this.at("(")) {
         if (ctorParams) throw parseError(`Duplicate constructor at ${tok.line}:${tok.col}`);
         ctorParams = this.parseParamList(true); // ctor: access-modified params → parameter properties
@@ -883,7 +903,7 @@ class Parser {
         const body = [...prelude, ...this.parseBlock()];
         const setter = this.thisAssigned;
         this.thisWritable = false; this.thisAssigned = false;
-        methods.push({ name: member, params, returnAnnot, body, setter });
+        methods.push({ name: member, params, returnAnnot, body, setter, wrappers: memberWrappers });
         continue;
       }
       // field declaration: `name: Type;` / `name = init;` / `name: Type = init;` (optional `?`).
@@ -950,11 +970,26 @@ class Parser {
     this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
     const emitted: FuncDecl[] = [];
+    /** `const __dec_C_m = w(…)` statements — the ONE-TIME decorator applications. */
+    const decorators: Stmt[] = [];
     // Constructor → `C.constructor(this, …ctorParams): void` (caller allocates `this`).
-    emitted.push({
+    const ctor = {
       kind: "FuncDecl", name: `${name}.constructor`,
       params: [thisParam, ...(ctorParams ?? [])], returnAnnot: "void", body: ctorBody,
-    } as FuncDecl);
+    } as FuncDecl;
+    // A CLASS `@wrapper` wraps the CONSTRUCTOR: the thing being decorated is
+    // `(instance, …ctorArgs) => instance` — nativets allocates the instance, the
+    // initializer fills it in and hands it back, and the wrapper may do anything
+    // around that. (Our classes are not first-class values, so the constructor is
+    // the closest expressible reading of Python's `C = wrap(C)`.)
+    if (dec?.wrappers.length) {
+      ctor.returnAnnot = selfMarker;
+      ctor.body = [...ctor.body, { kind: "ReturnStmt", argument: this.ident("this") }];
+      ctor.untrackThis = true; // `return this` hands the caller's own allocation back
+      this.applyWrappers(ctor, dec.wrappers, emitted, decorators);
+    } else {
+      emitted.push(ctor);
+    }
     // Each method → `C.method(this, …params)`.
     for (const m of methods) {
       const fn = {
@@ -962,12 +997,70 @@ class Parser {
         params: [thisParam, ...m.params], returnAnnot: m.returnAnnot, body: m.body,
       } as FuncDecl;
       if (m.setter) { fn.setter = true; this.lowerSetter(fn, name, isMutable, selfMarker); }
-      emitted.push(fn);
+      if (m.wrappers.length) this.applyWrappers(fn, m.wrappers, emitted, decorators);
+      else emitted.push(fn);
     }
     // Substitute the self MARKER for the real instance type, everywhere it reached.
-    mapTypesDeep(emitted, (t) => (t.includes(selfMarker) ? (t.split(selfMarker).join(objTy) as Ty) : t));
+    const unself = (t: Ty): Ty => (t.includes(selfMarker) ? (t.split(selfMarker).join(objTy) as Ty) : t);
+    mapTypesDeep(emitted, unself);
+    mapTypesDeep(decorators, unself);
     this.hoistedFns.push(...emitted);
-    return { kind: "MultiStmt", stmts: [] }; // the declaration itself is erased
+    // The decorator applications run WHERE THE CLASS WAS DECLARED (a module-level
+    // `const`), so each wrapper is applied exactly ONCE — Python's `m = w(m)`, not a
+    // per-call wrap. Function declarations hoist, so a decorator defined further down
+    // the file is still in scope here.
+    return { kind: "MultiStmt", stmts: decorators };
+  }
+
+  /**
+   * A `@wrapper` decorator — a REAL runtime wrapper (docs/decorators.md). The decorated
+   * function `f` is split in three:
+   *
+   *   `C.m$inner(this, …p)`   the original body, renamed
+   *   `const __dec_C_m = w((__self, …p) => C.m$inner(__self, …p));`   applied ONCE
+   *   `C.m(this, …p) { return __dec_C_m(this, …p); }`                 the replacement
+   *
+   * so `w` is an ordinary user function of type `(fn) => fn` over the method's own
+   * signature with the receiver as the first parameter. Stacked decorators apply
+   * BOTTOM-UP, exactly like Python: `@a @b m` ≡ `a(b(m))`.
+   */
+  private applyWrappers(fn: FuncDecl, wrappers: string[], emitted: FuncDecl[], decorators: Stmt[]): void {
+    const label = fn.name.replace(".", "::");
+    if (fn.returnAnnot === undefined) {
+      throw decoratorError(
+        `decorated method '${label}' has no return type annotation`,
+        "a decorator is typed `(fn) => fn` over the method's own signature, so the signature must be written out — annotate the return type (and every parameter)",
+      );
+    }
+    for (const p of fn.params) {
+      if (p.rest || p.default !== undefined) {
+        throw decoratorError(
+          `decorated method '${label}' has a ${p.rest ? "rest" : "default"} parameter`,
+          "a decorator wraps a fixed arity; give the method plain annotated parameters (or drop the decorator)",
+        );
+      }
+    }
+    const inner: FuncDecl = { ...fn, name: `${fn.name}$inner` };
+    emitted.push(inner);
+    // `(__self, …p) => C.m$inner(__self, …p)` — the method, bound to an explicit receiver.
+    const names = fn.params.map((p, i) => (i === 0 ? "__self" : p.name));
+    const arrow: Expr = {
+      kind: "ArrowFunction",
+      params: fn.params.map((p, i) => ({ name: names[i]!, annot: p.annot })),
+      body: { kind: "CallExpr", callee: this.ident(inner.name), args: names.map((n) => this.ident(n)) },
+      exprBody: true,
+    };
+    // Bottom-up application: the decorator written CLOSEST to the method wraps first.
+    let init: Expr = arrow;
+    for (let i = wrappers.length - 1; i >= 0; i--) init = { kind: "CallExpr", callee: this.ident(wrappers[i]!), args: [init] };
+    const cname = `__dec_${fn.name.replace(".", "_")}`;
+    const fnTy = makeFuncTy(fn.params.map((p) => p.annot ?? "number"), fn.returnAnnot);
+    decorators.push({ kind: "VarDecl", declKind: "const", decls: [{ name: cname, annot: fnTy, init }] });
+    // The replacement method: forward everything to the (once-)decorated value.
+    emitted.push({
+      kind: "FuncDecl", name: fn.name, params: fn.params, returnAnnot: fn.returnAnnot,
+      body: [{ kind: "ReturnStmt", argument: { kind: "CallExpr", callee: this.ident(cname), args: fn.params.map((p) => this.ident(p.name)) } }],
+    } as FuncDecl);
   }
 
   /**

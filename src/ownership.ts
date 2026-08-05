@@ -59,8 +59,11 @@ export interface MutableInfo {
   classes: Set<string>;
   /** `Class.method` names that assign a field (setters), across all classes. */
   setters: Set<string>;
+  /** Just the METHOD names of the above — the conservative check for a receiver whose
+   *  type the pass cannot resolve (a container element, a callback parameter). */
+  setterProps: Set<string>;
 }
-const NO_MUTABLE: MutableInfo = { classes: new Set(), setters: new Set() };
+const NO_MUTABLE: MutableInfo = { classes: new Set(), setters: new Set(), setterProps: new Set() };
 
 /** Methods that mutate an array in place (so they conflict with a live borrow). */
 const MUTATING = new Set(["push", "pop"]);
@@ -105,6 +108,13 @@ function lineOf(e: Expr): number {
   }
 }
 
+/** Peel a method CHAIN back to what it started from: `a.bump().bump()` ⇒ `a`. */
+function chainRoot(e: Expr): Expr {
+  let cur = e;
+  while (cur.kind === "CallExpr" && cur.callee.kind === "MemberExpr") cur = cur.callee.object;
+  return cur;
+}
+
 function isMoveCall(e: Expr): boolean {
   return e.kind === "CallExpr" && e.callee.kind === "Identifier" && e.callee.name === "move";
 }
@@ -130,7 +140,11 @@ class Analyzer {
   ) {
     for (const p of paramBorrows) this.borrowBindings.add(p);
     for (const a of aliasOf.keys()) this.borrowBindings.add(a); // an alias may never escape
+    for (const owner of aliasOf.values()) if (owner) this.aliasedOwners.add(owner);
   }
+
+  /** Owners that something else aliases — reassigning one would dangle the alias. */
+  private readonly aliasedOwners = new Set<string>();
 
   /** Is this type an instance of an `@@mutable` class? */
   private isMutableInstance(ty: import("./ast.ts").Ty): boolean {
@@ -357,23 +371,39 @@ class Analyzer {
           });
           return;
         }
-        if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier") {
-          const recv = e.callee.object.name;
-          // `@@mutable` exclusive access: a SETTER really mutates the receiver, so it needs
-          // ownership (Rust's `&mut self`). Through an alias, a by-borrow parameter or a
-          // `for-of` element we cannot prove we are the owner — refuse (NT1607).
+        // `@@mutable` EXCLUSIVE ACCESS: a setter really mutates the receiver, so it needs
+        // ownership (Rust's `&mut self`). The receiver is resolved through a method chain
+        // (`a.bump().bump()` is still `a`) down to a binding; anything else — an array or
+        // field element, an arrow parameter, a capture — is ownership we cannot establish,
+        // so it is refused rather than mutated blind. Recognized by the setter's NAME,
+        // which is why the whole block is inert unless the program has `@@mutable` classes.
+        if (e.callee.kind === "MemberExpr" && this.mutable.setterProps.has(e.callee.property)) {
+          const root = chainRoot(e.callee.object);
+          const recv = root.kind === "Identifier" && this.varTy.has(root.name) ? root.name : null;
+          if (recv === null) {
+            this.report({
+              code: OWN_CODES.MUTATE_THROUGH_BORROW,
+              message: `cannot call the \`@@mutable\` setter \`${e.callee.property}\` here: its receiver is not a binding whose ownership this scope can establish`,
+              line: lineOf(e.callee),
+              hint: "a setter mutates in place, so it needs an OWNED receiver — a local bound to `new C(…)` in this scope. Container elements, closure captures and callback parameters cannot be proved unique, so they are refused rather than mutated blind",
+            });
+            return;
+          }
           const tag = this.mutableClassOf(recv);
           if (tag !== undefined && this.mutable.setters.has(`${tag}.${e.callee.property}`) && this.borrowBindings.has(recv)) {
             const owner = this.aliasOf.get(recv);
             this.report({
               code: OWN_CODES.MUTATE_THROUGH_BORROW,
               message: `cannot mutate \`${recv}\` through a borrow: \`${tag}.${e.callee.property}\` assigns a field, so it needs exclusive (owning) access`,
-              line: e.callee.object.loc?.line ?? 0,
-              hint: owner !== undefined
+              line: lineOf(e.callee),
+              hint: owner !== undefined && owner !== ""
                 ? `\`${recv}\` is an alias of \`${owner}\`, which still owns the value — call the setter on \`${owner}\`, or make \`${recv}\` the owner with \`const ${recv} = move(${owner})\``
-                : `\`${recv}\` is borrowed (a parameter or a \`for-of\` element) and its owner is elsewhere — mutate it where it is owned, or return a new value instead`,
+                : `\`${recv}\` is borrowed (a parameter, an alias, or a \`for-of\` element) and its owner is elsewhere — mutate it where it is owned, or return a new value instead`,
             });
           }
+        }
+        if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier") {
+          const recv = e.callee.object.name;
           if (this.linear.has(recv) && this.isBorrowed(recv) && MUTATING.has(e.callee.property)) {
             this.report({ code: OWN_CODES.MUTATE_WHILE_BORROWED, message: `cannot mutate \`${recv}\` while it is borrowed (iterator invalidation)`, line: e.callee.object.loc?.line ?? 0 });
           }
@@ -384,6 +414,17 @@ class Analyzer {
       }
       case "AssignExpr":
         this.expr(e.value, state, true);
+        // Reassigning a binding that something else ALIASES would free the old value out
+        // from under the alias (`let b = a; a = new C();` ⇒ `b` dangles). rustc's E0506.
+        if (this.aliasedOwners.has(e.target)) {
+          this.report({
+            code: OWN_CODES.MOVE_WHILE_BORROWED,
+            message: `cannot assign to \`${e.target}\` because it is borrowed (an alias of it is still live)`,
+            line: 0,
+            hint: "an alias of a `@@mutable` value borrows from its owner for the rest of the scope; reassigning the owner would leave the alias dangling. Scope the alias more tightly, or mutate through the owner instead of rebinding it",
+          });
+          return;
+        }
         if (this.linear.has(e.target)) {
           // RAII on REASSIGNMENT (B2 step 4): the old value is about to become
           // unreachable, so this scope must free it — unless it was moved out (the new
@@ -533,8 +574,15 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   const mutable: MutableInfo = {
     classes: new Set(checked.program.mutableClasses ?? []),
     setters: new Set(),
+    setterProps: new Set(),
   };
-  for (const s of checked.program.body) if (s.kind === "FuncDecl" && s.setter) mutable.setters.add(s.name);
+  for (const s of checked.program.body) {
+    if (s.kind !== "FuncDecl" || !s.setter) continue;
+    const [tag, m] = [s.name.split(".")[0]!, s.name.split(".").slice(1).join(".")];
+    if (!mutable.classes.has(tag)) continue; // an ordinary class's setter copies — nothing to guard
+    mutable.setters.add(s.name);
+    mutable.setterProps.add(m.replace(/\$inner$/, ""));
+  }
   const isMutableTy = (t: import("./ast.ts").Ty): boolean => {
     if (!mutable.classes.size || !isObjectTy(t)) return false;
     const tag = classTag(t);
@@ -551,7 +599,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
    *     returning it is a legitimate transfer, not a move out of the caller's value.
    */
   const untrackedThis = (fn: FuncDecl): boolean =>
-    fn.params[0]?.name === "this" && (fn.setter === true || mutable.classes.has(fn.name.split(".")[0]!));
+    fn.params[0]?.name === "this" && (fn.setter === true || fn.untrackThis === true || mutable.classes.has(fn.name.split(".")[0]!));
 
   const runScope = (body: Stmt[], params: { name: string; ty: import("./ast.ts").Ty }[], untrack: Set<string> = new Set()): string[] => {
     const aliases = new Map<string, string>();
