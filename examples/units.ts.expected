@@ -1,0 +1,8 @@
+units demo — usage: units <value> <from> <to>
+37 C = 98.6 F
+98.6 F = 37 C
+100 C = 373.15 K
+5 km = 3.1068559611866697 mi
+26.2 mi = 42.1648128 km
+1 lb = 0.45359237 kg
+70 kg = 154.3235835294143 lb
