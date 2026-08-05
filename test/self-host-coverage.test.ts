@@ -35,14 +35,24 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     expect(r.statements).toBeGreaterThan(20);
   });
 
-  test("lexer.ts — its `class` now surfaces the deferred-feature blocker NT1015 (SH3)", () => {
+  test("lexer.ts — `class LexError extends Error {}` now COMPILES (SH3.5, extends-Error)", () => {
     const r = coverage(src("lexer.ts"));
     expect(r.parsed).toBe(true);
     expect(r.statements).toBeGreaterThan(0);
-    // SH3 adds minimal classes (fields + constructor + methods), so `class` is no longer
-    // a blanket NT1012. `class LexError extends Error {}` flows to the real parser, which
-    // accepts the class shape but reports its still-deferred feature — inheritance — as
-    // NT1015 (a real semantic blocker, not swallowed by a preamble parse error).
+    // SH3 added minimal classes (fields + constructor + methods) so `class` is no longer a
+    // blanket NT1012; SH3.5 adds `extends Error` (+ access modifiers + parameter properties),
+    // so lexer's `class LexError extends Error {}` no longer surfaces an NT1015 inheritance
+    // blocker at all — the class fully parses/typechecks (any remaining blocker is elsewhere).
+    expect(r.blockers.some((b) => b.code === "NT1012")).toBe(false);
+    expect(r.blockers.some((b) => b.code === "NT1015")).toBe(false);
+  });
+
+  test("parser.ts — the next deferred class feature (field initializers) is NT1015 (SH3.5)", () => {
+    // SH3.5 clears the modifier/extends NT1015 blockers; the remaining class blocker in the
+    // compiler's own source is a class *field initializer* (`private pos = 0;` — a field with
+    // an initializer instead of a constructor assignment), still deferred as NT1015.
+    const r = coverage(src("parser.ts"));
+    expect(r.parsed).toBe(true);
     expect(r.blockers.some((b) => b.code === "NT1015")).toBe(true);
     expect(r.blockers.some((b) => b.code === "NT1012")).toBe(false);
   });

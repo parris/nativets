@@ -29,6 +29,10 @@ const BIN: Record<string, Op> = {
   "??": { prec: 3, logical: true },
 };
 const ASSIGN_OPS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="]);
+// Access modifiers erased on class members and, on ctor params, promoted to parameter properties.
+const PARAM_ACCESS = new Set(["private", "public", "protected", "readonly"]);
+// Class-member modifiers/accessors that change semantics — still deferred (NT1015).
+const REJECTED_MEMBER_MODS = new Set(["static", "abstract", "declare", "override", "get", "set", "async"]);
 const SCALARS = new Set(["number", "boolean", "string", "void", "undefined", "null"]);
 
 class Parser {
@@ -46,6 +50,9 @@ class Parser {
   private hoistedFns: Stmt[] = [];
   /** True while parsing a constructor body — enables `this.field = expr` (FieldAssign). */
   private inCtor = false;
+  /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
+   *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
+  private inErrorCtor = false;
   constructor(private toks: Token[]) {}
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
@@ -365,13 +372,25 @@ class Parser {
     return { name, annot, default: def, rest };
   }
 
-  /** Parse a `( … )` parameter list (rest / optional / annotated / default params). */
-  private parseParamList(): Param[] {
+  /** Parse a `( … )` parameter list (rest / optional / annotated / default params).
+   *  When `ctor` is set, an access modifier (`private`/`public`/`protected`/`readonly`)
+   *  prefixing a param makes it a *parameter property* (marked `paramProp`), which
+   *  `parseClass` desugars into a field + a `this.x = x` constructor initialization. */
+  private parseParamList(ctor = false): Param[] {
     this.eat("(");
     const params: Param[] = [];
     if (!this.at(")")) {
       do {
         if (this.at(")")) break; // trailing comma in the param list
+        // Parameter property: consume + record access modifiers. A modifier only counts
+        // when another identifier (the param name) follows — `readonly` as a bare param
+        // name (`f(readonly: number)`) is left alone (next token is `:`/`,`/`)`).
+        let paramProp = false;
+        if (ctor) {
+          while (this.peek().type === "ident" && PARAM_ACCESS.has(this.peek().value) && this.peek(1).type === "ident") {
+            paramProp = true; this.next();
+          }
+        }
         let rest = false;
         if (this.at("...")) { this.eat("..."); rest = true; }
         const pname = this.expectIdent();
@@ -380,7 +399,10 @@ class Parser {
         if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
         let def: Expr | undefined;
         if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
-        params.push(this.mkParam(pname, annot, def, rest, optional));
+        if (paramProp && rest) throw nyi(NYI.CLASS_FEATURE, "a rest parameter cannot be a parameter property");
+        const p = this.mkParam(pname, annot, def, rest, optional);
+        if (paramProp) p.paramProp = true;
+        params.push(p);
       } while (this.at(",") && (this.eat(","), true));
     }
     this.eat(")");
@@ -407,31 +429,48 @@ class Parser {
     this.eat("class");
     const name = this.expectIdent();
     if (this.at("<")) throw nyi(NYI.CLASS_FEATURE, `generic class '${name}' (type parameters)`);
-    if (this.at("extends") || this.at("implements")) throw nyi(NYI.CLASS_FEATURE, `class inheritance ('${this.peek().value}')`);
+    // Only `extends Error` is supported: nativets models Error as `{message:string}`, so the
+    // subclass inherits a `message` field and `super(msg)` sets it. General user-class
+    // inheritance is still deferred (no vtables / field-layout inheritance).
+    let extendsError = false;
+    if (this.at("extends")) {
+      this.eat("extends");
+      const sup = this.expectIdent();
+      if (sup !== "Error") throw nyi(NYI.CLASS_FEATURE, `class inheritance ('extends ${sup}'); only 'extends Error' is supported`);
+      extendsError = true;
+    }
+    if (this.at("implements")) throw nyi(NYI.CLASS_FEATURE, "class 'implements' clause");
     this.eat("{");
     const fields: { key: string; ty: Ty }[] = [];
     const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[] }[] = [];
     let ctorParams: Param[] | null = null;
     let ctorBody: Stmt[] = [];
-    const modifiers = new Set(["private", "public", "protected", "readonly", "static", "abstract", "declare", "override", "get", "set", "async"]);
     while (!this.at("}") && this.peek().type !== "eof") {
       if (this.at(";")) { this.eat(";"); continue; }
+      // Erase access modifiers (`private`/`public`/`protected`/`readonly`) prefixing a member.
+      // They're single-module type-level info; `readonly` is already enforced by the
+      // immutability model (a field is only assignable as `this.f =` inside the ctor). A
+      // modifier keyword counts only when it PREFIXES a member — a member literally named
+      // `readonly(): T` / `private: T` (next token `(`/`:`/`?`/`=`) is left alone.
+      while (this.peek().type === "ident" && PARAM_ACCESS.has(this.peek().value)) {
+        const nv = this.peek(1).value;
+        if (nv === "(" || nv === ":" || nv === "?" || nv === "=") break;
+        this.next();
+      }
       const tok = this.peek();
-      // A modifier/accessor keyword only counts as such when it PREFIXES a member (another
-      // token follows before the member's `(`/`:`/`?`/`=`). `get(): T` / `set(): T` are
-      // ordinary methods literally named get/set, not accessors.
+      // Modifiers/accessors that change semantics (static/get/set/…) stay deferred (NT1015).
       const nextV = this.peek(1).value, nextIsMemberStart = nextV === "(" || nextV === ":" || nextV === "?" || nextV === "=";
-      if (tok.type === "ident" && modifiers.has(tok.value) && !nextIsMemberStart) throw nyi(NYI.CLASS_FEATURE, `class member modifier/accessor '${tok.value}' at ${tok.line}:${tok.col}`);
+      if (tok.type === "ident" && REJECTED_MEMBER_MODS.has(tok.value) && !nextIsMemberStart) throw nyi(NYI.CLASS_FEATURE, `class member modifier/accessor '${tok.value}' at ${tok.line}:${tok.col}`);
       if (this.at("[")) throw nyi(NYI.CLASS_FEATURE, `computed/index class member at ${tok.line}:${tok.col}`);
       const member = this.expectIdent();
       if (member === "constructor" && this.at("(")) {
         if (ctorParams) throw parseError(`Duplicate constructor at ${tok.line}:${tok.col}`);
-        ctorParams = this.parseParamList();
+        ctorParams = this.parseParamList(true); // ctor: access-modified params → parameter properties
         for (const p of ctorParams) if (p.rest) throw nyi(NYI.CLASS_FEATURE, "rest parameter in a constructor");
         if (this.at(":")) { this.eat(":"); this.parseType(); } // ctor return annot (ignored)
-        this.inCtor = true;
+        this.inCtor = true; this.inErrorCtor = extendsError;
         ctorBody = this.parseBlock();
-        this.inCtor = false;
+        this.inCtor = false; this.inErrorCtor = false;
         continue;
       }
       if (this.at("(")) {
@@ -451,6 +490,26 @@ class Parser {
       fields.push({ key: member, ty });
     }
     this.eat("}");
+
+    // Parameter properties (`constructor(private x: T)`): declare a field `x` and initialize
+    // it (`this.x = x`) at the top of the ctor body — the TS desugaring.
+    const paramPropInits: Stmt[] = [];
+    for (const p of ctorParams ?? []) {
+      if (!p.paramProp) continue;
+      fields.push({ key: p.name, ty: p.annot ?? "number" });
+      paramPropInits.push({ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: p.name, value: this.ident(p.name) } });
+    }
+    if (paramPropInits.length) ctorBody = [...paramPropInits, ...ctorBody];
+
+    // `extends Error` inherits a `message: string` field (slot 0); `super(msg)` sets it.
+    if (extendsError) fields.unshift({ key: "message", ty: "string" });
+    // A bare `class X extends Error {}` (no own fields, no ctor) gets a forwarding default
+    // constructor `constructor(message: string) { this.message = message }`, so `new X("m")`
+    // works and `x.message === "m"` — matching node's implicit `super(...arguments)`.
+    if (extendsError && ctorParams === null && fields.length === 1) {
+      ctorParams = [{ name: "message", annot: "string" }];
+      ctorBody = [{ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: "message", value: this.ident("message") } }];
+    }
 
     // Reject-don't-miscompile: fields are only initialized by the constructor, so a class
     // with fields but no constructor would leave instance slots uninitialized (node reads
@@ -840,6 +899,16 @@ class Parser {
       if (t.value === "true" || t.value === "false") { this.next(); return { kind: "BooleanLiteral", value: t.value === "true" }; }
       if (t.value === "undefined") { this.next(); return { kind: "UndefinedLiteral" }; }
       if (t.value === "null") { this.next(); return { kind: "NullLiteral" }; }
+      // `super(msg)` inside an Error-subclass constructor → set the inherited `message` field.
+      if (t.value === "super") {
+        if (!this.inErrorCtor) throw nyi(NYI.CLASS_FEATURE, `'super' is only supported in the constructor of a class that extends Error, at ${t.line}:${t.col}`);
+        this.next(); this.eat("(");
+        const args: Expr[] = [];
+        if (!this.at(")")) { do { if (this.at(")")) break; args.push(this.parseAssign()); } while (this.at(",") && (this.eat(","), true)); }
+        this.eat(")");
+        if (args.length !== 1) throw nyi(NYI.CLASS_FEATURE, `super(...) with ${args.length} arguments (an Error subclass takes a single message)`);
+        return { kind: "FieldAssign", object: this.ident("this"), field: "message", value: args[0]! };
+      }
       this.next();
       return { kind: "Identifier", name: t.value, loc: { line: t.line, col: t.col } };
     }
