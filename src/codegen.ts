@@ -34,6 +34,8 @@ const ACTOR_BUILTINS = new Set([
   "register", "whereis", "link", "monitor", "trapExit", "exit", "__crash", "__kill", "supervise",
   // v4 selective receive
   "receiveMatch",
+  // v6 M:N scheduler introspection (debug)
+  "__schedulers", "__schedUsed", "__schedSteals",
 ]);
 
 /** B3 v4/v5 message kind tag (must match NT_MSG_NUM/STR/STRUCT in runtime/nt_actor.h).
@@ -338,6 +340,9 @@ const DECLARES = [
   "declare i64 @nt_receive_slot()",
   "declare i64 @nt_self()",
   "declare void @nt_drain()",
+  "declare double @nt_schedulers()",
+  "declare double @nt_sched_used()",
+  "declare double @nt_sched_steals()",
   // --- B3 v2 links/monitors/trap + fault injection; v3 supervision ---
   "declare void @nt_register(ptr, i64)",
   "declare i64 @nt_whereis(ptr)",
@@ -3666,6 +3671,9 @@ class FnGen {
         return { v: d, ty: "number" };
       }
       case "__drain": { this.emit(`call void @nt_drain()`); return { v: "", ty: "void" }; }
+      case "__schedulers":   { const t = this.fresh(); this.emit(`${t} = call double @nt_schedulers()`); return { v: t, ty: "number" }; }
+      case "__schedUsed":    { const t = this.fresh(); this.emit(`${t} = call double @nt_sched_used()`); return { v: t, ty: "number" }; }
+      case "__schedSteals":  { const t = this.fresh(); this.emit(`${t} = call double @nt_sched_steals()`); return { v: t, ty: "number" }; }
 
       // --- B3 v2 registry / links / monitors / trap / fault injection ---
       case "register": {

@@ -14,8 +14,17 @@
  *     passing an already-shared node (v->root, v->tail) retains it first;
  *   - a slot store transfers ownership; overwriting a slot releases its old value.
  * The EMPTY-node singleton is pinned (retain/release are no-ops on it) and is not
- * counted, so the live-node counter reads 0 at rest. rc is non-atomic (like the
- * string rc): correct for the cooperative scheduler, not for M:N threads.
+ * counted, so the live-node counter reads 0 at rest.
+ *
+ * THREAD SAFETY (B3 v6). `refcount` is a plain word, and Stage 44's transient is a
+ * CHECK-then-ACT (`rc == 1 ⇒ write the tail in place`) — both are races the moment two
+ * scheduler threads share a vector. Under M:N every public entry point below runs under
+ * `nt_rt_lock`, the recursive hook nt_actor.c installs at nt_sched_init when it starts
+ * more than one scheduler thread; it is NULL otherwise, so the single-threaded path is
+ * a predictable branch and behaviour is unchanged. Read-only accessors (nt_pv_get,
+ * nt_pv_tailoff) need no lock: the data is immutable once published, and the ONLY writer
+ * of a published node is the transient fast path, which requires rc == 1 (nobody else
+ * can be holding it) and takes the lock anyway.
  */
 
 #include <stdint.h>
@@ -24,6 +33,13 @@
 #include <string.h>
 
 #include "nt_pvec.h"
+
+/* Defined in runtime.c. NULL unless the actor runtime started M:N scheduler threads;
+ * see the THREAD SAFETY note above. Recursive, so nested public calls (push_own -> push
+ * -> release) are fine. */
+extern void (*nt_rt_lock)(int acquire);
+#define NT_PV_LOCK()   do { if (nt_rt_lock) nt_rt_lock(1); } while (0)
+#define NT_PV_UNLOCK() do { if (nt_rt_lock) nt_rt_lock(0); } while (0)
 
 /* ---- allocation + reference counting ---- */
 
@@ -105,18 +121,24 @@ static nt_pv *mk_header(uint32_t count, uint32_t shift,
     return v;
 }
 
-void nt_pv_retain(nt_pv *v) { if (v) v->refcount++; }
+void nt_pv_retain(nt_pv *v) { if (!v) return; NT_PV_LOCK(); v->refcount++; NT_PV_UNLOCK(); }
 
 void nt_pv_release(nt_pv *v) {
     if (!v) return;
-    if (--v->refcount > 0) return;
-    release_node(v->root);
-    release_node(v->tail);
-    free(v);
+    NT_PV_LOCK();
+    if (--v->refcount <= 0) {
+        release_node(v->root);
+        release_node(v->tail);
+        free(v);
+    }
+    NT_PV_UNLOCK();
 }
 
 nt_pv *nt_pv_empty(void) {
-    return mk_header(0, NT_PV_BITS, nt_pv_empty_node(), new_node(1), 0);
+    NT_PV_LOCK();
+    nt_pv *v = mk_header(0, NT_PV_BITS, nt_pv_empty_node(), new_node(1), 0);
+    NT_PV_UNLOCK();
+    return v;
 }
 
 /* tailoff = number of elements currently held in the tree (not the tail).
@@ -158,16 +180,21 @@ static nt_pv_node *do_assoc(uint32_t level, nt_pv_node *node, uint32_t i, int64_
 }
 
 nt_pv *nt_pv_update(nt_pv *v, uint32_t i, int64_t val) {
-    if (i >= v->count) { nt_pv_retain(v); return v; }     /* unreachable: nt_arr_with panics first */
-    if (i >= nt_pv_tailoff(v)) {                          /* in the tail: share the whole tree */
+    NT_PV_LOCK();
+    nt_pv *out;
+    if (i >= v->count) { v->refcount++; out = v; }        /* unreachable: nt_arr_with panics first */
+    else if (i >= nt_pv_tailoff(v)) {                     /* in the tail: share the whole tree */
         nt_pv_node *newtail = clone_node(v->tail);
         newtail->slots[i & NT_PV_MASK] = val;
         retain_node(v->root);
-        return mk_header(v->count, v->shift, v->root, newtail, v->tail_len);
+        out = mk_header(v->count, v->shift, v->root, newtail, v->tail_len);
+    } else {
+        nt_pv_node *newroot = do_assoc(v->shift, v->root, i, val);
+        retain_node(v->tail);
+        out = mk_header(v->count, v->shift, newroot, v->tail, v->tail_len);
     }
-    nt_pv_node *newroot = do_assoc(v->shift, v->root, i, val);
-    retain_node(v->tail);
-    return mk_header(v->count, v->shift, newroot, v->tail, v->tail_len);
+    NT_PV_UNLOCK();
+    return out;
 }
 
 /* ---- append (push) ---- */
@@ -205,7 +232,7 @@ static nt_pv_node *push_tail(uint32_t count, uint32_t level,
     return ret;
 }
 
-nt_pv *nt_pv_push(nt_pv *v, int64_t val) {
+static nt_pv *pv_push_unlocked(nt_pv *v, int64_t val) {
     uint32_t cnt = v->count;
 
     /* (a) room in the tail? true ~31/32 of the time — O(1) fast path */
@@ -259,18 +286,32 @@ nt_pv *nt_pv_push(nt_pv *v, int64_t val) {
 static long g_pv_transient_hits = 0;
 long nt_pv_transient_hits(void) { return g_pv_transient_hits; }
 
+nt_pv *nt_pv_push(nt_pv *v, int64_t val) {
+    NT_PV_LOCK();
+    nt_pv *out = pv_push_unlocked(v, val);
+    NT_PV_UNLOCK();
+    return out;
+}
+
 nt_pv *nt_pv_push_own(nt_pv *v, int64_t val) {
+    NT_PV_LOCK();
+    nt_pv *out;
+    /* rc == 1 on BOTH the header and its tail leaf ⇒ nobody else can observe this
+     * storage, so the write is unobservable. Holding the lock across the check AND the
+     * write is what makes it sound under M:N (a concurrent retain cannot slip between). */
     if (v->refcount == 1 && v->tail->refcount == 1 &&
         v->count - nt_pv_tailoff(v) < NT_PV_WIDTH) {
         v->tail->kind = 1;
         v->tail->slots[v->tail_len++] = val;
         v->count++;
         g_pv_transient_hits++;
-        return v;                       /* still the caller's owned reference */
+        out = v;                        /* still the caller's owned reference */
+    } else {
+        out = pv_push_unlocked(v, val);
+        nt_pv_release(v);
     }
-    nt_pv *nv = nt_pv_push(v, val);
-    nt_pv_release(v);
-    return nv;
+    NT_PV_UNLOCK();
+    return out;
 }
 
 /* ---- pop — the inverse of push ---- */
@@ -297,7 +338,7 @@ static nt_pv_node *pop_tail(uint32_t count, uint32_t level, nt_pv_node *node) {
     }
 }
 
-nt_pv *nt_pv_pop(nt_pv *v) {
+static nt_pv *pv_pop_unlocked(nt_pv *v) {
     if (v->count == 0) { fputs("nt_pvec: pop of empty vector\n", stderr); abort(); }
     if (v->count == 1) return nt_pv_empty();
 
@@ -339,7 +380,15 @@ nt_pv *nt_pv_pop(nt_pv *v) {
  * trick: no per-element tail clone, so the whole build costs ~n/32 leaves plus
  * the internal spine instead of n node copies. Nothing shared is ever touched.
  */
+nt_pv *nt_pv_pop(nt_pv *v) {
+    NT_PV_LOCK();
+    nt_pv *out = pv_pop_unlocked(v);
+    NT_PV_UNLOCK();
+    return out;
+}
+
 nt_pv *nt_pv_from_slots(const int64_t *src, uint32_t n) {
+    NT_PV_LOCK();
     nt_pv *v = nt_pv_empty();
     uint32_t i = 0;
     while (i < n) {
@@ -348,10 +397,11 @@ nt_pv *nt_pv_from_slots(const int64_t *src, uint32_t n) {
             v->count++;
         }
         if (i < n) {                       /* tail full: promote it, start a new one */
-            nt_pv *nv = nt_pv_push(v, src[i++]);
+            nt_pv *nv = pv_push_unlocked(v, src[i++]);
             nt_pv_release(v);
             v = nv;
         }
     }
+    NT_PV_UNLOCK();
     return v;
 }

@@ -53,9 +53,22 @@ void *nativets_alloc(size_t n) {
  *
  * This is the shared-immutable (rc) model for value-semantics strings, distinct
  * from the linear/move model used for arrays and objects. Open-addressed linear
- * probe with backward-shift deletion (no tombstones). NOT thread-safe — fine for
- * the v0 cooperative scheduler; an M:N runtime would need a lock here.
+ * probe with backward-shift deletion (no tombstones).
+ *
+ * THREAD SAFETY (B3 v6). This table IS shared state: one global open-addressed array
+ * that REHASHES, so two scheduler threads registering strings concurrently would corrupt
+ * it. Under M:N (nt_actor.c, NATIVETS_SCHED_THREADS > 1) every entry point below runs
+ * under `nt_rt_lock`, a hook the actor runtime installs at nt_sched_init when — and only
+ * when — it starts more than one scheduler thread. It is NULL for every other program:
+ * a predictable NULL test, no pthread dependency in this file (which must keep compiling
+ * for wasm/Android), and behaviour identical to Stage 30's single-threaded RC.
  * ============================================================ */
+
+/* Installed by nt_actor.c ONLY in M:N mode; NULL everywhere else (see above).
+ * nt_pvec.c uses the same hook for its node refcounts + Stage-44 transients. */
+void (*nt_rt_lock)(int acquire) = 0;
+#define NT_RC_LOCK()   do { if (nt_rt_lock) nt_rt_lock(1); } while (0)
+#define NT_RC_UNLOCK() do { if (nt_rt_lock) nt_rt_lock(0); } while (0)
 
 typedef struct { void *key; long rc; } NtStrEnt;
 static NtStrEnt *g_str_tab = NULL;
@@ -113,32 +126,43 @@ static void str_tab_remove_at(size_t i) {
 /* Register a freshly-allocated heap string (rc=1). Called by every producer. */
 void nt_str_register(void *p) {
   if (!p) return;
+  NT_RC_LOCK();
   if (g_str_cap == 0 || (g_str_count + 1) * 10 >= g_str_cap * 7) str_tab_grow();
   size_t i = str_tab_slot(p);
   if (g_str_tab[i].key == NULL) { g_str_tab[i].key = p; g_str_count++; }
   g_str_tab[i].rc = 1; /* a reused (previously-freed) address starts fresh */
   g_str_allocs++;
+  NT_RC_UNLOCK();
 }
 
 /* Add an owner. No-op (returns p) for untracked pointers, e.g. literals. */
 void *nt_str_retain(void *p) {
-  if (!p || g_str_cap == 0) return p;
-  size_t i = str_tab_slot(p);
-  if (g_str_tab[i].key == p) g_str_tab[i].rc++;
+  if (!p) return p;
+  NT_RC_LOCK();
+  if (g_str_cap != 0) {
+    size_t i = str_tab_slot(p);
+    if (g_str_tab[i].key == p) g_str_tab[i].rc++;
+  }
+  NT_RC_UNLOCK();
   return p;
 }
 
 /* Drop an owner; free + remove at rc 0. No-op for untracked pointers (literals)
  * and NULL. Freeing is the ONLY place a heap string is reclaimed. */
 void nt_str_release(void *p) {
-  if (!p || g_str_cap == 0) return;
-  size_t i = str_tab_slot(p);
-  if (g_str_tab[i].key != p) return; /* literal / already freed / untracked */
-  if (--g_str_tab[i].rc <= 0) {
-    free(p);
-    str_tab_remove_at(i);
-    g_str_frees++;
+  if (!p) return;
+  NT_RC_LOCK();
+  if (g_str_cap != 0) {
+    size_t i = str_tab_slot(p);
+    if (g_str_tab[i].key == p) {       /* else: literal / already freed / untracked */
+      if (--g_str_tab[i].rc <= 0) {
+        free(p);
+        str_tab_remove_at(i);
+        g_str_frees++;
+      }
+    }
   }
+  NT_RC_UNLOCK();
 }
 
 /* Live heap-string count (registered - freed), for leak tests (cf. nt_arr_live). */
