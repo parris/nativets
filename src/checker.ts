@@ -35,6 +35,18 @@ const RELATIONAL = new Set(["<", "<=", ">", ">="]);
 const EQUALITY = new Set(["===", "!==", "==", "!="]);
 const BITWISE = new Set(["&", "|", "^", "<<", ">>", ">>>"]);
 
+/** stdlib Batch 1: `Number.*` numeric constants (exact IEEE-754 values, like node). */
+export const NUMBER_CONSTS: Record<string, number> = {
+  MAX_SAFE_INTEGER: 9007199254740991,
+  MIN_SAFE_INTEGER: -9007199254740991,
+  EPSILON: 2.220446049250313e-16,
+  MAX_VALUE: 1.7976931348623157e308,
+  MIN_VALUE: 5e-324,
+  POSITIVE_INFINITY: Infinity,
+  NEGATIVE_INFINITY: -Infinity,
+  NaN: NaN,
+};
+
 const MATH_METHODS: Record<string, number | "var"> = {
   floor: 1, ceil: 1, round: 1, abs: 1, sqrt: 1, trunc: 1, pow: 2, max: "var", min: "var",
 };
@@ -415,6 +427,11 @@ class Checker {
           ) {
             return "string"; // process.env.NAME (empty string if unset — see docs)
           }
+        }
+        // stdlib Batch 1: the `Number.*` numeric constants (MAX_SAFE_INTEGER, EPSILON, …).
+        if (e.object.kind === "Identifier" && e.object.name === "Number" && !scope.lookup("Number")) {
+          if (NUMBER_CONSTS[e.property] === undefined) throw nyi(NYI.OBJECT, `Number.${e.property}`);
+          return "number";
         }
         const ot = this.type(e.object, scope);
         // Accessing a member of a possibly-nullish object: the result is nullable
@@ -813,11 +830,39 @@ class Checker {
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object" && !scope.lookup("Object")) {
       const p = e.callee.property;
-      if (p !== "keys" && p !== "values") throw nyi(NYI.OBJECT, `Object.${p}`);
+      // Object.fromEntries([[k, v], …]) — the keys must be compile-time known, so the
+      // argument must be a literal array of literal [stringLiteral, value] pairs. The
+      // result type is built from those keys, exactly like an object literal.
+      if (p === "fromEntries") {
+        if (e.args.length !== 1) throw typeError("Object.fromEntries expects 1 argument");
+        const lit = e.args[0]!;
+        if (lit.kind !== "ArrayLiteral" || lit.elements.length === 0)
+          throw nyi(NYI.OBJECT, "Object.fromEntries of a non-literal (keys must be known at compile time)");
+        const fields: string[] = [];
+        for (const pair of lit.elements) {
+          if (pair.kind !== "ArrayLiteral" || pair.elements.length !== 2 || pair.elements[0]!.kind !== "StringLiteral")
+            throw nyi(NYI.OBJECT, "Object.fromEntries entries (each must be a literal [\"key\", value] pair)");
+          const key = (pair.elements[0] as { value: string }).value;
+          const vt = this.type(pair.elements[1]!, scope);
+          if (vt !== "number" && vt !== "string" && vt !== "boolean") throw nyi(NYI.OBJECT, `Object.fromEntries value of type ${vt}`);
+          fields.push(`${key}:${vt}`);
+        }
+        return `{${fields.join(",")}}` as Ty;
+      }
+      if (p !== "keys" && p !== "values" && p !== "entries") throw nyi(NYI.OBJECT, `Object.${p}`);
       if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
       const ot = this.type(e.args[0]!, scope);
       if (!isObjectTy(ot)) throw typeError(`Object.${p} expects an object`);
       if (p === "keys") return "string[]";
+      if (p === "entries") {
+        // [key, value] pairs. A pair is an ARRAY, and arrays are homogeneous here, so a
+        // pair is only representable when the values are strings (string[] pairs).
+        const fs = objectFields(ot);
+        if (fs.length === 0) throw nyi(NYI.OBJECT, "Object.entries of an empty object");
+        if (!fs.every((f) => f.ty === "string"))
+          throw nyi(NYI.OBJECT, "Object.entries of a non-string-valued object (a [string, T] pair is a mixed-type tuple; use Object.keys + field access)");
+        return "string[][]";
+      }
       // values → T[]; require a homogeneous value type (our arrays are homogeneous).
       const fs = objectFields(ot);
       if (fs.length === 0) throw nyi(NYI.OBJECT, "Object.values of an empty object");
@@ -837,6 +882,13 @@ class Checker {
     // Number.isInteger/isFinite/isSafeInteger(x) → boolean (no coercion; x is a number).
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Number" && !scope.lookup("Number")) {
       const p = e.callee.property;
+      // Number.isNaN / parseInt / parseFloat are the namespaced aliases of the globals
+      // (isNaN does NOT coerce — but the argument is already statically a number).
+      if (p === "isNaN" || p === "parseInt" || p === "parseFloat") {
+        const g = GLOBAL_FUNCS[p === "isNaN" ? "isNaN" : p]!;
+        this.checkArgs(e.args, g, scope, `Number.${p}`);
+        return g.ret;
+      }
       if (p !== "isInteger" && p !== "isFinite" && p !== "isSafeInteger") throw nyi(NYI.OBJECT, `Number.${p}`);
       if (e.args.length !== 1) throw typeError(`Number.${p} expects 1 argument`);
       if (this.type(e.args[0]!, scope) !== "number") throw typeError(`Number.${p} expects a number`);
@@ -918,6 +970,29 @@ class Checker {
         return "string";
       }
       if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee.property, e.args, scope);
+      // stdlib Batch 1: Number#toFixed(digits) — the digit count must be a literal
+      // 0..100 so the RangeError node throws for anything else is impossible here.
+      if (recv === "number") {
+        // Number#toString(radix) — radix must be a literal 2..36 (node throws
+        // RangeError otherwise, which we make impossible rather than emulate).
+        if (e.callee.property === "toString") {
+          if (e.args.length > 1) throw typeError(".toString expects 0..1 args");
+          if (e.args.length === 1) {
+            const r = e.args[0]!;
+            if (r.kind !== "NumberLiteral" || r.value < 2 || r.value > 36 || Math.floor(r.value) !== r.value)
+              throw nyi(NYI.OBJECT, ".toString(radix) with a non-literal / out-of-range radix (node throws RangeError outside 2..36)");
+          }
+          return "string";
+        }
+        if (e.callee.property !== "toFixed") throw nyi(NYI.OBJECT, `number method '${e.callee.property}'`);
+        if (e.args.length > 1) throw typeError(".toFixed expects 0..1 args");
+        if (e.args.length === 1) {
+          const d = e.args[0]!;
+          if (d.kind !== "NumberLiteral" || d.value < 0 || d.value > 100 || Math.floor(d.value) !== d.value)
+            throw nyi(NYI.OBJECT, ".toFixed(digits) with a non-literal / out-of-range digit count (node throws RangeError outside 0..100)");
+        }
+        return "string";
+      }
       if (recv === "string") {
         // .concat is VARIADIC (all-string args) — outside the fixed-arity table.
         if (e.callee.property === "concat") {

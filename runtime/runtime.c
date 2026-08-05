@@ -1503,3 +1503,119 @@ void *nt_arr_flat1(NtArray *a) {
   }
   return o;
 }
+
+/* Number#toFixed(digits) — ECMAScript §Number.prototype.toFixed, exactly.
+ *
+ * The spec picks the integer n minimizing |n/10^f - x|, breaking TIES toward the
+ * LARGER n (i.e. half-up on the magnitude, the sign being split off first). We get
+ * that by printing the EXACT decimal expansion of the double (libc's printf is
+ * exact at any precision; a double needs at most 1074 fractional digits) and then
+ * rounding that digit string half-up — so 1.25 -> "1.3" (a true tie) while the
+ * binary-inexact 1.005 (= 1.00499999...) -> "1.00", matching node.
+ * |x| >= 1e21 and the non-finite values fall back to ToString, like the spec. */
+const char *js_num_to_fixed(double x, double digitsd) {
+  int f = (int)digitsd;
+  if (f < 0) f = 0;
+  if (f > 100) f = 100;
+  char out[2400];
+  if (isnan(x) || !isfinite(x) || fabs(x) >= 1e21) {
+    js_number_to_string(x, out, sizeof(out));
+    char *o = alloc_str(strlen(out)); strcpy(o, out); return o;
+  }
+  int neg = x < 0;      /* false for -0, so (-0).toFixed(2) is "0.00" like node */
+  double m = fabs(x);   /* fabs, not -x: printf would print "-0.000…" for -0 */
+  char exact[2400];
+  snprintf(exact, sizeof(exact), "%.*f", 1080, m); /* the EXACT expansion */
+  char *dot = strchr(exact, '.');
+  size_t ilen = (size_t)(dot - exact);
+  char digits[2400];
+  memcpy(digits, exact, ilen);                       /* integer digits … */
+  memcpy(digits + ilen, dot + 1, strlen(dot + 1));   /* … then fraction digits */
+  size_t total = ilen + strlen(dot + 1);
+  digits[total] = 0;
+  size_t keep = ilen + (size_t)f;                    /* digits kept before rounding */
+  int roundUp = keep < total && digits[keep] >= '5'; /* first dropped digit */
+  digits[keep] = 0;
+  if (roundUp) {
+    long i = (long)keep - 1;
+    for (; i >= 0; i--) {
+      if (digits[i] != '9') { digits[i]++; break; }
+      digits[i] = '0';
+    }
+    if (i < 0) { memmove(digits + 1, digits, keep + 1); digits[0] = '1'; ilen++; keep++; }
+  }
+  size_t w = 0;
+  /* The sign comes from x < 0, which is false for -0 — so (-0).toFixed(2) is "0.00"
+   * while (-0.0001).toFixed(2) is "-0.00", exactly like node. */
+  if (neg) out[w++] = '-';
+  memcpy(out + w, digits, ilen); w += ilen;
+  if (f > 0) { out[w++] = '.'; memcpy(out + w, digits + ilen, (size_t)f); w += (size_t)f; }
+  out[w] = 0;
+  char *o = alloc_str(w); memcpy(o, out, w); o[w] = 0; return o;
+}
+
+/* Number#toString(radix) — a faithful port of V8's DoubleToRadixCString, which is
+ * what node runs, so the output matches digit for digit (including the fractional
+ * "emit until the remaining error is below half an ULP" rule and its carry).
+ * radix 10 (and the no-argument form) goes through the normal ToString path. */
+const char *js_num_to_radix_string(double value, double radixd) {
+  int radix = (int)radixd;
+  char out[2400];
+  if (radix == 10 || isnan(value) || !isfinite(value)) {
+    js_number_to_string(value, out, sizeof(out));
+    char *o = alloc_str(strlen(out)); strcpy(o, out); return o;
+  }
+  if (value == 0) { char *z = alloc_str(1); z[0] = '0'; z[1] = 0; return z; }
+  static const char chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+  const int kBufferSize = 2200;
+  char buffer[2200];
+  int integer_cursor = kBufferSize / 2;
+  int fraction_cursor = integer_cursor;
+  int negative = value < 0;
+  if (negative) value = -value;
+  double integer = floor(value);
+  double fraction = value - integer;
+  double delta = 0.5 * (nextafter(value, INFINITY) - value);
+  double tiny = nextafter(0.0, 1.0);
+  if (delta < tiny) delta = tiny;
+  if (fraction >= delta) {
+    buffer[fraction_cursor++] = '.';
+    do {
+      fraction *= radix;
+      delta *= radix;
+      int digit = (int)fraction;
+      buffer[fraction_cursor++] = chars[digit];
+      fraction -= digit;
+      if (fraction > 0.5 || (fraction == 0.5 && (digit & 1))) {
+        if (fraction + delta > 1) {
+          /* Round up, carrying backwards through the fraction digits. */
+          while (1) {
+            fraction_cursor--;
+            if (fraction_cursor == kBufferSize / 2) { integer += 1; break; }
+            char c = buffer[fraction_cursor];
+            digit = c > '9' ? (c - 'a' + 10) : (c - '0');
+            if (digit + 1 < radix) { buffer[fraction_cursor++] = chars[digit + 1]; break; }
+          }
+          break;
+        }
+      }
+    } while (fraction >= delta);
+  }
+  /* Integer digits; digits a double can no longer represent are filled with '0'
+   * (V8's `Double(integer / radix).Exponent() > 0` test == "still at least 2^53"). */
+  while (integer / radix >= 9007199254740992.0) {
+    integer /= radix;
+    buffer[--integer_cursor] = '0';
+  }
+  do {
+    double remainder = fmod(integer, radix);
+    buffer[--integer_cursor] = chars[(int)remainder];
+    integer = (integer - remainder) / radix;
+  } while (integer > 0);
+  if (negative) buffer[--integer_cursor] = '-';
+  size_t n = (size_t)(fraction_cursor - integer_cursor);
+  char *o = alloc_str(n);
+  memcpy(o, buffer + integer_cursor, n);
+  o[n] = 0;
+  return o;
+}

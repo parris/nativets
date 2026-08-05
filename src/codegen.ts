@@ -13,6 +13,7 @@
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { isConsoleLog } from "./checker.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
+import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy } from "./ast.ts";
 import { isOptChainExpr } from "./checker.ts";
 import type { ArrowFunction } from "./ast.ts";
@@ -176,6 +177,8 @@ const DECLARES = [
   "declare double @nt_arr_last_indexof_str(ptr, ptr)",
   "declare ptr @nt_arr_concat(ptr, ptr)",
   "declare ptr @nt_arr_flat1(ptr)",
+  "declare ptr @js_num_to_fixed(double, double)",
+  "declare ptr @js_num_to_radix_string(double, double)",
   // --- stdlib: URL parsing (WHATWG URL functional subset) ---
   "declare ptr @nt_url_protocol(ptr)",
   "declare ptr @nt_url_host(ptr)",
@@ -1265,6 +1268,11 @@ class FnGen {
       }
 
       case "MemberExpr": {
+        // stdlib Batch 1: `Number.*` numeric constants — folded to their exact IEEE-754 value.
+        if (e.object.kind === "Identifier" && e.object.name === "Number" && !this.isBound("Number")) {
+          const c = NUMBER_CONSTS[e.property];
+          if (c !== undefined) return { v: llvmDouble(c), ty: "number" };
+        }
         // Host I/O: process.argv (string[]) and process.env.NAME (string). Recognized
         // only when `process` is not a user binding (matches the checker's guard).
         if (!this.varTypes.has("process") && !this.captures.has("process")) {
@@ -1633,7 +1641,38 @@ class FnGen {
 
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object" && !this.isBound("Object")) {
+      if (e.callee.property === "fromEntries") {
+        // Literal entries (checker-verified): build the object block slot by slot.
+        const pairs = (e.args[0] as { elements: Expr[] }).elements;
+        const obj = this.fresh();
+        this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(pairs.length)})`);
+        pairs.forEach((pair, i) => {
+          const v = this.genExpr((pair as { elements: Expr[] }).elements[1]!);
+          const gep = this.fresh();
+          this.emit(`${gep} = getelementptr i64, ptr ${obj}, i64 ${i}`);
+          this.emit(`store i64 ${this.toSlot(v)}, ptr ${gep}`);
+        });
+        return { v: obj, ty: e.ty ?? "number" };
+      }
       const o = this.genExpr(e.args[0]!);
+      if (e.callee.property === "entries") {
+        // string[][] — one 2-element [key, value] array per field (checker: string values).
+        const fields = objectFields(o.ty);
+        const arr = this.fresh();
+        this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(fields.length, 1))})`);
+        fields.forEach((f, i) => {
+          const pair = this.fresh();
+          this.emit(`${pair} = call ptr @nt_arr_new(double 2.0)`);
+          this.emit(`call double @nt_arr_push(ptr ${pair}, i64 ${this.toSlot({ v: this.mod.intern(f.key), ty: "string" })})`);
+          const gep = this.fresh();
+          this.emit(`${gep} = getelementptr i64, ptr ${o.v}, i64 ${i}`);
+          const slot = this.fresh();
+          this.emit(`${slot} = load i64, ptr ${gep}`);
+          this.emit(`call double @nt_arr_push(ptr ${pair}, i64 ${slot})`);
+          this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot({ v: pair, ty: "string[]" })})`);
+        });
+        return { v: arr, ty: "string[][]" };
+      }
       if (e.callee.property === "keys") return this.buildStringArray(objectFields(o.ty).map((f) => f.key));
       // values: read each field slot into a fresh homogeneous array (checker enforced).
       const fields = objectFields(o.ty);
@@ -1674,6 +1713,9 @@ class FnGen {
           acc = cat;
         }
         return { v: acc, ty: "string" };
+      }
+      if (ns === "Number" && !this.isBound("Number") && (p === "isNaN" || p === "parseInt" || p === "parseFloat")) {
+        return this.genGlobal(p === "isNaN" ? "isNaN" : p, e.args)!; // the namespaced alias of the global
       }
       if (ns === "Number" && !this.isBound("Number") && (p === "isInteger" || p === "isFinite" || p === "isSafeInteger")) {
         const fn = p === "isInteger" ? "nt_num_is_integer" : p === "isFinite" ? "nt_num_is_finite" : "nt_num_is_safe_integer";
@@ -1731,6 +1773,17 @@ class FnGen {
         const u = this.genExpr(e.args[0]!);
         const t = this.fresh();
         this.emit(`${t} = call ptr @nt_bytes_decode(ptr ${u.v})`);
+        return { v: t, ty: "string" };
+      }
+      if (recv.ty === "number") { // stdlib Batch 1: Number#toFixed / #toString(radix)
+        const t = this.fresh();
+        if (e.callee.property === "toString") {
+          const r = e.args[0] ? this.genExpr(e.args[0]).v : llvmDouble(10);
+          this.emit(`${t} = call ptr @js_num_to_radix_string(double ${recv.v}, double ${r})`);
+        } else {
+          const d = e.args[0] ? this.genExpr(e.args[0]).v : "0.0";
+          this.emit(`${t} = call ptr @js_num_to_fixed(double ${recv.v}, double ${d})`);
+        }
         return { v: t, ty: "string" };
       }
       if (isArrayTy(recv.ty)) return this.genArrayMethod(e.callee.property, recv, e.args);

@@ -240,6 +240,94 @@ console.log(["ab", "cd"].flatMap((s) => s.split("")).join("-"));
   },
 ]);
 
+differential("stdlib batch 1: Object.entries / Object.fromEntries match node", [
+  {
+    name: "Object.entries(o) — [key, value] pairs in insertion order (string-valued objects)",
+    code: `
+const o = { name: "ada", role: "eng" };
+const e = Object.entries(o);
+console.log(e.length, e[0][0], e[0][1], e[1][0], e[1][1]);
+for (const kv of e) { console.log(kv[0] + "=" + kv[1]); }
+console.log(e[1].join(":"), e.length === Object.keys(o).length);
+`,
+  },
+  {
+    name: "Object.fromEntries([[k, v], ...]) with literal keys — the inverse of entries",
+    code: `
+const o = Object.fromEntries([["a", 1], ["b", 2]]);
+console.log(o.a, o.b, o.a + o.b);
+const s = Object.fromEntries([["name", "ada"]]);
+console.log(s.name, Object.keys(s).join(","));
+console.log(JSON.stringify(Object.fromEntries([["x", 10], ["y", 20]])));
+`,
+  },
+]);
+
+differential("stdlib batch 1: Number statics match node", [
+  {
+    name: "Number constants — MAX/MIN_SAFE_INTEGER, EPSILON, MAX/MIN_VALUE, infinities",
+    code: `
+console.log(Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER);
+console.log(Number.EPSILON);
+console.log(Number.MAX_VALUE, Number.MIN_VALUE);
+console.log(Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY);
+console.log(Number.MAX_SAFE_INTEGER + 1 === Number.MAX_SAFE_INTEGER + 2);
+console.log(0.1 + 0.2 - 0.3 < Number.EPSILON);
+`,
+  },
+  {
+    name: "Number.isNaN / Number.parseInt / Number.parseFloat (no coercion; same as the globals)",
+    code: `
+console.log(Number.isNaN(NaN), Number.isNaN(1), Number.isNaN(0 / 0));
+console.log(Number.parseInt("42px"), Number.parseInt("ff", 16), Number.parseInt("zz"));
+console.log(Number.parseFloat("3.5x"), Number.parseFloat("nope"));
+console.log(Number.isInteger(4), Number.isFinite(1 / 0), Number.isSafeInteger(2 ** 53));
+`,
+  },
+]);
+
+differential("stdlib batch 1: Number#toFixed matches node (exact decimal rounding)", [
+  {
+    name: "toFixed — ties round UP on the magnitude, binary-inexact values do NOT",
+    code: `
+console.log((1.25).toFixed(1), (1.35).toFixed(1), (2.5).toFixed(0), (0.5).toFixed(0));
+console.log((1.005).toFixed(2), (1.045).toFixed(2), (8.345).toFixed(2));
+console.log((3.14159).toFixed(0), (3.14159).toFixed(2), (3.14159).toFixed(5), (3.14159).toFixed(8));
+console.log((0).toFixed(0), (0).toFixed(3), (-0).toFixed(2));
+console.log((-1.25).toFixed(1), (-0.0001).toFixed(2), (-2.5).toFixed(0));
+console.log((123.456).toFixed(), (99.99).toFixed(1), (9.995).toFixed(2));
+`,
+  },
+  {
+    name: "toFixed — big/small magnitudes, NaN and Infinity, and money-style formatting",
+    code: `
+console.log((1e21).toFixed(2), (1.7e22).toFixed(0));
+console.log((NaN).toFixed(2), (1 / 0).toFixed(2), (-1 / 0).toFixed(2));
+console.log((1234567.891).toFixed(2), (0.000001).toFixed(7), (1e-7).toFixed(10));
+const price = 19.999;
+console.log("$" + price.toFixed(2), (price * 3).toFixed(2));
+let total = 0;
+for (let i = 0; i < 10; i++) { total += 0.1; }
+console.log(total.toFixed(2), total.toFixed(17));
+`,
+  },
+]);
+
+differential("stdlib batch 1: Number#toString(radix) matches node", [
+  {
+    name: "toString() and toString(radix) — integers, fractions, negatives, every common radix",
+    code: `
+console.log((255).toString(16), (255).toString(2), (255).toString(8), (255).toString(36));
+console.log((0).toString(2), (1).toString(2), (-255).toString(16));
+console.log((3735928559).toString(16), (1e9).toString(36));
+console.log((0.5).toString(2), (0.1).toString(2));
+console.log((1 / 3).toString(3), (3.75).toString(2), (-2.5).toString(8));
+console.log((123).toString(), (12.5).toString(), (255).toString(10));
+console.log((2 ** 60).toString(16), (2 ** 60).toString(2));
+`,
+  },
+]);
+
 describe("stdlib batch 1: in-place array mutators are REJECTED (NT1606), like .push/.pop", () => {
   // Arrays are immutable (Stage 29). node's .fill/.sort/.splice/.shift/.unshift/.copyWithin
   // all mutate the receiver, so they are refused with the mutation diagnostic that names
