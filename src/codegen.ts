@@ -150,6 +150,16 @@ const DECLARES = [
   "declare double @nt_obj_live()",
   "declare ptr @nt_str_split(ptr, ptr)",
   "declare ptr @nt_arr_reverse(ptr)",
+  // --- stdlib (web standards) Batch 1: Date/base64/fromCharCode/Number/Array.from ---
+  "declare double @nt_date_now()",
+  "declare ptr @nt_btoa(ptr)",
+  "declare ptr @nt_atob(ptr)",
+  "declare ptr @nt_from_char_code(double)",
+  "declare ptr @nt_from_code_point(double)",
+  "declare i32 @nt_num_is_finite(double)",
+  "declare i32 @nt_num_is_integer(double)",
+  "declare i32 @nt_num_is_safe_integer(double)",
+  "declare ptr @nt_arr_from_str(ptr)",
   // Networking tier (L-d): libcurl-backed HTTP(S) client (host/Linux only; conditionally linked).
   // Return the response body (rc-string); write the numeric status through the trailing double*.
   "declare ptr @nt_http_post(ptr, ptr, ptr, ptr)",
@@ -322,6 +332,8 @@ class FnGen {
   private loops: { brk: string; cont: string }[] = [];
   /** In a lifted arrow: captured var name -> its slot in the closure env (%__clo). */
   private captures = new Map<string, { index: number; ty: Ty }>();
+  /** Is `name` a user-bound local/param/capture (so a `Foo.bar` isn't a builtin namespace)? */
+  private isBound(name: string): boolean { return this.varTypes.has(name) || this.captures.has(name); }
   /** String-typed VarDecl locals in this frame — reference-counted: retained on
    *  bind/alias, released at scope exit. Params are excluded (the caller owns them). */
   private strLocals = new Set<string>();
@@ -1474,14 +1486,72 @@ class FnGen {
       return this.genJsonStringify(this.genExpr(e.args[0]!));
     }
 
-    // Object.keys(o) — keys are compile-time known from o's type; build a string[].
-    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object") {
-      const o = this.genExpr(e.args[0]!); // evaluate for side effects
-      return this.buildStringArray(objectFields(o.ty).map((f) => f.key));
+    // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object" && !this.isBound("Object")) {
+      const o = this.genExpr(e.args[0]!);
+      if (e.callee.property === "keys") return this.buildStringArray(objectFields(o.ty).map((f) => f.key));
+      // values: read each field slot into a fresh homogeneous array (checker enforced).
+      const fields = objectFields(o.ty);
+      const arr = this.fresh();
+      this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(fields.length, 1))})`);
+      fields.forEach((f, i) => {
+        const gep = this.fresh();
+        this.emit(`${gep} = getelementptr i64, ptr ${o.v}, i64 ${i}`);
+        const slot = this.fresh();
+        this.emit(`${slot} = load i64, ptr ${gep}`);
+        const val: Val = { v: this.fromSlot(slot, f.ty), ty: f.ty };
+        this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(val)})`);
+      });
+      return { v: arr, ty: `${fields[0]!.ty}[]` as Ty };
     }
 
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Math") {
       return this.genMath(e.callee.property, e.args);
+    }
+
+    // --- stdlib (web standards) Batch 1: static-namespace member calls ---
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier") {
+      const ns = e.callee.object.name, p = e.callee.property;
+      if (ns === "Date" && p === "now" && !this.isBound("Date")) {
+        const t = this.fresh();
+        this.emit(`${t} = call double @nt_date_now()`);
+        return { v: t, ty: "number" };
+      }
+      if (ns === "String" && (p === "fromCharCode" || p === "fromCodePoint") && !this.isBound("String")) {
+        const fn = p === "fromCharCode" ? "nt_from_char_code" : "nt_from_code_point";
+        let acc: string = this.mod.intern(""); // 0 args → ""
+        for (const a of e.args) {
+          const n = this.genExpr(a).v;
+          const ch = this.fresh();
+          this.emit(`${ch} = call ptr @${fn}(double ${n})`);
+          const cat = this.fresh();
+          this.emit(`${cat} = call ptr @js_str_concat(ptr ${acc}, ptr ${ch})`);
+          acc = cat;
+        }
+        return { v: acc, ty: "string" };
+      }
+      if (ns === "Number" && !this.isBound("Number") && (p === "isInteger" || p === "isFinite" || p === "isSafeInteger")) {
+        const fn = p === "isInteger" ? "nt_num_is_integer" : p === "isFinite" ? "nt_num_is_finite" : "nt_num_is_safe_integer";
+        const x = this.genExpr(e.args[0]!).v;
+        const r = this.fresh();
+        this.emit(`${r} = call i32 @${fn}(double ${x})`);
+        const t = this.fresh();
+        this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        return { v: t, ty: "boolean" };
+      }
+      if (ns === "Array" && !this.isBound("Array")) {
+        if (p === "isArray") {
+          const at = e.args[0]!.ty ?? "number";
+          this.genExpr(e.args[0]!); // evaluate for side effects
+          return { v: isArrayTy(at) ? "true" : "false", ty: "boolean" };
+        }
+        if (p === "from") {
+          const s = this.genExpr(e.args[0]!).v;
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @nt_arr_from_str(ptr ${s})`);
+          return { v: t, ty: "string[]" };
+        }
+      }
     }
     if (e.callee.kind === "MemberExpr") {
       const recv = this.genExpr(e.callee.object);
@@ -2166,6 +2236,9 @@ class FnGen {
       }
       case "Number": return { v: this.coerceToNumber(this.genExpr(args[0]!)), ty: "number" };
       case "String": return { v: this.coerceToString(this.genExpr(args[0]!)), ty: "string" };
+      // --- stdlib (web standards) Batch 1: base64 globals ---
+      case "btoa": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_btoa(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      case "atob": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_atob(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
       case "move": return this.genExpr(args[0]!); // ownership marker; runtime identity
       // Host I/O stdin builtins — return a fresh (rc-tracked) heap string.
       case "readLine": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_line()`); return { v: t, ty: "string" }; }

@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdint.h>
+#include <time.h>     /* clock_gettime / time — Date.now */
 #ifndef _WIN32
 #include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
 #if !defined(__wasi__)
@@ -959,4 +960,147 @@ const char *nt_read_key(void) {
   char *o = alloc_str(1); o[0] = g_stdin[g_stdin_pos]; o[1] = '\0';
   g_stdin_pos++;
   return o;
+}
+
+/* ============================================================
+ * stdlib (web standards) — Batch 1
+ *
+ * High-value web/JS globals implemented as C-runtime primitives, each
+ * differential-tested against `node` (node is the oracle). Grouped here so the
+ * block stays additive and merge-friendly. All string results go through
+ * alloc_str (rc-tracked heap strings); all UTF-8 emission matches node's
+ * byte output on a UTF-8 stdout.
+ * ============================================================ */
+
+/* Date.now(): integer ms since the Unix epoch (floored, like node). Uses POSIX
+ * clock_gettime (present on macOS/iOS/Linux/Android API 21+/wasi — unlike C11
+ * timespec_get, which the Android NDK lacks below API 29); Windows falls back to
+ * second-granularity time(). */
+double nt_date_now(void) {
+#if defined(_WIN32)
+  return (double)time(NULL) * 1000.0;
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return (double)ts.tv_sec * 1000.0 + (double)(ts.tv_nsec / 1000000);
+#endif
+}
+
+/* ---- base64 (btoa / atob) — pure byte ops over the string's bytes ---- */
+static const char B64_ENC[] =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+const char *nt_btoa(const char *s) {
+  size_t n = strlen(s);
+  size_t outlen = ((n + 2) / 3) * 4;
+  char *o = alloc_str(outlen);
+  size_t j = 0;
+  for (size_t i = 0; i < n; i += 3) {
+    unsigned b0 = (unsigned char)s[i];
+    unsigned b1 = (i + 1 < n) ? (unsigned char)s[i + 1] : 0;
+    unsigned b2 = (i + 2 < n) ? (unsigned char)s[i + 2] : 0;
+    o[j++] = B64_ENC[b0 >> 2];
+    o[j++] = B64_ENC[((b0 & 3) << 4) | (b1 >> 4)];
+    o[j++] = (i + 1 < n) ? B64_ENC[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+    o[j++] = (i + 2 < n) ? B64_ENC[b2 & 63] : '=';
+  }
+  o[outlen] = 0;
+  return o;
+}
+
+static int b64_val(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1; /* '=' , whitespace, or invalid — skipped */
+}
+
+const char *nt_atob(const char *s) {
+  size_t n = strlen(s);
+  char *o = alloc_str(n); /* decoded length is always <= encoded length */
+  size_t j = 0;
+  int quad[4], qi = 0;
+  for (size_t i = 0; i < n; i++) {
+    int v = b64_val(s[i]);
+    if (v < 0) continue;
+    quad[qi++] = v;
+    if (qi == 4) {
+      o[j++] = (char)((quad[0] << 2) | (quad[1] >> 4));
+      o[j++] = (char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
+      o[j++] = (char)(((quad[2] & 3) << 6) | quad[3]);
+      qi = 0;
+    }
+  }
+  if (qi >= 2) {
+    o[j++] = (char)((quad[0] << 2) | (quad[1] >> 4));
+    if (qi >= 3) o[j++] = (char)(((quad[1] & 15) << 4) | (quad[2] >> 2));
+  }
+  o[j] = 0;
+  return o;
+}
+
+/* ---- String.fromCharCode / fromCodePoint — UTF-8 encode one code unit/point.
+ * Matches node's UTF-8 stdout bytes for non-surrogate BMP (fromCharCode) and
+ * full code points up to U+10FFFF (fromCodePoint). Codegen concatenates the
+ * per-argument single-char strings, so the variadic form works. ---- */
+static const char *utf8_char(unsigned cp) {
+  unsigned char buf[4];
+  int n = 0;
+  if (cp < 0x80) {
+    buf[n++] = (unsigned char)cp;
+  } else if (cp < 0x800) {
+    buf[n++] = (unsigned char)(0xC0 | (cp >> 6));
+    buf[n++] = (unsigned char)(0x80 | (cp & 0x3F));
+  } else if (cp < 0x10000) {
+    buf[n++] = (unsigned char)(0xE0 | (cp >> 12));
+    buf[n++] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+    buf[n++] = (unsigned char)(0x80 | (cp & 0x3F));
+  } else {
+    buf[n++] = (unsigned char)(0xF0 | (cp >> 18));
+    buf[n++] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
+    buf[n++] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+    buf[n++] = (unsigned char)(0x80 | (cp & 0x3F));
+  }
+  char *o = alloc_str((size_t)n);
+  memcpy(o, buf, (size_t)n);
+  o[n] = 0;
+  return o;
+}
+const char *nt_from_char_code(double d) {
+  long v = (long)d;                         /* ToInteger */
+  unsigned cp = (unsigned)(((unsigned long)v) & 0xFFFF); /* ToUint16 */
+  return utf8_char(cp);
+}
+const char *nt_from_code_point(double d) {
+  return utf8_char((unsigned)(long)d);
+}
+
+/* ---- Number.isInteger / isFinite / isSafeInteger — no ToNumber coercion
+ * (the argument is already statically a number). ---- */
+int32_t nt_num_is_finite(double x)  { return isfinite(x) ? 1 : 0; }
+int32_t nt_num_is_integer(double x) { return (isfinite(x) && floor(x) == x) ? 1 : 0; }
+int32_t nt_num_is_safe_integer(double x) {
+  return (isfinite(x) && floor(x) == x && fabs(x) <= 9007199254740991.0) ? 1 : 0;
+}
+
+/* ---- Array.from(str) → string[] of code-point characters (node iterates by
+ * code point, not byte, so multi-byte UTF-8 stays one element). Builds the
+ * generic slot-vector directly via nt_arr_new/nt_arr_push. ---- */
+void *nt_arr_from_str(const char *s) {
+  void *a = nt_arr_new(1);
+  size_t i = 0, n = strlen(s);
+  while (i < n) {
+    unsigned char c = (unsigned char)s[i];
+    size_t len = 1;
+    if (c >= 0xF0) len = 4; else if (c >= 0xE0) len = 3; else if (c >= 0xC0) len = 2;
+    if (i + len > n) len = 1;
+    char *o = alloc_str(len);
+    memcpy(o, s + i, len);
+    o[len] = 0;
+    nt_arr_push(a, (int64_t)(intptr_t)o);
+    i += len;
+  }
+  return a;
 }

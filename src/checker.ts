@@ -53,6 +53,9 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   isNaN: { min: 1, max: 1, argTys: ["number"], ret: "boolean" },
   Number: { min: 1, max: 1, argTys: [null], ret: "number" },
   String: { min: 1, max: 1, argTys: [null], ret: "string" },
+  // --- stdlib (web standards) Batch 1: base64 globals (differential vs node) ---
+  btoa: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  atob: { min: 1, max: 1, argTys: ["string"], ret: "string" },
   __arrLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live array count
   __objLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live object count
   __strLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live heap-string count
@@ -673,12 +676,58 @@ class Checker {
       return "string";
     }
 
-    // Object.keys(o)
-    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object") {
-      if (e.callee.property !== "keys") throw nyi(NYI.OBJECT, `Object.${e.callee.property}`);
-      if (e.args.length !== 1) throw typeError("Object.keys expects 1 argument");
-      if (!isObjectTy(this.type(e.args[0]!, scope))) throw typeError("Object.keys expects an object");
-      return "string[]";
+    // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object" && !scope.lookup("Object")) {
+      const p = e.callee.property;
+      if (p !== "keys" && p !== "values") throw nyi(NYI.OBJECT, `Object.${p}`);
+      if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
+      const ot = this.type(e.args[0]!, scope);
+      if (!isObjectTy(ot)) throw typeError(`Object.${p} expects an object`);
+      if (p === "keys") return "string[]";
+      // values → T[]; require a homogeneous value type (our arrays are homogeneous).
+      const fs = objectFields(ot);
+      if (fs.length === 0) throw nyi(NYI.OBJECT, "Object.values of an empty object");
+      const vt = fs[0]!.ty;
+      if (!fs.every((f) => f.ty === vt)) throw nyi(NYI.OBJECT, "Object.values of a heterogeneous object (arrays are homogeneous)");
+      return `${vt}[]` as Ty;
+    }
+
+    // --- stdlib (web standards) Batch 1: static-namespace member calls ---
+    // String.fromCharCode(...nums) / String.fromCodePoint(...nums) → string.
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "String" && !scope.lookup("String")) {
+      const p = e.callee.property;
+      if (p !== "fromCharCode" && p !== "fromCodePoint") throw nyi(NYI.OBJECT, `String.${p}`);
+      for (const a of e.args) if (this.type(a, scope) !== "number") throw typeError(`String.${p} needs numbers`);
+      return "string";
+    }
+    // Number.isInteger/isFinite/isSafeInteger(x) → boolean (no coercion; x is a number).
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Number" && !scope.lookup("Number")) {
+      const p = e.callee.property;
+      if (p !== "isInteger" && p !== "isFinite" && p !== "isSafeInteger") throw nyi(NYI.OBJECT, `Number.${p}`);
+      if (e.args.length !== 1) throw typeError(`Number.${p} expects 1 argument`);
+      if (this.type(e.args[0]!, scope) !== "number") throw typeError(`Number.${p} expects a number`);
+      return "boolean";
+    }
+    // Array.isArray(x) → boolean (compile-time from x's static type); Array.from(str) → string[].
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Array" && !scope.lookup("Array")) {
+      const p = e.callee.property;
+      if (p === "isArray") {
+        if (e.args.length !== 1) throw typeError("Array.isArray expects 1 argument");
+        this.type(e.args[0]!, scope); // evaluated for side effects
+        return "boolean";
+      }
+      if (p === "from") {
+        if (e.args.length !== 1) throw typeError("Array.from expects 1 argument");
+        if (this.type(e.args[0]!, scope) !== "string") throw nyi(NYI.ARRAY, "Array.from of a non-string");
+        return "string[]";
+      }
+      throw nyi(NYI.OBJECT, `Array.${p}`);
+    }
+    // Date.now() → number (ms since epoch).
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Date" && !scope.lookup("Date")) {
+      if (e.callee.property !== "now") throw nyi(NYI.OBJECT, `Date.${e.callee.property}`);
+      if (e.args.length !== 0) throw typeError("Date.now expects no arguments");
+      return "number";
     }
 
     // Math.X(...)
