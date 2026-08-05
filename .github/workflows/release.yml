@@ -53,21 +53,31 @@ jobs:
     needs: [check, test]
     if: needs.check.outputs.release == 'true'
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: macos-latest
             asset: nativets-macos-arm64
+            bin: nativets
           - os: ubuntu-latest
             asset: nativets-linux-x64
+            bin: nativets
+          # Windows x64. `bun --compile` emits `nativets.exe` on Windows, so the
+          # source binary name differs (matrix.bin). The runtime's POSIX deps don't
+          # affect building the compiler itself — it's a self-contained bun bundle.
+          - os: windows-latest
+            asset: nativets-windows-x64.exe
+            bin: nativets.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - name: Build self-contained nativets binary
-        run: bun run compile # bun build --compile -> ./nativets (bundles compiler + embedded C runtime)
+        run: bun run compile # bun build --compile -> ./nativets[.exe] (bundles compiler + embedded C runtime)
       - name: Name the platform asset
-        run: mv nativets "${{ matrix.asset }}"
+        shell: bash # git-bash on windows-latest so `mv` works uniformly across the matrix
+        run: mv "${{ matrix.bin }}" "${{ matrix.asset }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
