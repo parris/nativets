@@ -402,6 +402,22 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   `NT1601` use-after-move now points at both the use (primary) and the earlier move (secondary).
   Plus a **GitHub Actions release workflow** (build self-contained macOS/Linux binaries + publish a
   Release on a version bump) and `test/assets/smoke.ll` now tracked (fixes a CI/worktree flake).
+- **Stage 33 ✅ (empty array literals — contextual element type; closes the NT1001 friction)**
+  A bare `[]` has no element to infer from, so its element type now comes from **context**, via
+  a `hint: Ty` threaded through `Checker.type`/`infer`. Contexts wired up: binding annotation
+  (`const xs: number[] = []`), assignment target (`m = []`), **return type** (`function f():
+  number[] { return []; }`), **parameter type** at the call site (`g([])`, incl. class methods,
+  function values, and rest params — one choke point, `typeArg`), **class field initializer**
+  (`items: number[] = []` → the desugared `FieldAssign` takes the declared field type),
+  **annotated object-literal field** (`const o: {xs: number[]} = { xs: [] }`), **`?? []`** (the
+  left operand's base type is the context — optional fields, `let x: T[] | undefined`, `Map#get`),
+  and **`?:`** (an empty arm takes the other arm's type; the outer context still wins). Nested /
+  object-element contexts (`{a:number}[]`, `number[][]`) fall out of the same path. A truly
+  context-free `[]` is still **rejected** (`emptyArrayError`, NT1001) — but the diagnostic now
+  names the element type as the missing piece and lists the three fixes. Empty arrays are ordinary
+  linear values: move-checked and dropped exactly once (`__arrLive()` balances); `JSON.stringify([])`
+  matches node. Verified by `test/empty-array.test.ts` (node-differential where node can run it).
+  Deferred: inferring from a *later* assignment (`let xs = []; xs = [1,2,3];`) — annotate instead.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 

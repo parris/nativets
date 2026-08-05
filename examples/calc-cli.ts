@@ -16,7 +16,7 @@ function isDigit(c: string): boolean {
 }
 
 function tokenize(s: string): { kind: string; num: number }[] {
-  let acc: { kind: string; num: number }[] = [{ kind: "^", num: 0 }]; // sentinel at 0
+  let acc: { kind: string; num: number }[] = []; // annotation supplies the element type
   let i: number = 0;
   while (i < s.length) {
     const c: string = s.charAt(i);
@@ -87,7 +87,7 @@ function parseExpr(toks: { kind: string; num: number }[], pos: number, minPrec: 
 
 function evaluate(s: string): number {
   const toks = tokenize(s);
-  const r = parseExpr(toks, 1, 0); // index 0 is the sentinel
+  const r = parseExpr(toks, 0, 0);
   return r.value;
 }
 

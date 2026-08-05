@@ -12,9 +12,8 @@
 //     (`acc = [...acc, tok]`), never by mutating in place.
 //   - Array parameters are BORROWS: a function may read/index them but cannot
 //     return one, so the parser only ever *reads* the token array.
-//   - Empty array literals `[]` are unsupported (can't infer the element type),
-//     so the token accumulator is seeded with a sentinel token at index 0 and
-//     real parsing starts at index 1.
+//   - The token accumulator starts genuinely EMPTY (`let acc: T[] = []`): an
+//     empty array literal takes its element type from the annotation.
 //   - No classes: tokens are structural records `{kind, num}`; parse results are
 //     records `{value, pos}` returned from mutually-recursive functions.
 
@@ -27,11 +26,9 @@ function isDigit(c: string): boolean {
 }
 
 // Produce a flat token stream. Token kinds: "num" (with `num` set), and the
-// single-char operators/parens "+", "-", "*", "/", "%", "(", ")". Index 0 is a
-// sentinel ("^") so the array is never an (unsupported) empty literal; real
-// tokens start at index 1.
+// single-char operators/parens "+", "-", "*", "/", "%", "(", ")".
 function tokenize(s: string): { kind: string; num: number }[] {
-  let acc: { kind: string; num: number }[] = [{ kind: "^", num: 0 }];
+  let acc: { kind: string; num: number }[] = [];
   let i: number = 0;
   while (i < s.length) {
     const c: string = s.charAt(i);
@@ -126,7 +123,7 @@ function parseExpr(
 // Tokenize + parse + evaluate one expression string to a number.
 function evaluate(s: string): number {
   const toks = tokenize(s);
-  const r = parseExpr(toks, 1, 0); // index 0 is the sentinel
+  const r = parseExpr(toks, 0, 0);
   return r.value;
 }
 
