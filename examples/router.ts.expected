@@ -1,0 +1,13 @@
+-- priority dispatch
+  api:   /users
+  api: ! /health
+  api:   /stats
+c1: 200 /users
+c3: 200 /health
+c2: 200 /stats
+-- crash + restart
+  api:   /boom
+c4: TIMEOUT
+-- after restart
+  api:   /users
+c5: 200 /users
