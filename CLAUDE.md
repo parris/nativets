@@ -402,6 +402,33 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   `NT1601` use-after-move now points at both the use (primary) and the earlier move (secondary).
   Plus a **GitHub Actions release workflow** (build self-contained macOS/Linux binaries + publish a
   Release on a version bump) and `test/assets/smoke.ll` now tracked (fixes a CI/worktree flake).
+- **Stage 33 ✅ (B3 v4: selective receive + timeouts + string messages)** Actors got the three
+  things that made them unusable for real programs. **`receive(ms)`** is Erlang's `after`: it
+  returns `T | undefined` (the A2 tagged pair), so a timeout is observably distinct from every
+  legal message — never an in-band sentinel. Timeouts run on a **virtual clock** that advances
+  only at quiescence (nothing runnable could still send), so they are deterministic and cost no
+  wall-clock time; `ms <= 0` is `after 0` (poll, never block). **`receiveMatch(pred[, ms])`** is
+  selective receive: it scans the mailbox, takes the first message satisfying the predicate, and
+  leaves the rest in place *in order* — OTP's **save queue**, restored for the next receive by
+  construction; when the scan is exhausted it blocks for messages it has not examined and resumes
+  scanning there, so a message arriving while blocked is never skipped. The scan is emitted by
+  codegen (`nt_mbox_count`/`peek_kind`/`peek_slot`/`take`/`wait_from`) so the predicate is an
+  ordinary TS closure. **String messages** (`send(pid, "text")`, `spawn(body, "text")`) are
+  **deep-copied on send** into a fresh RC-registered allocation, so a receiver never aliases the
+  sender's buffer (proved by freeing the sender's local before the receiver runs). The message type
+  comes from the declared type of the binding (`const m: string = receive()`) or the predicate's
+  parameter type; every message also carries a runtime **kind tag**, so a receive compiled for
+  `number` that meets a string aborts with a diagnostic instead of reinterpreting the pointer
+  (reject-don't-miscompile, at runtime). Crash records now name the **triggering message** in its
+  own kind, and the supervisor record reports the dead pid. Also: `x === undefined` / `x === null`
+  on a nullable is a **tag comparison** (the idiomatic narrowing test). New v4 declares + all v4
+  runtime calls are gated on actor usage, so **non-actor IR is byte-identical**. Tests:
+  `test/actors-v4.test.ts` + `test/actors/{timeout,selective,selective_timeout,selective_late,
+  strings,string_copy,kind_mismatch,crash_message}.ts`, and the first actor example app,
+  **`examples/router.ts`** (a supervised request router: priority dispatch via selective receive,
+  reply timeouts, crash + restart under a stable registered name). Deferred: **structured/`Dyn`
+  messages** (needs the type-driven deep-copy walk + a shape tag — a slot alone can't distinguish
+  two object types across actors), M:N OS threads, and the async-IO poller (v5).
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 

@@ -261,7 +261,12 @@ const DECLARES = [
   "declare i64 @nt_sup_new(i64, i64, i64)",
   "declare void @nt_sup_add_child(i64, ptr, ptr, ptr)",
   "declare i64 @nt_sup_start(i64)",
-  // --- B3 v4 typed messages, receive timeouts, selective receive ---
+];
+
+/** B3 v4 runtime entry points — typed messages, receive timeouts, selective receive.
+ *  Emitted ONLY in programs that use actors (like the v1 safepoint declare), so
+ *  non-actor IR is byte-identical to before v4. */
+const ACTOR_V4_DECLARES = [
   "declare i64 @nt_spawn_typed(ptr, ptr, i64, i64)",
   "declare void @nt_send_typed(i64, i64, i64)",
   "declare i64 @nt_recv_timed(i64, double, i32)",
@@ -347,7 +352,7 @@ class ModuleGen {
       ...DECLARES,
       // v1 preemption safepoint — declared only in actor programs (the only ones that
       // emit calls to it + link nt_actor.c), so non-actor IR stays byte-identical.
-      ...(this.usesActors ? ["declare void @nt_reduction_tick()"] : []),
+      ...(this.usesActors ? ["declare void @nt_reduction_tick()", ...ACTOR_V4_DECLARES] : []),
       "",
       ...this.strDefs,
       this.strDefs.length ? "" : null,
@@ -1863,14 +1868,20 @@ class FnGen {
 
   /** Call a function VALUE (closure ptr already computed): indirect call through slot 0. */
   private genCallValueFrom(clo: string, fnTy: Ty, args: Expr[]): Val {
-    const ps = funcParams(fnTy);
-    return this.callClosureWith(clo, fnTy, args.map((a, i) => ({ v: this.genExpr(a).v, ty: ps[i]! })));
+    return this.callClosure(clo, fnTy, (ps) => args.map((a, i) => ({ v: this.genExpr(a).v, ty: ps[i]! })));
   }
 
-  /** Call a closure value with ALREADY-generated argument values (the Expr-taking
-   *  genCallValueFrom delegates here; B3 v4's selective-receive scan calls the user
-   *  predicate with a value peeked out of the mailbox, which has no Expr form). */
+  /** Call a closure value with ALREADY-generated argument values — B3 v4's
+   *  selective-receive scan calls the user predicate with a value peeked out of the
+   *  mailbox, which has no Expr form. */
   private callClosureWith(clo: string, fnTy: Ty, argVs: Val[]): Val {
+    return this.callClosure(clo, fnTy, () => argVs);
+  }
+
+  /** Shared closure-call emission. Arguments are produced by `mk` at exactly the
+   *  point the Expr-taking path always produced them (after the fn-ptr load), so the
+   *  emitted IR for ordinary calls is unchanged. */
+  private callClosure(clo: string, fnTy: Ty, mk: (ps: Ty[]) => Val[]): Val {
     this.emitSafepoint(); // call site: preempt long / deeply-recursive call chains
     const fpSlot = this.fresh();
     this.emit(`${fpSlot} = getelementptr i64, ptr ${clo}, i64 0`);
@@ -1880,7 +1891,7 @@ class FnGen {
     this.emit(`${fp} = inttoptr i64 ${fpInt} to ptr`);
     const ps = funcParams(fnTy);
     const ret = funcRet(fnTy);
-    const argVals = argVs.map((a, i) => `${llvmTy(ps[i] ?? a.ty)} ${a.v}`);
+    const argVals = mk(ps).map((a, i) => `${llvmTy(ps[i] ?? a.ty)} ${a.v}`);
     const argStr = [`ptr ${clo}`, ...argVals].join(", ");
     if (ret === "void") { this.emit(`call void ${fp}(${argStr})`); return { v: "", ty: "void" }; }
     const t = this.fresh();
