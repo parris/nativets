@@ -590,6 +590,28 @@ types** (`compose` — a function returning a function) remain of the closure ca
 clusters: spread, destructuring, `try/catch`, `?.`/`??`, JSON, nested objects, and making
 objects/strings linear. The gap corpus has node-verified cases waiting in `KNOWN_UNSUPPORTED`.
 
+### Self-hosting frontier (re-measured after Stages 33–40)
+
+`nativets coverage` over `src/*.ts` — **`NT1013` generics is now 0** (Stage 36 monomorphization;
+the previous count of 4 was also partly a *misattribution*: `coverage` used to re-label any
+unparsed `Name<…>` statement as "generic type arguments", which aimed the burn-down at the wrong
+feature — the heuristic is gone). What remains is small and concrete:
+
+| Blocker | × | What it actually is |
+|---|---|---|
+| `NT0001` | 11 | see the breakdown below — no longer one bucket |
+| `NT1606` | 3 | `this.f = v` field mutation in `Checker`/`Analyzer` — a *source* refactor, not a missing feature |
+| `NT1009` | 1 | a general union (`Record<string, number \| "var">`) |
+| `NT1015` | 1 | `static` class members in `ModuleGen` |
+
+The `NT0001` bucket, named precisely (this is the next wave's work list):
+1. **`(expr as T)` in a ternary arm** misread as an arrow parameter list (`looksLikeArrow` lookahead) — `ast.ts`.
+2. **postfix `++`/`--` on a member/index target** (`this.pos++`) — `UpdateExpr` only models an identifier — `parser.ts`, `coverage.ts`.
+3. **array-of-object-type annotations** `{ key: string; ty: Ty }[]`.
+4. **`instanceof`** — `cli.ts`.
+5. **binding patterns in arrow params** (`([k, v]) => …`) — `ownership.ts`.
+6. **string escapes** (`\x22`, a lone `\`) in `codegen.ts`.
+
 ---
 
 ## Conventions
