@@ -338,7 +338,39 @@ double js_str_index_of(const char *s, const char *sub) {
  * so one implementation serves number[]/string[]/boolean[].
  * ============================================================ */
 
-typedef struct { int64_t len; int64_t cap; int64_t *data; } NtArray;
+/* ---- B2 step 2: the persistent-vector (32-way trie) backend --------------------
+ *
+ * An array has TWO representations behind ONE handle (docs/research/B2-vector-trie.md
+ * §4): the pre-existing FLAT block (`pv == NULL`) — the builder/"transient" form used
+ * by literals, .map/.filter/.slice/split/JSON — and, past NT_PV_THRESHOLD elements, a
+ * REFCOUNTED PERSISTENT TRIE (`pv != NULL`, `data == NULL`) whose copy-producing ops
+ * share structure instead of copying O(n) slots. `len` always mirrors the element
+ * count, so `.length` stays a plain load and codegen is untouched.
+ *
+ * nt_pvec.c is linked (and NT_PVEC defined) only when the program uses arrays. In a
+ * flat-only build the stubs below keep this file compiling and every hybrid branch is
+ * dominated by a constant-false NT_PV_ON, leaving exactly the old flat behaviour — so
+ * a missed link is a lost optimisation, never a correctness or link failure.
+ * ------------------------------------------------------------------------------- */
+#ifdef NT_PVEC
+#include "nt_pvec.h"
+#define NT_PV_ON 1
+#else
+#define NT_PV_ON 0
+#define NT_PV_THRESHOLD 32
+typedef struct nt_pv nt_pv;
+static nt_pv *nt_pv_from_slots(const int64_t *s, uint32_t n) { (void)s; (void)n; return 0; }
+static int64_t nt_pv_get(nt_pv *v, uint32_t i) { (void)v; (void)i; return 0; }
+static nt_pv *nt_pv_update(nt_pv *v, uint32_t i, int64_t x) { (void)v; (void)i; (void)x; return 0; }
+static nt_pv *nt_pv_push(nt_pv *v, int64_t x) { (void)v; (void)x; return 0; }
+static nt_pv *nt_pv_pop(nt_pv *v) { (void)v; return 0; }
+static void nt_pv_retain(nt_pv *v) { (void)v; }
+static void nt_pv_release(nt_pv *v) { (void)v; }
+static double nt_pv_node_live(void) { return 0.0; }
+static long nt_pv_node_allocs(void) { return 0; }
+#endif
+
+typedef struct { int64_t len; int64_t cap; int64_t *data; nt_pv *pv; } NtArray;
 
 static double slot_to_num(int64_t s) { double d; memcpy(&d, &s, 8); return d; }
 
@@ -346,36 +378,84 @@ static double slot_to_num(int64_t s) { double d; memcpy(&d, &s, 8); return d; }
 static long g_arr_allocs = 0;
 static long g_arr_frees = 0;
 
-NtArray *nt_arr_new(double capd) {
-  int64_t cap = (int64_t)capd; if (cap < 1) cap = 1;
+/* A counted, empty header (no backing store yet). */
+static NtArray *arr_header(void) {
   NtArray *a = (NtArray *)nativets_alloc(sizeof(NtArray));
-  a->len = 0; a->cap = cap;
-  a->data = (int64_t *)nativets_alloc(sizeof(int64_t) * (size_t)cap);
+  a->len = 0; a->cap = 0; a->data = NULL; a->pv = NULL;
   g_arr_allocs++;
   return a;
 }
 
-/* Copy-on-write primitive (B2 step 1): a FULL independent copy of the flat block
- * — same len/cap, duplicated slot data. Counts as a fresh allocation so the copy
- * is single-owner and drops exactly once (keeps __arrLive balanced). No structural
- * sharing yet: element pointers are copied by value, but the block itself is new,
- * so mutating/dropping the copy never touches the original. */
+/* FREEZE: flat -> persistent trie, once, and only past the threshold. Below it a
+ * full flat copy is ≤ 256 bytes and beats the trie, and the trie form of ≤ 32
+ * elements is a flat 32-slot tail anyway — so small arrays keep byte-identical
+ * behaviour AND representation. */
+static void arr_freeze(NtArray *a) {
+  if (!NT_PV_ON || a->pv || a->len <= NT_PV_THRESHOLD) return;
+  a->pv = nt_pv_from_slots(a->data, (uint32_t)a->len);
+  free(a->data);
+  a->data = NULL; a->cap = 0;
+}
+
+/* THAW: persistent trie -> a PRIVATE flat block. Needed by the one in-place
+ * mutator we keep for node compatibility (.reverse): a shared trie node has other
+ * owners, so it must never be written through. O(n), which .reverse is anyway. */
+static void arr_thaw(NtArray *a) {
+  if (!a->pv) return;
+  int64_t n = a->len;
+  int64_t *d = (int64_t *)nativets_alloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
+  for (int64_t i = 0; i < n; i++) d[i] = nt_pv_get(a->pv, (uint32_t)i);
+  nt_pv_release(a->pv);
+  a->pv = NULL; a->data = d; a->cap = n > 0 ? n : 1;
+}
+
+/* The one element read every other runtime array routine goes through. */
+static int64_t arr_at(NtArray *a, int64_t i) {
+  return a->pv ? nt_pv_get(a->pv, (uint32_t)i) : a->data[i];
+}
+
+NtArray *nt_arr_new(double capd) {
+  int64_t cap = (int64_t)capd; if (cap < 1) cap = 1;
+  NtArray *a = arr_header();
+  a->cap = cap;
+  a->data = (int64_t *)nativets_alloc(sizeof(int64_t) * (size_t)cap);
+  return a;
+}
+
+/* Copy-on-write primitive (B2 step 1/2). Flat: a FULL independent copy of the block.
+ * Trie: share the whole persistent vector (O(1)) — safe because nothing is ever
+ * mutated in place through it. Either way the result is single-owner at the handle
+ * level and drops exactly once (keeps __arrLive balanced). */
 NtArray *nt_arr_copy(NtArray *a) {
-  NtArray *c = (NtArray *)nativets_alloc(sizeof(NtArray));
+  NtArray *c = arr_header();
+  c->len = a->len;
+  if (a->pv) { nt_pv_retain(a->pv); c->pv = a->pv; return c; }
   int64_t cap = a->cap < 1 ? 1 : a->cap;
-  c->len = a->len; c->cap = cap;
+  c->cap = cap;
   c->data = (int64_t *)nativets_alloc(sizeof(int64_t) * (size_t)cap);
   memcpy(c->data, a->data, sizeof(int64_t) * (size_t)a->len);
-  g_arr_allocs++;
   return c;
 }
 
-/* Array.prototype.with(i, v) — pure: returns a NEW array (full CoW copy) with
- * slot i replaced by `slot`; the receiver is unchanged. Out-of-range i leaves the
- * copy untouched (fixtures stay in-bounds; node throws RangeError — not modeled). */
+/* Array.prototype.with(i, v) — pure: returns a NEW array with slot i replaced; the
+ * receiver is unchanged. Past the threshold this is PATH COPYING: only the root->leaf
+ * ancestors of i are allocated (O(log32 n)), every other subtree is shared by pointer.
+ * Out-of-range i leaves the copy untouched (fixtures stay in-bounds; node throws
+ * RangeError — not modeled). */
 NtArray *nt_arr_with(NtArray *a, double idxd, int64_t slot) {
-  NtArray *c = nt_arr_copy(a);
   int64_t i = (int64_t)idxd;
+  arr_freeze(a);
+  if (a->pv) {
+    NtArray *c = arr_header();
+    c->len = a->len;
+    if (i >= 0 && i < a->len) {
+      c->pv = nt_pv_update(a->pv, (uint32_t)i, slot);
+    } else {
+      nt_pv_retain(a->pv); c->pv = a->pv;
+    }
+    return c;
+  }
+  NtArray *c = nt_arr_copy(a);
   if (i >= 0 && i < c->len) c->data[i] = slot;
   return c;
 }
@@ -383,15 +463,29 @@ NtArray *nt_arr_with(NtArray *a, double idxd, int64_t slot) {
 /* Deterministic drop, inserted by the compiler at scope exit (RAII). This is the
  * ONLY place arrays are reclaimed — the ownership checker guarantees single-owner
  * so this frees exactly once and never a moved-out value. Element strings are
- * shared (not owned by the array) and are intentionally not freed here. */
+ * shared (not owned by the array) and are intentionally not freed here. Trie nodes
+ * are refcounted: releasing the header frees this version's private path nodes and
+ * leaves every node another version still references alive. */
 void nt_arr_free(NtArray *a) {
   if (!a) return;
+  if (a->pv) nt_pv_release(a->pv);
   free(a->data);
   free(a);
   g_arr_frees++;
 }
 double nt_arr_live(void) { return (double)(g_arr_allocs - g_arr_frees); }
+/* Structural-sharing witnesses (the array analogue of __arrLive): live trie nodes
+ * and cumulative node allocations. See test/sharing.test.ts. */
+double nt_arr_nodes(void) { return NT_PV_ON ? nt_pv_node_live() : 0.0; }
+double nt_arr_node_allocs(void) { return NT_PV_ON ? (double)nt_pv_node_allocs() : 0.0; }
+
 double nt_arr_push(NtArray *a, int64_t slot) {
+  if (a->pv) {   /* persistent append: O(1) amortized, shares the whole tree */
+    nt_pv *nv = nt_pv_push(a->pv, slot);
+    nt_pv_release(a->pv);
+    a->pv = nv;
+    return (double)(++a->len);
+  }
   if (a->len >= a->cap) {
     int64_t nc = a->cap * 2;
     int64_t *nd = (int64_t *)nativets_alloc(sizeof(int64_t) * (size_t)nc);
@@ -404,9 +498,19 @@ double nt_arr_push(NtArray *a, int64_t slot) {
 int64_t nt_arr_get(NtArray *a, double idxd) {
   int64_t i = (int64_t)idxd;
   if (i < 0 || i >= a->len) return 0;
-  return a->data[i];
+  return arr_at(a, i);
 }
-int64_t nt_arr_pop(NtArray *a) { return a->len == 0 ? 0 : a->data[--a->len]; }
+int64_t nt_arr_pop(NtArray *a) {
+  if (a->len == 0) return 0;
+  if (a->pv) {
+    int64_t v = nt_pv_get(a->pv, (uint32_t)(a->len - 1));
+    nt_pv *nv = nt_pv_pop(a->pv);
+    nt_pv_release(a->pv);
+    a->pv = nv; a->len--;
+    return v;
+  }
+  return a->data[--a->len];
+}
 double nt_arr_len(NtArray *a) { return (double)a->len; }
 
 /* growable string builder (never-free) */
@@ -425,7 +529,7 @@ const char *nt_arr_join_num(NtArray *a, const char *sep) {
   SB sb; sb_init(&sb); size_t sl = strlen(sep);
   for (int64_t i = 0; i < a->len; i++) {
     if (i > 0) sb_append(&sb, sep, sl);
-    char num[64]; js_number_to_string(slot_to_num(a->data[i]), num, sizeof(num));
+    char num[64]; js_number_to_string(slot_to_num(arr_at(a, i)), num, sizeof(num));
     sb_append(&sb, num, strlen(num));
   }
   const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
@@ -434,25 +538,25 @@ const char *nt_arr_join_str(NtArray *a, const char *sep) {
   SB sb; sb_init(&sb); size_t sl = strlen(sep);
   for (int64_t i = 0; i < a->len; i++) {
     if (i > 0) sb_append(&sb, sep, sl);
-    const char *s = (const char *)a->data[i];
+    const char *s = (const char *)(intptr_t) arr_at(a, i);
     sb_append(&sb, s, strlen(s));
   }
   const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
 }
 int32_t nt_arr_includes_num(NtArray *a, double x) {
-  for (int64_t i = 0; i < a->len; i++) if (slot_to_num(a->data[i]) == x) return 1;
+  for (int64_t i = 0; i < a->len; i++) if (slot_to_num(arr_at(a, i)) == x) return 1;
   return 0;
 }
 int32_t nt_arr_includes_str(NtArray *a, const char *x) {
-  for (int64_t i = 0; i < a->len; i++) if (strcmp((const char *)a->data[i], x) == 0) return 1;
+  for (int64_t i = 0; i < a->len; i++) if (strcmp((const char *)(intptr_t) arr_at(a, i), x) == 0) return 1;
   return 0;
 }
 double nt_arr_indexof_num(NtArray *a, double x) {
-  for (int64_t i = 0; i < a->len; i++) if (slot_to_num(a->data[i]) == x) return (double)i;
+  for (int64_t i = 0; i < a->len; i++) if (slot_to_num(arr_at(a, i)) == x) return (double)i;
   return -1.0;
 }
 double nt_arr_indexof_str(NtArray *a, const char *x) {
-  for (int64_t i = 0; i < a->len; i++) if (strcmp((const char *)a->data[i], x) == 0) return (double)i;
+  for (int64_t i = 0; i < a->len; i++) if (strcmp((const char *)(intptr_t) arr_at(a, i), x) == 0) return (double)i;
   return -1.0;
 }
 
@@ -506,6 +610,7 @@ NtArray *nt_str_split(const char *s, const char *sep) {
 }
 
 void *nt_arr_reverse(NtArray *a) {
+  arr_thaw(a);   /* node's .reverse mutates in place; never write through shared nodes */
   for (int64_t i = 0, j = a->len - 1; i < j; i++, j--) {
     int64_t t = a->data[i]; a->data[i] = a->data[j]; a->data[j] = t;
   }
@@ -520,13 +625,31 @@ void *nt_arr_slice(NtArray *a, double startd, double endd) {
   if (start < 0) start += n; if (start < 0) start = 0; if (start > n) start = n;
   if (end < 0) end += n; if (end < 0) end = 0; if (end > n) end = n;
   NtArray *out = nt_arr_new(end - start > 0 ? (double)(end - start) : 1);
-  for (long i = start; i < end; i++) nt_arr_push(out, a->data[i]);
+  for (long i = start; i < end; i++) nt_arr_push(out, arr_at(a, i));
   return out;
 }
 
-/* append all of src's elements to dst (array spread) */
+/* Append all of src's elements to dst (array spread).
+ *
+ * LEADING-SPREAD FAST PATH: `[...a, x]` lowers to nt_arr_new + nt_arr_extend +
+ * nt_arr_push, i.e. the destination is always FRESH AND EMPTY when the spread is
+ * first. Past the threshold, dst then ADOPTS src's persistent vector wholesale —
+ * O(1) with full structural sharing — and the trailing pushes take the persistent
+ * path, turning an O(n) append into O(1) amortized with no codegen change. A
+ * non-leading spread (`[0, ...a, 4]`) falls back to the element copy; a prepend is
+ * O(n) in any representation. */
 void nt_arr_extend(NtArray *dst, NtArray *src) {
-  for (int64_t i = 0; i < src->len; i++) nt_arr_push(dst, src->data[i]);
+  if (NT_PV_ON && dst->len == 0 && !dst->pv && src->len > NT_PV_THRESHOLD) {
+    arr_freeze(src);
+    if (src->pv) {
+      free(dst->data);
+      dst->data = NULL; dst->cap = 0;
+      nt_pv_retain(src->pv);
+      dst->pv = src->pv; dst->len = src->len;
+      return;
+    }
+  }
+  for (int64_t i = 0; i < src->len; i++) nt_arr_push(dst, arr_at(src, i));
 }
 
 /* JSON-quote a string: wrap in quotes, escape " \ and control chars */

@@ -60,6 +60,23 @@ and move-aware so a value is freed **exactly once by its final owner** and never
 value. No GC, no manual free. Observable via the runtime `__arrLive()` counter (allocated −
 freed); see `test/drops.test.ts`.
 
+### Shared storage: refcounted trie nodes (B2 step 2)
+
+Linearity is a property of the **handle**, not of every byte behind it. Past 32 elements an array's
+storage becomes a **persistent 32-way trie** (`runtime/nt_pvec.c`) whose nodes are *shared* between
+versions — `a.with(i,v)` copies only the root→leaf path — so a node has many owners and the linear
+drop must not free it directly. Resolution (chosen over the allocate-and-never-free placeholder):
+**the trie nodes are reference counted**. Constructors return owned (rc = 1) references, header
+construction *consumes* the root/tail references it is handed, a slot store transfers ownership and
+overwriting a slot releases the old occupant; `release` frees at zero and recursively releases an
+internal node's children (a leaf's slots are values, so recursion stops). `nt_arr_free` releases the
+header: this version's private path nodes die immediately, anything another version still references
+survives. **Exactly-once, never dangling** — the same guarantee the linear model gives, extended
+through the shared DAG (immutable ⇒ acyclic ⇒ rc is complete, no cycle collector). Witnessed by
+`__pvNodes()` (live nodes → 0 when all versions drop) in `test/sharing.test.ts` and by vector 22 of
+`test/runtime/pvec_test.c`, which is also run under ASan/UBSan. The rc is non-atomic, like the
+string rc.
+
 Conservative for safety: only top-level linear locals are dropped. Conditionally-created
 (nested-block) and temporary (unbound) arrays are not yet freed — safe (no double free), may
 leak. Element strings of a `string[]` are shared and not freed with the array.
@@ -73,3 +90,5 @@ leak. Element strings of a `string[]` are shared and not freed with the array.
 4. Drops for nested-scope and temporary values (needs block-scoped drop points / drop flags).
 5. General borrows beyond for-of (if we add reference bindings) + `E0507`/`E0508`.
 6. Extend linearity to **objects** (M1 part 2) and eventually owned strings.
+7. ✅ Refcounted **shared trie nodes** for arrays past the 32-element threshold (B2 step 2) — the
+   bridge between linear handles and structurally-shared storage.

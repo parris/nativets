@@ -24,6 +24,11 @@
 #define NT_PV_WIDTH  32          /* 1 << NT_PV_BITS */
 #define NT_PV_MASK   31          /* NT_PV_WIDTH - 1 */
 
+/* flat->trie switch point (docs/research/B2-vector-trie.md §1.8, §4.1): at or below
+ * 32 elements the persistent representation IS a flat 32-slot tail, so a flat copy
+ * is never worse; past it the trie's path copying wins. runtime.c reads this. */
+#define NT_PV_THRESHOLD 32
+
 typedef struct nt_pv_node {
     int32_t  refcount;           /* structural sharing / rc bookkeeping (tests read it) */
     int32_t  kind;               /* 0 = internal (slots are nt_pv_node*), 1 = leaf (values) */
@@ -41,6 +46,17 @@ typedef struct nt_pv {
 
 /* ---- construction ---- */
 nt_pv*      nt_pv_empty(void);
+/* Bulk build from a flat slot block ("freeze"): O(n) once, ~n/32 nodes. Uses the
+ * transient trick internally (the vector under construction is exclusively owned,
+ * so its fresh tail is filled in place) — never touches a published node. */
+nt_pv*      nt_pv_from_slots(const int64_t* src, uint32_t n);
+
+/* ---- reference counting (B2 step 4 / the linear-drop bridge) ----
+ * Every op below returns an OWNED header (rc = 1). Release it when the owning
+ * NtArray is dropped; nodes reachable from another live version survive, a
+ * version's private path nodes are freed immediately. See docs §4.2. */
+void        nt_pv_retain(nt_pv* v);
+void        nt_pv_release(nt_pv* v);
 
 /* ---- core ops (all persistent: return a new header, never mutate the input) ---- */
 int64_t*    nt_pv_array_for(nt_pv* v, uint32_t i);  /* leaf slot array for index i */
