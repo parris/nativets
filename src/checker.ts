@@ -483,7 +483,11 @@ class Checker {
           if (l !== "number" || r !== "number") throw typeError(`Bitwise op needs numbers`);
           return "number";
         }
-        if (e.op === "+" && (l === "string" || r === "string")) return "string";
+        if (e.op === "+" && (l === "string" || r === "string")) {
+          // Response/Headers have no string coercion (they are opaque handles).
+          for (const t of [l, r]) if (isResponseTy(t) || isHeadersTy(t)) throw nyi(NYI.OBJECT, `string concatenation with a ${t}`);
+          return "string";
+        }
         if (l !== "number" || r !== "number") throw typeError(`Arithmetic needs numbers, got ${l} ${e.op} ${r}`);
         return "number";
       }
@@ -664,6 +668,9 @@ class Checker {
         // layout for 7+ elements (not statically known here) — not cheap to match
         // byte-for-byte, so reject rather than guess (reject-don't-miscompile).
         if (isBytesTy(at)) throw nyi(NYI.BYTES, "console.log of a Uint8Array (node's column-grouped typed-array formatting)");
+        // A Response/Headers handle has no printable form here (node prints an inspected
+        // `Response { … }`); reject rather than print the raw pointer.
+        if (isResponseTy(at) || isHeadersTy(at)) throw nyi(NYI.OBJECT, `console.log of a ${at} (print .status / .ok / await res.text() instead)`);
       }
       return "void";
     }

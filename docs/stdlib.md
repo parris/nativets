@@ -29,11 +29,9 @@ it can't do safely instead of miscompiling.
   drives the language toward self-hosting.
 - **Tier C — needs new infrastructure (each its own initiative).** Some web APIs require machinery
   we don't have yet:
-  - **`fetch` / `Headers` / `Request` / `Response`** → the networking tier (sockets + TLS; the
-    HTTP-client lane is the seed).
-  - **`Promise` / `async` / `await`** → an **event loop** — *or* a decision to expose async via the
-    **actor** model instead (nativets already has BEAM-style actors; promises may be the wrong
-    primitive for this language). A real fork to decide.
+  - ~~**`fetch` / `Headers` / `Request` / `Response`**~~ **✅ done (host-only)** — see "fetch" below.
+  - ~~**`Promise` / `async` / `await`** → an **event loop** *or* the **actor** model~~ **✅ fork
+    resolved** — see "the async decision" below.
   - **`RegExp`** → a regex engine (NFA/backtracking) — sizable.
   - **`setTimeout` / `setInterval` / `queueMicrotask`** → an event loop / timer wheel (the actor
     scheduler is a starting point).
@@ -72,9 +70,34 @@ multi-line) isn't cheap to match byte-for-byte, so reject-don't-miscompile. **De
 are on the allocate-and-never-free placeholder (not linear/RC yet — safe, may leak).
 
 ### Batch 3 — needs new infrastructure (Tier C)
-**`URL` / `URLSearchParams`** (string-based, actually tractable soon), **`fetch`** (networking),
-**`RegExp`** (regex engine), **`Promise`/`async`** (event loop vs actors — decide), **`setTimeout`**
-(timers), streams.
+**`URL` / `URLSearchParams`** (string-based, actually tractable soon), ~~**`fetch`**~~ ✅,
+**`RegExp`** (regex engine), ~~**`Promise`/`async`** (event loop vs actors — decide)~~ ✅ decided,
+**`setTimeout`** (timers), streams.
+
+### `fetch` ✅ (done, host-only) + the async decision
+
+**The async fork is resolved: no event loop, no promises.** `async` is **erased** and `await` is an
+**identity pass-through** over an already-resolved value; `fetch` is a **blocking** call. The payoff
+is large — ordinary idiomatic source (`const res = await fetch(url); const body = await res.text();`)
+compiles under nativets **and runs unchanged under `node`**, so node stays the byte-for-byte oracle
+for networking (`test/fetch.test.ts` runs the same `.ts` under both, against a local
+`http.createServer` mock; never the real internet). The cost is that **there is no concurrency**:
+`await` never yields, so overlapping/parallel requests are **rejected with `NT1020`** —
+`Promise.all`/`Promise.*`/`new Promise`, `.then`/`.catch`/`.finally`, and un-awaited `async` results
+— pointing at the **actor** model (`spawn`/`send`/`receive`) as nativets' concurrency primitive.
+Never silently serialized-but-claimed-parallel, never miscompiled. `Promise<T>` in type position
+erases to `T`.
+
+**Surface:** `fetch(url)` / `fetch(url, { method, headers, body })` → `Response`, with `.status`,
+`.ok` (2xx), `.headers`, `await res.text()`, `await res.json()` (→ `Dyn`, so `as T` runs the
+Stage-20 generated validator), and `Headers#get(name)` (case-insensitive, `string | null`) /
+`#has(name)`. A transport failure **throws catchably** (node's fetch rejects); a non-2xx is a normal
+Response. Backed by `runtime/nt_http.c` (libcurl) beside the existing `httpGet`/`httpPost`
+primitives, linked **only when used** — so non-fetch programs and every cross-build stay curl-free.
+**Host (macOS/Linux) only**: iOS/Android need the platform HTTP stack (NSURLSession/OkHttp).
+**Deferred:** streams/`res.body`, `blob`/`arrayBuffer`/`formData`, `AbortController`/timeouts,
+`statusText`, header iteration, constructing `Request`/`Response`/`Headers` values. Example app:
+`examples/fetch-json.ts` (fetch → headers → validate with `as T` → summary).
 
 ## Testing
 

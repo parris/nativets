@@ -31,7 +31,7 @@ import { spawn, spawnSync } from "node:child_process";
 const HAS_LIBCURL = spawnSync("clang", ["-fsyntax-only", "-x", "c", "-"], { input: "#include <curl/curl.h>\n" }).status === 0;
 const test = HAS_LIBCURL ? _test : _test.skip;
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildBinary, sourceToIR } from "../src/driver.ts";
@@ -281,6 +281,55 @@ async function main() {
 main();
 `;
   expect(await expectMatchesNode(src)).toBe("42\n5\nhi!\nOK\n");
+});
+
+// ---------------------------------------------------------------------------
+// The example app, end-to-end against the local mock (fetch → headers → validate →
+// summary), plus its non-2xx and connection-failure paths. Same source under node.
+// ---------------------------------------------------------------------------
+describe("examples/fetch-json.ts", () => {
+  const SRC = readFileSync(join(import.meta.dir, "..", "examples", "fetch-json.ts"), "utf8");
+
+  /** Run the example with `--url <mock>` under both node and the compiled binary. */
+  async function runBoth(port: number, path: string): Promise<string> {
+    const file = join(scratch(), "fetch-json.ts");
+    writeFileSync(file, SRC);
+    const url = `http://127.0.0.1:${port}${path}`;
+    const oracle = await runAsync("node", [file, "--url", url]);
+    const bin = join(scratch(), "fetch-json");
+    await buildBinary(SRC, bin, { target: "host" });
+    const ours = await runAsync(bin, ["--url", url]);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    return ours.stdout;
+  }
+
+  const repoServer = () =>
+    startServer((req, res) => {
+      if (req.url === "/repo") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ name: "nativets", stars: 1234, topics: ["typescript", "llvm", "compiler"] }));
+      } else {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end("{}");
+      }
+    });
+
+  test("fetches, validates and summarizes the JSON (matches node)", async () => {
+    const out = await runBoth(await repoServer(), "/repo");
+    expect(out).toBe(
+      "status: 200\ncontent-type: application/json\nname:   nativets\nstars:  1234\ntopics: typescript, llvm, compiler\n",
+    );
+  });
+
+  test("reports a non-2xx without throwing (matches node)", async () => {
+    const out = await runBoth(await repoServer(), "/nope");
+    expect(out).toBe("status: 404\ncontent-type: application/json\nrequest failed with status 404\n");
+  });
+
+  test("catches a connection failure (matches node)", async () => {
+    expect(await runBoth(1, "/repo")).toBe("fetch failed\n");
+  });
 });
 
 // ---------------------------------------------------------------------------

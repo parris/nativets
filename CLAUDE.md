@@ -402,6 +402,24 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   `NT1601` use-after-move now points at both the use (primary) and the earlier move (secondary).
   Plus a **GitHub Actions release workflow** (build self-contained macOS/Linux binaries + publish a
   Release on a version bump) and `test/assets/smoke.ll` now tracked (fixes a CI/worktree flake).
+- **Stage 33 ✅ (`fetch` + the async fork, resolved)** The web-standard client on the existing
+  libcurl primitive: `fetch(url)` / `fetch(url, {method, headers, body})` → a `Response`
+  (`.status`, `.ok`, `.headers`, `await res.text()`, `await res.json()` → `Dyn` so `as T` runs the
+  Stage-20 validator) plus `Headers#get/has` (case-insensitive, `string | null`). **The async fork
+  is decided: no event loop, no promises** — `async` is **erased** and `await` is an **identity
+  pass-through** over an already-resolved value, with every request **blocking**. That is what
+  keeps node as the oracle: the SAME `.ts` (`const res = await fetch(u); const body = await
+  res.text();`) runs under node and as a native binary, differential-tested against a local
+  `http.createServer` mock (`test/fetch.test.ts` — never the real internet, async `spawn` for both
+  sides so the in-process mock can serve). The cost is **no concurrency**, so promise plumbing is
+  **rejected with `NT1020`** (`Promise.*`, `new Promise`, `.then`/`.catch`/`.finally`, an
+  un-awaited `async` result — except the canonical trailing `main();`), pointing at the **actor**
+  model as the concurrency primitive. Transport failure → catchable throw (pending-exception
+  protocol); non-2xx → a normal Response with `ok === false`. `Response`/`Headers` are reserved
+  ref types (like the bytes handles); `Promise<T>` in type position erases to `T`; a user function
+  named `main` is symbol-renamed so the idiomatic entrypoint compiles. **Host (macOS/Linux) only**
+  — `nt_http.c` + `-lcurl` stay conditionally linked, so cross-builds are unaffected; iOS/Android
+  need a native HTTP stack. Example: `examples/fetch-json.ts`.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
