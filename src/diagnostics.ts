@@ -98,6 +98,12 @@ export const NYI = {
   // `console.log(u8)` — node's size-dependent column-grouped typed-array layout is not
   // cheap to match byte-for-byte, so we reject rather than miscompile the format.
   BYTES: { code: "NT1016", milestone: "M3", hint: "Uint8Array works (index/length/for-of/encode/decode); only console.log of one is deferred — inspect elements individually or decode to a string" },
+  // Networking tier: `fetch`/`await` ARE supported — but nativets has no event loop, so
+  // `await` never yields and every request BLOCKS. Anything whose meaning depends on real
+  // promises (concurrent/overlapping requests, `Promise.all`, `.then`, an un-awaited async
+  // result) is refused rather than silently serialized-but-claimed-parallel. Concurrency in
+  // nativets is the ACTOR model: spawn/send/receive. See docs/divergences.md.
+  ASYNC: { code: "NT1020", milestone: "later", hint: "`await` is a pass-through over blocking calls — there is no concurrency. Use the actor model (spawn/send/receive) for parallel work" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

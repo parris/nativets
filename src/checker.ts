@@ -8,7 +8,7 @@
  */
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError } from "./diagnostics.ts";
 
@@ -416,6 +416,14 @@ class Checker {
           const ft = this.fieldOnBase(baseTy(ot), e.property);
           return makeNullable("undefined", baseTy(ft));
         }
+        // fetch's Response: `.status` (number), `.ok` (2xx, computed from the status),
+        // `.headers` (the response header block — see `Headers` below).
+        if (isResponseTy(ot)) {
+          if (e.property === "status") return "number";
+          if (e.property === "ok") return "boolean";
+          if (e.property === "headers") return "Headers";
+          throw nyi(NYI.OBJECT, `Response property '.${e.property}' (supported: .status, .ok, .headers, .text(), .json())`);
+        }
         if ((ot === "string" || isArrayTy(ot) || isBytesTy(ot)) && e.property === "length") return "number";
         if ((isMapTy(ot) || isSetTy(ot)) && e.property === "size") return "number";
         if (ot === "Dyn") return "Dyn"; // dynamic field access — runtime tag check
@@ -597,6 +605,9 @@ class Checker {
           });
           return objTy;
         }
+        // `new Promise(...)` — no event loop, so a promise cannot mean what it means in
+        // node. Reject (NT1020) with the pointer to actors for real concurrency.
+        if (e.callee === "Promise") throw nyi(NYI.ASYNC, "new Promise(...)");
         if (e.callee !== "Error") throw nyi(NYI.CLASS, `new ${e.callee}(...)`);
         if (e.args.length !== 1 || this.type(e.args[0]!, scope) !== "string") throw typeError("new Error(message: string)");
         return "{message:string}";
@@ -852,6 +863,16 @@ class Checker {
       return "number";
     }
 
+    // --- Networking tier: `fetch` (the web standard, on the libcurl primitive) ---
+    // `fetch(url)` / `fetch(url, init)` → Response. The call BLOCKS (no event loop);
+    // `await` in front of it is an identity pass-through — see docs/divergences.md.
+    if (e.callee.kind === "Identifier" && e.callee.name === "fetch" && !scope.lookup("fetch")) return this.inferFetch(e, scope);
+    // Explicit promise plumbing means nothing without an event loop — reject (NT1020)
+    // rather than pretend `Promise.all` runs anything in parallel.
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Promise" && !scope.lookup("Promise")) {
+      throw nyi(NYI.ASYNC, `Promise.${e.callee.property}`);
+    }
+
     // Math.X(...)
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Math") {
       const m = e.callee.property;
@@ -881,6 +902,25 @@ class Checker {
           if (at !== exp && !this.assignable(exp, at)) throw typeError(`'${cls}.${e.callee.property}' arg ${i} expects ${exp}, got ${at}`);
         });
         return msig.ret;
+      }
+      // `.then` / `.catch` / `.finally` are promise plumbing — no event loop, so the
+      // callback ordering they promise cannot be honored. Reject (NT1020).
+      if (["then", "catch", "finally"].includes(e.callee.property)) throw nyi(NYI.ASYNC, `'.${e.callee.property}()' on ${recv}`);
+      // fetch's Response: `await res.text()` → string, `await res.json()` → Dyn (which
+      // then narrows with `dyn as T`, reusing the Stage-20 runtime validator).
+      if (isResponseTy(recv)) {
+        if (e.args.length !== 0) throw typeError(`Response.${e.callee.property}() takes no arguments`);
+        if (e.callee.property === "text") return "string";
+        if (e.callee.property === "json") return "Dyn";
+        throw nyi(NYI.OBJECT, `Response method '.${e.callee.property}' (supported: .text(), .json(), .status, .ok, .headers)`);
+      }
+      // Response headers — `res.headers.get(name)` is case-insensitive per the spec and
+      // returns `string | null` (node's exact shape), so `?? "fallback"` composes.
+      if (isHeadersTy(recv)) {
+        if (e.callee.property !== "get" && e.callee.property !== "has")
+          throw nyi(NYI.OBJECT, `Headers method '.${e.callee.property}' (supported: .get(name), .has(name))`);
+        if (e.args.length !== 1 || this.type(e.args[0]!, scope) !== "string") throw typeError(`Headers.${e.callee.property}(name: string)`);
+        return e.callee.property === "has" ? "boolean" : makeNullable("null", "string");
       }
       if (isMapTy(recv)) return this.inferMapMethod(recv, e.callee.property, e.args, scope);
       if (isSetTy(recv)) return this.inferSetMethod(recv, e.callee.property, e.args, scope);
@@ -954,6 +994,32 @@ class Checker {
       return funcRet(ct);
     }
     throw nyi(NYI.CLOSURE, "unsupported call target");
+  }
+
+  /**
+   * `fetch(url, init?)` → Response. `init` is an ordinary object literal/value whose
+   * shape is read STATICALLY (like everything else here): `method`/`body` are strings
+   * and `headers` is an object of string values, so codegen can unroll the header
+   * block at compile time. Unknown init keys are refused rather than dropped silently.
+   */
+  private inferFetch(e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope): Ty {
+    if (e.args.length < 1 || e.args.length > 2) throw typeError("fetch(url, init?) expects 1 or 2 arguments");
+    if (this.type(e.args[0]!, scope) !== "string") throw typeError("fetch: url must be a string");
+    if (e.args.length === 2) {
+      const it = this.type(e.args[1]!, scope);
+      if (!isObjectTy(it)) throw typeError("fetch: init must be an object ({ method, headers, body })");
+      for (const f of objectFields(it)) {
+        if (f.key === "method" || f.key === "body") {
+          if (f.ty !== "string") throw typeError(`fetch: init.${f.key} must be a string`);
+        } else if (f.key === "headers") {
+          if (!isObjectTy(f.ty)) throw typeError("fetch: init.headers must be an object of string values");
+          for (const h of objectFields(f.ty)) if (h.ty !== "string") throw typeError(`fetch: header '${h.key}' must be a string`);
+        } else {
+          throw nyi(NYI.OBJECT, `fetch init option '${f.key}' (supported: method, headers, body)`);
+        }
+      }
+    }
+    return "Response";
   }
 
   /** Immutable Map methods (B2): .set/.get/.has/.delete. `.set`/`.delete` return a NEW map. */
