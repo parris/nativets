@@ -1,0 +1,93 @@
+name: Release on version bump
+
+# Builds a self-contained `nativets` binary and publishes a GitHub Release whenever
+# the version in package.json becomes a new value (a "version bump"). Detection is
+# idempotent: a release fires only if no tag `v<version>` exists yet, so ordinary
+# pushes that don't touch the version are a no-op.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # create tags + releases
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need existing tags to detect a bump
+      - id: v
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$VERSION" = "0.0.0" ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::version is the 0.0.0 placeholder — skipping release"
+          elif git rev-parse "v$VERSION" >/dev/null 2>&1; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::tag v$VERSION already exists — no version bump"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::new version v$VERSION — building a release"
+          fi
+
+  test:
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install clang (runtime toolchain the tests link through)
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - run: bun install --frozen-lockfile
+      - run: bun test # differential suite must pass before we ship a build
+
+  build:
+    needs: [check, test]
+    if: needs.check.outputs.release == 'true'
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            asset: nativets-macos-arm64
+          - os: ubuntu-latest
+            asset: nativets-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Build self-contained nativets binary
+        run: bun run compile # bun build --compile -> ./nativets (bundles compiler + embedded C runtime)
+      - name: Name the platform asset
+        run: mv nativets "${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: [check, build]
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release v${{ needs.check.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ needs.check.outputs.version }}" dist/* \
+            --title "v${{ needs.check.outputs.version }}" \
+            --generate-notes

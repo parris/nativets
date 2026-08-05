@@ -2,6 +2,8 @@ node_modules/
 bun.lockb
 # Compiler output
 *.ll
+# but the fixed toolchain-smoke input must be tracked (present in CI/worktrees)
+!test/assets/*.ll
 *.o
 *.out
 /build/
