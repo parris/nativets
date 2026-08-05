@@ -1,5 +1,34 @@
 # Divergences & unsupported features
 
+### stdlib Batch 1 — what cannot match node, and what we do instead
+
+The Batch-1 stdlib (`docs/stdlib.md`) is node-differential everywhere except these, all of
+which are **refusals or already-documented consequences**, never approximations:
+
+- **In-place array mutators are refused** — `.fill`, `.sort`, `.splice`, `.shift`, `.unshift`,
+  `.copyWithin` join `.push`/`.pop` under **`NT1606`** (arrays are immutable, Stage 29), each
+  with a hint naming the immutable replacement. `.sort`'s hint points at the ES2023 copying
+  form `.toSorted()` (delivered by the ordering lane, not this one).
+- **String index space is UTF-8 bytes** (§A.2 above): `.charCodeAt`, `.at` and string indices
+  address BYTES, so for non-ASCII they differ from node's UTF-16 code units (`"é".charCodeAt(0)`
+  is `195` here, `233` in node). `.codePointAt` *decodes* the UTF-8 sequence, so it returns the
+  same code point as node. ASCII is identical throughout; the non-ASCII behavior is pinned
+  behaviorally in `test/stdlib-batch1.test.ts`.
+- **`.replace`/`.replaceAll` accept STRING patterns only** — there is no `RegExp` (Tier C). The
+  `$$`/`$&`/``$` ``/`$'` replacement substitutions are supported; capture-group `$1` is literal,
+  as it is in node for a string pattern.
+- **`toFixed(digits)` / `toString(radix)` require a literal argument** in range (`0..100` /
+  `2..36`). node throws a `RangeError` outside those; we make the program **not compile**
+  instead of emulating the throw. The formatting itself is exact (ECMAScript ToFixed; V8's
+  `DoubleToRadixCString`).
+- **`Object.entries` needs a string-valued object**, and **`Object.fromEntries` needs literal
+  entries** — a `[string, number]` pair is a mixed-type tuple (our arrays are homogeneous) and
+  object keys must be compile-time known. Both are `NT1002` refusals with hints.
+- **`Array#at` / `Array#find` / `#findLast` are restricted to scalar elements** — handing back a
+  heap element would alias its owner under the linear model (`NT1001`).
+- **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
+  monotonic, whole milliseconds, plausible epoch range.
+
 ### Modules (SH1) — a whole-program link, and no import cycles
 
 `import`/`export` across `.ts` files are compiled by resolving the graph from the entry file and

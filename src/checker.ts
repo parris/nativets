@@ -53,10 +53,24 @@ const RELATIONAL = new Set(["<", "<=", ">", ">="]);
 const EQUALITY = new Set(["===", "!==", "==", "!="]);
 const BITWISE = new Set(["&", "|", "^", "<<", ">>", ">>>"]);
 
+/** stdlib Batch 1: `Number.*` numeric constants (exact IEEE-754 values, like node). */
+export const NUMBER_CONSTS: Record<string, number> = {
+  MAX_SAFE_INTEGER: 9007199254740991,
+  MIN_SAFE_INTEGER: -9007199254740991,
+  EPSILON: 2.220446049250313e-16,
+  MAX_VALUE: 1.7976931348623157e308,
+  MIN_VALUE: 5e-324,
+  POSITIVE_INFINITY: Infinity,
+  NEGATIVE_INFINITY: -Infinity,
+  NaN: NaN,
+};
+
 const MATH_METHODS: Record<string, number | "var"> = {
   floor: 1, ceil: 1, round: 1, abs: 1, sqrt: 1, trunc: 1, pow: 2, max: "var", min: "var",
 };
 interface MethodSig { min: number; max: number; argTys: (Ty | null)[]; ret: Ty; }
+/** stdlib Batch 1 (part 2): predicate HOFs — one inline arrow, boolean body. */
+const SEARCH_HOFS = new Set(["some", "every", "find", "findIndex", "findLast", "findLastIndex"]);
 const STRING_METHODS: Record<string, MethodSig> = {
   toUpperCase: { min: 0, max: 0, argTys: [], ret: "string" },
   toLowerCase: { min: 0, max: 0, argTys: [], ret: "string" },
@@ -68,7 +82,17 @@ const STRING_METHODS: Record<string, MethodSig> = {
   padStart: { min: 1, max: 2, argTys: ["number", "string"], ret: "string" },
   includes: { min: 1, max: 1, argTys: ["string"], ret: "boolean" },
   indexOf: { min: 1, max: 1, argTys: ["string"], ret: "number" },
-  split: { min: 1, max: 1, argTys: ["string"], ret: "string[]" },
+  split: { min: 1, max: 2, argTys: ["string", "number"], ret: "string[]" }, // 2nd arg = limit (stdlib batch 1)
+  // --- stdlib Batch 1 (part 2): string fills (byte-oriented, ASCII == node) ---
+  charCodeAt: { min: 0, max: 1, argTys: ["number"], ret: "number" },
+  codePointAt: { min: 0, max: 1, argTys: ["number"], ret: makeNullable("undefined", "number") },
+  at: { min: 1, max: 1, argTys: ["number"], ret: makeNullable("undefined", "string") }, // string | undefined
+  padEnd: { min: 1, max: 2, argTys: ["number", "string"], ret: "string" },
+  replace: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },     // string pattern only (no RegExp)
+  replaceAll: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },  // string pattern only (no RegExp)
+  startsWith: { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" },
+  endsWith: { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" },
+  lastIndexOf: { min: 1, max: 1, argTys: ["string"], ret: "number" }, // number | undefined (node: undefined out of range)
 };
 const GLOBAL_FUNCS: Record<string, MethodSig> = {
   parseInt: { min: 1, max: 2, argTys: ["string", "number"], ret: "number" },
@@ -679,6 +703,11 @@ class Checker {
             return "string"; // process.env.NAME (empty string if unset — see docs)
           }
         }
+        // stdlib Batch 1: the `Number.*` numeric constants (MAX_SAFE_INTEGER, EPSILON, …).
+        if (e.object.kind === "Identifier" && e.object.name === "Number" && !scope.lookup("Number")) {
+          if (NUMBER_CONSTS[e.property] === undefined) throw nyi(NYI.OBJECT, `Number.${e.property}`);
+          return "number";
+        }
         const ot = this.type(e.object, scope);
         // Accessing a member of a possibly-nullish object: the result is nullable
         // (the whole chain short-circuits to `undefined` if the object is nullish).
@@ -1145,11 +1174,39 @@ class Checker {
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object" && !scope.lookup("Object")) {
       const p = e.callee.property;
-      if (p !== "keys" && p !== "values") throw nyi(NYI.OBJECT, `Object.${p}`);
+      // Object.fromEntries([[k, v], …]) — the keys must be compile-time known, so the
+      // argument must be a literal array of literal [stringLiteral, value] pairs. The
+      // result type is built from those keys, exactly like an object literal.
+      if (p === "fromEntries") {
+        if (e.args.length !== 1) throw typeError("Object.fromEntries expects 1 argument");
+        const lit = e.args[0]!;
+        if (lit.kind !== "ArrayLiteral" || lit.elements.length === 0)
+          throw nyi(NYI.OBJECT, "Object.fromEntries of a non-literal (keys must be known at compile time)");
+        const fields: string[] = [];
+        for (const pair of lit.elements) {
+          if (pair.kind !== "ArrayLiteral" || pair.elements.length !== 2 || pair.elements[0]!.kind !== "StringLiteral")
+            throw nyi(NYI.OBJECT, "Object.fromEntries entries (each must be a literal [\"key\", value] pair)");
+          const key = (pair.elements[0] as { value: string }).value;
+          const vt = this.type(pair.elements[1]!, scope);
+          if (vt !== "number" && vt !== "string" && vt !== "boolean") throw nyi(NYI.OBJECT, `Object.fromEntries value of type ${vt}`);
+          fields.push(`${key}:${vt}`);
+        }
+        return `{${fields.join(",")}}` as Ty;
+      }
+      if (p !== "keys" && p !== "values" && p !== "entries") throw nyi(NYI.OBJECT, `Object.${p}`);
       if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
       const ot = this.type(e.args[0]!, scope);
       if (!isObjectTy(ot)) throw typeError(`Object.${p} expects an object`);
       if (p === "keys") return "string[]";
+      if (p === "entries") {
+        // [key, value] pairs. A pair is an ARRAY, and arrays are homogeneous here, so a
+        // pair is only representable when the values are strings (string[] pairs).
+        const fs = objectFields(ot);
+        if (fs.length === 0) throw nyi(NYI.OBJECT, "Object.entries of an empty object");
+        if (!fs.every((f) => f.ty === "string"))
+          throw nyi(NYI.OBJECT, "Object.entries of a non-string-valued object (a [string, T] pair is a mixed-type tuple; use Object.keys + field access)");
+        return "string[][]";
+      }
       // values → T[]; require a homogeneous value type (our arrays are homogeneous).
       const fs = objectFields(ot);
       if (fs.length === 0) throw nyi(NYI.OBJECT, "Object.values of an empty object");
@@ -1169,6 +1226,13 @@ class Checker {
     // Number.isInteger/isFinite/isSafeInteger(x) → boolean (no coercion; x is a number).
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Number" && !scope.lookup("Number")) {
       const p = e.callee.property;
+      // Number.isNaN / parseInt / parseFloat are the namespaced aliases of the globals
+      // (isNaN does NOT coerce — but the argument is already statically a number).
+      if (p === "isNaN" || p === "parseInt" || p === "parseFloat") {
+        const g = GLOBAL_FUNCS[p === "isNaN" ? "isNaN" : p]!;
+        this.checkArgs(e.args, g, scope, `Number.${p}`);
+        return g.ret;
+      }
       if (p !== "isInteger" && p !== "isFinite" && p !== "isSafeInteger") throw nyi(NYI.OBJECT, `Number.${p}`);
       if (e.args.length !== 1) throw typeError(`Number.${p} expects 1 argument`);
       if (this.type(e.args[0]!, scope) !== "number") throw typeError(`Number.${p} expects a number`);
@@ -1184,13 +1248,22 @@ class Checker {
       }
       if (p === "from") {
         if (e.args.length !== 1) throw typeError("Array.from expects 1 argument");
-        // Array.from(map.keys()) / Array.from(set) — an iteration position.
+        // Array.from(map.keys()) / Array.from(set) — an iteration position. This
+        // subsumes the plain `Array.from(arr)` / `Array.from(str)` forms: asIterable
+        // passes an array or string straight through and only rewrites collections.
         const from = this.asIterable(e.args[0]!, scope, "Array.from");
         e.args[0] = from.expr;
         const at = from.ty;
         if (isArrayTy(at)) return at;                     // arrays / Map-Set iterators → a copy
-        if (at !== "string") throw nyi(NYI.ARRAY, "Array.from of a non-string");
+        if (at !== "string") throw nyi(NYI.ARRAY, "Array.from of a non-string, non-array");
         return "string[]";
+      }
+      if (p === "of") { // Array.of(...items) ≡ an array literal of the arguments
+        if (e.args.length === 0) throw nyi(NYI.ARRAY, "Array.of() with no arguments (empty array literals need an element type)");
+        const ts = e.args.map((a) => this.type(a, scope));
+        if (ts.some((t) => t !== ts[0])) throw typeError("Array.of expects arguments of one type (arrays are homogeneous)");
+        if (ts[0] !== "number" && ts[0] !== "string" && ts[0] !== "boolean") throw nyi(NYI.ARRAY, `Array.of of ${ts[0]}`);
+        return `${ts[0]}[]` as Ty;
       }
       throw nyi(NYI.OBJECT, `Array.${p}`);
     }
@@ -1275,13 +1348,51 @@ class Checker {
         return "string";
       }
       if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee.property, e.args, scope);
+      // stdlib Batch 1: Number#toFixed(digits) — the digit count must be a literal
+      // 0..100 so the RangeError node throws for anything else is impossible here.
+      if (recv === "number") {
+        // Number#toString(radix) — radix must be a literal 2..36 (node throws
+        // RangeError otherwise, which we make impossible rather than emulate).
+        if (e.callee.property === "toString") {
+          if (e.args.length > 1) throw typeError(".toString expects 0..1 args");
+          if (e.args.length === 1) {
+            const r = e.args[0]!;
+            if (r.kind !== "NumberLiteral" || r.value < 2 || r.value > 36 || Math.floor(r.value) !== r.value)
+              throw nyi(NYI.OBJECT, ".toString(radix) with a non-literal / out-of-range radix (node throws RangeError outside 2..36)");
+          }
+          return "string";
+        }
+        if (e.callee.property !== "toFixed") throw nyi(NYI.OBJECT, `number method '${e.callee.property}'`);
+        if (e.args.length > 1) throw typeError(".toFixed expects 0..1 args");
+        if (e.args.length === 1) {
+          const d = e.args[0]!;
+          if (d.kind !== "NumberLiteral" || d.value < 0 || d.value > 100 || Math.floor(d.value) !== d.value)
+            throw nyi(NYI.OBJECT, ".toFixed(digits) with a non-literal / out-of-range digit count (node throws RangeError outside 0..100)");
+        }
+        return "string";
+      }
       if (recv === "string") {
+        // .concat is VARIADIC (all-string args) — outside the fixed-arity table.
+        if (e.callee.property === "concat") {
+          for (const a of e.args) if (this.type(a, scope) !== "string") throw typeError(".concat expects strings");
+          return "string";
+        }
         const sig = STRING_METHODS[e.callee.property];
         if (!sig) throw nyi(NYI.OBJECT, `string method '${e.callee.property}'`);
         this.checkArgs(e.args, sig, scope, `'.${e.callee.property}'`);
         return sig.ret;
       }
       throw nyi(NYI.OBJECT, `method call on ${recv}`);
+    }
+
+    // stdlib Batch 1: structuredClone(v) — a TYPE-DIRECTED deep copy, so its result
+    // type is its argument's type (identity), like the structured-clone algorithm.
+    if (e.callee.kind === "Identifier" && e.callee.name === "structuredClone" && !scope.lookup("structuredClone")) {
+      if (e.args.length !== 1) throw typeError("structuredClone expects 1 argument");
+      const t = this.type(e.args[0]!, scope);
+      if (!(t === "number" || t === "string" || t === "boolean" || isObjectTy(t) || isArrayTy(t)))
+        throw nyi(NYI.OBJECT, `structuredClone of ${t} (only scalars, objects and arrays are cloneable — node throws DataCloneError for functions)`);
+      return t;
     }
 
     // global builtin, function value, or user function
@@ -1431,8 +1542,10 @@ class Checker {
 
   private inferArrayMethod(recv: Ty, method: string, args: Expr[], scope: Scope): Ty {
     const el = elemTy(recv);
-    if (method === "map" || method === "filter" || method === "reduce") return this.inferHof(el, method, args, scope);
-    if (["forEach", "some", "every", "find"].includes(method)) throw nyi(NYI.CLOSURE, `array .${method} (needs first-class function values)`);
+    if (method === "map" || method === "filter" || method === "reduce" || method === "flatMap") return this.inferHof(el, method, args, scope);
+    // stdlib Batch 1 (part 2): the predicate HOFs, same inline-arrow contract as map/filter.
+    if (SEARCH_HOFS.has(method)) return this.inferSearchHof(recv, el, method, args, scope);
+    if (["forEach"].includes(method)) throw nyi(NYI.CLOSURE, `array .${method} (needs first-class function values)`);
 
     // --- ordering primitives (ES2023, non-mutating: node is the oracle) --------
     // `.sort`/`.reverse` sort IN PLACE, which the immutable model forbids; the
@@ -1459,10 +1572,42 @@ class Checker {
       // model forbids. Reject with NT1606 pointing at the non-mutating replacement
       // (rather than silently diverging from node's mutate-and-return semantics).
       case "push": throw mutationError("arrays are immutable: `.push` would mutate the array in place", "build a new array instead: `[...arr, x]` — the original is unchanged");
+      // The rest of node's in-place mutators (stdlib Batch 1): same treatment as
+      // .push/.pop — refuse and name the immutable replacement.
+      case "fill": throw mutationError("arrays are immutable: `.fill` would overwrite the array in place", "build a new array instead, e.g. `arr.map(() => v)` for a same-length fill, or `arr.with(i, v)` for one slot");
+      // (`.sort` is rejected above, next to `.toSorted` — the ordering primitives are
+      // handled together so the hint can point at the implemented copying form.)
+      case "splice": throw mutationError("arrays are immutable: `.splice` would mutate the array in place", "use `.slice(0, i)` / `.slice(j)` plus spread — `[...a.slice(0, i), ...a.slice(j)]`");
+      case "shift": throw mutationError("arrays are immutable: `.shift` would mutate the array in place", "use `arr.slice(1)` for the shorter array, or `arr[0]` for the first element");
+      case "unshift": throw mutationError("arrays are immutable: `.unshift` would mutate the array in place", "build a new array instead: `[x, ...arr]`");
+      case "copyWithin": throw mutationError("arrays are immutable: `.copyWithin` would overwrite the array in place", "build a new array from `.slice` + spread instead");
       case "pop": throw mutationError("arrays are immutable: `.pop` would mutate the array in place", "use `arr.slice(0, -1)` for the shorter array, or `arr[arr.length - 1]` for the last element");
       case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
       case "indexOf": need(1); if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`); return "number";
       case "reverse": need(0); return recv;
+      // --- stdlib Batch 1 (part 2): array fills ---
+      case "flat": { // ONE level only (node's default depth); an explicit depth must be 1
+        if (args.length > 1) throw typeError(".flat expects 0..1 args");
+        if (args.length === 1 && !(args[0]!.kind === "NumberLiteral" && (args[0] as { value: number }).value === 1))
+          throw nyi(NYI.ARRAY, ".flat(depth) with a depth other than 1 (chain .flat().flat() instead)");
+        if (!isArrayTy(el)) throw typeError(".flat expects an array of arrays");
+        return el;
+      }
+      case "lastIndexOf":
+        need(1);
+        if (argTys[0] !== el) throw typeError(`.lastIndexOf expects ${el}`);
+        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.lastIndexOf on ${recv}`);
+        return "number";
+      case "concat": // variadic; every argument must be an array of the same element type
+        if (args.length < 1) throw typeError(".concat expects at least 1 array");
+        for (const t of argTys) if (t !== recv) throw typeError(`.concat expects ${recv}, got ${t}`);
+        return recv;
+      case "at": // T | undefined (node: out-of-range is undefined, negative counts from the end)
+        need(1);
+        if (argTys[0] !== "number") throw typeError(".at index must be a number");
+        if (el !== "number" && el !== "string" && el !== "boolean")
+          throw nyi(NYI.ARRAY, `.at on ${recv} (only number/string/boolean elements — a heap element would alias its owner)`);
+        return makeNullable("undefined", el);
       case "with": // ES2023 immutable update: with(index, value) -> NEW array (CoW)
         need(2);
         if (argTys[0] !== "number") throw typeError(".with index must be a number");
@@ -1481,6 +1626,22 @@ class Checker {
     }
   }
 
+  /** some/every/find/findIndex/findLast/findLastIndex — one inline boolean-returning
+   *  arrow over the elements. `.find`/`.findLast` return `T | undefined` like node. */
+  private inferSearchHof(recv: Ty, el: Ty, method: string, args: Expr[], scope: Scope): Ty {
+    const arrow = args[0];
+    if (!arrow || arrow.kind !== "ArrowFunction") throw nyi(NYI.CLOSURE, `array .${method} needs an inline arrow (function values are not inlined yet)`);
+    if (args.length !== 1) throw typeError(`.${method} expects 1 argument`);
+    if (arrow.params.length !== 1) throw typeError(`.${method} callback takes (elem)`);
+    const bodyTy = this.typeArrowBody(arrow, [el], scope);
+    if (bodyTy !== "boolean") throw typeError(`.${method} callback must return boolean`);
+    if (method === "some" || method === "every") return "boolean";
+    if (method === "findIndex" || method === "findLastIndex") return "number";
+    if (el !== "number" && el !== "string" && el !== "boolean")
+      throw nyi(NYI.ARRAY, `.${method} on ${recv} (only number/string/boolean elements — a heap element would alias its owner)`);
+    return makeNullable("undefined", el); // .find / .findLast → T | undefined
+  }
+
   /** map/filter/reduce with an INLINE arrow callback (contextually typed). */
   private inferHof(el: Ty, method: string, args: Expr[], scope: Scope): Ty {
     const arrow = args[0];
@@ -1497,6 +1658,10 @@ class Checker {
     if (args.length !== 1) throw typeError(`.${method} expects 1 argument`);
     if (arrow.params.length !== 1) throw typeError(`.${method} callback takes (elem)`);
     const bodyTy = this.typeArrowBody(arrow, [el], scope);
+    if (method === "flatMap") { // callback returns an array; the results are concatenated (one level)
+      if (!isArrayTy(bodyTy)) throw typeError(".flatMap callback must return an array");
+      return bodyTy;
+    }
     if (method === "filter") {
       if (bodyTy !== "boolean") throw typeError(".filter callback must return boolean");
       return `${el}[]`;

@@ -45,19 +45,67 @@ it can't do safely instead of miscompiling.
 
 ## Prioritized catalog
 
-### Batch 1 — tractable now (Tier A/B, no new infra), high value
-- **`Date.now(): number`** (ms since epoch, via `time`/`clock_gettime`). *(`new Date()` object +
-  methods want classes — defer, or expose a functional date API.)*
-- **`btoa` / `atob`** — base64 encode/decode (pure byte ops).
-- **`String.fromCharCode` / `fromCodePoint`, `codePointAt`, `at`, `padEnd`, `replaceAll`,
-  `startsWith` / `endsWith`** — fill the obvious string gaps (`fromCharCode` also retires the TUI
-  lane's `\xHH` workaround).
-- **`Object.entries` / `Object.values` / `Object.fromEntries`** — compile-time-known keys, like the
-  existing `Object.keys`.
-- **`Array.isArray`, `Array.from`, `Array.of`, `Array#at` / `flat` / `flatMap` / `find` / `some` /
-  `every`** — the common array surface (HOFs already exist for `map`/`filter`/`reduce`).
-- **`Number.isInteger` / `isFinite` / `isSafeInteger` / `isNaN`, `Number.parseInt`/`parseFloat`.**
-- **`structuredClone`** — a type-directed deep copy (reuse the `JSON.stringify` walk shape).
+### Batch 1 ✅ DONE — tractable now (Tier A/B, no new infra), high value
+
+Landed in two tranches; `node` is the oracle for every API below
+(`test/stdlib-batch1.test.ts`, plus `test/base64.test.ts` for the base64 CLI). The exact
+supported surface:
+
+**Globals / statics**
+- **`Date.now(): number`** — ms since epoch (`clock_gettime`). Non-deterministic, so it is
+  tested behaviorally (monotonic + plausible range + whole ms), not against node.
+  *(`new Date()` and the date-component API are OUT of scope — deferred.)*
+- **`btoa(s)` / `atob(s)`** — base64 over the string's bytes, all padding lengths.
+- **`String.fromCharCode(...)` / `String.fromCodePoint(...)`** — variadic, UTF-8 encoded.
+- **`Number.isInteger` / `isFinite` / `isSafeInteger` / `isNaN` / `parseInt` / `parseFloat`**
+  (the `Number.*` forms are the namespaced aliases of the globals; no ToNumber coercion is
+  needed since the argument is already statically a `number`).
+- **`Number.MAX_SAFE_INTEGER` / `MIN_SAFE_INTEGER` / `EPSILON` / `MAX_VALUE` / `MIN_VALUE` /
+  `POSITIVE_INFINITY` / `NEGATIVE_INFINITY` / `NaN`** — constant-folded to their exact
+  IEEE-754 values.
+- **`Array.isArray(x)`** (compile-time, from the static type), **`Array.from(str)`** (code-point
+  characters), **`Array.from(arr)`** (shallow copy), **`Array.of(...)`**.
+- **`Object.keys` / `Object.values` / `Object.entries` / `Object.fromEntries`** — all
+  compile-time-key driven. `Object.entries` requires a **string-valued** object (a `[string, T]`
+  pair is a mixed-type tuple, which our homogeneous arrays cannot hold — otherwise `NT1002`,
+  pointing at `Object.keys` + field access). `Object.fromEntries` takes a **literal** array of
+  literal `["key", value]` pairs (the keys must be known at compile time).
+- **`structuredClone(v)`** — a **type-directed deep copy** (the `JSON.stringify` walk shape):
+  scalars pass through, objects become a fresh slot block with every field cloned, arrays a
+  fresh vector with every element cloned. Nested objects/arrays are new references, exactly
+  like node. Functions/`Map`/`Set`/`Dyn` are refused (`NT1002`), as node throws `DataCloneError`.
+
+**String methods** — `charCodeAt`, `codePointAt` (`number | undefined`), `at`
+(`string | undefined`, negative indices), `padEnd`, `startsWith` / `endsWith` (incl. the
+position argument), `replace` / `replaceAll` (**string patterns only** — no `RegExp`; `$$`,
+`$&`, ``$` ``, `$'` substitutions supported), `concat` (variadic), `lastIndexOf`, and
+`split(sep, limit)`. These join the pre-existing `slice`/`substring`/`charAt`/`toUpperCase`/
+`toLowerCase`/`trim`/`repeat`/`padStart`/`includes`/`indexOf`/`split`.
+
+**Number methods** — **`toFixed(digits)`** (ECMAScript-exact: the double's exact decimal
+expansion, rounded half-up on the magnitude, so `1.25 -> "1.3"` but `1.005 -> "1.00"`;
+`|x| >= 1e21`, `NaN` and the infinities fall back to `ToString`), and **`toString(radix)`**
+(a faithful port of V8's `DoubleToRadixCString`, so integers *and* fractions match node digit
+for digit: `(0.1).toString(2)`, `(1/3).toString(3)`, `(2**60).toString(16)`, …). Both require a
+**literal** argument in range (`0..100` / `2..36`), which makes node's `RangeError` unreachable
+instead of emulated.
+
+**Array methods** — `at` (`T | undefined`, negative indices), `lastIndexOf`, `concat`
+(variadic), `flat()` (one level), and the predicate HOFs `some` / `every` / `find` /
+`findIndex` / `findLast` / `findLastIndex` / `flatMap`, all with an **inline arrow** inlined
+into the generated loop (the Stage-12 `map`/`filter`/`reduce` contract, including captures).
+`find`/`findLast` return `T | undefined`; `findLast`/`findLastIndex` iterate **backwards**, so
+even a side-effecting callback observes node's exact call order.
+
+**Rejected on purpose** (arrays are immutable — Stage 29): `fill`, `sort`, `splice`, `shift`,
+`unshift`, `copyWithin` all mutate in place in node, so each is refused with **`NT1606`**
+naming the immutable replacement (`.with` / `.slice` + spread / `.map`), exactly like
+`.push`/`.pop` (`.sort`'s hint names the ES2023 copying `.toSorted()`).
+
+**Still open in Batch 1's spirit** (deferred, each needs more than a fill): `new Date()` and the
+date-component API, `Array.from` of an array-*like* or with a `mapFn`, `.flat(depth)` beyond one
+level (chain `.flat().flat()`), `String#normalize`, and
+anything RegExp-shaped.
 
 ### Batch 2 — needs a bytes type first
 `Uint8Array`/`ArrayBuffer` → then **`TextEncoder` / `TextDecoder`**, **`crypto.getRandomValues`**,
@@ -113,7 +161,7 @@ behavioral tests / local mocks, like the actor and HTTP lanes.
 
 ## Order
 
-1. **Batch 1** (this track's first tranche) — immediate ergonomic wins, all node-oracle-matched.
+1. ~~**Batch 1**~~ ✅ **done** — immediate ergonomic wins, all node-oracle-matched.
 2. **Bytes type** → Batch 2 (encoding + crypto).
 3. **The prelude → real `std/*` modules** — unblocked: self-hosting **SH1** (a real
    `import`/`export` module system) has landed.

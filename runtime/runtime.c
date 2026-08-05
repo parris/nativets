@@ -1528,3 +1528,306 @@ const char *nt_url_search_param(const char *u, const char *key) {
   }
   return url_empty();
 }
+
+/* ============================================================
+ * stdlib Batch 1 (part 2) — the everyday string/array/number surface.
+ *
+ * Every function here is differential-tested against `node`
+ * (test/stdlib-batch1.test.ts). Strings stay UTF-8 BYTE-oriented, the
+ * pre-existing documented divergence (docs/divergences.md §A.2): indices,
+ * .charCodeAt and .at address BYTES, identical to node for ASCII.
+ * ============================================================ */
+
+/* String#charCodeAt(i) — the BYTE at index i (ASCII-identical to node's UTF-16
+ * code unit); NaN when out of range, exactly like node. */
+double js_str_char_code_at(const char *s, double id) {
+  long n = (long)strlen(s);
+  if (isnan(id)) id = 0;
+  long i = (long)id;
+  if (i < 0 || i >= n) return NAN;
+  return (double)(unsigned char)s[i];
+}
+
+/* String#codePointAt(i) — decodes the UTF-8 sequence starting at BYTE i, so an
+ * ASCII string matches node's UTF-16 code point exactly. NaN is the
+ * out-of-range sentinel, which codegen turns into node's `undefined`
+ * (a code point is never NaN, so the sentinel is unambiguous). */
+double js_str_code_point_at(const char *s, double id) {
+  long n = (long)strlen(s);
+  if (isnan(id)) id = 0;
+  long i = (long)id;
+  if (i < 0 || i >= n) return NAN;
+  const unsigned char *p = (const unsigned char *)s + i;
+  unsigned c = p[0];
+  long need = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+  if (need == 0 || i + need >= n) return (double)c; /* ASCII, or a truncated/continuation byte */
+  unsigned cp = c & (unsigned)(0x7F >> (need + 1));
+  for (long k = 1; k <= need; k++) cp = (cp << 6) | (p[k] & 0x3F);
+  return (double)cp;
+}
+
+/* String#at(i) — one BYTE as a string, negative indices count from the end;
+ * NULL is the out-of-range sentinel that codegen turns into `undefined`. */
+const char *js_str_at(const char *s, double id) {
+  long n = (long)strlen(s);
+  if (isnan(id)) id = 0;
+  long i = (long)id;
+  if (i < 0) i += n;
+  if (i < 0 || i >= n) return NULL;
+  char *o = alloc_str(1); o[0] = s[i]; o[1] = 0; return o;
+}
+
+/* String#padEnd(target, pad) — pad on the right, truncating the final pad
+ * repetition, and a no-op when the string is already long enough or the pad is
+ * empty (node's semantics exactly). */
+const char *js_str_pad_end(const char *s, double targetd, const char *pad) {
+  long target = (long)targetd; long n = (long)strlen(s); size_t pn = strlen(pad);
+  if (n >= target || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, (size_t)n); o[n] = 0; return o; }
+  char *o = alloc_str((size_t)target);
+  memcpy(o, s, (size_t)n);
+  for (long i = n; i < target; i++) o[i] = pad[(size_t)(i - n) % pn];
+  o[target] = 0; return o;
+}
+
+/* String#startsWith(search, pos) / String#endsWith(search, endPos). `pos` is
+ * NaN when omitted: startsWith defaults to 0, endsWith to the length. */
+int32_t js_str_starts_with(const char *s, const char *sub, double posd) {
+  long n = (long)strlen(s), m = (long)strlen(sub);
+  long pos = isnan(posd) ? 0 : (long)posd;
+  if (pos < 0) pos = 0;
+  if (pos > n || pos + m > n) return 0;
+  return memcmp(s + pos, sub, (size_t)m) == 0 ? 1 : 0;
+}
+int32_t js_str_ends_with(const char *s, const char *sub, double endd) {
+  long n = (long)strlen(s), m = (long)strlen(sub);
+  long end = isnan(endd) ? n : (long)endd;
+  if (end > n) end = n;
+  if (end < 0) end = 0;
+  if (m > end) return 0;
+  return memcmp(s + end - m, sub, (size_t)m) == 0 ? 1 : 0;
+}
+
+/* rc-tracked finish for the existing SB string builder: the fills below build
+ * their result incrementally, and the final buffer must be reference-counted
+ * like every other heap string producer. */
+static const char *sb_finish_rc(SB *s) { s->buf[s->len] = 0; nt_str_register(s->buf); return s->buf; }
+
+/* $-substitution in a replacement string (string pattern => no capture groups):
+ * `$$` -> "$", `$&` -> the match, "$`" -> prefix, `$'` -> suffix; anything else
+ * is literal, exactly like node. */
+static void sb_add_replacement(SB *b, const char *rep, const char *s, size_t mstart, size_t mlen) {
+  size_t n = strlen(s);
+  for (size_t i = 0; rep[i];) {
+    if (rep[i] == '$' && rep[i + 1]) {
+      char c = rep[i + 1];
+      if (c == '$')  { sb_append(b, "$", 1); i += 2; continue; }
+      if (c == '&')  { sb_append(b, s + mstart, mlen); i += 2; continue; }
+      if (c == '`')  { sb_append(b, s, mstart); i += 2; continue; }
+      if (c == '\'') { sb_append(b, s + mstart + mlen, n - mstart - mlen); i += 2; continue; }
+    }
+    sb_append(b, rep + i, 1); i++;
+  }
+}
+
+/* String#replace / String#replaceAll with a STRING pattern (no RegExp — regex
+ * literals are rejected by the frontend). `all` = 0 replaces the first match
+ * only. An empty pattern matches at every position, like node. */
+const char *js_str_replace(const char *s, const char *pat, const char *rep, int32_t all) {
+  size_t n = strlen(s), m = strlen(pat);
+  SB b; sb_init(&b);
+  size_t i = 0; int done = 0;
+  while (i <= n) {
+    int hit = !done && (m == 0 ? 1 : (i + m <= n && memcmp(s + i, pat, m) == 0));
+    if (hit) {
+      sb_add_replacement(&b, rep, s, i, m);
+      if (!all) done = 1;
+      if (m == 0) { if (i < n) sb_append(&b, s + i, 1); i++; }
+      else i += m;
+      continue;
+    }
+    if (i < n) sb_append(&b, s + i, 1);
+    i++;
+  }
+  return sb_finish_rc(&b);
+}
+
+/* String#lastIndexOf(sub) — last match position, -1 when absent; an empty
+ * needle matches at the end (node: "abc".lastIndexOf("") === 3). */
+double js_str_last_index_of(const char *s, const char *sub) {
+  size_t n = strlen(s), m = strlen(sub);
+  if (m == 0) return (double)n;
+  if (m > n) return -1.0;
+  for (size_t i = n - m + 1; i-- > 0;) if (memcmp(s + i, sub, m) == 0) return (double)i;
+  return -1.0;
+}
+
+/* String#split(sep, limit) — like nt_str_split but stops after `limit` pieces
+ * (NaN = no limit). node applies the limit AFTER splitting, i.e. it simply
+ * truncates: "a,b,c".split(",", 2) === ["a","b"], limit 0 === []. */
+NtArray *nt_str_split_n(const char *s, const char *sep, double limitd) {
+  NtArray *a = nt_str_split(s, sep);
+  if (!isnan(limitd)) {
+    long lim = (long)limitd; if (lim < 0) lim = 0;
+    if (lim < a->len) a->len = lim;
+  }
+  return a;
+}
+
+/* Array#at(i) — normalize a possibly-negative index; -1 means out of range
+ * (codegen turns that into node's `undefined`). */
+double nt_arr_at_index(NtArray *a, double id) {
+  long n = (long)a->len;
+  long i = isnan(id) ? 0 : (long)id;
+  if (i < 0) i += n;
+  if (i < 0 || i >= n) return -1.0;
+  return (double)i;
+}
+
+/* Array#lastIndexOf — last match, -1 when absent (number and string flavors,
+ * mirroring the existing nt_arr_indexof_* pair). */
+double nt_arr_last_indexof_num(NtArray *a, double x) {
+  for (int64_t i = a->len - 1; i >= 0; i--) if (slot_to_num(a->data[i]) == x) return (double)i;
+  return -1.0;
+}
+double nt_arr_last_indexof_str(NtArray *a, const char *x) {
+  for (int64_t i = a->len - 1; i >= 0; i--)
+    if (strcmp((const char *)(intptr_t)a->data[i], x) == 0) return (double)i;
+  return -1.0;
+}
+
+/* Array#concat(other) — a NEW array holding both inputs' slots; both sources
+ * are left untouched (node-compatible, and the immutable model's shape). */
+void *nt_arr_concat(NtArray *a, NtArray *b) {
+  NtArray *o = nt_arr_new((double)(a->len + b->len + 1));
+  for (int64_t i = 0; i < a->len; i++) nt_arr_push(o, a->data[i]);
+  for (int64_t i = 0; i < b->len; i++) nt_arr_push(o, b->data[i]);
+  return o;
+}
+
+/* Array#flat() — ONE level of flattening into a NEW array. Each element slot of
+ * a nested array is an NtArray*; the sub-arrays are left untouched. */
+void *nt_arr_flat1(NtArray *a) {
+  NtArray *o = nt_arr_new(1);
+  for (int64_t i = 0; i < a->len; i++) {
+    NtArray *sub = (NtArray *)(intptr_t)a->data[i];
+    if (!sub) continue;
+    for (int64_t j = 0; j < sub->len; j++) nt_arr_push(o, sub->data[j]);
+  }
+  return o;
+}
+
+/* Number#toFixed(digits) — ECMAScript §Number.prototype.toFixed, exactly.
+ *
+ * The spec picks the integer n minimizing |n/10^f - x|, breaking TIES toward the
+ * LARGER n (i.e. half-up on the magnitude, the sign being split off first). We get
+ * that by printing the EXACT decimal expansion of the double (libc's printf is
+ * exact at any precision; a double needs at most 1074 fractional digits) and then
+ * rounding that digit string half-up — so 1.25 -> "1.3" (a true tie) while the
+ * binary-inexact 1.005 (= 1.00499999...) -> "1.00", matching node.
+ * |x| >= 1e21 and the non-finite values fall back to ToString, like the spec. */
+const char *js_num_to_fixed(double x, double digitsd) {
+  int f = (int)digitsd;
+  if (f < 0) f = 0;
+  if (f > 100) f = 100;
+  char out[2400];
+  if (isnan(x) || !isfinite(x) || fabs(x) >= 1e21) {
+    js_number_to_string(x, out, sizeof(out));
+    char *o = alloc_str(strlen(out)); strcpy(o, out); return o;
+  }
+  int neg = x < 0;      /* false for -0, so (-0).toFixed(2) is "0.00" like node */
+  double m = fabs(x);   /* fabs, not -x: printf would print "-0.000…" for -0 */
+  char exact[2400];
+  snprintf(exact, sizeof(exact), "%.*f", 1080, m); /* the EXACT expansion */
+  char *dot = strchr(exact, '.');
+  size_t ilen = (size_t)(dot - exact);
+  char digits[2400];
+  memcpy(digits, exact, ilen);                       /* integer digits … */
+  memcpy(digits + ilen, dot + 1, strlen(dot + 1));   /* … then fraction digits */
+  size_t total = ilen + strlen(dot + 1);
+  digits[total] = 0;
+  size_t keep = ilen + (size_t)f;                    /* digits kept before rounding */
+  int roundUp = keep < total && digits[keep] >= '5'; /* first dropped digit */
+  digits[keep] = 0;
+  if (roundUp) {
+    long i = (long)keep - 1;
+    for (; i >= 0; i--) {
+      if (digits[i] != '9') { digits[i]++; break; }
+      digits[i] = '0';
+    }
+    if (i < 0) { memmove(digits + 1, digits, keep + 1); digits[0] = '1'; ilen++; keep++; }
+  }
+  size_t w = 0;
+  /* The sign comes from x < 0, which is false for -0 — so (-0).toFixed(2) is "0.00"
+   * while (-0.0001).toFixed(2) is "-0.00", exactly like node. */
+  if (neg) out[w++] = '-';
+  memcpy(out + w, digits, ilen); w += ilen;
+  if (f > 0) { out[w++] = '.'; memcpy(out + w, digits + ilen, (size_t)f); w += (size_t)f; }
+  out[w] = 0;
+  char *o = alloc_str(w); memcpy(o, out, w); o[w] = 0; return o;
+}
+
+/* Number#toString(radix) — a faithful port of V8's DoubleToRadixCString, which is
+ * what node runs, so the output matches digit for digit (including the fractional
+ * "emit until the remaining error is below half an ULP" rule and its carry).
+ * radix 10 (and the no-argument form) goes through the normal ToString path. */
+const char *js_num_to_radix_string(double value, double radixd) {
+  int radix = (int)radixd;
+  char out[2400];
+  if (radix == 10 || isnan(value) || !isfinite(value)) {
+    js_number_to_string(value, out, sizeof(out));
+    char *o = alloc_str(strlen(out)); strcpy(o, out); return o;
+  }
+  if (value == 0) { char *z = alloc_str(1); z[0] = '0'; z[1] = 0; return z; }
+  static const char chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+  const int kBufferSize = 2200;
+  char buffer[2200];
+  int integer_cursor = kBufferSize / 2;
+  int fraction_cursor = integer_cursor;
+  int negative = value < 0;
+  if (negative) value = -value;
+  double integer = floor(value);
+  double fraction = value - integer;
+  double delta = 0.5 * (nextafter(value, INFINITY) - value);
+  double tiny = nextafter(0.0, 1.0);
+  if (delta < tiny) delta = tiny;
+  if (fraction >= delta) {
+    buffer[fraction_cursor++] = '.';
+    do {
+      fraction *= radix;
+      delta *= radix;
+      int digit = (int)fraction;
+      buffer[fraction_cursor++] = chars[digit];
+      fraction -= digit;
+      if (fraction > 0.5 || (fraction == 0.5 && (digit & 1))) {
+        if (fraction + delta > 1) {
+          /* Round up, carrying backwards through the fraction digits. */
+          while (1) {
+            fraction_cursor--;
+            if (fraction_cursor == kBufferSize / 2) { integer += 1; break; }
+            char c = buffer[fraction_cursor];
+            digit = c > '9' ? (c - 'a' + 10) : (c - '0');
+            if (digit + 1 < radix) { buffer[fraction_cursor++] = chars[digit + 1]; break; }
+          }
+          break;
+        }
+      }
+    } while (fraction >= delta);
+  }
+  /* Integer digits; digits a double can no longer represent are filled with '0'
+   * (V8's `Double(integer / radix).Exponent() > 0` test == "still at least 2^53"). */
+  while (integer / radix >= 9007199254740992.0) {
+    integer /= radix;
+    buffer[--integer_cursor] = '0';
+  }
+  do {
+    double remainder = fmod(integer, radix);
+    buffer[--integer_cursor] = chars[(int)remainder];
+    integer = (integer - remainder) / radix;
+  } while (integer > 0);
+  if (negative) buffer[--integer_cursor] = '-';
+  size_t n = (size_t)(fraction_cursor - integer_cursor);
+  char *o = alloc_str(n);
+  memcpy(o, buffer + integer_cursor, n);
+  o[n] = 0;
+  return o;
+}

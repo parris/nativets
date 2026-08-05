@@ -13,6 +13,7 @@
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { isConsoleLog } from "./checker.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
+import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 import { isOptChainExpr } from "./checker.ts";
 import type { ArrowFunction } from "./ast.ts";
@@ -84,6 +85,7 @@ function defaultZero(ty: Ty): string {
 }
 
 const POS_INF = "0x7FF0000000000000";
+const NAN_HEX = "0x7FF8000000000000"; // stdlib fills: "argument omitted" sentinel for optional numeric args
 
 function encodeCString(s: string): { body: string; len: number } {
   const bytes = new TextEncoder().encode(s);
@@ -184,6 +186,23 @@ const DECLARES = [
   "declare i32 @nt_num_is_integer(double)",
   "declare i32 @nt_num_is_safe_integer(double)",
   "declare ptr @nt_arr_from_str(ptr)",
+  // --- stdlib (web standards) Batch 1 PART 2: string/array/number fills ---
+  "declare double @js_str_char_code_at(ptr, double)",
+  "declare double @js_str_code_point_at(ptr, double)",
+  "declare ptr @js_str_at(ptr, double)",
+  "declare ptr @js_str_pad_end(ptr, double, ptr)",
+  "declare i32 @js_str_starts_with(ptr, ptr, double)",
+  "declare i32 @js_str_ends_with(ptr, ptr, double)",
+  "declare ptr @js_str_replace(ptr, ptr, ptr, i32)",
+  "declare double @js_str_last_index_of(ptr, ptr)",
+  "declare ptr @nt_str_split_n(ptr, ptr, double)",
+  "declare double @nt_arr_at_index(ptr, double)",
+  "declare double @nt_arr_last_indexof_num(ptr, double)",
+  "declare double @nt_arr_last_indexof_str(ptr, ptr)",
+  "declare ptr @nt_arr_concat(ptr, ptr)",
+  "declare ptr @nt_arr_flat1(ptr)",
+  "declare ptr @js_num_to_fixed(double, double)",
+  "declare ptr @js_num_to_radix_string(double, double)",
   // --- stdlib: URL parsing (WHATWG URL functional subset) ---
   "declare ptr @nt_url_protocol(ptr)",
   "declare ptr @nt_url_host(ptr)",
@@ -1166,6 +1185,13 @@ class FnGen {
     this.emit(`store i64 ${valSlot}, ptr ${g1}`);
     return p;
   }
+  /** Nullable-box tag: 0 (undefined) when `absent` (an i1) holds, else 2 (present).
+   *  Used by the stdlib fills whose node result is `T | undefined` (`.at`, `.find`, …). */
+  private nullTagIf(absent: string): string {
+    const t = this.fresh();
+    this.emit(`${t} = select i1 ${absent}, i64 0, i64 2`);
+    return t;
+  }
   /** Load the tag (i64) of a nullable box. */
   private nullTag(ptr: string): string {
     const g0 = this.fresh();
@@ -1378,6 +1404,11 @@ class FnGen {
       }
 
       case "MemberExpr": {
+        // stdlib Batch 1: `Number.*` numeric constants — folded to their exact IEEE-754 value.
+        if (e.object.kind === "Identifier" && e.object.name === "Number" && !this.isBound("Number")) {
+          const c = NUMBER_CONSTS[e.property];
+          if (c !== undefined) return { v: llvmDouble(c), ty: "number" };
+        }
         // Host I/O: process.argv (string[]) and process.env.NAME (string). Recognized
         // only when `process` is not a user binding (matches the checker's guard).
         if (!this.varTypes.has("process") && !this.captures.has("process")) {
@@ -1777,7 +1808,38 @@ class FnGen {
 
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object" && !this.isBound("Object")) {
+      if (e.callee.property === "fromEntries") {
+        // Literal entries (checker-verified): build the object block slot by slot.
+        const pairs = (e.args[0] as { elements: Expr[] }).elements;
+        const obj = this.fresh();
+        this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(pairs.length)})`);
+        pairs.forEach((pair, i) => {
+          const v = this.genExpr((pair as { elements: Expr[] }).elements[1]!);
+          const gep = this.fresh();
+          this.emit(`${gep} = getelementptr i64, ptr ${obj}, i64 ${i}`);
+          this.emit(`store i64 ${this.toSlot(v)}, ptr ${gep}`);
+        });
+        return { v: obj, ty: e.ty ?? "number" };
+      }
       const o = this.genExpr(e.args[0]!);
+      if (e.callee.property === "entries") {
+        // string[][] — one 2-element [key, value] array per field (checker: string values).
+        const fields = objectFields(o.ty);
+        const arr = this.fresh();
+        this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(fields.length, 1))})`);
+        fields.forEach((f, i) => {
+          const pair = this.fresh();
+          this.emit(`${pair} = call ptr @nt_arr_new(double 2.0)`);
+          this.emit(`call double @nt_arr_push(ptr ${pair}, i64 ${this.toSlot({ v: this.mod.intern(f.key), ty: "string" })})`);
+          const gep = this.fresh();
+          this.emit(`${gep} = getelementptr i64, ptr ${o.v}, i64 ${i}`);
+          const slot = this.fresh();
+          this.emit(`${slot} = load i64, ptr ${gep}`);
+          this.emit(`call double @nt_arr_push(ptr ${pair}, i64 ${slot})`);
+          this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot({ v: pair, ty: "string[]" })})`);
+        });
+        return { v: arr, ty: "string[][]" };
+      }
       if (e.callee.property === "keys") return this.buildStringArray(objectFields(o.ty).map((f) => f.key));
       // values: read each field slot into a fresh homogeneous array (checker enforced).
       const fields = objectFields(o.ty);
@@ -1819,6 +1881,9 @@ class FnGen {
         }
         return { v: acc, ty: "string" };
       }
+      if (ns === "Number" && !this.isBound("Number") && (p === "isNaN" || p === "parseInt" || p === "parseFloat")) {
+        return this.genGlobal(p === "isNaN" ? "isNaN" : p, e.args)!; // the namespaced alias of the global
+      }
       if (ns === "Number" && !this.isBound("Number") && (p === "isInteger" || p === "isFinite" || p === "isSafeInteger")) {
         const fn = p === "isInteger" ? "nt_num_is_integer" : p === "isFinite" ? "nt_num_is_finite" : "nt_num_is_safe_integer";
         const x = this.genExpr(e.args[0]!).v;
@@ -1843,7 +1908,18 @@ class FnGen {
           this.emit(`${t} = call ptr @nt_arr_from_str(ptr ${a.v})`);
           return { v: t, ty: "string[]" };
         }
+        if (p === "of") { // Array.of(...items) — build the array directly
+          const vals = e.args.map((x) => this.genExpr(x));
+          const arr = this.fresh();
+          this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(vals.length, 1))})`);
+          for (const v of vals) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(v)})`);
+          return { v: arr, ty: `${vals[0]!.ty}[]` as Ty };
+        }
       }
+    }
+    // stdlib Batch 1: structuredClone(v) — the type-directed deep copy.
+    if (e.callee.kind === "Identifier" && e.callee.name === "structuredClone" && !this.isBound("structuredClone")) {
+      return this.genDeepClone(this.genExpr(e.args[0]!));
     }
     // class instance method call: `inst.m(args)` → `C.m(inst, …args)` (the lowered fn).
     if (e.callee.kind === "MemberExpr") {
@@ -1896,6 +1972,17 @@ class FnGen {
         const u = this.genExpr(e.args[0]!);
         const t = this.fresh();
         this.emit(`${t} = call ptr @nt_bytes_decode(ptr ${u.v})`);
+        return { v: t, ty: "string" };
+      }
+      if (recv.ty === "number") { // stdlib Batch 1: Number#toFixed / #toString(radix)
+        const t = this.fresh();
+        if (e.callee.property === "toString") {
+          const r = e.args[0] ? this.genExpr(e.args[0]).v : llvmDouble(10);
+          this.emit(`${t} = call ptr @js_num_to_radix_string(double ${recv.v}, double ${r})`);
+        } else {
+          const d = e.args[0] ? this.genExpr(e.args[0]).v : "0.0";
+          this.emit(`${t} = call ptr @js_num_to_fixed(double ${recv.v}, double ${d})`);
+        }
         return { v: t, ty: "string" };
       }
       if (isArrayTy(recv.ty)) return this.genArrayMethod(e.callee.property, recv, e.args);
@@ -2233,9 +2320,114 @@ class FnGen {
         this.emit(`${t} = call double @js_str_index_of(ptr ${recv.v}, ptr ${a[0]!.v})`);
         return { v: t, ty: "number" };
       }
-      case "split": return { v: call("nt_str_split", `ptr ${recv.v}, ptr ${a[0]!.v}`), ty: "string[]" };
+      case "split": // optional 2nd arg = limit (NaN when omitted)
+        return { v: call("nt_str_split_n", `ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1]?.v ?? NAN_HEX}`), ty: "string[]" };
+      // --- stdlib Batch 1 (part 2): string fills ---
+      case "concat": { // variadic: fold the arguments onto the receiver
+        let acc = recv.v;
+        for (const x of a) { const t = this.fresh(); this.emit(`${t} = call ptr @js_str_concat(ptr ${acc}, ptr ${x.v})`); acc = t; }
+        return { v: acc, ty: "string" };
+      }
+      case "lastIndexOf": {
+        const t = this.fresh();
+        this.emit(`${t} = call double @js_str_last_index_of(ptr ${recv.v}, ptr ${a[0]!.v})`);
+        return { v: t, ty: "number" };
+      }
+      case "replace": case "replaceAll":
+        return { v: call("js_str_replace", `ptr ${recv.v}, ptr ${a[0]!.v}, ptr ${a[1]!.v}, i32 ${method === "replaceAll" ? 1 : 0}`), ty: "string" };
+      case "startsWith": case "endsWith": {
+        // The optional position argument is NaN when omitted (runtime default).
+        const fn = method === "startsWith" ? "js_str_starts_with" : "js_str_ends_with";
+        const r = this.fresh();
+        this.emit(`${r} = call i32 @${fn}(ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1]?.v ?? NAN_HEX})`);
+        const t = this.fresh();
+        this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        return { v: t, ty: "boolean" };
+      }
+      case "padEnd": return { v: call("js_str_pad_end", `ptr ${recv.v}, double ${a[0]!.v}, ptr ${a[1]?.v ?? this.mod.intern(" ")}`), ty: "string" };
+      case "charCodeAt": {
+        const t = this.fresh();
+        this.emit(`${t} = call double @js_str_char_code_at(ptr ${recv.v}, double ${a[0]?.v ?? "0.0"})`);
+        return { v: t, ty: "number" };
+      }
+      case "codePointAt": {
+        // number | undefined — the runtime returns NaN for an out-of-range index
+        // (never a real code point), which becomes node's `undefined` box.
+        const r = this.fresh();
+        this.emit(`${r} = call double @js_str_code_point_at(ptr ${recv.v}, double ${a[0]?.v ?? "0.0"})`);
+        const oob = this.fresh();
+        this.emit(`${oob} = fcmp uno double ${r}, ${r}`); // NaN sentinel => out of range
+        return { v: this.nullBox(this.nullTagIf(oob), this.toSlot({ v: r, ty: "number" })), ty: makeNullable("undefined", "number") };
+      }
+      case "at": {
+        // string | undefined — NULL from the runtime is the out-of-range sentinel.
+        const r = this.fresh();
+        this.emit(`${r} = call ptr @js_str_at(ptr ${recv.v}, double ${a[0]?.v ?? "0.0"})`);
+        const oob = this.fresh();
+        this.emit(`${oob} = icmp eq ptr ${r}, null`);
+        return { v: this.nullBox(this.nullTagIf(oob), this.toSlot({ v: r, ty: "string" })), ty: makeNullable("undefined", "string") };
+      }
       default: throw new Error(`unsupported string method .${method}`);
     }
+  }
+
+  /** structuredClone: a deep copy generated from the STATIC type (the same
+   *  type-directed walk shape as JSON.stringify). Scalars/strings are values and
+   *  pass through; an object becomes a fresh slot block with each field cloned;
+   *  an array becomes a fresh vector with each element cloned in a loop. */
+  private genDeepClone(v: Val): Val {
+    const ty = v.ty;
+    if (isObjectTy(ty)) {
+      const fields = objectFields(ty);
+      const obj = this.fresh();
+      this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(Math.max(fields.length, 1))})`);
+      fields.forEach((f, i) => {
+        const gep = this.fresh();
+        this.emit(`${gep} = getelementptr i64, ptr ${v.v}, i64 ${i}`);
+        const slot = this.fresh();
+        this.emit(`${slot} = load i64, ptr ${gep}`);
+        const cloned = this.genDeepClone({ v: this.fromSlot(slot, f.ty), ty: f.ty });
+        const dst = this.fresh();
+        this.emit(`${dst} = getelementptr i64, ptr ${obj}, i64 ${i}`);
+        this.emit(`store i64 ${this.toSlot(cloned)}, ptr ${dst}`);
+      });
+      return { v: obj, ty };
+    }
+    if (isArrayTy(ty)) {
+      const el = elemTy(ty);
+      // A scalar element array is a flat block — one runtime copy is already deep.
+      if (!isObjectTy(el) && !isArrayTy(el)) {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_arr_copy(ptr ${v.v})`);
+        return { v: t, ty };
+      }
+      const len = this.fresh();
+      this.emit(`${len} = call double @nt_arr_len(ptr ${v.v})`);
+      const out = this.fresh();
+      this.emit(`${out} = call ptr @nt_arr_new(double ${len})`);
+      const idx = this.slot("number");
+      this.emit(`store double 0x0000000000000000, ptr ${idx}`);
+      const cond = this.label("clc"), body = this.label("clb"), end = this.label("cle");
+      this.terminate(`br label %${cond}`);
+      this.to(this.block(cond));
+      const iC = this.fresh();
+      this.emit(`${iC} = load double, ptr ${idx}`);
+      const cmp = this.fresh();
+      this.emit(`${cmp} = fcmp olt double ${iC}, ${len}`);
+      this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
+      this.to(this.block(body));
+      const slot = this.fresh();
+      this.emit(`${slot} = call i64 @nt_arr_get(ptr ${v.v}, double ${iC})`);
+      const cloned = this.genDeepClone({ v: this.fromSlot(slot, el), ty: el });
+      this.emit(`call double @nt_arr_push(ptr ${out}, i64 ${this.toSlot(cloned)})`);
+      const iN = this.fresh();
+      this.emit(`${iN} = fadd double ${iC}, 1.0`);
+      this.emit(`store double ${iN}, ptr ${idx}`);
+      this.terminate(`br label %${cond}`);
+      this.to(this.block(end));
+      return { v: out, ty };
+    }
+    return v; // number / string / boolean — value semantics, nothing to clone
   }
 
   /** Build a `string[]` array literal from compile-time-known keys (Object.keys / for-in). */
@@ -2395,6 +2587,33 @@ class FnGen {
         return { v: t, ty: "number" };
       }
       case "reverse": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_arr_reverse(ptr ${recv.v})`); return { v: t, ty: recv.ty }; }
+      // --- stdlib Batch 1 (part 2): array fills ---
+      case "lastIndexOf": {
+        const x = this.genExpr(args[0]!).v;
+        const t = this.fresh();
+        this.emit(`${t} = call double @${numeric ? "nt_arr_last_indexof_num" : "nt_arr_last_indexof_str"}(ptr ${recv.v}, ${numeric ? "double" : "ptr"} ${x})`);
+        return { v: t, ty: "number" };
+      }
+      case "concat": { // variadic: fold each argument array onto a fresh copy
+        let acc = recv.v;
+        for (const arg of args) {
+          const b = this.genExpr(arg).v;
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @nt_arr_concat(ptr ${acc}, ptr ${b})`);
+          acc = t;
+        }
+        return { v: acc, ty: recv.ty };
+      }
+      case "at": {
+        // T | undefined — the runtime normalizes the index and returns -1 out of range.
+        const i = this.fresh();
+        this.emit(`${i} = call double @nt_arr_at_index(ptr ${recv.v}, double ${this.genExpr(args[0]!).v})`);
+        const oob = this.fresh();
+        this.emit(`${oob} = fcmp olt double ${i}, 0x0000000000000000`);
+        const slot = this.fresh();
+        this.emit(`${slot} = call i64 @nt_arr_get(ptr ${recv.v}, double ${i})`);
+        return { v: this.nullBox(this.nullTagIf(oob), slot), ty: makeNullable("undefined", el) };
+      }
       case "with": {
         // Immutable update (CoW): full copy of the flat block with slot i replaced.
         // Receiver is borrowed + unchanged; result is a fresh owned array (drops once).
@@ -2411,6 +2630,10 @@ class FnGen {
         this.emit(`${t} = call ptr @nt_arr_slice(ptr ${recv.v}, double ${a0}, double ${a1})`);
         return { v: t, ty: recv.ty };
       }
+      case "flat": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_arr_flat1(ptr ${recv.v})`); return { v: t, ty: el }; }
+      case "flatMap": return this.genFlatMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
+      case "some": case "every": case "find": case "findIndex": case "findLast": case "findLastIndex":
+        return this.genSearchHof(method, recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "map": return this.genMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "filter": return this.genFilter(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "reduce": return this.genReduce(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, args[1]!);
@@ -2643,6 +2866,25 @@ class FnGen {
     return { v: out, ty: `${R}[]` as Ty };
   }
 
+  /** flatMap — map's loop, but each callback result (an array) is CONCATENATED
+   *  into the output instead of pushed, i.e. exactly one level of flattening. */
+  private genFlatMap(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+    this.freshenHofArrow(arrow);
+    const el = elemTy(recv.ty);
+    const R = this.hofRetTy(arrow); // an array type (checker-enforced)
+    const p = arrow.params[0]!.name;
+    this.addLocal(p, el);
+    this.prepHofLocals(arrow);
+    let out = "";
+    const L = this.hofLoop(recv, "fmap", () => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double 1.0)`); });
+    L.elem(el, p);
+    const rv = this.genHofBody(arrow, R);
+    this.emit(`call void @nt_arr_extend(ptr ${out}, ptr ${rv.v})`);
+    this.hofStep(L.idx, L.upd, L.cond);
+    this.to(this.block(L.end));
+    return { v: out, ty: R };
+  }
+
   private genFilter(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
     this.freshenHofArrow(arrow); // unique per-inlining slots — no cross-callback name collision
     const el = elemTy(recv.ty);
@@ -2663,6 +2905,81 @@ class FnGen {
     this.hofStep(L.idx, L.upd, L.cond);
     this.to(this.block(L.end));
     return { v: out, ty: `${el}[]` as Ty };
+  }
+
+  /** some/every/find/findIndex/findLast/findLastIndex — ONE inlined predicate loop.
+   *  Forward with early exit for some/every/find/findIndex (node's iteration order);
+   *  `findLast`/`findLastIndex` iterate BACKWARDS, also node's order, so a callback
+   *  with side effects still observes the same sequence. The hit index lives in a
+   *  slot; `.find*` then boxes it as `T | undefined`. */
+  private genSearchHof(method: string, recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+    this.freshenHofArrow(arrow);
+    const el = elemTy(recv.ty);
+    const p = arrow.params[0]!.name;
+    const backwards = method === "findLast" || method === "findLastIndex";
+    this.addLocal(p, el);
+    this.prepHofLocals(arrow);
+
+    const src = recv.v;
+    const len = this.fresh();
+    this.emit(`${len} = call double @nt_arr_len(ptr ${src})`);
+    const hit = this.slot("number"); // index of the first (last) match, -1 = none
+    this.emit(`store double 0xBFF0000000000000, ptr ${hit}`); // -1
+    const idx = this.slot("number");
+    if (backwards) { const st = this.fresh(); this.emit(`${st} = fsub double ${len}, 1.0`); this.emit(`store double ${st}, ptr ${idx}`); }
+    else this.emit(`store double 0x0000000000000000, ptr ${idx}`);
+
+    const cond = this.label("srch"), body = this.label("srchb"), upd = this.label("srchu"), end = this.label("srche");
+    this.terminate(`br label %${cond}`);
+    this.to(this.block(cond));
+    const iC = this.fresh();
+    this.emit(`${iC} = load double, ptr ${idx}`);
+    const cmp = this.fresh();
+    this.emit(`${cmp} = fcmp ${backwards ? "oge" : "olt"} double ${iC}, ${backwards ? "0x0000000000000000" : len}`);
+    this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
+
+    this.to(this.block(body));
+    const iB = this.fresh();
+    this.emit(`${iB} = load double, ptr ${idx}`);
+    const slot = this.fresh();
+    this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src}, double ${iB})`);
+    this.emit(`store ${llvmTy(el)} ${this.fromSlot(slot, el)}, ptr %${p}.addr`);
+    const keep = this.genHofBody(arrow, "boolean");
+    // `.every` short-circuits on the FIRST FALSE; everything else on the first true.
+    const stop = this.label("srchs"), go = this.label("srchg");
+    const take = this.fresh();
+    if (method === "every") this.emit(`${take} = xor i1 ${keep.v}, true`);
+    else this.emit(`${take} = or i1 ${keep.v}, false`);
+    this.terminate(`br i1 ${take}, label %${stop}, label %${go}`);
+    this.to(this.block(stop));
+    const iH = this.fresh();
+    this.emit(`${iH} = load double, ptr ${idx}`);
+    this.emit(`store double ${iH}, ptr ${hit}`);
+    this.terminate(`br label %${end}`);
+
+    this.to(this.block(go));
+    const iU = this.fresh();
+    this.emit(`${iU} = load double, ptr ${idx}`);
+    const iN = this.fresh();
+    this.emit(`${iN} = ${backwards ? "fsub" : "fadd"} double ${iU}, 1.0`);
+    this.emit(`store double ${iN}, ptr ${idx}`);
+    this.terminate(`br label %${upd}`);
+    this.to(this.block(upd));
+    this.terminate(`br label %${cond}`);
+
+    this.to(this.block(end));
+    const h = this.fresh();
+    this.emit(`${h} = load double, ptr ${hit}`);
+    const found = this.fresh();
+    this.emit(`${found} = fcmp oge double ${h}, 0x0000000000000000`);
+    if (method === "some") return { v: found, ty: "boolean" };
+    if (method === "every") { const t = this.fresh(); this.emit(`${t} = xor i1 ${found}, true`); return { v: t, ty: "boolean" }; }
+    if (method === "findIndex" || method === "findLastIndex") return { v: h, ty: "number" };
+    const es = this.fresh();
+    this.emit(`${es} = call i64 @nt_arr_get(ptr ${src}, double ${h})`);
+    const miss = this.fresh();
+    this.emit(`${miss} = xor i1 ${found}, true`);
+    return { v: this.nullBox(this.nullTagIf(miss), es), ty: makeNullable("undefined", el) };
   }
 
   private genReduce(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>, initExpr: Expr): Val {
