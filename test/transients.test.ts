@@ -28,8 +28,16 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { compileAndRun, expectMatchesNode } from "./harness.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+
+import { compileAndRun, expectMatchesNode, emitIR } from "./harness.ts";
 import { ownershipCheck } from "../src/driver.ts";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** The idiomatic immutable loop-append (node-runnable: `[...a, i]` is plain ES). */
 const BUILD = `
@@ -349,4 +357,59 @@ console.log(__arrLive(), __pvNodes(), __pvAllocs());`;
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe("9999\n0 0 0\n");
   });
+});
+
+/*
+ * The sanitizer gate. Freeing MORE aggressively is only an improvement if it is still
+ * memory-safe, and the counters above cannot see a double free or a use-after-free —
+ * they would happily balance to zero while the program read freed memory. So the same
+ * generated program (loop reassignment, transients, block scopes, conditional moves,
+ * chained temporaries and two live snapshots sharing trie nodes) is compiled with
+ * ASan + UBSan and RUN: any invalid access aborts it, and -fno-sanitize-recover makes
+ * every UB finding fatal. Mirrors the C-level pattern of test/runtime/pvec_test.c.
+ */
+describe("sanitizers: no double free, no use-after-free", () => {
+  const PROGRAM = `${BUILD}
+${BIG}
+function churn(n: number): number {
+  let total: number = 0;
+  for (let i = 0; i < n; i = i + 1) {
+    const t: number[] = [i, i + 1, i + 2];
+    let sink: number[] = [];
+    if (i % 2 === 0) { sink = move(t); }                      // conditional move (drop flag)
+    total = total + sink.length + "a,b,c".split(",").length;  // block drop + temporary
+  }
+  return total;
+}
+let v: number[] = big(100).with(0, 5);          // trie-backed
+const snap: number[] = v.with(50, 77);          // shares v's tail leaf
+const snap2: number[] = v.with(99, 88);         // clones the tail
+for (let i = 0; i < 200; i = i + 1) { v = [...v, i]; }   // consuming appends
+const objs: { a: number }[] = [{ a: 1 }, { a: 2 }];
+const built: number[] = build(2000);
+console.log(v.length, v[0], v[299], snap[50], snap2[99], snap.length);
+console.log(built.length, built[1999], objs[1].a, churn(50));
+console.log(built.slice(0, 4).map((x: number): number => x * 2).join(","));`;
+
+  test("ASan + UBSan run of a program exercising every new drop path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nativets-asan-"));
+    try {
+      const ll = join(dir, "module.ll");
+      writeFileSync(ll, emitIR(PROGRAM));
+      const bin = join(dir, "prog");
+      const built = spawnSync("clang", [
+        "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+        "-DNT_PVEC", ll, join(ROOT, "runtime/runtime.c"), join(ROOT, "runtime/nt_pvec.c"),
+        "-lm", "-o", bin,
+      ], { encoding: "utf8" });
+      expect(built.status).toBe(0);
+      const run = spawnSync(bin, [], { encoding: "utf8" });
+      expect(run.stderr).not.toContain("AddressSanitizer");
+      expect(run.stderr).not.toContain("runtime error");
+      expect(run.status).toBe(0);
+      expect(run.stdout).toBe("300 5 199 77 88 100\n2000 1999 2 225\n0,2,4,6\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

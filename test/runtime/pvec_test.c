@@ -657,6 +657,63 @@ static void v22_refcount_balance(void) {
     end();
 }
 
+/* ============================================================
+ * 23 · TRANSIENTS: rc == 1 ⇒ mutate in place (B2 step 4)
+ *
+ * `nt_pv_push_own` CONSUMES its argument, so it may write the tail in place when
+ * nothing else can observe the vector. The two things to prove:
+ *   (a) it is IDENTICAL to the persistent push, element for element, and costs no
+ *       node allocations while there is room in the tail (that is the whole point);
+ *   (b) when a second version shares the header or the tail leaf, it must NOT
+ *       mutate — the older version stays exactly as it was.
+ * Run under ASan/UBSan like the rest of this file: an in-place write to a node the
+ * other version still owns would show up as wrong data here and as a UAF there.
+ * ============================================================ */
+static void v23_transient_push_own(void) {
+    begin("23. transient push (rc == 1 mutates in place)");
+    double base = nt_pv_node_live();
+
+    /* (a) uniquely owned: 1000 consuming appends, no clone while the tail has room */
+    nt_pv *v = nt_pv_empty();
+    long hits_before = nt_pv_transient_hits();
+    for (int i = 0; i < 1000; i++) v = nt_pv_push_own(v, i);
+    CHECK(v->count == 1000);
+    for (int i = 0; i < 1000; i++) CHECK(nt_pv_get(v, (uint32_t)i) == i);
+    /* 1000 appends, one promotion every 32 -> the vast majority mutate in place */
+    CHECK(nt_pv_transient_hits() - hits_before > 900);
+
+    /* (b) a SHARED tail: `update` into the tree retains the tail leaf, so the next
+     *     consuming append must fall back to the persistent path. */
+    nt_pv *w = nt_pv_update(v, 3, -7);          /* index 3 is in the tree */
+    CHECK(v->tail->refcount == 2);              /* the leaf is now shared */
+    nt_pv_retain(v);                            /* keep our own reference to compare */
+    nt_pv *v2 = nt_pv_push_own(v, 12345);       /* must clone, not mutate */
+    CHECK(v2->count == 1001);
+    CHECK(v->count == 1000);                    /* the older version is untouched */
+    CHECK(nt_pv_get(v, 999) == 999);
+    CHECK(nt_pv_get(w, 3) == -7);
+    CHECK(nt_pv_get(w, 999) == 999);
+    CHECK(nt_pv_get(v2, 1000) == 12345);
+    CHECK(nt_pv_get(v2, 3) == 3);
+
+    /* (c) a SHARED header (rc > 1): also never mutated in place. */
+    nt_pv_retain(v2);
+    nt_pv *v3 = nt_pv_push_own(v2, 999999);
+    CHECK(v2->count == 1001);
+    CHECK(v3->count == 1002);
+
+    nt_pv_release(v3);
+    nt_pv_release(v2);
+    nt_pv_release(v);
+    nt_pv_release(w);
+    if (nt_pv_node_live() != base) {
+        printf("    LEAK: %g live before, %g after\n", base, nt_pv_node_live());
+        g_fail++;
+    }
+    g_checks++;
+    end();
+}
+
 int main(void) {
     v01_empty_first();
     v02_fill_tail();
@@ -680,6 +737,7 @@ int main(void) {
     v20_immutability_sweep();
     v21_property();
     v22_refcount_balance();
+    v23_transient_push_own();
 
     printf("\n%d checks, %d failures\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
