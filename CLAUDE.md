@@ -402,6 +402,31 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   `NT1601` use-after-move now points at both the use (primary) and the earlier move (secondary).
   Plus a **GitHub Actions release workflow** (build self-contained macOS/Linux binaries + publish a
   Release on a version bump) and `test/assets/smoke.ll` now tracked (fixes a CI/worktree flake).
+- **Collections ✅ (Map/Set iteration + ordering primitives — the dogfooding gaps)**
+  **Insertion-ordered iteration**, node's guarantee, over a hash-ordered HAMT: the TS-level
+  handle is now `nt_mapset.c`'s **`NtColl` = the HAMT handle + a persistent insertion-order
+  key log** (`{ NtMap *m; NtOrd *buf; int64_t n; }`). The log is kept *clean* (put of a new
+  key appends, re-`set` keeps the original position, `delete` removes the entry so a
+  re-insert lands at the end — exactly node's rules) and *persistent* via copy-on-branch
+  appends (a version writes in place only when it is the buffer's tip), so older handles keep
+  their own order. `nt_hamt.c` is untouched. Surface: `for (const k of m.keys())`,
+  `.values()`, `for (const [k, v] of m.entries())`, `for (const [k, v] of m)` (parser binds
+  two names; codegen walks the key array and looks each value up — no tuple type needed),
+  `for (const v of set)`/`set.values()`, `Array.from(it)`, `[...it]`. Iterators are **real
+  arrays** (so they compose with the array HOFs) and are therefore only typed in those three
+  iteration positions — anywhere else, plus single-binding `for-of`/spread over a Map,
+  `.entries()` outside the `[k,v]` loop, and `.forEach`, is **`NT1014`** with the working
+  spelling in the hint. **Ordering:** `.toSorted()` / `.toSorted(cmp)` / `.toReversed()` —
+  the ES2023 *copying* methods (non-mutating in node too, so node stays the oracle);
+  `.sort()` is refused with `NT1606` pointing at them. The sort is a **stable** merge sort and
+  the default comparator compares elements' **string** forms, both matching node; a comparator
+  may be any function value via a codegen-emitted `i32 (ptr env, i64, i64)` shim over the
+  closure ABI. **String `< <= > >=`** now compile (`js_str_cmp`): byte order == code-point
+  order, matching node's UTF-16 order outside the astral/U+E000 corner (documented). Also
+  fixed a pre-existing crash: a `return` inside a **block-bodied lifted arrow** carried the
+  enclosing scope's drop list and emitted a load of an undefined `%local.addr`. Tests in
+  `test/collections.test.ts`; `examples/wordfreq.ts` lost its hand-rolled `strLess`, parallel
+  distinct-word array and selection scan.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
