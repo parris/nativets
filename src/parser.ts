@@ -526,7 +526,7 @@ class Parser {
       const typeArgs = this.at("<") ? this.parseTypeArgs() : undefined; // new Map<K,V>() / new Set<T>()
       this.eat("(");
       const args: Expr[] = [];
-      if (!this.at(")")) { args.push(this.parseAssign()); while (this.at(",")) { this.eat(","); args.push(this.parseAssign()); } }
+      if (!this.at(")")) { args.push(this.parseAssign()); while (this.at(",")) { this.eat(","); if (this.at(")")) break; args.push(this.parseAssign()); } }
       this.eat(")");
       // Route the constructed value through postfix so `new Map().set(...)`,
       // `new Set().add(x).has(x)`, `err.message`, etc. chain like any primary.
@@ -563,6 +563,7 @@ class Parser {
         const args: Expr[] = [];
         if (!this.at(")")) {
           do {
+            if (this.at(")")) break; // trailing comma in the argument list
             if (this.at("...")) { this.eat("..."); args.push({ kind: "SpreadExpr", argument: this.parseAssign() }); }
             else args.push(this.parseAssign());
           } while (this.at(",") && (this.eat(","), true));
