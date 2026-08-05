@@ -11,10 +11,29 @@
  * route through nt_key_num/nt_key_str so SameValueZero normalization (-0→+0,
  * NaN canonicalization) still happens in the one canonical place.
  *
- * Additive: this file is NEW and only calls the public nt_hamt.h API — nt_hamt.c
- * is untouched. Linked (with nt_hamt.c) only when a program uses Map/Set.
+ * INSERTION ORDER (collections lane). node guarantees Map/Set iterate in insertion
+ * order; the HAMT is hash-ordered (and its small-map form is sorted), so iterating
+ * the storage would be a SILENT divergence. The TS-level Map/Set handle is therefore
+ * an `NtColl` — the HAMT handle PLUS a persistent insertion-order key log:
+ *
+ *   NtColl { NtMap *m; NtOrd *buf; int64_t n; }   // this version sees buf[0..n)
+ *
+ * The log is kept CLEAN (exactly the live keys, in insertion order, no duplicates):
+ *   - put/add of a NEW key appends;   put of an EXISTING key does not (node keeps
+ *     the original position on re-set);
+ *   - delete removes the entry, so a later re-insert appends at the END (node);
+ * so iteration is a straight walk of buf[0..n) with no filtering or dedup.
+ *
+ * It stays PERSISTENT (old versions unchanged) with structural sharing via the
+ * append-log trick: a child may write in place only when it is the buffer's tip
+ * (`n == buf->used`) and capacity allows — otherwise it copies. Any other version
+ * still reads only its own prefix `n`, so it can never observe a sibling's append.
+ *
+ * Additive: nt_hamt.c is UNTOUCHED — NtColl wraps it from the outside. Linked (with
+ * nt_hamt.c) only when a program uses Map/Set.
  */
 #include "nt_hamt.h"
+#include <stdlib.h>
 #include <string.h>
 
 static NtKey ntk(int ktype, int64_t slot) {
@@ -24,11 +43,134 @@ static NtKey ntk(int ktype, int64_t slot) {
   return nt_key_num(d);
 }
 
-NtMap  *nt_map_put_slot(NtMap *m, int ktype, int64_t kslot, int64_t val) { return nt_map_put(m, ntk(ktype, kslot), val); }
-int64_t nt_map_get_slot(NtMap *m, int ktype, int64_t kslot)              { return nt_map_get(m, ntk(ktype, kslot)); }
-int     nt_map_has_slot(NtMap *m, int ktype, int64_t kslot)             { return nt_map_has(m, ntk(ktype, kslot)); }
-NtMap  *nt_map_remove_slot(NtMap *m, int ktype, int64_t kslot)          { return nt_map_remove(m, ntk(ktype, kslot)); }
+/* ---- insertion-order log ---------------------------------------------- */
 
-NtMap  *nt_set_add_slot(NtMap *s, int ktype, int64_t kslot)    { return nt_set_add(s, ntk(ktype, kslot)); }
-int     nt_set_has_slot(NtMap *s, int ktype, int64_t kslot)    { return nt_set_has(s, ntk(ktype, kslot)); }
-NtMap  *nt_set_remove_slot(NtMap *s, int ktype, int64_t kslot) { return nt_set_remove(s, ntk(ktype, kslot)); }
+/* Append-shared key log. `used` is the high-water mark of the SHARED buffer; a
+ * version's own length lives in NtColl.n (always <= used). */
+typedef struct {
+  int64_t  cap, used;
+  uint8_t *ktype;
+  int64_t *keys;
+} NtOrd;
+
+typedef struct {
+  NtMap  *m;    /* the HAMT handle (equality/lookup/size) */
+  NtOrd  *buf;  /* insertion-order key log (NULL when empty) */
+  int64_t n;    /* this version's visible prefix of buf */
+} NtColl;
+
+static void *xalloc2(size_t n) {
+  void *p = malloc(n);
+  if (!p) abort();
+  return p;
+}
+
+static NtColl *coll(NtMap *m, NtOrd *buf, int64_t n) {
+  NtColl *c = (NtColl *)xalloc2(sizeof(NtColl));
+  c->m = m; c->buf = buf; c->n = n;
+  return c;
+}
+
+static NtOrd *ord_alloc(int64_t cap) {
+  NtOrd *o = (NtOrd *)xalloc2(sizeof(NtOrd));
+  o->cap = cap > 0 ? cap : 1;
+  o->used = 0;
+  o->ktype = (uint8_t *)xalloc2(sizeof(uint8_t) * (size_t)o->cap);
+  o->keys = (int64_t *)xalloc2(sizeof(int64_t) * (size_t)o->cap);
+  return o;
+}
+
+/* Append `k` to c's log, returning the child's (buf, n). In place when this
+ * version is the buffer's tip; otherwise a fresh buffer (copy-on-branch), which
+ * is what keeps every older handle unchanged. */
+static NtOrd *ord_append(const NtColl *c, NtKey k, int64_t *out_n) {
+  NtOrd *b = c->buf;
+  if (b && c->n == b->used && c->n < b->cap) {
+    b->ktype[c->n] = k.type;
+    b->keys[c->n] = k.slot;
+    b->used = c->n + 1;
+    *out_n = c->n + 1;
+    return b;
+  }
+  NtOrd *nb = ord_alloc((c->n + 1) * 2);
+  if (b && c->n > 0) {
+    memcpy(nb->ktype, b->ktype, sizeof(uint8_t) * (size_t)c->n);
+    memcpy(nb->keys, b->keys, sizeof(int64_t) * (size_t)c->n);
+  }
+  nb->ktype[c->n] = k.type;
+  nb->keys[c->n] = k.slot;
+  nb->used = c->n + 1;
+  *out_n = c->n + 1;
+  return nb;
+}
+
+/* Drop `k` from c's log (it is known present). Always a fresh buffer — a removal
+ * can never be expressed as an append to a shared one. */
+static NtOrd *ord_remove(const NtColl *c, NtKey k, int64_t *out_n) {
+  NtOrd *b = c->buf;
+  NtOrd *nb = ord_alloc(c->n > 1 ? c->n - 1 : 1);
+  int64_t j = 0;
+  for (int64_t i = 0; i < c->n; i++) {
+    NtKey e; e.type = b->ktype[i]; e.slot = b->keys[i];
+    if (nt_key_eq(e, k)) continue;
+    nb->ktype[j] = e.type; nb->keys[j] = e.slot; j++;
+  }
+  nb->used = j;
+  *out_n = j;
+  return nb;
+}
+
+/* ---- map/set ops (NtColl in, NtColl out; the HAMT stays authoritative) ---- */
+
+NtColl *nt_coll_map_new(void) { return coll(nt_map_new(), NULL, 0); }
+NtColl *nt_coll_set_new(void) { return coll(nt_set_new(), NULL, 0); }
+int64_t nt_coll_size(NtColl *c) { return nt_map_size(c->m); }
+
+static NtColl *coll_put(NtColl *c, NtKey k, int64_t val, int has_val) {
+  NtMap *m2 = has_val ? nt_map_put(c->m, k, val) : nt_set_add(c->m, k);
+  if (nt_map_has(c->m, k)) return coll(m2, c->buf, c->n); /* re-set keeps position */
+  int64_t n2;
+  NtOrd *b2 = ord_append(c, k, &n2);
+  return coll(m2, b2, n2);
+}
+
+static NtColl *coll_remove(NtColl *c, NtKey k, int has_val) {
+  if (!nt_map_has(c->m, k)) return c; /* absent: pointer-stable no-op */
+  NtMap *m2 = has_val ? nt_map_remove(c->m, k) : nt_set_remove(c->m, k);
+  int64_t n2;
+  NtOrd *b2 = ord_remove(c, k, &n2);
+  return coll(m2, b2, n2);
+}
+
+NtColl *nt_map_put_slot(NtColl *c, int ktype, int64_t kslot, int64_t val) { return coll_put(c, ntk(ktype, kslot), val, 1); }
+int64_t nt_map_get_slot(NtColl *c, int ktype, int64_t kslot)              { return nt_map_get(c->m, ntk(ktype, kslot)); }
+int     nt_map_has_slot(NtColl *c, int ktype, int64_t kslot)              { return nt_map_has(c->m, ntk(ktype, kslot)); }
+NtColl *nt_map_remove_slot(NtColl *c, int ktype, int64_t kslot)           { return coll_remove(c, ntk(ktype, kslot), 1); }
+
+NtColl *nt_set_add_slot(NtColl *c, int ktype, int64_t kslot)    { return coll_put(c, ntk(ktype, kslot), 0, 0); }
+int     nt_set_has_slot(NtColl *c, int ktype, int64_t kslot)    { return nt_set_has(c->m, ntk(ktype, kslot)); }
+NtColl *nt_set_remove_slot(NtColl *c, int ktype, int64_t kslot) { return coll_remove(c, ntk(ktype, kslot), 0); }
+
+/* ---- iteration: materialize the insertion-ordered keys/values -------------
+ * `.keys()`/`.values()`/`.entries()` hand back a REAL NtArray (runtime.c's slot
+ * vector), so for-of / spread / Array.from all reuse the array machinery and the
+ * element order is exactly node's. Declared locally against an opaque type — the
+ * array vector lives in runtime.c, which does not export a header. */
+typedef struct NtArrayOpaque NtArrayOpaque;
+extern NtArrayOpaque *nt_arr_new(double capd);
+extern double nt_arr_push(NtArrayOpaque *a, int64_t slot);
+
+NtArrayOpaque *nt_coll_keys(NtColl *c) {
+  NtArrayOpaque *out = nt_arr_new((double)(c->n > 0 ? c->n : 1));
+  for (int64_t i = 0; i < c->n; i++) nt_arr_push(out, c->buf->keys[i]);
+  return out;
+}
+
+NtArrayOpaque *nt_coll_values(NtColl *c) {
+  NtArrayOpaque *out = nt_arr_new((double)(c->n > 0 ? c->n : 1));
+  for (int64_t i = 0; i < c->n; i++) {
+    NtKey k; k.type = c->buf->ktype[i]; k.slot = c->buf->keys[i];
+    nt_arr_push(out, nt_map_get(c->m, k));
+  }
+  return out;
+}

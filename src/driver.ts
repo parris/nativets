@@ -320,7 +320,9 @@ function writeIR(source: string): { dir: string; ll: string; rt: string; actor: 
   // B2 Map/Set: link the HAMT core + scalar-ABI wrappers only when used (codegen
   // emits nt_map_new/nt_set_new exactly then). libc-only, so it cross-links unchanged.
   const extra: string[] = [];
-  if (ir.includes("@nt_map_new(") || ir.includes("@nt_set_new(")) {
+  // Match the CALL site, not the (always-present) `declare` line — collections are
+  // reached through the nt_coll_*/nt_map_*_slot/nt_set_*_slot wrappers.
+  if (/\bcall\b[^\n]*@nt_(coll|map|set)_/.test(ir)) {
     writeFileSync(join(dir, "nt_hamt.h"), hamtHeader); // quote-included by both .c files
     const hamt = join(dir, "nt_hamt.c");
     writeFileSync(hamt, hamtSource);

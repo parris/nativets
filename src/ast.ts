@@ -435,7 +435,13 @@ export interface ForStmt {
   update: Expr | null;
   body: Stmt[];
 }
-export interface ForOfStmt { kind: "ForOfStmt"; name: string; annot?: Ty; iterable: Expr; body: Stmt[]; elemTy?: Ty; }
+/**
+ * `for (const x of it)`, plus the Map-entries form `for (const [k, v] of m)` /
+ * `of m.entries()`: `name2` holds the value binding and the checker rewrites
+ * `iterable` to the MAP itself (the loop walks its insertion-ordered keys and
+ * looks each value up — no tuple type required).
+ */
+export interface ForOfStmt { kind: "ForOfStmt"; name: string; annot?: Ty; iterable: Expr; body: Stmt[]; elemTy?: Ty; name2?: string; valTy?: Ty; }
 export interface ForInStmt { kind: "ForInStmt"; name: string; object: Expr; body: Stmt[]; }
 export interface SwitchCase { test: Expr | null; body: Stmt[]; } // test null === default
 export interface SwitchStmt { kind: "SwitchStmt"; discriminant: Expr; cases: SwitchCase[]; }

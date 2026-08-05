@@ -13,19 +13,15 @@
 //   dog: 1
 //   total: 5
 //
-// Written in the nativets immutable subset — leaning on the freshly-landed
-// generic `Map<string, number>`:
-//   - counting uses `map.has(k)` + `map.set(k, (map.get(k) ?? 0) + 1)`; the map
-//     is PERSISTENT so `.set` returns a NEW handle and we reassign (`counts = …`).
-//   - the `?? 0` makes counting correct whether `.get` returns 0-on-miss or
-//     undefined-on-miss (defensive against either Map#get semantics).
-//   - no `.push` / `arr[i] = v`: the distinct-word list grows via spread
-//     (`[...distinct, w]`), and we select the top-N with a manual selection scan
-//     (no `.sort` comparator in the subset), marking chosen words in a `Set`.
-//   - alphabetical tie-breaking can't use string `<` (the checker requires
-//     numeric relational operands), so `strLess` compares char ranks looked up
-//     in an alphabet string via `.indexOf` — identical under node, so the oracle
-//     is well-defined.
+// Written in the nativets immutable subset — leaning on the collections API:
+//   - counting uses `map.set(k, (map.get(k) ?? 0) + 1)`; the map is PERSISTENT,
+//     so `.set` returns a NEW handle and we reassign (`counts = …`).
+//   - `[...counts.keys()]` is the distinct-word list, in INSERTION (first-seen)
+//     order — node guarantees that order and so do we, so no parallel array has
+//     to be maintained by hand.
+//   - ranking is one `.toSorted(cmp)` (the ES2023 COPYING sort — non-mutating in
+//     node too, so the oracle is exact) with a comparator that captures the map:
+//     count descending, ties alphabetical via plain string `<`.
 //
 // It compiles + runs identically under `node` (via the harness stdin polyfill)
 // and nativets, and cross-compiles unchanged (libc-only runtime).
@@ -42,26 +38,6 @@ function charRank(c: string): number {
   return "abcdefghijklmnopqrstuvwxyz0123456789".indexOf(c);
 }
 
-// Lexicographic "a < b" using char ranks (the subset forbids string `<`). Equal
-// prefixes fall back to the shorter string being "less".
-function strLess(a: string, b: string): boolean {
-  const la: number = a.length;
-  const lb: number = b.length;
-  let i: number = 0;
-  while (i < la && i < lb) {
-    const ca: number = charRank(a.charAt(i));
-    const cb: number = charRank(b.charAt(i));
-    if (ca < cb) {
-      return true;
-    }
-    if (ca > cb) {
-      return false;
-    }
-    i = i + 1;
-  }
-  return la < lb;
-}
-
 // --- Read input (stdin, or the default paragraph when stdin is empty). ---
 const DEFAULT: string =
   "The quick brown fox jumps over the lazy dog. " +
@@ -76,7 +52,6 @@ const text: string = source.toLowerCase();
 
 // --- Single scan: split into words, count into the Map, track distinct + total. ---
 let counts = new Map<string, number>();
-let distinct: string[] = [];
 let total: number = 0;
 let cur: string = "";
 let i: number = 0;
@@ -89,9 +64,6 @@ while (i <= n) {
     cur = cur + ch;
   } else {
     if (cur.length > 0) {
-      if (!counts.has(cur)) {
-        distinct = [...distinct, cur];
-      }
       counts = counts.set(cur, (counts.get(cur) ?? 0) + 1);
       total = total + 1;
       cur = "";
@@ -100,31 +72,29 @@ while (i <= n) {
   i = i + 1;
 }
 
-// --- Report the top-N by count (desc), ties alphabetical. Selection scan. ---
-let limit: number = TOP_N;
-if (distinct.length < TOP_N) {
-  limit = distinct.length;
-}
-
-let used = new Set<string>();
-let printed: number = 0;
-while (printed < limit) {
-  let bestWord: string = "";
-  let bestCount: number = 0;
-  let found: boolean = false;
-  for (const w of distinct) {
-    if (used.has(w)) {
-      continue;
-    }
-    const c: number = counts.get(w) ?? 0;
-    if (!found || c > bestCount || (c === bestCount && strLess(w, bestWord))) {
-      bestWord = w;
-      bestCount = c;
-      found = true;
-    }
+// --- Report the top-N by count (desc), ties alphabetical. ---
+// `counts.keys()` is insertion-ordered (first-seen), and `.toSorted` is stable,
+// so the comparator alone fixes the output order.
+const words: string[] = [...counts.keys()];
+const ranked: string[] = words.toSorted((a: string, b: string) => {
+  const ca: number = counts.get(a) ?? 0;
+  const cb: number = counts.get(b) ?? 0;
+  if (ca !== cb) {
+    return cb - ca;
   }
-  console.log(bestWord + ": " + bestCount);
-  used = used.add(bestWord);
+  return a < b ? -1 : (a > b ? 1 : 0);
+});
+
+let limit: number = TOP_N;
+if (ranked.length < TOP_N) {
+  limit = ranked.length;
+}
+let printed: number = 0;
+for (const w of ranked) {
+  if (printed >= limit) {
+    break;
+  }
+  console.log(w + ": " + (counts.get(w) ?? 0));
   printed = printed + 1;
 }
 console.log("total: " + total);

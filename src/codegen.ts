@@ -107,6 +107,7 @@ const DECLARES = [
   "declare ptr @js_str_concat(ptr, ptr)",
   "declare double @js_str_len(ptr)",
   "declare i32 @js_str_eq(ptr, ptr)",
+  "declare i32 @js_str_cmp(ptr, ptr)",
   "declare ptr @js_num_to_str(double)",
   "declare ptr @js_bool_to_str(i32)",
   // bitwise
@@ -157,6 +158,11 @@ const DECLARES = [
   "declare double @nt_arr_indexof_num(ptr, double)",
   "declare double @nt_arr_indexof_str(ptr, ptr)",
   "declare ptr @nt_arr_copy(ptr)",
+  // ordering primitives (ES2023 copying methods): default sort by string form,
+  // comparator sort through a codegen-emitted closure shim, and reverse-copy.
+  "declare ptr @nt_arr_to_sorted(ptr, i32)",
+  "declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)",
+  "declare ptr @nt_arr_to_reversed(ptr)",
   "declare ptr @nt_arr_with(ptr, double, i64)",
   "declare void @nt_arr_free(ptr)",
   "declare double @nt_arr_live()",
@@ -235,17 +241,21 @@ const DECLARES = [
   "declare i32 @nt_gui_mouse_pressed()",
   "declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)",
   // --- B2 immutable Map/Set (nt_hamt via scalar-ABI wrappers in nt_mapset.c) ---
-  "declare ptr @nt_map_new()",
+  // The TS-level handle is nt_mapset.c's NtColl (HAMT + insertion-order key log),
+  // so construction/size/iteration go through the nt_coll_* wrappers.
+  "declare ptr @nt_coll_map_new()",
   "declare ptr @nt_map_put_slot(ptr, i32, i64, i64)",
   "declare i64 @nt_map_get_slot(ptr, i32, i64)",
   "declare i32 @nt_map_has_slot(ptr, i32, i64)",
   "declare ptr @nt_map_remove_slot(ptr, i32, i64)",
-  "declare i64 @nt_map_size(ptr)",
-  "declare ptr @nt_set_new()",
+  "declare ptr @nt_coll_set_new()",
   "declare ptr @nt_set_add_slot(ptr, i32, i64)",
   "declare i32 @nt_set_has_slot(ptr, i32, i64)",
   "declare ptr @nt_set_remove_slot(ptr, i32, i64)",
-  "declare i64 @nt_set_size(ptr)",
+  "declare i64 @nt_coll_size(ptr)",
+  // insertion-ordered iteration → a real NtArray of key/value slots
+  "declare ptr @nt_coll_keys(ptr)",
+  "declare ptr @nt_coll_values(ptr)",
   // --- stdlib batch 2: bytes (Uint8Array + TextEncoder/TextDecoder, nt_bytes.c) ---
   "declare ptr @nt_bytes_new(double)",
   "declare ptr @nt_bytes_from_arr(ptr)",
@@ -336,6 +346,43 @@ class ModuleGen {
         `  ${conv}`,
         `  call void %fp(ptr %env, ${llvmTy(argTy)} %arg)`,
         `  ret void`,
+        `}`,
+      ].join("\n"),
+    );
+    return name;
+  }
+
+  private cmpShims = new Map<string, string>();
+
+  /** Lazily emit a comparator trampoline for `.toSorted(cmp)` and return its symbol.
+   *  The runtime's stable merge sort calls `i32 (ptr env, i64 a, i64 b)`; a TS
+   *  comparator is a closure `[fn_ptr, caps…]` returning a double. The shim reads
+   *  the fn ptr from env slot 0, converts the raw element slots to the element's
+   *  LLVM type, calls it, and maps the result to a sign (NaN → 0, like node). One
+   *  shim per LLVM element type, so it works for any function VALUE, not just an
+   *  inline arrow. */
+  cmpShim(elTy: Ty): string {
+    const lt = llvmTy(elTy);
+    const existing = this.cmpShims.get(lt);
+    if (existing) return existing;
+    const name = `nt_cmp_shim_${this.cmpShims.size}`;
+    this.cmpShims.set(lt, name);
+    const conv = (reg: string, slot: string) =>
+      lt === "double" ? `%${reg} = bitcast i64 %${slot} to double` : `%${reg} = inttoptr i64 %${slot} to ptr`;
+    this.liftedFns.push(
+      [
+        `define i32 @${name}(ptr %env, i64 %sa, i64 %sb) {`,
+        `L:`,
+        `  %fpi = load i64, ptr %env`,
+        `  %fp = inttoptr i64 %fpi to ptr`,
+        `  ${conv("a", "sa")}`,
+        `  ${conv("b", "sb")}`,
+        `  %r = call double %fp(ptr %env, ${lt} %a, ${lt} %b)`,
+        `  %lt = fcmp olt double %r, 0.0`,
+        `  %gt = fcmp ogt double %r, 0.0`,
+        `  %p = select i1 %gt, i32 1, i32 0`,
+        `  %s = select i1 %lt, i32 -1, i32 %p`,
+        `  ret i32 %s`,
         `}`,
       ].join("\n"),
     );
@@ -515,7 +562,16 @@ class FnGen {
   }
 
   /** Emit deterministic drops (RAII frees) for owned linear locals. */
+  /** Set while generating a LIFTED arrow body (`@arrow_N`). The ownership pass walks
+   *  arrow bodies inside their enclosing function, so a `return` inside a block-bodied
+   *  arrow carries the ENCLOSING scope's drop list — locals that do not exist (and are
+   *  not owned) in the lifted function. Dropping them there emitted a load of an
+   *  undefined `%x.addr` (clang: "use of undefined value"). Suppress drops in a lifted
+   *  arrow: conservative (the enclosing owner still frees at its own scope exit). */
+  private liftedArrow = false;
+
   private emitDrops(names: string[]): void {
+    if (this.liftedArrow) return;
     for (const n of names) {
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr %${n}.addr`);
@@ -550,6 +606,7 @@ class FnGen {
           break;
         case "ForOfStmt":
           this.addLocal(s.name, s.elemTy ?? "string");
+          if (s.name2) this.addLocal(s.name2, s.valTy ?? "number"); // `for (const [k, v] of map)`
           this.collectLocals(s.body);
           break;
         case "ForInStmt":
@@ -619,6 +676,7 @@ class FnGen {
   /** Generate a lifted arrow `define <ret> @name(ptr %__clo, params) { ... }`. */
   genArrow(name: string, arrow: ArrowFunction): string {
     this.reset();
+    this.liftedArrow = true; // see `liftedArrow`: enclosing-scope drops don't apply here
     this.retTy = arrow.retTy ?? "number";
     const paramTys = arrow.paramTys ?? [];
     this.captures = new Map((arrow.captures ?? []).map((c, i) => [c.name, { index: i, ty: c.ty }]));
@@ -789,7 +847,12 @@ class FnGen {
         return;
       }
       case "ForOfStmt": {
-        const src = this.genExpr(s.iterable);
+        // `for (const [k, v] of map)`: the checker left `iterable` as the MAP, so
+        // walk its insertion-ordered key array and look each value up per step.
+        const mapV = s.name2 ? this.genExpr(s.iterable) : null;
+        const src = mapV
+          ? (() => { const a = this.fresh(); this.emit(`${a} = call ptr @nt_coll_keys(ptr ${mapV.v})`); return { v: a, ty: `${s.elemTy ?? "string"}[]` as Ty }; })()
+          : this.genExpr(s.iterable);
         const isStr = src.ty === "string";
         const isBytes = isBytesTy(src.ty);
         const el = s.elemTy ?? "string";
@@ -824,6 +887,12 @@ class FnGen {
           const slot = this.fresh();
           this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src.v}, double ${iB})`);
           this.emit(`store ${llvmTy(el)} ${this.fromSlot(slot, el)}, ptr %${s.name}.addr`);
+          if (mapV) { // entries: value = map.get(key) for this step's key slot
+            const vt = s.valTy ?? "number";
+            const vs = this.fresh();
+            this.emit(`${vs} = call i64 @nt_map_get_slot(ptr ${mapV.v}, i32 ${this.keyTag(el)}, i64 ${slot})`);
+            this.emit(`store ${llvmTy(vt)} ${this.fromSlot(vs, vt)}, ptr %${s.name2}.addr`);
+          }
         }
         this.loops.push({ brk: endLbl, cont: updLbl });
         this.genStmts(s.body);
@@ -1322,7 +1391,7 @@ class FnGen {
         }
         if ((isMapTy(obj.ty) || isSetTy(obj.ty)) && e.property === "size") {
           const sz = this.fresh();
-          this.emit(`${sz} = call i64 @${isMapTy(obj.ty) ? "nt_map_size" : "nt_set_size"}(ptr ${obj.v})`);
+          this.emit(`${sz} = call i64 @nt_coll_size(ptr ${obj.v})`);
           const d = this.fresh();
           this.emit(`${d} = sitofp i64 ${sz} to double`);
           return { v: d, ty: "number" };
@@ -1420,6 +1489,12 @@ class FnGen {
             // Heap reference identity: arrays/objects compare by pointer (as node
             // does for `===`), so a CoW copy is `!==` its source. NOT strcmp.
             this.emit(`${t} = icmp ${op === "===" || op === "==" ? "eq" : "ne"} ptr ${l.v}, ${r.v}`);
+          } else if (op === "<" || op === "<=" || op === ">" || op === ">=") {
+            // Lexicographic string compare: sign of js_str_cmp (memcmp order ==
+            // code-point order; node compares UTF-16 code units — see divergences).
+            const c = this.fresh();
+            this.emit(`${c} = call i32 @js_str_cmp(ptr ${l.v}, ptr ${r.v})`);
+            this.emit(`${t} = icmp ${op === "<" ? "slt" : op === "<=" ? "sle" : op === ">" ? "sgt" : "sge"} i32 ${c}, 0`);
           } else {
             const eq = this.fresh();
             this.emit(`${eq} = call i32 @js_str_eq(ptr ${l.v}, ptr ${r.v})`);
@@ -1595,8 +1670,8 @@ class FnGen {
       }
       case "NewExpr": {
         // Immutable collections (B2): fresh empty handle from the nt_hamt runtime.
-        if (e.callee === "Map") { const m = this.fresh(); this.emit(`${m} = call ptr @nt_map_new()`); return { v: m, ty: e.ty! }; }
-        if (e.callee === "Set") { const s = this.fresh(); this.emit(`${s} = call ptr @nt_set_new()`); return { v: s, ty: e.ty! }; }
+        if (e.callee === "Map") { const m = this.fresh(); this.emit(`${m} = call ptr @nt_coll_map_new()`); return { v: m, ty: e.ty! }; }
+        if (e.callee === "Set") { const s = this.fresh(); this.emit(`${s} = call ptr @nt_coll_set_new()`); return { v: s, ty: e.ty! }; }
         // Bytes (stdlib batch 2): `new Uint8Array(n)` -> zero-filled; `new Uint8Array([..])`
         // -> from the number array (each ToUint8). TextEncoder/TextDecoder are stateless
         // (no runtime object), represented by a null sentinel ptr.
@@ -1727,9 +1802,12 @@ class FnGen {
           return { v: isArrayTy(at) ? "true" : "false", ty: "boolean" };
         }
         if (p === "from") {
-          const s = this.genExpr(e.args[0]!).v;
+          const a = this.genExpr(e.args[0]!);
           const t = this.fresh();
-          this.emit(`${t} = call ptr @nt_arr_from_str(ptr ${s})`);
+          // Array.from(arrayLike) COPIES (node): a Map/Set iterator is already a
+          // fresh array, but `Array.from(arr)` must not alias its source.
+          if (isArrayTy(a.ty)) { this.emit(`${t} = call ptr @nt_arr_copy(ptr ${a.v})`); return { v: t, ty: a.ty }; }
+          this.emit(`${t} = call ptr @nt_arr_from_str(ptr ${a.v})`);
           return { v: t, ty: "string[]" };
         }
       }
@@ -2147,6 +2225,13 @@ class FnGen {
     const tag = this.keyTag(k);
     const keySlot = () => this.toSlot(this.genExpr(args[0]!)); // arg[0] typed as k
     switch (method) {
+      // Iterators → a real array of key/value slots in INSERTION order (the key log
+      // in nt_mapset.c), so for-of / spread / Array.from all match node's order.
+      case "keys": case "values": {
+        const a = this.fresh();
+        this.emit(`${a} = call ptr @nt_coll_${method}(ptr ${recv.v})`);
+        return { v: a, ty: `${method === "keys" ? k : v}[]` as Ty };
+      }
       case "set": {
         const ks = keySlot();
         const vs = this.toSlot(this.genExpr(args[1]!));
@@ -2193,6 +2278,13 @@ class FnGen {
     const tag = this.keyTag(el);
     const elSlot = () => this.toSlot(this.genExpr(args[0]!));
     switch (method) {
+      // `.values()`/`.keys()` are the same thing for a Set: its elements, in
+      // insertion order (node's guarantee, kept by nt_mapset.c's key log).
+      case "keys": case "values": {
+        const a = this.fresh();
+        this.emit(`${a} = call ptr @nt_coll_keys(ptr ${recv.v})`);
+        return { v: a, ty: `${el}[]` as Ty };
+      }
       case "add": {
         const es = elSlot();
         const t = this.fresh();
@@ -2220,6 +2312,22 @@ class FnGen {
     const el = elemTy(recv.ty);
     const numeric = el === "number";
     switch (method) {
+      // ES2023 copying ordering primitives (non-mutating in node too).
+      case "toSorted": {
+        const t = this.fresh();
+        if (args.length === 0) {
+          this.emit(`${t} = call ptr @nt_arr_to_sorted(ptr ${recv.v}, i32 ${el === "string" ? 1 : 0})`);
+        } else {
+          const clo = this.genExpr(args[0]!); // any function value → closure block
+          this.emit(`${t} = call ptr @nt_arr_to_sorted_by(ptr ${recv.v}, ptr ${clo.v}, ptr @${this.mod.cmpShim(el)})`);
+        }
+        return { v: t, ty: recv.ty };
+      }
+      case "toReversed": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_arr_to_reversed(ptr ${recv.v})`);
+        return { v: t, ty: recv.ty };
+      }
       case "push": {
         const slot = this.toSlot(this.genExpr(args[0]!));
         const t = this.fresh();

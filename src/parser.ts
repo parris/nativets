@@ -695,6 +695,17 @@ class Parser {
     this.eat("for"); this.eat("(");
     if (this.at("let") || this.at("const")) {
       const declKind = this.next().value as "let" | "const";
+      // `for (const [k, v] of m)` — the Map-entries binding. Kept as two names on
+      // the ForOfStmt (the checker resolves it against the Map's K/V) rather than
+      // desugared through a temp, since there is no tuple type to bind to.
+      if (this.at("[")) {
+        this.eat("[");
+        const k = this.expectIdent(); this.eat(",");
+        const v = this.expectIdent(); this.eat("]");
+        this.eat("of");
+        const iterable = this.parseExpression(); this.eat(")");
+        return { kind: "ForOfStmt", name: k, name2: v, iterable, body: this.parseControlled() };
+      }
       const name = this.expectIdent();
       let annot: Ty | undefined;
       if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
