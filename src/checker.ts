@@ -913,7 +913,7 @@ class Checker {
     switch (method) {
       case "set": if (args.length !== 2) throw typeError(".set expects (key, value)"); needKey(0);
         if (argTys[1] !== v) throw typeError(`.set value expects ${v}, got ${argTys[1]}`); return recv; // NEW map
-      case "get": if (args.length !== 1) throw typeError(".get expects (key)"); needKey(0); return v;
+      case "get": if (args.length !== 1) throw typeError(".get expects (key)"); needKey(0); return makeNullable("undefined", v); // V | undefined (miss → undefined)
       case "has": if (args.length !== 1) throw typeError(".has expects (key)"); needKey(0); return "boolean";
       case "delete": if (args.length !== 1) throw typeError(".delete expects (key)"); needKey(0); return recv; // NEW map
       default: throw nyi(NYI.COLLECTION, `Map method '.${method}'`);

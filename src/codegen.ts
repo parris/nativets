@@ -13,7 +13,7 @@
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { isConsoleLog } from "./checker.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag } from "./ast.ts";
 import { isOptChainExpr } from "./checker.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
@@ -1988,10 +1988,20 @@ class FnGen {
         return { v: t, ty: recv.ty };
       }
       case "get": {
+        // Returns `V | undefined`: build a nullable box — tag 2 (present) + the
+        // value slot on a hit, tag 0 (undefined) on a miss. Reuses A2 machinery.
         const ks = keySlot();
+        const present = this.fresh();
+        this.emit(`${present} = call i32 @nt_map_has_slot(ptr ${recv.v}, i32 ${tag}, i64 ${ks})`);
         const slot = this.fresh();
         this.emit(`${slot} = call i64 @nt_map_get_slot(ptr ${recv.v}, i32 ${tag}, i64 ${ks})`);
-        return { v: this.fromSlot(slot, v), ty: v };
+        const isP = this.fresh();
+        this.emit(`${isP} = icmp ne i32 ${present}, 0`);
+        const tg = this.fresh();
+        this.emit(`${tg} = select i1 ${isP}, i64 2, i64 0`);
+        const vs = this.fresh();
+        this.emit(`${vs} = select i1 ${isP}, i64 ${slot}, i64 0`);
+        return { v: this.nullBox(tg, vs), ty: makeNullable("undefined", v) };
       }
       case "has": {
         const ks = keySlot();
