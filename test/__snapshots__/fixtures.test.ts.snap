@@ -1,5 +1,754 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
+exports[`fixtures generics/array-generic.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_with(ptr, double, i64)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare double @nt_date_now()
+declare ptr @nt_btoa(ptr)
+declare ptr @nt_atob(ptr)
+declare ptr @nt_from_char_code(double)
+declare ptr @nt_from_code_point(double)
+declare i32 @nt_num_is_finite(double)
+declare i32 @nt_num_is_integer(double)
+declare i32 @nt_num_is_safe_integer(double)
+declare ptr @nt_arr_from_str(ptr)
+declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
+declare ptr @nt_http_get(ptr, ptr, ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare ptr @nt_read_key()
+declare void @nt_raw_mode(i32)
+declare void @nt_exit(double)
+declare ptr @nt_map_new()
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare i64 @nt_map_size(ptr)
+declare ptr @nt_set_new()
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_set_size(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+
+define double @first(ptr %xs) {
+entry:
+  %xs.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %xs, ptr %xs.addr
+  %t0 = load ptr, ptr %xs.addr
+  %t1 = call i64 @nt_arr_get(ptr %t0, double 0x0000000000000000)
+  %t2 = bitcast i64 %t1 to double
+  ret double %t2
+}
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  %xs.addr = alloca ptr
+  br label %L0
+L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
+  %t0 = call ptr @nt_arr_new(double 0x4014000000000000)
+  %t1 = bitcast double 0x4008000000000000 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t1)
+  %t2 = bitcast double 0x3FF0000000000000 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t2)
+  %t3 = bitcast double 0x4010000000000000 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t3)
+  %t4 = bitcast double 0x3FF0000000000000 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t4)
+  %t5 = bitcast double 0x4014000000000000 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t5)
+  store ptr %t0, ptr %xs.addr
+  %t6 = load ptr, ptr %xs.addr
+  %t7 = call double @nt_arr_len(ptr %t6)
+  call void @js_print_num(double %t7)
+  call void @js_print_newline()
+  %t8 = load ptr, ptr %xs.addr
+  %t9 = call i64 @nt_arr_get(ptr %t8, double 0x4000000000000000)
+  %t10 = bitcast i64 %t9 to double
+  call void @js_print_num(double %t10)
+  call void @js_print_newline()
+  %t11 = load ptr, ptr %xs.addr
+  %t12 = call double @first(ptr %t11)
+  call void @js_print_num(double %t12)
+  call void @js_print_newline()
+  %t13 = load ptr, ptr %xs.addr
+  call void @nt_arr_free(ptr %t13)
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures generics/erased-types.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_with(ptr, double, i64)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare double @nt_date_now()
+declare ptr @nt_btoa(ptr)
+declare ptr @nt_atob(ptr)
+declare ptr @nt_from_char_code(double)
+declare ptr @nt_from_code_point(double)
+declare i32 @nt_num_is_finite(double)
+declare i32 @nt_num_is_integer(double)
+declare i32 @nt_num_is_safe_integer(double)
+declare ptr @nt_arr_from_str(ptr)
+declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
+declare ptr @nt_http_get(ptr, ptr, ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare ptr @nt_read_key()
+declare void @nt_raw_mode(i32)
+declare void @nt_exit(double)
+declare ptr @nt_map_new()
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare i64 @nt_map_size(ptr)
+declare ptr @nt_set_new()
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_set_size(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+
+define double @sum(ptr %xs) {
+entry:
+  %xs.addr = alloca ptr
+  %total.addr = alloca double
+  %x.addr = alloca double
+  %s1 = alloca double
+  br label %L0
+L0:
+  store ptr %xs, ptr %xs.addr
+  store double 0x0000000000000000, ptr %total.addr
+  %t0 = load ptr, ptr %xs.addr
+  store double 0x0000000000000000, ptr %s1
+  %t1 = call double @nt_arr_len(ptr %t0)
+  br label %of2
+of2:
+  %t2 = load double, ptr %s1
+  %t3 = fcmp olt double %t2, %t1
+  br i1 %t3, label %ofbody3, label %endof5
+ofbody3:
+  %t4 = load double, ptr %s1
+  %t5 = call i64 @nt_arr_get(ptr %t0, double %t4)
+  %t6 = bitcast i64 %t5 to double
+  store double %t6, ptr %x.addr
+  %t7 = load double, ptr %total.addr
+  %t8 = load double, ptr %x.addr
+  %t9 = fadd double %t7, %t8
+  store double %t9, ptr %total.addr
+  br label %ofupd4
+ofupd4:
+  %t10 = load double, ptr %s1
+  %t11 = fadd double %t10, 1.0
+  store double %t11, ptr %s1
+  br label %of2
+endof5:
+  %t12 = load double, ptr %total.addr
+  ret double %t12
+}
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  %data.addr = alloca ptr
+  br label %L0
+L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
+  %t0 = call ptr @nt_arr_new(double 0x4010000000000000)
+  %t1 = bitcast double 0x3FF0000000000000 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t1)
+  %t2 = bitcast double 0x4000000000000000 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t2)
+  %t3 = bitcast double 0x4008000000000000 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t3)
+  %t4 = bitcast double 0x4010000000000000 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t4)
+  store ptr %t0, ptr %data.addr
+  %t5 = load ptr, ptr %data.addr
+  %t6 = call double @sum(ptr %t5)
+  call void @js_print_num(double %t6)
+  call void @js_print_newline()
+  %t7 = load ptr, ptr %data.addr
+  call void @nt_arr_free(ptr %t7)
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures generics/generic-arrow.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_with(ptr, double, i64)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare double @nt_date_now()
+declare ptr @nt_btoa(ptr)
+declare ptr @nt_atob(ptr)
+declare ptr @nt_from_char_code(double)
+declare ptr @nt_from_code_point(double)
+declare i32 @nt_num_is_finite(double)
+declare i32 @nt_num_is_integer(double)
+declare i32 @nt_num_is_safe_integer(double)
+declare ptr @nt_arr_from_str(ptr)
+declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
+declare ptr @nt_http_get(ptr, ptr, ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare ptr @nt_read_key()
+declare void @nt_raw_mode(i32)
+declare void @nt_exit(double)
+declare ptr @nt_map_new()
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare i64 @nt_map_size(ptr)
+declare ptr @nt_set_new()
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_set_size(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+
+define double @arrow_0(ptr %__clo, double %x) {
+entry:
+  %x.addr = alloca double
+  br label %L0
+L0:
+  store double %x, ptr %x.addr
+  %t0 = load double, ptr %x.addr
+  ret double %t0
+}
+
+define double @arrow_1(ptr %__clo, double %a, double %b) {
+entry:
+  %a.addr = alloca double
+  %b.addr = alloca double
+  br label %L0
+L0:
+  store double %a, ptr %a.addr
+  store double %b, ptr %b.addr
+  %t0 = load double, ptr %a.addr
+  ret double %t0
+}
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  %identity.addr = alloca ptr
+  %dup.addr = alloca ptr
+  br label %L0
+L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
+  %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
+  %t1 = ptrtoint ptr @arrow_0 to i64
+  %t2 = getelementptr i64, ptr %t0, i64 0
+  store i64 %t1, ptr %t2
+  store ptr %t0, ptr %identity.addr
+  %t3 = call ptr @nt_obj_new(double 0x3FF0000000000000)
+  %t4 = ptrtoint ptr @arrow_1 to i64
+  %t5 = getelementptr i64, ptr %t3, i64 0
+  store i64 %t4, ptr %t5
+  store ptr %t3, ptr %dup.addr
+  %t6 = load ptr, ptr %identity.addr
+  %t7 = getelementptr i64, ptr %t6, i64 0
+  %t8 = load i64, ptr %t7
+  %t9 = inttoptr i64 %t8 to ptr
+  %t10 = call double %t9(ptr %t6, double 0x4058C00000000000)
+  call void @js_print_num(double %t10)
+  call void @js_print_newline()
+  %t11 = load ptr, ptr %dup.addr
+  %t12 = getelementptr i64, ptr %t11, i64 0
+  %t13 = load i64, ptr %t12
+  %t14 = inttoptr i64 %t13 to ptr
+  %t15 = call double %t14(ptr %t11, double 0x401C000000000000, double 0x4020000000000000)
+  call void @js_print_num(double %t15)
+  call void @js_print_newline()
+  %t16 = load ptr, ptr %identity.addr
+  %t17 = getelementptr i64, ptr %t16, i64 0
+  %t18 = load i64, ptr %t17
+  %t19 = inttoptr i64 %t18 to ptr
+  %t20 = call double %t19(ptr %t16, double 0x4000000000000000)
+  %t21 = load ptr, ptr %identity.addr
+  %t22 = getelementptr i64, ptr %t21, i64 0
+  %t23 = load i64, ptr %t22
+  %t24 = inttoptr i64 %t23 to ptr
+  %t25 = call double %t24(ptr %t21, double 0x4008000000000000)
+  %t26 = fadd double %t20, %t25
+  call void @js_print_num(double %t26)
+  call void @js_print_newline()
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures generics/identity.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_with(ptr, double, i64)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare double @nt_date_now()
+declare ptr @nt_btoa(ptr)
+declare ptr @nt_atob(ptr)
+declare ptr @nt_from_char_code(double)
+declare ptr @nt_from_code_point(double)
+declare i32 @nt_num_is_finite(double)
+declare i32 @nt_num_is_integer(double)
+declare i32 @nt_num_is_safe_integer(double)
+declare ptr @nt_arr_from_str(ptr)
+declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
+declare ptr @nt_http_get(ptr, ptr, ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare ptr @nt_read_key()
+declare void @nt_raw_mode(i32)
+declare void @nt_exit(double)
+declare ptr @nt_map_new()
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare i64 @nt_map_size(ptr)
+declare ptr @nt_set_new()
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_set_size(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+
+define double @id(double %x) {
+entry:
+  %x.addr = alloca double
+  br label %L0
+L0:
+  store double %x, ptr %x.addr
+  %t0 = load double, ptr %x.addr
+  ret double %t0
+}
+
+define double @pickFirst(double %a, double %b) {
+entry:
+  %a.addr = alloca double
+  %b.addr = alloca double
+  br label %L0
+L0:
+  store double %a, ptr %a.addr
+  store double %b, ptr %b.addr
+  %t0 = load double, ptr %a.addr
+  ret double %t0
+}
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  br label %L0
+L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
+  %t0 = call double @id(double 0x4014000000000000)
+  call void @js_print_num(double %t0)
+  call void @js_print_newline()
+  %t1 = call double @id(double 0x4008000000000000)
+  %t2 = call double @id(double 0x4010000000000000)
+  %t3 = fadd double %t1, %t2
+  call void @js_print_num(double %t3)
+  call void @js_print_newline()
+  %t4 = call double @pickFirst(double 0x4024000000000000, double 0x4034000000000000)
+  call void @js_print_num(double %t4)
+  call void @js_print_newline()
+  ret i32 0
+}
+"
+`;
+
 exports[`fixtures stage1/01_integer.ts emits stable LLVM IR (snapshot) 1`] = `
 "; ModuleID = 'nativets'
 declare void @js_print_num(double)
