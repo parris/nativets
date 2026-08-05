@@ -149,6 +149,41 @@ export function runWithNodeIO(source: string, io: IOInput = {}): RunResult {
   }
 }
 
+/* ============================================================
+ * stdlib: URL — differential harness. nativets has no classes, so the WHATWG URL
+ * API is exposed as functional builtins (urlProtocol(u), urlSearchParam(u,key),
+ * …). node has `new URL(...)` instead, so for the ORACLE run only we prepend a
+ * tiny polyfill that defines those globals in terms of `new URL(...)` — making
+ * node the oracle for our functional subset. Harmless for any other fixture (it
+ * just defines unused globals), but kept in a dedicated oracle like Host I/O so
+ * the generic fixtures oracle stays untouched.
+ * ============================================================ */
+const URL_POLYFILL = [
+  ";(function () {",
+  "  globalThis.urlProtocol = (u) => new URL(u).protocol;",
+  "  globalThis.urlHost = (u) => new URL(u).host;",
+  "  globalThis.urlHostname = (u) => new URL(u).hostname;",
+  "  globalThis.urlPathname = (u) => new URL(u).pathname;",
+  "  globalThis.urlSearch = (u) => new URL(u).search;",
+  "  globalThis.urlHash = (u) => new URL(u).hash;",
+  "  globalThis.urlSearchParam = (u, k) => { const v = new URL(u).searchParams.get(k); return v === null ? '' : v; };",
+  "})();",
+  "",
+].join("\n");
+
+/** The oracle for a stdlib-URL fixture: node with the URL polyfill prepended. */
+export function runWithNodeURL(source: string): RunResult {
+  const dir = scratch("oracle-url");
+  try {
+    const file = join(dir, "case.ts"); // .ts so node strips type annotations
+    writeFileSync(file, URL_POLYFILL + source);
+    const proc = spawnSync("node", [file], { encoding: "utf8" });
+    return { stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", exitCode: proc.status ?? -1 };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /** Compile a Host-I/O fixture and run the binary with the same argv/stdin/env. */
 export async function compileAndRunIO(source: string, io: IOInput = {}): Promise<RunResult> {
   const dir = scratch("run-io");
