@@ -22,7 +22,9 @@
 #include <math.h>
 #include <stdint.h>
 #include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
+#if !defined(__wasi__)
 #include <termios.h>  /* tcgetattr/tcsetattr — raw-mode single-key input   */
+#endif                /* wasi-libc has no termios; raw mode degrades to the piped path */
 
 /* ---- allocation (never-free; see header comment) ---- */
 
@@ -909,6 +911,7 @@ const char *nt_read_line(void) {
  * from the SAME lazily-slurped stdin buffer + cursor that readLine/readStdin use,
  * so a piped keystroke script is deterministic and matches the node oracle
  * byte-for-byte. libc/termios only, so it cross-compiles unchanged. */
+#if !defined(__wasi__)
 static struct termios g_saved_termios;
 static int            g_raw_active = 0;
 
@@ -928,6 +931,11 @@ void nt_raw_mode(int32_t on) {
     g_raw_active = 0;
   }
 }
+#else
+/* WASI has no termios: raw mode is a no-op, so readKey serves bytes from the piped
+ * stdin buffer (nt_read_key's non-tty path) — deterministic and still matches node. */
+void nt_raw_mode(int32_t on) { (void)on; }
+#endif
 
 const char *nt_read_key(void) {
   if (isatty(STDIN_FILENO)) {
