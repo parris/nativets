@@ -103,11 +103,14 @@ export async function expectMatchesNode(source: string): Promise<{
 /** Declared inputs a Host-I/O fixture is run with (identical on both sides). */
 export interface IOInput { args?: string[]; stdin?: string; env?: Record<string, string>; }
 
-/** node-only polyfill for the stdin builtins (see block comment above). */
+/** node-only polyfill for the stdin builtins (ESM — the repo is `"type":"module"`,
+ * so `require` is unavailable; use a top-level import). The file is a `.ts` so node
+ * strips type annotations, matching `runWithNode` — real typed programs work. */
 const STDIN_POLYFILL = [
+  'import { readFileSync as __rfs } from "node:fs";',
   ";(function () {",
   "  let __buf = null, __pos = 0;",
-  '  function __load() { if (__buf === null) { try { __buf = require("fs").readFileSync(0, "utf8"); } catch (e) { __buf = ""; } } }',
+  '  function __load() { if (__buf === null) { try { __buf = __rfs(0, "utf8"); } catch (e) { __buf = ""; } } }',
   "  globalThis.readStdin = function () { __load(); const r = __buf.slice(__pos); __pos = __buf.length; return r; };",
   "  globalThis.readLine = function () {",
   "    __load();",
@@ -124,7 +127,7 @@ const STDIN_POLYFILL = [
 export function runWithNodeIO(source: string, io: IOInput = {}): RunResult {
   const dir = scratch("oracle-io");
   try {
-    const file = join(dir, "case.js"); // .js so node runs it as CommonJS (require available)
+    const file = join(dir, "case.ts"); // .ts so node strips type annotations (like runWithNode)
     writeFileSync(file, STDIN_POLYFILL + source);
     const proc = spawnSync("node", [file, ...(io.args ?? [])], {
       encoding: "utf8",
