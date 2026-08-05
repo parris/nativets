@@ -328,6 +328,91 @@ console.log((2 ** 60).toString(16), (2 ** 60).toString(2));
   },
 ]);
 
+differential("stdlib batch 1: btoa / atob (base64) match node", [
+  {
+    name: "btoa/atob — round trip, every padding length, the empty string",
+    code: `
+console.log(btoa("hello"), btoa("hi"), btoa("h"), btoa(""));
+console.log(atob("aGVsbG8="), atob("aGk="), atob("aA=="), atob(""));
+console.log(atob(btoa("nativets: TS to native")) === "nativets: TS to native");
+console.log(btoa("Man"), btoa("Ma"), btoa("M"));
+console.log(btoa("nativets").length, atob("bmF0aXZldHM="));
+`,
+  },
+]);
+
+differential("stdlib batch 1: structuredClone (type-directed deep copy) matches node", [
+  {
+    name: "structuredClone — scalars pass through, objects/arrays are NEW (not the same reference)",
+    code: `
+console.log(structuredClone(5), structuredClone("hi"), structuredClone(true));
+const arr = [1, 2, 3];
+const ca = structuredClone(arr);
+console.log(ca.join("-"), ca.length, ca === arr);
+const words = ["a", "b"];
+const cw = structuredClone(words);
+console.log(cw.join("|"), cw === words);
+`,
+  },
+  {
+    name: "structuredClone — DEEP: nested objects and arrays are cloned, not shared",
+    code: `
+const o = { name: "ada", scores: [1, 2, 3], inner: { x: 1, y: 2 } };
+const c = structuredClone(o);
+console.log(c.name, c.scores.join(","), c.inner.x + c.inner.y);
+console.log(c === o, c.inner === o.inner, c.scores === o.scores);
+console.log(JSON.stringify(c));
+console.log(JSON.stringify(c) === JSON.stringify(o));
+const rows = [{ id: 1 }, { id: 2 }];
+const cr = structuredClone(rows);
+console.log(cr.length, cr[0].id + cr[1].id, cr === rows, cr[0] === rows[0]);
+`,
+  },
+]);
+
+describe("stdlib batch 1: Date.now() — non-deterministic, so bounded not equal", () => {
+  // node cannot be the oracle for a clock read, so this is a BEHAVIORAL test:
+  // Date.now() must be a plausible epoch-ms value and must never go backwards.
+  test("Date.now() is monotonic and in a plausible epoch-ms range", async () => {
+    const { compileAndRun } = await import("./harness.ts");
+    const r = await compileAndRun(`
+const a = Date.now();
+let spin = 0;
+for (let i = 0; i < 200000; i++) { spin += i; }
+const b = Date.now();
+console.log(a);
+console.log(b);
+console.log(b >= a, spin > 0);
+`);
+    const [a, b, flags] = r.stdout.trim().split("\n");
+    expect(r.exitCode).toBe(0);
+    expect(flags).toBe("true true");
+    expect(Number(a)).toBeGreaterThan(1.7e12);   // after 2023-11
+    expect(Number(a)).toBeLessThan(4e12);        // before 2096
+    expect(Number(b)).toBeGreaterThanOrEqual(Number(a));
+    expect(Number.isInteger(Number(a))).toBe(true); // whole milliseconds, like node
+  });
+});
+
+describe("stdlib batch 1: non-ASCII strings — the documented UTF-8-byte divergence", () => {
+  // docs/divergences.md §A.2: our strings are UTF-8 BYTES, node's are UTF-16 code
+  // units. So for non-ASCII the INDEX SPACE differs, and node cannot be the oracle.
+  // These are BEHAVIORAL assertions that pin what we actually do — never silently.
+  test("indices/charCodeAt are byte-based; codePointAt still decodes the code point", async () => {
+    const { compileAndRun } = await import("./harness.ts");
+    const r = await compileAndRun(`
+console.log("café".length);          // 5 bytes (node: 4 UTF-16 units)
+console.log("é".charCodeAt(0));      // 195 = first UTF-8 byte (node: 233)
+console.log("é".codePointAt(0));     // 233 = the code point (node: 233 — same)
+console.log("é".length);             // 2 bytes (node: 1)
+console.log("abc".charCodeAt(1));    // ASCII is identical to node
+console.log(String.fromCharCode(233) === "é"); // encode side round-trips
+`);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe(["5", "195", "233", "2", "98", "true", ""].join("\n"));
+  });
+});
+
 describe("stdlib batch 1: in-place array mutators are REJECTED (NT1606), like .push/.pop", () => {
   // Arrays are immutable (Stage 29). node's .fill/.sort/.splice/.shift/.unshift/.copyWithin
   // all mutate the receiver, so they are refused with the mutation diagnostic that names

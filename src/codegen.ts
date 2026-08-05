@@ -1751,6 +1751,10 @@ class FnGen {
         }
       }
     }
+    // stdlib Batch 1: structuredClone(v) — the type-directed deep copy.
+    if (e.callee.kind === "Identifier" && e.callee.name === "structuredClone" && !this.isBound("structuredClone")) {
+      return this.genDeepClone(this.genExpr(e.args[0]!));
+    }
     // class instance method call: `inst.m(args)` → `C.m(inst, …args)` (the lowered fn).
     if (e.callee.kind === "MemberExpr") {
       const cls = classTag(e.callee.object.ty ?? "");
@@ -2156,6 +2160,65 @@ class FnGen {
       }
       default: throw new Error(`unsupported string method .${method}`);
     }
+  }
+
+  /** structuredClone: a deep copy generated from the STATIC type (the same
+   *  type-directed walk shape as JSON.stringify). Scalars/strings are values and
+   *  pass through; an object becomes a fresh slot block with each field cloned;
+   *  an array becomes a fresh vector with each element cloned in a loop. */
+  private genDeepClone(v: Val): Val {
+    const ty = v.ty;
+    if (isObjectTy(ty)) {
+      const fields = objectFields(ty);
+      const obj = this.fresh();
+      this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(Math.max(fields.length, 1))})`);
+      fields.forEach((f, i) => {
+        const gep = this.fresh();
+        this.emit(`${gep} = getelementptr i64, ptr ${v.v}, i64 ${i}`);
+        const slot = this.fresh();
+        this.emit(`${slot} = load i64, ptr ${gep}`);
+        const cloned = this.genDeepClone({ v: this.fromSlot(slot, f.ty), ty: f.ty });
+        const dst = this.fresh();
+        this.emit(`${dst} = getelementptr i64, ptr ${obj}, i64 ${i}`);
+        this.emit(`store i64 ${this.toSlot(cloned)}, ptr ${dst}`);
+      });
+      return { v: obj, ty };
+    }
+    if (isArrayTy(ty)) {
+      const el = elemTy(ty);
+      // A scalar element array is a flat block — one runtime copy is already deep.
+      if (!isObjectTy(el) && !isArrayTy(el)) {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_arr_copy(ptr ${v.v})`);
+        return { v: t, ty };
+      }
+      const len = this.fresh();
+      this.emit(`${len} = call double @nt_arr_len(ptr ${v.v})`);
+      const out = this.fresh();
+      this.emit(`${out} = call ptr @nt_arr_new(double ${len})`);
+      const idx = this.slot("number");
+      this.emit(`store double 0x0000000000000000, ptr ${idx}`);
+      const cond = this.label("clc"), body = this.label("clb"), end = this.label("cle");
+      this.terminate(`br label %${cond}`);
+      this.to(this.block(cond));
+      const iC = this.fresh();
+      this.emit(`${iC} = load double, ptr ${idx}`);
+      const cmp = this.fresh();
+      this.emit(`${cmp} = fcmp olt double ${iC}, ${len}`);
+      this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
+      this.to(this.block(body));
+      const slot = this.fresh();
+      this.emit(`${slot} = call i64 @nt_arr_get(ptr ${v.v}, double ${iC})`);
+      const cloned = this.genDeepClone({ v: this.fromSlot(slot, el), ty: el });
+      this.emit(`call double @nt_arr_push(ptr ${out}, i64 ${this.toSlot(cloned)})`);
+      const iN = this.fresh();
+      this.emit(`${iN} = fadd double ${iC}, 1.0`);
+      this.emit(`store double ${iN}, ptr ${idx}`);
+      this.terminate(`br label %${cond}`);
+      this.to(this.block(end));
+      return { v: out, ty };
+    }
+    return v; // number / string / boolean — value semantics, nothing to clone
   }
 
   /** Build a `string[]` array literal from compile-time-known keys (Object.keys / for-in). */

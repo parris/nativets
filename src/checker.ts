@@ -1007,6 +1007,16 @@ class Checker {
       throw nyi(NYI.OBJECT, `method call on ${recv}`);
     }
 
+    // stdlib Batch 1: structuredClone(v) — a TYPE-DIRECTED deep copy, so its result
+    // type is its argument's type (identity), like the structured-clone algorithm.
+    if (e.callee.kind === "Identifier" && e.callee.name === "structuredClone" && !scope.lookup("structuredClone")) {
+      if (e.args.length !== 1) throw typeError("structuredClone expects 1 argument");
+      const t = this.type(e.args[0]!, scope);
+      if (!(t === "number" || t === "string" || t === "boolean" || isObjectTy(t) || isArrayTy(t)))
+        throw nyi(NYI.OBJECT, `structuredClone of ${t} (only scalars, objects and arrays are cloneable — node throws DataCloneError for functions)`);
+      return t;
+    }
+
     // global builtin, function value, or user function
     if (e.callee.kind === "Identifier") {
       const g = GLOBAL_FUNCS[e.callee.name];
