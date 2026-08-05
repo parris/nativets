@@ -120,6 +120,17 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
 
 ---
 
+## Example apps (north-star targets — drive the roadmap)
+
+Two target apps in [`docs/examples.md`](examples.md), each staged from achievable-now to the full
+vision, forcing capabilities that make nativets real:
+- **Calculator (cross-platform UI app):** expression engine → CLI calculator (once input exists) →
+  TUI (the achievable cross-platform "UI") → native GUI (per-platform UI FFI, north-star).
+- **LLM chat (CLI, key via arg):** argv + stdin loop + JSON (✅) → HTTP/TLS networking → chat.
+
+**Both depend on a Host I/O FFI** (argv/stdin/env — which is also self-hosting SH4): today nativets
+has no input at all. Build that first; it's the highest-leverage unlock.
+
 ## Ongoing / infrastructure
 
 - **Distribution:**
