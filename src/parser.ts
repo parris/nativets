@@ -87,6 +87,9 @@ class Parser {
   }
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
+  /** `const` declarators desugared from binding patterns in the parameter list being
+   *  parsed; spliced at the top of that function's body (see parsePatternParam). */
+  private paramPrelude: Stmt[] = [];
   private ident(name: string): Expr { return { kind: "Identifier", name }; }
 
   /**
@@ -566,6 +569,61 @@ class Parser {
     return { kind: "VarDecl", declKind, decls };
   }
 
+  /**
+   * A BINDING PATTERN in parameter position — `([k, v]) => …`, `({ name, age }) => …`.
+   *
+   * Reuses the Stage-15 declaration desugaring: the parameter itself becomes a fresh
+   * temp (`__d0`), and the pattern turns into `const` declarators reading out of it,
+   * queued in `paramPrelude` for the caller to splice at the top of the body. Nothing
+   * downstream (checker, ownership, codegen) sees a pattern — only ordinary locals.
+   */
+  private parsePatternParam(): Param {
+    const tmp = this.freshTmp();
+    const decls: Declarator[] = [];
+    if (this.at("[")) {
+      this.eat("[");
+      let i = 0;
+      while (!this.at("]")) {
+        if (this.at(",")) { this.eat(","); i++; continue; } // elision hole — no binding
+        const rest = this.at("...") && (this.eat("..."), true);
+        const name = this.expectIdent();
+        decls.push({
+          name,
+          init: rest
+            ? { kind: "CallExpr", callee: { kind: "MemberExpr", object: this.ident(tmp), property: "slice" }, args: [{ kind: "NumberLiteral", value: i }] }
+            : { kind: "IndexExpr", object: this.ident(tmp), index: { kind: "NumberLiteral", value: i } },
+        });
+        i++;
+        if (this.at(",")) this.eat(","); else break;
+      }
+      this.eat("]");
+    } else {
+      this.eat("{");
+      while (!this.at("}")) {
+        const key = this.expectIdent();
+        const binding = this.at(":") ? (this.eat(":"), this.expectIdent()) : key;
+        decls.push({ name: binding, init: { kind: "MemberExpr", object: this.ident(tmp), property: key } });
+        if (this.at(",")) this.eat(","); else break;
+      }
+      this.eat("}");
+    }
+    if (this.at("?")) this.eat("?");
+    let annot: Ty | undefined;
+    if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
+    let def: Expr | undefined;
+    if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
+    if (decls.length) this.paramPrelude.push({ kind: "VarDecl", declKind: "const", decls });
+    return { name: tmp, annot, default: def, rest: false };
+  }
+
+  /** Take (and clear) the pattern-parameter prelude. Called right after a parameter
+   *  list is parsed, before the body — so a nested arrow's prelude never mixes in. */
+  private takeParamPrelude(): Stmt[] {
+    const p = this.paramPrelude;
+    this.paramPrelude = [];
+    return p;
+  }
+
   // Build a Param, applying optional-param (`x?: T`) erasure: an optional param is a
   // nullable `T | undefined` with an implicit `undefined` default, so it can be omitted
   // (mirrors the optional-field `{ a?: T }` encoding).
@@ -596,6 +654,7 @@ class Parser {
             paramProp = true; this.next();
           }
         }
+        if (this.at("[") || this.at("{")) { params.push(this.parsePatternParam()); continue; } // `function f([a, b]: T[])`
         let rest = false;
         if (this.at("...")) { this.eat("..."); rest = true; }
         const pname = this.expectIdent();
@@ -624,9 +683,10 @@ class Parser {
     if (typeParams.length) this.typeParamScopes.push(new Set(typeParams));
     try {
       const params = this.parseParamList();
+      const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
       let returnAnnot: Ty | undefined;
       if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
-      const body = this.parseBlock();
+      const body = [...prelude, ...this.parseBlock()];
       return typeParams.length
         ? { kind: "FuncDecl", name, params, returnAnnot, body, typeParams }
         : { kind: "FuncDecl", name, params, returnAnnot, body };
@@ -700,18 +760,20 @@ class Parser {
       if (member === "constructor" && this.at("(")) {
         if (ctorParams) throw parseError(`Duplicate constructor at ${tok.line}:${tok.col}`);
         ctorParams = this.parseParamList(true); // ctor: access-modified params → parameter properties
+        const patternPrelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
         for (const p of ctorParams) if (p.rest) throw nyi(NYI.CLASS_FEATURE, "rest parameter in a constructor");
         if (this.at(":")) { this.eat(":"); this.parseType(); } // ctor return annot (ignored)
         this.inCtor = true; this.inErrorCtor = extendsError;
-        ctorBody = this.parseBlock();
+        ctorBody = [...patternPrelude, ...this.parseBlock()];
         this.inCtor = false; this.inErrorCtor = false;
         continue;
       }
       if (this.at("(")) {
         const params = this.parseParamList();
+        const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
         let returnAnnot: Ty | undefined;
         if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
-        methods.push({ name: member, params, returnAnnot, body: this.parseBlock() });
+        methods.push({ name: member, params, returnAnnot, body: [...prelude, ...this.parseBlock()] });
         continue;
       }
       // field declaration: `name: Type;` / `name = init;` / `name: Type = init;` (optional `?`).
@@ -1002,6 +1064,7 @@ class Parser {
       this.eat("(");
       if (!this.at(")")) {
         do {
+          if (this.at("[") || this.at("{")) { params.push(this.parsePatternParam()); continue; } // `([k, v]) => …`
           let rest = false;
           if (this.at("...")) { this.eat("..."); rest = true; }
           const name = this.expectIdent();
@@ -1017,10 +1080,15 @@ class Parser {
     } else {
       params.push({ name: this.expectIdent() });
     }
+    const prelude = this.takeParamPrelude();
     if (this.at(":")) { this.eat(":"); this.parseType(); }
     this.eat("=>");
-    if (this.at("{")) return { kind: "ArrowFunction", params, body: this.parseBlock(), exprBody: false };
-    return { kind: "ArrowFunction", params, body: this.parseAssign(), exprBody: true };
+    if (this.at("{")) return { kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false };
+    const body = this.parseAssign();
+    // A pattern parameter needs statements to bind its names, so an expression body
+    // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
+    if (prelude.length) return { kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false };
+    return { kind: "ArrowFunction", params, body, exprBody: true };
   }
 
   private parseAssign(): Expr {
