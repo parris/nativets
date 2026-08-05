@@ -111,6 +111,13 @@ export const NYI = {
   // `export default`, `import * as ns`, `export * from`, dynamic `import()`, and
   // bare/node_modules specifiers.
   MODULE: { code: "NT1017", milestone: "M3", hint: "supported module syntax: `import { a, b as c } from \"./rel/path.ts\"`, `import type { T } from …`, `import \"./m.ts\"`, `export function|const|let|class|type|interface`, `export { a as b }`, `export { x } from \"./y.ts\"`" },
+  // `instanceof` is decided at COMPILE TIME from the static type of the left operand —
+  // exact, because a value's static type IS its class here (user classes have no
+  // inheritance, and there are no polymorphic references). What this code refuses is a
+  // right operand whose class membership a static type cannot decide: `Error` (nativets
+  // models it structurally as `{message:string}`, so an Error and a plain record with a
+  // `message` are indistinguishable), `Object`/`Function`, and any non-class value.
+  INSTANCEOF: { code: "NT1021", milestone: "later", hint: "`x instanceof C` works for a user class and for Array/Map/Set/Uint8Array; for an Error, compare a discriminant field (e.g. `e.code !== undefined`) instead" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

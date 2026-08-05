@@ -1121,6 +1121,18 @@ class Parser {
     let left = this.parseUnary();
     for (;;) {
       const t = this.peek();
+      // `x instanceof C` — a keyword operator at relational precedence (10). The right
+      // operand is a CLASS NAME, not an expression: nativets decides the test from the
+      // left operand's static type (see the checker), so a computed constructor has
+      // nothing to resolve against and is refused rather than guessed.
+      if (t.type === "ident" && t.value === "instanceof" && BIN["<"]!.prec >= minPrec) {
+        this.next();
+        const cls = this.peek();
+        if (cls.type !== "ident") throw nyi(NYI.INSTANCEOF, `'instanceof' with a computed right operand at ${cls.line}:${cls.col}`);
+        this.next();
+        left = { kind: "InstanceOfExpr", object: left, className: cls.value };
+        continue;
+      }
       if (t.type !== "punct") break;
       const info = BIN[t.value];
       if (!info || info.prec < minPrec) break;

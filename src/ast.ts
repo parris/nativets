@@ -259,6 +259,7 @@ export type Expr =
   | ArrowFunction
   | NewExpr
   | AsExpr
+  | InstanceOfExpr
   | CallExpr;
 
 export type Stmt =
@@ -394,6 +395,18 @@ export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
 export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
+
+/**
+ * `x instanceof C` — decided at COMPILE TIME from the static type of `x`.
+ *
+ * A value's static type IS its exact class in this subset: user classes have no
+ * inheritance (only `extends Error`), and there are no polymorphic references, so
+ * "does this value's runtime class chain contain C" has one answer per site, and the
+ * checker fills it into `result`. `C` must be a class the compiler can name (a user
+ * class, or `Array`/`Map`/`Set`/`Uint8Array`); anything else is rejected (NT1021)
+ * rather than guessed.
+ */
+export interface InstanceOfExpr { kind: "InstanceOfExpr"; object: Expr; className: string; result?: boolean; ty?: Ty; }
 
 /** Arrow function. `captures` (filled by the checker) are free vars closed over. */
 export interface ArrowFunction {

@@ -1,0 +1,9 @@
+diagnostic NT0001
+build failure: clang exploded
+true false
+true
+true false
+true false
+true true false
+true
+true

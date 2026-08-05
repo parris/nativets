@@ -1738,6 +1738,12 @@ class FnGen {
         if (e.expr.ty === "Dyn") return this.genDynNarrow(this.genExpr(e.expr).v, e.ty);
         return { v: this.genExpr(e.expr).v, ty: e.ty };
       }
+      case "InstanceOfExpr": {
+        // The checker already decided the test from the static type; emit the constant.
+        // The left operand is still evaluated — it may have side effects (`f() instanceof C`).
+        this.genExpr(e.object);
+        return { v: e.result ? "true" : "false", ty: "boolean" };
+      }
       case "IndexAssign": {
         // Element write `u[i] = v` (+ compound) — only Uint8Array reaches codegen (the
         // checker rejects immutable array/object index-assign with NT1606). The store
@@ -2850,6 +2856,7 @@ class FnGen {
       case "CallExpr": this.subExpr(e.callee, map); for (const a of e.args) this.subExpr(a, map); return;
       case "NewExpr": for (const a of e.args) this.subExpr(a, map); return;
       case "AsExpr": this.subExpr(e.expr, map); return;
+      case "InstanceOfExpr": this.subExpr(e.object, map); return;
       case "ArrowFunction": {
         const child = this.childRenameMap(e.params, e.body, e.exprBody, map);
         for (const p of e.params) if (p.default) this.subExpr(p.default, child);

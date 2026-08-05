@@ -966,6 +966,21 @@ class Checker {
         return "{message:string}";
       }
       case "AsExpr": { this.type(e.expr, scope); return e.ty; } // identity retype
+      case "InstanceOfExpr": {
+        // `x instanceof C`, decided here and folded to a constant by codegen. A value's
+        // static type IS its exact class in this subset (user classes don't inherit, and
+        // nothing is polymorphic), so the answer is the same one node computes.
+        const ot = this.type(e.object, scope);
+        const c = e.className;
+        if (c === "Array") e.result = isArrayTy(ot);
+        else if (c === "Uint8Array") e.result = isBytesTy(ot);
+        else if (c === "Map") e.result = isMapTy(ot);
+        else if (c === "Set") e.result = isSetTy(ot);
+        else if (this.functions.has(`${c}.constructor`)) e.result = classTag(ot) === c;
+        else throw nyi(NYI.INSTANCEOF, `'instanceof ${c}'${c === "Error" ? " (Error is modelled structurally as {message:string})" : ""}`);
+        e.ty = "boolean";
+        return "boolean";
+      }
       case "CallExpr": return this.inferCall(e, scope, hint);
     }
   }
@@ -1812,6 +1827,8 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "ObjectLiteral": e.properties.forEach((p) => collectIdents(p.value, out)); return;
     case "SpreadExpr": collectIdents(e.argument, out); return;
     case "SequenceExpr": e.exprs.forEach((x) => collectIdents(x, out)); return;
+    case "AsExpr": collectIdents(e.expr, out); return;
+    case "InstanceOfExpr": collectIdents(e.object, out); return; // the class name is not a value
     case "ArrowFunction": if (e.exprBody) collectIdents(e.body as Expr, out); return;
     default: return; // literals
   }
