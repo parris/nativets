@@ -42,6 +42,11 @@ async function buildAndRun(file: string): Promise<{ stdout: string; stderr: stri
 const CASES: { name: string; file: string; expected: string }[] = [
   // --- 1. receive(ms): a timeout is observably `undefined`, not a sentinel number ---
   { name: "receive(ms) times out with undefined; a waiting message does not", file: "timeout.ts", expected: "7\n-1\n" },
+
+  // --- 2. selective receive: the save queue keeps the skipped messages, in order ---
+  { name: "receiveMatch picks out of the middle; skipped messages stay queued in order", file: "selective.ts", expected: "200\n1\n2\n3\n" },
+  { name: "a selective receive that never matches times out and consumes nothing", file: "selective_timeout.ts", expected: "-1\n7\n8\n" },
+  { name: "a match arriving while blocked resumes the scan at the first new message", file: "selective_late.ts", expected: "9\n1\n2\n" },
 ];
 
 describe("B3 v4 actors — selective receive / timeouts / string messages", () => {
