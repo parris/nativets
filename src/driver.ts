@@ -36,7 +36,7 @@ import hamtSource from "../runtime/nt_hamt.c" with { type: "text" };
 import hamtHeader from "../runtime/nt_hamt.h" with { type: "text" };
 import mapsetSource from "../runtime/nt_mapset.c" with { type: "text" };
 
-export type Target = "host" | "ios" | "ios-sim" | "android";
+export type Target = "host" | "ios" | "ios-sim" | "android" | "wasm";
 
 /** Options for a native build. `static` produces a fully static binary (no dynamic libc). */
 export interface BuildOpts { target?: Target; static?: boolean }
@@ -86,11 +86,72 @@ export function androidClang(): string {
   return join(bin, any[0]!);
 }
 
+/**
+ * Candidate wasi-sdk roots, most-specific first: the `WASI_SDK_PATH` env override, then the
+ * conventional install locations (a wasi-sdk tarball unpacked to /opt or $HOME, and the
+ * Homebrew `wasi-sdk` keg). A wasi-sdk root holds `bin/clang` (a wasm-capable LLVM) and
+ * `share/wasi-sysroot` (wasi-libc). Mirrors how `androidClang` hunts for the NDK.
+ */
+function wasiSdkRoots(): string[] {
+  const roots: string[] = [];
+  const env = process.env.WASI_SDK_PATH;
+  if (env) roots.push(env);
+  roots.push(
+    "/opt/wasi-sdk",
+    join(homedir(), "wasi-sdk"),
+    "/opt/homebrew/opt/wasi-sdk",
+    "/usr/local/opt/wasi-sdk",
+  );
+  return roots;
+}
+
+/** Whether `cc` (a clang) has the WebAssembly backend — Apple's system clang does NOT. */
+function clangSupportsWasm(cc: string): boolean {
+  const r = spawnSync(cc, ["--print-targets"], { encoding: "utf8" });
+  return r.status === 0 && /\bwasm32\b/.test(r.stdout ?? "");
+}
+
+/**
+ * Locate the wasi-libc sysroot (`--sysroot`). Prefer a wasi-sdk's bundled sysroot, then a
+ * standalone Homebrew `wasi-libc` keg. Throws a clear BuildError when none is present.
+ */
+export function wasiSysroot(): string {
+  const cands: string[] = [];
+  for (const r of wasiSdkRoots()) cands.push(join(r, "share", "wasi-sysroot"));
+  cands.push(
+    "/opt/homebrew/opt/wasi-libc/share/wasi-sysroot",
+    "/usr/local/opt/wasi-libc/share/wasi-sysroot",
+  );
+  for (const c of cands) if (existsSync(c)) return c;
+  throw new BuildError("wasi-sdk not found; set WASI_SDK_PATH (its share/wasi-sysroot is the wasi-libc sysroot)");
+}
+
+/**
+ * A wasm-capable clang for the WASI target: a wasi-sdk's bundled `bin/clang`, else a Homebrew
+ * LLVM clang, else the system `clang` iff it actually carries the WebAssembly backend (Apple's
+ * does not). Throws a clear BuildError when nothing can target wasm.
+ */
+export function wasiClang(): string {
+  const cands: string[] = [];
+  for (const r of wasiSdkRoots()) cands.push(join(r, "bin", "clang"));
+  cands.push("/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang");
+  for (const c of cands) if (existsSync(c)) return c;
+  if (clangSupportsWasm("clang")) return "clang";
+  throw new BuildError("wasi-sdk not found; set WASI_SDK_PATH (or install a clang/LLVM with the wasm32 target)");
+}
+
+/** Whether this machine can build for wasm (a wasm-capable clang + a wasi sysroot). For tests. */
+export function wasmToolchainAvailable(): boolean {
+  try { wasiClang(); wasiSysroot(); return true; } catch { return false; }
+}
+
 interface Toolchain { cc: string; flags: string[] }
 
-/** The C compiler to invoke for a target (the NDK wrapper resolves an Android clang). */
+/** The C compiler to invoke for a target (the NDK wrapper resolves an Android clang; wasm needs a wasm-capable clang). */
 function ccFor(target: Target): string {
-  return target === "android" ? androidClang() : "clang";
+  if (target === "android") return androidClang();
+  if (target === "wasm") return wasiClang();
+  return "clang";
 }
 
 /**
@@ -104,6 +165,10 @@ function targetFlags(target: Target): string[] {
     case "ios": return ["-target", `arm64-apple-ios${IOS_VERSION}`, "-isysroot", sdkPath("iphoneos")];
     case "ios-sim": return ["-target", `arm64-apple-ios${IOS_VERSION}-simulator`, "-isysroot", sdkPath("iphonesimulator")];
     case "android": return [];
+    // wasm: the wasi-sdk clang is a generic LLVM (not target-baked, unlike the NDK wrapper),
+    // so it needs both the triple and the wasi-libc sysroot. `wasiSysroot()` resolves it
+    // (throwing a clear BuildError when absent) — analogous to iOS's `-isysroot` via xcrun.
+    case "wasm": return ["--target=wasm32-wasi", "--sysroot", wasiSysroot()];
   }
 }
 
@@ -122,6 +187,8 @@ export function supportsStatic(target: Target): boolean {
     case "android": return true;
     case "ios":
     case "ios-sim": return false;
+    // wasm modules are self-contained by construction; `-static` is not a wasi link concept.
+    case "wasm": return false;
     // `host` is Apple only when we're building on macOS; on a Linux host it's a Linux ELF.
     case "host": return process.platform !== "darwin";
   }
@@ -137,7 +204,7 @@ export function resolveStatic(target: Target, requested: boolean): { flags: stri
   if (supportsStatic(target)) return { flags: ["-static"] };
   return {
     flags: [],
-    warning: `--static: a fully static libc binary is not supported on the '${target}' (Apple) target; producing the default dynamic-libc binary instead`,
+    warning: `--static: a fully static libc binary is not supported on the '${target}' target; producing the default binary instead`,
   };
 }
 
@@ -205,8 +272,15 @@ function run(cc: string, args: string[]): void {
 
 export async function buildBinary(source: string, outPath: string, opts: BuildOpts = {}): Promise<void> {
   const target = opts.target ?? "host";
-  const cc = ccFor(target);
   const { dir, ll, rt, actor, extra } = writeIR(source);
+  // Actors need the ucontext-based cooperative scheduler (nt_actor.c); wasm32-wasi has no
+  // ucontext, so gate here with a clear error instead of a cryptic link failure. Ordinary
+  // (non-actor) programs link fine — the actor runtime is only pulled in when used.
+  if (target === "wasm" && actor) {
+    rmSync(dir, { recursive: true, force: true });
+    throw new BuildError("the wasm (WASI) target does not support actors (spawn/send/receive): the actor runtime needs ucontext, which wasm32-wasi lacks");
+  }
+  const cc = ccFor(target);
   try {
     const { args, warning } = linkArgv(target, { ll, rt, actor, extra, out: outPath }, { static: opts.static });
     if (warning) console.error(`warning: ${warning}`);
