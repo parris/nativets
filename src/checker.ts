@@ -56,6 +56,14 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   // --- stdlib (web standards) Batch 1: base64 globals (differential vs node) ---
   btoa: { min: 1, max: 1, argTys: ["string"], ret: "string" },
   atob: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  // --- stdlib: URL parsing (WHATWG URL functional subset; node is the oracle) ---
+  urlProtocol: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  urlHost: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  urlHostname: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  urlPathname: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  urlSearch: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  urlHash: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  urlSearchParam: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
   __arrLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live array count
   __objLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live object count
   __strLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live heap-string count

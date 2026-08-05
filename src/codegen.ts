@@ -160,6 +160,14 @@ const DECLARES = [
   "declare i32 @nt_num_is_integer(double)",
   "declare i32 @nt_num_is_safe_integer(double)",
   "declare ptr @nt_arr_from_str(ptr)",
+  // --- stdlib: URL parsing (WHATWG URL functional subset) ---
+  "declare ptr @nt_url_protocol(ptr)",
+  "declare ptr @nt_url_host(ptr)",
+  "declare ptr @nt_url_hostname(ptr)",
+  "declare ptr @nt_url_pathname(ptr)",
+  "declare ptr @nt_url_search(ptr)",
+  "declare ptr @nt_url_hash(ptr)",
+  "declare ptr @nt_url_search_param(ptr, ptr)",
   // Networking tier (L-d): libcurl-backed HTTP(S) client (host/Linux only; conditionally linked).
   // Return the response body (rc-string); write the numeric status through the trailing double*.
   "declare ptr @nt_http_post(ptr, ptr, ptr, ptr)",
@@ -2255,6 +2263,14 @@ class FnGen {
       // --- stdlib (web standards) Batch 1: base64 globals ---
       case "btoa": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_btoa(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
       case "atob": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_atob(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      // --- stdlib: URL parsing (WHATWG URL functional subset) — string in, string out ---
+      case "urlProtocol": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_protocol(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      case "urlHost": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_host(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      case "urlHostname": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_hostname(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      case "urlPathname": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_pathname(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      case "urlSearch": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_search(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      case "urlHash": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_hash(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      case "urlSearchParam": { const u = this.genExpr(args[0]!).v; const k = this.genExpr(args[1]!).v; const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_search_param(ptr ${u}, ptr ${k})`); return { v: t, ty: "string" }; }
       case "move": return this.genExpr(args[0]!); // ownership marker; runtime identity
       // Host I/O stdin builtins — return a fresh (rc-tracked) heap string.
       case "readLine": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_line()`); return { v: t, ty: "string" }; }

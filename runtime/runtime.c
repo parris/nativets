@@ -1104,3 +1104,215 @@ void *nt_arr_from_str(const char *s) {
   }
   return a;
 }
+
+/* ============================================================
+ * stdlib: URL parsing (WHATWG URL — a FUNCTIONAL SUBSET)
+ *
+ * nativets has no classes, so the WHATWG `new URL(u)` API is exposed as plain
+ * global functions that each parse the URL string and return one component:
+ *   urlProtocol/urlHost/urlHostname/urlPathname/urlSearch/urlHash -> string,
+ *   urlSearchParam(u, key) -> first value for a query key (percent/`+` decoded).
+ *
+ * SUPPORTED subset (each accessor matches `node`'s new URL(u).<part> and
+ * searchParams.get byte-for-byte — node is the oracle):
+ *   - absolute http:// and https:// URLs (scheme case-insensitive)
+ *   - host + optional port (default ports 80/http, 443/https are dropped, like node)
+ *   - hostname lowercased; userinfo (user:pass@) stripped; pathname defaults to "/"
+ *   - search keeps the raw (still-encoded) query incl. leading '?'; "" if empty
+ *   - hash keeps the raw fragment incl. leading '#'; "" if empty
+ *   - searchParams.get: form-urldecodes ('+'->space, %XX->byte) key and value
+ *
+ * OUT OF SUBSET (rejected as "" — we do NOT throw like node, a documented
+ * divergence): relative URLs, non-http(s) schemes, IPv6 bracket hosts ([::1]),
+ * punycode/IDNA, and path/percent-encoding normalization (input assumed already
+ * canonical — node re-normalizes those). Pure libc string scanning, no allocs
+ * beyond the returned rc-string.
+ * ============================================================ */
+
+typedef struct {
+  int ok;                              /* 1 iff a supported http(s) URL */
+  int is_https;                        /* scheme: 1=https, 0=http */
+  const char *host;  size_t host_len;  /* hostname region (pre-lowercase) */
+  const char *port;  size_t port_len;  /* port digits (0 len if absent) */
+  const char *path;  size_t path_len;  /* path region (0 len if absent) */
+  const char *query; size_t query_len; /* query, no '?' (NULL if no '?') */
+  const char *frag;  size_t frag_len;  /* fragment, no '#' (NULL if no '#') */
+} NtUrl;
+
+/* case-insensitive ASCII prefix test (scheme match; node lowercases schemes). */
+static int url_ci_prefix(const char *s, const char *pfx) {
+  for (; *pfx; s++, pfx++) {
+    char a = *s;
+    if (a >= 'A' && a <= 'Z') a += 32;
+    if (a != *pfx) return 0;
+  }
+  return 1;
+}
+
+static NtUrl url_parse(const char *u) {
+  NtUrl r;
+  memset(&r, 0, sizeof r);
+  const char *auth;
+  if (url_ci_prefix(u, "https://")) { r.is_https = 1; auth = u + 8; }
+  else if (url_ci_prefix(u, "http://")) { r.is_https = 0; auth = u + 7; }
+  else return r; /* not absolute http(s): ok stays 0 */
+
+  /* authority ends at the first of '/', '?', '#', or NUL */
+  const char *ae = auth;
+  while (*ae && *ae != '/' && *ae != '?' && *ae != '#') ae++;
+
+  /* strip userinfo: host starts after the last '@' in [auth, ae) */
+  const char *hstart = auth;
+  for (const char *p = auth; p < ae; p++) if (*p == '@') hstart = p + 1;
+
+  if (hstart < ae && *hstart == '[') return r; /* IPv6 bracket host: out of subset */
+
+  /* host:port split on the first ':' in the host region */
+  const char *colon = NULL;
+  for (const char *p = hstart; p < ae; p++) if (*p == ':') { colon = p; break; }
+  if (colon) {
+    r.host = hstart; r.host_len = (size_t)(colon - hstart);
+    r.port = colon + 1; r.port_len = (size_t)(ae - (colon + 1));
+  } else {
+    r.host = hstart; r.host_len = (size_t)(ae - hstart);
+  }
+  if (r.host_len == 0) return r; /* empty host: out of subset */
+
+  /* path / query / fragment from the authority end onward */
+  const char *p = ae;
+  const char *pstart = p;
+  while (*p && *p != '?' && *p != '#') p++;
+  r.path = pstart; r.path_len = (size_t)(p - pstart);
+  if (*p == '?') {
+    const char *qs = p + 1, *q = qs;
+    while (*q && *q != '#') q++;
+    r.query = qs; r.query_len = (size_t)(q - qs);
+    p = q;
+  }
+  if (*p == '#') {
+    r.frag = p + 1; r.frag_len = strlen(p + 1);
+  }
+  r.ok = 1;
+  return r;
+}
+
+static const char *url_empty(void) { char *o = alloc_str(0); o[0] = 0; return o; }
+static const char *url_dup(const char *s) {
+  size_t n = strlen(s); char *o = alloc_str(n); memcpy(o, s, n); o[n] = 0; return o;
+}
+static const char *url_lower(const char *s, size_t n) {
+  char *o = alloc_str(n);
+  for (size_t i = 0; i < n; i++) { char c = s[i]; o[i] = (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+  o[n] = 0; return o;
+}
+
+const char *nt_url_protocol(const char *u) {
+  NtUrl r = url_parse(u);
+  if (!r.ok) return url_empty();
+  return url_dup(r.is_https ? "https:" : "http:");
+}
+
+const char *nt_url_hostname(const char *u) {
+  NtUrl r = url_parse(u);
+  if (!r.ok) return url_empty();
+  return url_lower(r.host, r.host_len);
+}
+
+const char *nt_url_host(const char *u) {
+  NtUrl r = url_parse(u);
+  if (!r.ok) return url_empty();
+  int drop = (r.port_len == 0);
+  if (!drop) { /* drop the default port (node does): 443 for https, 80 for http */
+    if (r.is_https && r.port_len == 3 && strncmp(r.port, "443", 3) == 0) drop = 1;
+    if (!r.is_https && r.port_len == 2 && strncmp(r.port, "80", 2) == 0) drop = 1;
+  }
+  if (drop) return url_lower(r.host, r.host_len);
+  size_t n = r.host_len + 1 + r.port_len;
+  char *o = alloc_str(n);
+  for (size_t i = 0; i < r.host_len; i++) { char c = r.host[i]; o[i] = (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+  o[r.host_len] = ':';
+  memcpy(o + r.host_len + 1, r.port, r.port_len);
+  o[n] = 0;
+  return o;
+}
+
+const char *nt_url_pathname(const char *u) {
+  NtUrl r = url_parse(u);
+  if (!r.ok) return url_empty();
+  if (r.path_len == 0) return url_dup("/"); /* node defaults an absent path to "/" */
+  char *o = alloc_str(r.path_len);
+  memcpy(o, r.path, r.path_len);
+  o[r.path_len] = 0;
+  return o;
+}
+
+const char *nt_url_search(const char *u) {
+  NtUrl r = url_parse(u);
+  if (!r.ok || r.query == NULL || r.query_len == 0) return url_empty();
+  size_t n = r.query_len + 1;
+  char *o = alloc_str(n);
+  o[0] = '?';
+  memcpy(o + 1, r.query, r.query_len);
+  o[n] = 0;
+  return o;
+}
+
+const char *nt_url_hash(const char *u) {
+  NtUrl r = url_parse(u);
+  if (!r.ok || r.frag == NULL || r.frag_len == 0) return url_empty();
+  size_t n = r.frag_len + 1;
+  char *o = alloc_str(n);
+  o[0] = '#';
+  memcpy(o + 1, r.frag, r.frag_len);
+  o[n] = 0;
+  return o;
+}
+
+static int url_hexval(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+/* application/x-www-form-urlencoded decode: '+'->space, %XX->byte, else literal. */
+static const char *url_form_decode(const char *s, size_t n) {
+  char *o = alloc_str(n);
+  size_t j = 0;
+  for (size_t i = 0; i < n; i++) {
+    char c = s[i];
+    if (c == '+') {
+      o[j++] = ' ';
+    } else if (c == '%' && i + 2 < n && url_hexval(s[i + 1]) >= 0 && url_hexval(s[i + 2]) >= 0) {
+      o[j++] = (char)(url_hexval(s[i + 1]) * 16 + url_hexval(s[i + 2]));
+      i += 2;
+    } else {
+      o[j++] = c;
+    }
+  }
+  o[j] = 0;
+  return o;
+}
+
+/* searchParams.get(key): first value whose decoded key matches (node decodes
+ * keys too); "" when the key is absent or present with no value. */
+const char *nt_url_search_param(const char *u, const char *key) {
+  NtUrl r = url_parse(u);
+  if (!r.ok || r.query == NULL || r.query_len == 0) return url_empty();
+  const char *q = r.query;
+  size_t n = r.query_len, i = 0;
+  while (i < n) {
+    size_t start = i;
+    while (i < n && q[i] != '&') i++;
+    size_t plen = i - start;
+    const char *pair = q + start;
+    size_t eq = plen; /* index of first '=' within the pair, or plen if none */
+    for (size_t k = 0; k < plen; k++) if (pair[k] == '=') { eq = k; break; }
+    const char *dkey = url_form_decode(pair, eq);
+    if (strcmp(dkey, key) == 0) {
+      if (eq == plen) return url_empty();                 /* key present, no '=' */
+      return url_form_decode(pair + eq + 1, plen - eq - 1);
+    }
+    if (i < n) i++; /* skip the '&' */
+  }
+  return url_empty();
+}
