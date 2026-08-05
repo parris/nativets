@@ -48,6 +48,52 @@ console.log(p.show());
     expect(r.status).toBe(0);
   });
 
+  // Field initializers combined with a parameter property. Node rejects the parameter
+  // property (strip-only), so this too is behavioral. Pins the desugaring ORDER: parameter
+  // properties, then field initializers (declaration order), then the constructor body.
+  test("field initializers run after param-props and before the ctor body", async () => {
+    const source = `
+class Cart {
+  items: number[] = [10, 20];
+  total = 1;
+  tag: string;
+  constructor(private owner: string, tag: string) {
+    this.tag = tag;
+    this.total = this.total + 100;   // sees the field-initialized value (1) first
+  }
+  summary(): string {
+    return this.owner + "/" + this.tag + " items=" + this.items.length + " total=" + this.total;
+  }
+}
+const c = new Cart("alice", "vip");
+console.log(c.summary());
+`;
+    const r = await run(source);
+    expect(r.stdout).toBe("alice/vip items=2 total=101\n");
+    expect(r.status).toBe(0);
+  });
+
+  // Field type inferred from a `new Map<…>()` initializer with no annotation (a self-host
+  // shape, `private vars = new Map<string, number>()`). Behavioral: immutable Map ops
+  // (.get of an absent key → 0) are a documented Phase-B divergence from node.
+  test("field type is inferred from a new Map<…>() initializer", async () => {
+    const source = `
+class Env {
+  private vars = new Map<string, number>();
+  private pos = 5;
+  seed(): number {
+    const v = this.vars.set("a", 1).set("b", 2);
+    return v.get("a") + v.get("b") + this.pos;
+  }
+}
+const e = new Env();
+console.log(e.seed());
+`;
+    const r = await run(source);
+    expect(r.stdout).toBe("8\n");
+    expect(r.status).toBe(0);
+  });
+
   test("parameter property combined with extends Error + super (NTError shape)", async () => {
     const source = `
 class CodedError extends Error {
