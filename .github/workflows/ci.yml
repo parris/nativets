@@ -1,0 +1,78 @@
+name: CI
+
+# Runs the test suite on every push and pull request.
+#
+# Matrix rationale:
+#   - macOS + Linux run the FULL `bun test` differential suite (node is the oracle,
+#     and both have a POSIX-complete runtime for runtime/runtime.c).
+#   - Windows runs a REDUCED job: the runtime has POSIX-only deps (termios / unistd /
+#     ucontext), so the full suite cannot pass there yet. Instead we prove the compiler
+#     BUNDLES on Windows and (when the `--target windows` lane is merged) that it can
+#     compile + run a native Windows binary. Full Windows parity is a runtime-port
+#     follow-on, tracked separately.
+
+on:
+  push:
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---- Full suite: macOS (host oracle) + Linux -----------------------------
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install clang (Linux; the runtime toolchain the tests link through)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - run: bun install --frozen-lockfile
+      # node is preinstalled on GitHub runners (the differential oracle);
+      # the cross-target tests (iOS / Android / wasm) skip gracefully headless.
+      - run: bun test
+
+  # ---- Reduced Windows job: bundle + native smoke test ---------------------
+  #
+  # WHY REDUCED: runtime/runtime.c depends on POSIX headers (termios / unistd /
+  # ucontext) that Windows lacks, so `bun test` (which links the full runtime)
+  # cannot pass here yet. We therefore:
+  #   1. Build the self-contained compiler (proves it bundles on Windows), and
+  #   2. Smoke-test it: compile a POSIX-free arithmetic/string program to a native
+  #      Windows binary via `--target windows`, run it, and assert stdout.
+  # The smoke step depends on the parallel `--target windows` compiler lane; if that
+  # is not yet merged the step fails there (acceptable — bundling is still proven).
+  windows-smoke:
+    name: windows-smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Build self-contained nativets binary (proves it bundles on Windows)
+        shell: bash
+        run: bun run compile # bun --compile emits nativets.exe on Windows
+      - name: Smoke test — compile + run a native Windows binary, assert stdout
+        shell: bash
+        run: |
+          # Depends on the `--target windows` compiler lane (parallel work). If that
+          # is not merged yet, `build --target windows` fails here — acceptable.
+          ./nativets.exe build ci/smoke.ts -o smoke.exe --target windows
+          ACTUAL="$(./smoke.exe)"
+          EXPECTED=$'result=42\r\nhello world' # Windows stdout uses CRLF line endings
+          # Normalize CRLF -> LF before comparing so the check is line-ending agnostic.
+          if [ "$(printf '%s' "$ACTUAL" | tr -d '\r')" != "$(printf '%s' "$EXPECTED" | tr -d '\r')" ]; then
+            echo "smoke mismatch:"
+            echo "  expected: result=42 / hello world"
+            echo "  actual:   $ACTUAL"
+            exit 1
+          fi
+          echo "windows smoke OK"
