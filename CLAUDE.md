@@ -402,6 +402,28 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   `NT1601` use-after-move now points at both the use (primary) and the earlier move (secondary).
   Plus a **GitHub Actions release workflow** (build self-contained macOS/Linux binaries + publish a
   Release on a version bump) and `test/assets/smoke.ll` now tracked (fixes a CI/worktree flake).
+- **Stage 33 ✅ (stdlib Batch 1 complete — the everyday standard library)** The web-standard
+  surface node gave us for free, built natively and node-differential end to end
+  (`test/stdlib-batch1.test.ts`, `docs/stdlib.md`). **Strings:** `charCodeAt`, `codePointAt`
+  (`number | undefined`), `at` (`string | undefined`, negative indices), `padEnd`,
+  `startsWith`/`endsWith` (+ position arg), `replace`/`replaceAll` (**string patterns only** —
+  no RegExp — with `$$`/`$&`/`` $` ``/`$'` substitution), variadic `concat`, `lastIndexOf`,
+  `split(sep, limit)`. **Arrays:** `at`, `lastIndexOf`, variadic `concat`, `flat()`, `Array.of`,
+  `Array.from(arr)`, and the predicate HOFs `some`/`every`/`find`/`findIndex`/`findLast`/
+  `findLastIndex`/`flatMap` — inline arrows inlined into the generated loop like Stage 12, with
+  `findLast*` iterating **backwards** so even a side-effecting callback sees node's call order.
+  **Objects:** `Object.entries` (string-valued objects) + `Object.fromEntries` (literal entries).
+  **Numbers:** the `Number.*` constants (`MAX_SAFE_INTEGER`, `EPSILON`, …), `Number.isNaN`/
+  `parseInt`/`parseFloat`, **`toFixed`** (ECMAScript-exact: the double's exact decimal expansion
+  rounded half-up on the magnitude — `1.25 → "1.3"`, `1.005 → "1.00"`) and **`toString(radix)`**
+  (a faithful port of V8's `DoubleToRadixCString`, so `(0.1).toString(2)` / `(1/3).toString(3)`
+  match digit for digit). **`structuredClone`** — a type-directed deep copy reusing the
+  `JSON.stringify` walk shape (nested objects/arrays become new references, like node).
+  **Refused, not approximated:** the remaining in-place mutators `.fill`/`.sort`/`.splice`/
+  `.shift`/`.unshift`/`.copyWithin` are `NT1606` with the immutable replacement in the hint
+  (arrays are immutable, Stage 29); `toFixed`/`toString` require literal in-range arguments so
+  node's `RangeError` is unreachable rather than emulated. Non-ASCII stays on the documented
+  UTF-8-byte index space (§A.2), now pinned by a behavioral test.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
