@@ -16,7 +16,7 @@ import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 import { isOptChainExpr } from "./checker.ts";
-import type { ArrowFunction } from "./ast.ts";
+import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
 
 export function llvmDouble(n: number): string {
@@ -50,6 +50,17 @@ function scanUsesActors(node: unknown): boolean {
     if (callee?.kind === "Identifier" && ACTOR_BUILTINS.has(callee.name as string)) return true;
   }
   for (const k in n) if (scanUsesActors(n[k])) return true;
+  return false;
+}
+
+/** Does this expression mention `name` anywhere? (Structural walk, same shape as
+ *  scanUsesActors.) Guards the consuming-append transient: `x = [...x, ...x]` must
+ *  NOT hand the first spread ownership of storage the second one still reads. */
+function mentions(node: unknown, name: string): boolean {
+  if (node === null || typeof node !== "object") return false;
+  const n = node as Record<string, unknown>;
+  if (n.kind === "Identifier" && n.name === name) return true;
+  for (const k in n) if (k !== "ty" && mentions(n[k], name)) return true;
   return false;
 }
 
@@ -171,6 +182,8 @@ const DECLARES = [
   // structural-sharing witnesses (B2 step 2): live / cumulative persistent-vector nodes
   "declare double @nt_arr_nodes()",
   "declare double @nt_arr_node_allocs()",
+  "declare double @nt_arr_transients()",
+  "declare void @nt_arr_extend_own(ptr, ptr)",
   "declare ptr @nt_obj_new(double)",
   "declare void @nt_obj_free(ptr)",
   "declare double @nt_obj_live()",
@@ -569,6 +582,7 @@ class FnGen {
     this.hofReturnStack = [];
     this.strLocals = new Set();
     this.globalVars = new Set();
+    this.consumeNode = null; this.consumeTaken = false;
   }
 
   // ---- string reference counting (value-semantics strings) ----
@@ -617,6 +631,14 @@ class FnGen {
    *  arrow: conservative (the enclosing owner still frees at its own scope exit). */
   private liftedArrow = false;
 
+  /** Set while lowering a CONSUMING APPEND `x = [...x, e]` (B2 step 4 transients): the
+   *  spread source is the assignment's own dying value, so its storage is MOVED into
+   *  the new array instead of copied+retained. `consumeNode` is the exact `...x`
+   *  element (identity-compared, so a second `...x` in the same literal still copies);
+   *  `consumedAssign` records that the assignment's `dropOld` is already satisfied. */
+  private consumeNode: Expr | null = null;
+  private consumeTaken = false;
+
   private emitDrops(names: string[]): void {
     if (this.liftedArrow) return;
     for (const n of names) {
@@ -626,6 +648,39 @@ class FnGen {
       const free = isObjectTy(this.varTypes.get(n) ?? "number") ? "nt_obj_free" : "nt_arr_free";
       this.emit(`call void @${free}(ptr ${p})`);
     }
+  }
+
+  /** Free the value a linear local is about to lose to an assignment (see AssignExpr).
+   *  A no-op unless the ownership pass proved the old value dead; skipped inside a
+   *  lifted arrow for the same reason drops are (the slot may not exist there), and
+   *  skipped when the consuming-append transient already took ownership of it. */
+  private emitDropOld(e: AssignExpr, ty: Ty): void {
+    if (this.consumeTaken) { this.consumeTaken = false; return; } // storage moved into the new version
+    if (!e.dropOld || this.liftedArrow || !(isArrayTy(ty) || isObjectTy(ty))) return;
+    // A MODULE-LEVEL binding promoted to an LLVM global is one that some function body
+    // reads — and such a function may have returned the pointer to a caller that still
+    // holds it. The ownership pass cannot see that aliasing (it analyses one scope at a
+    // time), so a global is never freed on reassignment: a documented leak, never a UAF.
+    if (this.globalVars.has(e.target)) return;
+    const p = this.fresh();
+    this.emit(`${p} = load ptr, ptr ${this.addr(e.target)}`);
+    this.emit(`call void @${isObjectTy(ty) ? "nt_obj_free" : "nt_arr_free"}(ptr ${p})`);
+  }
+
+  /** The CONSUMING-APPEND pattern `x = [...x, e1, …]` (B2 step 4). Requires the
+   *  ownership pass's `dropOld` proof (x is owned here and no closure captured it),
+   *  a LEADING spread of exactly the assignment target, and no other mention of `x`
+   *  in the literal — so the storage really is dead once the spread has read it.
+   *  Returns the `...x` element node (identity-matched later), or null. */
+  private consumingSpread(e: AssignExpr, ty: Ty): Expr | null {
+    if (!e.dropOld || this.liftedArrow || !isArrayTy(ty)) return null;
+    if (this.captures.has(e.target) || this.globalVars.has(e.target)) return null;
+    const lit = e.value;
+    if (lit.kind !== "ArrayLiteral" || lit.elements.length === 0) return null;
+    const head = lit.elements[0]!;
+    if (head.kind !== "SpreadExpr" || head.argument.kind !== "Identifier" || head.argument.name !== e.target) return null;
+    for (let i = 1; i < lit.elements.length; i++) if (mentions(lit.elements[i]!, e.target)) return null;
+    return head;
   }
 
   private addLocal(name: string, ty: Ty): void {
@@ -1269,7 +1324,15 @@ class FnGen {
         for (const element of e.elements) {
           if (element.kind === "SpreadExpr") {
             const src = this.genExpr(element.argument);
-            this.emit(`call void @nt_arr_extend(ptr ${arr}, ptr ${src.v})`);
+            // Consuming append (`x = [...x, e]`): this spread's source is dying, so MOVE
+            // its storage into the fresh array — which also leaves the vector at rc 1,
+            // the transient condition for the trailing pushes. See `consumingSpread`.
+            if (this.consumeNode === element) {
+              this.consumeNode = null; this.consumeTaken = true;
+              this.emit(`call void @nt_arr_extend_own(ptr ${arr}, ptr ${src.v})`);
+            } else {
+              this.emit(`call void @nt_arr_extend(ptr ${arr}, ptr ${src.v})`);
+            }
           } else {
             this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.genExpr(element))})`);
           }
@@ -1668,11 +1731,18 @@ class FnGen {
         }
         const ty = this.varTypes.get(e.target) ?? "number";
         if (e.op === "=") {
+          const consume = this.consumingSpread(e, ty);
+          if (consume) { this.consumeNode = consume; this.consumedAssign = e; }
           const val = this.coerce(this.genExpr(e.value), ty); // box into a nullable slot if needed
+          this.consumeNode = null;
           // RC: reassigning a string local. Retain an aliased borrow so the new value
           // outlives the assignment (safe if it escapes); the previous value is left
           // to leak (a conservative over-retention) rather than risk a premature free.
           if (ty === "string" && this.strLocals.has(e.target)) this.retainStrBind(e.value, val.v);
+          // RAII on reassignment (B2 step 4): free the superseded linear value AFTER the
+          // right-hand side has been evaluated (it may read the old value) and before the
+          // slot is overwritten. `dropOld` is the ownership pass's proof that it is dead.
+          this.emitDropOld(e, ty);
           this.emit(`store ${llvmTy(ty)} ${val.v}, ptr ${this.addr(e.target)}`);
           return { v: val.v, ty };
         }
@@ -3272,6 +3342,7 @@ class FnGen {
       case "__pvNodes": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_nodes()`); return { v: t, ty: "number" }; }
       case "__pvAllocs": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_node_allocs()`); return { v: t, ty: "number" }; }
       case "__strLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_str_live()`); return { v: t, ty: "number" }; }
+      case "__pvTransients": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_transients()`); return { v: t, ty: "number" }; }
       // Networking tier (L-d): HTTP(S) client → {status:number, body:string}.
       case "httpGet": return this.genHttp("nt_http_get", args, false);
       case "httpPost": return this.genHttp("nt_http_post", args, true);

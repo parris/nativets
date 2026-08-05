@@ -79,9 +79,22 @@ function isMoveCall(e: Expr): boolean {
 class Analyzer {
   readonly diags: OwnDiag[] = [];
   private collecting = true;
-  constructor(private linear: Set<string>, private topLevel: string[], paramBorrows: string[] = []) {
+  constructor(
+    private linear: Set<string>,
+    private topLevel: string[],
+    paramBorrows: string[] = [],
+    /** Names read from inside an arrow body. A closure copies the pointer into its
+     *  env, so the binding is no longer the only reference — reassigning it must NOT
+     *  free the old value (the closure may outlive the assignment). Conservative:
+     *  over-approximated by "mentioned anywhere inside any arrow in this scope". */
+    private captured: Set<string> = new Set(),
+  ) {
     for (const p of paramBorrows) this.borrowBindings.add(p);
   }
+
+  /** Collection mode: record every name an arrow body mentions (pass 1). */
+  private arrowDepth = 0;
+  readonly arrowNames = new Set<string>();
 
   /** Names bound to a BORROW rather than owned: by-borrow params (whole scope) and for-of
    *  loop variables over a LINEAR element (loop body). Moving out of any is E0507 (NT1604). */
@@ -200,6 +213,7 @@ class Analyzer {
   private expr(e: Expr, state: State, consume: boolean): void {
     switch (e.kind) {
       case "Identifier": {
+        if (this.arrowDepth > 0) this.arrowNames.add(e.name);
         // Moving out of a borrowed binding (by-borrow param / for-of element) is E0507.
         if (consume && this.borrowBindings.has(e.name)) {
           this.report({ code: OWN_CODES.MOVE_OUT_OF_BORROW, message: `cannot move out of \`${e.name}\`: it is borrowed (the owner is elsewhere)`, line: e.loc?.line ?? 0 });
@@ -235,7 +249,15 @@ class Analyzer {
       }
       case "AssignExpr":
         this.expr(e.value, state, true);
-        if (this.linear.has(e.target)) state.set(e.target, { moved: false }); // reassignment revives
+        if (this.linear.has(e.target)) {
+          // RAII on REASSIGNMENT (B2 step 4): the old value is about to become
+          // unreachable, so this scope must free it — unless it was moved out (the new
+          // owner will free it; `a = a` / `a = move(a)` land here too, and freeing then
+          // would destroy the value we are storing) or a closure captured the pointer.
+          const st = state.get(e.target);
+          e.dropOld = st !== undefined && !st.moved && !this.captured.has(e.target) && this.arrowDepth === 0;
+          state.set(e.target, { moved: false }); // reassignment revives
+        }
         return;
       case "FieldAssign": // `this.field = v`: read the instance (borrow), move the value in
         this.expr(e.object, state, false);
@@ -270,8 +292,10 @@ class Analyzer {
       case "AsExpr": this.expr(e.expr, state, false); return;
       case "ObjectLiteral": for (const p of e.properties) this.expr(p.value, state, !p.spread); return; // fields move into the object; a `...spread` source is COPIED (borrow), so it stays usable + owned
       case "ArrowFunction": // analyze body in the enclosing scope (captures/params aren't linear here)
+        this.arrowDepth++;
         if (e.exprBody) this.expr(e.body as Expr, state, false);
         else this.seq(e.body as Stmt[], state);
+        this.arrowDepth--;
         return;
       case "SequenceExpr": for (const x of e.exprs) this.expr(x, state, false); return;
       default: return; // literals, update (numeric), unreachable kinds
@@ -308,8 +332,14 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     for (const s of body) if (s.kind === "VarDecl") for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) topLevel.push(d.name);
     // Linear params are BORROWED (the caller owns + drops them) — moving one out is E0507.
     const paramBorrows = params.filter((p) => isLinearTy(p.ty)).map((p) => p.name);
-    const a = new Analyzer(linear, topLevel, paramBorrows);
-    const st: State = new Map(params.filter((p) => isLinearTy(p.ty)).map((p) => [p.name, { moved: false }]));
+    const entry = (): State => new Map(params.filter((p) => isLinearTy(p.ty)).map((p) => [p.name, { moved: false }]));
+    // Pass 1 (discard): which names does a closure body mention? Those pointers may be
+    // copied into a closure env that outlives the binding, so they are never freed on
+    // reassignment. Diagnostics from this pass are dropped — pass 2 is the real one.
+    const scan = new Analyzer(linear, topLevel, paramBorrows);
+    scan.seq(body, entry());
+    const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames);
+    const st = entry();
     a.seq(body, st);
     diags.push(...a.diags);
     return a.ownedTopLevel(st);

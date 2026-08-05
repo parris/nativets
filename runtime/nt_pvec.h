@@ -65,6 +65,16 @@ nt_pv*      nt_pv_update(nt_pv* v, uint32_t i, int64_t val);
 nt_pv*      nt_pv_push(nt_pv* v, int64_t val);
 nt_pv*      nt_pv_pop(nt_pv* v);
 
+/* ---- TRANSIENT append (B2 step 4) ----
+ * CONSUMES the caller's owned reference and returns an owned reference to the
+ * result. When the vector is UNIQUELY owned (header rc == 1 AND its tail leaf
+ * rc == 1) no other version can observe its storage, so the element is written
+ * into the tail IN PLACE — Clojure's transient trick, made provable here by the
+ * linear ownership model. Otherwise it falls back to the persistent push and
+ * releases the old reference, so the result is identical either way. */
+nt_pv*      nt_pv_push_own(nt_pv* v, int64_t val);
+long        nt_pv_transient_hits(void);   /* # in-place appends (test witness) */
+
 /* ---- test/introspection helpers ---- */
 uint32_t    nt_pv_tailoff(nt_pv* v);       /* # elements currently in the tree */
 nt_pv_node* nt_pv_empty_node(void);        /* the shared all-NULL empty internal node */

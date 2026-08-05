@@ -116,6 +116,7 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   __pvNodes: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live persistent-vector nodes
   __pvAllocs: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: cumulative pvec node allocs
   __strLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live heap-string count
+  __pvTransients: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: in-place (rc==1) appends
   // Host I/O FFI (stdin): the node oracle gets these via a harness polyfill prelude.
   readLine: { min: 0, max: 0, argTys: [], ret: "string" },  // next stdin line (no newline), "" at EOF
   readStdin: { min: 0, max: 0, argTys: [], ret: "string" }, // all remaining stdin

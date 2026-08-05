@@ -351,6 +351,11 @@ export interface AssignExpr {
   target: string;
   value: Expr;
   ty?: Ty;
+  /** Ownership (B2 step 4): the value being OVERWRITTEN is a linear heap value this
+   *  scope still owns, so the assignment must free it (RAII on reassignment). Set by
+   *  `src/ownership.ts` only when it can prove the old value is dead — not moved out,
+   *  not captured by a closure. */
+  dropOld?: boolean;
 }
 
 /**
