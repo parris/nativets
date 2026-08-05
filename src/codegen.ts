@@ -166,6 +166,9 @@ const DECLARES = [
   "declare ptr @nt_arr_with(ptr, double, i64)",
   "declare void @nt_arr_free(ptr)",
   "declare double @nt_arr_live()",
+  // structural-sharing witnesses (B2 step 2): live / cumulative persistent-vector nodes
+  "declare double @nt_arr_nodes()",
+  "declare double @nt_arr_node_allocs()",
   "declare ptr @nt_obj_new(double)",
   "declare void @nt_obj_free(ptr)",
   "declare double @nt_obj_live()",
@@ -2919,6 +2922,8 @@ class FnGen {
       case "rawMode": { const b = this.fresh(); this.emit(`${b} = zext i1 ${this.genExpr(args[0]!).v} to i32`); this.emit(`call void @nt_raw_mode(i32 ${b})`); return { v: "", ty: "void" }; }
       case "__arrLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_live()`); return { v: t, ty: "number" }; }
       case "__objLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_obj_live()`); return { v: t, ty: "number" }; }
+      case "__pvNodes": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_nodes()`); return { v: t, ty: "number" }; }
+      case "__pvAllocs": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_node_allocs()`); return { v: t, ty: "number" }; }
       case "__strLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_str_live()`); return { v: t, ty: "number" }; }
       // Networking tier (L-d): HTTP(S) client → {status:number, body:string}.
       case "httpGet": return this.genHttp("nt_http_get", args, false);

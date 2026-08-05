@@ -438,3 +438,79 @@ indices above, which is the point.
 ---
 *(No source files were modified. This is a design + test-vector spec only — the C module and
 its harness are the GREEN step that follows.)*
+
+---
+
+## Part 4 — Integration decision (B2 step 2, landed)
+
+*Written before the code, per the red-green discipline: the representation and memory
+decisions the wiring commits to.*
+
+### 4.1 Representation: a hybrid `NtArray`, dispatched inside the runtime
+
+The array **handle stays exactly what it was** — an opaque `ptr` to `NtArray`. Codegen,
+the checker and the ownership pass are unchanged at the type level; every existing
+`nt_arr_*` entry point keeps its signature. `NtArray` grows one field:
+
+```c
+typedef struct { int64_t len; int64_t cap; int64_t *data; nt_pv *pv; } NtArray;
+```
+
+- **flat mode** (`pv == NULL`) — the pre-existing `len/cap/data` block. This is the
+  **transient/builder** role: array literals, `.map`/`.filter`/`.slice`/`split`/`JSON.parse`
+  all build with amortized-doubling `nt_arr_push`, which is strictly cheaper than a
+  persistent trie (no per-element tail clone).
+- **trie mode** (`pv != NULL`, `data == NULL`) — a `nt_pv` persistent vector; `len` mirrors
+  `pv->count` so `.length` stays a plain load.
+
+**Freeze** (flat → trie) happens *lazily*, only when a **persistent copy-producing op** is
+applied to an array **longer than `NT_PV_THRESHOLD` (32)**: `.with(i,v)` and the
+leading-spread append `[...a, x]`. Below the threshold a full flat copy is ≤ 256 bytes and
+beats the trie, and the persistent representation of ≤ 32 elements *is* a flat 32-slot tail
+anyway — so 32 is the zero-waste boundary (§1.8). Consequence: **every program that only ever
+touches small arrays keeps byte-identical behaviour *and* representation.**
+
+**Thaw** (trie → a private flat block) happens for the one in-place mutator we still keep for
+node compatibility, `.reverse` — mutating a *shared* trie node would corrupt other versions,
+so the array first materializes a private copy. `.reverse` is O(n) regardless.
+
+`[...a, x]` needed **no codegen change**: codegen already emits `nt_arr_new` + `nt_arr_extend`
++ `nt_arr_push`, and `nt_arr_extend` into a *fresh empty* destination now **adopts** the
+source's persistent vector wholesale (O(1), full sharing) instead of copying; the following
+`nt_arr_push` then takes the persistent path. Non-leading spread (`[0, ...a, 4]`) falls back
+to the flat copy — a prepend is O(n) in any representation.
+
+### 4.2 Memory: reference-counted trie nodes (resolution (a))
+
+Arrays are **linear with deterministic drop** (`nt_arr_free` at scope exit). A shared trie
+node has *many* owners, so freeing one version's nodes would dangle another's. Resolution
+(a) from the plan is implemented: **the trie nodes are reference counted** — the `refcount`
+fields `nt_pvec.h` already reserved are now live.
+
+- `new_node`/`clone_node`/`do_assoc`/`push_tail`/`pop_tail`/`new_path` return **owned
+  (rc = 1) references**; `mk_header` **consumes** the root/tail references handed to it, so a
+  caller that passes an already-shared node (`v->root`) retains it first. This *transfer*
+  convention is what keeps the counts auditable.
+- `release_node` frees at zero and recursively releases children (leaves hold values, never
+  pointers, so recursion stops there). The shared EMPTY node singleton is **pinned**
+  (retain/release are no-ops on it) and excluded from the node counter.
+- `nt_arr_free` releases the header; the nodes still referenced by another version survive,
+  and a version's private path nodes are freed immediately. **Exactly-once, never a
+  dangling pointer** — the same guarantee the linear model already gave, extended through
+  the DAG.
+- Witness: `__pvNodes()` (live nodes) and `__pvAllocs()` (cumulative) — the array analogue of
+  `__arrLive()`. `test/sharing.test.ts` asserts both the sharing bound and the return to 0.
+
+The rc is **non-atomic** (like the string rc of Stage 30) — correct under the cooperative
+scheduler, and it would need a lock under a future M:N actor runtime.
+
+### 4.3 Linking
+
+`nt_pvec.c` is linked **only when the program uses arrays** (the IR contains a `call … @nt_arr_*`),
+alongside `-DNT_PVEC`. Unlike Map/Set/bytes/http — which are reached *only* from
+codegen-emitted calls — the persistent vector sits **behind the core array primitives inside
+`runtime.c`**, so `runtime.c` cannot reference it unconditionally. The gate is therefore a
+compile-time one: without `-DNT_PVEC`, `runtime.c` compiles a set of static stubs and every
+hybrid branch is dominated by a constant-false `NT_PV_ON`, leaving the *pre-existing flat
+behaviour* — i.e. a false negative in the detection costs performance, never correctness or a
+link error. Non-array programs and the iOS/Android/wasm cross-builds are byte-unaffected.

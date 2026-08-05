@@ -40,6 +40,14 @@ import mapsetSource from "../runtime/nt_mapset.c" with { type: "text" };
 // bytes builtins (codegen emits a `call … @nt_bytes_*` exactly then), like Map/Set.
 import bytesSource from "../runtime/nt_bytes.c" with { type: "text" };
 import bytesHeader from "../runtime/nt_bytes.h" with { type: "text" };
+// The B2 step-2 persistent vector (32-way trie + tail): the structural-sharing backend
+// for arrays past ~32 elements. libc-only. Unlike Map/Set/bytes/http it is reached from
+// inside runtime.c (it sits behind the core nt_arr_* primitives), so the gate is a
+// COMPILE-time one: nt_pvec.c + `-DNT_PVEC` are added only when a program uses arrays,
+// and without them runtime.c compiles the pre-existing flat-only path. A missed gate is
+// therefore a lost optimisation, never a link error. See docs/research/B2-vector-trie.md §4.3.
+import pvecSource from "../runtime/nt_pvec.c" with { type: "text" };
+import pvecHeader from "../runtime/nt_pvec.h" with { type: "text" };
 // The HTTP(S) client primitive (networking tier, L-d), backed by libcurl. Linked (with
 // `-lcurl`) ONLY when a program uses httpGet/httpPost — so non-HTTP programs and their
 // iOS/Android cross-builds are unaffected. Networking is HOST/LINUX ONLY for now; iOS/
@@ -329,6 +337,16 @@ function writeIR(source: string): { dir: string; ll: string; rt: string; actor: 
     const mapset = join(dir, "nt_mapset.c");
     writeFileSync(mapset, mapsetSource);
     extra.push(hamt, mapset);
+  }
+  // Persistent vector (B2 step 2): link nt_pvec.c + define NT_PVEC ONLY when the program
+  // actually uses arrays — matched at a CALL site (`call … @nt_arr_*`), never the
+  // always-present `declare`, exactly like the bytes/curl/gui lanes. `-D` is position-
+  // independent for clang, so it may ride in `extra` with the source files.
+  if (/\bcall\b[^\n]*@nt_arr_/.test(ir)) {
+    writeFileSync(join(dir, "nt_pvec.h"), pvecHeader); // quote-included by runtime.c + the .c
+    const pvec = join(dir, "nt_pvec.c");
+    writeFileSync(pvec, pvecSource);
+    extra.push(pvec, "-DNT_PVEC");
   }
   // Bytes (stdlib batch 2): link nt_bytes.c ONLY when a program uses Uint8Array /
   // TextEncoder / TextDecoder (codegen emits `call … @nt_bytes_*` exactly then).

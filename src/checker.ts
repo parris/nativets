@@ -72,6 +72,8 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   urlSearchParam: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
   __arrLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live array count
   __objLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live object count
+  __pvNodes: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live persistent-vector nodes
+  __pvAllocs: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: cumulative pvec node allocs
   __strLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live heap-string count
   // Host I/O FFI (stdin): the node oracle gets these via a harness polyfill prelude.
   readLine: { min: 0, max: 0, argTys: [], ret: "string" },  // next stdin line (no newline), "" at EOF

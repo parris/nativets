@@ -507,6 +507,24 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   enclosing scope's drop list and emitted a load of an undefined `%local.addr`. Tests in
   `test/collections.test.ts`; `examples/wordfreq.ts` lost its hand-rolled `strLess`, parallel
   distinct-word array and selection scan.
+- **Stage 38 ✅ (B2 step 2: real structural sharing for arrays)** Past **32 elements** an array's
+  storage switches from the flat block to the **32-way persistent vector trie** (`runtime/nt_pvec.c`,
+  Clojure `PersistentVector` — previously dead code), behind the SAME `NtArray` handle, so codegen /
+  checker / ownership are untouched. `arr.with(i,v)` becomes **path copying** — only the root→leaf
+  ancestors are allocated (measured: **2** nodes at n=1000, **3** at n=2000, **4** at n=40000 =
+  `shift/5+1`), and the leading-spread append `[...a, x]` becomes **O(1)** (measured: **1** node) by
+  having `nt_arr_extend` **adopt** the source's vector into the fresh destination — no codegen change.
+  Flat stays the *builder/transient* form (literals, `.map`/`.filter`/`.slice`/`split`/JSON), so small
+  arrays are byte-identical in behaviour *and* representation; `.reverse` **thaws** to a private block
+  rather than writing through shared nodes. **Memory:** a shared node has many owners, so the linear
+  drop can't free it — the trie nodes are **reference counted** (owned-return / consuming-header
+  convention); `nt_arr_free` releases the header and a node dies with its last owner. Freed exactly
+  once, never dangling (`__pvNodes()` → 0; ASan/UBSan clean). `nt_pvec.c` + `-DNT_PVEC` are linked
+  only when the program uses arrays; without them runtime.c compiles the old flat-only path, so a
+  missed gate costs performance, never correctness. Node-differential across the danger zones
+  (31/32/33, 1023/1024/1025, deep 2000) in `test/sharing.test.ts`; verified running on the iOS
+  simulator + Android arm64 link. **Deferred:** pvec-backed `Map`/`Set` (still HAMT), transients /
+  rc==1-mutate-in-place, and dropping non-top-level temporaries (pre-existing safe leak).
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 

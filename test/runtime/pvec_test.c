@@ -604,6 +604,59 @@ static void v21_property(void) {
     end();
 }
 
+/* ============================================================
+ * 22 · reference counting: a shared node dies with its LAST owner
+ *
+ * The integration gate for B2 step 2 (docs §4.2). Arrays are linear with a
+ * deterministic drop, but a shared trie node has MANY owners, so `nt_arr_free`
+ * releases the header instead of freeing nodes. This walks the danger-zone sizes
+ * doing update/push/pop churn, releases every version, and asserts the live-node
+ * count returns exactly to its starting value — no leak and (under ASan/UBSan,
+ * which this file is also run with) no double free or dangling child.
+ * ============================================================ */
+static void v22_refcount_balance(void) {
+    begin("22 rc: every version released -> live node count returns to base");
+    static const uint32_t sizes[] = { 0, 1, 31, 32, 33, 1023, 1024, 1055, 1056,
+                                      1057, 2000, 32800, 32801 };
+    for (size_t si = 0; si < sizeof(sizes) / sizeof(*sizes); si++) {
+        uint32_t n = sizes[si];
+        double base = nt_pv_node_live();
+
+        int64_t *flat = (int64_t *)malloc(sizeof(int64_t) * (n ? n : 1));
+        for (uint32_t i = 0; i < n; i++) flat[i] = (int64_t)i;
+        nt_pv *v = nt_pv_from_slots(flat, n);
+        free(flat);
+        CHECK(v->count == n);
+        for (uint32_t i = 0; i < n; i++) CHECK(nt_pv_get(v, i) == (int64_t)i);
+
+        /* derived versions: each shares v's off-path subtrees, then is released */
+        for (uint32_t i = 0; i < n; i += (n / 7 + 1)) {
+            nt_pv *w = nt_pv_update(v, i, -1);
+            CHECK(nt_pv_get(w, i) == -1);
+            CHECK(nt_pv_get(v, i) == (int64_t)i);   /* source untouched */
+            nt_pv_release(w);                        /* only w's path nodes die */
+            CHECK(nt_pv_get(v, i) == (int64_t)i);   /* ...and v still reads fine */
+        }
+
+        /* push/pop churn across the height bump, releasing each intermediate */
+        nt_pv *p = v; nt_pv_retain(p);
+        for (int k = 0; k < 200; k++) { nt_pv *q = nt_pv_push(p, 1000 + k); nt_pv_release(p); p = q; }
+        CHECK(p->count == n + 200);
+        for (int k = 0; k < 200; k++) { nt_pv *q = nt_pv_pop(p); nt_pv_release(p); p = q; }
+        CHECK(p->count == n);
+        for (uint32_t i = 0; i < n; i++) CHECK(nt_pv_get(p, i) == (int64_t)i);
+        nt_pv_release(p);
+        nt_pv_release(v);
+
+        if (nt_pv_node_live() != base) {
+            printf("    LEAK at n=%u: %g live before, %g after\n", n, base, nt_pv_node_live());
+            g_fail++;
+        }
+        g_checks++;
+    }
+    end();
+}
+
 int main(void) {
     v01_empty_first();
     v02_fill_tail();
@@ -626,6 +679,7 @@ int main(void) {
     v19_uniform_depth();
     v20_immutability_sweep();
     v21_property();
+    v22_refcount_balance();
 
     printf("\n%d checks, %d failures\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

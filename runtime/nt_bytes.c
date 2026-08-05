@@ -19,8 +19,14 @@
 extern void *nativets_alloc(size_t n);
 extern void  nt_str_register(void *p);
 
-/* NtArray layout mirrors runtime.c: number slots hold a double bit-cast to int64. */
-typedef struct { int64_t len; int64_t cap; int64_t *data; } NtArray;
+/* Arrays are read through runtime.c's EXPORTED accessors, never through a local copy
+ * of the NtArray layout. That copy used to exist here and silently went stale when
+ * arrays gained persistent-trie storage (B2 step 2): past 32 elements the flat `data`
+ * pointer is NULL, so reading it crashed. nt_arr_get/nt_arr_len are representation-
+ * agnostic, so this file no longer cares how an array is stored. Slots hold a double
+ * bit-cast to int64. */
+extern int64_t nt_arr_get(void *a, double idx);
+extern double  nt_arr_len(void *a);
 
 /* JS ToUint8: NaN/±Inf -> 0; else truncate toward zero, then modulo 256 (wrap, not
  * clamp — that is Uint8ClampedArray). Done in double space so huge magnitudes that
@@ -45,11 +51,12 @@ NtBytes *nt_bytes_new(double nd) {
 }
 
 NtBytes *nt_bytes_from_arr(void *arrp) {
-  NtArray *a = (NtArray *)arrp;
-  NtBytes *b = nt_bytes_new((double)a->len);
-  for (int64_t i = 0; i < a->len; i++) {
+  int64_t n = (int64_t)nt_arr_len(arrp);
+  NtBytes *b = nt_bytes_new((double)n);
+  for (int64_t i = 0; i < n; i++) {
+    int64_t slot = nt_arr_get(arrp, (double)i);
     double d;
-    memcpy(&d, &a->data[i], sizeof d);
+    memcpy(&d, &slot, sizeof d);
     b->data[i] = to_uint8(d);
   }
   return b;

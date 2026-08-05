@@ -74,8 +74,13 @@ miscompile), pointing at the immutable replacement:
 - `o.f = v` → use `{ ...o, f: v }`.
 
 This is a deliberate divergence from node (which mutates). The immutable API is node-matched:
-`arr.with(i, v)` is real ES2023, and spread runs identically on node. `.with` does a full copy (no
-structural sharing yet — that needs refcounting, B2 step 2/4). Consequence: `NT1603` iterator-
+`arr.with(i, v)` is real ES2023, and spread runs identically on node. ~~`.with` does a full copy~~
+**RESOLVED (B2 step 2)**: past 32 elements `.with` and the leading-spread append `[...a, x]` are
+backed by a **refcounted persistent vector trie** and copy only the root→leaf path — O(log32 n) /
+O(1) amortized instead of O(n), with the untouched subtrees shared by pointer. Not a behavioural
+divergence: every observable (indexing, `.length`, `for-of`, HOF, `.join`, `.slice`, `.reverse`,
+spread, `JSON.stringify`, `===`) stays byte-identical to node — see `test/sharing.test.ts`.
+Consequence: `NT1603` iterator-
 invalidation is now unreachable (you can't mutate during iteration if you can't mutate). `.reverse`
 still mutates in place (which *matches* node, so not a divergence — but violates the frozen-value
 spirit; slated to reject/copy-return later). Heap `===`/`!==` on arrays/objects is **reference
