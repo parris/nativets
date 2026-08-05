@@ -100,6 +100,15 @@ export function lex(source: string): Token[] {
         if (source[i] === "\\") {
           advance();
           const e = source[i]!;
+          if (e === "x") {
+            // `\xHH` — two-hex-digit byte escape (e.g. `\x1b` = ESC), as node does.
+            advance();
+            const h = (source[i] ?? "") + (source[i + 1] ?? "");
+            if (!/^[0-9a-fA-F]{2}$/.test(h)) throw new LexError(`Invalid \\x escape at ${line}:${col}`);
+            s += String.fromCharCode(parseInt(h, 16));
+            advance(); advance();
+            continue;
+          }
           s += ESCAPES[e] ?? e;
           advance();
         } else {

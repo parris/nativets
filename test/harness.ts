@@ -88,3 +88,80 @@ export async function expectMatchesNode(source: string): Promise<{
   const ours = await compileAndRun(source);
   return { ours, oracle };
 }
+
+/* ============================================================
+ * Host I/O differential harness — feeds the SAME argv + stdin + env to BOTH
+ * `node file.ts <args>` and our compiled `./binary <args>`, so a fixture that
+ * reads input can be differential-tested against node.
+ *
+ * process.argv / process.env / process.exit are native to node, so no shim is
+ * needed for them. node has no synchronous readLine()/readStdin(), so for the
+ * ORACLE run only we prepend a tiny polyfill that reads fd 0 once and serves it
+ * from a shared cursor — byte-for-byte identical to the runtime's stdin FFI.
+ * ============================================================ */
+
+/** Declared inputs a Host-I/O fixture is run with (identical on both sides). */
+export interface IOInput { args?: string[]; stdin?: string; env?: Record<string, string>; }
+
+/** node-only polyfill for the stdin builtins (ESM — the repo is `"type":"module"`,
+ * so `require` is unavailable; use a top-level import). The file is a `.ts` so node
+ * strips type annotations, matching `runWithNode` — real typed programs work. */
+const STDIN_POLYFILL = [
+  'import { readFileSync as __rfs } from "node:fs";',
+  ";(function () {",
+  "  let __buf = null, __pos = 0;",
+  '  function __load() { if (__buf === null) { try { __buf = __rfs(0, "utf8"); } catch (e) { __buf = ""; } } }',
+  "  globalThis.readStdin = function () { __load(); const r = __buf.slice(__pos); __pos = __buf.length; return r; };",
+  "  globalThis.readLine = function () {",
+  "    __load();",
+  '    if (__pos >= __buf.length) return "";',
+  "    const nl = __buf.indexOf(String.fromCharCode(10), __pos);",
+  "    if (nl < 0) { const r = __buf.slice(__pos); __pos = __buf.length; return r; }",
+  "    const r = __buf.slice(__pos, nl); __pos = nl + 1; return r;",
+  "  };",
+  // readKey: next single char from the shared cursor ("" at EOF), mirroring the
+  // runtime's non-tty degrade path (one byte at a time). rawMode is a no-op for
+  // piped stdin (not a tty), matching the runtime.
+  "  globalThis.readKey = function () {",
+  "    __load();",
+  '    if (__pos >= __buf.length) return "";',
+  "    const r = __buf.slice(__pos, __pos + 1); __pos += 1; return r;",
+  "  };",
+  "  globalThis.rawMode = function () {};",
+  "})();",
+  "",
+].join("\n");
+
+/** The oracle for a Host-I/O fixture: node with the polyfill, same argv/stdin/env. */
+export function runWithNodeIO(source: string, io: IOInput = {}): RunResult {
+  const dir = scratch("oracle-io");
+  try {
+    const file = join(dir, "case.ts"); // .ts so node strips type annotations (like runWithNode)
+    writeFileSync(file, STDIN_POLYFILL + source);
+    const proc = spawnSync("node", [file, ...(io.args ?? [])], {
+      encoding: "utf8",
+      input: io.stdin ?? "",
+      env: { ...process.env, ...(io.env ?? {}) },
+    });
+    return { stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", exitCode: proc.status ?? -1 };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Compile a Host-I/O fixture and run the binary with the same argv/stdin/env. */
+export async function compileAndRunIO(source: string, io: IOInput = {}): Promise<RunResult> {
+  const dir = scratch("run-io");
+  try {
+    const bin = join(dir, "prog");
+    await buildBinary(source, bin, { target: "host" });
+    const proc = spawnSync(bin, io.args ?? [], {
+      encoding: "utf8",
+      input: io.stdin ?? "",
+      env: { ...process.env, ...(io.env ?? {}) },
+    });
+    return { stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", exitCode: proc.status ?? -1 };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}

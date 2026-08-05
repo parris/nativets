@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdint.h>
+#include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
+#include <termios.h>  /* tcgetattr/tcsetattr — raw-mode single-key input   */
 
 /* ---- allocation (never-free; see header comment) ---- */
 
@@ -805,4 +807,140 @@ void nt_dyn_print(NtDyn *d) {
     case DYN_NULL: fputs("null", stdout); break;
     default:       fputs("[object]", stdout); break;
   }
+}
+
+/* ============================================================
+ * Host I/O FFI — CLI args, environment, stdin, exit. libc/POSIX only
+ * (getenv/fread/exit), so it cross-links unchanged for macOS/iOS/Android.
+ *
+ * argv shape (node-consistent): node's `process.argv` is
+ * [execPath, scriptPath, ...userArgs]. The compiled binary receives only ONE
+ * leading path (C argv[0]); we synthesize node's two-slot prefix by repeating
+ * argv[0], so USER ARGS BEGIN AT INDEX 2 and `argv.length` equals node's. A
+ * fixture reads `process.argv.slice(2)` / `.length` (identical on both sides);
+ * argv[0]/argv[1] contents (machine-specific paths) are never compared.
+ * ============================================================ */
+
+static int    g_argc = 0;
+static char **g_argv = NULL;
+
+/* Called first thing in @main to stash the real argc/argv. */
+void nt_init_args(int argc, char **argv) { g_argc = argc; g_argv = argv; }
+
+/* process.argv -> a fresh string[] in node's shape (see header above). Elements
+ * are the untracked C argv pointers (treated like string literals: never freed).
+ * The array block itself is a single-owner linear value, dropped at scope exit. */
+NtArray *nt_argv(void) {
+  NtArray *a = nt_arr_new((double)(g_argc + 1));
+  const char *prog = g_argc > 0 ? g_argv[0] : "";
+  nt_arr_push(a, (int64_t)(intptr_t)prog);        /* [0] execPath              */
+  nt_arr_push(a, (int64_t)(intptr_t)prog);        /* [1] scriptPath (mirror)   */
+  for (int i = 1; i < g_argc; i++)                /* [2..] user CLI arguments  */
+    nt_arr_push(a, (int64_t)(intptr_t)g_argv[i]);
+  return a;
+}
+
+/* process.env.NAME -> the value, or "" when unset (node yields `undefined`;
+ * returning "" is a documented divergence — fixtures read only vars we set). The
+ * returned pointer is into the C environment (untracked, like a literal). */
+const char *nt_getenv(const char *name) {
+  const char *v = getenv(name);
+  return v ? v : "";
+}
+
+/* process.exit(code) — flushes stdio and exits (never returns). */
+void nt_exit(double code) { exit((int)code); }
+
+/* ---- stdin: lazily slurp all of fd 0, then serve from a shared cursor ----
+ * Mirrors the node oracle polyfill (readFileSync(0,'utf8') + a cursor) so both
+ * sides agree byte-for-byte:
+ *   readStdin() -> everything from the cursor to EOF (cursor -> end)
+ *   readLine()  -> the next line WITHOUT its trailing '\n' (or the remainder if
+ *                  unterminated); "" once the cursor is at EOF. */
+static char  *g_stdin = NULL;
+static size_t g_stdin_len = 0;
+static size_t g_stdin_pos = 0;
+static int    g_stdin_loaded = 0;
+
+static void stdin_load(void) {
+  if (g_stdin_loaded) return;
+  g_stdin_loaded = 1;
+  size_t cap = 4096, len = 0;
+  char *buf = (char *)nativets_alloc(cap);
+  size_t n;
+  while ((n = fread(buf + len, 1, cap - len, stdin)) > 0) {
+    len += n;
+    if (len == cap) { cap *= 2; char *nb = (char *)nativets_alloc(cap); memcpy(nb, buf, len); free(buf); buf = nb; }
+  }
+  if (len + 1 > cap) { char *nb = (char *)nativets_alloc(len + 1); memcpy(nb, buf, len); free(buf); buf = nb; }
+  buf[len] = '\0';
+  g_stdin = buf; g_stdin_len = len; g_stdin_pos = 0;
+}
+
+const char *nt_read_stdin(void) {
+  stdin_load();
+  size_t rem = g_stdin_len - g_stdin_pos;
+  char *o = alloc_str(rem);
+  memcpy(o, g_stdin + g_stdin_pos, rem); o[rem] = '\0';
+  g_stdin_pos = g_stdin_len;
+  return o;
+}
+
+const char *nt_read_line(void) {
+  stdin_load();
+  if (g_stdin_pos >= g_stdin_len) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  size_t start = g_stdin_pos, i = start;
+  while (i < g_stdin_len && g_stdin[i] != '\n') i++;
+  size_t len = i - start;
+  char *o = alloc_str(len);
+  memcpy(o, g_stdin + start, len); o[len] = '\0';
+  g_stdin_pos = (i < g_stdin_len) ? i + 1 : g_stdin_len; /* consume the '\n' */
+  return o;
+}
+
+/* ---- raw single-key input (the TUI unlock, docs/examples.md C-c) ----
+ * rawMode(on) puts the controlling terminal in non-canonical, no-echo mode via
+ * termios (~(ICANON|ECHO)) so keypresses arrive un-buffered and un-echoed, and
+ * restores the saved settings on off. readKey() returns the next single byte
+ * ("" at EOF).
+ *
+ * Graceful degradation when stdin is NOT a tty (e.g. piped in tests): rawMode is
+ * a no-op (tcsetattr on a non-tty would fail anyway) and readKey serves one byte
+ * from the SAME lazily-slurped stdin buffer + cursor that readLine/readStdin use,
+ * so a piped keystroke script is deterministic and matches the node oracle
+ * byte-for-byte. libc/termios only, so it cross-compiles unchanged. */
+static struct termios g_saved_termios;
+static int            g_raw_active = 0;
+
+void nt_raw_mode(int32_t on) {
+  if (on) {
+    if (g_raw_active) return;
+    if (!isatty(STDIN_FILENO)) return;                 /* piped: no-op */
+    if (tcgetattr(STDIN_FILENO, &g_saved_termios) != 0) return;
+    struct termios raw = g_saved_termios;
+    raw.c_lflag &= ~((tcflag_t)(ICANON | ECHO));
+    raw.c_cc[VMIN] = 1;                                /* block for 1 byte */
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0) g_raw_active = 1;
+  } else {
+    if (!g_raw_active) return;
+    tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_termios);
+    g_raw_active = 0;
+  }
+}
+
+const char *nt_read_key(void) {
+  if (isatty(STDIN_FILENO)) {
+    /* Live terminal: one un-buffered byte straight from fd 0. */
+    unsigned char c;
+    ssize_t n = read(STDIN_FILENO, &c, 1);
+    if (n <= 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+    char *o = alloc_str(1); o[0] = (char)c; o[1] = '\0'; return o;
+  }
+  /* Piped (not a tty): one byte from the shared slurp buffer + cursor. */
+  stdin_load();
+  if (g_stdin_pos >= g_stdin_len) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  char *o = alloc_str(1); o[0] = g_stdin[g_stdin_pos]; o[1] = '\0';
+  g_stdin_pos++;
+  return o;
 }

@@ -82,6 +82,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -111,10 +117,11 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   call void @js_print_num(double 0x401C000000000000)
   call void @js_print_newline()
   ret i32 0
@@ -204,6 +211,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -233,10 +246,11 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = fadd double 0x3FF0000000000000, 0x4000000000000000
   %t1 = fmul double %t0, 0x4008000000000000
   %t2 = fdiv double 0x4010000000000000, 0x4000000000000000
@@ -330,6 +344,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -359,10 +379,11 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = frem double 0x4024000000000000, 0x4008000000000000
   call void @js_print_num(double %t0)
   call void @js_print_newline()
@@ -453,6 +474,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -482,10 +509,11 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call double @pow(double 0x4000000000000000, double 0x4020000000000000)
   call void @js_print_num(double %t0)
   call void @js_print_newline()
@@ -576,6 +604,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -605,10 +639,11 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = fneg double 0x4014000000000000
   %t1 = fadd double %t0, 0x4000000000000000
   call void @js_print_num(double %t1)
@@ -700,6 +735,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -729,11 +770,12 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %x.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x4035000000000000, ptr %x.addr
   %t0 = load double, ptr %x.addr
   call void @js_print_num(double %t0)
@@ -825,6 +867,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -854,11 +902,12 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %x.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x3FF0000000000000, ptr %x.addr
   %t0 = load double, ptr %x.addr
   %t1 = fadd double %t0, 0x4044800000000000
@@ -953,6 +1002,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -993,11 +1048,12 @@ L0:
   ret double %t1
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %x.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x4035000000000000, ptr %x.addr
   %t0 = load double, ptr %x.addr
   %t1 = call double @dbl(double %t0)
@@ -1090,6 +1146,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -1119,10 +1181,11 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = fdiv double 0x3FF0000000000000, 0x4000000000000000
   call void @js_print_num(double %t0)
   call void @js_print_newline()
@@ -1213,6 +1276,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -1318,7 +1387,7 @@ L0:
   ret double %t10
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %base.addr = alloca double
   %add.addr = alloca ptr
@@ -1326,6 +1395,7 @@ entry:
   %g.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = ptrtoint ptr @arrow_0 to i64
   %t2 = getelementptr i64, ptr %t0, i64 0
@@ -1479,6 +1549,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -1542,12 +1618,13 @@ L0:
   ret ptr %t0
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %c.addr = alloca ptr
   %d.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @makeCounter()
   store ptr %t0, ptr %c.addr
   %t1 = load ptr, ptr %c.addr
@@ -1674,6 +1751,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -1710,13 +1793,14 @@ declare i64 @nt_sup_start(i64)
 @.str.4 = private unnamed_addr constant [1 x i8] c"\\00"
 @.str.5 = private unnamed_addr constant [9 x i8] c"fallback\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %nums.addr = alloca ptr
   %x.addr = alloca double
   %y.addr = alloca i8
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_str_split(ptr @.str.0, ptr @.str.1)
   %t1 = call ptr @nt_arr_join_str(ptr %t0, ptr @.str.2)
   call void @js_print_str(ptr %t1)
@@ -1837,6 +1921,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -1869,7 +1959,7 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"Bob\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %__d0.addr = alloca ptr
   %first.addr = alloca double
@@ -1886,6 +1976,7 @@ entry:
   %__d3.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store ptr null, ptr %name.addr
   %t0 = call ptr @nt_arr_new(double 0x4014000000000000)
   %t1 = bitcast double 0x4024000000000000 to i64
@@ -2091,6 +2182,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -2140,7 +2237,7 @@ L0:
   ret double %t4
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %a.addr = alloca ptr
   %b.addr = alloca ptr
@@ -2149,6 +2246,7 @@ entry:
   %merged.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4008000000000000)
   %t1 = bitcast double 0x3FF0000000000000 to i64
   call double @nt_arr_push(ptr %t0, i64 %t1)
@@ -2336,6 +2434,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -2408,11 +2512,12 @@ endof5:
   ret double %t12
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %data.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4008000000000000)
   %t2 = bitcast double 0x401C000000000000 to i64
@@ -2593,6 +2698,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -2638,7 +2749,7 @@ declare i64 @nt_sup_start(i64)
 @.str.13 = private unnamed_addr constant [6 x i8] c"\\22id\\22:\\00"
 @.str.14 = private unnamed_addr constant [9 x i8] c"\\22items\\22:\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %s1 = alloca ptr
   %s2 = alloca double
@@ -2648,6 +2759,7 @@ entry:
   %s18 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @js_num_to_str(double 0x4045000000000000)
   call void @js_print_str(ptr %t0)
   call void @js_print_newline()
@@ -2934,6 +3046,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -3020,11 +3138,12 @@ endtry2:
   ret ptr null
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %e.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @risky(double 0x4014000000000000)
   call void @js_print_str(ptr %t0)
   call void @js_print_newline()
@@ -3131,6 +3250,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -3229,7 +3354,7 @@ L0:
   ret double %t1
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %compose.addr = alloca ptr
   %inc.addr = alloca ptr
@@ -3237,6 +3362,7 @@ entry:
   %addThenDouble.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = ptrtoint ptr @arrow_0 to i64
   %t2 = getelementptr i64, ptr %t0, i64 0
@@ -3380,6 +3506,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -3409,10 +3541,11 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = fcmp olt double 0x4008000000000000, 0x4014000000000000
   %t1 = zext i1 %t0 to i32
   call void @js_print_bool(i32 %t1)
@@ -3516,6 +3649,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -3574,10 +3713,11 @@ ternend4:
   ret double %t10
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call double @fib(double 0x4024000000000000)
   call void @js_print_num(double %t0)
   call void @js_print_newline()
@@ -3668,6 +3808,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -3700,11 +3846,12 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [5 x i8] c"even\\00"
 @.str.1 = private unnamed_addr constant [4 x i8] c"odd\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %x.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x401C000000000000, ptr %x.addr
   %t0 = load double, ptr %x.addr
   %t1 = frem double %t0, 0x4000000000000000
@@ -3806,6 +3953,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -3835,13 +3988,14 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %s1 = alloca i1
   %s4 = alloca i1
   %s7 = alloca i1
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store i1 true, ptr %s1
   br i1 true, label %rhs2, label %logend3
 rhs2:
@@ -3965,6 +4119,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -3994,11 +4154,12 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %n.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x7FF8000000000000, ptr %n.addr
   %t0 = load double, ptr %n.addr
   %t1 = load double, ptr %n.addr
@@ -4107,6 +4268,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -4136,12 +4303,13 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %i.addr = alloca double
   %sum.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x3FF0000000000000, ptr %i.addr
   store double 0x0000000000000000, ptr %sum.addr
   br label %while1
@@ -4249,6 +4417,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -4285,7 +4459,7 @@ declare i64 @nt_sup_start(i64)
 @.str.4 = private unnamed_addr constant [2 x i8] c"x\\00"
 @.str.5 = private unnamed_addr constant [2 x i8] c"y\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %a.addr = alloca ptr
   %e.addr = alloca ptr
@@ -4298,6 +4472,7 @@ entry:
   %s31 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_json_parse(ptr @.str.0)
   %t1 = call i32 @nt_exc_pending()
   %t2 = icmp ne i32 %t1, 0
@@ -4590,6 +4765,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -4622,10 +4803,11 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [5 x i8] c"true\\00"
 @.str.1 = private unnamed_addr constant [6 x i8] c"false\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_json_parse(ptr @.str.0)
   %t1 = call i32 @nt_exc_pending()
   %t2 = icmp ne i32 %t1, 0
@@ -4753,6 +4935,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -4814,10 +5002,11 @@ endtry2:
   ret ptr null
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @p(ptr @.str.2)
   call void @js_print_str(ptr %t0)
   call void @js_print_newline()
@@ -4911,6 +5100,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -4946,10 +5141,11 @@ declare i64 @nt_sup_start(i64)
 @.str.3 = private unnamed_addr constant [5 x i8] c"0e+1\\00"
 @.str.4 = private unnamed_addr constant [6 x i8] c"1e400\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_json_parse(ptr @.str.0)
   %t1 = call i32 @nt_exc_pending()
   %t2 = icmp ne i32 %t1, 0
@@ -5127,6 +5323,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -5158,11 +5360,12 @@ declare i64 @nt_sup_start(i64)
 
 @.str.0 = private unnamed_addr constant [2 x i8] c"5\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %n.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_json_parse(ptr @.str.0)
   %t1 = call i32 @nt_exc_pending()
   %t2 = icmp ne i32 %t1, 0
@@ -5270,6 +5473,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -5310,7 +5519,7 @@ declare i64 @nt_sup_start(i64)
 @.str.8 = private unnamed_addr constant [5 x i8] c"name\\00"
 @.str.9 = private unnamed_addr constant [6 x i8] c"admin\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %p.addr = alloca ptr
   %q.addr = alloca ptr
@@ -5318,6 +5527,7 @@ entry:
   %u.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_json_parse(ptr @.str.0)
   %t1 = call i32 @nt_exc_pending()
   %t2 = icmp ne i32 %t1, 0
@@ -5595,6 +5805,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -5627,10 +5843,11 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [10 x i8] c"{bad json\\00"
 @.str.1 = private unnamed_addr constant [10 x i8] c"unreached\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_json_parse(ptr @.str.0)
   %t1 = call i32 @nt_exc_pending()
   %t2 = icmp ne i32 %t1, 0
@@ -5728,6 +5945,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -5763,10 +5986,11 @@ declare i64 @nt_sup_start(i64)
 @.str.3 = private unnamed_addr constant [11 x i8] c"\\22a\\5Cu0041b\\22\\00"
 @.str.4 = private unnamed_addr constant [7 x i8] c"\\22x\\5Cty\\22\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_json_parse(ptr @.str.0)
   %t1 = call i32 @nt_exc_pending()
   %t2 = icmp ne i32 %t1, 0
@@ -5946,6 +6170,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -5984,7 +6214,7 @@ declare i64 @nt_sup_start(i64)
 @.str.6 = private unnamed_addr constant [2 x i8] c"}\\00"
 @.str.7 = private unnamed_addr constant [4 x i8] c"arr\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %obj.addr = alloca ptr
   %s.addr = alloca ptr
@@ -5993,6 +6223,7 @@ entry:
   %s2 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store ptr null, ptr %s.addr
   %t0 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t1 = bitcast double 0x4014000000000000 to i64
@@ -6165,6 +6396,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -6197,11 +6434,12 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
 @.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = bitcast double 0x4014000000000000 to i64
   %t2 = call ptr @nt_obj_new(double 0x4000000000000000)
@@ -6327,6 +6565,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -6358,11 +6602,12 @@ declare i64 @nt_sup_start(i64)
 
 @.str.0 = private unnamed_addr constant [7 x i8] c"object\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t2 = getelementptr i64, ptr %t1, i64 0
@@ -6464,6 +6709,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -6496,11 +6747,12 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
 @.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t2 = getelementptr i64, ptr %t1, i64 0
@@ -6625,6 +6877,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -6657,11 +6915,12 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
 @.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = bitcast double 0x4045000000000000 to i64
   %t2 = call ptr @nt_obj_new(double 0x4000000000000000)
@@ -6787,6 +7046,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -6819,12 +7084,13 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
 @.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %x.addr = alloca ptr
   %y.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t1 = getelementptr i64, ptr %t0, i64 0
   store i64 0, ptr %t1
@@ -6997,6 +7263,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -7029,12 +7301,13 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
 @.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %a.addr = alloca ptr
   %b.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t1 = getelementptr i64, ptr %t0, i64 0
   store i64 1, ptr %t1
@@ -7178,6 +7451,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -7210,7 +7489,7 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [1 x i8] c"\\00"
 @.str.1 = private unnamed_addr constant [2 x i8] c"x\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %x.addr = alloca ptr
   %y.addr = alloca ptr
@@ -7222,6 +7501,7 @@ entry:
   %s15 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t1 = getelementptr i64, ptr %t0, i64 0
   store i64 0, ptr %t1
@@ -7408,6 +7688,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -7437,11 +7723,12 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t2 = bitcast double 0x401C000000000000 to i64
@@ -7549,6 +7836,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -7581,12 +7874,13 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
 @.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   %s1 = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t2 = getelementptr i64, ptr %t1, i64 0
@@ -7740,6 +8034,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -7772,12 +8072,13 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
 @.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %a.addr = alloca ptr
   %s1 = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t1 = getelementptr i64, ptr %t0, i64 0
   store i64 1, ptr %t1
@@ -7925,6 +8226,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -7954,11 +8261,12 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t2 = call ptr @nt_obj_new(double 0x3FF0000000000000)
@@ -8073,6 +8381,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -8105,12 +8419,13 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
 @.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   %s1 = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t2 = call ptr @nt_obj_new(double 0x4000000000000000)
@@ -8285,6 +8600,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -8314,7 +8635,7 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   %p.addr = alloca ptr
@@ -8324,6 +8645,7 @@ entry:
   %s13 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t2 = getelementptr i64, ptr %t1, i64 0
@@ -8542,6 +8864,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -8574,7 +8902,7 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [5 x i8] c"none\\00"
 @.str.1 = private unnamed_addr constant [3 x i8] c"hi\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   %p.addr = alloca ptr
@@ -8586,6 +8914,7 @@ entry:
   %s21 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t2 = getelementptr i64, ptr %t1, i64 0
@@ -8837,6 +9166,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -8866,7 +9201,7 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   %p.addr = alloca ptr
@@ -8874,6 +9209,7 @@ entry:
   %s5 = alloca i1
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = zext i1 false to i64
   %t2 = call ptr @nt_obj_new(double 0x4000000000000000)
@@ -9030,6 +9366,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -9063,7 +9405,7 @@ declare i64 @nt_sup_start(i64)
 @.str.1 = private unnamed_addr constant [6 x i8] c"world\\00"
 @.str.2 = private unnamed_addr constant [1 x i8] c"\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   %t.addr = alloca ptr
@@ -9071,6 +9413,7 @@ entry:
   %s5 = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t2 = getelementptr i64, ptr %t1, i64 0
@@ -9227,6 +9570,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -9259,7 +9608,7 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
 @.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %a.addr = alloca ptr
   %b.addr = alloca ptr
@@ -9271,6 +9620,7 @@ entry:
   %s31 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t1 = getelementptr i64, ptr %t0, i64 0
   store i64 1, ptr %t1
@@ -9566,6 +9916,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -9595,12 +9951,13 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %o.addr = alloca ptr
   %p.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t1 = bitcast double 0x3FF0000000000000 to i64
   %t2 = getelementptr i64, ptr %t0, i64 0
@@ -9744,6 +10101,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -9775,13 +10138,14 @@ declare i64 @nt_sup_start(i64)
 
 @.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %v0.addr = alloca ptr
   %v1.addr = alloca ptr
   %v2.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4008000000000000)
   %t1 = bitcast double 0x3FF0000000000000 to i64
   call double @nt_arr_push(ptr %t0, i64 %t1)
@@ -9915,6 +10279,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -9946,12 +10316,13 @@ declare i64 @nt_sup_start(i64)
 
 @.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %a.addr = alloca ptr
   %b.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4008000000000000)
   %t1 = bitcast double 0x4024000000000000 to i64
   call double @nt_arr_push(ptr %t0, i64 %t1)
@@ -10083,6 +10454,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -10118,12 +10495,13 @@ declare i64 @nt_sup_start(i64)
 @.str.3 = private unnamed_addr constant [4 x i8] c"dog\\00"
 @.str.4 = private unnamed_addr constant [2 x i8] c"-\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %a.addr = alloca ptr
   %b.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4008000000000000)
   %rc1 = call ptr @nt_str_retain(ptr @.str.0)
   %t2 = ptrtoint ptr @.str.0 to i64
@@ -10255,6 +10633,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -10288,11 +10672,12 @@ declare i64 @nt_sup_start(i64)
 @.str.1 = private unnamed_addr constant [2 x i8] c"y\\00"
 @.str.2 = private unnamed_addr constant [2 x i8] c"z\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %m.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_map_new()
   %rc1 = call ptr @nt_str_retain(ptr @.str.0)
   %t2 = ptrtoint ptr @.str.0 to i64
@@ -10422,6 +10807,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -10458,12 +10849,13 @@ declare i64 @nt_sup_start(i64)
 @.str.4 = private unnamed_addr constant [4 x i8] c"k25\\00"
 @.str.5 = private unnamed_addr constant [4 x i8] c"k50\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %m.addr = alloca ptr
   %i.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_map_new()
   store ptr %t0, ptr %m.addr
   store double 0x0000000000000000, ptr %i.addr
@@ -10621,6 +11013,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -10653,12 +11051,13 @@ declare i64 @nt_sup_start(i64)
 @.str.0 = private unnamed_addr constant [2 x i8] c"a\\00"
 @.str.1 = private unnamed_addr constant [2 x i8] c"b\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %m.addr = alloca ptr
   %m2.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_map_new()
   store ptr %t0, ptr %m.addr
   %t1 = load ptr, ptr %m.addr
@@ -10777,6 +11176,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -10810,11 +11215,12 @@ declare i64 @nt_sup_start(i64)
 @.str.1 = private unnamed_addr constant [2 x i8] c"b\\00"
 @.str.2 = private unnamed_addr constant [2 x i8] c"c\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %s.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_set_new()
   %rc1 = call ptr @nt_str_retain(ptr @.str.0)
   %t2 = ptrtoint ptr @.str.0 to i64
@@ -10942,6 +11348,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -10971,11 +11383,12 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %s.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_set_new()
   %t1 = bitcast double 0x3FF0000000000000 to i64
   %t2 = call ptr @nt_set_add_slot(ptr %t0, i32 0, i64 %t1)
@@ -11099,6 +11512,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -11128,7 +11547,7 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %pts.addr = alloca ptr
   %sum.addr = alloca double
@@ -11136,6 +11555,7 @@ entry:
   %s1 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4008000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t2 = bitcast double 0x3FF0000000000000 to i64
@@ -11302,6 +11722,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -11331,11 +11757,12 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %a.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4000000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t2 = bitcast double 0x3FF0000000000000 to i64
@@ -11481,6 +11908,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -11510,7 +11943,7 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %pts.addr = alloca ptr
   %shifted.addr = alloca ptr
@@ -11523,6 +11956,7 @@ entry:
   %s18 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4008000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t2 = bitcast double 0x3FF0000000000000 to i64
@@ -11828,6 +12262,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -11857,13 +12297,14 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %rows.addr = alloca ptr
   %r.addr = alloca ptr
   %s1 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4000000000000000)
   %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t2 = call ptr @nt_obj_new(double 0x4000000000000000)
@@ -12105,6 +12546,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -12134,7 +12581,7 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %base.addr = alloca ptr
   %items.addr = alloca ptr
@@ -12145,6 +12592,7 @@ entry:
   %s6 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4000000000000000)
   %t1 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t2 = bitcast double 0x3FF0000000000000 to i64
@@ -12344,6 +12792,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -12423,13 +12877,14 @@ endfor4:
   ret ptr %t14
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %a.addr = alloca ptr
   %b.addr = alloca ptr
   %c.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store ptr null, ptr %a.addr
   store ptr null, ptr %b.addr
   store ptr null, ptr %c.addr
@@ -12551,6 +13006,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -12621,13 +13082,14 @@ L0:
   ret ptr %t11
 }
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %acc.addr = alloca ptr
   %i.addr = alloca double
   %s.addr = alloca ptr
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store ptr null, ptr %acc.addr
   store ptr null, ptr %s.addr
   %rc0 = call ptr @nt_str_retain(ptr @.str.2)
@@ -12752,6 +13214,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -12785,10 +13253,11 @@ declare i64 @nt_sup_start(i64)
 @.str.1 = private unnamed_addr constant [4 x i8] c"bar\\00"
 @.str.2 = private unnamed_addr constant [4 x i8] c"baz\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @js_str_concat(ptr @.str.0, ptr @.str.1)
   %t1 = call ptr @js_str_concat(ptr %t0, ptr @.str.2)
   call void @js_print_str(ptr %t1)
@@ -12880,6 +13349,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -12911,10 +13386,11 @@ declare i64 @nt_sup_start(i64)
 
 @.str.0 = private unnamed_addr constant [6 x i8] c"hello\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call double @js_str_len(ptr @.str.0)
   call void @js_print_num(double %t0)
   call void @js_print_newline()
@@ -13005,6 +13481,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -13039,12 +13521,13 @@ declare i64 @nt_sup_start(i64)
 @.str.2 = private unnamed_addr constant [2 x i8] c" \\00"
 @.str.3 = private unnamed_addr constant [1 x i8] c"\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %name.addr = alloca ptr
   %n.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store ptr null, ptr %name.addr
   %rc0 = call ptr @nt_str_retain(ptr @.str.0)
   store ptr @.str.0, ptr %name.addr
@@ -13148,6 +13631,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -13177,11 +13666,12 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %x.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x4024000000000000, ptr %x.addr
   %t0 = load double, ptr %x.addr
   %t1 = fadd double %t0, 0x4014000000000000
@@ -13282,6 +13772,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -13311,12 +13807,13 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %total.addr = alloca double
   %i.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x0000000000000000, ptr %total.addr
   store double 0x0000000000000000, ptr %i.addr
   br label %for1
@@ -13426,6 +13923,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -13455,11 +13958,12 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %i.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x4014000000000000, ptr %i.addr
   %t0 = load double, ptr %i.addr
   %t1 = fadd double %t0, 1.0
@@ -13561,6 +14065,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -13594,10 +14104,11 @@ declare i64 @nt_sup_start(i64)
 @.str.1 = private unnamed_addr constant [7 x i8] c"string\\00"
 @.str.2 = private unnamed_addr constant [8 x i8] c"boolean\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   call void @js_print_str(ptr @.str.0)
   call void @js_print_sep()
   call void @js_print_str(ptr @.str.1)
@@ -13691,6 +14202,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -13720,12 +14237,13 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %s.addr = alloca double
   %i.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x0000000000000000, ptr %s.addr
   store double 0x0000000000000000, ptr %i.addr
   br label %for1
@@ -13841,6 +14359,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -13870,12 +14394,13 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %s.addr = alloca double
   %i.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x0000000000000000, ptr %s.addr
   store double 0x0000000000000000, ptr %i.addr
   br label %for1
@@ -13992,6 +14517,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -14021,11 +14552,12 @@ declare i64 @nt_sup_new(i64, i64, i64)
 declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
 declare i64 @nt_sup_start(i64)
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %i.addr = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store double 0x0000000000000000, ptr %i.addr
   br label %while1
 while1:
@@ -14132,6 +14664,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -14166,7 +14704,7 @@ declare i64 @nt_sup_start(i64)
 @.str.2 = private unnamed_addr constant [6 x i8] c"there\\00"
 @.str.3 = private unnamed_addr constant [2 x i8] c" \\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %xs.addr = alloca ptr
   %sum.addr = alloca double
@@ -14176,6 +14714,7 @@ entry:
   %s1 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4014000000000000)
   %t1 = bitcast double 0x4008000000000000 to i64
   call double @nt_arr_push(ptr %t0, i64 %t1)
@@ -14358,6 +14897,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -14394,7 +14939,7 @@ declare i64 @nt_sup_start(i64)
 @.str.4 = private unnamed_addr constant [2 x i8] c",\\00"
 @.str.5 = private unnamed_addr constant [1 x i8] c"\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %p.addr = alloca ptr
   %o.addr = alloca ptr
@@ -14403,6 +14948,7 @@ entry:
   %s1 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   store ptr null, ptr %ks.addr
   %t0 = call ptr @nt_obj_new(double 0x4008000000000000)
   %rc1 = call ptr @nt_str_retain(ptr @.str.0)
@@ -14606,6 +15152,12 @@ declare i32 @nt_exc_pending()
 declare ptr @nt_exc_message()
 declare void @nt_exc_clear()
 declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare void @nt_exit(double)
 declare ptr @nt_map_new()
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
@@ -14637,7 +15189,7 @@ declare i64 @nt_sup_start(i64)
 
 @.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
 
-define i32 @main() {
+define i32 @main(i32 %argc, ptr %argv) {
 entry:
   %nums.addr = alloca ptr
   %factor.addr = alloca double
@@ -14653,6 +15205,7 @@ entry:
   %s28 = alloca double
   br label %L0
 L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @nt_arr_new(double 0x4014000000000000)
   %t1 = bitcast double 0x3FF0000000000000 to i64
   call double @nt_arr_push(ptr %t0, i64 %t1)
