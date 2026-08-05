@@ -101,6 +101,18 @@ export function typeError(message: string): NTError {
   return new NTError({ code: "NT2001", message });
 }
 
+/**
+ * In-place mutation of an array/object is rejected (NT1606). nativets' data model
+ * is immutable-by-default (Phase B "sharp turn", a deliberate divergence from node):
+ * arrays and objects are values that are never mutated in place. `.push`/`.pop`,
+ * `arr[i] = v`, and `o.f = v` are refused with an actionable pointer to the
+ * immutable replacement — reject-don't-miscompile, surfaced by `coverage`.
+ * Sits in the NT16xx ownership/memory-model band alongside the move checker.
+ */
+export function mutationError(message: string, hint: string): NTError {
+  return new NTError({ code: "NT1606", message, milestone: "later", hint });
+}
+
 export function parseError(message: string): NTError {
   return new NTError({ code: "NT0001", message });
 }
