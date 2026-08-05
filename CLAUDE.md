@@ -668,6 +668,56 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   any arrow body (a closure env holds a second pointer), module-level bindings promoted to globals
   (a function may have returned the pointer), temporaries in non-chain positions, and array/object
   **elements** (a container frees its handle, not what its slots point at).
+- **Stage 45 ✅ (B3 v6: M:N scheduler threads, lock-free MPSC mailboxes, work stealing, async-IO
+  poller)** The last major deferred piece of the actor runtime. **The determinism problem came
+  first**, because every actor test asserts EXACT stdout and that is only a specification while one
+  cooperative scheduler makes the interleaving a pure function of the program. So the mode is chosen
+  at RUN TIME by **`NATIVETS_SCHED_THREADS`**: unset or `1` is the **default** and collapses to the
+  v0..v5 scheduler *byte for byte* (one FIFO queue, direct mailbox appends, virtual clock — all 39
+  existing actor/supervision tests pass unchanged); `N`/`auto` starts N OS threads. **(1) M:N
+  threads.** Each thread drives its own `NtSched` (own run queue + own ucontext); `g_current` and
+  the scheduler pointer are thread-local, so an actor may be resumed on a different thread than it
+  suspended on — **actors migrate, pids do not** (one global actor table). The hazard real threads
+  introduce is a sender enqueueing an actor whose registers are still being written to its
+  ucontext; it is closed by a **`NT_SWITCHING`** state that only the scheduler regaining control may
+  leave, paired with a block-predicate re-check (`mbox_ready`) at slice end — the two halves make a
+  lost wakeup impossible from either side. Quiescence is a single counter incremented *before* a pid
+  becomes visible to a thief and decremented only when its slice ends unqueued, so `__drain()`
+  cannot return early. **(2) Lock-free MPSC mailboxes.** Many senders, one receiver ⇒ a Treiber-stack
+  **intake** (one CAS per send) that the owner drains with an atomic exchange + batch reverse
+  (restoring FIFO) into its **private list** — which is the same list v4/v5 scan by index for
+  SELECTIVE receive, something an MPSC queue cannot support. That is exactly BEAM's outer/inner
+  mailbox split, so the save-queue machinery is untouched. **(3) Work stealing** — an idle scheduler
+  takes from the HEAD of a victim's queue, probing victims round-robin from itself. **(4) The
+  async-IO poller** (kqueue/epoll): `nt_io_wait(fd)` parks an actor on a file descriptor — out of
+  the run queue entirely, no slice, no spin — and kernel readiness wakes it; only scheduler 0 polls
+  (no thundering herd) and it blocks in the poller when the system is otherwise idle, so a parked
+  actor keeps `__drain` alive. **Refcount soundness — the real risk.** Stage 30's string RC
+  side-table (one global open-addressed hash that *rehashes*) and Stage 38/44's pvec node refcounts
+  (plus the transient's `rc == 1 ⇒ write in place` check-then-act) are single-threaded structures.
+  They now call through **`nt_rt_lock`**, a hook `nt_sched_init` installs *only* when it starts more
+  than one scheduler thread — `NULL` for everything else, so it is a predictable branch, needs no
+  pthread dependency in `runtime.c` (which must keep cross-compiling), and leaves the default path
+  behaviourally identical. The *values* need no protection: every message is **deep-copied on send**
+  (Stage 42) and arrays/objects are **immutable** (Stage 29), so what crosses a thread boundary is
+  read-only storage plus its count. The live-value stat counters became relaxed atomics (TSan found
+  that one). **TSan.** A compiled actor program cannot be TSan-gated: the coroutines are ucontext
+  **fibers that migrate**, and TSan's fiber support CHECK-fails (`tsan_rtl_proc.cpp:46`) exactly
+  then — without annotations it instead calls every actor stack slot a race. (The annotations are
+  in `nt_actor.c`, compiled in under `-fsanitize=thread`; they make 2-thread runs clean but do not
+  survive 4.) So the gate drives what genuinely becomes shared — the RC table and the pvec
+  refcounts — from plain pthreads through the same hook, and ships a **negative control**: with the
+  hook removed the identical workload reports 57 races, with it 0. **Invariants verified, not
+  assumed:** non-actor IR is byte-identical to main (diffed); the actor runtime is still linked only
+  when used; non-actor iOS/iOS-sim/Android cross-builds still link, and Android actor builds still
+  fail on NDK-24's missing `ucontext`, exactly as before; the M:N fan-in property runs on the **iOS
+  simulator** with 4 scheduler threads. **Deferred:** wiring the poller to a TS-visible IO builtin
+  (`readLine` slurps stdin up front and `fetch` is blocking libcurl — that retrofit is what would
+  make Stage 34's `await` more than an identity), a dirty-scheduler pool, `nt_io_wait` timeouts, and
+  per-actor heap arenas that would remove the RC lock entirely. Tests: `test/actors-mn.test.ts`
+  (mode gate, determinism regression, M:N properties — per-pair FIFO, exactly-once, migration,
+  supervision outcome, a repeated stress run — plus the TSan and poller gates),
+  `test/actors/mn_{fanin,parallel,stress}.ts`, `test/runtime/{mn_rc_race_test,poll_test}.c`.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 

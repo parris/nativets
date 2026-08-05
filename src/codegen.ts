@@ -340,9 +340,6 @@ const DECLARES = [
   "declare i64 @nt_receive_slot()",
   "declare i64 @nt_self()",
   "declare void @nt_drain()",
-  "declare double @nt_schedulers()",
-  "declare double @nt_sched_used()",
-  "declare double @nt_sched_steals()",
   // --- B3 v2 links/monitors/trap + fault injection; v3 supervision ---
   "declare void @nt_register(ptr, i64)",
   "declare i64 @nt_whereis(ptr)",
@@ -377,6 +374,11 @@ const ACTOR_V4_DECLARES = [
   "declare i64 @nt_recv_struct(ptr, double, i32)",
   "declare i32 @nt_mbox_shape_ok(i64, ptr)",
   "declare ptr @nt_msg_str_copy(ptr)",
+  // v6 M:N introspection (debug builtins). In the GATED list, not the unconditional one,
+  // so a non-actor program's IR is still byte-identical.
+  "declare double @nt_schedulers()",
+  "declare double @nt_sched_used()",
+  "declare double @nt_sched_steals()",
 ];
 
 interface Val { v: string; ty: Ty; }

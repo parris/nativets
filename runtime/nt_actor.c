@@ -5,15 +5,18 @@
  * leaks for the process lifetime). Per-actor arenas / drop-on-exit are a
  * follow-up; v0 just mallocs.
  *
- * Scheduling model (deterministic, single-threaded):
+ * Scheduling model:
  *   - Every actor (including `main`, which is actor 0) has its own ucontext.
- *   - A dedicated scheduler context runs scheduler_loop(): it pops a RUNNABLE
- *     pid off the FIFO run queue, swaps into it, and regains control when that
- *     actor yields (blocks in receive) or dies (body returns). When the run
- *     queue is empty it idle-returns to `main` (the drain / receive caller).
- *   - Blocking receive() sets the actor BLOCKED and yields to the scheduler;
- *     send() to a BLOCKED actor flips it RUNNABLE and enqueues it — that is the
- *     BLOCKED->RUNNABLE wakeup edge.
+ *   - A scheduler context runs scheduler_loop(): it pops a RUNNABLE pid off a FIFO
+ *     run queue, swaps into it, and regains control when that actor yields (blocks
+ *     in receive), is preempted, or dies. When nothing is runnable anywhere,
+ *     scheduler 0 idle-returns to `main` (the drain / receive caller).
+ *   - Blocking receive() switches out asking to be BLOCKED; send() to a BLOCKED
+ *     actor CASes it RUNNABLE and enqueues it — the BLOCKED->RUNNABLE wakeup edge.
+ *   - v6: `NATIVETS_SCHED_THREADS` chooses ONE scheduler (the default; the schedule
+ *     is then a pure function of the program, which is what the behavioral tests
+ *     assert) or N OS threads with per-scheduler queues, work stealing and lock-free
+ *     MPSC mailbox intake. See nt_actor.h's v6 block for what survives the switch.
  *
  * MESSAGE VALUES (resolved in v5): NtMsg stays the internal carrier for the C-level
  * API and for exit/DOWN signals, but a COMPILER-sent message is a raw 8-byte slot plus
@@ -44,11 +47,57 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+/* v6 async-IO poller: kqueue on macOS/BSD, epoll on Linux. Absent elsewhere, in which
+ * case nt_io_wait reports "unsupported" and the caller keeps its blocking read. */
+#if defined(__linux__)
+#  include <sys/epoll.h>
+#  define NT_POLL_EPOLL 1
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#  include <sys/event.h>
+#  define NT_POLL_KQUEUE 1
+#endif
+
 #include "nt_actor.h"
 
 /* macOS marks the ucontext family deprecated; it still works and is the cleanest
  * portable coroutine substrate for v0. Silence just those warnings. */
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
+/* ============================================================================
+ * ThreadSanitizer FIBER annotations.
+ *
+ * TSan models one shadow stack per OS thread. ucontext coroutines break that: an actor's
+ * stack is written on one scheduler thread and read on another after migration, and TSan
+ * — which never saw the swapcontext — reports every such access as a race. Those are
+ * FALSE POSITIVES that drown the real ones, so an unannotated TSan run over this runtime
+ * is worthless. TSan ships an API for exactly this; we drive it so a report from
+ * `-fsanitize=thread` means something.
+ *
+ * Compiled away entirely unless -fsanitize=thread is on, so the shipped runtime is
+ * unchanged. Each ucontext (every actor, every scheduler) owns one TSan fiber; each
+ * swapcontext is preceded by the matching __tsan_switch_to_fiber.
+ * ========================================================================== */
+#if defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+#    define NT_TSAN_FIBERS 1
+#  endif
+#endif
+
+#ifdef NT_TSAN_FIBERS
+void *__tsan_get_current_fiber(void);
+void *__tsan_create_fiber(unsigned flags);
+void  __tsan_destroy_fiber(void *fiber);
+void  __tsan_switch_to_fiber(void *fiber, unsigned flags);
+#  define NT_FIBER_FIELD          void *tsan_fiber;
+#  define NT_FIBER_NEW(o)         ((o)->tsan_fiber = __tsan_create_fiber(0))
+#  define NT_FIBER_HERE(o)        ((o)->tsan_fiber = __tsan_get_current_fiber())
+#  define NT_FIBER_SWITCH(o)      __tsan_switch_to_fiber((o)->tsan_fiber, 0)
+#else
+#  define NT_FIBER_FIELD
+#  define NT_FIBER_NEW(o)         ((void)0)
+#  define NT_FIBER_HERE(o)        ((void)0)
+#  define NT_FIBER_SWITCH(o)      ((void)0)
+#endif
 
 #define NT_MAX_ACTORS 1024
 #define NT_MAX_REG     256
@@ -104,6 +153,7 @@ typedef struct NtActor {
   int         next_status;             /* what the actor wants to be after this slice */
   int64_t     wait_n;                  /* v6: block until mbox holds MORE than this many */
   _Atomic long kill_req;               /* v6: async kill of an actor RUNNING on another thread */
+  _Atomic int io_ready;                /* v6: the poller saw our fd become readable */
   _Atomic(NtMboxNode *) in_head;       /* v6: lock-free MPSC intake (Treiber stack) */
   NtActorFn   entry;
   NtMsg       entry_arg;
@@ -114,6 +164,7 @@ typedef struct NtActor {
   int64_t     carg;
   ucontext_t  ctx;
   char       *stack;
+  NT_FIBER_FIELD
   NtMboxNode *mbox_head, *mbox_tail;   /* FIFO mailbox */
 
   /* ---- v2: links / monitors / trap_exit / crash record ---- */
@@ -147,6 +198,7 @@ typedef struct NtSched {
   NtRqNode        *head, *tail;
   ucontext_t       ctx;              /* this scheduler's own context */
   char            *stack;
+  NT_FIBER_FIELD
   pthread_t        thread;
   int              ran;              /* did this scheduler ever run an actor? (test hook) */
 } NtSched;
@@ -158,9 +210,14 @@ static NtActor  *g_main;            /* actor 0 (the program's main thread) */
 static NtSched   g_scheds[NT_MAX_SCHED];
 static int       g_nsched = 1;      /* resolved from NATIVETS_SCHED_THREADS; 1 = deterministic */
 static int       g_mt;              /* g_nsched > 1: the M:N path is live */
-static _Atomic int64_t g_inflight;  /* pids sitting in some run queue */
-static _Atomic int64_t g_running;   /* actors currently executing on some scheduler */
+/* OUTSTANDING WORK. Incremented BEFORE a pid is inserted into any run queue and
+ * decremented only when that pid's slice ENDS without being re-queued — so it is never
+ * transiently 0 while an actor is queued, being stolen, or executing. That invariant is
+ * what lets `main` safely conclude, from another thread, that __drain() is complete. */
+static _Atomic int64_t g_inflight;
 static _Atomic int64_t g_steals;    /* work-stealing hits (test hook) */
+static int             g_poll_fd = -1;   /* kqueue/epoll instance (lazily created) */
+static _Atomic int64_t g_io_waiters;     /* actors parked WAITING on a file descriptor */
 
 /* Per-OS-thread: which scheduler this thread drives, and which actor is on its stack.
  * `g_current` keeps its old name (every call site reads it fresh after a yield, which is
@@ -256,11 +313,11 @@ static NtMsg msg_deepcopy(NtMsg m) {
 static void rq_push_on(NtSched *s, NtPid pid) {
   NtRqNode *n = (NtRqNode *)malloc(sizeof(NtRqNode));
   n->pid = pid; n->next = NULL;
+  atomic_fetch_add(&g_inflight, 1);        /* count it BEFORE it is visible to a thief */
   if (g_mt) pthread_mutex_lock(&s->lock);
   if (s->tail) s->tail->next = n; else s->head = n;
   s->tail = n;
   if (g_mt) pthread_mutex_unlock(&s->lock);
-  atomic_fetch_add(&g_inflight, 1);
   if (g_mt) {                              /* a parked scheduler may now have work */
     pthread_mutex_lock(&g_idle_lock);
     pthread_cond_broadcast(&g_idle_cv);
@@ -284,7 +341,7 @@ static int rq_pop_from(NtSched *s, NtPid *out) {
     got = 1;
   }
   if (g_mt) pthread_mutex_unlock(&s->lock);
-  if (got) { free(n); atomic_fetch_sub(&g_inflight, 1); }
+  if (got) free(n);      /* g_inflight stays up: the pid is now RUNNING, still outstanding */
   return got;
 }
 
@@ -353,7 +410,12 @@ static int64_t mbox_count_of(NtActor *a);
  * receive, whose save queue leaves earlier messages in place — which is precisely why
  * "mailbox non-empty" is the WRONG wake condition and would spin forever. Safe to call
  * from the scheduler while `a` is switched out: no consumer is running. */
-static int mbox_ready(NtActor *a) { return mbox_count_of(a) > a->wait_n; }
+static int mbox_ready(NtActor *a) {
+  /* v6: a fd that became readable while we were SWITCHING wakes us just like a message
+   * would — same lost-wakeup argument, different event source. */
+  if (atomic_load(&a->io_ready)) return 1;
+  return mbox_count_of(a) > a->wait_n;
+}
 
 static int mbox_empty(NtActor *a) { mbox_drain(a); return a->mbox_head == NULL; }
 
@@ -402,6 +464,7 @@ static void switch_out(int next_status) {
   NtActor *a = g_current;
   a->next_status = next_status;
   atomic_store(&a->status, NT_SWITCHING);
+  NT_FIBER_SWITCH(t_sched);
   swapcontext(&a->ctx, &t_sched->ctx);
 }
 
@@ -414,6 +477,7 @@ static void actor_trampoline(void) {
   /* hand control back to the scheduler; we never resume */
   self = g_current;
   self->next_status = NT_DEAD;
+  NT_FIBER_SWITCH(t_sched);
   swapcontext(&self->ctx, &t_sched->ctx);
 }
 
@@ -445,14 +509,12 @@ static int fire_earliest_timeout(void) {
  * is also the only safe moment to advance the VIRTUAL clock — a timeout may fire exactly
  * when nothing runnable could still send, which is the same rule v4 chose, so receive
  * timeouts keep their deterministic semantics in both modes. */
-static int quiescent(void) {
-  return atomic_load(&g_inflight) == 0 && atomic_load(&g_running) == 0;
-}
+static int quiescent(void) { return atomic_load(&g_inflight) == 0; }
 
 /* An actor just switched out. Publish the state it asked for. Leaving SWITCHING is OUR
  * exclusive right, so a sender that raced us either already flipped BLOCKED->RUNNABLE
- * (and enqueued) or left `woken` behind for us to notice here. Exactly one of the two
- * enqueues wins, because both go through the same CAS. */
+ * (and enqueued) or it could not, in which case re-evaluating the block predicate here
+ * catches it. Exactly one of the two enqueues wins: both go through the same CAS. */
 static void finish_slice(NtSched *s, NtActor *a) {
   int ns = a->next_status;
   if (ns == NT_DEAD || atomic_load(&a->status) == NT_DEAD) {
@@ -487,9 +549,100 @@ static void sched_park(void) {
   ts.tv_nsec += 200 * 1000;                    /* 200µs */
   if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
   pthread_mutex_lock(&g_idle_lock);
-  if (atomic_load(&g_inflight) == 0) pthread_cond_timedwait(&g_idle_cv, &g_idle_lock, &ts);
+  pthread_cond_timedwait(&g_idle_cv, &g_idle_lock, &ts);
   pthread_mutex_unlock(&g_idle_lock);
 }
+
+/* ======================= v6: the async-IO poller ======================= */
+
+static void wake_actor(NtActor *a);   /* defined with the other wake paths, below */
+
+/* Park an actor on a FILE DESCRIPTOR instead of on its mailbox, and wake it when the
+ * kernel says the fd is readable. This is the piece that stops one blocking read from
+ * costing a whole scheduler thread: the actor leaves the run queue entirely (it is not
+ * spinning, not holding a slice), the scheduler runs everyone else, and readiness — not a
+ * timer — puts it back. Registrations are ONESHOT: one wait, one wake, re-armed by the
+ * next nt_io_wait, which matches the "park until this specific read can proceed" shape.
+ *
+ * Only scheduler 0 polls, so there is exactly one kevent/epoll_wait caller and no
+ * thundering herd; the other schedulers keep executing actors while it waits. */
+static int poll_init(void) {
+  if (g_poll_fd >= 0) return 1;
+#if defined(NT_POLL_KQUEUE)
+  g_poll_fd = kqueue();
+#elif defined(NT_POLL_EPOLL)
+  g_poll_fd = epoll_create1(0);
+#endif
+  return g_poll_fd >= 0;
+}
+
+static int poll_arm(int fd, NtActor *a) {
+#if defined(NT_POLL_KQUEUE)
+  struct kevent ev;
+  EV_SET(&ev, fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, a);
+  return kevent(g_poll_fd, &ev, 1, NULL, 0, NULL) >= 0;
+#elif defined(NT_POLL_EPOLL)
+  struct epoll_event ev;
+  ev.events = EPOLLIN | EPOLLONESHOT;
+  ev.data.ptr = a;
+  if (epoll_ctl(g_poll_fd, EPOLL_CTL_ADD, fd, &ev) == 0) return 1;
+  return epoll_ctl(g_poll_fd, EPOLL_CTL_MOD, fd, &ev) == 0;  /* already registered: re-arm */
+#else
+  (void)fd; (void)a; return 0;
+#endif
+}
+
+/* Collect ready fds and make their actors runnable. `timeout_ms < 0` blocks until an event
+ * (used only when the system is otherwise idle, so nothing is starved by waiting). */
+static int poll_reap(int timeout_ms) {
+  if (g_poll_fd < 0) return 0;
+  int woke = 0;
+#if defined(NT_POLL_KQUEUE)
+  struct kevent evs[16];
+  struct timespec ts, *tsp = NULL;
+  if (timeout_ms >= 0) { ts.tv_sec = timeout_ms / 1000;
+                         ts.tv_nsec = (long)(timeout_ms % 1000) * 1000000L; tsp = &ts; }
+  int n = kevent(g_poll_fd, NULL, 0, evs, 16, tsp);
+  for (int i = 0; i < n; i++) {
+    NtActor *a = (NtActor *)evs[i].udata;
+#elif defined(NT_POLL_EPOLL)
+  struct epoll_event evs[16];
+  int n = epoll_wait(g_poll_fd, evs, 16, timeout_ms);
+  for (int i = 0; i < n; i++) {
+    NtActor *a = (NtActor *)evs[i].data.ptr;
+#else
+  { int n = 0; (void)timeout_ms; NtActor *a = NULL;
+#endif
+    if (!a) continue;
+    atomic_fetch_sub(&g_io_waiters, 1);
+    a->wait_n = 0;
+    atomic_store(&a->io_ready, 1);
+    wake_actor(a);                 /* BLOCKED->RUNNABLE, or caught by finish_slice */
+    woke++;
+  }
+  return woke;
+}
+
+/* Compiler/runtime entry point. Returns 1 when the fd is readable, 0 on EOF-ish wakeups,
+ * and -1 when parking is not possible — no poller on this platform, or the caller is
+ * `main` / off-scheduler, in which case the CALLER must keep its ordinary blocking read.
+ * That -1 default is what keeps every existing non-actor program byte-identical. */
+int32_t nt_io_wait(int32_t fd, double ms) {
+  (void)ms;                        /* v6.4: readiness only; timeouts are a follow-up */
+  NtActor *a = g_current;
+  if (!a || a == g_main) return -1;
+  if (!poll_init()) return -1;
+  atomic_store(&a->io_ready, 0);
+  if (!poll_arm((int)fd, a)) return -1;
+  atomic_fetch_add(&g_io_waiters, 1);
+  a->wait_n = INT64_MAX;           /* messages must NOT wake us: we are waiting on IO */
+  switch_out(NT_BLOCKED);
+  a = g_current;                   /* resumed, possibly on another scheduler thread */
+  a->wait_n = 0;
+  return atomic_exchange(&a->io_ready, 0) ? 1 : 0;
+}
+
+double nt_io_waiters(void) { return (double)atomic_load(&g_io_waiters); }
 
 /* The scheduler: run RUNNABLE actors FIFO from our own queue, then steal. Scheduler 0
  * additionally owns the virtual clock and the idle-return to `main`. */
@@ -500,25 +653,36 @@ static void scheduler_loop(void) {
     if (rq_take(s, &pid)) {
       NtActor *a = actor_at(pid);
       int exp = NT_RUNNABLE;
-      if (!a || !atomic_compare_exchange_strong(&a->status, &exp, NT_RUNNING))
-        continue;                              /* stale queue entry (dead / already taken) */
-      atomic_fetch_add(&g_running, 1);
+      if (!a || !atomic_compare_exchange_strong(&a->status, &exp, NT_RUNNING)) {
+        atomic_fetch_sub(&g_inflight, 1);      /* stale entry (dead / already taken) */
+        continue;
+      }
       s->ran = 1;
       g_current = a;
+      NT_FIBER_SWITCH(a);
       swapcontext(&s->ctx, &a->ctx);           /* run until it yields/dies */
       a = g_current;                           /* (unchanged; re-read for clarity) */
-      finish_slice(s, a);
+      finish_slice(s, a);                      /* may re-queue it (another +1) */
       g_current = NULL;
-      atomic_fetch_sub(&g_running, 1);
+      atomic_fetch_sub(&g_inflight, 1);        /* this slice is done */
       continue;
     }
     if (s->index != 0) { sched_park(); continue; }   /* workers only ever run actors */
     /* Scheduler 0: nothing local. Wait for true system-wide quiescence before deciding. */
-    if (g_mt && !quiescent()) { sched_park(); continue; }
+    if (g_mt && !quiescent()) {
+      if (atomic_load(&g_io_waiters) > 0) poll_reap(0);   /* never block while others run */
+      sched_park();
+      continue;
+    }
+    /* Idle but an actor is parked on a fd: the program is NOT finished, so block in the
+     * poller until the kernel reports readiness. This is the whole point of the poller —
+     * the wait costs no scheduler slice and no busy loop. */
+    if (atomic_load(&g_io_waiters) > 0) { poll_reap(-1); continue; }
     if (fire_earliest_timeout()) continue;     /* v4: quiescent ⇒ a timeout is now due */
     /* Fully idle: resume whoever entered the scheduler (main). */
     g_current = g_main;
     atomic_store(&g_main->status, NT_RUNNING);
+    NT_FIBER_SWITCH(g_main);
     swapcontext(&s->ctx, &g_main->ctx);
   }
 }
@@ -529,8 +693,8 @@ static void yield_to_sched(void) { switch_out(NT_BLOCKED); }
 /* Post-send wakeup. The message is already in the mailbox, so the ONLY thing left is the
  * BLOCKED->RUNNABLE edge — a CAS, because under M:N the receiver may be concurrently
  * deciding to block. If it is mid-switch we cannot enqueue it (its context is still being
- * saved), so we leave `woken` and finish_slice does it; the mailbox check there covers the
- * same case, which is why a lost wakeup is impossible from either side. */
+ * saved) — finish_slice re-checks the block predicate and does it instead. Those two halves
+ * are why a lost wakeup is impossible from either side. */
 static void wake_actor(NtActor *a) {
   int exp = NT_BLOCKED;
   if (atomic_compare_exchange_strong(&a->status, &exp, NT_RUNNABLE)) rq_push(a->pid);
@@ -579,7 +743,9 @@ static void *sched_thread_main(void *arg) {
   s->ctx.uc_stack.ss_size = NT_STACK_SIZE;
   s->ctx.uc_link = NULL;
   makecontext(&s->ctx, scheduler_loop, 0);
+  NT_FIBER_NEW(s);
   ucontext_t here;                        /* park this thread's native context; never resumed */
+  NT_FIBER_SWITCH(s);
   swapcontext(&here, &s->ctx);
   return NULL;
 }
@@ -616,8 +782,8 @@ void nt_sched_init(void) {
   g_nreg = 0;
   g_now_ms = 0;                            /* v4: virtual clock starts at 0 */
   atomic_store(&g_inflight, 0);
-  atomic_store(&g_running, 0);
   atomic_store(&g_steals, 0);
+  atomic_store(&g_io_waiters, 0);
 
   g_nsched = resolve_nsched();
   g_mt = g_nsched > 1;
@@ -634,12 +800,14 @@ void nt_sched_init(void) {
 
   g_main = actor_alloc(/*with_stack=*/0);   /* actor 0 uses the native/main stack */
   g_current = g_main;
+  NT_FIBER_HERE(g_main);                    /* main runs on the process's own fiber */
 
   getcontext(&g_scheds[0].ctx);
   g_scheds[0].ctx.uc_stack.ss_sp = g_scheds[0].stack;
   g_scheds[0].ctx.uc_stack.ss_size = NT_STACK_SIZE;
   g_scheds[0].ctx.uc_link = NULL;           /* scheduler_loop never returns */
   makecontext(&g_scheds[0].ctx, scheduler_loop, 0);
+  NT_FIBER_NEW(&g_scheds[0]);
 
   for (int i = 1; i < g_nsched; i++)        /* the M:N workers (none when g_nsched == 1) */
     pthread_create(&g_scheds[i].thread, NULL, sched_thread_main, &g_scheds[i]);
@@ -656,6 +824,7 @@ NtPid nt_spawn(NtActorFn body, NtMsg arg) {
   a->ctx.uc_stack.ss_size = NT_STACK_SIZE;
   a->ctx.uc_link = NULL;                     /* the trampoline always swaps out explicitly */
   makecontext(&a->ctx, actor_trampoline, 0);
+  NT_FIBER_NEW(a);
 
   rq_push(a->pid);
   return a->pid;
@@ -734,6 +903,7 @@ NtPid nt_spawn_closure(NtClosureFn body, void *env, int64_t arg) {
   a->ctx.uc_stack.ss_size = NT_STACK_SIZE;
   a->ctx.uc_link = NULL;
   makecontext(&a->ctx, actor_trampoline, 0);
+  NT_FIBER_NEW(a);
 
   rq_push(a->pid);
   return a->pid;
@@ -1085,13 +1255,19 @@ extern void nt_str_register(void *p);    /* runtime.c: join the string RC table 
 
 static _Thread_local int g_timed_out;    /* did the last receive / mailbox wait time out? */
 
+/* Both of these are OWNER-side views of the mailbox, so they drain the lock-free intake
+ * first: under M:N a message posted by another scheduler thread lives there until its
+ * owner (or, while the owner is switched out, its scheduler) pulls the batch across.
+ * No-op single-threaded, where senders append to the private list directly. */
 static int64_t mbox_count_of(NtActor *a) {
+  mbox_drain(a);
   int64_t n = 0;
   for (NtMboxNode *p = a->mbox_head; p; p = p->next) n++;
   return n;
 }
 
 static NtMboxNode *mbox_at(NtActor *a, int64_t i) {
+  mbox_drain(a);
   NtMboxNode *p = a->mbox_head;
   while (p && i-- > 0) p = p->next;
   return p;
