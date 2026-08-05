@@ -365,6 +365,10 @@ class FnGen {
   private tryHandlers: { catchLbl: string; excVar: string | null; eType: Ty }[] = [];
   /** Active finally blocks (a `return` inside runs finally first, mode=1). */
   private finallyStack: { finallyLbl: string; modeSlot: string; retSlot: string | null }[] = [];
+  /** Active inlined-HOF callbacks (map/filter/reduce with a BLOCK body): a `return`
+   *  inside stores the per-element result and branches to the callback's join, rather
+   *  than returning from the enclosing function. */
+  private hofReturnStack: { slot: string; done: string; ty: Ty }[] = [];
 
   constructor(private mod: ModuleGen) {}
 
@@ -422,6 +426,7 @@ class FnGen {
     this.captures = new Map();
     this.tryHandlers = [];
     this.finallyStack = [];
+    this.hofReturnStack = [];
     this.strLocals = new Set();
   }
 
@@ -615,6 +620,15 @@ class FnGen {
       }
       case "ExprStmt": this.genExpr(s.expr); return;
       case "ReturnStmt": {
+        // Inside an inlined HOF block callback: a `return` yields the per-element
+        // result — store it and branch to the callback's join (not a function ret).
+        if (this.hofReturnStack.length > 0 && this.finallyStack.length === 0) {
+          const h = this.hofReturnStack[this.hofReturnStack.length - 1]!;
+          const v = s.argument ? this.coerce(this.genExpr(s.argument), h.ty) : { v: defaultZero(h.ty), ty: h.ty };
+          this.emit(`store ${llvmTy(h.ty)} ${v.v}, ptr ${h.slot}`);
+          this.terminate(`br label %${h.done}`);
+          return;
+        }
         if (this.finallyStack.length > 0) {
           // return inside a try/catch with a finally: stash value, run finally (mode=1)
           const f = this.finallyStack[this.finallyStack.length - 1]!;
@@ -2087,15 +2101,50 @@ class FnGen {
     this.terminate(`br label %${cond}`);
   }
 
+  /** Element type produced by an inlined HOF callback — its `retTy` (recorded by the
+   *  checker for both expression and block bodies). */
+  private hofRetTy(arrow: Extract<Expr, { kind: "ArrowFunction" }>): Ty {
+    return (arrow.retTy ?? (arrow.exprBody ? (arrow.body as Expr).ty : "number") ?? "number") as Ty;
+  }
+
+  /** Allocate a block-body callback's own locals before the loop, null-initializing
+   *  its string locals (mirrors emitStrInit for the frame) so a 0-iteration loop or a
+   *  conditional bind releases null (a no-op), never garbage. Expression bodies have
+   *  no locals beyond the param. */
+  private prepHofLocals(arrow: Extract<Expr, { kind: "ArrowFunction" }>): void {
+    if (arrow.exprBody) return;
+    const before = new Set(this.strLocals);
+    this.collectLocals(arrow.body as Stmt[]);
+    for (const n of this.strLocals) if (!before.has(n)) this.emit(`store ptr null, ptr %${n}.addr`);
+  }
+
+  /** Emit an inlined HOF callback body and yield its result Val (type `retTy`). An
+   *  expression body evaluates directly; a BLOCK body runs its statements — a `return`
+   *  inside stores to a result slot (via hofReturnStack) and branches to the join. */
+  private genHofBody(arrow: Extract<Expr, { kind: "ArrowFunction" }>, retTy: Ty): Val {
+    if (arrow.exprBody) return this.genExpr(arrow.body as Expr);
+    const slot = this.slot(retTy);
+    const done = this.label("hofr");
+    this.hofReturnStack.push({ slot, done, ty: retTy });
+    this.genStmts(arrow.body as Stmt[]);
+    this.hofReturnStack.pop();
+    if (!this.terminated) this.terminate(`br label %${done}`); // fall-through (no return hit)
+    this.to(this.block(done));
+    const v = this.fresh();
+    this.emit(`${v} = load ${llvmTy(retTy)}, ptr ${slot}`);
+    return { v, ty: retTy };
+  }
+
   private genMap(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
     const el = elemTy(recv.ty);
-    const R = ((arrow.body as Expr).ty ?? "number") as Ty;
+    const R = this.hofRetTy(arrow);
     const p = arrow.params[0]!.name;
     this.addLocal(p, el);
+    this.prepHofLocals(arrow);
     let out = "";
     const L = this.hofLoop(recv, "map", (len) => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); });
     L.elem(el, p);
-    const rv = this.genExpr(arrow.body as Expr);
+    const rv = this.genHofBody(arrow, R);
     this.emit(`call double @nt_arr_push(ptr ${out}, i64 ${this.toSlot(rv)})`);
     this.hofStep(L.idx, L.upd, L.cond);
     this.to(this.block(L.end));
@@ -2106,10 +2155,11 @@ class FnGen {
     const el = elemTy(recv.ty);
     const p = arrow.params[0]!.name;
     this.addLocal(p, el);
+    this.prepHofLocals(arrow);
     let out = "";
     const L = this.hofLoop(recv, "flt", (len) => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); });
     const pv = L.elem(el, p);
-    const keep = this.genExpr(arrow.body as Expr); // boolean
+    const keep = this.genHofBody(arrow, "boolean"); // boolean
     const pushLbl = this.label("fltp");
     const skipLbl = this.label("flts");
     this.terminate(`br i1 ${keep.v}, label %${pushLbl}, label %${skipLbl}`);
@@ -2131,9 +2181,10 @@ class FnGen {
     this.addLocal(accName, A);
     this.addLocal(xName, el);
     this.emit(`store ${llvmTy(A)} ${init.v}, ptr %${accName}.addr`); // pre-loop init
+    this.prepHofLocals(arrow);
     const L = this.hofLoop(recv, "red", () => {});
     L.elem(el, xName);
-    const rv = this.genExpr(arrow.body as Expr);
+    const rv = this.genHofBody(arrow, A);
     this.emit(`store ${llvmTy(A)} ${rv.v}, ptr %${accName}.addr`);
     this.hofStep(L.idx, L.upd, L.cond);
     this.to(this.block(L.end));

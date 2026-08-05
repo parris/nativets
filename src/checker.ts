@@ -115,6 +115,10 @@ export function check(program: Program): CheckedProgram {
     let rest = false;
     s.params.forEach((p, i) => { if (p.rest) { if (i !== s.params.length - 1) throw typeError("rest parameter must be last"); rest = true; } });
     const params = s.params.map((p) => p.annot ?? (p.default ? c.type(p.default, builtins()) : "number"));
+    // Type each ANNOTATED default against its param type (the `??` above skips it when
+    // annotated) so its `.ty` is set for codegen and an empty-array default `[]` gets
+    // its element type from the annotation (`function f(a: T[] = [])`).
+    s.params.forEach((p, i) => { if (p.default && p.annot) c.type(p.default, builtins(), params[i]); });
     const fixed = rest ? s.params.length - 1 : s.params.length;
     const required = s.params.slice(0, fixed).filter((p) => !p.default).length;
     const defaults = s.params.map((p) => p.default ?? null);
@@ -211,7 +215,7 @@ class Checker {
     switch (s.kind) {
       case "VarDecl":
         for (const d of s.decls) {
-          const t = this.type(d.init, scope);
+          const t = this.type(d.init, scope, d.annot); // annotation is the context (e.g. `const a: T[] = []`)
           if (d.annot && d.annot !== t && !this.assignable(d.annot, t)) {
             throw typeError(`'${d.name}' declared ${d.annot} but initialized with ${t}`);
           }
@@ -226,7 +230,7 @@ class Checker {
       case "FuncDecl": return;
       case "ReturnStmt":
         if (s.argument) {
-          const t = this.type(s.argument, scope);
+          const t = this.type(s.argument, scope, ret === "void" ? undefined : ret); // return type is the context (e.g. `return []`)
           if (ret !== "void" && t !== ret) throw typeError(`return type ${t} does not match declared ${ret}`);
         }
         return;
@@ -317,9 +321,9 @@ class Checker {
     }
   }
 
-  type(e: Expr, scope: Scope): Ty { const t = this.infer(e, scope); e.ty = t; return t; }
+  type(e: Expr, scope: Scope, hint?: Ty): Ty { const t = this.infer(e, scope, hint); e.ty = t; return t; }
 
-  private infer(e: Expr, scope: Scope): Ty {
+  private infer(e: Expr, scope: Scope, hint?: Ty): Ty {
     switch (e.kind) {
       case "NumberLiteral": return "number";
       case "BooleanLiteral": return "boolean";
@@ -330,7 +334,17 @@ class Checker {
         for (const x of e.exprs) this.type(x, scope);
         return "string";
       case "ArrayLiteral": {
-        if (e.elements.length === 0) throw nyi(NYI.ARRAY, "empty array literals (cannot infer element type)");
+        if (e.elements.length === 0) {
+          // Empty `[]` has no element to infer from — take the element type from
+          // CONTEXT (a variable/param annotation, a return type, or an assignment
+          // target). With no context we still reject (don't guess).
+          if (hint && isArrayTy(hint)) {
+            const el = elemTy(hint);
+            if (el !== "number" && el !== "string" && el !== "boolean" && !isObjectTy(el) && !isArrayTy(el)) throw nyi(NYI.ARRAY, `arrays of ${el}`);
+            return hint;
+          }
+          throw nyi(NYI.ARRAY, "empty array literals (cannot infer element type)");
+        }
         const tys = e.elements.map((el) => {
           if (el.kind === "SpreadExpr") {
             const st = this.type(el.argument, scope);
@@ -492,7 +506,7 @@ class Checker {
         const b = scope.lookup(e.target);
         if (!b) throw typeError(`'${e.target}' is not defined`);
         if (b.constant) throw typeError(`Cannot assign to const '${e.target}'`);
-        const vt = this.type(e.value, scope);
+        const vt = this.type(e.value, scope, e.op === "=" ? b.ty : undefined); // assignment target is the context (e.g. `a = []`)
         if (e.op === "=") {
           if (vt !== b.ty && !this.assignable(b.ty, vt)) throw typeError(`Cannot assign ${vt} to ${b.ty} '${e.target}'`);
         } else if (e.op === "+=" && b.ty === "string") {
@@ -895,7 +909,6 @@ class Checker {
   private inferHof(el: Ty, method: string, args: Expr[], scope: Scope): Ty {
     const arrow = args[0];
     if (!arrow || arrow.kind !== "ArrowFunction") throw nyi(NYI.CLOSURE, `array .${method} needs an inline arrow (first-class functions not yet supported)`);
-    if (!arrow.exprBody) throw nyi(NYI.CLOSURE, `array .${method} needs an expression-body arrow`);
 
     if (method === "reduce") {
       if (args.length !== 2) throw typeError(".reduce expects (callback, initialValue)");
@@ -916,10 +929,23 @@ class Checker {
     return `${bodyTy}[]`;
   }
 
+  /** Type an inlined HOF callback body (map/filter/reduce). Supports both an
+   *  expression body and a BLOCK body — the block's statements run per-element in
+   *  the generated loop and its `return` yields the element result. `arrow.retTy`
+   *  is recorded for codegen. */
   private typeArrowBody(arrow: Extract<Expr, { kind: "ArrowFunction" }>, paramTypes: Ty[], scope: Scope): Ty {
     const inner = scope.child();
     arrow.params.forEach((p, i) => inner.declare(p.name, paramTypes[i]!, false));
-    return this.type(arrow.body as Expr, inner);
+    arrow.paramTys = paramTypes;
+    let retTy: Ty;
+    if (arrow.exprBody) {
+      retTy = this.type(arrow.body as Expr, inner);
+    } else {
+      retTy = this.inferBlockReturn(arrow.body as Stmt[], inner); // first top-level `return`
+      this.checkBlock(arrow.body as Stmt[], inner.child(), retTy); // validate every return against it
+    }
+    arrow.retTy = retTy;
+    return retTy;
   }
 
   /** Type an arrow used as a VALUE → a function type, with capture analysis. */
