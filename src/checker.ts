@@ -13,6 +13,11 @@ import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
+
+/** Types storable as a Map value (a raw i64 slot): scalars plus heap refs (array/object). */
+function isMapValueTy(v: Ty): boolean {
+  return v === "number" || v === "string" || v === "boolean" || isArrayTy(v) || isObjectTy(v);
+}
 export interface CheckedProgram { program: Program; functions: Map<string, Sig>; }
 
 interface Binding { ty: Ty; constant: boolean; }
@@ -532,8 +537,12 @@ class Checker {
         if (e.callee === "Map") {
           if (e.args.length !== 0) throw nyi(NYI.COLLECTION, "new Map(iterable) (use .set)");
           const k = e.typeArgs?.[0] ?? "string", v = e.typeArgs?.[1] ?? "number";
-          if (k !== "string") throw nyi(NYI.COLLECTION, `Map with ${k} keys`);
-          if (v !== "number") throw nyi(NYI.COLLECTION, `Map with ${v} values`);
+          // Keys ride an i64 slot tagged NT_K_STR (string) or NT_K_NUM (number) —
+          // those are the two the runtime canonicalizes (SameValueZero), so keys are
+          // restricted to string|number. Values ride a raw i64 slot, so any storable
+          // type works: scalars plus heap refs (array/object).
+          if (k !== "string" && k !== "number") throw nyi(NYI.COLLECTION, `Map with ${k} keys (only string|number keys)`);
+          if (!isMapValueTy(v)) throw nyi(NYI.COLLECTION, `Map with ${v} values`);
           return makeMapTy(k, v);
         }
         if (e.callee === "Set") {
