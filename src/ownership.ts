@@ -24,7 +24,7 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
-import { isArrayTy, isObjectTy } from "./ast.ts";
+import { isArrayTy, isObjectTy, setBlockDrops } from "./ast.ts";
 
 /** The linear (single-owner, move-checked + dropped) types: heap aggregates. */
 function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t); }
@@ -42,7 +42,14 @@ const MUTATING = new Set(["push", "pop"]);
 
 export interface OwnDiag { code: string; message: string; line: number; movedAt?: number; }
 
-type VarState = { moved: boolean; at?: number };
+/**
+ * `moved` is MAY-move (join = OR) — the lattice the use-after-move check reads, so a
+ * value moved on one path is an error to use on any path. `must` is MUST-move
+ * (join = AND): it separates "definitely gone" from "gone only on some path", which is
+ * exactly rustc's DROP-FLAG question. A may-but-not-must-moved value still has an owner
+ * at runtime on some paths, so it must still be dropped — see `nullOnMove`.
+ */
+type VarState = { moved: boolean; must: boolean; at?: number };
 type State = Map<string, VarState>;
 
 const clone = (s: State): State => new Map([...s].map(([k, v]) => [k, { ...v }]));
@@ -51,7 +58,8 @@ function merge(a: State, b: State): State {
   for (const k of new Set([...a.keys(), ...b.keys()])) {
     const va = a.get(k), vb = b.get(k);
     const moved = !!va?.moved || !!vb?.moved;
-    out.set(k, { moved, at: va?.at ?? vb?.at });
+    const must = !!va?.must && !!vb?.must;   // definitely moved only if moved on BOTH paths
+    out.set(k, { moved, must, at: va?.at ?? vb?.at });
   }
   return out;
 }
@@ -79,9 +87,22 @@ function isMoveCall(e: Expr): boolean {
 class Analyzer {
   readonly diags: OwnDiag[] = [];
   private collecting = true;
-  constructor(private linear: Set<string>, private topLevel: string[], paramBorrows: string[] = []) {
+  constructor(
+    private linear: Set<string>,
+    private topLevel: string[],
+    paramBorrows: string[] = [],
+    /** Names read from inside an arrow body. A closure copies the pointer into its
+     *  env, so the binding is no longer the only reference — reassigning it must NOT
+     *  free the old value (the closure may outlive the assignment). Conservative:
+     *  over-approximated by "mentioned anywhere inside any arrow in this scope". */
+    private captured: Set<string> = new Set(),
+  ) {
     for (const p of paramBorrows) this.borrowBindings.add(p);
   }
+
+  /** Collection mode: record every name an arrow body mentions (pass 1). */
+  private arrowDepth = 0;
+  readonly arrowNames = new Set<string>();
 
   /** Names bound to a BORROW rather than owned: by-borrow params (whole scope) and for-of
    *  loop variables over a LINEAR element (loop body). Moving out of any is E0507 (NT1604). */
@@ -93,48 +114,96 @@ class Analyzer {
   private popBorrow(n: string): void { const c = (this.borrowed.get(n) ?? 1) - 1; if (c <= 0) this.borrowed.delete(n); else this.borrowed.set(n, c); }
   private isBorrowed(n: string): boolean { return this.borrowed.has(n); }
 
-  /** Top-level linear locals still owned (not moved) in `state` — the drop set. */
-  ownedTopLevel(state: State): string[] {
-    return this.topLevel.filter((n) => state.has(n) && !state.get(n)!.moved);
+  /**
+   * DROP DECISION for one name at one program point — the rustc drop-flag question.
+   *   - not moved on any path        → drop it (the common case, no flag needed);
+   *   - moved on EVERY path (`must`) → never drop (the new owner will);
+   *   - moved on SOME path           → still drop, but the value needs a runtime flag.
+   * Our flag is free: the move NULLS the variable's slot (see `nullOnMove` / codegen)
+   * and `nt_arr_free(NULL)` / `nt_obj_free(NULL)` are no-ops, so the pointer IS the
+   * drop flag and the drop stays a single unconditional call. A name a closure
+   * captured is excluded — its env holds a second pointer we cannot null.
+   */
+  private droppable(n: string, state: State): boolean {
+    const st = state.get(n);
+    if (!st) return false;
+    if (!st.moved) return true;
+    if (st.must || this.captured.has(n)) return false;
+    this.condDrops.add(n); // ⇒ every move of `n` must null its slot
+    return true;
   }
+
+  /** Names that need the null-on-move drop flag, and the move sites to null at. */
+  readonly condDrops = new Set<string>();
+  readonly moveSites = new Map<string, Set<Expr>>();
+
+  /** Top-level linear locals to free at this point — the scope-exit drop set. */
+  ownedTopLevel(state: State): string[] {
+    return this.topLevel.filter((n) => this.droppable(n, state));
+  }
+
+  /** Linear locals of every ACTIVE scope that are still owned — what a `return` from
+   *  inside a nested block must free (innermost first). */
+  private ownedInScope(state: State): string[] {
+    const out: string[] = [];
+    for (let i = this.scopes.length - 1; i >= 0; i--) out.push(...this.scopes[i]!.filter((n) => this.droppable(n, state)));
+    out.push(...this.ownedTopLevel(state));
+    return out;
+  }
+
+  /** Stack of nested block scopes (their directly-declared linear locals). */
+  private scopes: string[][] = [];
 
   private report(d: OwnDiag): void { if (this.collecting) this.diags.push(d); }
 
   seq(stmts: Stmt[], state: State): void { for (const s of stmts) this.stmt(s, state); }
+
+  /** A NESTED statement list: its own linear locals are freed at its fall-through exit
+   *  (`blockDrops`), so a value that never leaves the block does not wait for the
+   *  function to return. Move-aware — a local moved out of the block is not dropped.
+   *  `break`/`continue`/`throw` jump past the drop point: a leak, never a double free. */
+  private scoped(list: Stmt[], state: State): void {
+    const declared = declaredLinear(list).filter((n) => this.linear.has(n));
+    if (declared.length === 0) { this.seq(list, state); return; }
+    this.scopes.push(declared);
+    this.seq(list, state);
+    this.scopes.pop();
+    setBlockDrops(list, declared.filter((n) => this.droppable(n, state)));
+  }
 
   private stmt(s: Stmt, state: State): void {
     switch (s.kind) {
       case "VarDecl":
         for (const d of s.decls) {
           this.expr(d.init, state, true);
-          if (isLinearTy(d.ty ?? "number")) state.set(d.name, { moved: false });
+          if (isLinearTy(d.ty ?? "number")) state.set(d.name, { moved: false, must: false });
         }
         return;
       case "ExprStmt": this.expr(s.expr, state, false); return;
       case "ReturnStmt":
         if (s.argument) this.expr(s.argument, state, true); // returning a bare value moves it out
-        s.drops = this.ownedTopLevel(state); // free everything still owned before returning
+        s.drops = this.ownedInScope(state); // free everything still owned before returning
         return;
       case "IfStmt": {
         this.expr(s.test, state, false);
         const s1 = clone(state);
-        this.seq(s.consequent, s1);
+        this.scoped(s.consequent, s1);
         const s2 = clone(state);
-        if (s.alternate) this.seq(s.alternate, s2);
+        if (s.alternate) this.scoped(s.alternate, s2);
         assignInto(state, merge(s1, s2));
         return;
       }
       case "WhileStmt":
-        this.loop(state, (st) => { this.expr(s.test, st, false); this.seq(s.body, st); });
+        this.loop(state, (st) => { this.expr(s.test, st, false); this.scoped(s.body, st); });
         return;
       case "DoWhileStmt":
-        this.loop(state, (st) => { this.seq(s.body, st); this.expr(s.test, st, false); });
+        this.loop(state, (st) => { this.scoped(s.body, st); this.expr(s.test, st, false); });
         return;
       case "ForStmt": {
         if (s.init) { if ((s.init as any).kind === "VarDecl") this.stmt(s.init as Stmt, state); else this.expr(s.init as Expr, state, false); }
         this.loop(state, (st) => {
           if (s.test) this.expr(s.test, st, false);
-          this.seq(s.body, st);
+          this.scoped(s.body, st);
           if (s.update) this.expr(s.update, st, false);
         });
         return;
@@ -148,28 +217,28 @@ class Analyzer {
         // moving it out of the loop is E0507 (NT1604).
         const elemBorrow = s.elemTy !== undefined && isLinearTy(s.elemTy);
         if (elemBorrow) this.borrowBindings.add(s.name);
-        this.loop(state, (st) => { this.seq(s.body, st); });
+        this.loop(state, (st) => { this.scoped(s.body, st); });
         if (elemBorrow) this.borrowBindings.delete(s.name);
         if (bv) this.popBorrow(bv);
         return;
       }
       case "SwitchStmt": {
         this.expr(s.discriminant, state, false);
-        const merged = s.cases.map((c) => { const cs = clone(state); this.seq(c.body, cs); return cs; });
+        const merged = s.cases.map((c) => { const cs = clone(state); this.scoped(c.body, cs); return cs; });
         for (const m of merged) assignInto(state, merge(state, m));
         return;
       }
       case "ForInStmt":
         this.expr(s.object, state, false);
-        this.loop(state, (st) => { this.seq(s.body, st); });
+        this.loop(state, (st) => { this.scoped(s.body, st); });
         return;
-      case "BlockStmt": this.seq(s.body, state); return;
-      case "MultiStmt": this.seq(s.stmts, state); return;
+      case "BlockStmt": this.scoped(s.body, state); return;
+      case "MultiStmt": this.seq(s.stmts, state); return; // scope-less group: its decls belong to the enclosing block
       case "ThrowStmt": this.expr(s.argument, state, false); return;
       case "TryStmt":
-        this.seq(s.block, state);
-        if (s.handler) this.seq(s.handler, state);
-        if (s.finalizer) this.seq(s.finalizer, state);
+        this.scoped(s.block, state);
+        if (s.handler) this.scoped(s.handler, state);
+        if (s.finalizer) this.scoped(s.finalizer, state);
         return;
       case "BreakStmt": case "ContinueStmt": case "FuncDecl":
         return;
@@ -200,6 +269,7 @@ class Analyzer {
   private expr(e: Expr, state: State, consume: boolean): void {
     switch (e.kind) {
       case "Identifier": {
+        if (this.arrowDepth > 0) this.arrowNames.add(e.name);
         // Moving out of a borrowed binding (by-borrow param / for-of element) is E0507.
         if (consume && this.borrowBindings.has(e.name)) {
           this.report({ code: OWN_CODES.MOVE_OUT_OF_BORROW, message: `cannot move out of \`${e.name}\`: it is borrowed (the owner is elsewhere)`, line: e.loc?.line ?? 0 });
@@ -217,7 +287,10 @@ class Analyzer {
             this.report({ code: OWN_CODES.MOVE_WHILE_BORROWED, message: `cannot move \`${e.name}\` because it is borrowed`, line: e.loc?.line ?? 0 });
             return;
           }
-          state.set(e.name, { moved: true, at: e.loc?.line });
+          let sites = this.moveSites.get(e.name);
+          if (!sites) { sites = new Set(); this.moveSites.set(e.name, sites); }
+          sites.add(e);
+          state.set(e.name, { moved: true, must: true, at: e.loc?.line });
         }
         return;
       }
@@ -235,7 +308,14 @@ class Analyzer {
       }
       case "AssignExpr":
         this.expr(e.value, state, true);
-        if (this.linear.has(e.target)) state.set(e.target, { moved: false }); // reassignment revives
+        if (this.linear.has(e.target)) {
+          // RAII on REASSIGNMENT (B2 step 4): the old value is about to become
+          // unreachable, so this scope must free it — unless it was moved out (the new
+          // owner will free it; `a = a` / `a = move(a)` land here too, and freeing then
+          // would destroy the value we are storing) or a closure captured the pointer.
+          e.dropOld = !this.captured.has(e.target) && this.arrowDepth === 0 && this.droppable(e.target, state);
+          state.set(e.target, { moved: false, must: false }); // reassignment revives
+        }
         return;
       case "FieldAssign": // `this.field = v`: read the instance (borrow), move the value in
         this.expr(e.object, state, false);
@@ -264,20 +344,40 @@ class Analyzer {
         this.expr(e.test, state, false); this.expr(e.consequent, state, false); this.expr(e.alternate, state, false);
         return;
       case "TemplateLiteral": for (const x of e.exprs) this.expr(x, state, false); return;
-      case "ArrayLiteral": for (const el of e.elements) this.expr(el, state, false); return;
+      case "ArrayLiteral":
+        // An element MOVES into the array (the same rule ObjectLiteral fields follow):
+        // the array now holds the only reference, so the source binding must not be
+        // dropped at scope exit. Treating elements as borrows was a use-after-free —
+        // `return [o1, o2]` freed both objects while the returned array pointed at them.
+        // A `...spread` source is COPIED, so it stays owned (borrow).
+        for (const el of e.elements) this.expr(el, state, el.kind !== "SpreadExpr");
+        return;
       case "SpreadExpr": this.expr(e.argument, state, false); return; // spread copies (borrow)
       case "NewExpr": for (const a of e.args) this.expr(a, state, false); return;
       case "AsExpr": this.expr(e.expr, state, false); return;
       case "InstanceOfExpr": this.expr(e.object, state, false); return; // a type TEST only borrows
       case "ObjectLiteral": for (const p of e.properties) this.expr(p.value, state, !p.spread); return; // fields move into the object; a `...spread` source is COPIED (borrow), so it stays usable + owned
       case "ArrowFunction": // analyze body in the enclosing scope (captures/params aren't linear here)
+        this.arrowDepth++;
         if (e.exprBody) this.expr(e.body as Expr, state, false);
         else this.seq(e.body as Stmt[], state);
+        this.arrowDepth--;
         return;
       case "SequenceExpr": for (const x of e.exprs) this.expr(x, state, false); return;
       default: return; // literals, update (numeric), unreachable kinds
     }
   }
+}
+
+/** Linear locals declared DIRECTLY in this statement list (a `MultiStmt` is a
+ *  scope-less group — the destructuring/swap desugaring — so it counts as direct). */
+function declaredLinear(list: Stmt[]): string[] {
+  const out: string[] = [];
+  for (const s of list) {
+    if (s.kind === "VarDecl") { for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out.push(d.name); }
+    else if (s.kind === "MultiStmt") out.push(...declaredLinear(s.stmts));
+  }
+  return out;
 }
 
 function collectLinear(stmts: Stmt[], out: Set<string>): void {
@@ -309,11 +409,21 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     for (const s of body) if (s.kind === "VarDecl") for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) topLevel.push(d.name);
     // Linear params are BORROWED (the caller owns + drops them) — moving one out is E0507.
     const paramBorrows = params.filter((p) => isLinearTy(p.ty)).map((p) => p.name);
-    const a = new Analyzer(linear, topLevel, paramBorrows);
-    const st: State = new Map(params.filter((p) => isLinearTy(p.ty)).map((p) => [p.name, { moved: false }]));
+    const entry = (): State => new Map(params.filter((p) => isLinearTy(p.ty)).map((p) => [p.name, { moved: false, must: false }]));
+    // Pass 1 (discard): which names does a closure body mention? Those pointers may be
+    // copied into a closure env that outlives the binding, so they are never freed on
+    // reassignment. Diagnostics from this pass are dropped — pass 2 is the real one.
+    const scan = new Analyzer(linear, topLevel, paramBorrows);
+    scan.seq(body, entry());
+    const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames);
+    const st = entry();
     a.seq(body, st);
+    const end = a.ownedTopLevel(st); // computed BEFORE marking: it can add to condDrops
+    // Drop flags: a name that is dropped on a path where it MIGHT already have been
+    // moved needs its move sites to null the slot, so the drop is a no-op there.
+    for (const n of a.condDrops) for (const site of a.moveSites.get(n) ?? []) (site as { nullOnMove?: boolean }).nullOnMove = true;
     diags.push(...a.diags);
-    return a.ownedTopLevel(st);
+    return end;
   };
 
   checked.program.endDrops = runScope(checked.program.body, []);

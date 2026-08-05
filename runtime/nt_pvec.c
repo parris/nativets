@@ -240,6 +240,39 @@ nt_pv *nt_pv_push(nt_pv *v, int64_t val) {
     return mk_header(cnt + 1, newshift, newroot, newtail, 1);
 }
 
+/* ---- TRANSIENT append: rc == 1 ⇒ uniquely owned ⇒ mutate in place ----
+ *
+ * The whole point of B2 step 4. A persistent push clones the 32-slot tail leaf for
+ * every element (~36x the flat cost); but if NOBODY else can reach this vector, the
+ * clone is unobservable and can be skipped. "Nobody else" is exactly what the
+ * refcounts say:
+ *   - header rc == 1 : no other NtArray version shares this vector, and
+ *   - tail   rc == 1 : no other version shares this leaf (a `.with` into the tree
+ *                      retains the tail, a `.with` into the tail clones it).
+ * Both must hold; either alone is not enough. The caller hands over its reference
+ * (this is the LAST use of `v`), so on the fallback path we release it.
+ *
+ * This is where the linear ownership model pays off over a plain RC language: the
+ * compiler's consuming-append lowering (`x = [...x, e]`) guarantees the source is
+ * dead, so rc really is 1 at the append and the fast path is the common one.
+ */
+static long g_pv_transient_hits = 0;
+long nt_pv_transient_hits(void) { return g_pv_transient_hits; }
+
+nt_pv *nt_pv_push_own(nt_pv *v, int64_t val) {
+    if (v->refcount == 1 && v->tail->refcount == 1 &&
+        v->count - nt_pv_tailoff(v) < NT_PV_WIDTH) {
+        v->tail->kind = 1;
+        v->tail->slots[v->tail_len++] = val;
+        v->count++;
+        g_pv_transient_hits++;
+        return v;                       /* still the caller's owned reference */
+    }
+    nt_pv *nv = nt_pv_push(v, val);
+    nt_pv_release(v);
+    return nv;
+}
+
 /* ---- pop — the inverse of push ---- */
 
 /* `count` is the PRE-pop element count. Returns the copied node, or NULL if the

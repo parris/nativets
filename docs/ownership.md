@@ -98,9 +98,53 @@ through the shared DAG (immutable ⇒ acyclic ⇒ rc is complete, no cycle colle
 `test/runtime/pvec_test.c`, which is also run under ASan/UBSan. The rc is non-atomic, like the
 string rc.
 
-Conservative for safety: only top-level linear locals are dropped. Conditionally-created
-(nested-block) and temporary (unbound) arrays are not yet freed — safe (no double free), may
-leak. Element strings of a `string[]` are shared and not freed with the array.
+### Where drops happen (B2 step 4 — the leaks closed)
+
+Drop is no longer only "top-level locals at scope exit". Four drop points, all computed by the
+ownership pass so they stay move-aware:
+
+| Drop point | Set | Notes |
+|---|---|---|
+| function / module fall-through exit | `FuncDecl.endDrops`, `Program.endDrops` | as before |
+| `return` | `ReturnStmt.drops` | now every **active scope**, not just the top level |
+| nested block exit (`if` arm, loop body, `switch` case, `try` block) | `Stmt[].blockDrops` | a loop-body local is freed **each iteration** |
+| **reassignment** `x = …` | `AssignExpr.dropOld` | the superseded value is freed after the RHS is evaluated |
+| unbound **temporary** | emitted by codegen | a fresh array consumed as a method receiver (`xs.map(f).filter(g)`, `s.split(",").length`) is freed there |
+
+**Conditional moves get a drop flag.** The move lattice tracks MAY-move (join = OR — what the
+use-after-move check reads) *and* MUST-move (join = AND). A value moved on only some paths is
+still dropped, under a flag that costs nothing: the move **nulls the binding's slot**
+(`Identifier.nullOnMove`) and `nt_arr_free(NULL)` / `nt_obj_free(NULL)` are no-ops — so the
+pointer itself is rustc's runtime drop flag and the drop stays one unconditional call.
+
+Deliberately conservative (leak, never a double free / dangling pointer):
+
+- a value that escapes a block via `break` / `continue` / `throw` jumps past the drop point;
+- a name mentioned inside any **arrow body** is never dropped on reassignment (the closure env
+  holds a second pointer we cannot see or null);
+- a **module-level binding promoted to a global** is never dropped on reassignment — some
+  function reads it and may have returned the pointer to a caller we cannot analyse;
+- **temporaries in non-chain positions** (a call argument) — a callee may retain them;
+- **elements**: freeing an array/object frees the handle, not what its slots point at. Element
+  strings are refcounted separately; element objects/arrays are not freed at all.
+
+### Transients: `rc == 1` ⇒ mutate in place
+
+Cloning a 32-slot tail leaf per append costs ~36× a flat write. Clojure's answer is the
+transient: if nobody else can observe the value, mutate it. Here that is *provable* rather than
+hoped for — `nt_pv_push_own` writes the tail in place only when the vector header's refcount is 1
+**and** its tail leaf's refcount is 1 (a `.with` into the tree retains the tail; a `.with` into
+the tail clones it), and otherwise falls back to the persistent push. Old-version-unchanged
+therefore holds by construction, decided by the refcount.
+
+Linearity is what makes the fast path the common one: `x = [...x, e]` is compiled as a
+**consuming append** (`nt_arr_extend_own`) — the ownership pass proves `x`'s old value is dead,
+so the new array *moves* the storage instead of copying/retaining it, and the trailing push finds
+rc = 1. Measured on 200k loop-appends: peak RSS 87.9 MB → 5.3 MB, 200001 abandoned handles → 0,
+217660 trie-node allocations → 0. On an already-frozen (trie-backed) array, 320 appends allocate
+30 nodes instead of ~320, with 309 of them written in place.
+
+Element strings of a `string[]` are shared and not freed with the array.
 
 ## Roadmap
 
@@ -113,3 +157,6 @@ leak. Element strings of a `string[]` are shared and not freed with the array.
 6. Extend linearity to **objects** (M1 part 2) and eventually owned strings.
 7. ✅ Refcounted **shared trie nodes** for arrays past the 32-element threshold (B2 step 2) — the
    bridge between linear handles and structurally-shared storage.
+8. ✅ Drops for **reassignment, nested scopes and temporaries** + **drop flags** for conditional
+   moves, and **transients** (`rc == 1` ⇒ mutate in place) — B2 step 4. See the table above for
+   what is still deliberately left leaking.

@@ -408,11 +408,13 @@ static nt_pv *nt_pv_from_slots(const int64_t *s, uint32_t n) { (void)s; (void)n;
 static int64_t nt_pv_get(nt_pv *v, uint32_t i) { (void)v; (void)i; return 0; }
 static nt_pv *nt_pv_update(nt_pv *v, uint32_t i, int64_t x) { (void)v; (void)i; (void)x; return 0; }
 static nt_pv *nt_pv_push(nt_pv *v, int64_t x) { (void)v; (void)x; return 0; }
+static nt_pv *nt_pv_push_own(nt_pv *v, int64_t x) { (void)v; (void)x; return 0; }
 static nt_pv *nt_pv_pop(nt_pv *v) { (void)v; return 0; }
 static void nt_pv_retain(nt_pv *v) { (void)v; }
 static void nt_pv_release(nt_pv *v) { (void)v; }
 static double nt_pv_node_live(void) { return 0.0; }
 static long nt_pv_node_allocs(void) { return 0; }
+static long nt_pv_transient_hits(void) { return 0; }
 #endif
 
 typedef struct { int64_t len; int64_t cap; int64_t *data; nt_pv *pv; } NtArray;
@@ -526,12 +528,17 @@ double nt_arr_live(void) { return (double)(g_arr_allocs - g_arr_frees); }
  * and cumulative node allocations. See test/sharing.test.ts. */
 double nt_arr_nodes(void) { return NT_PV_ON ? nt_pv_node_live() : 0.0; }
 double nt_arr_node_allocs(void) { return NT_PV_ON ? (double)nt_pv_node_allocs() : 0.0; }
+/* # appends that mutated a uniquely-owned tail in place instead of cloning it. */
+double nt_arr_transients(void) { return NT_PV_ON ? (double)nt_pv_transient_hits() : 0.0; }
 
 double nt_arr_push(NtArray *a, int64_t slot) {
-  if (a->pv) {   /* persistent append: O(1) amortized, shares the whole tree */
-    nt_pv *nv = nt_pv_push(a->pv, slot);
-    nt_pv_release(a->pv);
-    a->pv = nv;
+  if (a->pv) {
+    /* TRANSIENT append (B2 step 4): `a` is a handle the caller is building or has
+     * just taken sole ownership of, so if its vector's refcount is 1 the tail can be
+     * written in place instead of cloned. nt_pv_push_own falls back to the persistent
+     * push (and releases the old ref) whenever ANOTHER version shares the storage —
+     * so "old version unchanged" holds by construction, decided by the refcount. */
+    a->pv = nt_pv_push_own(a->pv, slot);
     return (double)(++a->len);
   }
   if (a->len >= a->cap) {
@@ -709,6 +716,28 @@ void nt_arr_extend(NtArray *dst, NtArray *src) {
     }
   }
   for (int64_t i = 0; i < src->len; i++) nt_arr_push(dst, arr_at(src, i));
+}
+
+/* CONSUMING extend (B2 step 4). Emitted for `x = [...x, e]`, where the ownership pass
+ * has proved the spread source is the assignment's own dying value: nothing can observe
+ * it after this statement. So instead of copying/retaining, `dst` STEALS src's storage
+ * and src's header is freed here (it is the reassignment's drop, moved earlier).
+ *
+ * Two payoffs, both invisible: the flat builder block is moved rather than copied
+ * (O(n) -> O(1) per append), and a trie-backed vector arrives at the following
+ * nt_arr_push with refcount 1, which is exactly the transient condition — so the
+ * append writes the tail in place. If ANOTHER version shares that vector its refcount
+ * is > 1 and the push silently falls back to path copying. */
+void nt_arr_extend_own(NtArray *dst, NtArray *src) {
+  if (dst->len == 0 && !dst->pv) {          /* the leading-spread shape: dst is fresh */
+    free(dst->data);
+    dst->data = src->data; dst->cap = src->cap; dst->pv = src->pv; dst->len = src->len;
+    src->data = NULL; src->pv = NULL; src->len = 0; src->cap = 0;
+    nt_arr_free(src);                       /* header only: its storage moved to dst */
+    return;
+  }
+  nt_arr_extend(dst, src);
+  nt_arr_free(src);
 }
 
 /* ---- ordering primitives: Array#toSorted / #toReversed (ES2023) ------------

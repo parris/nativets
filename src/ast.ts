@@ -301,7 +301,13 @@ export interface ObjectLiteral { kind: "ObjectLiteral"; properties: ObjectProper
 export interface SpreadExpr { kind: "SpreadExpr"; argument: Expr; ty?: Ty; }
 
 export interface Loc { line: number; col: number; file?: string; }
-export interface Identifier { kind: "Identifier"; name: string; ty?: Ty; loc?: Loc; }
+export interface Identifier {
+  kind: "Identifier"; name: string; ty?: Ty; loc?: Loc;
+  /** Ownership drop flag (B2 step 4): this read MOVES the value out of a binding that
+   *  is dropped on some other path, so the slot is nulled here. `free(NULL)` is a
+   *  no-op, which makes the pointer itself rustc's runtime drop flag. */
+  nullOnMove?: boolean;
+}
 
 export interface MemberExpr {
   kind: "MemberExpr";
@@ -367,6 +373,11 @@ export interface AssignExpr {
   target: string;
   value: Expr;
   ty?: Ty;
+  /** Ownership (B2 step 4): the value being OVERWRITTEN is a linear heap value this
+   *  scope still owns, so the assignment must free it (RAII on reassignment). Set by
+   *  `src/ownership.ts` only when it can prove the old value is dead — not moved out,
+   *  not captured by a closure. */
+  dropOld?: boolean;
 }
 
 /**
@@ -454,6 +465,21 @@ export interface FuncDecl {
 }
 
 export interface ReturnStmt { kind: "ReturnStmt"; argument: Expr | null; drops?: string[]; }
+
+/**
+ * BLOCK-SCOPED drops (B2 step 4). A nested statement list (an `if` arm, a loop body, a
+ * `switch` case, a `try` block) owns the linear locals it declares directly, and frees
+ * them at its own fall-through exit — the RAII scope exit, one level down from
+ * `FuncDecl.endDrops`. Every block-owning statement already holds a plain `Stmt[]`, so
+ * the set is attached to the LIST rather than adding a field to a dozen statement kinds.
+ * `structuredClone` (generic specialization) runs BEFORE ownership, so nothing is lost.
+ */
+export function setBlockDrops(list: Stmt[], names: string[]): void {
+  (list as Stmt[] & { blockDrops?: string[] }).blockDrops = names;
+}
+export function blockDrops(list: Stmt[]): string[] {
+  return (list as Stmt[] & { blockDrops?: string[] }).blockDrops ?? [];
+}
 export interface IfStmt { kind: "IfStmt"; test: Expr; consequent: Stmt[]; alternate: Stmt[] | null; }
 export interface WhileStmt { kind: "WhileStmt"; test: Expr; body: Stmt[]; }
 export interface DoWhileStmt { kind: "DoWhileStmt"; body: Stmt[]; test: Expr; }

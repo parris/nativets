@@ -274,8 +274,22 @@ class Parser {
     this.eat("<");
     const tys: Ty[] = [];
     if (!this.at(">")) { do { tys.push(this.parseType()); } while (this.at(",") && (this.eat(","), true)); }
-    this.eat(">");
+    this.eatTypeClose();
     return tys;
+  }
+  /**
+   * Close a `<…>` type-argument list. NESTED generics end in a single `>>` / `>>>`
+   * token (`Map<string, Set<Expr>>`), because the lexer sees the shift operators —
+   * which is right everywhere except here. So split the token: consume one `>` and
+   * leave the remainder in place for the enclosing list to close with.
+   */
+  private eatTypeClose(): void {
+    const t = this.peek();
+    if (t.type === "punct" && (t.value === ">>" || t.value === ">>>")) {
+      t.value = t.value.slice(1); // leaves `>` (or `>>`) for the outer level
+      return;
+    }
+    this.eat(">");
   }
   // tuple type `[T, U, ...]` — modeled as an array of the first element type
   private parseTupleType(): Ty {
