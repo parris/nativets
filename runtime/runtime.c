@@ -21,10 +21,12 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdint.h>
+#ifndef _WIN32
 #include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
 #if !defined(__wasi__)
 #include <termios.h>  /* tcgetattr/tcsetattr — raw-mode single-key input   */
-#endif                /* wasi-libc has no termios; raw mode degrades to the piped path */
+#endif                /* termios: absent on wasi-libc */
+#endif                /* unistd/termios: absent on Windows (raw-key TUI is a no-op on wasi/Windows) */
 
 /* ---- allocation (never-free; see header comment) ---- */
 
@@ -911,10 +913,15 @@ const char *nt_read_line(void) {
  * from the SAME lazily-slurped stdin buffer + cursor that readLine/readStdin use,
  * so a piped keystroke script is deterministic and matches the node oracle
  * byte-for-byte. libc/termios only, so it cross-compiles unchanged. */
-#if !defined(__wasi__)
+/* Raw single-key input. POSIX uses termios; on Windows and WASI (no termios) rawMode is a
+ * no-op and readKey serves bytes from the piped stdin buffer — so line/stdin/argv programs
+ * build+run there, but a live single-keystroke TUI needs a POSIX terminal. */
+#if !defined(_WIN32) && !defined(__wasi__)
 static struct termios g_saved_termios;
 static int            g_raw_active = 0;
+#endif
 
+#if !defined(_WIN32) && !defined(__wasi__)
 void nt_raw_mode(int32_t on) {
   if (on) {
     if (g_raw_active) return;
@@ -932,12 +939,12 @@ void nt_raw_mode(int32_t on) {
   }
 }
 #else
-/* WASI has no termios: raw mode is a no-op, so readKey serves bytes from the piped
- * stdin buffer (nt_read_key's non-tty path) — deterministic and still matches node. */
+/* Windows / WASI: no termios — raw mode is a no-op. */
 void nt_raw_mode(int32_t on) { (void)on; }
 #endif
 
 const char *nt_read_key(void) {
+#if !defined(_WIN32) && !defined(__wasi__)
   if (isatty(STDIN_FILENO)) {
     /* Live terminal: one un-buffered byte straight from fd 0. */
     unsigned char c;
@@ -945,7 +952,8 @@ const char *nt_read_key(void) {
     if (n <= 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
     char *o = alloc_str(1); o[0] = (char)c; o[1] = '\0'; return o;
   }
-  /* Piped (not a tty): one byte from the shared slurp buffer + cursor. */
+#endif
+  /* Piped (not a tty) or Windows: one byte from the shared slurp buffer + cursor. */
   stdin_load();
   if (g_stdin_pos >= g_stdin_len) { char *o = alloc_str(0); o[0] = '\0'; return o; }
   char *o = alloc_str(1); o[0] = g_stdin[g_stdin_pos]; o[1] = '\0';

@@ -41,7 +41,7 @@ import mapsetSource from "../runtime/nt_mapset.c" with { type: "text" };
 // Android need the platform HTTP stack (NSURLSession/OkHttp), a follow-on.
 import httpSource from "../runtime/nt_http.c" with { type: "text" };
 
-export type Target = "host" | "ios" | "ios-sim" | "android" | "wasm";
+export type Target = "host" | "ios" | "ios-sim" | "android" | "wasm" | "windows";
 
 /** Options for a native build. `static` produces a fully static binary (no dynamic libc). */
 export interface BuildOpts { target?: Target; static?: boolean }
@@ -174,6 +174,11 @@ function targetFlags(target: Target): string[] {
     // so it needs both the triple and the wasi-libc sysroot. `wasiSysroot()` resolves it
     // (throwing a clear BuildError when absent) — analogous to iOS's `-isysroot` via xcrun.
     case "wasm": return ["--target=wasm32-wasi", "--sysroot", wasiSysroot()];
+    // Windows x86-64 PE via clang's MSVC/UCRT target. IR carries no triple, so clang stamps
+    // this in. Header-free IR compiles to a COFF object on any host (the local arch check);
+    // LINKING a full .exe needs the Windows SDK + lld-link, so it links natively on a Windows
+    // runner (or a mingw sysroot). No -isysroot: the Windows SDK is discovered by clang itself.
+    case "windows": return ["-target", "x86_64-pc-windows-msvc"];
   }
 }
 
@@ -194,6 +199,9 @@ export function supportsStatic(target: Target): boolean {
     case "ios-sim": return false;
     // wasm modules are self-contained by construction; `-static` is not a wasi link concept.
     case "wasm": return false;
+    // Windows links dynamically against the UCRT/MSVCRT (no fully-static libc archive in the
+    // default toolchain), so `--static` falls back to the dynamic default there, like Apple.
+    case "windows": return false;
     // `host` is Apple only when we're building on macOS; on a Linux host it's a Linux ELF.
     case "host": return process.platform !== "darwin";
   }
@@ -231,8 +239,10 @@ export function linkArgv(
     ...(files.actor ? [files.actor] : []),
     ...(files.extra ?? []),
     ...staticFlags,
-    // -lm: libm is separate on Android NDK (fmod/floor/...); harmless on macOS/iOS.
-    "-lm",
+    // -lm: libm is separate on Android NDK (fmod/floor/...); harmless on macOS/iOS. Windows
+    // folds the math functions into the UCRT/MSVCRT (no separate m.lib), so omit it there —
+    // lld-link would otherwise fail resolving a nonexistent `m.lib`.
+    ...(target === "windows" ? [] : ["-lm"]),
     "-o",
     files.out,
   ];
