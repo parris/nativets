@@ -299,7 +299,7 @@ export interface ObjectProperty { key: string; value: Expr; spread?: boolean; }
 export interface ObjectLiteral { kind: "ObjectLiteral"; properties: ObjectProperty[]; ty?: Ty; }
 export interface SpreadExpr { kind: "SpreadExpr"; argument: Expr; ty?: Ty; }
 
-export interface Loc { line: number; col: number; }
+export interface Loc { line: number; col: number; file?: string; }
 export interface Identifier { kind: "Identifier"; name: string; ty?: Ty; loc?: Loc; }
 
 export interface MemberExpr {
@@ -311,7 +311,13 @@ export interface MemberExpr {
 }
 
 /** obj[expr] element access */
-export interface IndexExpr { kind: "IndexExpr"; object: Expr; index: Expr; ty?: Ty; }
+/**
+ * `obj[i]`. `loc` is set ONLY by the parser, on an index the programmer actually wrote —
+ * that is exactly the set of reads whose out-of-range access must PANIC (and the location
+ * the panic reports). Desugarings that synthesize an IndexExpr (destructuring, spread-call
+ * expansion) leave it undefined and keep the internal, non-panicking accessor.
+ */
+export interface IndexExpr { kind: "IndexExpr"; object: Expr; index: Expr; ty?: Ty; loc?: Loc; }
 
 export type UnaryOp = "-" | "+" | "!" | "~" | "void";
 export interface UnaryExpr { kind: "UnaryExpr"; op: UnaryOp; operand: Expr; ty?: Ty; }
@@ -367,6 +373,7 @@ export interface IndexAssign {
   index: Expr;
   value: Expr;
   ty?: Ty;
+  loc?: Loc; // the written `[` — an out-of-range element WRITE panics from here
 }
 
 /**
@@ -382,7 +389,7 @@ export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
 
 // `typeArgs` are EXPLICIT call-site type arguments (`id<string>("x")`) — they pin the
 // instantiation of a generic callee instead of inferring it from the argument types.
-export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
+export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; loc?: Loc; }
 export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
 

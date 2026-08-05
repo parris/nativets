@@ -1,5 +1,63 @@
 # Divergences & unsupported features
 
+### THE HEADLINE DIVERGENCE — an out-of-bounds index PANICS
+
+In JS an out-of-range read is *defined*: `a[5]` on a 3-element array is `undefined`, and an
+out-of-range write to a typed array is a silent no-op. **nativets aborts instead.**
+
+```
+panic: index out of bounds: the length is 3 but the index is 5
+  at examples/thing.ts:12:9
+  help: array index is out of range; use `.at(5)` to get `undefined` instead of panicking
+```
+
+on **stderr** (stdout is flushed first and stays byte-comparable), via `abort()` — SIGABRT, so
+a shell sees **exit code 134**, the same path as `nativets: out of memory`.
+
+**Why, given that node is the oracle.** Every indexed accessor in the runtime is bounds-checked,
+so nativets never performs an out-of-bounds *memory* access — that part was never in question.
+What was wrong was the **policy on a failed check**: it returned a benign value (`nt_arr_get` →
+`0`, `js_str_char_at` → `""`, `nt_bytes_get` → `0`, an OOB `Uint8Array` write → nothing,
+`nt_pv_update` out of range → an unchanged copy). Measured, that matched **neither** node **nor**
+a trap:
+
+| | nativets (before) | node |
+|---|---|---|
+| `a[5]` on `[1,2,3]` | `0` | `undefined` |
+| `a[-1]` | `0` | `undefined` |
+| `"abc"[7]` | `""` | `undefined` |
+| `u[9] = 1` on a 4-byte array | silently ignored | silently ignored |
+
+A wrong-but-plausible `0` is the worst outcome available: the program keeps running and computes
+a wrong answer from a value that was never there. Memory safety is supposed to mean *a guaranteed
+controlled stop*, never *continuing into a phantom value*. Reproducing node's `undefined` would
+mean making every element read nullable (`T | undefined`) — the whole language pays a tagged-pair
+box on every index so that a bug can be *quietly propagated*. So we take the third option, the one
+Rust takes: stop, loudly, at the exact source location.
+
+Rules:
+
+- **Covered accessors:** array read `a[i]`, string index `s[i]`, `Uint8Array` read `u[i]` **and
+  write** `u[i] = v` (including compound `u[i] += v`), and `arr.with(i, v)` (flat *and* past the
+  32-element persistent-trie threshold — node throws a `RangeError` here, so node stops too).
+  **Negative indices panic everywhere** (they are not Python-style wrap-around).
+- **A panic is NOT an exception.** It deliberately does not go through the Stage-20
+  pending-exception protocol: `try { a[5] } catch {}` still aborts, and a `finally` does not run.
+  It stops the program; it is not a control-flow construct.
+- **`.at(i)` is the node-exact escape hatch** and is unchanged: it returns `T | undefined`
+  (`a.at(5)` → `undefined`, `a.at(-1)` → the last element), matching node byte for byte. It is the
+  documented way to ask "give me `undefined` instead of panicking", which is what the panic's
+  `help:` line names. `String#charAt(i)` is likewise untouched — node *defines* it as `""` out of
+  range, so it is not a defect and does not panic.
+- **Compile-time beats runtime.** When the length and the index are both statically known — a
+  literal array/string, or a `const` bound to one, indexed by a numeric literal — the program is
+  **rejected** with **`NT2002`** (`index 5 is out of bounds for an array of length 3`) rather than
+  built and aborted. It is a real user error, hence the NT2xxx type-error band rather than the
+  NT1xxx "not yet implemented" gradient, and `coverage` surfaces it.
+- **Only written indices panic.** Compiler-generated in-bounds reads (`for-of`, the array HOFs,
+  `JSON.stringify`, destructuring, spread-call expansion) keep the internal non-panicking
+  accessor, so nothing pays twice and in-bounds programs are behaviourally unchanged.
+
 ### stdlib Batch 1 — what cannot match node, and what we do instead
 
 The Batch-1 stdlib (`docs/stdlib.md`) is node-differential everywhere except these, all of

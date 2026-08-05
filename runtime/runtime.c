@@ -166,6 +166,34 @@ static void js_number_to_string(double v, char *out, size_t out_len) {
   snprintf(out, out_len, "%.17g", v);
 }
 
+/* ============================================================
+ * PANIC — out-of-bounds index (see docs/divergences.md).
+ *
+ * Every indexed accessor here is bounds-checked, so nativets never performs an
+ * out-of-bounds MEMORY access. What changed is the POLICY on a failed check: it
+ * used to return a benign value (0 / "" / a no-op write), which matches neither
+ * node (`undefined`) nor a trap — the program carried on computing with a value
+ * that was never there. It now stops, rustc-style.
+ *
+ * A panic is NOT an exception: it deliberately does NOT go through the pending-
+ * exception protocol (nt_exc_raise), so `try`/`catch` cannot swallow it. stdout is
+ * flushed first so everything the program printed before the fault is still there
+ * and byte-comparable; the report goes to stderr. abort() (SIGABRT -> shell exit
+ * 134) matches the existing out-of-memory path.
+ * ============================================================ */
+void nt_panic_bounds(const char *what, double len, double idx, const char *loc) {
+  char l[64], i[64];
+  js_number_to_string(len, l, sizeof(l));
+  js_number_to_string(idx, i, sizeof(i));
+  fflush(stdout);
+  fprintf(stderr, "panic: index out of bounds: the length is %s but the index is %s\n", l, i);
+  if (loc && *loc) fprintf(stderr, "  at %s\n", loc);
+  fprintf(stderr, "  help: %s is out of range; use `.at(%s)` to get `undefined` instead of panicking\n",
+          what && *what ? what : "the index", i);
+  fflush(stderr);
+  abort();
+}
+
 /* ---- console.log building blocks ---- */
 
 void js_print_num(double v) {
@@ -298,6 +326,14 @@ const char *js_str_lower(const char *s) {
 const char *js_str_char_at(const char *s, double id) {
   long n = (long)strlen(s); long i = (long)id;
   if (i < 0 || i >= n) { char *o = alloc_str(0); o[0] = 0; return o; }
+  char *o = alloc_str(1); o[0] = s[i]; o[1] = 0; return o;
+}
+/* `s[i]` as WRITTEN — out of range PANICS. `.charAt(i)` above keeps node's semantics
+ * (it is DEFINED to return "" out of range, so it is not a defect) and `.at(i)` returns
+ * `string | undefined`; only the bracket index, whose node value is `undefined`, panics. */
+const char *nt_str_index(const char *s, double id, const char *loc) {
+  long n = (long)strlen(s); long i = (long)id;
+  if (!(id == id) || i < 0 || i >= n) nt_panic_bounds("string index", (double)n, id, loc);
   char *o = alloc_str(1); o[0] = s[i]; o[1] = 0; return o;
 }
 static const char *slice_impl(const char *s, double startd, double endd, int clampNeg) {
@@ -449,10 +485,13 @@ NtArray *nt_arr_copy(NtArray *a) {
 /* Array.prototype.with(i, v) — pure: returns a NEW array with slot i replaced; the
  * receiver is unchanged. Past the threshold this is PATH COPYING: only the root->leaf
  * ancestors of i are allocated (O(log32 n)), every other subtree is shared by pointer.
- * Out-of-range i leaves the copy untouched (fixtures stay in-bounds; node throws
- * RangeError — not modeled). */
-NtArray *nt_arr_with(NtArray *a, double idxd, int64_t slot) {
+ * Out-of-range i PANICS: it used to leave the copy untouched, so the caller went on
+ * holding an array it believed it had updated (node throws a RangeError here — both
+ * stop the program; ours is an uncatchable panic, see docs/divergences.md). */
+NtArray *nt_arr_with(NtArray *a, double idxd, int64_t slot, const char *loc) {
   int64_t i = (int64_t)idxd;
+  if (!(idxd == idxd) || i < 0 || i >= a->len)
+    nt_panic_bounds("`.with` index", (double)a->len, idxd, loc);
   arr_freeze(a);
   if (a->pv) {
     NtArray *c = arr_header();
@@ -507,6 +546,17 @@ double nt_arr_push(NtArray *a, int64_t slot) {
 int64_t nt_arr_get(NtArray *a, double idxd) {
   int64_t i = (int64_t)idxd;
   if (i < 0 || i >= a->len) return 0;
+  return arr_at(a, i);
+}
+
+/* `arr[i]` as WRITTEN IN THE SOURCE — out of range PANICS (see nt_panic_bounds).
+ * nt_arr_get above keeps the return-0 policy because it is the internal accessor
+ * every other runtime routine (and every compiler-generated in-bounds loop) reads
+ * through; only indices the programmer wrote reach this one. */
+int64_t nt_arr_index(NtArray *a, double idxd, const char *loc) {
+  int64_t i = (int64_t)idxd;
+  if (!(idxd == idxd) || i < 0 || i >= a->len)
+    nt_panic_bounds("array index", (double)a->len, idxd, loc);
   return arr_at(a, i);
 }
 int64_t nt_arr_pop(NtArray *a) {

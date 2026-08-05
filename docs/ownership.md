@@ -39,6 +39,27 @@ a lexical, nesting-aware set separate from the move lattice.
 Diagnostics mirror rustc's phrasing and multi-span style, e.g.
 `error[NT1601]: use of moved value: \`a\` (moved at line 3, used at line 4)`.
 
+## Bounds: an out-of-range index PANICS (the other half of memory safety)
+
+Ownership answers *whose* value this is; bounds answer *whether the element exists*. Every
+indexed accessor in the runtime has always been bounds-checked — nativets never performs an
+out-of-bounds **memory** access — but the *policy* on a failed check used to be to hand back a
+benign value (`nt_arr_get` → `0`, `js_str_char_at` → `""`, a `Uint8Array` write → a silent
+no-op, `.with` out of range → an unchanged copy). That is memory-safe and **still wrong**: it
+matches neither node (`undefined`) nor a trap, so the program kept computing on a value that
+was never there.
+
+The policy is now rustc's: **panic**. `arr[i]`, `s[i]`, `u[i]`, `u[i] = v` and `arr.with(i, v)`
+abort with `panic: index out of bounds: the length is N but the index is I`, the source
+location, and a pointer at `.at(i)`. A panic is **not** an exception — it does not use the
+pending-exception protocol, so `try`/`catch` cannot swallow it — and when both the length and
+the index are compile-time constants the program is rejected outright (**NT2002**) instead.
+See `docs/divergences.md` and `test/panic.test.ts`.
+
+Only indices the **programmer wrote** panic; compiler-generated in-bounds loops (`for-of`, the
+HOFs, `JSON.stringify`) keep reading through the internal `nt_arr_get`, so nothing pays for a
+second check.
+
 ## Tests (rustc `compiletest`-style)
 
 `test/ownership/*.ts`, driven by `test/ownership.test.ts`:

@@ -158,7 +158,7 @@ static nt_pv_node *do_assoc(uint32_t level, nt_pv_node *node, uint32_t i, int64_
 }
 
 nt_pv *nt_pv_update(nt_pv *v, uint32_t i, int64_t val) {
-    if (i >= v->count) { nt_pv_retain(v); return v; }     /* out of range: no-op */
+    if (i >= v->count) { nt_pv_retain(v); return v; }     /* unreachable: nt_arr_with panics first */
     if (i >= nt_pv_tailoff(v)) {                          /* in the tail: share the whole tree */
         nt_pv_node *newtail = clone_node(v->tail);
         newtail->slots[i & NT_PV_MASK] = val;

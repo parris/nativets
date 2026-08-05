@@ -21,6 +21,8 @@ export interface ParseOpts {
    *  and the instance shape of an imported `class`). Seeds the alias table so an
    *  annotation naming an imported type resolves to its real shape. */
   typeEnv?: Map<string, Ty>;
+  /** This module's path, as it should appear in a runtime panic's `at <file>:<line>:<col>`. */
+  file?: string;
 }
 
 export class ParseError extends Error {}
@@ -82,8 +84,10 @@ class Parser {
   private exportValues = new Map<string, string>();
   private exportReexports = new Map<string, { source: string; imported: string; line: number }>();
   private exportTypes = new Set<string>();
+  private file?: string;
   constructor(private toks: Token[], opts: ParseOpts = {}) {
     if (opts.typeEnv) for (const [k, v] of opts.typeEnv) this.typeAliases.set(k, v);
+    this.file = opts.file;
   }
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
@@ -1023,7 +1027,7 @@ class Parser {
       // type, so it emits an IndexAssign and lets type inference decide.
       if (left.kind === "IndexExpr") {
         const op = this.next().value as any;
-        return { kind: "IndexAssign", op, object: left.object, index: left.index, value: this.parseAssign() };
+        return { kind: "IndexAssign", op, object: left.object, index: left.index, value: this.parseAssign(), loc: left.loc };
       }
       if (left.kind === "MemberExpr") {
         // The ONE allowed field assignment: `this.field = v` while building an instance
@@ -1169,12 +1173,13 @@ class Parser {
         if (this.at("[")) throw nyi(NYI.OPTIONAL_CHAIN, `optional element access '?.[]' at ${t.line}:${t.col}`);
         expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true };
       } else if (this.at("[")) {
-        this.eat("[");
+        const br = this.eat("[");
         const index = this.parseExpression();
         this.eat("]");
-        expr = { kind: "IndexExpr", object: expr, index };
+        // A WRITTEN index carries its location: out of range panics and reports here.
+        expr = { kind: "IndexExpr", object: expr, index, loc: { line: br.line, col: br.col, file: this.file } };
       } else if (this.at("(")) {
-        this.eat("(");
+        const lp = this.eat("(");
         const args: Expr[] = [];
         if (!this.at(")")) {
           do {
@@ -1184,9 +1189,10 @@ class Parser {
           } while (this.at(",") && (this.eat(","), true));
         }
         this.eat(")");
+        const callLoc = { line: lp.line, col: lp.col, file: this.file };
         expr = pendingTypeArgs
-          ? { kind: "CallExpr", callee: expr, args, typeArgs: pendingTypeArgs }
-          : { kind: "CallExpr", callee: expr, args };
+          ? { kind: "CallExpr", callee: expr, args, typeArgs: pendingTypeArgs, loc: callLoc }
+          : { kind: "CallExpr", callee: expr, args, loc: callLoc };
         pendingTypeArgs = null;
         // Record plain `f(...)` calls so an un-awaited call to an `async function`
         // can be rejected after the whole program is parsed (see checkFloatingAsyncCalls).

@@ -302,7 +302,7 @@ function moduleOrder(
  * every single-file program takes an unchanged path through the compiler.
  */
 export function linkProgram(entrySource: string, entryPath?: string, read: ReadModule = defaultRead): Program {
-  const first = parse(entrySource);
+  const first = parse(entrySource, { file: entryPath });
   if (!first.imports?.length) return first; // ordinary single-module program
 
   const entry = resolve(entryPath ?? "entry.ts");
@@ -331,7 +331,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     }
 
     // 2. The real parse, with imported types in scope.
-    const program = parse(source, { typeEnv });
+    const program = parse(source, { typeEnv, file: path });
 
     // 3. Rename map: imported locals → the exporting module's final names; own
     //    top-level bindings → a module-unique name (the entry keeps its own names,

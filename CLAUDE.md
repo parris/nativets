@@ -574,6 +574,28 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   (arrays are immutable, Stage 29 — `.sort` points at the ordering lane's `.toSorted()`); `toFixed`/`toString` require literal in-range arguments so
   node's `RangeError` is unreachable rather than emulated. Non-ASCII stays on the documented
   UTF-8-byte index space (§A.2), now pinned by a behavioral test.
+- **Stage 41 ✅ (out-of-bounds is a controlled PANIC — a defect fix)** Every indexed accessor in
+  the runtime was already bounds-checked (no UB, no OOB memory access ever), but the **policy** on
+  a failed check was to return a benign value — `nt_arr_get` → `0`, `js_str_char_at` → `""`,
+  `nt_bytes_get` → `0`, an OOB `Uint8Array` write → a silent no-op, `nt_pv_update` out of range → an
+  unchanged copy. That matched **neither node** (`undefined`) **nor a trap**: the program carried on
+  computing from a value that was never there — a silent wrong answer. It now **panics**, rustc-style:
+  `panic: index out of bounds: the length is 3 but the index is 5`, then `at <file>:<line>:<col>` and
+  a `help:` line naming `.at(i)`, all on **stderr** with stdout flushed first (so stdout stays
+  byte-comparable), via `abort()` → **exit 134**, the same path as the existing OOM abort. A panic is
+  **not an exception**: it deliberately bypasses the Stage-20 pending-exception protocol, so
+  `try { a[5] } catch {}` still aborts and `finally` does not run. Covered: `a[i]`, `s[i]`, `u[i]`,
+  `u[i] = v` (incl. compound), and `arr.with(i, v)` (flat + persistent-trie), **negative indices
+  everywhere**. `.at(i)` (node-exact `T | undefined`) and `.charAt(i)` (node *defines* it as `""`) are
+  untouched — `.at` is the documented escape hatch the panic points at. **Compile-time beats runtime:**
+  a literal index into a statically-known length (a literal array/string, or a `const` bound to one) is
+  **rejected with `NT2002`** — a real user error, so the NT2xxx type band, surfaced by `coverage`.
+  Mechanics: the parser stamps a written `[` with `file:line:col` (`IndexExpr.loc`, threaded from
+  `ParseOpts.file` through the module linker), codegen routes only those through the new panicking
+  accessors (`nt_arr_index` / `nt_str_index` / `nt_bytes_index` / `nt_bytes_index_set`), so synthesized
+  indices (destructuring, spread-call expansion) and every compiler-generated in-bounds loop keep the
+  cheap internal read and in-bounds IR is otherwise unchanged. Deliberate, documented node divergence
+  (`docs/divergences.md`, headline entry). Tests: `test/panic.test.ts`.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
