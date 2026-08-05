@@ -524,6 +524,14 @@ class FnGen {
   private tryHandlers: { catchLbl: string; excVar: string | null; eType: Ty }[] = [];
   /** Active finally blocks (a `return` inside runs finally first, mode=1). */
   private finallyStack: { finallyLbl: string; modeSlot: string; retSlot: string | null }[] = [];
+  /**
+   * True while emitting `main`. `retTy` is "number" there (top-level expressions are typed
+   * like any others), but the FUNCTION returns `i32` — so any `ret` emitted from a generic
+   * path must use `i32`, not `llvmTy(this.retTy)`. Only the finally-return path can reach
+   * this, and only as dead code (a top-level `return` is illegal), but LLVM still type-checks
+   * unreachable blocks: emitting `ret double` inside `@main` made clang reject the module.
+   */
+  private inMain = false;
   /** Active inlined-HOF callbacks (map/filter/reduce with a BLOCK body): a `return`
    *  inside stores the per-element result and branches to the callback's join, rather
    *  than returning from the enclosing function. */
@@ -618,6 +626,7 @@ class FnGen {
     this.hofReturnStack = [];
     this.strLocals = new Set();
     this.globalVars = new Set();
+    this.inMain = false;
   }
 
   // ---- string reference counting (value-semantics strings) ----
@@ -763,6 +772,7 @@ class FnGen {
   genMain(body: Stmt[], endDrops: string[]): string {
     this.reset();
     this.retTy = "number";
+    this.inMain = true;
     // `main` owns the module-level declarations, so its storage for them IS the global.
     this.globalVars = new Set(this.mod.globals.keys());
     this.collectLocals(body);
@@ -1137,7 +1147,10 @@ class FnGen {
             const retLbl = this.label("finret");
             this.terminate(`br i1 ${isRet}, label %${retLbl}, label %${endLbl}`);
             this.to(this.block(retLbl));
-            if (this.retTy === "void" || !retSlot) this.terminate("ret void");
+            // In `main` this block is unreachable (no top-level `return`), but it must still
+            // type-check against `define i32 @main` — see `inMain`.
+            if (this.inMain) this.terminate("ret i32 0");
+            else if (this.retTy === "void" || !retSlot) this.terminate("ret void");
             else { const rv = this.fresh(); this.emit(`${rv} = load ${llvmTy(this.retTy)}, ptr ${retSlot}`); this.terminate(`ret ${llvmTy(this.retTy)} ${rv}`); }
           }
         }
