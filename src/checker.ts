@@ -853,6 +853,26 @@ class Checker {
         return "number";
       }
       case "UpdateExpr": {
+        // Member/index target (`this.n++`, `u[i]++`). The parser already vetted a field
+        // target against the immutability rule; an INDEX target is decided here, exactly
+        // like `IndexAssign`: a mutable `Uint8Array` element is writable, an immutable
+        // array/object element is NT1606.
+        if (e.targetExpr) {
+          const tgt = e.targetExpr;
+          if (tgt.kind === "IndexExpr") {
+            const ot = this.type(tgt.object, scope);
+            if (isBytesTy(ot)) {
+              if (this.type(tgt.index, scope) !== "number") throw typeError("Uint8Array index must be a number");
+              return "number";
+            }
+            if (isObjectTy(ot))
+              throw mutationError("objects are immutable: `o[k]++` would mutate the object in place", "use `{ ...o, k: o[k] + 1 }` — returns a NEW object; the original is unchanged");
+            throw mutationError("arrays are immutable: `arr[i]++` would mutate the array in place", "use `arr.with(i, arr[i] + 1)` — returns a NEW array; the original is unchanged");
+          }
+          const ft = this.type(tgt, scope);
+          if (ft !== "number") throw typeError(`'${e.op}' needs number`);
+          return "number";
+        }
         const b = scope.lookup(e.target);
         if (!b) throw typeError(`'${e.target}' is not defined`);
         if (b.ty !== "number") throw typeError(`'${e.op}' needs number`);
@@ -1032,6 +1052,21 @@ class Checker {
         return "{message:string}";
       }
       case "AsExpr": { this.type(e.expr, scope); return e.ty; } // identity retype
+      case "InstanceOfExpr": {
+        // `x instanceof C`, decided here and folded to a constant by codegen. A value's
+        // static type IS its exact class in this subset (user classes don't inherit, and
+        // nothing is polymorphic), so the answer is the same one node computes.
+        const ot = this.type(e.object, scope);
+        const c = e.className;
+        if (c === "Array") e.result = isArrayTy(ot);
+        else if (c === "Uint8Array") e.result = isBytesTy(ot);
+        else if (c === "Map") e.result = isMapTy(ot);
+        else if (c === "Set") e.result = isSetTy(ot);
+        else if (this.functions.has(`${c}.constructor`)) e.result = classTag(ot) === c;
+        else throw nyi(NYI.INSTANCEOF, `'instanceof ${c}'${c === "Error" ? " (Error is modelled structurally as {message:string})" : ""}`);
+        e.ty = "boolean";
+        return "boolean";
+      }
       case "CallExpr": return this.inferCall(e, scope, hint);
     }
   }
@@ -1866,7 +1901,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "IndexExpr": collectIdents(e.object, out); collectIdents(e.index, out); return;
     case "UnaryExpr": collectIdents(e.operand, out); return;
     case "TypeofExpr": collectIdents(e.operand, out); return;
-    case "UpdateExpr": out.add(e.target); return;
+    case "UpdateExpr": if (e.targetExpr) collectIdents(e.targetExpr, out); else out.add(e.target); return;
     case "BinaryExpr": collectIdents(e.left, out); collectIdents(e.right, out); return;
     case "LogicalExpr": collectIdents(e.left, out); collectIdents(e.right, out); return;
     case "ConditionalExpr": collectIdents(e.test, out); collectIdents(e.consequent, out); collectIdents(e.alternate, out); return;
@@ -1878,6 +1913,8 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "ObjectLiteral": e.properties.forEach((p) => collectIdents(p.value, out)); return;
     case "SpreadExpr": collectIdents(e.argument, out); return;
     case "SequenceExpr": e.exprs.forEach((x) => collectIdents(x, out)); return;
+    case "AsExpr": collectIdents(e.expr, out); return;
+    case "InstanceOfExpr": collectIdents(e.object, out); return; // the class name is not a value
     case "ArrowFunction": if (e.exprBody) collectIdents(e.body as Expr, out); return;
     default: return; // literals
   }

@@ -76,6 +76,53 @@ thing. `NT0001` is now reported honestly, and the *named* residual causes, in fr
 Four modules — `lexer.ts`, `diagnostics.ts`, `driver.ts`, `coverage-preprocess.ts` — now report
 **no blockers at all** at statement granularity.
 
+### Re-measured after the `NT0001` burn-down — the parse tail is GONE
+
+`coverage` over all twelve `src/*.ts` modules now reports, whole-tree:
+
+| Code | × | What it actually is |
+|------|---|---------------------|
+| `NT0001` | **0** | **cleared** — every statement in the compiler's own source parses |
+| `NT1606` | 8 | `this.f = v` / `this.f++` field mutation in `Parser`/`Checker`/`FnGen`/`Analyzer`/`coverage` |
+| `NT1015` | 2 | a `static` member in `ModuleGen`; a class field needing a type annotation in `modules.ts` |
+| `NT1009` | 1 | a general union type (`Record<string, number \| "var">` in `checker.ts`) |
+| `NT1013` | 0 | still cleared (SH2 erasure + M3 monomorphization) |
+
+The ×11 `NT0001` bucket was six small, concrete gaps, closed one at a time against a node oracle
+(fixtures in `test/selfhost-parse/`, gate in `test/selfhost-parse.test.ts`, whole-tree assertion in
+`test/self-host-coverage.test.ts`):
+
+1. **`(expr as T)` / `(x)` in a ternary arm** misread as an arrow parameter list. `looksLikeArrow`
+   committed to the arrow grammar on any `) :`; it now also requires the parens to hold a real
+   parameter list *and* a top-level `=>` after the return-type annotation. (`ast.ts` ×2)
+2. **Nested template literals** — the lexer ended the outer template at the first backtick inside a
+   `${…}` substitution. It now tracks substitutions (with nested templates, quoted strings and
+   braces), and the parser's splitter skips quoted runs to match. (`ast.ts` ×1, `codegen.ts` ×1)
+3. **Radix + separator numeric literals** `0x22` / `0b1010` / `0o17` / `1_000`. (`codegen.ts` ×1)
+4. **`++`/`--` on a member or index target** (`this.pos++`, `u[i]++`). Mutability mirrors plain
+   assignment exactly (Stage 29): a `Uint8Array` element and `this.f` inside a constructor are
+   writable; every other field/element is `NT1606`. (`parser.ts` ×1, `coverage.ts` ×1)
+5. **`instanceof`**, decided at COMPILE TIME from the static type — exact, because a value's static
+   type IS its class in this subset. Right operands a static type cannot decide are refused with the
+   new **`NT1021`**, notably `instanceof Error` (nativets models `Error` structurally as
+   `{message:string}`, so an Error and a plain record with a `message` are the same type). (`cli.ts` ×1)
+6. **Binding patterns in parameter position** (`([k, v]) => …`) — the Stage-15 declaration
+   desugaring extended to parameters, arrows/functions/methods/constructors alike. (`ownership.ts` ×1)
+
+Two of the six as originally named were **misdiagnoses the measurement corrected**: the `ast.ts`
+failure was the nested template on that line, not the `{ key: string; ty: Ty }[]` annotation (which
+already parsed); and the `codegen.ts` failure was hex *number* literals, not the `\xHH` *string*
+escape (which already worked — `test/hex-escape.test.ts`). Two extra gaps the same pass turned up
+were closed with them: **parenthesized types** (`(() => Scope) | null`) and **`delete o.k`**, which
+is now named as the mutation it is (`NT1606`) instead of "unparsed".
+
+**Reading:** self-hosting is no longer blocked on *syntax*. The dominant blocker is now `NT1606` —
+the compiler is written with mutable class fields (`this.pos++`, `this.mode = …`), which the
+immutable-by-default model (Stage 29) only permits inside a constructor. That is a decision about
+the *source* (refactor those classes into fold/return-new shapes) or about the *language* (make
+class instance fields mutable), not a missing feature. The remaining `NT1015`/`NT1009` are a
+`static` member, one un-annotated class field, and one general union.
+
 ---
 
 ## The strategic fork

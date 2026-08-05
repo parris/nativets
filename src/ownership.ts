@@ -268,6 +268,7 @@ class Analyzer {
       case "SpreadExpr": this.expr(e.argument, state, false); return; // spread copies (borrow)
       case "NewExpr": for (const a of e.args) this.expr(a, state, false); return;
       case "AsExpr": this.expr(e.expr, state, false); return;
+      case "InstanceOfExpr": this.expr(e.object, state, false); return; // a type TEST only borrows
       case "ObjectLiteral": for (const p of e.properties) this.expr(p.value, state, !p.spread); return; // fields move into the object; a `...spread` source is COPIED (borrow), so it stays usable + owned
       case "ArrowFunction": // analyze body in the enclosing scope (captures/params aren't linear here)
         if (e.exprBody) this.expr(e.body as Expr, state, false);

@@ -651,27 +651,40 @@ types** (`compose` — a function returning a function) remain of the closure ca
 clusters: spread, destructuring, `try/catch`, `?.`/`??`, JSON, nested objects, and making
 objects/strings linear. The gap corpus has node-verified cases waiting in `KNOWN_UNSUPPORTED`.
 
-### Self-hosting frontier (re-measured after Stages 33–40)
+### Self-hosting frontier (re-measured after the `NT0001` burn-down)
 
-`nativets coverage` over `src/*.ts` — **`NT1013` generics is now 0** (Stage 36 monomorphization;
-the previous count of 4 was also partly a *misattribution*: `coverage` used to re-label any
-unparsed `Name<…>` statement as "generic type arguments", which aimed the burn-down at the wrong
-feature — the heuristic is gone). What remains is small and concrete:
+`nativets coverage` over `src/*.ts` — **`NT0001` is now 0**, as is `NT1013` (Stage 36
+monomorphization). **Every statement in the compiler's own source parses.** The frontier is no
+longer syntax at all:
 
 | Blocker | × | What it actually is |
 |---|---|---|
-| `NT0001` | 11 | see the breakdown below — no longer one bucket |
-| `NT1606` | 3 | `this.f = v` field mutation in `Checker`/`Analyzer` — a *source* refactor, not a missing feature |
+| `NT1606` | 8 | `this.f = v` / `this.f++` field mutation in `Parser`/`Checker`/`FnGen`/`Analyzer`/`coverage` — a *source* refactor (or a language decision about mutable class fields), not a missing feature |
+| `NT1015` | 2 | a `static` member in `ModuleGen`; a class field needing a type annotation in `modules.ts` |
 | `NT1009` | 1 | a general union (`Record<string, number \| "var">`) |
-| `NT1015` | 1 | `static` class members in `ModuleGen` |
 
-The `NT0001` bucket, named precisely (this is the next wave's work list):
-1. **`(expr as T)` in a ternary arm** misread as an arrow parameter list (`looksLikeArrow` lookahead) — `ast.ts`.
-2. **postfix `++`/`--` on a member/index target** (`this.pos++`) — `UpdateExpr` only models an identifier — `parser.ts`, `coverage.ts`.
-3. **array-of-object-type annotations** `{ key: string; ty: Ty }[]`.
-4. **`instanceof`** — `cli.ts`.
-5. **binding patterns in arrow params** (`([k, v]) => …`) — `ownership.ts`.
-6. **string escapes** (`\x22`, a lone `\`) in `codegen.ts`.
+The `NT0001` bucket was ×11 and was never one feature — six concrete gaps, each extracted from a
+real statement and closed one at a time (fixtures in `test/selfhost-parse/`, gate in
+`test/selfhost-parse.test.ts`):
+
+1. **`(expr as T)` / `(x)` in a ternary arm** misread as an arrow parameter list — `looksLikeArrow`
+   accepted any `) :`; it now also needs a real parameter list *and* a top-level `=>`.
+2. **nested template literals** — a `` ` `` inside a `${…}` substitution ended the outer literal.
+   (This, not "array-of-object-type annotations", was the real `ast.ts` failure; `{k: string}[]`
+   already parsed. It was also the `\`-in-`codegen.ts` failure.)
+3. **radix + separator numeric literals** `0x22` / `0b1010` / `0o17` / `1_000` — the `codegen.ts`
+   blocker was hex *number* literals, not the `\xHH` *string* escape (which already worked).
+4. **`++`/`--` on a member/index target** (`this.pos++`, `u[i]++`) — mutability mirrors plain
+   assignment exactly: a `Uint8Array` element and `this.f` in a constructor are writable,
+   everything else is `NT1606`.
+5. **`instanceof`** — decided at compile time from the static type (a value's static type IS its
+   exact class here). Undecidable right operands, notably `Error` (modelled structurally as
+   `{message:string}`), are refused with the new **`NT1021`**.
+6. **binding patterns in parameters** (`([k, v]) => …`) — the Stage-15 declaration desugaring
+   extended to parameter position.
+
+Plus two more the measurement turned up: **parenthesized types** (`(() => Scope) | null`) and
+**`delete o.k`**, which is now named as the mutation it is (`NT1606`) rather than "unparsed".
 
 ---
 

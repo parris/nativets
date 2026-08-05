@@ -259,6 +259,7 @@ export type Expr =
   | ArrowFunction
   | NewExpr
   | AsExpr
+  | InstanceOfExpr
   | CallExpr;
 
 export type Stmt =
@@ -322,12 +323,21 @@ export interface IndexExpr { kind: "IndexExpr"; object: Expr; index: Expr; ty?: 
 export type UnaryOp = "-" | "+" | "!" | "~" | "void";
 export interface UnaryExpr { kind: "UnaryExpr"; op: UnaryOp; operand: Expr; ty?: Ty; }
 
-/** ++x / x++ / --x / x-- */
+/**
+ * ++x / x++ / --x / x--, and the member/index forms `this.f++` / `u[i]++`.
+ *
+ * `target` names the local for the (overwhelmingly common) identifier case. A
+ * member/index target instead carries `targetExpr` — a MemberExpr or IndexExpr —
+ * with `target` left empty. Mutability is decided exactly as for a plain assignment:
+ * `this.f` inside a constructor and a `Uint8Array` element are writable, everything
+ * else is NT1606 (objects/arrays are immutable — Stage 29).
+ */
 export interface UpdateExpr {
   kind: "UpdateExpr";
   op: "++" | "--";
   prefix: boolean;
   target: string;
+  targetExpr?: Expr;
   ty?: Ty;
 }
 
@@ -392,6 +402,18 @@ export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
 export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; loc?: Loc; }
 export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
+
+/**
+ * `x instanceof C` — decided at COMPILE TIME from the static type of `x`.
+ *
+ * A value's static type IS its exact class in this subset: user classes have no
+ * inheritance (only `extends Error`), and there are no polymorphic references, so
+ * "does this value's runtime class chain contain C" has one answer per site, and the
+ * checker fills it into `result`. `C` must be a class the compiler can name (a user
+ * class, or `Array`/`Map`/`Set`/`Uint8Array`); anything else is rejected (NT1021)
+ * rather than guessed.
+ */
+export interface InstanceOfExpr { kind: "InstanceOfExpr"; object: Expr; className: string; result?: boolean; ty?: Ty; }
 
 /** Arrow function. `captures` (filled by the checker) are free vars closed over. */
 export interface ArrowFunction {

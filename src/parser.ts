@@ -91,6 +91,9 @@ class Parser {
   }
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
+  /** `const` declarators desugared from binding patterns in the parameter list being
+   *  parsed; spliced at the top of that function's body (see parsePatternParam). */
+  private paramPrelude: Stmt[] = [];
   private ident(name: string): Expr { return { kind: "Identifier", name }; }
 
   /**
@@ -211,7 +214,7 @@ class Parser {
     const t = this.peek();
     if (t.type === "str") { this.next(); base = "string"; }        // string-literal type: "a"
     else if (t.type === "num") { this.next(); base = "number"; }   // numeric-literal type: 0
-    else if (this.at("(")) base = this.parseFuncType();
+    else if (this.at("(")) base = this.parseParenOrFuncType();
     else if (this.at("{")) base = this.parseObjectType();
     else if (this.at("[")) base = this.parseTupleType();
     else if (this.at("import")) base = this.parseImportType();    // inline import type: import("m").T
@@ -282,6 +285,21 @@ class Parser {
     this.eat("]");
     return `${tys[0] ?? "number"}[]` as Ty;
   }
+  /**
+   * A leading `(` in type position is either a function type's parameter list
+   * (`(a: T) => U`) or a PARENTHESIZED type (`(() => Scope) | null`, `(number)[]`).
+   * Parens carry no meaning of their own — they only group — so try the function-type
+   * grammar and fall back to "parse a type, expect `)`", which is transparent.
+   */
+  private parseParenOrFuncType(): Ty {
+    const save = this.pos;
+    try { return this.parseFuncType(); } catch { this.pos = save; }
+    this.eat("(");
+    const inner = this.parseType();
+    this.eat(")");
+    return inner;
+  }
+
   private parseFuncType(): Ty {
     this.eat("(");
     const params: Ty[] = [];
@@ -570,6 +588,61 @@ class Parser {
     return { kind: "VarDecl", declKind, decls };
   }
 
+  /**
+   * A BINDING PATTERN in parameter position — `([k, v]) => …`, `({ name, age }) => …`.
+   *
+   * Reuses the Stage-15 declaration desugaring: the parameter itself becomes a fresh
+   * temp (`__d0`), and the pattern turns into `const` declarators reading out of it,
+   * queued in `paramPrelude` for the caller to splice at the top of the body. Nothing
+   * downstream (checker, ownership, codegen) sees a pattern — only ordinary locals.
+   */
+  private parsePatternParam(): Param {
+    const tmp = this.freshTmp();
+    const decls: Declarator[] = [];
+    if (this.at("[")) {
+      this.eat("[");
+      let i = 0;
+      while (!this.at("]")) {
+        if (this.at(",")) { this.eat(","); i++; continue; } // elision hole — no binding
+        const rest = this.at("...") && (this.eat("..."), true);
+        const name = this.expectIdent();
+        decls.push({
+          name,
+          init: rest
+            ? { kind: "CallExpr", callee: { kind: "MemberExpr", object: this.ident(tmp), property: "slice" }, args: [{ kind: "NumberLiteral", value: i }] }
+            : { kind: "IndexExpr", object: this.ident(tmp), index: { kind: "NumberLiteral", value: i } },
+        });
+        i++;
+        if (this.at(",")) this.eat(","); else break;
+      }
+      this.eat("]");
+    } else {
+      this.eat("{");
+      while (!this.at("}")) {
+        const key = this.expectIdent();
+        const binding = this.at(":") ? (this.eat(":"), this.expectIdent()) : key;
+        decls.push({ name: binding, init: { kind: "MemberExpr", object: this.ident(tmp), property: key } });
+        if (this.at(",")) this.eat(","); else break;
+      }
+      this.eat("}");
+    }
+    if (this.at("?")) this.eat("?");
+    let annot: Ty | undefined;
+    if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
+    let def: Expr | undefined;
+    if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
+    if (decls.length) this.paramPrelude.push({ kind: "VarDecl", declKind: "const", decls });
+    return { name: tmp, annot, default: def, rest: false };
+  }
+
+  /** Take (and clear) the pattern-parameter prelude. Called right after a parameter
+   *  list is parsed, before the body — so a nested arrow's prelude never mixes in. */
+  private takeParamPrelude(): Stmt[] {
+    const p = this.paramPrelude;
+    this.paramPrelude = [];
+    return p;
+  }
+
   // Build a Param, applying optional-param (`x?: T`) erasure: an optional param is a
   // nullable `T | undefined` with an implicit `undefined` default, so it can be omitted
   // (mirrors the optional-field `{ a?: T }` encoding).
@@ -600,6 +673,7 @@ class Parser {
             paramProp = true; this.next();
           }
         }
+        if (this.at("[") || this.at("{")) { params.push(this.parsePatternParam()); continue; } // `function f([a, b]: T[])`
         let rest = false;
         if (this.at("...")) { this.eat("..."); rest = true; }
         const pname = this.expectIdent();
@@ -628,9 +702,10 @@ class Parser {
     if (typeParams.length) this.typeParamScopes.push(new Set(typeParams));
     try {
       const params = this.parseParamList();
+      const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
       let returnAnnot: Ty | undefined;
       if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
-      const body = this.parseBlock();
+      const body = [...prelude, ...this.parseBlock()];
       return typeParams.length
         ? { kind: "FuncDecl", name, params, returnAnnot, body, typeParams }
         : { kind: "FuncDecl", name, params, returnAnnot, body };
@@ -704,18 +779,20 @@ class Parser {
       if (member === "constructor" && this.at("(")) {
         if (ctorParams) throw parseError(`Duplicate constructor at ${tok.line}:${tok.col}`);
         ctorParams = this.parseParamList(true); // ctor: access-modified params → parameter properties
+        const patternPrelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
         for (const p of ctorParams) if (p.rest) throw nyi(NYI.CLASS_FEATURE, "rest parameter in a constructor");
         if (this.at(":")) { this.eat(":"); this.parseType(); } // ctor return annot (ignored)
         this.inCtor = true; this.inErrorCtor = extendsError;
-        ctorBody = this.parseBlock();
+        ctorBody = [...patternPrelude, ...this.parseBlock()];
         this.inCtor = false; this.inErrorCtor = false;
         continue;
       }
       if (this.at("(")) {
         const params = this.parseParamList();
+        const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
         let returnAnnot: Ty | undefined;
         if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
-        methods.push({ name: member, params, returnAnnot, body: this.parseBlock() });
+        methods.push({ name: member, params, returnAnnot, body: [...prelude, ...this.parseBlock()] });
         continue;
       }
       // field declaration: `name: Type;` / `name = init;` / `name: Type = init;` (optional `?`).
@@ -958,8 +1035,47 @@ class Parser {
         else if (v === ")") { depth--; if (depth === 0) break; }
       }
       const after = this.toks[i + 1];
-      const then = this.toks[i + 2];
-      return !!after && (after.value === "=>" || (after.value === ":" && !!then)); // (a): T =>
+      if (!after) return false;
+      if (after.value === "=>") return true;
+      // `(a): T => …` — an arrow with a RETURN-TYPE annotation. A trailing `:` alone is
+      // not enough: `cond ? (t.slice(2) as Ty) : t` and `cond ? (x) : y` are ternary arms
+      // that also end `) :`. Commit to the arrow grammar only when the parens really hold
+      // a parameter list AND a top-level `=>` follows the annotation.
+      return after.value === ":" && this.parenHoldsParams(i) && this.annotEndsInArrow(i + 2);
+    }
+    return false;
+  }
+
+  /**
+   * Do the tokens between `this.pos` (`(`) and `end` (its matching `)`) look like a
+   * PARAMETER LIST rather than a parenthesized expression? Checking the first parameter's
+   * shape is enough to separate the two: a parameter starts with `...`, a binding pattern,
+   * or an identifier followed by one of `, ) : ? =` — an expression like `t.slice(2)` or
+   * `a === b` diverges on its very next token.
+   */
+  private parenHoldsParams(end: number): boolean {
+    const first = this.toks[this.pos + 1];
+    if (!first || this.pos + 1 >= end) return true; // `()` — the empty parameter list
+    if (first.value === "..." || first.value === "[" || first.value === "{") return true;
+    if (first.type !== "ident") return false;
+    const nxt = this.toks[this.pos + 2];
+    return !!nxt && [",", ")", ":", "?", "="].includes(nxt.value);
+  }
+
+  /** Scan a return-type annotation from `i` for the `=>` that makes it an arrow. In TYPE
+   *  position `<…>` is always a type-argument list, so it nests like any other bracket
+   *  (`(x): Map<string, number> => …` must not stop at that comma). */
+  private annotEndsInArrow(i: number): boolean {
+    let depth = 0;
+    for (; i < this.toks.length; i++) {
+      const v = this.toks[i]!.value;
+      if (v === "(" || v === "[" || v === "{" || v === "<") depth++;
+      else if (v === ")" || v === "]" || v === "}") { if (depth === 0) return false; depth--; }
+      else if (v === ">" || v === ">>" || v === ">>>") depth -= v.length;
+      else if (depth <= 0) {
+        if (v === "=>") return true;
+        if (v === ";" || v === "," || v === ":" || v === "?" || v === "=") return false;
+      }
     }
     return false;
   }
@@ -970,6 +1086,7 @@ class Parser {
       this.eat("(");
       if (!this.at(")")) {
         do {
+          if (this.at("[") || this.at("{")) { params.push(this.parsePatternParam()); continue; } // `([k, v]) => …`
           let rest = false;
           if (this.at("...")) { this.eat("..."); rest = true; }
           const name = this.expectIdent();
@@ -985,10 +1102,15 @@ class Parser {
     } else {
       params.push({ name: this.expectIdent() });
     }
+    const prelude = this.takeParamPrelude();
     if (this.at(":")) { this.eat(":"); this.parseType(); }
     this.eat("=>");
-    if (this.at("{")) return { kind: "ArrowFunction", params, body: this.parseBlock(), exprBody: false };
-    return { kind: "ArrowFunction", params, body: this.parseAssign(), exprBody: true };
+    if (this.at("{")) return { kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false };
+    const body = this.parseAssign();
+    // A pattern parameter needs statements to bind its names, so an expression body
+    // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
+    if (prelude.length) return { kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false };
+    return { kind: "ArrowFunction", params, body, exprBody: true };
   }
 
   private parseAssign(): Expr {
@@ -1089,6 +1211,18 @@ class Parser {
     let left = this.parseUnary();
     for (;;) {
       const t = this.peek();
+      // `x instanceof C` — a keyword operator at relational precedence (10). The right
+      // operand is a CLASS NAME, not an expression: nativets decides the test from the
+      // left operand's static type (see the checker), so a computed constructor has
+      // nothing to resolve against and is refused rather than guessed.
+      if (t.type === "ident" && t.value === "instanceof" && BIN["<"]!.prec >= minPrec) {
+        this.next();
+        const cls = this.peek();
+        if (cls.type !== "ident") throw nyi(NYI.INSTANCEOF, `'instanceof' with a computed right operand at ${cls.line}:${cls.col}`);
+        this.next();
+        left = { kind: "InstanceOfExpr", object: left, className: cls.value };
+        continue;
+      }
       if (t.type !== "punct") break;
       const info = BIN[t.value];
       if (!info || info.prec < minPrec) break;
@@ -1117,6 +1251,14 @@ class Parser {
       return operand;
     }
     if (this.at("typeof")) { this.eat("typeof"); return { kind: "TypeofExpr", operand: this.parseUnary() }; }
+    // `delete o.k` removes a key IN PLACE. Objects are immutable (Stage 29), so it
+    // cannot mean what node means — refuse it the same way as `o.f = v`, naming the
+    // mutation rather than reporting the statement as unparseable.
+    if (this.at("delete") && this.startsExpression(this.peek(1))) {
+      this.eat("delete");
+      this.parseUnary();
+      throw mutationError("objects are immutable: `delete o.k` would remove a key in place", "rebuild without the key — e.g. `Object.keys(o).filter((x) => x !== k)` — or keep a nullable field and set it to undefined");
+    }
     if (this.at("new")) {
       this.eat("new");
       const callee = this.expectIdent();
@@ -1132,10 +1274,24 @@ class Parser {
     if (this.at("++") || this.at("--")) {
       const op = this.next().value as "++" | "--";
       const operand = this.parseUnary();
-      if (operand.kind !== "Identifier") throw parseError("Invalid update target");
-      return { kind: "UpdateExpr", op, prefix: true, target: operand.name };
+      if (operand.kind === "Identifier") return { kind: "UpdateExpr", op, prefix: true, target: operand.name };
+      if (operand.kind === "MemberExpr" || operand.kind === "IndexExpr")
+        return { kind: "UpdateExpr", op, prefix: true, target: "", targetExpr: this.updateTarget(operand) };
+      throw parseError("Invalid update target");
     }
     return this.parsePostfix();
+  }
+
+  /**
+   * Vet a member/index `++`/`--` target, mirroring plain assignment exactly (Stage 29):
+   * `this.f` is writable only while the constructor is building the instance, any other
+   * field is NT1606; an INDEX target is deferred to the checker, which accepts a mutable
+   * `Uint8Array` element and rejects an immutable array/object element.
+   */
+  private updateTarget(target: Expr): Expr {
+    if (target.kind === "MemberExpr" && !(this.inCtor && target.object.kind === "Identifier" && target.object.name === "this"))
+      throw mutationError("objects are immutable: `o.f++` would mutate the object in place", "use `{ ...o, f: o.f + 1 }` — returns a NEW object; the original is unchanged");
+    return target;
   }
 
   // Disambiguate a `<` after a primary between call-site TYPE ARGUMENTS (`f<T>(x)`)
@@ -1209,6 +1365,9 @@ class Parser {
       } else if ((this.at("++") || this.at("--")) && expr.kind === "Identifier") {
         const op = this.next().value as "++" | "--";
         expr = { kind: "UpdateExpr", op, prefix: false, target: expr.name };
+      } else if ((this.at("++") || this.at("--")) && (expr.kind === "MemberExpr" || expr.kind === "IndexExpr")) {
+        const op = this.next().value as "++" | "--";
+        expr = { kind: "UpdateExpr", op, prefix: false, target: "", targetExpr: this.updateTarget(expr) };
       } else break;
     }
     return expr;
@@ -1287,12 +1446,18 @@ class Parser {
       if (raw[i] === "$" && raw[i + 1] === "{") {
         quasis.push(cur); cur = "";
         i += 2;
+        // Find the substitution's matching `}`. Braces inside a nested template's TEXT
+        // or inside a quoted string are not delimiters, so skip both wholesale — the
+        // lexer captured them verbatim and `parseExpressionFrom` re-lexes them below.
         let depth = 1;
         let src = "";
         while (i < raw.length && depth > 0) {
-          if (raw[i] === "{") depth++;
-          else if (raw[i] === "}") { depth--; if (depth === 0) break; }
-          src += raw[i]; i++;
+          const ch = raw[i]!;
+          if (ch === "\\") { src += ch + (raw[i + 1] ?? ""); i += 2; continue; }
+          if (ch === "`" || ch === '"' || ch === "'") { const [txt, next] = skipQuoted(raw, i); src += txt; i = next; continue; }
+          if (ch === "{") depth++;
+          else if (ch === "}") { depth--; if (depth === 0) break; }
+          src += ch; i++;
         }
         i++;
         exprs.push(parseExpressionFrom(src));
@@ -1303,6 +1468,36 @@ class Parser {
     quasis.push(cur);
     return { kind: "TemplateLiteral", quasis, exprs };
   }
+}
+
+/**
+ * Copy a quoted run (a `'`/`"` string or a nested `` ` `` template) starting at `i`
+ * verbatim, returning `[text, indexAfterIt]`. A nested template's own `${…}`
+ * substitutions are skipped recursively, so `` `${a ? `}` : b}` `` stays intact.
+ */
+function skipQuoted(raw: string, i: number): [string, number] {
+  const q = raw[i]!;
+  let out = q;
+  i++;
+  while (i < raw.length && raw[i] !== q) {
+    const ch = raw[i]!;
+    if (ch === "\\") { out += ch + (raw[i + 1] ?? ""); i += 2; continue; }
+    if (q === "`" && ch === "$" && raw[i + 1] === "{") {
+      out += "${"; i += 2;
+      let depth = 1;
+      while (i < raw.length && depth > 0) {
+        const c2 = raw[i]!;
+        if (c2 === "\\") { out += c2 + (raw[i + 1] ?? ""); i += 2; continue; }
+        if (c2 === "`" || c2 === '"' || c2 === "'") { const [t, n] = skipQuoted(raw, i); out += t; i = n; continue; }
+        if (c2 === "{") depth++;
+        else if (c2 === "}") depth--;
+        out += c2; i++;
+      }
+      continue;
+    }
+    out += ch; i++;
+  }
+  return [out + q, i + 1];
 }
 
 function decodeEscape(ch: string): string {

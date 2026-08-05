@@ -1588,6 +1588,43 @@ class FnGen {
       }
 
       case "UpdateExpr": {
+        // Member/index target (`this.n++`, `u[i]++`). Read-modify-write in place, with
+        // the object and index evaluated EXACTLY ONCE (node semantics), yielding the old
+        // value for postfix and the new one for prefix. Only writable targets reach here
+        // — the parser/checker rejected the immutable ones with NT1606.
+        if (e.targetExpr) {
+          const tgt = e.targetExpr;
+          const delta = e.op === "++" ? "fadd" : "fsub";
+          if (tgt.kind === "IndexExpr") {
+            const obj = this.genExpr(tgt.object);
+            const idx = this.genExpr(tgt.index);
+            const old = this.fresh();
+            this.emit(`${old} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
+            const nv = this.fresh();
+            this.emit(`${nv} = ${delta} double ${old}, 1.0`);
+            this.emit(`call void @nt_bytes_set(ptr ${obj.v}, double ${idx.v}, double ${nv})`);
+            // The stored byte wraps (ToUint8), so a prefix update must report the byte
+            // that landed, not the raw sum — read it back rather than reusing `nv`.
+            if (!e.prefix) return { v: old, ty: "number" };
+            const back = this.fresh();
+            this.emit(`${back} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
+            return { v: back, ty: "number" };
+          }
+          const m = tgt as Extract<Expr, { kind: "MemberExpr" }>;
+          const obj = this.genExpr(m.object);
+          const slot = this.fresh();
+          this.emit(`${slot} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, m.property)}`);
+          const raw = this.fresh();
+          this.emit(`${raw} = load i64, ptr ${slot}`);
+          const old = this.fresh();
+          this.emit(`${old} = bitcast i64 ${raw} to double`);
+          const nv = this.fresh();
+          this.emit(`${nv} = ${delta} double ${old}, 1.0`);
+          const back = this.fresh();
+          this.emit(`${back} = bitcast double ${nv} to i64`);
+          this.emit(`store i64 ${back}, ptr ${slot}`);
+          return { v: e.prefix ? nv : old, ty: "number" };
+        }
         if (this.captures.has(e.target)) {
           const cur = this.readCapture(e.target);
           const nv = this.fresh();
@@ -1779,6 +1816,12 @@ class FnGen {
         // checks the tag and unboxes; a plain `expr as Type` is an identity retype.
         if (e.expr.ty === "Dyn") return this.genDynNarrow(this.genExpr(e.expr).v, e.ty);
         return { v: this.genExpr(e.expr).v, ty: e.ty };
+      }
+      case "InstanceOfExpr": {
+        // The checker already decided the test from the static type; emit the constant.
+        // The left operand is still evaluated — it may have side effects (`f() instanceof C`).
+        this.genExpr(e.object);
+        return { v: e.result ? "true" : "false", ty: "boolean" };
       }
       case "IndexAssign": {
         // Element write `u[i] = v` (+ compound) — only Uint8Array reaches codegen (the
@@ -2888,7 +2931,10 @@ class FnGen {
   private subExpr(e: Expr, map: Map<string, string>): void {
     switch (e.kind) {
       case "Identifier": if (map.has(e.name)) e.name = map.get(e.name)!; return;
-      case "UpdateExpr": if (map.has(e.target)) e.target = map.get(e.target)!; return;
+      case "UpdateExpr":
+        if (e.targetExpr) { this.subExpr(e.targetExpr, map); return; }
+        if (map.has(e.target)) e.target = map.get(e.target)!;
+        return;
       case "AssignExpr": this.subExpr(e.value, map); if (map.has(e.target)) e.target = map.get(e.target)!; return;
       case "TemplateLiteral": for (const x of e.exprs) this.subExpr(x, map); return;
       case "ArrayLiteral": for (const x of e.elements) this.subExpr(x, map); return;
@@ -2907,6 +2953,7 @@ class FnGen {
       case "CallExpr": this.subExpr(e.callee, map); for (const a of e.args) this.subExpr(a, map); return;
       case "NewExpr": for (const a of e.args) this.subExpr(a, map); return;
       case "AsExpr": this.subExpr(e.expr, map); return;
+      case "InstanceOfExpr": this.subExpr(e.object, map); return;
       case "ArrowFunction": {
         const child = this.childRenameMap(e.params, e.body, e.exprBody, map);
         for (const p of e.params) if (p.default) this.subExpr(p.default, child);

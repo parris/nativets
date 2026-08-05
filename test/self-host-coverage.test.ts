@@ -24,6 +24,7 @@ const src = (name: string) => readFileSync(new URL(`../src/${name}`, import.meta
 const SRC_MODULES = [
   "ast.ts", "lexer.ts", "diagnostics.ts", "parser.ts", "checker.ts",
   "codegen.ts", "coverage.ts", "ownership.ts", "driver.ts", "cli.ts",
+  "modules.ts", "coverage-preprocess.ts",
 ];
 
 describe("SH0: coverage survives the compiler's own module syntax", () => {
@@ -87,6 +88,34 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     expect(r.parsed).toBe(true);
     expect(r.compiles).toBe(true);
     expect(r.blockers).toEqual([]);
+  });
+
+  test("NT0001 is CLEARED — every statement in src/ now parses", () => {
+    // The NT0001 "unparsed statement" bucket was the #1 self-host blocker at x11 once
+    // Stage 36 cleared NT1013. It was never one feature; the six causes were extracted
+    // from real statements and closed one at a time (see test/selfhost-parse.test.ts):
+    // paren-vs-arrow lookahead, nested template literals, radix/separator numeric
+    // literals, `++`/`--` on a member or index target, `instanceof`, binding patterns in
+    // parameters — plus parenthesized types and `delete`. Whole tree: ZERO.
+    for (const f of SRC_MODULES) {
+      const r = coverage(src(f));
+      const nt0001 = r.blockers.filter((b) => b.code === "NT0001");
+      expect({ file: f, nt0001 }).toEqual({ file: f, nt0001: [] });
+    }
+  });
+
+  test("the frontier is now NT1606 field mutation — a SOURCE refactor, not a missing feature", () => {
+    // Re-measured after the NT0001 burn-down. What blocks src/ is no longer syntax: it
+    // is `this.f = v` / `this.f++` inside class methods (objects are immutable since
+    // Stage 29 — only a constructor may write fields), which is a property of how the
+    // compiler is WRITTEN. The residue is 2x NT1015 (a `static` member, a class field
+    // needing an annotation) and 1x NT1009 (a general union).
+    const hist = new Map<string, number>();
+    for (const f of SRC_MODULES) {
+      for (const b of coverage(src(f)).blockers) hist.set(b.code, (hist.get(b.code) ?? 0) + b.count);
+    }
+    expect([...hist.keys()].sort()).toEqual(["NT1009", "NT1015", "NT1606"]);
+    expect(hist.get("NT1606")).toBeGreaterThan(hist.get("NT1015")!);
   });
 
   test("every src module reaches analysis (no file dies on the module preamble)", () => {
