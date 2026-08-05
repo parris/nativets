@@ -30,7 +30,7 @@ jobs:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - name: Install clang (Linux; the runtime toolchain the tests link through)
         if: runner.os == 'Linux'
@@ -63,7 +63,7 @@ jobs:
     name: windows-smoke
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       # HARD GATE: bundling the compiler must succeed. `bun --compile` emits nativets.exe.

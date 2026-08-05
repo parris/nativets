@@ -405,8 +405,10 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
-Coverage: base corpus **37/39**; **gap corpus 55/55** (A1 closed `json-roundtrip`, A2 closed
-`optional-chaining`) — the whole gap corpus now compiles + matches node.
+Coverage: base corpus **37/39**; **gap corpus 53/55** (A1 closed `json-roundtrip`, A2 closed
+`optional-chaining`; the 2 remaining are **deliberate**: `array-push-pop` — refused now that
+Stage 29 made arrays immutable, `.push`/`.pop` mutation is gone by design — and
+`higher-order-compose` — nested function types). Every compiled case matches node.
 Everything else is rejected with an `NT1xxx` diagnostic — see `docs/divergences.md`.
 **Phase 2 (immutable data, `|>`, BEAM actors, runtime typecheck) design is in `docs/phase2-design.md`.**
 
