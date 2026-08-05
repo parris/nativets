@@ -157,6 +157,125 @@ console.log(sum, m.size);`;
   });
 });
 
+/*
+ * String relational compare. node compares UTF-16 CODE UNITS; our strings are
+ * UTF-8 bytes, and byte order == code-point order, so the two agree everywhere
+ * except a string containing an astral (>= U+10000) character compared against one
+ * containing U+E000..U+FFFF at the same position (documented in docs/divergences.md).
+ * Everything tested here is in the agreeing range.
+ */
+describe("string relational comparison (< <= > >=)", () => {
+  test("ASCII ordering matches node, including prefixes, case and digits", async () => {
+    const src = `
+console.log("apple" < "banana", "banana" < "apple");
+console.log("app" < "apple", "apple" <= "apple", "apple" < "apple");
+console.log("Zebra" < "apple", "a" > "A", "10" < "9");
+console.log("" < "a", "a" >= "", "abc" >= "abd");`;
+    await matchesNode(src);
+  });
+
+  test("non-ASCII BMP ordering matches node (byte order == code-point order)", async () => {
+    const src = `
+console.log("café" < "cafz", "éclair" > "zebra", "ä" < "ö");`;
+    await matchesNode(src);
+  });
+
+  test("comparison drives real code (max-by-name over an array)", async () => {
+    const src = `
+const names = ["pear", "apple", "fig", "banana"];
+let best = names[0];
+for (const n of names) { if (n > best) best = n; }
+console.log(best);`;
+    await matchesNode(src);
+  });
+});
+
+/*
+ * Ordering primitives. Arrays are immutable here (Stage 29), and node's `.sort()`
+ * SORTS IN PLACE — so we implement the genuinely non-mutating ES2023 pair
+ * `.toSorted()` / `.toReversed()` (real node methods, so node stays the oracle)
+ * and refuse `.sort()` with a pointer at them. Sorting is STABLE, like node's.
+ */
+describe("toSorted / toReversed (ES2023, non-mutating — node is the oracle)", () => {
+  test("default .toSorted() compares STRING forms, exactly like node", async () => {
+    const src = `
+const nums = [10, 9, 1, 100, 2, -3];
+console.log(nums.toSorted().join(","));   // string compare: -3,1,10,100,2,9
+console.log(nums.join(","));              // source untouched
+const words = ["pear", "Apple", "fig", "apple"];
+console.log(words.toSorted().join(","));`;
+    await matchesNode(src);
+  });
+
+  test(".toSorted(cmp) with an inline arrow — numeric and reverse-numeric", async () => {
+    const src = `
+const nums = [10, 9, 1, 100, 2, -3];
+console.log(nums.toSorted((a: number, b: number) => a - b).join(","));
+console.log(nums.toSorted((a: number, b: number) => b - a).join(","));
+const words = ["pear", "fig", "banana"];
+console.log(words.toSorted((a: string, b: string) => a.length - b.length).join(","));`;
+    await matchesNode(src);
+  });
+
+  test(".toSorted(cmp) accepts a comparator held in a variable (a closure value)", async () => {
+    const src = `
+const byLen = (a: string, b: string) => a.length - b.length;
+const words = ["pear", "fig", "banana", "kiwi"];
+console.log(words.toSorted(byLen).join(","));
+const factor = -1; // captured by the comparator
+const desc = (a: number, b: number) => (a - b) * factor;
+console.log([3, 1, 2].toSorted(desc).join(","));`;
+    await matchesNode(src);
+  });
+
+  test("sorting is STABLE (equal keys keep their input order), like node", async () => {
+    const src = `
+const people = [
+  { name: "ada", age: 36 },
+  { name: "bob", age: 24 },
+  { name: "cat", age: 36 },
+  { name: "dan", age: 24 },
+  { name: "eve", age: 36 },
+];
+const byAge = people.toSorted((a: { name: string, age: number }, b: { name: string, age: number }) => a.age - b.age);
+let out = "";
+for (const p of byAge) out = out + p.name + ":" + p.age + " ";
+console.log(out);`;
+    await matchesNode(src);
+  });
+
+  test(".toSorted() on strings composes with Map iteration (sorted key report)", async () => {
+    const src = `
+const m = new Map<string, number>().set("pear", 2).set("apple", 5).set("fig", 1);
+for (const k of [...m.keys()].toSorted()) console.log(k, m.get(k));`;
+    await matchesNode(src);
+  });
+
+  test(".toReversed() returns a NEW reversed array; the source is untouched", async () => {
+    const src = `
+const a = [1, 2, 3, 4];
+const b = a.toReversed();
+console.log(b.join(","), a.join(","), a === b);
+const s = ["x", "y", "z"];
+console.log(s.toReversed().join(""), s.join(""));`;
+    await matchesNode(src);
+  });
+
+  test("empty and single-element arrays sort/reverse like node", async () => {
+    const src = `
+const one = [42];
+console.log(one.toSorted().join(","), one.toReversed().join(","));
+const two = ["b", "a"];
+console.log(two.toSorted().join(","), two.toSorted((x: string, y: string) => (x < y ? 1 : -1)).join(","));`;
+    await matchesNode(src);
+  });
+
+  test("`.sort()` is refused (it mutates) with a pointer at `.toSorted()`", () => {
+    expect(codeOf("const a = [3, 1, 2];\na.sort();")).toBe("NT1606");
+    expect(codeOf("const a = [3, 1, 2];\na.sort((x: number, y: number) => x - y);")).toBe("NT1606");
+  });
+});
+
 describe("Map/Set iteration — what is refused (reject, never miscompile)", () => {
   const M = 'const m = new Map<string, number>().set("a", 1);\n';
   const S = "const s = new Set<number>().add(1);\n";

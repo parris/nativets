@@ -92,6 +92,7 @@ const DECLARES = [
   "declare ptr @js_str_concat(ptr, ptr)",
   "declare double @js_str_len(ptr)",
   "declare i32 @js_str_eq(ptr, ptr)",
+  "declare i32 @js_str_cmp(ptr, ptr)",
   "declare ptr @js_num_to_str(double)",
   "declare ptr @js_bool_to_str(i32)",
   // bitwise
@@ -142,6 +143,11 @@ const DECLARES = [
   "declare double @nt_arr_indexof_num(ptr, double)",
   "declare double @nt_arr_indexof_str(ptr, ptr)",
   "declare ptr @nt_arr_copy(ptr)",
+  // ordering primitives (ES2023 copying methods): default sort by string form,
+  // comparator sort through a codegen-emitted closure shim, and reverse-copy.
+  "declare ptr @nt_arr_to_sorted(ptr, i32)",
+  "declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)",
+  "declare ptr @nt_arr_to_reversed(ptr)",
   "declare ptr @nt_arr_with(ptr, double, i64)",
   "declare void @nt_arr_free(ptr)",
   "declare double @nt_arr_live()",
@@ -306,6 +312,43 @@ class ModuleGen {
         `  ${conv}`,
         `  call void %fp(ptr %env, ${llvmTy(argTy)} %arg)`,
         `  ret void`,
+        `}`,
+      ].join("\n"),
+    );
+    return name;
+  }
+
+  private cmpShims = new Map<string, string>();
+
+  /** Lazily emit a comparator trampoline for `.toSorted(cmp)` and return its symbol.
+   *  The runtime's stable merge sort calls `i32 (ptr env, i64 a, i64 b)`; a TS
+   *  comparator is a closure `[fn_ptr, caps…]` returning a double. The shim reads
+   *  the fn ptr from env slot 0, converts the raw element slots to the element's
+   *  LLVM type, calls it, and maps the result to a sign (NaN → 0, like node). One
+   *  shim per LLVM element type, so it works for any function VALUE, not just an
+   *  inline arrow. */
+  cmpShim(elTy: Ty): string {
+    const lt = llvmTy(elTy);
+    const existing = this.cmpShims.get(lt);
+    if (existing) return existing;
+    const name = `nt_cmp_shim_${this.cmpShims.size}`;
+    this.cmpShims.set(lt, name);
+    const conv = (reg: string, slot: string) =>
+      lt === "double" ? `%${reg} = bitcast i64 %${slot} to double` : `%${reg} = inttoptr i64 %${slot} to ptr`;
+    this.liftedFns.push(
+      [
+        `define i32 @${name}(ptr %env, i64 %sa, i64 %sb) {`,
+        `L:`,
+        `  %fpi = load i64, ptr %env`,
+        `  %fp = inttoptr i64 %fpi to ptr`,
+        `  ${conv("a", "sa")}`,
+        `  ${conv("b", "sb")}`,
+        `  %r = call double %fp(ptr %env, ${lt} %a, ${lt} %b)`,
+        `  %lt = fcmp olt double %r, 0.0`,
+        `  %gt = fcmp ogt double %r, 0.0`,
+        `  %p = select i1 %gt, i32 1, i32 0`,
+        `  %s = select i1 %lt, i32 -1, i32 %p`,
+        `  ret i32 %s`,
         `}`,
       ].join("\n"),
     );
@@ -1377,6 +1420,12 @@ class FnGen {
             // Heap reference identity: arrays/objects compare by pointer (as node
             // does for `===`), so a CoW copy is `!==` its source. NOT strcmp.
             this.emit(`${t} = icmp ${op === "===" || op === "==" ? "eq" : "ne"} ptr ${l.v}, ${r.v}`);
+          } else if (op === "<" || op === "<=" || op === ">" || op === ">=") {
+            // Lexicographic string compare: sign of js_str_cmp (memcmp order ==
+            // code-point order; node compares UTF-16 code units — see divergences).
+            const c = this.fresh();
+            this.emit(`${c} = call i32 @js_str_cmp(ptr ${l.v}, ptr ${r.v})`);
+            this.emit(`${t} = icmp ${op === "<" ? "slt" : op === "<=" ? "sle" : op === ">" ? "sgt" : "sge"} i32 ${c}, 0`);
           } else {
             const eq = this.fresh();
             this.emit(`${eq} = call i32 @js_str_eq(ptr ${l.v}, ptr ${r.v})`);
@@ -2151,6 +2200,22 @@ class FnGen {
     const el = elemTy(recv.ty);
     const numeric = el === "number";
     switch (method) {
+      // ES2023 copying ordering primitives (non-mutating in node too).
+      case "toSorted": {
+        const t = this.fresh();
+        if (args.length === 0) {
+          this.emit(`${t} = call ptr @nt_arr_to_sorted(ptr ${recv.v}, i32 ${el === "string" ? 1 : 0})`);
+        } else {
+          const clo = this.genExpr(args[0]!); // any function value → closure block
+          this.emit(`${t} = call ptr @nt_arr_to_sorted_by(ptr ${recv.v}, ptr ${clo.v}, ptr @${this.mod.cmpShim(el)})`);
+        }
+        return { v: t, ty: recv.ty };
+      }
+      case "toReversed": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_arr_to_reversed(ptr ${recv.v})`);
+        return { v: t, ty: recv.ty };
+      }
       case "push": {
         const slot = this.toSlot(this.genExpr(args[0]!));
         const t = this.fresh();

@@ -201,6 +201,15 @@ double js_str_len(const char *s) { return (double)strlen(s); }
 
 int32_t js_str_eq(const char *a, const char *b) { return strcmp(a, b) == 0 ? 1 : 0; }
 
+/* Lexicographic compare for `<` `<=` `>` `>=` and the default `.toSorted()`.
+ * Returns <0 / 0 / >0. node compares UTF-16 code units; strcmp on our UTF-8 bytes
+ * is code-POINT order, which agrees everywhere except astral (>= U+10000) chars
+ * vs U+E000..U+FFFF — a documented divergence (docs/divergences.md). */
+int32_t js_str_cmp(const char *a, const char *b) {
+  int r = strcmp(a, b);
+  return r < 0 ? -1 : (r > 0 ? 1 : 0);
+}
+
 /* number -> string, allocated (for template literals / string coercion) */
 const char *js_num_to_str(double v) {
   char buf[64];
@@ -527,6 +536,79 @@ void *nt_arr_slice(NtArray *a, double startd, double endd) {
 /* append all of src's elements to dst (array spread) */
 void nt_arr_extend(NtArray *dst, NtArray *src) {
   for (int64_t i = 0; i < src->len; i++) nt_arr_push(dst, src->data[i]);
+}
+
+/* ---- ordering primitives: Array#toSorted / #toReversed (ES2023) ------------
+ * Both are NON-MUTATING in node too, which is what lets node stay the oracle for
+ * an immutable-array language (`.sort`/`.reverse` sort in place and are refused).
+ * The sort is a STABLE bottom-up merge sort — node's sort is required to be
+ * stable, so equal elements must keep their input order.
+ * The comparator variant takes a closure env + a codegen-emitted shim so the
+ * callback can be any TS function value (see ModuleGen.cmpShim). ---- */
+
+typedef int32_t (*NtCmpFn)(void *env, int64_t a, int64_t b);
+
+/* node's DEFAULT comparator: compare the elements' STRING forms ("10" < "9"). */
+static int32_t nt_cmp_default_num(void *env, int64_t a, int64_t b) {
+  char ba[64], bb[64];
+  double da, db;
+  (void)env;
+  memcpy(&da, &a, sizeof da);
+  memcpy(&db, &b, sizeof db);
+  js_number_to_string(da, ba, sizeof ba);
+  js_number_to_string(db, bb, sizeof bb);
+  int r = strcmp(ba, bb);
+  return r < 0 ? -1 : (r > 0 ? 1 : 0);
+}
+static int32_t nt_cmp_default_str(void *env, int64_t a, int64_t b) {
+  (void)env;
+  int r = strcmp((const char *)(intptr_t)a, (const char *)(intptr_t)b);
+  return r < 0 ? -1 : (r > 0 ? 1 : 0);
+}
+
+static void nt_merge_run(const int64_t *src, int64_t *dst, int64_t lo, int64_t mid,
+                         int64_t hi, void *env, NtCmpFn cmp) {
+  int64_t i = lo, j = mid, k = lo;
+  while (i < mid && j < hi) {
+    /* take the RIGHT element only when it compares strictly less -> stable */
+    if (cmp(env, src[j], src[i]) < 0) dst[k++] = src[j++];
+    else dst[k++] = src[i++];
+  }
+  while (i < mid) dst[k++] = src[i++];
+  while (j < hi) dst[k++] = src[j++];
+}
+
+static NtArray *nt_arr_sorted_with(NtArray *a, void *env, NtCmpFn cmp) {
+  int64_t n = a->len;
+  NtArray *out = nt_arr_new(n > 0 ? (double)n : 1);
+  for (int64_t i = 0; i < n; i++) nt_arr_push(out, a->data[i]);
+  if (n < 2) return out;
+  int64_t *buf = (int64_t *)nativets_alloc(sizeof(int64_t) * (size_t)n);
+  int64_t *from = out->data, *to = buf;
+  for (int64_t width = 1; width < n; width *= 2) {
+    for (int64_t lo = 0; lo < n; lo += 2 * width) {
+      int64_t mid = lo + width < n ? lo + width : n;
+      int64_t hi = lo + 2 * width < n ? lo + 2 * width : n;
+      nt_merge_run(from, to, lo, mid, hi, env, cmp);
+    }
+    int64_t *t = from; from = to; to = t;
+  }
+  if (from != out->data) memcpy(out->data, from, sizeof(int64_t) * (size_t)n);
+  return out;
+}
+
+void *nt_arr_to_sorted(NtArray *a, int32_t is_str) {
+  return nt_arr_sorted_with(a, NULL, is_str ? nt_cmp_default_str : nt_cmp_default_num);
+}
+
+void *nt_arr_to_sorted_by(NtArray *a, void *env, void *cmp) {
+  return nt_arr_sorted_with(a, env, (NtCmpFn)cmp);
+}
+
+void *nt_arr_to_reversed(NtArray *a) {
+  NtArray *out = nt_arr_new(a->len > 0 ? (double)a->len : 1);
+  for (int64_t i = a->len - 1; i >= 0; i--) nt_arr_push(out, a->data[i]);
+  return out;
 }
 
 /* JSON-quote a string: wrap in quotes, escape " \ and control chars */

@@ -507,7 +507,11 @@ class Checker {
         const l = this.type(e.left, scope);
         const r = this.type(e.right, scope);
         if (RELATIONAL.has(e.op)) {
-          if (l !== "number" || r !== "number") throw typeError(`Comparison needs numbers`);
+          // Strings compare lexicographically (node: UTF-16 code units; we compare
+          // UTF-8 bytes == code-point order — identical outside the astral/U+E000
+          // corner documented in docs/divergences.md).
+          if (l === "string" && r === "string") return "boolean";
+          if (l !== "number" || r !== "number") throw typeError(`Comparison needs numbers or two strings`);
           return "boolean";
         }
         if (EQUALITY.has(e.op)) {
@@ -1072,6 +1076,24 @@ class Checker {
     const el = elemTy(recv);
     if (method === "map" || method === "filter" || method === "reduce") return this.inferHof(el, method, args, scope);
     if (["forEach", "some", "every", "find"].includes(method)) throw nyi(NYI.CLOSURE, `array .${method} (needs first-class function values)`);
+
+    // --- ordering primitives (ES2023, non-mutating: node is the oracle) --------
+    // `.sort`/`.reverse` sort IN PLACE, which the immutable model forbids; the
+    // ES2023 copying pair is the supported spelling. `.toSorted()` with no
+    // comparator uses node's default (compare the elements' STRING forms).
+    if (method === "sort") throw mutationError("arrays are immutable: `.sort` would sort the array in place", "use `.toSorted()` (ES2023) — it returns a NEW sorted array and leaves the original alone");
+    if (method === "toSorted") {
+      if (args.length > 1) throw typeError(".toSorted expects 0..1 args");
+      if (args.length === 0) {
+        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.toSorted() without a comparator on ${el}[] (node compares String(x) — pass a comparator)`);
+        return recv;
+      }
+      const want = makeFuncTy([el, el], "number");
+      const at = this.typeArg(args[0]!, want, scope);
+      if (at !== want) throw typeError(`.toSorted comparator must be ${want}, got ${at}`);
+      return recv;
+    }
+    if (method === "toReversed") { if (args.length !== 0) throw typeError(".toReversed expects 0 args"); return recv; }
 
     const argTys = args.map((a) => this.type(a, scope));
     const need = (n: number) => { if (args.length !== n) throw typeError(`.${method} expects ${n} args`); };
