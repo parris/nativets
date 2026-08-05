@@ -1,0 +1,11 @@
+{
+  "name": "root",
+  "child": {
+    "id": 5,
+    "tags": [
+      "a",
+      "b"
+    ]
+  },
+  "ok": true
+}

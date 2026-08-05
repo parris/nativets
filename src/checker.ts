@@ -742,8 +742,20 @@ class Checker {
         return "Dyn";
       }
       if (e.callee.property !== "stringify") throw nyi(NYI.JSON, `JSON.${e.callee.property}`);
-      if (e.args.length !== 1) throw typeError("JSON.stringify expects 1 argument");
+      if (e.args.length < 1 || e.args.length > 3) throw typeError("JSON.stringify expects 1 to 3 arguments");
       this.type(e.args[0]!, scope);
+      // arg2 (replacer) — only `null`/`undefined` supported (no array/function replacer).
+      if (e.args.length >= 2) {
+        const r = e.args[1]!;
+        if (r.kind !== "NullLiteral" && r.kind !== "UndefinedLiteral")
+          throw nyi(NYI.JSON, "JSON.stringify replacer (only null is supported)");
+      }
+      // arg3 (space/indent) — a literal number or string so the indent is known at compile time.
+      if (e.args.length === 3) {
+        const s = e.args[2]!;
+        if (s.kind !== "NumberLiteral" && s.kind !== "StringLiteral")
+          throw nyi(NYI.JSON, "JSON.stringify indent (must be a number or string literal)");
+      }
       return "string";
     }
 
