@@ -2,6 +2,6 @@
 type Pt = { x: number; y: number };
 const m = new Map<string, Pt>();
 const m2 = m.set("origin", { x: 0, y: 0 }).set("unit", { x: 1, y: 1 });
-const o = m2.get("origin");
-const u = m2.get("unit");
+const o = m2.get("origin") ?? { x: 0, y: 0 }; // .get is `Pt | undefined`; ?? narrows the hit
+const u = m2.get("unit") ?? { x: 0, y: 0 };
 console.log(o.x, o.y, u.x, u.y, m2.size);
