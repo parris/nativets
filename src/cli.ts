@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { sourceToIR, buildBinary, type Target } from "./driver.ts";
+import { sourceToIR, buildBinary, BuildError, type Target } from "./driver.ts";
 import { coverage, renderCoverage } from "./coverage.ts";
 import { NTError, formatDiagnostic } from "./diagnostics.ts";
 
@@ -24,6 +24,8 @@ async function guard<T>(fn: () => Promise<T> | T): Promise<T> {
   } catch (e) {
     // Render multi-span diagnostics against the source (rustc-style caret underlines).
     if (e instanceof NTError) { console.error(formatDiagnostic(e.diag, source)); process.exit(1); }
+    // Toolchain/link failures (missing raylib/curl/SDK, cross-target limits) — a clear one-liner.
+    if (e instanceof BuildError) { console.error(`build error: ${e.message}`); process.exit(1); }
     throw e;
   }
 }

@@ -40,6 +40,11 @@ import mapsetSource from "../runtime/nt_mapset.c" with { type: "text" };
 // iOS/Android cross-builds are unaffected. Networking is HOST/LINUX ONLY for now; iOS/
 // Android need the platform HTTP stack (NSURLSession/OkHttp), a follow-on.
 import httpSource from "../runtime/nt_http.c" with { type: "text" };
+// The GUI primitive (north-star C-d), backed by raylib. Linked (with -lraylib + the platform
+// frameworks raylib needs) ONLY when a program calls a GUI builtin (initWindow/drawRect/…) —
+// so non-GUI programs and every cross-build stay raylib-free. HOST DESKTOP ONLY for now
+// (macOS/Linux/Windows); a wasm/emscripten lane is a documented follow-on (see calc-gui.ts).
+import guiSource from "../runtime/nt_gui.c" with { type: "text" };
 
 export type Target = "host" | "ios" | "ios-sim" | "android" | "wasm" | "windows";
 
@@ -148,6 +153,57 @@ export function wasiClang(): string {
 /** Whether this machine can build for wasm (a wasm-capable clang + a wasi sysroot). For tests. */
 export function wasmToolchainAvailable(): boolean {
   try { wasiClang(); wasiSysroot(); return true; } catch { return false; }
+}
+
+/**
+ * The frameworks raylib links against on macOS: its GLFW backend drives the Cocoa window +
+ * the OpenGL/CoreVideo/IOKit stack. Appended on darwin even when pkg-config was used, since a
+ * static libraylib.a does not carry these as recorded dependencies (harmless if duplicated).
+ */
+const RAYLIB_MAC_FRAMEWORKS = [
+  "-framework", "CoreVideo", "-framework", "IOKit", "-framework", "Cocoa",
+  "-framework", "GLUT", "-framework", "OpenGL",
+];
+
+/**
+ * Locate raylib for a HOST GUI link and return the linker flags. Prefer `pkg-config --libs
+ * raylib` (the canonical source of truth); otherwise hunt the conventional install roots
+ * (Homebrew keg, /usr/local, /opt/local) for libraylib and pair -L/-lraylib. On macOS the
+ * platform frameworks are always appended. Throws a clear BuildError when raylib is not
+ * installed. GUI is HOST-DESKTOP ONLY (macOS/Linux/Windows) — see nt_gui.c / calc-gui.ts.
+ */
+export function raylibLinkFlags(): string[] {
+  let flags: string[] | null = null;
+  const pc = spawnSync("pkg-config", ["--libs", "raylib"], { encoding: "utf8" });
+  if (pc.status === 0 && (pc.stdout ?? "").trim()) {
+    flags = (pc.stdout as string).trim().split(/\s+/);
+  } else {
+    const libDirs = [
+      "/opt/homebrew/lib", "/opt/homebrew/opt/raylib/lib",
+      "/usr/local/lib", "/usr/local/opt/raylib/lib",
+      "/opt/local/lib", "/usr/lib", "/usr/lib64",
+    ];
+    for (const d of libDirs) {
+      if (existsSync(join(d, "libraylib.dylib")) || existsSync(join(d, "libraylib.a")) || existsSync(join(d, "libraylib.so"))) {
+        flags = ["-L" + d, "-lraylib"];
+        break;
+      }
+    }
+  }
+  if (!flags) {
+    throw new BuildError(
+      "raylib not found: install it (macOS: `brew install raylib`; Linux: your distro's `raylib` / `libraylib-dev`) — the GUI FFI (initWindow/drawRect/…) needs it. GUI is host-desktop only.",
+    );
+  }
+  if (process.platform === "darwin") {
+    for (const f of RAYLIB_MAC_FRAMEWORKS) if (!flags.includes(f)) flags.push(f);
+  }
+  return flags;
+}
+
+/** Whether this machine can link a GUI (raylib-backed) program. For tests / build-verify. */
+export function raylibAvailable(): boolean {
+  try { raylibLinkFlags(); return true; } catch { return false; }
 }
 
 interface Toolchain { cc: string; flags: string[] }
@@ -278,6 +334,17 @@ function writeIR(source: string): { dir: string; ll: string; rt: string; actor: 
     const http = join(dir, "nt_http.c");
     writeFileSync(http, httpSource);
     extra.push(http, "-lcurl");
+  }
+  // GUI (north-star C-d): link nt_gui.c + raylib (+ macOS frameworks) ONLY when the program
+  // actually CALLS a GUI builtin — matched at the call site (`call … @nt_gui_*`), never the
+  // always-present `declare`, exactly like the curl lane. `raylibLinkFlags()` locates raylib
+  // (pkg-config / Homebrew / /usr/local / /opt) or throws a clear BuildError. HOST-DESKTOP
+  // ONLY: GUI programs are not cross-built (iOS/Android/wasm need platform UI bindings), so
+  // non-GUI programs and every cross-build stay entirely raylib-free.
+  if (/\bcall\b[^\n]*@nt_gui_/.test(ir)) {
+    const gui = join(dir, "nt_gui.c");
+    writeFileSync(gui, guiSource);
+    extra.push(gui, ...raylibLinkFlags());
   }
   // Link the v0 actor runtime ONLY when the program uses actors (codegen emits the
   // nt_sched_init prologue exactly then). It relies on ucontext (makecontext/
