@@ -9,7 +9,7 @@
 
 import { lex, type Token } from "./lexer.ts";
 import { parseError, nyi, NYI, mutationError } from "./diagnostics.ts";
-import { makeNullable } from "./ast.ts";
+import { makeNullable, makeMapTy, makeSetTy } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty,
 } from "./ast.ts";
@@ -120,10 +120,8 @@ class Parser {
     else {
       const id = this.expectIdent();
       if (id === "true" || id === "false") base = "boolean";       // boolean-literal type
-      else if ((id === "Map" || id === "Set") && this.at("<")) {
-        const a = this.parseTypeArgs();
-        base = (id === "Map" ? `Map<${a[0] ?? "string"},${a[1] ?? "number"}>` : `Set<${a[0] ?? "string"}>`) as Ty;
-      } else base = this.resolveNamed(id);
+      else if (this.at("<")) base = this.parseGenericType(id);      // `Name<...>` — erase the args
+      else base = this.resolveNamed(id);
     }
     let suffix = "";
     while (this.at("[")) { this.eat("["); this.eat("]"); suffix += "[]"; } // T[], T[][]
@@ -139,7 +137,38 @@ class Parser {
     while (this.at(".")) { this.eat("."); name = this.expectIdent(); } // import("m").Ns.Type
     return this.resolveNamed(name);
   }
-  // generic type-argument list `<T, U>` (Map/Set only in this subset)
+  // A generic type reference `Name<T, U>` in type position. Generics carry no runtime
+  // in this subset, so the arg list is parsed for grammar and then ERASED to a concrete
+  // supported shape (never miscompiled): container/wrapper/utility types map to their
+  // erasure; a type parameter or unknown generic falls back through `resolveNamed`.
+  private parseGenericType(id: string): Ty {
+    const a = this.parseTypeArgs();
+    switch (id) {
+      case "Map": return makeMapTy(a[0] ?? "string", a[1] ?? "number");
+      case "Record": return makeMapTy(a[0] ?? "string", a[1] ?? "number"); // dictionary → Map
+      case "Set": return makeSetTy(a[0] ?? "string");
+      case "Array":
+      case "ReadonlyArray": return `${a[0] ?? "number"}[]` as Ty;          // Array<T> → T[]
+      // single-arg wrapper/mapped types erase to their inner type
+      case "Promise":
+      case "Awaited":
+      case "Partial":
+      case "Required":
+      case "Readonly":
+      case "NonNullable": return a[0] ?? "number";
+      // multi-arg utility types erase to their first (subject) type argument
+      case "Extract":
+      case "Exclude":
+      case "Omit":
+      case "Pick":
+      case "Parameters":
+      case "ReturnType": return a[0] ?? "number";
+      // unknown generic / type parameter used with args: erase args, resolve the base name
+      default: return this.resolveNamed(id);
+    }
+  }
+  // generic type-argument list `<T, U>` — parsed everywhere a `<...>` type-arg list
+  // appears (annotations, `new X<..>()`, call-site `f<..>()`); the args are erased.
   private parseTypeArgs(): Ty[] {
     this.eat("<");
     const tys: Ty[] = [];
@@ -330,6 +359,7 @@ class Parser {
   private parseFuncDecl(): Stmt {
     this.eat("function");
     const name = this.expectIdent();
+    if (this.at("<")) this.skipGenerics(); // erased generic type-parameter list `f<T, U>`
     this.eat("(");
     const params: Param[] = [];
     if (!this.at(")")) {
@@ -534,6 +564,10 @@ class Parser {
   }
 
   private parseAssign(): Expr {
+    // Generic arrow `<T>(x: T): T => x` — a leading `<` can only start a generic arrow
+    // in this subset (no JSX / old-style casts), so it is unambiguous: erase the type-param
+    // list and parse the arrow that follows.
+    if (this.at("<")) { this.skipGenerics(); return this.parseArrow(); }
     if (this.looksLikeArrow()) return this.parseArrow();
     const left = this.parsePipe();
     const t = this.peek();
@@ -634,6 +668,26 @@ class Parser {
     return this.parsePostfix();
   }
 
+  // Disambiguate a `<` after a primary between call-site TYPE ARGUMENTS (`f<T>(x)`)
+  // and the LESS-THAN operator (`a < b`). Speculatively parse a balanced `<...>` type-arg
+  // list; commit (return true, position past `>`) only when it is IMMEDIATELY followed by
+  // `(` — a call. Any parse failure, or a `>` not followed by `(`, backtracks fully so the
+  // binary parser reads `<` as comparison. This matches TS/Node's rule (a following `(`
+  // is what promotes `<...>` to type args), keeping ordinary comparisons (`i < n`,
+  // `x < f(y)`, `a < b > c`) untouched.
+  private tryCallTypeArgs(): boolean {
+    const save = this.pos;
+    try {
+      this.parseTypeArgs();
+    } catch {
+      this.pos = save;
+      return false;
+    }
+    if (this.at("(")) return true;
+    this.pos = save;
+    return false;
+  }
+
   private parsePostfix(start?: Expr): Expr {
     let expr = start ?? this.parsePrimary();
     for (;;) {
@@ -663,6 +717,11 @@ class Parser {
         }
         this.eat(")");
         expr = { kind: "CallExpr", callee: expr, args };
+      } else if (this.at("<") && this.tryCallTypeArgs()) {
+        // Call-site type arguments `f<T>(x)` / `foo<string>()` — parsed and ERASED.
+        // Only committed when a balanced `<...>` is immediately followed by `(` (a call),
+        // otherwise `<` is left for the binary parser to read as less-than (see helper).
+        continue; // the following `(` is handled by the call branch next iteration
       } else if ((this.at("++") || this.at("--")) && expr.kind === "Identifier") {
         const op = this.next().value as "++" | "--";
         expr = { kind: "UpdateExpr", op, prefix: false, target: expr.name };
