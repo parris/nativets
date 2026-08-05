@@ -56,6 +56,9 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   __arrLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live array count
   __objLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live object count
   __strLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live heap-string count
+  // Host I/O FFI (stdin): the node oracle gets these via a harness polyfill prelude.
+  readLine: { min: 0, max: 0, argTys: [], ret: "string" },  // next stdin line (no newline), "" at EOF
+  readStdin: { min: 0, max: 0, argTys: [], ret: "string" }, // all remaining stdin
 };
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 const ACTOR_BUILTINS = new Set([
@@ -335,6 +338,20 @@ class Checker {
         return b.ty;
       }
       case "MemberExpr": {
+        // Host I/O: process.argv -> string[], process.env.NAME -> string. Recognized
+        // only when `process` is not shadowed by a user binding.
+        if (!scope.lookup("process")) {
+          if (e.object.kind === "Identifier" && e.object.name === "process") {
+            if (e.property === "argv") return "string[]";
+            throw typeError(`process.${e.property} is not supported`);
+          }
+          if (
+            e.object.kind === "MemberExpr" && e.object.object.kind === "Identifier" &&
+            e.object.object.name === "process" && e.object.property === "env"
+          ) {
+            return "string"; // process.env.NAME (empty string if unset — see docs)
+          }
+        }
         const ot = this.type(e.object, scope);
         // Accessing a member of a possibly-nullish object: the result is nullable
         // (the whole chain short-circuits to `undefined` if the object is nullish).
@@ -625,6 +642,17 @@ class Checker {
       if (e.args.length !== 2) throw typeError("spawn(body, arg) takes two arguments");
       if (this.type(e.args[1]!, scope) !== msgTy) throw typeError(`spawn: arg type must match the body's parameter (${msgTy})`);
       return "number"; // pid
+    }
+
+    // Host I/O: process.exit(code?) — not shadowable by a user `process` binding.
+    if (
+      e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" &&
+      e.callee.object.name === "process" && !scope.lookup("process")
+    ) {
+      if (e.callee.property !== "exit") throw typeError(`process.${e.callee.property}() is not supported`);
+      if (e.args.length > 1) throw typeError("process.exit(code?) takes at most one argument");
+      if (e.args.length === 1 && this.type(e.args[0]!, scope) !== "number") throw typeError("process.exit: code must be a number");
+      return "void";
     }
 
     // JSON.stringify(x) / JSON.parse(s): Dyn
