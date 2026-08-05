@@ -10,6 +10,8 @@
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep } from "./ast.ts";
+// stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
+import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError } from "./diagnostics.ts";
 
@@ -133,14 +135,11 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   // --- stdlib (web standards) Batch 1: base64 globals (differential vs node) ---
   btoa: { min: 1, max: 1, argTys: ["string"], ret: "string" },
   atob: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  // --- stdlib: URL parsing (WHATWG URL functional subset; node is the oracle) ---
-  urlProtocol: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  urlHost: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  urlHostname: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  urlPathname: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  urlSearch: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  urlHash: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  urlSearchParam: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
+  // --- stdlib Batch 3: URI encoding (ECMAScript §19.2, byte-exact vs node) ---
+  encodeURIComponent: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  decodeURIComponent: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  encodeURI: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  decodeURI: { min: 1, max: 1, argTys: ["string"], ret: "string" },
   __arrLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live array count
   __objLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live object count
   __pvNodes: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live persistent-vector nodes
@@ -736,7 +735,9 @@ class Checker {
         });
         const first = tys[0]!;
         if (!tys.every((t) => t === first)) throw typeError(`array elements must share a type (got ${[...new Set(tys)].join(", ")})`);
-        if (first !== "number" && first !== "string" && first !== "boolean" && !isObjectTy(first) && !isArrayTy(first)) throw nyi(NYI.ARRAY, `arrays of ${first}`);
+        // A `Date` is represented AS a double (stdlib batch 3), so `Date[]` is a
+        // `number[]` in every way that matters to the slot vector — allow it.
+        if (first !== "number" && first !== "string" && first !== "boolean" && !isObjectTy(first) && !isArrayTy(first) && !isDateTy(first)) throw nyi(NYI.ARRAY, `arrays of ${first}`);
         return `${first}[]`;
       }
       case "ObjectLiteral": {
@@ -813,6 +814,15 @@ class Checker {
           if (e.property === "ok") return "boolean";
           if (e.property === "headers") return "Headers";
           throw nyi(NYI.OBJECT, `Response property '.${e.property}' (supported: .status, .ok, .headers, .text(), .json())`);
+        }
+        // stdlib Batch 3: `new URL(u)` components. Every one is a `string` (node's
+        // shape: an absent part is "", never null), and `.searchParams` hands back the
+        // query as a URLSearchParams. `.href`/`.toString()` would need the WHATWG
+        // serializer (which normalizes), so they are refused rather than approximated.
+        if (isUrlTy(ot)) {
+          if (URL_COMPONENTS.includes(e.property)) return "string";
+          if (e.property === "searchParams") return "URLSearchParams";
+          throw nyi(NYI.WEBAPI, `URL property '.${e.property}' (supported: ${URL_COMPONENTS.join(", ")}, searchParams)`);
         }
         if ((ot === "string" || isArrayTy(ot) || isBytesTy(ot)) && e.property === "length") return "number";
         if ((isMapTy(ot) || isSetTy(ot)) && e.property === "size") return "number";
@@ -906,6 +916,15 @@ class Checker {
         if (e.op === "+" && (l === "string" || r === "string")) {
           // Response/Headers have no string coercion (they are opaque handles).
           for (const t of [l, r]) if (isResponseTy(t) || isHeadersTy(t)) throw nyi(NYI.OBJECT, `string concatenation with a ${t}`);
+          // A `T | null` / `T | undefined` is a two-slot BOX, not a renderable value —
+          // concatenating one used to reach codegen and emit invalid IR. Unwrap first
+          // (`?? "…"`), which is also the only spelling whose output is unambiguous.
+          for (const t of [l, r]) if (isNullableTy(t)) throw nyi(NYI.OPTIONAL_CHAIN, `string concatenation with a \`${baseTy(t)} | ${nullishKind(t)}\` (unwrap it first, e.g. \`(x ?? "") + …\`)`);
+          // stdlib Batch 3: `"" + date` is node's Date#toString — a LOCALE- and
+          // zone-name-formatted human string ("Thu Jan 01 1970 … (GMT)"), which needs
+          // the tz display-name tables. Refuse rather than approximate.
+          for (const t of [l, r]) if (isDateTy(t) || isUrlTy(t) || isSearchParamsTy(t))
+            throw nyi(NYI.WEBAPI, `string concatenation with a ${t} (use ${isDateTy(t) ? "`.toISOString()`" : "`.toString()` / a component"})`);
           return "string";
         }
         if (l !== "number" || r !== "number") throw typeError(`Arithmetic needs numbers, got ${l} ${e.op} ${r}`);
@@ -1031,6 +1050,30 @@ class Checker {
           if (e.args.length !== 0) throw typeError(`new ${e.callee}() takes no arguments`);
           return e.callee;
         }
+        // --- stdlib Batch 3: the object-shaped web APIs ---
+        // `new Date()` (the clock), `new Date(ms)`, `new Date(isoString)`. A Date is a
+        // VALUE — its representation is the epoch-ms double — so it needs no allocation.
+        if (e.callee === "Date" && !scope.lookup("Date")) {
+          if (e.args.length > 1) throw nyi(NYI.WEBAPI, "new Date(y, m, d, …) (the component constructor)");
+          if (e.args.length === 1) {
+            const at = this.type(e.args[0]!, scope);
+            if (at !== "number" && at !== "string")
+              throw typeError(`new Date expects a number (epoch ms) or an ISO string, got ${at}`);
+          }
+          return "Date";
+        }
+        // `new URL(u)` — a string handle re-parsed by each accessor. A RELATIVE base
+        // (`new URL(path, base)`) needs URL resolution we do not implement.
+        if (e.callee === "URL" && !scope.lookup("URL")) {
+          if (e.args.length === 2) throw nyi(NYI.WEBAPI, "new URL(relative, base) (relative-URL resolution)");
+          if (e.args.length !== 1 || this.type(e.args[0]!, scope) !== "string") throw typeError("new URL(url: string)");
+          return "URL";
+        }
+        if (e.callee === "URLSearchParams" && !scope.lookup("URLSearchParams")) {
+          if (e.args.length !== 1 || this.type(e.args[0]!, scope) !== "string")
+            throw typeError("new URLSearchParams(init: string) — only the query-string form is supported");
+          return "URLSearchParams";
+        }
         // `new C(args)` on a user class: the ctor lowered to `C.constructor(this, …)`,
         // so its sig carries the instance type (param 0 = `this`) and the ctor param types.
         const ctor = this.functions.get(`${e.callee}.constructor`);
@@ -1122,6 +1165,11 @@ class Checker {
         // A Response/Headers handle has no printable form here (node prints an inspected
         // `Response { … }`); reject rather than print the raw pointer.
         if (isResponseTy(at) || isHeadersTy(at)) throw nyi(NYI.OBJECT, `console.log of a ${at} (print .status / .ok / await res.text() instead)`);
+        // stdlib Batch 3: node's util.inspect of a Date IS its ISO string (and the
+        // literal "Invalid Date" for a NaN time value), so `console.log(d)` is exact.
+        // A URL/URLSearchParams inspects as `URL { href: …, … }` — refused, not guessed.
+        if (isUrlTy(at) || isSearchParamsTy(at))
+          throw nyi(NYI.WEBAPI, `console.log of a ${at} (node prints an inspected \`${at} { … }\`; print a component, e.g. \`u.href\`-less \`u.origin + u.pathname\`, or \`${at === "URL" ? "u.searchParams" : "p"}.toString()\`)`);
       }
       return "void";
     }
@@ -1315,11 +1363,27 @@ class Checker {
         }
         return `{${fields.join(",")}}` as Ty;
       }
-      if (p !== "keys" && p !== "values" && p !== "entries") throw nyi(NYI.OBJECT, `Object.${p}`);
+      // --- stdlib Batch 3 ---
+      // `Object.freeze(o)` is the IDENTITY here and honestly so: objects are already
+      // immutable (Stage 29), so freezing changes nothing and node's contract —
+      // "returns the same object, now non-writable" — is met exactly.
+      if (p === "freeze" || p === "isFrozen") {
+        if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
+        const ot = this.type(e.args[0]!, scope);
+        if (!isObjectTy(ot)) throw typeError(`Object.${p} expects an object`);
+        return p === "isFrozen" ? "boolean" : ot;
+      }
+      // `Object.assign(target, …)` MUTATES its target — the one thing this language
+      // does not do. Point at the object spread that expresses the same intent.
+      if (p === "assign" || p === "defineProperty" || p === "setPrototypeOf")
+        throw mutationError(`Object.${p} mutates its target object`,
+          "objects are immutable — build a new one with spread: `const merged = { ...a, ...b }`");
+      if (p !== "keys" && p !== "values" && p !== "entries" && p !== "getOwnPropertyNames") throw nyi(NYI.OBJECT, `Object.${p}`);
       if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
       const ot = this.type(e.args[0]!, scope);
       if (!isObjectTy(ot)) throw typeError(`Object.${p} expects an object`);
-      if (p === "keys") return "string[]";
+      // `getOwnPropertyNames` == `keys` for a plain record (no non-enumerable props here).
+      if (p === "keys" || p === "getOwnPropertyNames") return "string[]";
       if (p === "entries") {
         // [key, value] pairs. A pair is an ARRAY, and arrays are homogeneous here, so a
         // pair is only representable when the values are strings (string[] pairs).
@@ -1455,6 +1519,9 @@ class Checker {
         if (e.args.length !== 1 || this.type(e.args[0]!, scope) !== "string") throw typeError(`Headers.${e.callee.property}(name: string)`);
         return e.callee.property === "has" ? "boolean" : makeNullable("null", "string");
       }
+      // --- stdlib Batch 3: Date / URLSearchParams instance methods ---
+      if (isDateTy(recv)) return this.inferDateMethod(e.callee.property, e.args, scope);
+      if (isSearchParamsTy(recv)) return this.inferSearchParamsMethod(e.callee.property, e.args, scope);
       if (isMapTy(recv)) return this.inferMapMethod(recv, e.callee.property, e.args, scope, e);
       if (isSetTy(recv)) return this.inferSetMethod(recv, e.callee.property, e.args, scope, e);
       // Bytes (stdlib batch 2): TextEncoder#encode(string) -> Uint8Array (UTF-8);
@@ -1499,6 +1566,16 @@ class Checker {
           for (const a of e.args) if (this.type(a, scope) !== "string") throw typeError(".concat expects strings");
           return "string";
         }
+        // stdlib Batch 3 — the two string methods that need data we do not ship, named
+        // precisely instead of falling into the generic "not supported" bucket:
+        // `normalize` needs the Unicode canonical decomposition/composition tables
+        // (NFC/NFD/NFKC/NFKD), `localeCompare` needs ICU collation (which is why
+        // "a".localeCompare("B") is -1 in node but +1 under a byte compare). Both are
+        // silently-wrong-looking if approximated, so they are refused.
+        if (e.callee.property === "normalize")
+          throw nyi(NYI.WEBAPI, "String#normalize (Unicode NFC/NFD normalization needs the Unicode character database, which nativets does not ship — nativets strings are raw UTF-8 bytes)");
+        if (e.callee.property === "localeCompare" || e.callee.property.startsWith("toLocale"))
+          throw nyi(NYI.WEBAPI, `String#${e.callee.property} (locale-aware ${e.callee.property === "localeCompare" ? "collation" : "formatting"} needs ICU; use ${e.callee.property === "localeCompare" ? "`<` / `>` (code-point order, see docs/divergences.md)" : "the non-locale form"})`);
         const sig = STRING_METHODS[e.callee.property];
         if (!sig) throw nyi(NYI.OBJECT, `string method '${e.callee.property}'`);
         this.checkArgs(e.args, sig, scope, `'.${e.callee.property}'`);
@@ -1617,6 +1694,39 @@ class Checker {
     inner.declare(s.name, s.elemTy, false);
     inner.declare(s.name2!, s.valTy, false);
     this.loopDepth++; this.checkBlock(s.body, inner, ret); this.loopDepth--;
+  }
+
+  /* ============================================================
+   * stdlib Batch 3 — Date + URLSearchParams instance methods.
+   * ============================================================ */
+
+  /** Date component getters. All take no arguments and return a `number`, except
+   * `toISOString()` (a `string`). A Date is an immutable time value here, so the
+   * `setX` MUTATORS are refused (NT1023) pointing at reconstruction. */
+  private inferDateMethod(method: string, args: Expr[], scope: Scope): Ty {
+    void scope;
+    if (DATE_GETTERS.has(method) || method === "getTime" || method === "valueOf" || method === "toISOString"
+        || method === "toJSON") {
+      if (args.length !== 0) throw typeError(`Date.${method}() takes no arguments`);
+      return method === "toISOString" || method === "toJSON" ? "string" : "number";
+    }
+    if (method.startsWith("set"))
+      throw nyi(NYI.WEBAPI, `Date method '.${method}' (a Date is an immutable time value — build a new one, e.g. \`new Date(d.getTime() + ms)\`)`);
+    throw nyi(NYI.WEBAPI, `Date method '.${method}'`);
+  }
+
+  /** URLSearchParams: the read-only lookups. `.get` is `string | null` (node's exact
+   * shape, so `?? "…"` composes); `.getAll` is `string[]`. */
+  private inferSearchParamsMethod(method: string, args: Expr[], scope: Scope): Ty {
+    if (method === "toString") {
+      if (args.length !== 0) throw typeError("URLSearchParams.toString() takes no arguments");
+      return "string";
+    }
+    if (method !== "get" && method !== "has" && method !== "getAll")
+      throw nyi(NYI.WEBAPI, `URLSearchParams method '.${method}' (supported: .get(k), .has(k), .getAll(k), .toString())`);
+    if (args.length !== 1 || this.type(args[0]!, scope) !== "string") throw typeError(`URLSearchParams.${method}(name: string)`);
+    if (method === "has") return "boolean";
+    return method === "getAll" ? "string[]" : makeNullable("null", "string");
   }
 
   private inferMapMethod(recv: Ty, method: string, args: Expr[], scope: Scope, node: Expr): Ty {

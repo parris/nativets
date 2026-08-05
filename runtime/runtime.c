@@ -1397,12 +1397,12 @@ void *nt_arr_from_str(const char *s) {
 }
 
 /* ============================================================
- * stdlib: URL parsing (WHATWG URL — a FUNCTIONAL SUBSET)
+ * stdlib: URL parsing (WHATWG URL — a SUBSET)
  *
- * nativets has no classes, so the WHATWG `new URL(u)` API is exposed as plain
- * global functions that each parse the URL string and return one component:
- *   urlProtocol/urlHost/urlHostname/urlPathname/urlSearch/urlHash -> string,
- *   urlSearchParam(u, key) -> first value for a query key (percent/`+` decoded).
+ * These are the component accessors behind `new URL(u)` (Batch 3 — before
+ * classes existed they were also exposed as `urlProtocol(u)`-style globals,
+ * which the real class API replaced). A URL value IS its text, so each accessor
+ * re-parses it and returns one component.
  *
  * SUPPORTED subset (each accessor matches `node`'s new URL(u).<part> and
  * searchParams.get byte-for-byte — node is the oracle):
@@ -1584,29 +1584,8 @@ static const char *url_form_decode(const char *s, size_t n) {
   return o;
 }
 
-/* searchParams.get(key): first value whose decoded key matches (node decodes
- * keys too); "" when the key is absent or present with no value. */
-const char *nt_url_search_param(const char *u, const char *key) {
-  NtUrl r = url_parse(u);
-  if (!r.ok || r.query == NULL || r.query_len == 0) return url_empty();
-  const char *q = r.query;
-  size_t n = r.query_len, i = 0;
-  while (i < n) {
-    size_t start = i;
-    while (i < n && q[i] != '&') i++;
-    size_t plen = i - start;
-    const char *pair = q + start;
-    size_t eq = plen; /* index of first '=' within the pair, or plen if none */
-    for (size_t k = 0; k < plen; k++) if (pair[k] == '=') { eq = k; break; }
-    const char *dkey = url_form_decode(pair, eq);
-    if (strcmp(dkey, key) == 0) {
-      if (eq == plen) return url_empty();                 /* key present, no '=' */
-      return url_form_decode(pair + eq + 1, plen - eq - 1);
-    }
-    if (i < n) i++; /* skip the '&' */
-  }
-  return url_empty();
-}
+/* (searchParams lookups live with `URLSearchParams` in the Batch 3 block below —
+ * they operate on the query TEXT, so `new URLSearchParams(q)` shares them.) */
 
 /* ============================================================
  * stdlib Batch 1 (part 2) — the everyday string/array/number surface.
@@ -1910,3 +1889,447 @@ const char *js_num_to_radix_string(double value, double radixd) {
   o[n] = 0;
   return o;
 }
+
+/* ============================================================
+ * stdlib Batch 3 — the object-shaped web APIs (`Date`, `URL`, URI encoding).
+ *
+ * A `Date` VALUE is just its time value: the epoch-ms `double` (NaN == node's
+ * "Invalid Date"). No heap block, no allocation — `getTime()` is the identity.
+ *
+ * TIMEZONE: the local accessors are genuinely local. `nt_date_fields` breaks a
+ * time value down with `localtime_r`, which reads the same IANA zone (`TZ`,
+ * /etc/localtime) node's ICU reads, so `getHours()` etc. agree with node on the
+ * same machine. `toISOString` and the date-only string form are UTC by
+ * specification and go through the pure civil-calendar arithmetic below (no
+ * `time_t`, so the whole ±8.64e15 ms JS range works, incl. year +275760).
+ * ============================================================ */
+
+#define NT_DATE_MAX 8.64e15 /* ES TimeClip: |t| > 8.64e15 ms is an Invalid Date */
+
+/* ES TimeClip: NaN or out of range -> NaN, else truncate toward zero. */
+static double nt_time_clip(double t) {
+  if (!(t >= -NT_DATE_MAX && t <= NT_DATE_MAX)) return NAN; /* also catches NaN */
+  return t < 0 ? -floor(-t) : floor(t);
+}
+
+/* Howard Hinnant's civil_from_days / days_from_civil (proleptic Gregorian),
+ * exact over the whole JS date range and free of any `time_t` limit. */
+static int64_t nt_days_from_civil(int64_t y, int64_t m, int64_t d) {
+  y -= m <= 2;
+  int64_t era = (y >= 0 ? y : y - 399) / 400;
+  int64_t yoe = y - era * 400;                                    /* [0, 399] */
+  int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;   /* [0, 365] */
+  int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;            /* [0, 146096] */
+  return era * 146097 + doe - 719468;
+}
+static void nt_civil_from_days(int64_t z, int64_t *y, int64_t *m, int64_t *d) {
+  z += 719468;
+  int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  int64_t doe = z - era * 146097;                                       /* [0, 146096] */
+  int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;   /* [0, 399] */
+  int64_t yy = yoe + era * 400;
+  int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);                 /* [0, 365] */
+  int64_t mp = (5 * doy + 2) / 153;                                      /* [0, 11] */
+  int64_t dd = doy - (153 * mp + 2) / 5 + 1;                             /* [1, 31] */
+  int64_t mm = mp + (mp < 10 ? 3 : -9);                                  /* [1, 12] */
+  *y = yy + (mm <= 2);
+  *m = mm;
+  *d = dd;
+}
+
+/* Floor-division helpers (JS date math floors; C division truncates). */
+static int64_t nt_fdiv(int64_t a, int64_t b) { int64_t q = a / b; if ((a % b) && ((a < 0) != (b < 0))) q--; return q; }
+static int64_t nt_fmod_i(int64_t a, int64_t b) { int64_t r = a % b; if (r && ((r < 0) != (b < 0))) r += b; return r; }
+
+/*
+ * One component of a time value. `which`: 0 fullYear, 1 month (0-based), 2 date,
+ * 3 hours, 4 minutes, 5 seconds, 6 milliseconds, 7 day-of-week (0=Sunday).
+ * `utc` selects UTC (civil arithmetic) vs LOCAL (localtime_r). NaN in, NaN out —
+ * node's Invalid Date getters all return NaN.
+ */
+double nt_date_field(double t, double which, double utc) {
+  if (isnan(t)) return NAN;
+  int w = (int)which;
+  int64_t ms = (int64_t)t;
+  if (utc == 0.0) {
+    /* LOCAL: ask libc for the zone offset at this instant, then reuse the civil
+     * arithmetic so out-of-time_t-range instants still work (the offset is only
+     * meaningful inside the tz database's range anyway). */
+    time_t secs = (time_t)nt_fdiv(ms, 1000);
+    struct tm lt;
+    if (localtime_r(&secs, &lt) != NULL) {
+      /* offset = local wall clock - UTC, in seconds */
+      int64_t loc = nt_days_from_civil(lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday) * 86400
+                  + lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec;
+      ms += (loc - (int64_t)secs) * 1000;
+    }
+  }
+  int64_t days = nt_fdiv(ms, 86400000);
+  int64_t tod = nt_fmod_i(ms, 86400000);
+  if (w == 7) return (double)nt_fmod_i(days + 4, 7); /* 1970-01-01 was a Thursday */
+  if (w == 3) return (double)(tod / 3600000);
+  if (w == 4) return (double)((tod / 60000) % 60);
+  if (w == 5) return (double)((tod / 1000) % 60);
+  if (w == 6) return (double)(tod % 1000);
+  int64_t y, m, d;
+  nt_civil_from_days(days, &y, &m, &d);
+  if (w == 0) return (double)y;
+  if (w == 1) return (double)(m - 1);
+  return (double)d;
+}
+
+/* Date#toISOString(): always UTC, `YYYY-MM-DDTHH:mm:ss.sssZ` (extended
+ * `±YYYYYY` outside 0..9999). An Invalid Date THROWS, like node's RangeError —
+ * catchable through the pending-exception protocol. */
+const char *nt_date_to_iso(double t) {
+  if (isnan(t)) { nt_exc_raise_msg("RangeError: Invalid time value"); return ""; }
+  int64_t ms = (int64_t)t;
+  int64_t days = nt_fdiv(ms, 86400000), tod = nt_fmod_i(ms, 86400000);
+  int64_t y, m, d;
+  nt_civil_from_days(days, &y, &m, &d);
+  char buf[64];
+  int n;
+  if (y >= 0 && y <= 9999)
+    n = snprintf(buf, sizeof buf, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                 (int)y, (int)m, (int)d, (int)(tod / 3600000), (int)((tod / 60000) % 60),
+                 (int)((tod / 1000) % 60), (int)(tod % 1000));
+  else
+    n = snprintf(buf, sizeof buf, "%c%06d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                 y < 0 ? '-' : '+', (int)(y < 0 ? -y : y), (int)m, (int)d,
+                 (int)(tod / 3600000), (int)((tod / 60000) % 60),
+                 (int)((tod / 1000) % 60), (int)(tod % 1000));
+  char *o = alloc_str((size_t)n);
+  memcpy(o, buf, (size_t)n);
+  o[n] = 0;
+  return o;
+}
+
+/* `new Date(ms)` — TimeClip only. */
+double nt_date_from_ms(double ms) { return nt_time_clip(ms); }
+
+/* console.log(date): node's util.inspect of a Date IS its ISO string, and the
+ * literal "Invalid Date" when the time value is NaN. Never throws (unlike
+ * toISOString), so the print path needs no exception check. */
+const char *nt_date_inspect(double t) {
+  if (isnan(t)) return url_dup("Invalid Date");
+  return nt_date_to_iso(t);
+}
+
+/* JSON.stringify(date): node goes through Date.prototype.toJSON, which yields the
+ * QUOTED ISO string — and the JSON literal `null` for a non-finite time value
+ * (toJSON tests the time value BEFORE calling toISOString, so it never throws). */
+const char *nt_date_to_json(double t) {
+  if (isnan(t)) return url_dup("null");
+  const char *iso = nt_date_to_iso(t);
+  size_t n = strlen(iso);
+  char *o = alloc_str(n + 2);
+  o[0] = '"';
+  memcpy(o + 1, iso, n);
+  o[n + 1] = '"';
+  o[n + 2] = 0;
+  return o;
+}
+
+/* Local wall-clock fields -> epoch ms, via mktime (the tz database's inverse). */
+static double nt_local_to_ms(int64_t y, int64_t mo, int64_t d, int64_t h, int64_t mi, int64_t s, int64_t msec) {
+  struct tm lt;
+  memset(&lt, 0, sizeof lt);
+  lt.tm_year = (int)(y - 1900); lt.tm_mon = (int)(mo - 1); lt.tm_mday = (int)d;
+  lt.tm_hour = (int)h; lt.tm_min = (int)mi; lt.tm_sec = (int)s;
+  lt.tm_isdst = -1; /* let libc decide; matches node for the ambiguous DST hour */
+  time_t tt = mktime(&lt);
+  if (tt == (time_t)-1) return NAN;
+  return (double)tt * 1000.0 + (double)msec;
+}
+
+/*
+ * `new Date(str)` — the ECMAScript Date Time String Format ONLY (§21.4.1.15):
+ *   YYYY-MM-DD | YYYY-MM | YYYY  (date-only -> UTC)
+ *   <date>T HH:mm[:ss[.sss]] [Z | ±HH:MM]  (no offset -> LOCAL, per ES6+)
+ * Anything else (RFC 2822, "March 15 2020", node's implementation-defined
+ * fallbacks) is an Invalid Date -> NaN, which is exactly what node returns for a
+ * string IT cannot parse — see docs/divergences.md §D for the ones it can.
+ */
+double nt_date_parse(const char *s) {
+  const char *p = s;
+  int64_t y = 0, mo = 1, d = 1, h = 0, mi = 0, sec = 0, ms = 0;
+  int neg_year = 0, have_time = 0, have_zone = 0;
+  int64_t zone_min = 0;
+  size_t i = 0;
+  /* year: ±YYYYYY or YYYY */
+  if (p[i] == '+' || p[i] == '-') {
+    neg_year = p[i] == '-';
+    i++;
+    for (int k = 0; k < 6; k++) { if (p[i + k] < '0' || p[i + k] > '9') return NAN; y = y * 10 + (p[i + k] - '0'); }
+    i += 6;
+    if (neg_year && y == 0) return NAN; /* -000000 is invalid per spec */
+    if (neg_year) y = -y;
+  } else {
+    for (int k = 0; k < 4; k++) { if (p[i + k] < '0' || p[i + k] > '9') return NAN; y = y * 10 + (p[i + k] - '0'); }
+    i += 4;
+  }
+  if (p[i] == '-') {
+    i++;
+    if (p[i] < '0' || p[i] > '9' || p[i + 1] < '0' || p[i + 1] > '9') return NAN;
+    mo = (p[i] - '0') * 10 + (p[i + 1] - '0'); i += 2;
+    if (p[i] == '-') {
+      i++;
+      if (p[i] < '0' || p[i] > '9' || p[i + 1] < '0' || p[i + 1] > '9') return NAN;
+      d = (p[i] - '0') * 10 + (p[i + 1] - '0'); i += 2;
+    }
+  }
+  if (p[i] == 'T' || p[i] == 't' || p[i] == ' ') {
+    have_time = 1;
+    i++;
+    if (p[i] < '0' || p[i] > '9' || p[i + 1] < '0' || p[i + 1] > '9') return NAN;
+    h = (p[i] - '0') * 10 + (p[i + 1] - '0'); i += 2;
+    if (p[i] != ':') return NAN;
+    i++;
+    if (p[i] < '0' || p[i] > '9' || p[i + 1] < '0' || p[i + 1] > '9') return NAN;
+    mi = (p[i] - '0') * 10 + (p[i + 1] - '0'); i += 2;
+    if (p[i] == ':') {
+      i++;
+      if (p[i] < '0' || p[i] > '9' || p[i + 1] < '0' || p[i + 1] > '9') return NAN;
+      sec = (p[i] - '0') * 10 + (p[i + 1] - '0'); i += 2;
+      if (p[i] == '.') {
+        i++;
+        if (p[i] < '0' || p[i] > '9') return NAN;
+        int k = 0;
+        for (; k < 3 && p[i] >= '0' && p[i] <= '9'; k++, i++) ms = ms * 10 + (p[i] - '0');
+        for (int f = k; f < 3; f++) ms *= 10;              /* ".4" == 400ms */
+        while (p[i] >= '0' && p[i] <= '9') i++;            /* extra digits truncated */
+      }
+    }
+    if (p[i] == 'Z' || p[i] == 'z') { have_zone = 1; i++; }
+    else if (p[i] == '+' || p[i] == '-') {
+      int zneg = p[i] == '-';
+      i++;
+      if (p[i] < '0' || p[i] > '9' || p[i + 1] < '0' || p[i + 1] > '9') return NAN;
+      int64_t zh = (p[i] - '0') * 10 + (p[i + 1] - '0'); i += 2;
+      if (p[i] == ':') i++;
+      if (p[i] < '0' || p[i] > '9' || p[i + 1] < '0' || p[i + 1] > '9') return NAN;
+      int64_t zm = (p[i] - '0') * 10 + (p[i + 1] - '0'); i += 2;
+      if (zh > 23 || zm > 59) return NAN;
+      zone_min = zh * 60 + zm;
+      if (zneg) zone_min = -zone_min;
+      have_zone = 1;
+    }
+  }
+  if (p[i] != 0) return NAN;                                /* trailing garbage */
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return NAN;
+  if (h > 24 || mi > 59 || sec > 59) return NAN;
+  if (h == 24 && (mi || sec || ms)) return NAN;
+  if (!have_time || have_zone) {
+    double t = (double)nt_days_from_civil(y, mo, d) * 86400000.0
+             + (double)(h * 3600000 + mi * 60000 + sec * 1000 + ms)
+             - (double)zone_min * 60000.0;
+    return nt_time_clip(t);
+  }
+  return nt_time_clip(nt_local_to_ms(y, mo, d, h, mi, sec, ms));
+}
+
+/* ---- `new URL(u)` as a real class (Batch 3) -------------------------------
+ *
+ * A URL value IS its text: every accessor re-parses with the same `url_parse`
+ * the Batch-1 functional builtins used, so the supported subset (absolute
+ * http(s), no IPv6/IDNA/normalization) is unchanged — see the block above.
+ * The one new obligation a CLASS has is validation: node's `new URL(bad)`
+ * throws a TypeError, so a URL outside the subset raises a CATCHABLE exception
+ * here instead of quietly yielding "" the way the functional accessors did.
+ */
+const char *nt_url_validate(const char *u) {
+  NtUrl r = url_parse(u);
+  if (!r.ok) {
+    size_t n = strlen(u);
+    char *m = (char *)nativets_alloc(n + 32);
+    memcpy(m, "TypeError: Invalid URL: ", 24);
+    memcpy(m + 24, u, n);
+    m[24 + n] = 0;
+    nt_exc_raise_msg(m);
+    return url_empty();
+  }
+  return url_dup(u);
+}
+
+/* `.port` — the explicit port, "" when absent OR when it is the scheme default
+ * (node drops 80/http and 443/https). `.origin` — `protocol//host`. */
+const char *nt_url_port(const char *u) {
+  NtUrl r = url_parse(u);
+  if (!r.ok || r.port_len == 0) return url_empty();
+  if (r.is_https && r.port_len == 3 && strncmp(r.port, "443", 3) == 0) return url_empty();
+  if (!r.is_https && r.port_len == 2 && strncmp(r.port, "80", 2) == 0) return url_empty();
+  char *o = alloc_str(r.port_len);
+  memcpy(o, r.port, r.port_len);
+  o[r.port_len] = 0;
+  return o;
+}
+
+const char *nt_url_origin(const char *u) {
+  const char *proto = nt_url_protocol(u), *host = nt_url_host(u);
+  if (host[0] == 0) return url_empty();
+  size_t pn = strlen(proto), hn = strlen(host);
+  char *o = alloc_str(pn + 2 + hn);
+  memcpy(o, proto, pn);
+  o[pn] = '/'; o[pn + 1] = '/';
+  memcpy(o + pn + 2, host, hn);
+  o[pn + 2 + hn] = 0;
+  return o;
+}
+
+/* ---- URLSearchParams -------------------------------------------------------
+ *
+ * The handle is the RAW query text with no leading '?' — `nt_qs_init` strips one
+ * if present (node accepts both `new URLSearchParams("?a=1")` and `"a=1"`), and
+ * `url.searchParams` passes `.search` straight through. Lookups form-urldecode
+ * ('+'->space, %XX->byte) both sides of each pair, like `searchParams.get`.
+ */
+const char *nt_qs_init(const char *q) {
+  if (q[0] == '?') q++;
+  return url_dup(q);
+}
+
+/* Walk the pairs of `q`; for each, call back with the decoded key/value.
+ * Returns the first matching value (rc-string), or NULL if the key is absent.
+ * `all` (optional) collects EVERY match into an existing NtArray. */
+static const char *qs_scan(const char *q, const char *key, void *all) {
+  size_t n = strlen(q), i = 0;
+  const char *first = NULL;
+  while (i < n) {
+    size_t start = i;
+    while (i < n && q[i] != '&') i++;
+    size_t plen = i - start;
+    const char *pair = q + start;
+    size_t eq = plen;
+    for (size_t k = 0; k < plen; k++) if (pair[k] == '=') { eq = k; break; }
+    if (plen > 0) {
+      const char *dkey = url_form_decode(pair, eq);
+      if (strcmp(dkey, key) == 0) {
+        const char *val = (eq == plen) ? url_empty() : url_form_decode(pair + eq + 1, plen - eq - 1);
+        if (all) nt_arr_push((NtArray *)all, (int64_t)(intptr_t)val);
+        else if (!first) return val;
+      }
+    }
+    if (i < n) i++;
+  }
+  return first;
+}
+
+/* `.get(k)` — first value, or NULL for a miss (codegen boxes NULL as node's `null`). */
+const char *nt_qs_get(const char *q, const char *key) { return qs_scan(q, key, NULL); }
+/* `.getAll(k)` — every value, in order (empty array for a miss). */
+NtArray *nt_qs_get_all(const char *q, const char *key) {
+  NtArray *a = nt_arr_new(0);
+  qs_scan(q, key, a);
+  return a;
+}
+
+/* `.toString()` — node re-SERIALIZES (decode each pair, then
+ * application/x-www-form-urlencoded encode it), so `?a=b+c` round-trips to
+ * `a=b%2Bc`… no: '+' decodes to a space and re-encodes as '+'. Empty pairs are
+ * dropped and a valueless key gains an '='. */
+static int qs_unreserved(unsigned char c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+      || c == '*' || c == '-' || c == '.' || c == '_';
+}
+const char *nt_qs_to_string(const char *q) {
+  size_t n = strlen(q);
+  /* worst case: every byte becomes %XX, plus the '=' and '&' separators */
+  char *buf = (char *)nativets_alloc(n * 3 + 2);
+  size_t j = 0, i = 0;
+  int first = 1;
+  while (i < n) {
+    size_t start = i;
+    while (i < n && q[i] != '&') i++;
+    size_t plen = i - start;
+    const char *pair = q + start;
+    if (plen > 0) {
+      size_t eq = plen;
+      for (size_t k = 0; k < plen; k++) if (pair[k] == '=') { eq = k; break; }
+      const char *dk = url_form_decode(pair, eq);
+      const char *dv = (eq == plen) ? url_empty() : url_form_decode(pair + eq + 1, plen - eq - 1);
+      if (!first) buf[j++] = '&';
+      first = 0;
+      for (const char *s = dk; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (qs_unreserved(c)) buf[j++] = (char)c;
+        else if (c == ' ') buf[j++] = '+';
+        else { static const char H[] = "0123456789ABCDEF"; buf[j++] = '%'; buf[j++] = H[c >> 4]; buf[j++] = H[c & 15]; }
+      }
+      buf[j++] = '=';
+      for (const char *s = dv; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (qs_unreserved(c)) buf[j++] = (char)c;
+        else if (c == ' ') buf[j++] = '+';
+        else { static const char H[] = "0123456789ABCDEF"; buf[j++] = '%'; buf[j++] = H[c >> 4]; buf[j++] = H[c & 15]; }
+      }
+    }
+    if (i < n) i++;
+  }
+  buf[j] = 0;
+  char *o = alloc_str(j);
+  memcpy(o, buf, j);
+  o[j] = 0;
+  return o;
+}
+
+/* ---- encodeURIComponent / decodeURIComponent / encodeURI / decodeURI -------
+ *
+ * Byte-exact per ECMAScript §19.2.6: percent-encode every byte outside the
+ * per-function "unescaped" set, uppercase hex. nativets strings are already
+ * UTF-8, so the UTF-16→UTF-8 step the spec describes is the identity here (and
+ * the lone-surrogate URIError node throws is unreachable by construction).
+ * Decoding a malformed `%` sequence THROWS catchably, like node's URIError.
+ */
+static int uri_unescaped(unsigned char c) { /* uriUnescaped = alphanum + uriMark */
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+      || c == '-' || c == '_' || c == '.' || c == '!' || c == '~' || c == '*' || c == '\'' || c == '(' || c == ')';
+}
+static int uri_reserved(unsigned char c) { /* uriReserved + '#', kept literal by encodeURI */
+  return c == ';' || c == '/' || c == '?' || c == ':' || c == '@' || c == '&' || c == '='
+      || c == '+' || c == '$' || c == ',' || c == '#';
+}
+static const char *uri_encode(const char *s, int keep_reserved) {
+  static const char H[] = "0123456789ABCDEF";
+  size_t n = strlen(s);
+  char *buf = (char *)nativets_alloc(n * 3 + 1);
+  size_t j = 0;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (uri_unescaped(c) || (keep_reserved && uri_reserved(c))) buf[j++] = (char)c;
+    else { buf[j++] = '%'; buf[j++] = H[c >> 4]; buf[j++] = H[c & 15]; }
+  }
+  buf[j] = 0;
+  char *o = alloc_str(j);
+  memcpy(o, buf, j);
+  o[j] = 0;
+  return o;
+}
+const char *nt_encode_uri_component(const char *s) { return uri_encode(s, 0); }
+const char *nt_encode_uri(const char *s) { return uri_encode(s, 1); }
+
+static const char *uri_decode(const char *s, int keep_reserved) {
+  size_t n = strlen(s);
+  char *buf = (char *)nativets_alloc(n + 1);
+  size_t j = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (s[i] != '%') { buf[j++] = s[i]; continue; }
+    if (i + 2 >= n || url_hexval(s[i + 1]) < 0 || url_hexval(s[i + 2]) < 0) {
+      nt_exc_raise_msg("URIError: URI malformed");
+      return url_empty();
+    }
+    unsigned char b = (unsigned char)(url_hexval(s[i + 1]) * 16 + url_hexval(s[i + 2]));
+    /* decodeURI preserves the escapes of the reserved set (it must round-trip
+     * with encodeURI, which never produced them). */
+    if (keep_reserved && uri_reserved(b)) { buf[j++] = s[i]; buf[j++] = s[i + 1]; buf[j++] = s[i + 2]; }
+    else buf[j++] = (char)b;
+    i += 2;
+  }
+  buf[j] = 0;
+  char *o = alloc_str(j);
+  memcpy(o, buf, j);
+  o[j] = 0;
+  return o;
+}
+const char *nt_decode_uri_component(const char *s) { return uri_decode(s, 0); }
+const char *nt_decode_uri(const char *s) { return uri_decode(s, 1); }
+

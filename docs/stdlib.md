@@ -54,7 +54,7 @@ supported surface:
 **Globals / statics**
 - **`Date.now(): number`** — ms since epoch (`clock_gettime`). Non-deterministic, so it is
   tested behaviorally (monotonic + plausible range + whole ms), not against node.
-  *(`new Date()` and the date-component API are OUT of scope — deferred.)*
+  *(`new Date()` and the date-component API landed later, in **Batch 3** — see below.)*
 - **`btoa(s)` / `atob(s)`** — base64 over the string's bytes, all padding lengths.
 - **`String.fromCharCode(...)` / `String.fromCodePoint(...)`** — variadic, UTF-8 encoded.
 - **`Number.isInteger` / `isFinite` / `isSafeInteger` / `isNaN` / `parseInt` / `parseFloat`**
@@ -102,10 +102,10 @@ even a side-effecting callback observes node's exact call order.
 naming the immutable replacement (`.with` / `.slice` + spread / `.map`), exactly like
 `.push`/`.pop` (`.sort`'s hint names the ES2023 copying `.toSorted()`).
 
-**Still open in Batch 1's spirit** (deferred, each needs more than a fill): `new Date()` and the
-date-component API, `Array.from` of an array-*like* or with a `mapFn`, `.flat(depth)` beyond one
-level (chain `.flat().flat()`), `String#normalize`, and
-anything RegExp-shaped.
+**Still open in Batch 1's spirit** (deferred, each needs more than a fill): `Array.from` of an
+array-*like* or with a `mapFn`, and `.flat(depth)` beyond one level (chain `.flat().flat()`).
+*(`new Date()` + the date-component API landed in Batch 3; `String#normalize` is refused there,
+`NT1023` — it needs the Unicode character database. Anything RegExp-shaped is still Tier C.)*
 
 ### Batch 2 — needs a bytes type first
 `Uint8Array`/`ArrayBuffer` → then **`TextEncoder` / `TextDecoder`**, **`crypto.getRandomValues`**,
@@ -122,10 +122,65 @@ multi-line) isn't cheap to match byte-for-byte, so reject-don't-miscompile. **De
 / `DataView`, other typed-array flavors, `.slice`/`.set`/`.subarray`, `crypto`, `Blob`. Bytes buffers
 are on the allocate-and-never-free placeholder (not linear/RC yet — safe, may leak).
 
-### Batch 3 — needs new infrastructure (Tier C)
-**`URL` / `URLSearchParams`** (string-based, actually tractable soon), ~~**`fetch`**~~ ✅,
-**`RegExp`** (regex engine), ~~**`Promise`/`async`** (event loop vs actors — decide)~~ ✅ decided,
-**`setTimeout`** (timers), streams.
+### Batch 3 ✅ DONE (except RegExp/timers) — the object-shaped web APIs
+
+Batch 3 was deferred while nativets had no classes. Classes landed (SH3–SH3.6), so the
+functional workarounds became the real API. `node` is the oracle for every case
+(`test/stdlib-batch3.test.ts`, `test/stdlib-url.test.ts`) — with **no polyfill**, which is the
+point: these fixtures are ordinary TypeScript that node runs as written. The exact surface:
+
+**`Date`** — `new Date()` (the clock), `new Date(ms)` (ES `TimeClip`: truncate toward zero,
+`|t| > 8.64e15` → Invalid Date), `new Date(isoString)`, plus `getTime`/`valueOf`,
+`getFullYear`/`getMonth`/`getDate`/`getHours`/`getMinutes`/`getSeconds`/`getMilliseconds`/
+`getDay`, the zone-independent **`getUTC*`** aliases of all eight, `toISOString`/`toJSON`, and
+`console.log(date)` (node's `util.inspect` of a Date IS the ISO string). A `Date` VALUE is the
+epoch-ms `double` itself — no allocation, no drop, and `Date[]` is a `number[]` in every way that
+matters. `Date` works as a parameter/return/object-field type; `JSON.stringify` serializes it
+through `toJSON` (quoted ISO, or `null` for an Invalid Date), and `structuredClone` copies it.
+
+> **TIMEZONE (the decision, in full in `docs/divergences.md`): local time is REALLY local.** The
+> runtime uses `localtime_r`/`mktime`, which read the same IANA zone node's ICU reads, so
+> `getHours()` matches node on the same machine — DST transitions and half-hour zones included.
+> To keep the tests deterministic the local-time cases pin **`TZ` on both sides** (`UTC`,
+> `America/New_York`, `Asia/Kolkata`). `toISOString` and `getUTC*` are zone-independent by
+> specification, via pure civil-calendar arithmetic (no `time_t`, so the full ±8.64e15 ms range
+> works, incl. `+275760-09-13T00:00:00.000Z`). `new Date()` itself is a clock read, so — like
+> `Date.now()` in Batch 1 — it is tested behaviorally, never against node.
+
+**`URL`** — `new URL(u)` with `.protocol`/`.host`/`.hostname`/`.port`/`.pathname`/`.search`/
+`.hash`/`.origin`/`.searchParams`, over the same absolute-`http(s)` subset the Batch-1 functional
+accessors had (default ports dropped, hostname lowercased, userinfo stripped). A URL outside the
+subset **throws catchably**, like node's `TypeError: Invalid URL` — the obligation a class has
+that loose functions did not. **The old functional entry points (`urlProtocol(u)`, …) are
+REMOVED**, along with the `URL_POLYFILL` oracle in `test/harness.ts`; `test/stdlib-url/*.ts` were
+migrated to `new URL(...)` and are now differential against plain `node`.
+
+**`URLSearchParams`** — `new URLSearchParams(query)` (with or without the leading `?`) and
+`url.searchParams`, then `.get(k)` (`string | null`, node's exact shape, so `?? "…"` composes),
+`.has(k)`, `.getAll(k)` (`string[]`), `.toString()` (re-serialized, `+`/`%XX` normalized).
+Read-only: `.append`/`.set`/`.delete`/`.sort` mutate, so they are refused.
+
+**`Object.freeze` / `isFrozen` / `getOwnPropertyNames`** — `freeze` is the **identity** and
+honestly so: objects are already immutable (Stage 29), so freezing changes nothing and node's
+contract (same object back, non-writable) is met exactly; `isFrozen` is constant-`true`;
+`getOwnPropertyNames` == `Object.keys` for a plain record. `Object.assign`/`defineProperty`/
+`setPrototypeOf` MUTATE their target → **`NT1606`** pointing at object spread.
+
+**`encodeURIComponent` / `decodeURIComponent` / `encodeURI` / `decodeURI`** — byte-exact per
+ECMAScript §19.2 (uppercase hex, the two different "unescaped" sets, `decodeURI` preserving the
+reserved escapes). nativets strings are already UTF-8, so the spec's UTF-16→UTF-8 step is the
+identity and node's lone-surrogate `URIError` is unreachable; a malformed `%` sequence throws
+catchably, like node's `URIError: URI malformed`.
+
+**Refused on purpose (`NT1023`, the new web-API code)** — nothing here is approximated:
+`String#normalize` (needs the Unicode character database), `String#localeCompare` /
+`toLocale*` (needs ICU collation), `Date#setX` (a Date is an immutable time value → build a new
+one), `Date#toString`/`toLocaleDateString` and `"" + date` (locale + zone-display-name tables),
+`new Date(y, m, d, …)`, `new URL(relative, base)` (URL resolution), `URL#href`/`toString` (the
+WHATWG serializer, which normalizes), and `console.log(url)`.
+
+**Still Tier C, untouched by this batch:** **`RegExp`** (a regex engine — its own initiative) and
+**`setTimeout`/timers**/streams. ~~`fetch`~~ ✅ and ~~`Promise`/`async`~~ ✅ (decided) — see below.
 
 ### `fetch` ✅ (done, host-only) + the async decision
 
@@ -162,7 +217,10 @@ behavioral tests / local mocks, like the actor and HTTP lanes.
 ## Order
 
 1. ~~**Batch 1**~~ ✅ **done** — immediate ergonomic wins, all node-oracle-matched.
-2. **Bytes type** → Batch 2 (encoding + crypto).
-3. **The prelude → real `std/*` modules** — unblocked: self-hosting **SH1** (a real
+2. ~~**Bytes type** → Batch 2~~ ✅ **done** for `Uint8Array` + `TextEncoder`/`TextDecoder`;
+   `crypto` / `Blob` / `ArrayBuffer` still open.
+3. ~~**Batch 3** — `Date`, `URL`/`URLSearchParams`, `Object.freeze`, URI encoding~~ ✅ **done**
+   (classes unblocked it).
+4. **The prelude → real `std/*` modules** — unblocked: self-hosting **SH1** (a real
    `import`/`export` module system) has landed.
-4. Tier-C initiatives (networking, event-loop/async decision, regex) as they mature.
+5. Remaining Tier-C initiatives: **`RegExp`** (a regex engine) and **timers/streams**.

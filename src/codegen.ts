@@ -16,6 +16,8 @@ import { blockDrops } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
+// stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
+import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
@@ -89,8 +91,9 @@ function freshArray(e: Expr): boolean {
 }
 
 function llvmTy(ty: Ty): string {
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*
+  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*; URL/URLSearchParams = the URL/query TEXT
   switch (ty) {
+    case "Date": return "double"; // stdlib batch 3: a Date IS its time value (epoch ms)
     case "number": return "double";
     case "boolean": return "i1";
     case "string": return "ptr";
@@ -245,14 +248,31 @@ const DECLARES = [
   "declare ptr @nt_arr_flat1(ptr)",
   "declare ptr @js_num_to_fixed(double, double)",
   "declare ptr @js_num_to_radix_string(double, double)",
-  // --- stdlib: URL parsing (WHATWG URL functional subset) ---
+  // --- stdlib: URL component parsing (the runtime behind `new URL(u)`) ---
   "declare ptr @nt_url_protocol(ptr)",
   "declare ptr @nt_url_host(ptr)",
   "declare ptr @nt_url_hostname(ptr)",
   "declare ptr @nt_url_pathname(ptr)",
   "declare ptr @nt_url_search(ptr)",
   "declare ptr @nt_url_hash(ptr)",
-  "declare ptr @nt_url_search_param(ptr, ptr)",
+  // --- stdlib Batch 3: Date components + URL components + URI encoding ---
+  "declare double @nt_date_field(double, double, double)",
+  "declare ptr @nt_date_to_iso(double)",
+  "declare double @nt_date_from_ms(double)",
+  "declare double @nt_date_parse(ptr)",
+  "declare ptr @nt_date_inspect(double)",
+  "declare ptr @nt_date_to_json(double)",
+  "declare ptr @nt_url_validate(ptr)",
+  "declare ptr @nt_url_port(ptr)",
+  "declare ptr @nt_url_origin(ptr)",
+  "declare ptr @nt_qs_init(ptr)",
+  "declare ptr @nt_qs_get(ptr, ptr)",
+  "declare ptr @nt_qs_get_all(ptr, ptr)",
+  "declare ptr @nt_qs_to_string(ptr)",
+  "declare ptr @nt_encode_uri_component(ptr)",
+  "declare ptr @nt_decode_uri_component(ptr)",
+  "declare ptr @nt_encode_uri(ptr)",
+  "declare ptr @nt_decode_uri(ptr)",
   // Networking tier (L-d): libcurl-backed HTTP(S) client (host/Linux only; conditionally linked).
   // Return the response body (rc-string); write the numeric status through the trailing double*.
   "declare ptr @nt_http_post(ptr, ptr, ptr, ptr)",
@@ -1328,8 +1348,8 @@ class FnGen {
     // slot never holds a dangling pointer after a local owner is dropped.
     if (val.ty === "string") this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
     const t = this.fresh();
-    if (val.ty === "number") this.emit(`${t} = bitcast double ${val.v} to i64`);
-    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty))) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    if (val.ty === "number" || isDateTy(val.ty)) this.emit(`${t} = bitcast double ${val.v} to i64`); // a Date IS a double (batch 3)
+    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -1337,8 +1357,8 @@ class FnGen {
   /** Unpack a 64-bit slot into a value of the given type. */
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
-    if (ty === "number") this.emit(`${t} = bitcast i64 ${slot} to double`);
-    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    if (ty === "number" || isDateTy(ty)) this.emit(`${t} = bitcast i64 ${slot} to double`); // a Date IS a double (batch 3)
+    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
@@ -1640,6 +1660,20 @@ class FnGen {
           const ok = this.fresh(); this.emit(`${ok} = and i1 ${lo}, ${hi}`);
           return { v: ok, ty: "boolean" };
         }
+        // stdlib Batch 3: a URL component is one runtime re-parse of the URL text.
+        // `.searchParams` is the query text (the same handle shape), so it is the
+        // `.search` accessor with the leading '?' stripped by `nt_qs_init`.
+        if (isUrlTy(obj.ty)) {
+          const t = this.fresh();
+          if (e.property === "searchParams") {
+            const q = this.fresh();
+            this.emit(`${q} = call ptr @nt_url_search(ptr ${obj.v})`);
+            this.emit(`${t} = call ptr @nt_qs_init(ptr ${q})`);
+            return { v: t, ty: "URLSearchParams" };
+          }
+          this.emit(`${t} = call ptr @nt_url_${e.property}(ptr ${obj.v})`);
+          return { v: t, ty: "string" };
+        }
         if (e.property === "length" && (obj.ty === "string" || isArrayTy(obj.ty) || isBytesTy(obj.ty))) {
           const t = this.fresh();
           if (obj.ty === "string") this.emit(`${t} = call double @js_str_len(ptr ${obj.v})`);
@@ -1680,6 +1714,9 @@ class FnGen {
           inner === "null" ? "object" :
           isFuncTy(inner) ? "function" :
           isObjectTy(inner) || isArrayTy(inner) ? "object" :
+          // stdlib Batch 3: a Date/URL/URLSearchParams is an OBJECT in node, whatever
+          // our internal representation is (a Date is a bare double here).
+          isDateTy(inner) || isUrlRefTy(inner) ? "object" :
           inner; // number | boolean | string
         return { v: this.mod.intern(name), ty: "string" };
       }
@@ -2001,6 +2038,37 @@ class FnGen {
           return { v: b, ty: "Uint8Array" };
         }
         if (e.callee === "TextEncoder" || e.callee === "TextDecoder") return { v: "null", ty: e.callee };
+        // --- stdlib Batch 3 ---
+        // `new Date()` reads the clock; `new Date(ms)` TimeClips; `new Date(iso)` parses
+        // the ES Date Time String Format (NaN == node's Invalid Date). The VALUE is the
+        // time value itself, so there is nothing to allocate and nothing to drop.
+        if (e.ty === "Date") {
+          const t = this.fresh();
+          if (e.args.length === 0) this.emit(`${t} = call double @nt_date_now()`);
+          else {
+            const a = this.genExpr(e.args[0]!);
+            this.emit(a.ty === "string"
+              ? `${t} = call double @nt_date_parse(ptr ${a.v})`
+              : `${t} = call double @nt_date_from_ms(double ${a.v})`);
+          }
+          return { v: t, ty: "Date" };
+        }
+        // `new URL(u)` / `new URLSearchParams(q)` are string handles: the URL text and the
+        // raw query text. `new URL` VALIDATES here (node throws a TypeError on a URL it
+        // cannot parse), through the catchable pending-exception protocol.
+        if (e.ty === "URL") {
+          const u = this.genExpr(e.args[0]!);
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @nt_url_validate(ptr ${u.v})`);
+          this.emitExcCheck();
+          return { v: t, ty: "URL" };
+        }
+        if (e.ty === "URLSearchParams") {
+          const q = this.genExpr(e.args[0]!);
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @nt_qs_init(ptr ${q.v})`);
+          return { v: t, ty: "URLSearchParams" };
+        }
         // `new C(args)` on a user class: allocate the field slot block, then run the
         // constructor (`C.constructor(this, …args)`), and hand back the instance ptr.
         const cls = classTag(e.ty ?? "");
@@ -2094,7 +2162,13 @@ class FnGen {
         });
         return { v: arr, ty: "string[][]" };
       }
-      if (e.callee.property === "keys") return this.buildStringArray(objectFields(o.ty).map((f) => f.key));
+      // stdlib Batch 3: `Object.freeze(o)` is the identity (objects are ALREADY
+      // immutable, Stage 29) and `isFrozen` is therefore the constant `true`.
+      // `getOwnPropertyNames` == `keys` for a plain record.
+      if (e.callee.property === "freeze") return o;
+      if (e.callee.property === "isFrozen") return { v: "true", ty: "boolean" };
+      if (e.callee.property === "keys" || e.callee.property === "getOwnPropertyNames")
+        return this.buildStringArray(objectFields(o.ty).map((f) => f.key));
       // values: read each field slot into a fresh homogeneous array (checker enforced).
       const fields = objectFields(o.ty);
       const arr = this.fresh();
@@ -2213,6 +2287,28 @@ class FnGen {
         this.emit(`${slot} = ptrtoint ptr ${got} to i64`);
         return { v: this.nullBox(tag, slot), ty: makeNullable("null", "string") };
       }
+      // --- stdlib Batch 3 ---
+      // Date: the value IS the time value, so `getTime()`/`valueOf()` are the identity;
+      // every component getter is one `nt_date_field(t, which, utc)` call; `toISOString`
+      // is fallible (node throws RangeError on an Invalid Date).
+      if (isDateTy(recv.ty)) {
+        const p = e.callee.property;
+        if (p === "getTime" || p === "valueOf") return { v: recv.v, ty: "number" };
+        if (p === "toISOString" || p === "toJSON") {
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @nt_date_to_iso(double ${recv.v})`);
+          this.emitExcCheck();
+          return { v: t, ty: "string" };
+        }
+        const g = DATE_GETTERS.get(p)!;
+        const t = this.fresh();
+        this.emit(`${t} = call double @nt_date_field(double ${recv.v}, double ${llvmDouble(g.which)}, double ${llvmDouble(g.utc)})`);
+        return { v: t, ty: "number" };
+      }
+      // URLSearchParams over the raw query text: `.get` is a nullable box (node returns
+      // null for a miss), `.has` a boolean, `.getAll` a string[], `.toString` the
+      // normalized serialization.
+      if (isSearchParamsTy(recv.ty)) return this.genSearchParamsMethod(e.callee.property, recv, e.args);
       if (isMapTy(recv.ty)) return this.genMapMethod(e.callee.property, recv, e.args);
       if (isSetTy(recv.ty)) return this.genSetMethod(e.callee.property, recv, e.args);
       // Bytes (stdlib batch 2): TextEncoder#encode -> Uint8Array; TextDecoder#decode -> string.
@@ -2431,6 +2527,14 @@ class FnGen {
     if (val.ty === "undefined" || val.ty === "void") { this.emit(`call void @js_print_str(ptr ${this.mod.intern("undefined")})`); return; }
     if (val.ty === "null") { this.emit(`call void @js_print_str(ptr ${this.mod.intern("null")})`); return; }
     if (val.ty === "Dyn") { this.emit(`call void @nt_dyn_print(ptr ${val.v})`); return; }
+    // stdlib Batch 3: node's util.inspect of a Date is its ISO string ("Invalid Date"
+    // when the time value is NaN) — the one non-throwing renderer, so no exc check.
+    if (isDateTy(val.ty)) {
+      const s = this.fresh();
+      this.emit(`${s} = call ptr @nt_date_inspect(double ${val.v})`);
+      this.emit(`call void @js_print_str(ptr ${s})`);
+      return;
+    }
     if (isNullableTy(val.ty)) { this.emitPrintNullable(val.v, baseTy(val.ty)); return; }
     this.emit(`call void @js_print_str(ptr ${val.v})`);
   }
@@ -2715,6 +2819,39 @@ class FnGen {
   private keyTag(ty: Ty): number { return ty === "string" ? 1 : 0; }
 
   /** Immutable Map methods → nt_hamt scalar-ABI wrappers. `.set`/`.delete` return a NEW handle. */
+  /**
+   * stdlib Batch 3 — URLSearchParams over the raw query text. `.get` returns NULL
+   * for a miss, which becomes the `null` arm of the A2 tagged pair (node's exact
+   * `string | null` shape); `.has` is the NULL test; `.getAll` a fresh string[].
+   */
+  private genSearchParamsMethod(method: string, recv: Val, args: Expr[]): Val {
+    if (method === "toString") {
+      const t = this.fresh();
+      this.emit(`${t} = call ptr @nt_qs_to_string(ptr ${recv.v})`);
+      return { v: t, ty: "string" };
+    }
+    const key = this.genExpr(args[0]!).v;
+    if (method === "getAll") {
+      const t = this.fresh();
+      this.emit(`${t} = call ptr @nt_qs_get_all(ptr ${recv.v}, ptr ${key})`);
+      return { v: t, ty: "string[]" };
+    }
+    const got = this.fresh();
+    this.emit(`${got} = call ptr @nt_qs_get(ptr ${recv.v}, ptr ${key})`);
+    const isNull = this.fresh();
+    this.emit(`${isNull} = icmp eq ptr ${got}, null`);
+    if (method === "has") {
+      const t = this.fresh();
+      this.emit(`${t} = xor i1 ${isNull}, true`);
+      return { v: t, ty: "boolean" };
+    }
+    const tag = this.fresh();
+    this.emit(`${tag} = select i1 ${isNull}, i64 1, i64 2`); // 1 = null, 2 = present
+    const slot = this.fresh();
+    this.emit(`${slot} = ptrtoint ptr ${got} to i64`);
+    return { v: this.nullBox(tag, slot), ty: makeNullable("null", "string") };
+  }
+
   private genMapMethod(method: string, recv: Val, args: Expr[]): Val {
     const k = mapKeyTy(recv.ty), v = mapValTy(recv.ty);
     const tag = this.keyTag(k);
@@ -3309,6 +3446,10 @@ class FnGen {
       return { v: t, ty: "string" };
     }
     if (ty === "string") { const t = this.fresh(); this.emit(`${t} = call ptr @js_json_quote(ptr ${val.v})`); return { v: t, ty: "string" }; }
+    // stdlib Batch 3: node serializes a Date through `Date.prototype.toJSON`, i.e.
+    // the QUOTED ISO string — and `null` for a non-finite time value (toJSON checks
+    // the time value first, so an Invalid Date serializes rather than throwing).
+    if (isDateTy(ty)) { const t = this.fresh(); this.emit(`${t} = call ptr @nt_date_to_json(double ${val.v})`); return { v: t, ty: "string" }; }
     if (isArrayTy(ty)) return this.genJsonArray(val, indent, depth);
     if (isObjectTy(ty)) return this.genJsonObject(val, indent, depth);
     return { v: this.mod.intern("null"), ty: "string" };
@@ -3530,13 +3671,18 @@ class FnGen {
       case "btoa": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_btoa(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
       case "atob": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_atob(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
       // --- stdlib: URL parsing (WHATWG URL functional subset) — string in, string out ---
-      case "urlProtocol": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_protocol(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
-      case "urlHost": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_host(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
-      case "urlHostname": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_hostname(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
-      case "urlPathname": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_pathname(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
-      case "urlSearch": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_search(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
-      case "urlHash": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_hash(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
-      case "urlSearchParam": { const u = this.genExpr(args[0]!).v; const k = this.genExpr(args[1]!).v; const t = this.fresh(); this.emit(`${t} = call ptr @nt_url_search_param(ptr ${u}, ptr ${k})`); return { v: t, ty: "string" }; }
+      // --- stdlib Batch 3: URI encoding. decode* is fallible (node's URIError). ---
+      case "encodeURIComponent": case "encodeURI": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_${name === "encodeURI" ? "encode_uri" : "encode_uri_component"}(ptr ${this.genExpr(args[0]!).v})`);
+        return { v: t, ty: "string" };
+      }
+      case "decodeURIComponent": case "decodeURI": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_${name === "decodeURI" ? "decode_uri" : "decode_uri_component"}(ptr ${this.genExpr(args[0]!).v})`);
+        this.emitExcCheck();
+        return { v: t, ty: "string" };
+      }
       case "move": return this.genExpr(args[0]!); // ownership marker; runtime identity
       // Host I/O stdin builtins — return a fresh (rc-tracked) heap string.
       case "readLine": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_line()`); return { v: t, ty: "string" }; }
