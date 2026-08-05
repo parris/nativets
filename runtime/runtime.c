@@ -583,6 +583,10 @@ static void nt_exc_raise(const char *msg) { g_exc_set = 1; g_exc_msg = msg; }
 int32_t nt_exc_pending(void) { return g_exc_set; }
 const char *nt_exc_message(void) { return g_exc_msg ? g_exc_msg : ""; }
 void nt_exc_clear(void) { g_exc_set = 0; g_exc_msg = NULL; }
+/* Public entry point so the CONDITIONALLY-LINKED runtime pieces (nt_http.c's `fetch`)
+ * can raise a catchable throw too — a network/DNS failure must reject like node's
+ * fetch does, not abort. The flag/message live here, so they need a real symbol. */
+void nt_exc_raise_msg(const char *msg) { nt_exc_raise(msg); }
 void nt_exc_abort(void) {
   fprintf(stderr, "nativets: uncaught %s\n", g_exc_msg ? g_exc_msg : "exception");
   exit(1);

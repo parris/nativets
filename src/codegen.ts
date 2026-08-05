@@ -13,7 +13,7 @@
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { isConsoleLog } from "./checker.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 import { isOptChainExpr } from "./checker.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
@@ -46,7 +46,7 @@ function scanUsesActors(node: unknown): boolean {
 }
 
 function llvmTy(ty: Ty): string {
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || isBytesRefTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*
+  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*
   switch (ty) {
     case "number": return "double";
     case "boolean": return "i1";
@@ -57,8 +57,16 @@ function llvmTy(ty: Ty): string {
   }
 }
 
+/**
+ * LLVM symbol for a user function. `main` is the C entry point this module emits
+ * itself, so a user function of that name — the idiomatic `async function main() { … }
+ * main();` entrypoint — is renamed instead of colliding ("invalid redefinition of
+ * function 'main'"). Purely a symbol-level rename; the TS-level name is unchanged.
+ */
+function userSym(name: string): string { return name === "main" ? "nt_user_main" : name; }
+
 function defaultZero(ty: Ty): string {
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || isBytesRefTy(ty)) return "null";
+  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "null";
   switch (ty) {
     case "number": return "0x0000000000000000";
     case "boolean": return "false";
@@ -172,6 +180,10 @@ const DECLARES = [
   // Return the response body (rc-string); write the numeric status through the trailing double*.
   "declare ptr @nt_http_post(ptr, ptr, ptr, ptr)",
   "declare ptr @nt_http_get(ptr, ptr, ptr)",
+  // `fetch` (web standard) — blocking; fills the Response block's status + raw-header
+  // slots through the two trailing out-pointers and returns the body (rc-string).
+  "declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)",
+  "declare ptr @nt_headers_get(ptr, ptr)",
   "declare ptr @nt_arr_slice(ptr, double, double)",
   "declare void @nt_arr_extend(ptr, ptr)",
   "declare ptr @js_json_quote(ptr)",
@@ -563,7 +575,7 @@ class FnGen {
       this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`);
     }
     const params = fn.params.map((p, i) => `${llvmTy(sig.params[i]!)} %${p.name}`).join(", ");
-    return this.assemble(`define ${llvmTy(this.retTy)} @${fn.name}(${params})`, b0);
+    return this.assemble(`define ${llvmTy(this.retTy)} @${userSym(fn.name)}(${params})`, b0);
   }
 
   genMain(body: Stmt[], endDrops: string[]): string {
@@ -1000,7 +1012,7 @@ class FnGen {
     if (val.ty === "string") this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
     const t = this.fresh();
     if (val.ty === "number") this.emit(`${t} = bitcast double ${val.v} to i64`);
-    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || isBytesRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty))) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -1009,7 +1021,7 @@ class FnGen {
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
     if (ty === "number") this.emit(`${t} = bitcast i64 ${slot} to double`);
-    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || isBytesRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
@@ -1267,6 +1279,17 @@ class FnGen {
           const t = this.fresh();
           this.emit(`${t} = call ptr @nt_dyn_get_field(ptr ${obj.v}, ptr ${this.mod.intern(e.property)})`);
           return { v: t, ty: "Dyn" };
+        }
+        // fetch's Response block: `.status` / `.headers` are slots; `.ok` is the
+        // spec's 200..299 predicate computed from the status.
+        if (isResponseTy(obj.ty)) {
+          if (e.property === "status") return this.responseSlot(obj.v, 0, "number");
+          if (e.property === "headers") return this.responseSlot(obj.v, 2, "Headers");
+          const st = this.responseSlot(obj.v, 0, "number").v;
+          const lo = this.fresh(); this.emit(`${lo} = fcmp oge double ${st}, ${llvmDouble(200)}`);
+          const hi = this.fresh(); this.emit(`${hi} = fcmp olt double ${st}, ${llvmDouble(300)}`);
+          const ok = this.fresh(); this.emit(`${ok} = and i1 ${lo}, ${hi}`);
+          return { v: ok, ty: "boolean" };
         }
         if (e.property === "length" && (obj.ty === "string" || isArrayTy(obj.ty) || isBytesTy(obj.ty))) {
           const t = this.fresh();
@@ -1684,6 +1707,35 @@ class FnGen {
     }
     if (e.callee.kind === "MemberExpr") {
       const recv = this.genExpr(e.callee.object);
+      // fetch: `res.text()` hands back the already-read body; `res.json()` parses it
+      // into a Dyn (so `as T` narrowing composes exactly like JSON.parse's result).
+      if (isResponseTy(recv.ty)) {
+        const body = this.responseSlot(recv.v, 1, "string");
+        if (e.callee.property === "text") return body;
+        const d = this.fresh();
+        this.emit(`${d} = call ptr @nt_json_parse(ptr ${body.v})`);
+        this.emitExcCheck();
+        return { v: d, ty: "Dyn" };
+      }
+      // `res.headers.get(name)` — case-insensitive in the runtime; a miss is NULL,
+      // which becomes the `null` arm of the nullable box (node returns null too).
+      if (isHeadersTy(recv.ty)) {
+        const key = this.genExpr(e.args[0]!).v;
+        const got = this.fresh();
+        this.emit(`${got} = call ptr @nt_headers_get(ptr ${recv.v}, ptr ${key})`);
+        const isNull = this.fresh();
+        this.emit(`${isNull} = icmp eq ptr ${got}, null`);
+        if (e.callee.property === "has") {
+          const t = this.fresh();
+          this.emit(`${t} = xor i1 ${isNull}, true`);
+          return { v: t, ty: "boolean" };
+        }
+        const tag = this.fresh();
+        this.emit(`${tag} = select i1 ${isNull}, i64 1, i64 2`); // 1 = null, 2 = present
+        const slot = this.fresh();
+        this.emit(`${slot} = ptrtoint ptr ${got} to i64`);
+        return { v: this.nullBox(tag, slot), ty: makeNullable("null", "string") };
+      }
       if (isMapTy(recv.ty)) return this.genMapMethod(e.callee.property, recv, e.args);
       if (isSetTy(recv.ty)) return this.genSetMethod(e.callee.property, recv, e.args);
       // Bytes (stdlib batch 2): TextEncoder#encode -> Uint8Array; TextDecoder#decode -> string.
@@ -2595,6 +2647,79 @@ class FnGen {
     return { v: obj, ty };
   }
 
+  /**
+   * `fetch(url, init?)` → a `Response` handle: a 3-slot heap block
+   * `[status(double bits), body(ptr), rawHeaders(ptr)]`. The status and raw-header
+   * slots are passed to the runtime AS the out-pointers (no alloca — loop-safe, the
+   * same trick genHttp uses), and the returned body is stored into slot 1.
+   *
+   * The request line comes from the STATIC shape of `init`: `method` (default "GET"),
+   * `body` (default ""), and `headers` — an object whose keys are known at compile
+   * time, so the wire header block is unrolled into `k: v\n` concatenations.
+   *
+   * The call BLOCKS. A transport failure raises through the pending-exception
+   * protocol, so the emitted `emitExcCheck` routes it to the nearest catch — matching
+   * node's fetch rejecting.
+   */
+  private genFetch(args: Expr[]): Val {
+    const url = this.genExpr(args[0]!).v;
+    let method: string = this.mod.intern("GET");
+    let body: string = this.mod.intern("");
+    let headers: string = this.mod.intern("");
+    if (args[1]) {
+      const init = this.genExpr(args[1]!);
+      const field = (key: string): string | null => {
+        const ft = fieldType(init.ty, key);
+        if (!ft) return null;
+        const gep = this.fresh();
+        this.emit(`${gep} = getelementptr i64, ptr ${init.v}, i64 ${fieldIndex(init.ty, key)}`);
+        const slot = this.fresh();
+        this.emit(`${slot} = load i64, ptr ${gep}`);
+        return this.fromSlot(slot, ft);
+      };
+      method = field("method") ?? method;
+      body = field("body") ?? body;
+      const hdrTy = fieldType(init.ty, "headers");
+      const hdrObj = hdrTy ? field("headers") : null;
+      if (hdrObj && hdrTy) {
+        // Build the newline-joined "Name: Value" block the curl layer expects.
+        let acc = this.mod.intern("");
+        for (const f of objectFields(hdrTy)) {
+          const gep = this.fresh();
+          this.emit(`${gep} = getelementptr i64, ptr ${hdrObj}, i64 ${fieldIndex(hdrTy, f.key)}`);
+          const slot = this.fresh();
+          this.emit(`${slot} = load i64, ptr ${gep}`);
+          const v = this.fromSlot(slot, "string");
+          acc = this.concat(this.concat(acc, this.mod.intern(`${f.key}: `)), v);
+          acc = this.concat(acc, this.mod.intern("\n"));
+        }
+        headers = acc;
+      }
+    }
+    const resp = this.fresh();
+    this.emit(`${resp} = call ptr @nt_obj_new(double ${llvmDouble(3)})`);
+    const gStatus = this.fresh();
+    this.emit(`${gStatus} = getelementptr i64, ptr ${resp}, i64 0`);
+    const gHeaders = this.fresh();
+    this.emit(`${gHeaders} = getelementptr i64, ptr ${resp}, i64 2`);
+    const bodyStr = this.fresh();
+    this.emit(`${bodyStr} = call ptr @nt_fetch(ptr ${url}, ptr ${method}, ptr ${headers}, ptr ${body}, ptr ${gStatus}, ptr ${gHeaders})`);
+    const gBody = this.fresh();
+    this.emit(`${gBody} = getelementptr i64, ptr ${resp}, i64 1`);
+    this.emit(`store i64 ${this.toSlot({ v: bodyStr, ty: "string" })}, ptr ${gBody}`);
+    this.emitExcCheck(); // a network/DNS failure rejects like node's fetch
+    return { v: resp, ty: "Response" };
+  }
+
+  /** Load one slot of a Response block (0 status, 1 body, 2 raw headers). */
+  private responseSlot(resp: string, idx: number, ty: Ty): Val {
+    const gep = this.fresh();
+    this.emit(`${gep} = getelementptr i64, ptr ${resp}, i64 ${idx}`);
+    const slot = this.fresh();
+    this.emit(`${slot} = load i64, ptr ${gep}`);
+    return { v: this.fromSlot(slot, ty), ty };
+  }
+
   private genGlobal(name: string, args: Expr[]): Val | null {
     switch (name) {
       case "parseInt": {
@@ -2640,6 +2765,8 @@ class FnGen {
       // Networking tier (L-d): HTTP(S) client → {status:number, body:string}.
       case "httpGet": return this.genHttp("nt_http_get", args, false);
       case "httpPost": return this.genHttp("nt_http_post", args, true);
+      // `fetch(url, init?)` — the web-standard client (blocking; see genFetch).
+      case "fetch": return this.isBound("fetch") ? null : this.genFetch(args);
 
       // --- GUI FFI (raylib-backed, north-star C-d) ---
       // Flat scalar ABI: numbers pass as double, the title/text string as ptr; i32-returning
@@ -2840,9 +2967,9 @@ class FnGen {
       for (let i = fixed; i < args.length; i++) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.genExpr(args[i]!))})`);
       argVals.push(`ptr ${arr}`);
       const argstr = argVals.join(", ");
-      if (sig.ret === "void") { this.emit(`call void @${name}(${argstr})`); return { v: "", ty: "void" }; }
+      if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); return { v: "", ty: "void" }; }
       const t = this.fresh();
-      this.emit(`${t} = call ${llvmTy(sig.ret)} @${name}(${argstr})`);
+      this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
       return { v: t, ty: sig.ret };
     }
     const argVals: string[] = [];
@@ -2855,11 +2982,11 @@ class FnGen {
     }
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");
     if (sig.ret === "void") {
-      this.emit(`call void @${name}(${argstr})`);
+      this.emit(`call void @${userSym(name)}(${argstr})`);
       return { v: "", ty: "void" };
     }
     const t = this.fresh();
-    this.emit(`${t} = call ${llvmTy(sig.ret)} @${name}(${argstr})`);
+    this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
     return { v: t, ty: sig.ret };
   }
 }

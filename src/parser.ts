@@ -50,6 +50,19 @@ class Parser {
   private hoistedFns: Stmt[] = [];
   /** True while parsing a constructor body — enables `this.field = expr` (FieldAssign). */
   private inCtor = false;
+  /**
+   * async/await (networking tier). nativets has no event loop and no promises, so
+   * `async` is ERASED and `await` is an IDENTITY pass-through over an
+   * already-resolved value (`fetch` is a blocking call). The payoff: ordinary
+   * idiomatic source compiles here AND runs unchanged under node, which stays the
+   * byte-for-byte oracle. The cost: there is NO concurrency, so anything that would
+   * only make sense with real promises (an un-awaited async result, `.then`,
+   * `Promise.all`) must be REJECTED rather than silently serialized — these two sets
+   * are how the parser spots the first case. See docs/divergences.md.
+   */
+  private asyncFns = new Set<string>();          // names of `async function f`
+  private awaitedCalls = new Set<Expr>();        // call nodes that are the operand of an `await`
+  private identCalls: { node: Expr; name: string; line: number; col: number }[] = [];
   /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
    *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
   private inErrorCtor = false;
@@ -64,6 +77,7 @@ class Parser {
     const alias = this.typeAliases.get(id);
     if (alias) return alias;
     if (id === "Uint8Array" || id === "TextEncoder" || id === "TextDecoder") return id as Ty; // stdlib batch-2 bytes types
+    if (id === "Response" || id === "Headers") return id as Ty; // networking tier: fetch's Response/Headers
     return (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty;
   }
 
@@ -95,10 +109,33 @@ class Parser {
   parseProgram(): Program {
     const body: Stmt[] = [];
     while (this.peek().type !== "eof") body.push(this.parseStatement());
+    this.checkFloatingAsyncCalls(body);
     // Class members lower to top-level functions (`C.constructor`, `C.method`) so they
     // register + hoist alongside ordinary functions for the checker/codegen.
     body.push(...this.hoistedFns);
     return { kind: "Program", body };
+  }
+
+  /**
+   * Reject calling an `async function` without `await` — under node that yields a
+   * *Promise* (and lets the caller interleave); here the body already ran to
+   * completion, so anything that uses the value, or that expects other code to run
+   * while it is pending, would silently diverge. The ONE allowed exception is the
+   * canonical entrypoint `main();` as the LAST top-level statement: with nothing
+   * after it, node's "suspend, run the rest, resume" and our "run it now" produce
+   * identical output. Everything else is NT1020, pointing at the actor model
+   * (`spawn`/`send`/`receive`) for actual concurrency.
+   */
+  private checkFloatingAsyncCalls(body: Stmt[]): void {
+    const last = body[body.length - 1];
+    const entrypoint = last && last.kind === "ExprStmt" ? last.expr : null;
+    for (const c of this.identCalls) {
+      if (!this.asyncFns.has(c.name) || this.awaitedCalls.has(c.node) || c.node === entrypoint) continue;
+      throw nyi(
+        NYI.ASYNC,
+        `calling async function '${c.name}' without 'await' at ${c.line}:${c.col} (its value is a Promise under node; nativets runs it to completion immediately)`,
+      );
+    }
   }
 
   // ---- types (permissive; we only need scalars precisely) ----
@@ -281,6 +318,13 @@ class Parser {
     if (this.at("class") && this.peek(1).type === "ident") return this.parseClass();
     if (this.at("let") || this.at("const")) { const d = this.parseVarDecl(); this.eat(";"); return d; }
     if (this.at("function")) return this.parseFuncDecl();
+    // `async function f() {…}` — `async` is ERASED (see the async/await note above):
+    // the body is compiled as an ordinary function and `await` inside it is identity.
+    if (this.at("async") && this.peek(1).value === "function") {
+      this.next();
+      this.asyncFns.add(this.peek(1).value); // the declared name (after `function`)
+      return this.parseFuncDecl();
+    }
     if (this.at("return")) return this.parseReturn();
     if (this.at("if")) return this.parseIf();
     if (this.at("while")) return this.parseWhile();
@@ -710,6 +754,12 @@ class Parser {
     return { kind: "SequenceExpr", exprs };
   }
 
+  /** Can this token begin an expression? (Used to tell the `await` operator from an identifier.) */
+  private startsExpression(t: Token): boolean {
+    if (t.type === "ident" || t.type === "num" || t.type === "str" || t.type === "template") return true;
+    return t.type === "punct" && ["(", "[", "{", "!", "-", "+", "~", "..."].includes(t.value);
+  }
+
   private looksLikeArrow(): boolean {
     const t = this.peek();
     if (t.type === "ident" && this.peek(1).value === "=>") return true;
@@ -760,6 +810,8 @@ class Parser {
     // in this subset (no JSX / old-style casts), so it is unambiguous: erase the type-param
     // list and parse the arrow that follows.
     if (this.at("<")) { this.skipGenerics(); return this.parseArrow(); }
+    // `async (x) => …` / `async x => …` — `async` is erased (see the async/await note).
+    if (this.at("async") && (this.peek(1).value === "(" || this.peek(2).value === "=>")) { this.next(); return this.parseArrow(); }
     if (this.looksLikeArrow()) return this.parseArrow();
     const left = this.parsePipe();
     const t = this.peek();
@@ -850,6 +902,15 @@ class Parser {
       return { kind: "UnaryExpr", op, operand: this.parseUnary() };
     }
     if (this.at("void")) { this.eat("void"); return { kind: "UnaryExpr", op: "void", operand: this.parseUnary() }; }
+    // `await e` — IDENTITY on an already-resolved value (no event loop; `fetch` and
+    // friends block). Only treated as the operator when something that can START an
+    // expression follows, so `await` stays usable as an ordinary identifier.
+    if (this.at("await") && this.startsExpression(this.peek(1))) {
+      this.eat("await");
+      const operand = this.parseUnary();
+      this.awaitedCalls.add(operand); // marks a `await f()` call as legitimately consumed
+      return operand;
+    }
     if (this.at("typeof")) { this.eat("typeof"); return { kind: "TypeofExpr", operand: this.parseUnary() }; }
     if (this.at("new")) {
       this.eat("new");
@@ -921,6 +982,12 @@ class Parser {
         }
         this.eat(")");
         expr = { kind: "CallExpr", callee: expr, args };
+        // Record plain `f(...)` calls so an un-awaited call to an `async function`
+        // can be rejected after the whole program is parsed (see checkFloatingAsyncCalls).
+        if (expr.callee.kind === "Identifier") {
+          const loc = expr.callee.loc ?? { line: 0, col: 0 };
+          this.identCalls.push({ node: expr, name: expr.callee.name, line: loc.line, col: loc.col });
+        }
       } else if (this.at("<") && this.tryCallTypeArgs()) {
         // Call-site type arguments `f<T>(x)` / `foo<string>()` — parsed and ERASED.
         // Only committed when a balanced `<...>` is immediately followed by `(` (a call),

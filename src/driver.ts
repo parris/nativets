@@ -344,7 +344,8 @@ function writeIR(source: string): { dir: string; ll: string; rt: string; actor: 
   // iOS/Android cross-builds) free of the curl dependency.
   // Match the CALL site, not the (always-present) `declare` line, so nt_http.c + libcurl
   // are pulled in ONLY when the program actually calls the builtin.
-  if (ir.includes("call ptr @nt_http_post(") || ir.includes("call ptr @nt_http_get(")) {
+  // `fetch` lives in the same file, so its call site pulls in the same object + libcurl.
+  if (ir.includes("call ptr @nt_http_post(") || ir.includes("call ptr @nt_http_get(") || ir.includes("call ptr @nt_fetch(")) {
     const http = join(dir, "nt_http.c");
     writeFileSync(http, httpSource);
     extra.push(http, "-lcurl");

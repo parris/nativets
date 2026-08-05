@@ -98,6 +98,18 @@ export function isTextEncoderTy(t: Ty): boolean { return t === "TextEncoder"; }
 export function isTextDecoderTy(t: Ty): boolean { return t === "TextDecoder"; }
 export function isBytesRefTy(t: Ty): boolean { return t === "Uint8Array" || t === "TextEncoder" || t === "TextDecoder"; }
 
+/**
+ * Networking tier (`fetch`). A `Response` is a 3-slot heap block
+ * `[status(double bits), body(ptr), rawHeaders(ptr)]`; `Headers` is just the raw
+ * header block that came back on the wire (case-insensitive lookup happens in the
+ * runtime). Both are lowered to `ptr`, and — like the bytes handles — they are plain
+ * reserved type names (no `{`/`[]`/`(`/`<`/`?`), so no structural predicate matches
+ * them and they are neither linear nor printable as objects.
+ */
+export function isResponseTy(t: Ty): boolean { return t === "Response"; }
+export function isHeadersTy(t: Ty): boolean { return t === "Headers"; }
+export function isFetchRefTy(t: Ty): boolean { return t === "Response" || t === "Headers"; }
+
 export function mapKeyTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[0] as Ty; }
 export function mapValTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[1] as Ty; }
 export function setElemTy(t: Ty): Ty { return t.slice(4, -1) as Ty; }
