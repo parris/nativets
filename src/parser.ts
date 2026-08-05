@@ -174,6 +174,7 @@ class Parser {
     const fields: string[] = [];
     if (!this.at("}")) {
       do {
+        if (this.at("}")) break; // tolerate a trailing `,`/`;` separator (interface bodies)
         const key = this.expectIdent();
         const optional = this.at("?"); // `{ a?: T }` ≡ `{ a: T | undefined }`
         if (optional) this.eat("?");
