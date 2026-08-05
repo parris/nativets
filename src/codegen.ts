@@ -65,6 +65,21 @@ function mentions(node: unknown, name: string): boolean {
   return false;
 }
 
+/** Array-producing calls that mint a FRESH, unaliased array. A user function call is
+ *  deliberately absent: it may return a module-level array the caller does not own. */
+const FRESH_ARRAY_CALLS = new Set([
+  "map", "filter", "slice", "concat", "with", "toSorted", "toReversed", "flat", "flatMap",
+  "split", "keys", "values", "entries",
+]);
+/** …and the one array method that returns its RECEIVER (in-place, like node). */
+const RETAINS_RECEIVER = new Set(["reverse"]);
+
+function freshArray(e: Expr): boolean {
+  if (e.kind === "ArrayLiteral") return true;
+  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") return FRESH_ARRAY_CALLS.has(e.callee.property);
+  return false;
+}
+
 function llvmTy(ty: Ty): string {
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*
   switch (ty) {
@@ -670,6 +685,22 @@ class FnGen {
     const p = this.fresh();
     this.emit(`${p} = load ptr, ptr ${this.addr(e.target)}`);
     this.emit(`call void @${isObjectTy(ty) ? "nt_obj_free" : "nt_arr_free"}(ptr ${p})`);
+  }
+
+  /** Free the RECEIVER of an array method when the receiver was an unbound TEMPORARY
+   *  (`"a,b".split(",").length`, `xs.map(f).filter(g)`): no binding owns it, so the
+   *  drop pass never sees it — this is the statement-scoped half of RAII.
+   *
+   *  Both halves of the rule are syntactic and conservative:
+   *   - the receiver must be a FRESH array producer (`freshArray`) — a plain function
+   *     call is excluded, since it may return an array the callee still owns;
+   *   - the method must not hand the receiver back (`.reverse` mutates in place and
+   *     returns it, exactly like node), and the result must not BE the receiver.
+   *  Element pointers (strings/objects the result copied) are never freed here — the
+   *  header is all this owns. Anything not matching just leaks, as it did before. */
+  private freeReceiverTemp(objExpr: Expr, recv: Val, method: string, out: Val): void {
+    if (!freshArray(objExpr) || RETAINS_RECEIVER.has(method) || out.v === recv.v) return;
+    this.emit(`call void @nt_arr_free(ptr ${recv.v})`);
   }
 
   /** The CONSUMING-APPEND pattern `x = [...x, e1, …]` (B2 step 4). Requires the
@@ -1521,7 +1552,11 @@ class FnGen {
           const t = this.fresh();
           if (obj.ty === "string") this.emit(`${t} = call double @js_str_len(ptr ${obj.v})`);
           else if (isBytesTy(obj.ty)) this.emit(`${t} = call double @nt_bytes_len(ptr ${obj.v})`);
-          else this.emit(`${t} = call double @nt_arr_len(ptr ${obj.v})`);
+          else {
+            this.emit(`${t} = call double @nt_arr_len(ptr ${obj.v})`);
+            // `xs.map(f).length` — reading the length is the last use of that temporary.
+            this.freeReceiverTemp(e.object, obj, "length", { v: t, ty: "number" });
+          }
           return { v: t, ty: "number" };
         }
         if ((isMapTy(obj.ty) || isSetTy(obj.ty)) && e.property === "size") {
@@ -2063,7 +2098,11 @@ class FnGen {
         }
         return { v: t, ty: "string" };
       }
-      if (isArrayTy(recv.ty)) return this.genArrayMethod(e.callee.property, recv, e.args);
+      if (isArrayTy(recv.ty)) {
+        const out = this.genArrayMethod(e.callee.property, recv, e.args);
+        this.freeReceiverTemp(e.callee.object, recv, e.callee.property, out);
+        return out;
+      }
       return this.genStringMethod(e.callee.property, recv, e.args);
     }
     if (e.callee.kind === "Identifier") {

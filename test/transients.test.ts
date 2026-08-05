@@ -135,6 +135,49 @@ console.log(__arrLive());`;
   });
 });
 
+describe("leak 4: unbound temporaries in a chain are freed", () => {
+  test("a chained builder's intermediate arrays do not accumulate", async () => {
+    // `"…".split("")` and `.map(…)` each mint a fresh array; only the last one is
+    // bound. The intermediates are dead the moment the next link has read them.
+    const src = `
+function f(n: number): number {
+  let s: number = 0;
+  for (let i = 0; i < n; i = i + 1) {
+    s = s + "a,b,c".split(",").length;
+    s = s + [1, 2, 3].map((x: number): number => x * 2).filter((x: number): boolean => x > 2).length;
+  }
+  return s;
+}
+console.log(f(100));
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("500\n0\n");
+  });
+
+  test("the receiver-preserving .reverse() is never freed under the caller", async () => {
+    // `.reverse` returns its RECEIVER (it mutates in place, like node). Freeing the
+    // temp after the call would hand back freed memory — the one exclusion.
+    const src = `
+const a: number[] = [1, 2, 3].reverse();
+const b: string = "x,y,z".split(",").reverse().join("-");
+console.log(a.join(","), b, a.length);`;
+    const { ours, oracle } = await expectMatchesNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.stdout).toBe("3,2,1 z-y-x 3\n");
+  });
+
+  test("a chain over trie-backed arrays still matches node", async () => {
+    const src = `${BUILD}
+const s: number = build(100).slice(10, 20).map((x: number): number => x + 1).reduce((a: number, x: number): number => a + x, 0);
+console.log(s, build(40).toSorted((x: number, y: number): number => y - x)[0]);
+console.log(build(50).filter((x: number): boolean => x % 10 === 0).join(","));`;
+    const { ours, oracle } = await expectMatchesNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
 describe("leak 3: a conditionally-moved value still gets dropped (drop flags)", () => {
   test("moved on one branch only — freed on the branch that kept it", async () => {
     // rustc compiles this with a runtime DROP FLAG. Our equivalent is cheaper and needs
