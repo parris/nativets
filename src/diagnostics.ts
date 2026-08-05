@@ -89,6 +89,10 @@ export const NYI = {
   CLASS: { code: "NT1012", milestone: "M3", hint: "classes are not implemented" },
   GENERIC: { code: "NT1013", milestone: "M3", hint: "generics need monomorphization" },
   COLLECTION: { code: "NT1014", milestone: "M3", hint: "immutable Map/Set support string keys + number values (Map) / string|number elems (Set)" },
+  // Minimal classes ARE implemented (fields + constructor + methods + `new`/`this`).
+  // Everything beyond that plain shape — inheritance, static, getters/setters, access
+  // modifiers, parameter properties, field initializers — is deferred with this code.
+  CLASS_FEATURE: { code: "NT1015", milestone: "M3", hint: "minimal classes support only fields + a constructor + methods; this class feature is deferred" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

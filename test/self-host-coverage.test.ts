@@ -35,13 +35,16 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     expect(r.statements).toBeGreaterThan(20);
   });
 
-  test("lexer.ts — surfaces its `class` as a feature-level NT1012 blocker", () => {
+  test("lexer.ts — its `class` now surfaces the deferred-feature blocker NT1015 (SH3)", () => {
     const r = coverage(src("lexer.ts"));
     expect(r.parsed).toBe(true);
     expect(r.statements).toBeGreaterThan(0);
-    // `class LexError extends Error {}` — a real semantic blocker, reported as NT1012
-    // rather than swallowed by a preamble parse error.
-    expect(r.blockers.some((b) => b.code === "NT1012")).toBe(true);
+    // SH3 adds minimal classes (fields + constructor + methods), so `class` is no longer
+    // a blanket NT1012. `class LexError extends Error {}` flows to the real parser, which
+    // accepts the class shape but reports its still-deferred feature — inheritance — as
+    // NT1015 (a real semantic blocker, not swallowed by a preamble parse error).
+    expect(r.blockers.some((b) => b.code === "NT1015")).toBe(true);
+    expect(r.blockers.some((b) => b.code === "NT1012")).toBe(false);
   });
 
   test("generic type arguments now PARSE + ERASE — no longer an NT1013 blocker (SH2)", () => {
@@ -77,11 +80,15 @@ describe("SH0 preprocess: strips module/type surface, neutralizes lexer hazards"
       "export function f(n: number): number { return n + 1; }",
     ].join("\n");
     const pre = preprocessForCoverage(source);
-    // The class is recorded as an NT1012 blocker; import/type/interface/shebang erased.
-    expect(pre.stripped.some((b) => b.code === "NT1012")).toBe(true);
+    // Minimal classes now compile, so `class` is NO LONGER pre-stripped as an NT1012
+    // blocker — it flows to the real parser as an ordinary statement (which handles it,
+    // or surfaces the real next blocker NT1015 for a deferred class feature). Meanwhile
+    // import/type/interface/shebang are still erased and the regex still neutralized.
+    expect(pre.stripped.some((b) => b.code === "NT1012")).toBe(false);
     const joined = pre.statements.map((s) => s.text).join("\n");
     expect(joined).not.toContain("import");
     expect(joined).not.toContain("interface");
+    expect(joined).toContain("class Box");
     expect(joined).toContain("function f");
     // regex literal was neutralized (no stray backslash reaches the real lexer).
     expect(joined).not.toContain("/a");

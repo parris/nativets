@@ -87,10 +87,29 @@ export function mapKeyTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[
 export function mapValTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[1] as Ty; }
 export function setElemTy(t: Ty): Ty { return t.slice(4, -1) as Ty; }
 
-export function isObjectTy(t: Ty): boolean { return typeof t === "string" && !isNullableTy(t) && t.startsWith("{") && !t.endsWith("[]"); }
-/** Parse an object type into ordered [key, type] fields (nesting-aware). */
+/**
+ * Class instance types (minimal classes) are structural object types with a leading
+ * class-name TAG: `Name{field:ty,...}` (e.g. `Point{x:number,y:number}`). The `{...}`
+ * body reuses ALL object machinery (field slots, printing, JSON, equality); the tag is
+ * read only for method resolution (`inst.m()` → `Name.m(inst, …)`). A plain object literal
+ * type has no tag (`{a:number}`). `classTag` returns the tag when present.
+ */
+export function classTag(t: Ty): string | undefined {
+  if (typeof t !== "string") return undefined;
+  const i = t.indexOf("{");
+  if (i <= 0 || !t.endsWith("}")) return undefined;
+  const tag = t.slice(0, i);
+  return /^[A-Za-z_$][\w$]*$/.test(tag) ? tag : undefined;
+}
+export function isObjectTy(t: Ty): boolean {
+  if (typeof t !== "string" || isNullableTy(t) || t.endsWith("[]")) return false;
+  const i = t.indexOf("{");
+  if (i < 0 || !t.endsWith("}")) return false;
+  return i === 0 || /^[A-Za-z_$][\w$]*$/.test(t.slice(0, i)); // untagged literal or class-tagged
+}
+/** Parse an object type into ordered [key, type] fields (nesting-aware; tag-tolerant). */
 export function objectFields(t: Ty): { key: string; ty: Ty }[] {
-  const inner = t.slice(1, -1);
+  const inner = t.slice(t.indexOf("{") + 1, -1);
   if (inner === "") return [];
   return splitTopLevel(inner, ",").map((part) => {
     const i = part.indexOf(":");
@@ -122,6 +141,7 @@ export type Expr =
   | ConditionalExpr
   | SequenceExpr
   | AssignExpr
+  | FieldAssign
   | TypeofExpr
   | SpreadExpr
   | ArrowFunction
@@ -220,6 +240,15 @@ export interface AssignExpr {
   value: Expr;
   ty?: Ty;
 }
+
+/**
+ * Field initialization `this.field = expr` — permitted ONLY inside a class constructor
+ * (the parser emits this in place of an `AssignExpr` for a `this.f = v` target while
+ * parsing a ctor body). It is the single place field assignment is allowed: everywhere
+ * else `o.f = v` stays rejected (NT1606) since values are immutable, and a method
+ * mutating `this` is likewise rejected. Lowers to a static slot store on the instance.
+ */
+export interface FieldAssign { kind: "FieldAssign"; object: Expr; field: string; value: Expr; ty?: Ty; }
 
 export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
 

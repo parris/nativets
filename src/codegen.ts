@@ -13,7 +13,7 @@
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { isConsoleLog } from "./checker.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag } from "./ast.ts";
 import { isOptChainExpr } from "./checker.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
@@ -1457,10 +1457,38 @@ class FnGen {
         if (e.expr.ty === "Dyn") return this.genDynNarrow(this.genExpr(e.expr).v, e.ty);
         return { v: this.genExpr(e.expr).v, ty: e.ty };
       }
+      case "FieldAssign": {
+        // `this.field = value` — store one instance slot (constructor initialization).
+        const obj = this.genExpr(e.object);
+        const ft = fieldType(obj.ty, e.field)!;
+        const slot = this.toSlot(this.coerce(this.genExpr(e.value), ft));
+        const g = this.fresh();
+        this.emit(`${g} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, e.field)}`);
+        this.emit(`store i64 ${slot}, ptr ${g}`);
+        return { v: this.fromSlot(slot, ft), ty: ft };
+      }
       case "NewExpr": {
         // Immutable collections (B2): fresh empty handle from the nt_hamt runtime.
         if (e.callee === "Map") { const m = this.fresh(); this.emit(`${m} = call ptr @nt_map_new()`); return { v: m, ty: e.ty! }; }
         if (e.callee === "Set") { const s = this.fresh(); this.emit(`${s} = call ptr @nt_set_new()`); return { v: s, ty: e.ty! }; }
+        // `new C(args)` on a user class: allocate the field slot block, then run the
+        // constructor (`C.constructor(this, …args)`), and hand back the instance ptr.
+        const cls = classTag(e.ty ?? "");
+        if (cls) {
+          const objTy = e.ty!;
+          const nfields = objectFields(objTy).length;
+          const obj = this.fresh();
+          this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(Math.max(nfields, 1))})`);
+          const csig = this.mod.functions.get(`${cls}.constructor`)!;
+          const argVals: string[] = [`ptr ${obj}`];
+          for (let i = 1; i < csig.params.length; i++) {
+            const provided = e.args[i - 1];
+            const v = provided ? this.genExpr(provided) : this.genExpr(csig.defaults[i]!);
+            argVals.push(`${llvmTy(csig.params[i]!)} ${this.coerce(v, csig.params[i]!).v}`);
+          }
+          this.emit(`call void @${cls}.constructor(${argVals.join(", ")})`);
+          return { v: obj, ty: objTy };
+        }
         // new Error(msg) → object { message: msg }
         const msg = this.genExpr(e.args[0]!);
         const obj = this.fresh();
@@ -1567,6 +1595,13 @@ class FnGen {
           this.emit(`${t} = call ptr @nt_arr_from_str(ptr ${s})`);
           return { v: t, ty: "string[]" };
         }
+      }
+    }
+    // class instance method call: `inst.m(args)` → `C.m(inst, …args)` (the lowered fn).
+    if (e.callee.kind === "MemberExpr") {
+      const cls = classTag(e.callee.object.ty ?? "");
+      if (cls && this.mod.functions.has(`${cls}.${e.callee.property}`)) {
+        return this.genUserCall(`${cls}.${e.callee.property}`, [e.callee.object, ...e.args]);
       }
     }
     if (e.callee.kind === "MemberExpr") {

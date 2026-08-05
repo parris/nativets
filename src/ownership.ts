@@ -237,6 +237,10 @@ class Analyzer {
         this.expr(e.value, state, true);
         if (this.linear.has(e.target)) state.set(e.target, { moved: false }); // reassignment revives
         return;
+      case "FieldAssign": // `this.field = v`: read the instance (borrow), move the value in
+        this.expr(e.object, state, false);
+        this.expr(e.value, state, true);
+        return;
       case "MemberExpr": this.expr(e.object, state, false); return;
       case "IndexExpr":
         // Reading `arr[i]` in a CONSUMING position (binding / return / move) when the element

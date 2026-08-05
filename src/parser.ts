@@ -9,9 +9,9 @@
 
 import { lex, type Token } from "./lexer.ts";
 import { parseError, nyi, NYI, mutationError } from "./diagnostics.ts";
-import { makeNullable, makeMapTy, makeSetTy } from "./ast.ts";
+import { makeNullable, makeMapTy, makeSetTy, objectType } from "./ast.ts";
 import type {
-  Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty,
+  Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
 } from "./ast.ts";
 
 export class ParseError extends Error {}
@@ -41,6 +41,11 @@ class Parser {
    * entire trace. Unknown named types still fall back to `number`, as before.
    */
   private typeAliases = new Map<string, Ty>();
+  /** Top-level functions synthesized from class members (ctor + methods), appended to
+   *  the program body after parsing so they hoist like ordinary function declarations. */
+  private hoistedFns: Stmt[] = [];
+  /** True while parsing a constructor body — enables `this.field = expr` (FieldAssign). */
+  private inCtor = false;
   constructor(private toks: Token[]) {}
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
@@ -82,6 +87,9 @@ class Parser {
   parseProgram(): Program {
     const body: Stmt[] = [];
     while (this.peek().type !== "eof") body.push(this.parseStatement());
+    // Class members lower to top-level functions (`C.constructor`, `C.method`) so they
+    // register + hoist alongside ordinary functions for the checker/codegen.
+    body.push(...this.hoistedFns);
     return { kind: "Program", body };
   }
 
@@ -262,6 +270,7 @@ class Parser {
     // `type`/`interface` used as ordinary identifiers still parse as expressions.
     if (this.at("type") && this.peek(1).type === "ident" && (this.peek(2).value === "=" || this.peek(2).value === "<")) return this.parseTypeAlias();
     if (this.at("interface") && this.peek(1).type === "ident") return this.parseInterface();
+    if (this.at("class") && this.peek(1).type === "ident") return this.parseClass();
     if (this.at("let") || this.at("const")) { const d = this.parseVarDecl(); this.eat(";"); return d; }
     if (this.at("function")) return this.parseFuncDecl();
     if (this.at("return")) return this.parseReturn();
@@ -356,10 +365,8 @@ class Parser {
     return { name, annot, default: def, rest };
   }
 
-  private parseFuncDecl(): Stmt {
-    this.eat("function");
-    const name = this.expectIdent();
-    if (this.at("<")) this.skipGenerics(); // erased generic type-parameter list `f<T, U>`
+  /** Parse a `( … )` parameter list (rest / optional / annotated / default params). */
+  private parseParamList(): Param[] {
     this.eat("(");
     const params: Param[] = [];
     if (!this.at(")")) {
@@ -377,9 +384,95 @@ class Parser {
       } while (this.at(",") && (this.eat(","), true));
     }
     this.eat(")");
+    return params;
+  }
+
+  private parseFuncDecl(): Stmt {
+    this.eat("function");
+    const name = this.expectIdent();
+    if (this.at("<")) this.skipGenerics(); // erased generic type-parameter list `f<T, U>`
+    const params = this.parseParamList();
     let returnAnnot: Ty | undefined;
     if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
     return { kind: "FuncDecl", name, params, returnAnnot, body: this.parseBlock() };
+  }
+
+  // ---- classes (minimal: fields + constructor + methods; no inheritance/static/
+  // getters/access-modifiers/parameter-properties/field-initializers — those are
+  // deferred with NT1015). A class INSTANCE is a heap object whose slots are the
+  // declared fields in order; its type is the structural object type TAGGED with the
+  // class name (`Point{x:number,y:number}`). Each method + the constructor lower to a
+  // top-level function taking the instance as an explicit first `this` param.
+  private parseClass(): Stmt {
+    this.eat("class");
+    const name = this.expectIdent();
+    if (this.at("<")) throw nyi(NYI.CLASS_FEATURE, `generic class '${name}' (type parameters)`);
+    if (this.at("extends") || this.at("implements")) throw nyi(NYI.CLASS_FEATURE, `class inheritance ('${this.peek().value}')`);
+    this.eat("{");
+    const fields: { key: string; ty: Ty }[] = [];
+    const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[] }[] = [];
+    let ctorParams: Param[] | null = null;
+    let ctorBody: Stmt[] = [];
+    const modifiers = new Set(["private", "public", "protected", "readonly", "static", "abstract", "declare", "override", "get", "set", "async"]);
+    while (!this.at("}") && this.peek().type !== "eof") {
+      if (this.at(";")) { this.eat(";"); continue; }
+      const tok = this.peek();
+      // A modifier/accessor keyword only counts as such when it PREFIXES a member (another
+      // token follows before the member's `(`/`:`/`?`/`=`). `get(): T` / `set(): T` are
+      // ordinary methods literally named get/set, not accessors.
+      const nextV = this.peek(1).value, nextIsMemberStart = nextV === "(" || nextV === ":" || nextV === "?" || nextV === "=";
+      if (tok.type === "ident" && modifiers.has(tok.value) && !nextIsMemberStart) throw nyi(NYI.CLASS_FEATURE, `class member modifier/accessor '${tok.value}' at ${tok.line}:${tok.col}`);
+      if (this.at("[")) throw nyi(NYI.CLASS_FEATURE, `computed/index class member at ${tok.line}:${tok.col}`);
+      const member = this.expectIdent();
+      if (member === "constructor" && this.at("(")) {
+        if (ctorParams) throw parseError(`Duplicate constructor at ${tok.line}:${tok.col}`);
+        ctorParams = this.parseParamList();
+        for (const p of ctorParams) if (p.rest) throw nyi(NYI.CLASS_FEATURE, "rest parameter in a constructor");
+        if (this.at(":")) { this.eat(":"); this.parseType(); } // ctor return annot (ignored)
+        this.inCtor = true;
+        ctorBody = this.parseBlock();
+        this.inCtor = false;
+        continue;
+      }
+      if (this.at("(")) {
+        const params = this.parseParamList();
+        let returnAnnot: Ty | undefined;
+        if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
+        methods.push({ name: member, params, returnAnnot, body: this.parseBlock() });
+        continue;
+      }
+      // field declaration: `name: Type;` (optional `?`); initializers are deferred
+      if (this.at("?")) this.eat("?");
+      let ty: Ty = "number";
+      if (this.at(":")) { this.eat(":"); ty = this.parseType(); }
+      else throw nyi(NYI.CLASS_FEATURE, `class field '${member}' needs a type annotation`);
+      if (this.at("=")) throw nyi(NYI.CLASS_FEATURE, `class field initializer on '${member}' (assign it in the constructor instead)`);
+      if (this.at(";")) this.eat(";");
+      fields.push({ key: member, ty });
+    }
+    this.eat("}");
+
+    // Reject-don't-miscompile: fields are only initialized by the constructor, so a class
+    // with fields but no constructor would leave instance slots uninitialized (node reads
+    // them as `undefined`). Refuse it rather than emit garbage.
+    if (fields.length > 0 && ctorParams === null) throw nyi(NYI.CLASS_FEATURE, `class '${name}' declares fields but has no constructor to initialize them`);
+
+    const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
+    this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
+    const thisParam: Param = { name: "this", annot: objTy };
+    // Constructor → `C.constructor(this, …ctorParams): void` (caller allocates `this`).
+    this.hoistedFns.push({
+      kind: "FuncDecl", name: `${name}.constructor`,
+      params: [thisParam, ...(ctorParams ?? [])], returnAnnot: "void", body: ctorBody,
+    } as FuncDecl);
+    // Each method → `C.method(this, …params)`.
+    for (const m of methods) {
+      this.hoistedFns.push({
+        kind: "FuncDecl", name: `${name}.${m.name}`,
+        params: [thisParam, ...m.params], returnAnnot: m.returnAnnot, body: m.body,
+      } as FuncDecl);
+    }
+    return { kind: "MultiStmt", stmts: [] }; // the declaration itself is erased
   }
 
   private parseReturn(): Stmt {
@@ -576,8 +669,16 @@ class Parser {
       // which the model forbids. Reject with NT1606 pointing at the CoW replacement.
       if (left.kind === "IndexExpr")
         throw mutationError("arrays are immutable: `arr[i] = v` would mutate the array in place", "use `arr.with(i, v)` — returns a NEW array; the original is unchanged");
-      if (left.kind === "MemberExpr")
+      if (left.kind === "MemberExpr") {
+        // The ONE allowed field assignment: `this.field = v` while building an instance
+        // inside a constructor. Everywhere else `o.f = v` stays rejected (immutability),
+        // and a method (parsed with inCtor=false) mutating `this` falls through here too.
+        if (this.inCtor && t.value === "=" && left.object.kind === "Identifier" && left.object.name === "this") {
+          this.next();
+          return { kind: "FieldAssign", object: left.object, field: left.property, value: this.parseAssign() };
+        }
         throw mutationError("objects are immutable: `o.f = v` would mutate the object in place", "use `{ ...o, f: v }` — returns a NEW object; the original is unchanged");
+      }
       if (left.kind !== "Identifier") throw parseError("Invalid assignment target");
       const op = this.next().value as any;
       return { kind: "AssignExpr", op, target: left.name, value: this.parseAssign() };
