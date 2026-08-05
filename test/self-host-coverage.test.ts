@@ -44,11 +44,14 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     expect(r.blockers.some((b) => b.code === "NT1012")).toBe(true);
   });
 
-  test("generic type arguments surface as NT1013 (a real self-hosting blocker)", () => {
-    // codegen.ts is generic-heavy; the histogram must name generics, not die on them.
+  test("generic type arguments now PARSE + ERASE — no longer an NT1013 blocker (SH2)", () => {
+    // codegen.ts is generic-heavy (`Extract<Expr, {...}>`, `Record<K,V>`, `Map<K,V>`).
+    // SH2 makes generic type arguments parse and erase to a supported shape, so they no
+    // longer die on/surface as NT1013 — the histogram advances past them to the next
+    // real blocker (classes, etc.).
     const r = coverage(src("codegen.ts"));
     expect(r.parsed).toBe(true);
-    expect(r.blockers.some((b) => b.code === "NT1013")).toBe(true);
+    expect(r.blockers.some((b) => b.code === "NT1013")).toBe(false);
   });
 
   test("every src module reaches analysis (no file dies on the module preamble)", () => {
