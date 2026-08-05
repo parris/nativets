@@ -12,7 +12,16 @@ import { parseError, nyi, NYI, mutationError } from "./diagnostics.ts";
 import { makeNullable, makeMapTy, makeSetTy, objectType } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
+  ImportDecl, ExportTable,
 } from "./ast.ts";
+
+/** Options for parsing ONE module of a program (see src/modules.ts). */
+export interface ParseOpts {
+  /** Type-level names imported from already-parsed dependencies (`import type`,
+   *  and the instance shape of an imported `class`). Seeds the alias table so an
+   *  annotation naming an imported type resolves to its real shape. */
+  typeEnv?: Map<string, Ty>;
+}
 
 export class ParseError extends Error {}
 
@@ -53,7 +62,16 @@ class Parser {
   /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
    *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
   private inErrorCtor = false;
-  constructor(private toks: Token[]) {}
+  /** Module surface (SH1): `import` declarations and the export table. Empty for an
+   *  ordinary single-file program, in which case `parseProgram` leaves them off the
+   *  Program entirely — so every existing single-module path is untouched. */
+  private imports: ImportDecl[] = [];
+  private exportValues = new Map<string, string>();
+  private exportReexports = new Map<string, { source: string; imported: string; line: number }>();
+  private exportTypes = new Set<string>();
+  constructor(private toks: Token[], opts: ParseOpts = {}) {
+    if (opts.typeEnv) for (const [k, v] of opts.typeEnv) this.typeAliases.set(k, v);
+  }
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
   private ident(name: string): Expr { return { kind: "Identifier", name }; }
@@ -98,7 +116,16 @@ class Parser {
     // Class members lower to top-level functions (`C.constructor`, `C.method`) so they
     // register + hoist alongside ordinary functions for the checker/codegen.
     body.push(...this.hoistedFns);
-    return { kind: "Program", body };
+    const program: Program = { kind: "Program", body };
+    // Only attach the module surface when the source actually used it, so a
+    // single-file program's Program is byte-identical to what it always was.
+    if (this.imports.length) program.imports = this.imports;
+    if (this.exportValues.size || this.exportReexports.size || this.exportTypes.size) {
+      const types = new Map<string, Ty>();
+      for (const n of this.exportTypes) { const t = this.typeAliases.get(n); if (t) types.set(n, t); }
+      program.exports = { values: this.exportValues, reexports: this.exportReexports, types } satisfies ExportTable;
+    }
+    return program;
   }
 
   // ---- types (permissive; we only need scalars precisely) ----
@@ -272,8 +299,116 @@ class Parser {
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
   }
 
+  // ---- modules (SH1) --------------------------------------------------------
+  // `import`/`export` are recorded on the Program and ERASED from the statement
+  // stream: they bind/expose names, they never execute. The linker (src/modules.ts)
+  // resolves the graph and merges every module into one Program. Anything outside
+  // the supported surface is refused with NT1017 (never miscompiled).
+
+  /** A module specifier string, validated to be a relative path (`./x.ts`, `../y.ts`). */
+  private parseSpecifier(what: string): string {
+    const t = this.peek();
+    if (t.type !== "str") throw parseError(`Expected a module path string after '${what}' at ${t.line}:${t.col}`);
+    this.next();
+    if (!t.value.startsWith("./") && !t.value.startsWith("../")) {
+      throw nyi(NYI.MODULE, `the module specifier '${t.value}' (only relative paths like './util.ts' are resolved — there is no node_modules resolution)`);
+    }
+    return t.value;
+  }
+
+  /** `{ a, b as c }` — an import or export clause. A `type`-modified spec is kept but
+   *  flagged: it binds no value, yet the linker still uses it to seed type aliases. */
+  private parseNamedClause(): { name: string; alias: string; typeOnly: boolean }[] {
+    this.eat("{");
+    const out: { name: string; alias: string; typeOnly: boolean }[] = [];
+    while (!this.at("}")) {
+      // inline type modifier: `import { type T, x }` / `export { type T }`
+      const typeOnly = this.at("type") && this.peek(1).type === "ident" && this.peek(1).value !== "as";
+      if (typeOnly) this.next();
+      const name = this.expectIdent();
+      let alias = name;
+      if (this.at("as")) { this.eat("as"); alias = this.expectIdent(); }
+      out.push({ name, alias, typeOnly });
+      if (this.at(",")) this.eat(","); else break;
+    }
+    this.eat("}");
+    return out;
+  }
+
+  private parseImport(): Stmt {
+    const kw = this.eat("import");
+    if (this.at("(")) throw nyi(NYI.MODULE, `dynamic 'import()' at ${kw.line}:${kw.col}`);
+    // `import "./side-effect.ts";` — run the module, bind nothing.
+    if (this.peek().type === "str") {
+      const source = this.parseSpecifier("import");
+      if (this.at(";")) this.eat(";");
+      this.imports.push({ source, specs: [], line: kw.line });
+      return { kind: "MultiStmt", stmts: [] };
+    }
+    if (this.at("*")) throw nyi(NYI.MODULE, `namespace import 'import * as ns' at ${kw.line}:${kw.col}`);
+    // `import type { T } from …` — the whole clause is type-level, so it is erased
+    // (the linker still visits the module so its type exports resolve).
+    const typeOnly = this.at("type") && this.peek(1).value === "{";
+    if (typeOnly) this.next();
+    if (!this.at("{")) throw nyi(NYI.MODULE, `default import 'import ${this.peek().value} from …' at ${kw.line}:${kw.col}`);
+    const clause = this.parseNamedClause();
+    if (this.at(",")) throw nyi(NYI.MODULE, `a combined default + named import at ${kw.line}:${kw.col}`);
+    this.eat("from");
+    const source = this.parseSpecifier("from");
+    if (this.at(";")) this.eat(";");
+    this.imports.push({
+      source,
+      specs: clause.map((c) => ({ imported: c.name, local: c.alias, typeOnly: typeOnly || c.typeOnly })),
+      line: kw.line,
+    });
+    return { kind: "MultiStmt", stmts: [] };
+  }
+
+  private parseExport(): Stmt {
+    const kw = this.eat("export");
+    if (this.at("default")) throw nyi(NYI.MODULE, `'export default' at ${kw.line}:${kw.col} (use a named export: \`export function f() {}\`)`);
+    if (this.at("*")) throw nyi(NYI.MODULE, `'export * from …' at ${kw.line}:${kw.col} (list the names: \`export { a, b } from "./m.ts"\`)`);
+    // `export { a, b as c };` and the re-export `export { x } from "./y.ts";`
+    if (this.at("{")) {
+      const clause = this.parseNamedClause();
+      if (this.at("from")) {
+        this.eat("from");
+        const source = this.parseSpecifier("from");
+        for (const c of clause) if (!c.typeOnly) this.exportReexports.set(c.alias, { source, imported: c.name, line: kw.line });
+        // A re-export is also a dependency edge (the module must be loaded/ordered).
+        this.imports.push({ source, specs: [], line: kw.line });
+      } else {
+        // `export { type T }` re-publishes a local type alias; a plain spec is a value.
+        for (const c of clause) c.typeOnly ? this.exportTypes.add(c.name) : this.exportValues.set(c.alias, c.name);
+      }
+      if (this.at(";")) this.eat(";");
+      return { kind: "MultiStmt", stmts: [] };
+    }
+    // `export type X = …` / `export interface X { … }` — type-level, erased, but the
+    // shape is published so an importing module's annotations resolve to it.
+    if (this.at("type") && this.peek(1).type === "ident") { const name = this.peek(1).value; const s = this.parseTypeAlias(); this.exportTypes.add(name); return s; }
+    if (this.at("interface")) { const name = this.peek(1).value; const s = this.parseInterface(); this.exportTypes.add(name); return s; }
+    // `export class C { … }` — the class name is BOTH a value (its ctor/methods lower
+    // to `C.constructor` / `C.m`) and a type (the tagged instance shape).
+    if (this.at("class")) { const name = this.peek(1).value; const s = this.parseClass(); this.exportValues.set(name, name); this.exportTypes.add(name); return s; }
+    if (this.at("function")) { const s = this.parseFuncDecl() as FuncDecl; this.exportValues.set(s.name, s.name); return s; }
+    if (this.at("let") || this.at("const")) {
+      const d = this.parseVarDecl();
+      this.eat(";");
+      for (const decl of d.decls) this.exportValues.set(decl.name, decl.name);
+      return d;
+    }
+    throw nyi(NYI.MODULE, `'export' of a '${this.peek().value || this.peek().type}' declaration at ${kw.line}:${kw.col}`);
+  }
+
   // ---- statements ----
   parseStatement(): Stmt {
+    // Module syntax. `import`/`export` only start a declaration at statement level;
+    // `import(` in a TYPE is handled by parseImportType, and an expression starting
+    // with the identifier `export` is not valid TS, so no lookahead guard is needed
+    // beyond keeping `import.` / `import(` out (dynamic import → NT1017 above).
+    if (this.at("import") && this.peek(1).value !== ".") return this.parseImport();
+    if (this.at("export")) return this.parseExport();
     // Type-level declarations — parsed, recorded, and ERASED (no runtime). Guarded so
     // `type`/`interface` used as ordinary identifiers still parse as expressions.
     if (this.at("type") && this.peek(1).type === "ident" && (this.peek(2).value === "=" || this.peek(2).value === "<")) return this.parseTypeAlias();
@@ -1030,8 +1165,8 @@ function decodeEscape(ch: string): string {
   return map[ch] ?? ch;
 }
 
-export function parse(source: string): Program {
-  return new Parser(lex(source)).parseProgram();
+export function parse(source: string, opts: ParseOpts = {}): Program {
+  return new Parser(lex(source), opts).parseProgram();
 }
 
 export function parseExpressionFrom(source: string): Expr {

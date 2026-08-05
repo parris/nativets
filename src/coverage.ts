@@ -9,6 +9,7 @@
 
 import type { Program, Stmt, Expr } from "./ast.ts";
 import { parse } from "./parser.ts";
+import { linkProgram } from "./modules.ts";
 import { check } from "./checker.ts";
 import { NTError, NYI } from "./diagnostics.ts";
 import { preprocessForCoverage } from "./coverage-preprocess.ts";
@@ -43,7 +44,17 @@ function classifyParseFailure(text: string, diag: { code: string; message: strin
   return { spec: { code: "NT0001", milestone: "later", hint: "syntax outside the accepted single-file subset" }, feature: "unparsed statement" };
 }
 
-export function coverage(source: string): CoverageReport {
+export function coverage(source: string, entryPath?: string): CoverageReport {
+  // SH1 modules: when the entry declares imports AND we know where it lives, report on
+  // the WHOLE linked program (every module in the graph), not just this file — otherwise
+  // every imported name would look undefined. A link failure (bad path, cycle, missing
+  // export) falls through to the per-statement recovery path below, which reports it.
+  let linked: Program | null = null;
+  if (entryPath) {
+    try {
+      if (parse(source).imports?.length) linked = linkProgram(source, entryPath);
+    } catch { /* reported by the recovery path */ }
+  }
   // Coverage-only pre-strip: survive the module/type preamble (shebang, import,
   // export, type/interface, class) and regex literals that the real lexer/parser
   // reject, so a self-hosting source reaches a feature-level histogram instead of a
@@ -58,8 +69,10 @@ export function coverage(source: string): CoverageReport {
     b.count++;
     found.set(key, b);
   };
-  // Constructs the pre-strip erased that are real blockers (classes → NT1012).
-  for (const b of pre.stripped) {
+  // Constructs the pre-strip erased that are real blockers (classes → NT1012). A linked
+  // multi-module program was parsed for real, so the pre-strip's guesses don't apply.
+  const stripped = linked ? [] : pre.stripped;
+  for (const b of stripped) {
     const e = found.get(b.code);
     if (e) e.count += b.count;
     else found.set(b.code, { ...b });
@@ -127,7 +140,8 @@ export function coverage(source: string): CoverageReport {
   const body: Stmt[] = [];
   let firstError: { code: string; message: string } | undefined;
   let parseFailures = 0;
-  for (const st of pre.statements) {
+  if (linked) body.push(...linked.body);
+  for (const st of linked ? [] : pre.statements) {
     let prog: Program;
     try {
       prog = parse(st.text);
@@ -154,8 +168,8 @@ export function coverage(source: string): CoverageReport {
     if (!firstError) firstError = err;
   }
 
-  const parsed = body.length > 0 || pre.stripped.length > 0;
-  const compiles = parsed && checkPassed && parseFailures === 0 && pre.stripped.length === 0;
+  const parsed = body.length > 0 || stripped.length > 0;
+  const compiles = parsed && checkPassed && parseFailures === 0 && stripped.length === 0;
   const blockers = [...found.values()].sort((a, b) => a.milestone.localeCompare(b.milestone) || b.count - a.count);
   return { parsed, compiles, statements, firstError, blockers };
 }

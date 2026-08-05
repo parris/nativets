@@ -23,10 +23,15 @@ it can't do safely instead of miscompiling.
   `Math`/`JSON` builtins — a runtime function + a codegen `genGlobal` case + a checker signature.
 - **Tier B — a nativets *prelude* (dogfooded).** Higher-level APIs that are *expressible in the
   supported subset* are written **in nativets itself** and auto-prepended to every program (a
-  "prelude"). This is the delivery vehicle for composed helpers **until the module system exists**
-  (self-hosting **SH1** adds real `import`/bundling); at SH1 the prelude becomes proper
-  `import`ed `std/*` modules. Writing the stdlib in nativets is the ultimate dogfood — it also
-  drives the language toward self-hosting.
+  "prelude"). This was the delivery vehicle for composed helpers until the module system existed.
+  **Self-hosting SH1 has now landed a real module system** (`src/modules.ts`: `import`/`export`
+  across `.ts` files, whole-program linked — see `docs/self-hosting.md`), so the prelude can become
+  proper `import`ed `std/*` modules: a `std/` directory of ordinary nativets `.ts` files that a
+  program pulls in with `import { … } from "…/std/x.ts"`, with no compiler change needed. Writing
+  the stdlib in nativets is the ultimate dogfood — it also drives the language toward self-hosting.
+  *(Open design question deliberately left for the stdlib lane: how `std/*` is located — a bare
+  `"std:collections"`-style specifier would need a resolver hook, since only relative paths resolve
+  today.)*
 - **Tier C — needs new infrastructure (each its own initiative).** Some web APIs require machinery
   we don't have yet:
   - **`fetch` / `Headers` / `Request` / `Response`** → the networking tier (sockets + TLS; the
@@ -87,5 +92,6 @@ behavioral tests / local mocks, like the actor and HTTP lanes.
 
 1. **Batch 1** (this track's first tranche) — immediate ergonomic wins, all node-oracle-matched.
 2. **Bytes type** → Batch 2 (encoding + crypto).
-3. **The prelude → real `std/*` modules at self-hosting SH1.**
+3. **The prelude → real `std/*` modules** — unblocked: self-hosting **SH1** (a real
+   `import`/`export` module system) has landed.
 4. Tier-C initiatives (networking, event-loop/async decision, regex) as they mature.

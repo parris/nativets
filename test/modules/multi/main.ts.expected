@@ -1,0 +1,7 @@
+[shared] init
+[util] init
+[greet] init
+[main] init
+>> report ***
+42 21
+>> hi world

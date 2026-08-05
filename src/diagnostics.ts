@@ -98,6 +98,13 @@ export const NYI = {
   // `console.log(u8)` — node's size-dependent column-grouped typed-array layout is not
   // cheap to match byte-for-byte, so we reject rather than miscompile the format.
   BYTES: { code: "NT1016", milestone: "M3", hint: "Uint8Array works (index/length/for-of/encode/decode); only console.log of one is deferred — inspect elements individually or decode to a string" },
+  // Modules (SH1). `import { a, b as c } from "./m.ts"`, `import type`, side-effect
+  // imports, `export` of function/const/let/class/type/interface, `export { a as b }`
+  // and `export { x } from "./y.ts"` ARE supported (whole-program link, see
+  // src/modules.ts). What this code refuses is the module syntax outside that subset:
+  // `export default`, `import * as ns`, `export * from`, dynamic `import()`, and
+  // bare/node_modules specifiers.
+  MODULE: { code: "NT1017", milestone: "M3", hint: "supported module syntax: `import { a, b as c } from \"./rel/path.ts\"`, `import type { T } from …`, `import \"./m.ts\"`, `export function|const|let|class|type|interface`, `export { a as b }`, `export { x } from \"./y.ts\"`" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
@@ -124,4 +131,17 @@ export function mutationError(message: string, hint: string): NTError {
 
 export function parseError(message: string): NTError {
   return new NTError({ code: "NT0001", message });
+}
+
+/**
+ * Module-graph (link-time) errors — the NT17xx band, alongside NT16xx for the
+ * memory model. These are not "unimplemented TypeScript": they are real defects in
+ * a program's import graph, so they carry no milestone.
+ *
+ *   NT1701  a module could not be resolved / read
+ *   NT1702  an import cycle (named, in order — never hang, never miscompile)
+ *   NT1703  a module has no such export
+ */
+export function moduleError(code: "NT1701" | "NT1702" | "NT1703", message: string, hint?: string): NTError {
+  return new NTError({ code, message, hint });
 }

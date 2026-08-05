@@ -1,0 +1,15 @@
+INVENTORY
+----------------------------------
+         hammer (tool)  x3  $37.50
+         wrench (tool)  x1  $19.00
+          beans (food)  x12  $15.00
+           rice (food)  x4  $14.00
+           SICP (book)  x2  $90.00
+
+BY CATEGORY
+----------------------------------
+    tool  $56.50
+    food  $29.00
+    book  $90.00
+
+grand total: $175.50

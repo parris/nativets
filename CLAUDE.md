@@ -28,12 +28,15 @@ case that node can run is a case we can differential-test.
 ## Architecture (the pipeline)
 
 ```
-source.ts
+source.ts (entry)
   │  src/lexer.ts      hand-written tokenizer (no `typescript` dependency)
   ▼
 tokens
   │  src/parser.ts     recursive-descent + Pratt expression precedence
   ▼
+AST (src/ast.ts)
+  │  src/modules.ts    resolve `import`/`export` → merge the graph into ONE Program
+  ▼                    (whole-program link; no-op for a module-less file)
 AST (src/ast.ts)
   │  src/checker.ts    scope resolution + static type inference (number|boolean|string|void)
   ▼
@@ -215,6 +218,10 @@ Located in `test/`, run with `bun test` (73 tests today).
 7. **Ownership / move checker** (`test/ownership.test.ts`, `test/ownership/*.ts`) — rustc
    `compiletest`-style: `//@ check-pass` must be accepted; `//~ ERROR NT1601` must be
    reported on that exact line, with no unexpected diagnostics.
+8. **Modules** (`test/modules.test.ts`, `test/modules/<case>/main.ts` + its imports) — a
+   multi-module program cannot be a single source string, so each case is a DIRECTORY with an
+   entry `main.ts`. node is still the oracle (it resolves the same `./x.ts` specifiers). The
+   file also pins the rejection table: NT1017 module syntax, NT1701/1702/1703 graph defects.
 
 If a divergence from node is intentional, document it in `docs/divergences.md`.
 
@@ -402,6 +409,26 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   `NT1601` use-after-move now points at both the use (primary) and the earlier move (secondary).
   Plus a **GitHub Actions release workflow** (build self-contained macOS/Linux binaries + publish a
   Release on a version bump) and `test/assets/smoke.ll` now tracked (fixes a CI/worktree flake).
+- **Stage 33 ✅ (SH1: a real module system — `import` / `export` across files)** nativets now
+  compiles a **program**, not a file. `src/modules.ts` is a **whole-program linker**: from the entry
+  file it resolves every `./relative.ts` specifier, loads each module **exactly once** (a diamond's
+  shared module runs once), orders them post-order DFS (= ESM evaluation order), **alpha-renames**
+  each non-entry module's top-level bindings with a per-module prefix (so two files may declare the
+  same `helper`/`class Box`/`TAG`), and merges everything into **ONE `Program`** — checker,
+  ownership and codegen are untouched and the IR is still one triple-free `.ll`. Supported surface:
+  `import { a, b as c } from "./m.ts"`, `import type`/inline `type` specs (erased, but the type
+  still resolves in the importer), side-effect `import "./m.ts"`, `export` of
+  function/const/let/class/type/interface, `export { a as b }`, and the re-export
+  `export { x } from "./y.ts"`. **Module scope is real**: a module's functions see its module-level
+  bindings — the bindings a function body actually reads are promoted to LLVM globals
+  (`@nt.g.<name>`, written by `main` in module order), everything else stays a `main` local, so
+  **single-file IR is byte-identical to before**. Refused (never miscompiled): `export default`,
+  `import * as ns`, `export * from`, dynamic `import()`, bare/`node_modules` specifiers → **NT1017**;
+  plus a new **NT17xx** link band — **NT1701** unreadable module, **NT1702** import cycle (named, in
+  order; never hangs), **NT1703** no such export. `build`/`run`/`emit`/`coverage` all take a
+  multi-module entry. Tests: `test/modules.test.ts` + `test/modules/`; dogfood apps
+  `examples/roman-modular/` (examples/roman.ts as three modules, byte-identical output) and
+  `examples/inventory/`.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 

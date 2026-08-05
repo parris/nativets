@@ -18,16 +18,33 @@ export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr 
 function isMapValueTy(v: Ty): boolean {
   return v === "number" || v === "string" || v === "boolean" || isArrayTy(v) || isObjectTy(v);
 }
-export interface CheckedProgram { program: Program; functions: Map<string, Sig>; }
+export interface CheckedProgram {
+  program: Program;
+  functions: Map<string, Sig>;
+  /** Module-level bindings a FUNCTION body reads → promoted to LLVM globals by
+   *  codegen (see the module scope in `check`). Empty for programs whose functions
+   *  only touch their own params/locals, which is every program written before SH1. */
+  globals: Map<string, Ty>;
+}
 
 interface Binding { ty: Ty; constant: boolean; }
 
 class Scope {
   private vars = new Map<string, Binding>();
+  /** Names of THIS scope's own bindings that some lookup resolved to. Used on the
+   *  module scope to learn which top-level bindings a function body reads, so only
+   *  those are promoted to LLVM globals (everything else stays a `main` local, and
+   *  every single-file program's IR is unchanged). */
+  readonly hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
   declare(name: string, ty: Ty, constant: boolean): void { this.vars.set(name, { ty, constant }); }
-  lookup(name: string): Binding | undefined { return this.vars.get(name) ?? this.parent?.lookup(name); }
+  own(name: string): Binding | undefined { return this.vars.get(name); }
+  lookup(name: string): Binding | undefined {
+    const b = this.vars.get(name);
+    if (b) { this.hits.add(name); return b; }
+    return this.parent?.lookup(name);
+  }
 }
 
 const BUILTIN_NUMBERS = ["NaN", "Infinity"];
@@ -113,6 +130,12 @@ export function check(program: Program): CheckedProgram {
     for (const n of BUILTIN_NUMBERS) s.declare(n, "number", true);
     return s;
   };
+  /**
+   * The MODULE scope — top-level bindings, and the parent of every function scope
+   * (SH1: a module's functions must see its module-level `const`s, most visibly an
+   * imported module's `export const` read from an imported function).
+   */
+  const moduleScope = builtins();
 
   for (const s of program.body) {
     if (s.kind !== "FuncDecl") continue;
@@ -132,18 +155,41 @@ export function check(program: Program): CheckedProgram {
     functions.set(s.name, { params, ret, required, defaults, rest });
   }
 
+  // pass 1.5: pre-declare the module-level bindings, so return-type inference and
+  // function bodies can see them. Best-effort: an initializer we cannot type yet
+  // (e.g. one calling a function whose return type pass 2 has not inferred) is
+  // simply skipped here — `checkBlock` below re-declares every one with its final
+  // type, which is what the promoted-globals table is read from.
+  for (const s of program.body) {
+    if (s.kind !== "VarDecl") continue;
+    for (const d of s.decls) {
+      try {
+        moduleScope.declare(d.name, d.annot ?? c.type(d.init, moduleScope), s.declKind === "const");
+      } catch { /* typed for real in checkBlock */ }
+    }
+  }
+
   // pass 2: infer return types for unannotated functions (e.g. ones returning closures)
   for (const s of program.body) {
     if (s.kind === "FuncDecl" && !s.returnAnnot) {
-      const inferred = c.inferReturnType(s, builtins());
+      const inferred = c.inferReturnType(s, moduleScope.child());
       s.returnTy = inferred;
       functions.get(s.name)!.ret = inferred;
     }
   }
 
-  c.checkBlock(program.body, builtins());
-  for (const s of program.body) if (s.kind === "FuncDecl") c.checkFunction(s, builtins());
-  return { program, functions };
+  c.checkBlock(program.body, moduleScope);
+  // Only reads made from INSIDE a function body promote a module binding to a global,
+  // so clear the top level's own hits before checking the functions.
+  moduleScope.hits.clear();
+  for (const s of program.body) if (s.kind === "FuncDecl") c.checkFunction(s, moduleScope.child());
+  const globals = new Map<string, Ty>();
+  for (const name of moduleScope.hits) {
+    if (BUILTIN_NUMBERS.includes(name)) continue; // NaN/Infinity are constants, not storage
+    const b = moduleScope.own(name);
+    if (b) globals.set(name, b.ty);
+  }
+  return { program, functions, globals };
 }
 
 class Checker {
