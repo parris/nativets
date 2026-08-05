@@ -8,7 +8,7 @@
  */
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError } from "./diagnostics.ts";
 
@@ -516,6 +516,16 @@ class Checker {
         }
         return b.ty;
       }
+      case "FieldAssign": {
+        // `this.field = expr` inside a constructor — initialize one instance slot.
+        const ot = this.type(e.object, scope);
+        if (!isObjectTy(ot)) throw typeError(`cannot assign field on non-object type ${ot}`);
+        const ft = fieldType(ot, e.field);
+        if (!ft) throw typeError(`Property '${e.field}' does not exist on ${ot}`);
+        const vt = this.type(e.value, scope);
+        if (vt !== ft && !this.assignable(ft, vt)) throw typeError(`cannot assign ${vt} to field '${e.field}' of type ${ft}`);
+        return ft;
+      }
       case "NewExpr": {
         // Immutable collections (B2). `new Map<K,V>()` / `new Set<T>()`; bare
         // `new Map()`/`new Set()` default to Map<string,number> / Set<string>.
@@ -531,6 +541,20 @@ class Checker {
           const el = e.typeArgs?.[0] ?? "string";
           if (el !== "string" && el !== "number") throw nyi(NYI.COLLECTION, `Set of ${el}`);
           return makeSetTy(el);
+        }
+        // `new C(args)` on a user class: the ctor lowered to `C.constructor(this, …)`,
+        // so its sig carries the instance type (param 0 = `this`) and the ctor param types.
+        const ctor = this.functions.get(`${e.callee}.constructor`);
+        if (ctor) {
+          const objTy = ctor.params[0]!;             // `this` — the instance type
+          const min = ctor.required - 1, max = ctor.params.length - 1;
+          if (e.args.length < min || e.args.length > max) throw typeError(`new ${e.callee} expects ${min}..${max} args, got ${e.args.length}`);
+          e.args.forEach((a, i) => {
+            const exp = ctor.params[i + 1]!;
+            const at = this.typeArg(a, exp, scope);
+            if (at !== exp && !this.assignable(exp, at)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`);
+          });
+          return objTy;
         }
         if (e.callee !== "Error") throw nyi(NYI.CLASS, `new ${e.callee}(...)`);
         if (e.args.length !== 1 || this.type(e.args[0]!, scope) !== "string") throw typeError("new Error(message: string)");
@@ -781,6 +805,23 @@ class Checker {
     // receiver.method(...)
     if (e.callee.kind === "MemberExpr") {
       const recv = this.type(e.callee.object, scope);
+      // class instance method: `inst.m(args)` → the lowered `C.m(this, …)`.
+      const cls = classTag(recv);
+      if (cls) {
+        const msig = this.functions.get(`${cls}.${e.callee.property}`);
+        if (!msig) {
+          if (fieldType(recv, e.callee.property)) throw typeError(`'${e.callee.property}' is a field of ${cls}, not a method`);
+          throw typeError(`Method '${e.callee.property}' does not exist on ${cls}`);
+        }
+        const min = msig.required - 1, max = msig.params.length - 1;
+        if (e.args.length < min || e.args.length > max) throw typeError(`'${cls}.${e.callee.property}' expects ${min}..${max} args, got ${e.args.length}`);
+        e.args.forEach((a, i) => {
+          const exp = msig.params[i + 1]!;
+          const at = this.typeArg(a, exp, scope);
+          if (at !== exp && !this.assignable(exp, at)) throw typeError(`'${cls}.${e.callee.property}' arg ${i} expects ${exp}, got ${at}`);
+        });
+        return msig.ret;
+      }
       if (isMapTy(recv)) return this.inferMapMethod(recv, e.callee.property, e.args, scope);
       if (isSetTy(recv)) return this.inferSetMethod(recv, e.callee.property, e.args, scope);
       if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee.property, e.args, scope);
@@ -1032,6 +1073,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "LogicalExpr": collectIdents(e.left, out); collectIdents(e.right, out); return;
     case "ConditionalExpr": collectIdents(e.test, out); collectIdents(e.consequent, out); collectIdents(e.alternate, out); return;
     case "AssignExpr": out.add(e.target); collectIdents(e.value, out); return;
+    case "FieldAssign": collectIdents(e.object, out); collectIdents(e.value, out); return;
     case "CallExpr": collectIdents(e.callee, out); e.args.forEach((a) => collectIdents(a, out)); return;
     case "ArrayLiteral": e.elements.forEach((x) => collectIdents(x, out)); return;
     case "ObjectLiteral": e.properties.forEach((p) => collectIdents(p.value, out)); return;

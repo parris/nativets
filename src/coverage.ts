@@ -110,6 +110,7 @@ export function coverage(source: string): CoverageReport {
       case "LogicalExpr": walkExpr(e.left); walkExpr(e.right); break;
       case "ConditionalExpr": walkExpr(e.test); walkExpr(e.consequent); walkExpr(e.alternate); break;
       case "AssignExpr": walkExpr(e.value); break;
+      case "FieldAssign": walkExpr(e.object); walkExpr(e.value); break;
       case "CallExpr": walkExpr(e.callee); e.args.forEach(walkExpr); break;
       // Arrow functions / closures are supported (Stage 13) — no longer a blocker; walk
       // the body so nested unsupported constructs are still surfaced by the checker.

@@ -32,7 +32,6 @@
  */
 
 import type { Blocker } from "./coverage.ts";
-import { NYI } from "./diagnostics.ts";
 
 /** A top-level statement, module syntax stripped, ready to feed to `parse`. */
 export interface PreStatement { text: string; line: number }
@@ -271,11 +270,10 @@ export function preprocessForCoverage(source: string): Preprocessed {
     if (isKw(t, "import")) { i = skipToSemicolon(i); continue; }
     if (isKw(t, "type") && toks[i + 1]?.kind === "ident") { i = skipToSemicolon(i); continue; }
     if (isKw(t, "interface")) { i = skipBraceBlock(i); continue; }
-    if (isKw(t, "class")) {
-      stripped.push({ code: NYI.CLASS.code, feature: `class ${toks[i + 1]?.value ?? ""}`.trim(), milestone: NYI.CLASS.milestone, hint: NYI.CLASS.hint, count: 1 });
-      i = skipBraceBlock(i);
-      continue;
-    }
+    // `class` is no longer erased: minimal classes (fields + constructor + methods) now
+    // parse + compile, so the class flows to the real parser as an ordinary statement.
+    // A class using a still-deferred feature (inheritance/static/modifiers/field
+    // initializers/parameter properties) surfaces its real next blocker (NT1015) there.
 
     // A normal top-level statement: collect tokens until a safe boundary. We split
     // BEFORE a statement-starter keyword that follows a completed statement (`}`/`;`)
