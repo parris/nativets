@@ -767,6 +767,26 @@ class Checker {
         return "number";
       }
       case "UpdateExpr": {
+        // Member/index target (`this.n++`, `u[i]++`). The parser already vetted a field
+        // target against the immutability rule; an INDEX target is decided here, exactly
+        // like `IndexAssign`: a mutable `Uint8Array` element is writable, an immutable
+        // array/object element is NT1606.
+        if (e.targetExpr) {
+          const tgt = e.targetExpr;
+          if (tgt.kind === "IndexExpr") {
+            const ot = this.type(tgt.object, scope);
+            if (isBytesTy(ot)) {
+              if (this.type(tgt.index, scope) !== "number") throw typeError("Uint8Array index must be a number");
+              return "number";
+            }
+            if (isObjectTy(ot))
+              throw mutationError("objects are immutable: `o[k]++` would mutate the object in place", "use `{ ...o, k: o[k] + 1 }` — returns a NEW object; the original is unchanged");
+            throw mutationError("arrays are immutable: `arr[i]++` would mutate the array in place", "use `arr.with(i, arr[i] + 1)` — returns a NEW array; the original is unchanged");
+          }
+          const ft = this.type(tgt, scope);
+          if (ft !== "number") throw typeError(`'${e.op}' needs number`);
+          return "number";
+        }
         const b = scope.lookup(e.target);
         if (!b) throw typeError(`'${e.target}' is not defined`);
         if (b.ty !== "number") throw typeError(`'${e.op}' needs number`);
@@ -1780,7 +1800,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "IndexExpr": collectIdents(e.object, out); collectIdents(e.index, out); return;
     case "UnaryExpr": collectIdents(e.operand, out); return;
     case "TypeofExpr": collectIdents(e.operand, out); return;
-    case "UpdateExpr": out.add(e.target); return;
+    case "UpdateExpr": if (e.targetExpr) collectIdents(e.targetExpr, out); else out.add(e.target); return;
     case "BinaryExpr": collectIdents(e.left, out); collectIdents(e.right, out); return;
     case "LogicalExpr": collectIdents(e.left, out); collectIdents(e.right, out); return;
     case "ConditionalExpr": collectIdents(e.test, out); collectIdents(e.consequent, out); collectIdents(e.alternate, out); return;

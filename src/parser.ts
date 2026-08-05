@@ -954,8 +954,44 @@ class Parser {
         else if (v === ")") { depth--; if (depth === 0) break; }
       }
       const after = this.toks[i + 1];
-      const then = this.toks[i + 2];
-      return !!after && (after.value === "=>" || (after.value === ":" && !!then)); // (a): T =>
+      if (!after) return false;
+      if (after.value === "=>") return true;
+      // `(a): T => …` — an arrow with a RETURN-TYPE annotation. A trailing `:` alone is
+      // not enough: `cond ? (t.slice(2) as Ty) : t` and `cond ? (x) : y` are ternary arms
+      // that also end `) :`. Commit to the arrow grammar only when the parens really hold
+      // a parameter list AND a top-level `=>` follows the annotation.
+      return after.value === ":" && this.parenHoldsParams(i) && this.annotEndsInArrow(i + 2);
+    }
+    return false;
+  }
+
+  /**
+   * Do the tokens between `this.pos` (`(`) and `end` (its matching `)`) look like a
+   * PARAMETER LIST rather than a parenthesized expression? Checking the first parameter's
+   * shape is enough to separate the two: a parameter starts with `...`, a binding pattern,
+   * or an identifier followed by one of `, ) : ? =` — an expression like `t.slice(2)` or
+   * `a === b` diverges on its very next token.
+   */
+  private parenHoldsParams(end: number): boolean {
+    const first = this.toks[this.pos + 1];
+    if (!first || this.pos + 1 >= end) return true; // `()` — the empty parameter list
+    if (first.value === "..." || first.value === "[" || first.value === "{") return true;
+    if (first.type !== "ident") return false;
+    const nxt = this.toks[this.pos + 2];
+    return !!nxt && [",", ")", ":", "?", "="].includes(nxt.value);
+  }
+
+  /** Scan a return-type annotation from `i` for the `=>` that makes it an arrow. */
+  private annotEndsInArrow(i: number): boolean {
+    let depth = 0;
+    for (; i < this.toks.length; i++) {
+      const v = this.toks[i]!.value;
+      if (v === "(" || v === "[" || v === "{") depth++;
+      else if (v === ")" || v === "]" || v === "}") { if (depth === 0) return false; depth--; }
+      else if (depth === 0) {
+        if (v === "=>") return true;
+        if (v === ";" || v === "," || v === ":" || v === "?" || v === "=") return false;
+      }
     }
     return false;
   }
@@ -1128,10 +1164,24 @@ class Parser {
     if (this.at("++") || this.at("--")) {
       const op = this.next().value as "++" | "--";
       const operand = this.parseUnary();
-      if (operand.kind !== "Identifier") throw parseError("Invalid update target");
-      return { kind: "UpdateExpr", op, prefix: true, target: operand.name };
+      if (operand.kind === "Identifier") return { kind: "UpdateExpr", op, prefix: true, target: operand.name };
+      if (operand.kind === "MemberExpr" || operand.kind === "IndexExpr")
+        return { kind: "UpdateExpr", op, prefix: true, target: "", targetExpr: this.updateTarget(operand) };
+      throw parseError("Invalid update target");
     }
     return this.parsePostfix();
+  }
+
+  /**
+   * Vet a member/index `++`/`--` target, mirroring plain assignment exactly (Stage 29):
+   * `this.f` is writable only while the constructor is building the instance, any other
+   * field is NT1606; an INDEX target is deferred to the checker, which accepts a mutable
+   * `Uint8Array` element and rejects an immutable array/object element.
+   */
+  private updateTarget(target: Expr): Expr {
+    if (target.kind === "MemberExpr" && !(this.inCtor && target.object.kind === "Identifier" && target.object.name === "this"))
+      throw mutationError("objects are immutable: `o.f++` would mutate the object in place", "use `{ ...o, f: o.f + 1 }` — returns a NEW object; the original is unchanged");
+    return target;
   }
 
   // Disambiguate a `<` after a primary between call-site TYPE ARGUMENTS (`f<T>(x)`)
@@ -1203,6 +1253,9 @@ class Parser {
       } else if ((this.at("++") || this.at("--")) && expr.kind === "Identifier") {
         const op = this.next().value as "++" | "--";
         expr = { kind: "UpdateExpr", op, prefix: false, target: expr.name };
+      } else if ((this.at("++") || this.at("--")) && (expr.kind === "MemberExpr" || expr.kind === "IndexExpr")) {
+        const op = this.next().value as "++" | "--";
+        expr = { kind: "UpdateExpr", op, prefix: false, target: "", targetExpr: this.updateTarget(expr) };
       } else break;
     }
     return expr;
@@ -1281,12 +1334,18 @@ class Parser {
       if (raw[i] === "$" && raw[i + 1] === "{") {
         quasis.push(cur); cur = "";
         i += 2;
+        // Find the substitution's matching `}`. Braces inside a nested template's TEXT
+        // or inside a quoted string are not delimiters, so skip both wholesale — the
+        // lexer captured them verbatim and `parseExpressionFrom` re-lexes them below.
         let depth = 1;
         let src = "";
         while (i < raw.length && depth > 0) {
-          if (raw[i] === "{") depth++;
-          else if (raw[i] === "}") { depth--; if (depth === 0) break; }
-          src += raw[i]; i++;
+          const ch = raw[i]!;
+          if (ch === "\\") { src += ch + (raw[i + 1] ?? ""); i += 2; continue; }
+          if (ch === "`" || ch === '"' || ch === "'") { const [txt, next] = skipQuoted(raw, i); src += txt; i = next; continue; }
+          if (ch === "{") depth++;
+          else if (ch === "}") { depth--; if (depth === 0) break; }
+          src += ch; i++;
         }
         i++;
         exprs.push(parseExpressionFrom(src));
@@ -1297,6 +1356,36 @@ class Parser {
     quasis.push(cur);
     return { kind: "TemplateLiteral", quasis, exprs };
   }
+}
+
+/**
+ * Copy a quoted run (a `'`/`"` string or a nested `` ` `` template) starting at `i`
+ * verbatim, returning `[text, indexAfterIt]`. A nested template's own `${…}`
+ * substitutions are skipped recursively, so `` `${a ? `}` : b}` `` stays intact.
+ */
+function skipQuoted(raw: string, i: number): [string, number] {
+  const q = raw[i]!;
+  let out = q;
+  i++;
+  while (i < raw.length && raw[i] !== q) {
+    const ch = raw[i]!;
+    if (ch === "\\") { out += ch + (raw[i + 1] ?? ""); i += 2; continue; }
+    if (q === "`" && ch === "$" && raw[i + 1] === "{") {
+      out += "${"; i += 2;
+      let depth = 1;
+      while (i < raw.length && depth > 0) {
+        const c2 = raw[i]!;
+        if (c2 === "\\") { out += c2 + (raw[i + 1] ?? ""); i += 2; continue; }
+        if (c2 === "`" || c2 === '"' || c2 === "'") { const [t, n] = skipQuoted(raw, i); out += t; i = n; continue; }
+        if (c2 === "{") depth++;
+        else if (c2 === "}") depth--;
+        out += c2; i++;
+      }
+      continue;
+    }
+    out += ch; i++;
+  }
+  return [out + q, i + 1];
 }
 
 function decodeEscape(ch: string): string {

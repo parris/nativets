@@ -316,12 +316,21 @@ export interface IndexExpr { kind: "IndexExpr"; object: Expr; index: Expr; ty?: 
 export type UnaryOp = "-" | "+" | "!" | "~" | "void";
 export interface UnaryExpr { kind: "UnaryExpr"; op: UnaryOp; operand: Expr; ty?: Ty; }
 
-/** ++x / x++ / --x / x-- */
+/**
+ * ++x / x++ / --x / x--, and the member/index forms `this.f++` / `u[i]++`.
+ *
+ * `target` names the local for the (overwhelmingly common) identifier case. A
+ * member/index target instead carries `targetExpr` — a MemberExpr or IndexExpr —
+ * with `target` left empty. Mutability is decided exactly as for a plain assignment:
+ * `this.f` inside a constructor and a `Uint8Array` element are writable, everything
+ * else is NT1606 (objects/arrays are immutable — Stage 29).
+ */
 export interface UpdateExpr {
   kind: "UpdateExpr";
   op: "++" | "--";
   prefix: boolean;
   target: string;
+  targetExpr?: Expr;
   ty?: Ty;
 }
 

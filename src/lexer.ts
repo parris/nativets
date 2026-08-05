@@ -52,6 +52,51 @@ export function lex(source: string): Token[] {
     }
   };
 
+  /** Raw inner text of a template, up to (not including) its closing backtick. */
+  const scanTemplateBody = (sl: number, sc: number): string => {
+    let raw = "";
+    while (i < source.length && source[i] !== "`") {
+      if (source[i] === "\\") { raw += source[i]; advance(); raw += source[i] ?? ""; advance(); continue; }
+      if (source[i] === "$" && source[i + 1] === "{") { raw += "${"; advance(2); raw += scanSubstitution(sl, sc); continue; }
+      raw += source[i];
+      advance();
+    }
+    if (source[i] !== "`") throw new LexError(`Unterminated template at ${sl}:${sc}`);
+    return raw;
+  };
+
+  /** A `${…}` substitution's source, up to AND including its matching `}`. Nested
+   *  templates, quoted strings and braces are tracked so none of them ends it early. */
+  const scanSubstitution = (sl: number, sc: number): string => {
+    let out = "";
+    let depth = 1;
+    while (i < source.length) {
+      const ch = source[i]!;
+      if (ch === "\\") { out += ch; advance(); out += source[i] ?? ""; advance(); continue; }
+      if (ch === "`") { out += ch; advance(); out += scanTemplateBody(sl, sc) + "`"; advance(); continue; }
+      if (ch === '"' || ch === "'") { out += scanQuoted(ch, sl, sc); continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}") { depth--; if (depth === 0) { advance(); return out + "}"; } }
+      out += ch;
+      advance();
+    }
+    throw new LexError(`Unterminated template substitution at ${sl}:${sc}`);
+  };
+
+  /** A quoted string INSIDE a substitution, copied verbatim (quotes included). */
+  const scanQuoted = (q: string, sl: number, sc: number): string => {
+    let out = q;
+    advance();
+    while (i < source.length && source[i] !== q) {
+      if (source[i] === "\\") { out += source[i]; advance(); }
+      out += source[i];
+      advance();
+    }
+    if (source[i] !== q) throw new LexError(`Unterminated string at ${sl}:${sc}`);
+    advance();
+    return out + q;
+  };
+
   while (i < source.length) {
     const c = source[i]!;
 
@@ -71,8 +116,21 @@ export function lex(source: string): Token[] {
 
     // number
     if (c >= "0" && c <= "9") {
+      // Radix-prefixed literals `0x1f` / `0b1010` / `0o17` (either case). Kept as raw
+      // text — the parser's `Number(value)` decodes every form exactly as node does.
+      // Without this the lexer read `0` and then `x1f` as an identifier, which is what
+      // made `src/codegen.ts`'s byte constants (`0x22`, `0x5c`) unparseable.
+      const radix = source[i + 1];
+      if (c === "0" && radix !== undefined && /[xXbBoO]/.test(radix)) {
+        let s = "0" + radix;
+        advance(2);
+        while (i < source.length && /[0-9a-fA-F_]/.test(source[i]!)) { if (source[i] !== "_") s += source[i]; advance(); }
+        tokens.push({ type: "num", value: s, line: sl, col: sc });
+        continue;
+      }
       let s = "";
-      while (i < source.length && source[i]! >= "0" && source[i]! <= "9") { s += source[i]; advance(); }
+      // `_` is a numeric SEPARATOR (`1_000_000`) — legal between digits, dropped here.
+      while (i < source.length && ((source[i]! >= "0" && source[i]! <= "9") || source[i] === "_")) { if (source[i] !== "_") s += source[i]; advance(); }
       if (source[i] === ".") { s += "."; advance(); while (i < source.length && source[i]! >= "0" && source[i]! <= "9") { s += source[i]; advance(); } }
       if (source[i] === "e" || source[i] === "E") {
         s += source[i]; advance();
@@ -123,17 +181,15 @@ export function lex(source: string): Token[] {
       continue;
     }
 
-    // template literal — capture raw inner text (basic: no nested backticks)
+    // template literal — capture raw inner text, INCLUDING nested templates inside a
+    // `${…}` substitution (the parser re-lexes each substitution source). Scanning to
+    // the first backtick used to end the outer literal early, so
+    // `` `{${xs.map((x) => `${x.k}`).join(",")}}` `` — the shape `src/ast.ts` and every
+    // `src/codegen.ts` emit site are written in — could not be tokenized at all.
     if (c === "`") {
       advance();
-      let raw = "";
-      while (i < source.length && source[i] !== "`") {
-        if (source[i] === "\\") { raw += source[i]; advance(); raw += source[i]; advance(); continue; }
-        raw += source[i];
-        advance();
-      }
-      if (source[i] !== "`") throw new LexError(`Unterminated template at ${sl}:${sc}`);
-      advance();
+      const raw = scanTemplateBody(sl, sc);
+      advance(); // closing backtick
       tokens.push({ type: "template", value: raw, line: sl, col: sc });
       continue;
     }

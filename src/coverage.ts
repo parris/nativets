@@ -120,7 +120,7 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
       case "TemplateLiteral": e.exprs.forEach(walkExpr); break;
       case "SequenceExpr": e.exprs.forEach(walkExpr); break;
       case "UnaryExpr": walkExpr(e.operand); break;
-      case "UpdateExpr": break;
+      case "UpdateExpr": if (e.targetExpr) walkExpr(e.targetExpr); break; // `this.n++` / `u[i]++`
       case "TypeofExpr": walkExpr(e.operand); break;
       case "BinaryExpr": walkExpr(e.left); walkExpr(e.right); break;
       case "LogicalExpr": walkExpr(e.left); walkExpr(e.right); break;

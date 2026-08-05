@@ -141,7 +141,7 @@ class Renamer {
       case "IndexExpr": this.expr(e.object); this.expr(e.index); return;
       case "UnaryExpr": this.expr(e.operand); return;
       case "TypeofExpr": this.expr(e.operand); return;
-      case "UpdateExpr": e.target = this.n(e.target); return;
+      case "UpdateExpr": if (e.targetExpr) this.expr(e.targetExpr); else e.target = this.n(e.target); return;
       case "BinaryExpr": case "LogicalExpr": this.expr(e.left); this.expr(e.right); return;
       case "ConditionalExpr": this.expr(e.test); this.expr(e.consequent); this.expr(e.alternate); return;
       case "SequenceExpr": e.exprs.forEach((x) => this.expr(x)); return;
