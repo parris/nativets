@@ -78,7 +78,9 @@ describe("cross-platform execution", () => {
     }
   }, 120_000);
 
-  test("produces a valid iOS-device arm64 Mach-O binary", async () => {
+  // Needs Apple's iOS sysroot, so it is macOS-only: on the Linux CI runner there is no
+  // `xcrun`/SDK and the link can't produce a Mach-O at all (see toolchain.test.ts).
+  (process.platform === "darwin" ? test : test.skip)("produces a valid iOS-device arm64 Mach-O binary", async () => {
     const dir = mkdtempSync(join(tmpdir(), "xiosd-"));
     try {
       const bin = join(dir, "prog");

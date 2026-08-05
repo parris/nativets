@@ -19,6 +19,20 @@ function tmp(): string {
   return mkdtempSync(join(tmpdir(), "nativets-tc-"));
 }
 
+/**
+ * The iOS SDK path, or null where there isn't one (any non-macOS host — e.g. the
+ * Linux CI runner, where `xcrun` doesn't exist and spawnSync returns stdout: null).
+ * iOS targets need Apple's sysroot; the Android target does not, so only the iOS
+ * test is gated. Same discipline as test/cross.test.ts: skip where the toolchain is
+ * absent so the suite stays green headless, and be a hard gate where it is present.
+ */
+const IOS_SDK: string | null = (() => {
+  if (process.platform !== "darwin") return null;
+  const r = spawnSync("xcrun", ["--sdk", "iphoneos", "--show-sdk-path"], { encoding: "utf8" });
+  const path = (r.stdout ?? "").trim();
+  return r.status === 0 && path ? path : null;
+})();
+
 describe("toolchain", () => {
   test("clang consumes our LLVM IR and the binary runs (exit 0)", () => {
     const dir = tmp();
@@ -33,12 +47,10 @@ describe("toolchain", () => {
     }
   });
 
-  test("cross-compiles LLVM IR to an iOS arm64 object", () => {
+  (IOS_SDK ? test : test.skip)("cross-compiles LLVM IR to an iOS arm64 object", () => {
     const dir = tmp();
     try {
-      const sdk = spawnSync("xcrun", ["--sdk", "iphoneos", "--show-sdk-path"], {
-        encoding: "utf8",
-      }).stdout.trim();
+      const sdk = IOS_SDK!;
       const ll = join(dir, "t.ll");
       writeFileSync(ll, "define i32 @main() {\nentry:\n  ret i32 0\n}\n");
       const obj = join(dir, "t.o");
