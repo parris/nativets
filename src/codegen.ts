@@ -269,6 +269,9 @@ class ModuleGen {
     return [
       "; ModuleID = 'nativets'",
       ...DECLARES,
+      // v1 preemption safepoint — declared only in actor programs (the only ones that
+      // emit calls to it + link nt_actor.c), so non-actor IR stays byte-identical.
+      ...(this.usesActors ? ["declare void @nt_reduction_tick()"] : []),
       "",
       ...this.strDefs,
       this.strDefs.length ? "" : null,
@@ -347,6 +350,14 @@ class FnGen {
     if (!b.terminated) { b.lines.push("  " + line); b.terminated = true; }
   }
   private get terminated(): boolean { return this.blocks[this.cur]!.terminated; }
+
+  /** v1 reduction-counted preemption: emit a safepoint (budget tick + maybe-yield)
+   *  at loop back-edges and function-call sites. Emitted ONLY in programs that use
+   *  actors, so non-actor programs keep byte-identical IR; the runtime tick is itself
+   *  a no-op unless a spawned actor is running. */
+  private emitSafepoint(): void {
+    if (this.mod.usesActors) this.emit(`call void @nt_reduction_tick()`);
+  }
 
   private reset(): void {
     this.entryAllocas = []; this.blocks = []; this.cur = 0; this.tmp = 0; this.lbl = 0;
@@ -550,6 +561,7 @@ class FnGen {
         const endLbl = this.label("endwhile");
         this.terminate(`br label %${condLbl}`);
         this.to(this.block(condLbl));
+        this.emitSafepoint(); // back-edge: preempt on budget exhaustion
         const cond = this.genCond(s.test);
         this.terminate(`br i1 ${cond}, label %${bodyLbl}, label %${endLbl}`);
         this.to(this.block(bodyLbl));
@@ -571,6 +583,7 @@ class FnGen {
         const endLbl = this.label("endfor");
         this.terminate(`br label %${condLbl}`);
         this.to(this.block(condLbl));
+        this.emitSafepoint(); // back-edge: preempt on budget exhaustion
         if (s.test) {
           const cond = this.genCond(s.test);
           this.terminate(`br i1 ${cond}, label %${bodyLbl}, label %${endLbl}`);
@@ -599,6 +612,7 @@ class FnGen {
         this.loops.pop();
         if (!this.terminated) this.terminate(`br label %${condLbl}`);
         this.to(this.block(condLbl));
+        this.emitSafepoint(); // back-edge: preempt on budget exhaustion
         const cond = this.genCond(s.test);
         this.terminate(`br i1 ${cond}, label %${bodyLbl}, label %${endLbl}`);
         this.to(this.block(endLbl));
@@ -618,6 +632,7 @@ class FnGen {
         const endLbl = this.label("endof");
         this.terminate(`br label %${condLbl}`);
         this.to(this.block(condLbl));
+        this.emitSafepoint(); // back-edge: preempt on budget exhaustion
         const iC = this.fresh();
         this.emit(`${iC} = load double, ptr ${idx}`);
         const cmp = this.fresh();
@@ -690,6 +705,7 @@ class FnGen {
         const endLbl = this.label("endin");
         this.terminate(`br label %${condLbl}`);
         this.to(this.block(condLbl));
+        this.emitSafepoint(); // back-edge: preempt on budget exhaustion
         const iC = this.fresh();
         this.emit(`${iC} = load double, ptr ${idx}`);
         const cmp = this.fresh();
@@ -1492,6 +1508,7 @@ class FnGen {
 
   /** Call a function VALUE (closure ptr already computed): indirect call through slot 0. */
   private genCallValueFrom(clo: string, fnTy: Ty, args: Expr[]): Val {
+    this.emitSafepoint(); // call site: preempt long / deeply-recursive call chains
     const fpSlot = this.fresh();
     this.emit(`${fpSlot} = getelementptr i64, ptr ${clo}, i64 0`);
     const fpInt = this.fresh();
@@ -2161,6 +2178,7 @@ class FnGen {
   }
 
   private genUserCall(name: string, args: Expr[]): Val {
+    this.emitSafepoint(); // call site: preempt long / deeply-recursive call chains
     const sig = this.mod.functions.get(name)!;
     if (sig.rest) {
       const fixed = sig.params.length - 1;

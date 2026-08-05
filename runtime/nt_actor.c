@@ -45,6 +45,12 @@
 #define NT_STACK_SIZE  (256 * 1024)
 #define NT_SUP_CHILD_ID_MAX 64
 
+/* v1 reduction-counted preemption: an actor may run this many reductions (safepoints
+ * — call sites + loop back-edges, emitted by codegen) before it is forced to yield.
+ * Matches BEAM's CONTEXT_REDS. One fixed budget + one cooperative scheduler ⇒ the
+ * interleaving is a pure function of the program, so fairness tests stay deterministic. */
+#define NT_CONTEXT_REDS 2000
+
 typedef enum { NT_RUNNABLE, NT_RUNNING, NT_BLOCKED, NT_DEAD } NtStatus;
 
 typedef struct NtMboxNode { NtMsg msg; NtPid from; struct NtMboxNode *next; } NtMboxNode;
@@ -77,6 +83,8 @@ typedef struct NtActor {
   NtMon       monitors[NT_MAX_MONS]; int nmons;   /* who is monitoring THIS actor */
   /* triggering-message causal tag: the last message this actor dequeued */
   int         last_valid; NtPid last_from; int64_t last_val;
+  /* ---- v1: reduction-counted preemption ---- */
+  int64_t     reductions;              /* budget remaining this slice; refills to NT_CONTEXT_REDS */
 } NtActor;
 
 typedef struct NtRqNode { NtPid pid; struct NtRqNode *next; } NtRqNode;
@@ -179,6 +187,7 @@ static NtActor *actor_alloc(int with_stack) {
   NtActor *a = (NtActor *)calloc(1, sizeof(NtActor));
   a->pid = g_nactors;
   a->status = NT_RUNNING;
+  a->reductions = NT_CONTEXT_REDS;    /* full budget for the first slice */
   a->stack = with_stack ? (char *)malloc(NT_STACK_SIZE) : NULL;
   g_actors[g_nactors++] = a;
   return a;
@@ -220,6 +229,28 @@ static void scheduler_loop(void) {
 /* yield the current actor back to the scheduler context */
 static void yield_to_sched(void) {
   swapcontext(&g_current->ctx, &g_sched_ctx);
+}
+
+/* ======================= v1: reduction-counted preemption ======================= */
+
+/* The compiler-emitted safepoint. Codegen calls this at every function-call site and
+ * loop back-edge, so a long compute loop or deep recursion decrements a budget and,
+ * when exhausted, cooperatively yields — the running actor is re-enqueued at the run-
+ * queue TAIL and the scheduler runs the next actor (fairness / no starvation).
+ *
+ * Cheap by design: for the common case it is a load + decrement + branch + store.
+ * A no-op unless a spawned actor is currently running: main (actor 0) is the driver
+ * and is never preempted, and off-scheduler code (g_current == NULL, i.e. before
+ * nt_sched_init) returns immediately — so non-actor execution is behaviorally
+ * unchanged. On exhaustion the budget refills to NT_CONTEXT_REDS for the next slice. */
+void nt_reduction_tick(void) {
+  NtActor *a = g_current;
+  if (!a || a == g_main) return;        /* not a preemptible actor: no-op */
+  if (--a->reductions > 0) return;       /* budget remains: keep running */
+  a->reductions = NT_CONTEXT_REDS;       /* refill for our next slice */
+  a->status = NT_RUNNABLE;
+  rq_push(a->pid);                        /* re-enqueue at the tail (round-robin fairness) */
+  yield_to_sched();                       /* scheduler runs the next actor; resumes us later */
 }
 
 void nt_sched_init(void) {

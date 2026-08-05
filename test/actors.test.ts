@@ -31,6 +31,13 @@ const CASES: { name: string; file: string; expected: string }[] = [
   { name: "self() yields distinct pids", file: "self.ts", expected: "0\n1\n2\n" },
   { name: "per-sender FIFO", file: "fifo.ts", expected: "1\n2\n3\n" },
   { name: "two-actor ping/pong (blocking receive wakeup)", file: "pingpong.ts", expected: "100\n200\n" },
+  // v1 reduction-counted preemption (compiler-emitted safepoints). A cooperative-
+  // only scheduler would let the non-blocking hog run to completion first; the
+  // interleaving below only happens because the hog is PREEMPTED at loop back-edges.
+  // Cooperative-only outputs are noted per case; the single fixed-budget scheduler
+  // keeps the preempted schedule deterministic, so we assert exact stdout.
+  { name: "preemption: no-starvation (hog yields to a tick actor)", file: "fairness.ts", expected: "1\n3\n2\n" }, // cooperative-only: 1\n2\n3\n
+  { name: "preemption: two compute loops interleave", file: "interleave.ts", expected: "10\n20\n11\n21\n12\n22\n" }, // cooperative-only: 10\n11\n12\n20\n21\n22\n
 ];
 
 describe("B3 v0 actors — behavioral (native, deterministic)", () => {

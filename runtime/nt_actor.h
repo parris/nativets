@@ -89,6 +89,12 @@ NtPid   nt_spawn_closure(NtClosureFn body, void *env, int64_t arg); /* returns n
 void    nt_send_slot(NtPid to, int64_t slot);                        /* enqueue a raw slot */
 int64_t nt_receive_slot(void);                                        /* block; FIFO dequeue slot */
 
+/* v1 reduction-counted preemption: the compiler-emitted SAFEPOINT. Codegen calls
+ * this at every function-call site and loop back-edge; it decrements the running
+ * actor's budget and yields (re-enqueued at the run-queue tail) when it hits 0, so
+ * a long loop / deep recursion can't monopolize the scheduler. No-op off-scheduler. */
+void    nt_reduction_tick(void);
+
 /* ============================================================================
  * v2 — links / monitors / trap_exit + fault injection (B3-actors §2 v2.0–2.2).
  *
