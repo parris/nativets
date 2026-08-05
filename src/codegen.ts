@@ -168,6 +168,13 @@ const DECLARES = [
   "declare ptr @nt_exc_message()",
   "declare void @nt_exc_clear()",
   "declare void @nt_exc_abort()",
+  // --- Host I/O FFI: CLI args / env / stdin / exit (libc-only, cross-links) ---
+  "declare void @nt_init_args(i32, ptr)",
+  "declare ptr @nt_argv()",
+  "declare ptr @nt_getenv(ptr)",
+  "declare ptr @nt_read_line()",
+  "declare ptr @nt_read_stdin()",
+  "declare void @nt_exit(double)",
   // --- B2 immutable Map/Set (nt_hamt via scalar-ABI wrappers in nt_mapset.c) ---
   "declare ptr @nt_map_new()",
   "declare ptr @nt_map_put_slot(ptr, i32, i64, i64)",
@@ -505,12 +512,14 @@ class FnGen {
     this.collectLocals(body);
     const b0 = this.block(this.label("L"));
     this.to(b0);
+    // Host I/O: stash argc/argv into runtime globals so process.argv can read them.
+    this.emit(`call void @nt_init_args(i32 %argc, ptr %argv)`);
     // Bring up the v0 actor scheduler + actor 0 (main) before any actor call.
     if (this.mod.usesActors) this.emit(`call void @nt_sched_init()`);
     this.emitStrInit();
     this.genStmts(body);
     if (!this.terminated) { this.emitDrops(endDrops); this.emitStrDrops(); this.terminate("ret i32 0"); }
-    return this.assemble("define i32 @main()", b0);
+    return this.assemble("define i32 @main(i32 %argc, ptr %argv)", b0);
   }
 
   /** Generate a lifted arrow `define <ret> @name(ptr %__clo, params) { ... }`. */
@@ -1154,6 +1163,23 @@ class FnGen {
       }
 
       case "MemberExpr": {
+        // Host I/O: process.argv (string[]) and process.env.NAME (string). Recognized
+        // only when `process` is not a user binding (matches the checker's guard).
+        if (!this.varTypes.has("process") && !this.captures.has("process")) {
+          if (e.object.kind === "Identifier" && e.object.name === "process" && e.property === "argv") {
+            const t = this.fresh();
+            this.emit(`${t} = call ptr @nt_argv()`);
+            return { v: t, ty: "string[]" };
+          }
+          if (
+            e.object.kind === "MemberExpr" && e.object.object.kind === "Identifier" &&
+            e.object.object.name === "process" && e.object.property === "env"
+          ) {
+            const t = this.fresh();
+            this.emit(`${t} = call ptr @nt_getenv(ptr ${this.mod.intern(e.property)})`);
+            return { v: t, ty: "string" };
+          }
+        }
         // An optional chain whose result is nullable is lowered as a unit: guard at
         // each `?.`, short-circuiting the WHOLE rest of the chain to `undefined`.
         if (isNullableTy(e.ty ?? "") && isOptChainExpr(e)) return this.genOptChain(e);
@@ -1416,6 +1442,18 @@ class FnGen {
 
   private genCall(e: Extract<Expr, { kind: "CallExpr" }>): Val {
     if (isConsoleLog(e)) return this.genConsoleLog(e.args);
+
+    // process.exit(code?) — flush + exit; the block cannot fall through afterwards.
+    if (
+      e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" &&
+      e.callee.object.name === "process" && e.callee.property === "exit" &&
+      !this.varTypes.has("process") && !this.captures.has("process")
+    ) {
+      const code = e.args.length ? this.genExpr(e.args[0]!).v : llvmDouble(0);
+      this.emit(`call void @nt_exit(double ${code})`);
+      this.terminate("unreachable");
+      return { v: "", ty: "void" };
+    }
 
     // JSON.stringify(x) — serialization generated from x's static type.
     // JSON.parse(s) — runtime recursive-descent parser producing a tagged Dyn box.
@@ -2097,6 +2135,9 @@ class FnGen {
       case "Number": return { v: this.coerceToNumber(this.genExpr(args[0]!)), ty: "number" };
       case "String": return { v: this.coerceToString(this.genExpr(args[0]!)), ty: "string" };
       case "move": return this.genExpr(args[0]!); // ownership marker; runtime identity
+      // Host I/O stdin builtins — return a fresh (rc-tracked) heap string.
+      case "readLine": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_line()`); return { v: t, ty: "string" }; }
+      case "readStdin": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_stdin()`); return { v: t, ty: "string" }; }
       case "__arrLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_live()`); return { v: t, ty: "number" }; }
       case "__objLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_obj_live()`); return { v: t, ty: "number" }; }
       case "__strLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_str_live()`); return { v: t, ty: "number" }; }
