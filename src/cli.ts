@@ -72,7 +72,10 @@ if (cmd === "run") {
   try {
     const bin = join(dir, "prog");
     await guard(() => buildBinary(source, bin, { target: "host" }));
-    const r = spawnSync(bin, [], { stdio: "inherit" });
+    // Forward CLI args after the source file to the program as process.argv[2..]
+    // (a leading `--` separator is dropped): `nativets run chat.ts -- --key $KEY`.
+    const fwd = rest[0] === "--" ? rest.slice(1) : rest;
+    const r = spawnSync(bin, fwd, { stdio: "inherit" });
     process.exit(r.status ?? -1);
   } finally {
     rmSync(dir, { recursive: true, force: true });

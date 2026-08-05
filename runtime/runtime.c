@@ -806,3 +806,90 @@ void nt_dyn_print(NtDyn *d) {
     default:       fputs("[object]", stdout); break;
   }
 }
+
+/* ============================================================
+ * Host I/O FFI — CLI args, environment, stdin, exit. libc/POSIX only
+ * (getenv/fread/exit), so it cross-links unchanged for macOS/iOS/Android.
+ *
+ * PORTED from the canonical host-I/O lane (impl-host-io) so the chat example
+ * builds+tests in this worktree; identical surface — prefer that lane's copy on
+ * merge (see the HTTP-lane report).
+ *
+ * argv shape (node-consistent): node's `process.argv` is
+ * [execPath, scriptPath, ...userArgs]. The compiled binary receives only ONE
+ * leading path (C argv[0]); we synthesize node's two-slot prefix by repeating
+ * argv[0], so USER ARGS BEGIN AT INDEX 2 and `argv.length` equals node's.
+ * ============================================================ */
+
+static int    g_argc = 0;
+static char **g_argv = NULL;
+
+/* Called first thing in @main to stash the real argc/argv. */
+void nt_init_args(int argc, char **argv) { g_argc = argc; g_argv = argv; }
+
+/* process.argv -> a fresh string[] in node's shape (see header above). Elements
+ * are the untracked C argv pointers (treated like string literals: never freed). */
+NtArray *nt_argv(void) {
+  NtArray *a = nt_arr_new((double)(g_argc + 1));
+  const char *prog = g_argc > 0 ? g_argv[0] : "";
+  nt_arr_push(a, (int64_t)(intptr_t)prog);        /* [0] execPath              */
+  nt_arr_push(a, (int64_t)(intptr_t)prog);        /* [1] scriptPath (mirror)   */
+  for (int i = 1; i < g_argc; i++)                /* [2..] user CLI arguments  */
+    nt_arr_push(a, (int64_t)(intptr_t)g_argv[i]);
+  return a;
+}
+
+/* process.env.NAME -> the value, or "" when unset (documented divergence from
+ * node's `undefined`). The returned pointer is into the C environment. */
+const char *nt_getenv(const char *name) {
+  const char *v = getenv(name);
+  return v ? v : "";
+}
+
+/* process.exit(code) — flushes stdio and exits (never returns). */
+void nt_exit(double code) { exit((int)code); }
+
+/* ---- stdin: lazily slurp all of fd 0, then serve from a shared cursor ----
+ *   readStdin() -> everything from the cursor to EOF (cursor -> end)
+ *   readLine()  -> the next line WITHOUT its trailing '\n' (or the remainder if
+ *                  unterminated); "" once the cursor is at EOF. */
+static char  *g_stdin = NULL;
+static size_t g_stdin_len = 0;
+static size_t g_stdin_pos = 0;
+static int    g_stdin_loaded = 0;
+
+static void stdin_load(void) {
+  if (g_stdin_loaded) return;
+  g_stdin_loaded = 1;
+  size_t cap = 4096, len = 0;
+  char *buf = (char *)nativets_alloc(cap);
+  size_t n;
+  while ((n = fread(buf + len, 1, cap - len, stdin)) > 0) {
+    len += n;
+    if (len == cap) { cap *= 2; char *nb = (char *)nativets_alloc(cap); memcpy(nb, buf, len); free(buf); buf = nb; }
+  }
+  if (len + 1 > cap) { char *nb = (char *)nativets_alloc(len + 1); memcpy(nb, buf, len); free(buf); buf = nb; }
+  buf[len] = '\0';
+  g_stdin = buf; g_stdin_len = len; g_stdin_pos = 0;
+}
+
+const char *nt_read_stdin(void) {
+  stdin_load();
+  size_t rem = g_stdin_len - g_stdin_pos;
+  char *o = alloc_str(rem);
+  memcpy(o, g_stdin + g_stdin_pos, rem); o[rem] = '\0';
+  g_stdin_pos = g_stdin_len;
+  return o;
+}
+
+const char *nt_read_line(void) {
+  stdin_load();
+  if (g_stdin_pos >= g_stdin_len) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  size_t start = g_stdin_pos, i = start;
+  while (i < g_stdin_len && g_stdin[i] != '\n') i++;
+  size_t len = i - start;
+  char *o = alloc_str(len);
+  memcpy(o, g_stdin + start, len); o[len] = '\0';
+  g_stdin_pos = (i < g_stdin_len) ? i + 1 : g_stdin_len; /* consume the '\n' */
+  return o;
+}

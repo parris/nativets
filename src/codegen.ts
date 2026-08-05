@@ -150,6 +150,16 @@ const DECLARES = [
   "declare double @nt_obj_live()",
   "declare ptr @nt_str_split(ptr, ptr)",
   "declare ptr @nt_arr_reverse(ptr)",
+  // Host I/O FFI: CLI args / env / stdin. libc-only, cross-links unchanged.
+  "declare void @nt_init_args(i32, ptr)",
+  "declare ptr @nt_argv()",
+  "declare ptr @nt_getenv(ptr)",
+  "declare ptr @nt_read_line()",
+  "declare ptr @nt_read_stdin()",
+  // Networking tier (L-d): libcurl-backed HTTP(S) client (host/Linux only; conditionally linked).
+  // Return the response body (rc-string); write the numeric status through the trailing double*.
+  "declare ptr @nt_http_post(ptr, ptr, ptr, ptr)",
+  "declare ptr @nt_http_get(ptr, ptr, ptr)",
   "declare ptr @nt_arr_slice(ptr, double, double)",
   "declare void @nt_arr_extend(ptr, ptr)",
   "declare ptr @js_json_quote(ptr)",
@@ -505,12 +515,14 @@ class FnGen {
     this.collectLocals(body);
     const b0 = this.block(this.label("L"));
     this.to(b0);
+    // Host I/O: stash argc/argv into runtime globals so process.argv can read them.
+    this.emit(`call void @nt_init_args(i32 %argc, ptr %argv)`);
     // Bring up the v0 actor scheduler + actor 0 (main) before any actor call.
     if (this.mod.usesActors) this.emit(`call void @nt_sched_init()`);
     this.emitStrInit();
     this.genStmts(body);
     if (!this.terminated) { this.emitDrops(endDrops); this.emitStrDrops(); this.terminate("ret i32 0"); }
-    return this.assemble("define i32 @main()", b0);
+    return this.assemble("define i32 @main(i32 %argc, ptr %argv)", b0);
   }
 
   /** Generate a lifted arrow `define <ret> @name(ptr %__clo, params) { ... }`. */
@@ -1154,6 +1166,19 @@ class FnGen {
       }
 
       case "MemberExpr": {
+        // Host I/O FFI: process.argv -> string[] (nt_argv); process.env.NAME -> string
+        // (nt_getenv). `process` is not a real binding — recognize the shapes directly.
+        if (e.object.kind === "Identifier" && e.object.name === "process" && e.property === "argv") {
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @nt_argv()`);
+          return { v: t, ty: "string[]" };
+        }
+        if (e.object.kind === "MemberExpr" && e.object.object.kind === "Identifier"
+            && e.object.object.name === "process" && e.object.property === "env") {
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @nt_getenv(ptr ${this.mod.intern(e.property)})`);
+          return { v: t, ty: "string" };
+        }
         // An optional chain whose result is nullable is lowered as a unit: guard at
         // each `?.`, short-circuiting the WHOLE rest of the chain to `undefined`.
         if (isNullableTy(e.ty ?? "") && isOptChainExpr(e)) return this.genOptChain(e);
@@ -2074,6 +2099,32 @@ class FnGen {
     return { v: this.concat(af, this.mod.intern("]")), ty: "string" };
   }
 
+  /**
+   * HTTP client builtin (httpGet/httpPost) → a `{status:number,body:string}` object.
+   * The status out-param is the object's status slot itself (no alloca — loop-safe: the
+   * chat REPL calls httpPost every turn), which the runtime fills with the numeric status
+   * as raw double bits (== toSlot(number)); the body string is stored (retained) in slot 1.
+   */
+  private genHttp(fn: string, args: Expr[], hasBody: boolean): Val {
+    const url = this.genExpr(args[0]!).v;
+    const headers = this.genExpr(args[1]!).v;
+    const body = hasBody ? this.genExpr(args[2]!).v : null;
+    const ty: Ty = "{status:number,body:string}";
+    const obj = this.fresh();
+    this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(2)})`);
+    const gStatus = this.fresh();
+    this.emit(`${gStatus} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, "status")}`);
+    const resp = this.fresh();
+    const call = hasBody
+      ? `${resp} = call ptr @${fn}(ptr ${url}, ptr ${headers}, ptr ${body}, ptr ${gStatus})`
+      : `${resp} = call ptr @${fn}(ptr ${url}, ptr ${headers}, ptr ${gStatus})`;
+    this.emit(call); // writes *status_out into the status slot as a double
+    const gBody = this.fresh();
+    this.emit(`${gBody} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, "body")}`);
+    this.emit(`store i64 ${this.toSlot({ v: resp, ty: "string" })}, ptr ${gBody}`);
+    return { v: obj, ty };
+  }
+
   private genGlobal(name: string, args: Expr[]): Val | null {
     switch (name) {
       case "parseInt": {
@@ -2100,6 +2151,12 @@ class FnGen {
       case "__arrLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_live()`); return { v: t, ty: "number" }; }
       case "__objLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_obj_live()`); return { v: t, ty: "number" }; }
       case "__strLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_str_live()`); return { v: t, ty: "number" }; }
+      // Host I/O stdin builtins — return a fresh (rc-tracked) heap string.
+      case "readLine": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_line()`); return { v: t, ty: "string" }; }
+      case "readStdin": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_stdin()`); return { v: t, ty: "string" }; }
+      // Networking tier (L-d): HTTP(S) client → {status:number, body:string}.
+      case "httpGet": return this.genHttp("nt_http_get", args, false);
+      case "httpPost": return this.genHttp("nt_http_post", args, true);
 
       // --- B3 v0 actors ---
       case "spawn": {

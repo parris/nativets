@@ -56,6 +56,13 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   __arrLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live array count
   __objLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live object count
   __strLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live heap-string count
+  // Host I/O FFI (stdin): the node oracle gets these via a harness polyfill prelude.
+  readLine: { min: 0, max: 0, argTys: [], ret: "string" },  // next stdin line (no newline), "" at EOF
+  readStdin: { min: 0, max: 0, argTys: [], ret: "string" }, // all remaining stdin
+  // Networking tier (L-d): libcurl-backed HTTP(S) client. `headers` is a newline-joined
+  // list of "Name: Value" lines. Returns {status, body}; host/Linux only (see driver.ts).
+  httpGet: { min: 2, max: 2, argTys: ["string", "string"], ret: "{status:number,body:string}" },
+  httpPost: { min: 3, max: 3, argTys: ["string", "string", "string"], ret: "{status:number,body:string}" },
 };
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 const ACTOR_BUILTINS = new Set([
@@ -335,6 +342,16 @@ class Checker {
         return b.ty;
       }
       case "MemberExpr": {
+        // Host I/O FFI: process.argv -> string[]; process.env.NAME -> string. `process`
+        // is not a real binding, so recognize these shapes before typing the object.
+        if (e.object.kind === "Identifier" && e.object.name === "process" && !scope.lookup("process")) {
+          if (e.property === "argv") return "string[]";
+          throw typeError(`process.${e.property} is not supported (only process.argv / process.env.NAME)`);
+        }
+        if (e.object.kind === "MemberExpr" && e.object.object.kind === "Identifier"
+            && e.object.object.name === "process" && e.object.property === "env" && !scope.lookup("process")) {
+          return "string"; // process.env.NAME
+        }
         const ot = this.type(e.object, scope);
         // Accessing a member of a possibly-nullish object: the result is nullable
         // (the whole chain short-circuits to `undefined` if the object is nullish).
