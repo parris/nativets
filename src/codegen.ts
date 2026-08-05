@@ -30,7 +30,14 @@ const ACTOR_BUILTINS = new Set([
   "spawn", "send", "receive", "self", "__drain",
   // v2 links/monitors/trap + fault injection; v3 supervision + registry
   "register", "whereis", "link", "monitor", "trapExit", "exit", "__crash", "__kill", "supervise",
+  // v4 selective receive
+  "receiveMatch",
 ]);
+
+/** B3 v4 message kind tag (must match NT_MSG_NUM / NT_MSG_STR in runtime/nt_actor.h).
+ *  Sent alongside every message so a receive compiled for one type can never
+ *  reinterpret another's bits — a mismatch is a runtime error, not a miscompile. */
+function msgKind(ty: Ty): number { return baseTy(ty) === "string" ? 1 : 0; }
 
 /** Does the program call any actor builtin? (Drives the nt_sched_init prologue in
  *  @main.) A structural walk over the plain-object AST — order/shape-agnostic. */
@@ -254,6 +261,16 @@ const DECLARES = [
   "declare i64 @nt_sup_new(i64, i64, i64)",
   "declare void @nt_sup_add_child(i64, ptr, ptr, ptr)",
   "declare i64 @nt_sup_start(i64)",
+  // --- B3 v4 typed messages, receive timeouts, selective receive ---
+  "declare i64 @nt_spawn_typed(ptr, ptr, i64, i64)",
+  "declare void @nt_send_typed(i64, i64, i64)",
+  "declare i64 @nt_recv_timed(i64, double, i32)",
+  "declare i32 @nt_recv_timed_out()",
+  "declare i64 @nt_mbox_count()",
+  "declare i64 @nt_mbox_peek_slot(i64)",
+  "declare i64 @nt_mbox_peek_kind(i64)",
+  "declare void @nt_mbox_take(i64)",
+  "declare i32 @nt_mbox_wait_from(i64, double, i32)",
 ];
 
 interface Val { v: string; ty: Ty; }
@@ -1350,6 +1367,20 @@ class FnGen {
         const op = e.op;
         if (op in FCMP) {
           const lt = e.left.ty ?? "number";
+          // A2 nullable === undefined / === null: compare the BOX TAG (0=undefined,
+          // 1=null, 2=present), never truthiness — so `0` / `""` / `false` are present.
+          const nullLit = (t: Ty | undefined): number | null => t === "undefined" ? 0 : t === "null" ? 1 : null;
+          const boxSide = isNullableTy(lt) ? e.left : isNullableTy(e.right.ty ?? "number") ? e.right : null;
+          if (boxSide && nullLit((boxSide === e.left ? e.right : e.left).ty) !== null) {
+            const want = nullLit((boxSide === e.left ? e.right : e.left).ty)!;
+            const box = this.genExpr(boxSide);
+            const eq = this.fresh();
+            this.emit(`${eq} = icmp eq i64 ${this.nullTag(box.v)}, ${want}`);
+            if (op === "===" || op === "==") return { v: eq, ty: "boolean" };
+            const ne = this.fresh();
+            this.emit(`${ne} = xor i1 ${eq}, true`);
+            return { v: ne, ty: "boolean" };
+          }
           const l = this.genExpr(e.left);
           const r = this.genExpr(e.right);
           const t = this.fresh();
@@ -1703,7 +1734,7 @@ class FnGen {
       return this.genStringMethod(e.callee.property, recv, e.args);
     }
     if (e.callee.kind === "Identifier") {
-      const g = this.genGlobal(e.callee.name, e.args);
+      const g = this.genGlobal(e.callee.name, e.args, e.ty);
       if (g) return g;
       const cap = this.captures.get(e.callee.name);
       if (cap && isFuncTy(cap.ty)) return this.genCallValueFrom(this.readCapture(e.callee.name).v, cap.ty, e.args);
@@ -1832,6 +1863,14 @@ class FnGen {
 
   /** Call a function VALUE (closure ptr already computed): indirect call through slot 0. */
   private genCallValueFrom(clo: string, fnTy: Ty, args: Expr[]): Val {
+    const ps = funcParams(fnTy);
+    return this.callClosureWith(clo, fnTy, args.map((a, i) => ({ v: this.genExpr(a).v, ty: ps[i]! })));
+  }
+
+  /** Call a closure value with ALREADY-generated argument values (the Expr-taking
+   *  genCallValueFrom delegates here; B3 v4's selective-receive scan calls the user
+   *  predicate with a value peeked out of the mailbox, which has no Expr form). */
+  private callClosureWith(clo: string, fnTy: Ty, argVs: Val[]): Val {
     this.emitSafepoint(); // call site: preempt long / deeply-recursive call chains
     const fpSlot = this.fresh();
     this.emit(`${fpSlot} = getelementptr i64, ptr ${clo}, i64 0`);
@@ -1841,7 +1880,7 @@ class FnGen {
     this.emit(`${fp} = inttoptr i64 ${fpInt} to ptr`);
     const ps = funcParams(fnTy);
     const ret = funcRet(fnTy);
-    const argVals = args.map((a, i) => `${llvmTy(ps[i]!)} ${this.genExpr(a).v}`);
+    const argVals = argVs.map((a, i) => `${llvmTy(ps[i] ?? a.ty)} ${a.v}`);
     const argStr = [`ptr ${clo}`, ...argVals].join(", ");
     if (ret === "void") { this.emit(`call void ${fp}(${argStr})`); return { v: "", ty: "void" }; }
     const t = this.fresh();
@@ -2595,7 +2634,7 @@ class FnGen {
     return { v: obj, ty };
   }
 
-  private genGlobal(name: string, args: Expr[]): Val | null {
+  private genGlobal(name: string, args: Expr[], retTy?: Ty): Val | null {
     switch (name) {
       case "parseInt": {
         const s = this.genExpr(args[0]!).v;
@@ -2685,13 +2724,14 @@ class FnGen {
 
       // --- B3 v0 actors ---
       case "spawn": {
-        // spawn(body, arg): body is a closure value; message rides in an i64 slot.
+        // spawn(body, arg): body is a closure value; message rides in a typed i64 slot
+        // (a string arg is deep-copied by the runtime, like any sent message).
         const fn = this.genExpr(args[0]!);              // ptr: [fn_ptr, caps...]
         const argTy = funcParams(fn.ty)[0] ?? "number"; // the body's message type
         const entry = this.mod.actorEntry(argTy);
-        const slot = this.toSlot(this.genExpr(args[1]!));
+        const slot = this.slotNoRetain(this.genExpr(args[1]!));
         const pidI = this.fresh();
-        this.emit(`${pidI} = call i64 @nt_spawn_closure(ptr @${entry}, ptr ${fn.v}, i64 ${slot})`);
+        this.emit(`${pidI} = call i64 @nt_spawn_typed(ptr @${entry}, ptr ${fn.v}, i64 ${slot}, i64 ${msgKind(argTy)})`);
         const pid = this.fresh();
         this.emit(`${pid} = sitofp i64 ${pidI} to double`);
         return { v: pid, ty: "number" };
@@ -2700,15 +2740,32 @@ class FnGen {
         const pidV = this.genExpr(args[0]!).v;          // double
         const pidI = this.fresh();
         this.emit(`${pidI} = fptosi double ${pidV} to i64`);
-        const slot = this.toSlot(this.genExpr(args[1]!));
-        this.emit(`call void @nt_send_slot(i64 ${pidI}, i64 ${slot})`);
+        const msg = this.genExpr(args[1]!);
+        // No retain: the runtime DEEP-COPIES a string message, so the receiver owns a
+        // private copy and the sender's own local keeps its existing ownership.
+        const slot = this.slotNoRetain(msg);
+        this.emit(`call void @nt_send_typed(i64 ${pidI}, i64 ${slot}, i64 ${msgKind(msg.ty)})`);
         return { v: "", ty: "void" };
       }
+      // v4: receive() blocks; receive(ms) is Erlang's `after` — on timeout it yields the
+      // A2 `undefined` box rather than any in-band sentinel.
       case "receive": {
+        const rt: Ty = retTy ?? "number";
+        const base = baseTy(rt);
+        const kind = msgKind(base);
+        if (args.length === 0) {
+          const slot = this.fresh();
+          this.emit(`${slot} = call i64 @nt_recv_timed(i64 ${kind}, double ${llvmDouble(0)}, i32 0)`);
+          return { v: this.fromSlot(slot, base), ty: base };
+        }
+        const ms = this.genExpr(args[0]!).v;
         const slot = this.fresh();
-        this.emit(`${slot} = call i64 @nt_receive_slot()`);
-        return { v: this.fromSlot(slot, "number"), ty: "number" }; // v0: number messages
+        this.emit(`${slot} = call i64 @nt_recv_timed(i64 ${kind}, double ${ms}, i32 1)`);
+        const flag = this.fresh(); this.emit(`${flag} = call i32 @nt_recv_timed_out()`);
+        const to = this.fresh(); this.emit(`${to} = icmp ne i32 ${flag}, 0`);
+        return { v: this.genTimeoutBox(to, slot, rt), ty: rt };
       }
+      case "receiveMatch": return this.genReceiveMatch(args, retTy ?? "number");
       case "self": {
         const p = this.fresh();
         this.emit(`${p} = call i64 @nt_self()`);
@@ -2826,6 +2883,123 @@ class FnGen {
     const pidI = this.fresh(); this.emit(`${pidI} = call i64 @nt_sup_start(i64 ${handle})`);
     const pid = this.fresh(); this.emit(`${pid} = sitofp i64 ${pidI} to double`);
     return { v: pid, ty: "number" };
+  }
+
+  /** Pack a value into a raw 8-byte slot WITHOUT the string retain `toSlot` adds.
+   *  For handoffs where the CALLEE takes its own copy — an actor send/spawn deep-copies
+   *  a string message — so the sender keeps exactly the ownership it already had. */
+  private slotNoRetain(val: Val): string {
+    if (val.ty !== "string") return this.toSlot(val);
+    const t = this.fresh();
+    this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    return t;
+  }
+
+  /** B3 v4: join a timed receive into `T | undefined` — the A2 tagged pair, so a
+   *  timeout is a real `undefined` and never collides with a legal message value. */
+  private genTimeoutBox(timedOut: string, slot: string, rt: Ty): string {
+    const out = this.slot(rt);
+    const toLbl = this.label("rcvto"), okLbl = this.label("rcvok"), endLbl = this.label("rcvend");
+    this.terminate(`br i1 ${timedOut}, label %${toLbl}, label %${okLbl}`);
+    this.to(this.block(toLbl));
+    this.emit(`store ptr ${this.nullBox("0", "0")}, ptr ${out}`);
+    this.terminate(`br label %${endLbl}`);
+    this.to(this.block(okLbl));
+    this.emit(`store ptr ${this.nullBox("2", slot)}, ptr ${out}`);
+    this.terminate(`br label %${endLbl}`);
+    this.to(this.block(endLbl));
+    const r = this.fresh();
+    this.emit(`${r} = load ptr, ptr ${out}`);
+    return r;
+  }
+
+  /** B3 v4 selective receive — `receiveMatch(pred)` / `receiveMatch(pred, ms)`.
+   *
+   *  OTP semantics, emitted as a scan over the mailbox rather than a dequeue: walk the
+   *  queued messages in order, skip kinds this receive wasn't compiled for, apply the
+   *  user predicate (an ordinary closure call, so it can capture and can even yield at
+   *  its safepoint), and TAKE the first match. Everything that didn't match simply stays
+   *  where it is — that IS Erlang's save queue, restored for the next receive for free.
+   *  When the scan is exhausted we block for messages we haven't examined yet and resume
+   *  scanning from there, so a message arriving mid-scan is never skipped. */
+  private genReceiveMatch(args: Expr[], retTy: Ty): Val {
+    const nullable = isNullableTy(retTy);
+    const base = baseTy(retTy);
+    const kind = msgKind(base);
+    const pred = this.genExpr(args[0]!);                    // closure ptr: (base) => boolean
+    const hasT = args.length > 1;
+    const ms = hasT ? this.genExpr(args[1]!).v : llvmDouble(0);
+
+    const scanned = this.slot("number");   // first not-yet-examined index (survives a block)
+    const iSlot = this.slot("number");     // scan cursor
+    const res = this.slot(base);           // the matched message
+    const okSlot = this.slot("boolean");   // matched (vs timed out)
+    this.emit(`store double ${llvmDouble(0)}, ptr ${scanned}`);
+    this.emit(`store ${llvmTy(base)} ${defaultZero(base)}, ptr ${res}`);
+    this.emit(`store i1 false, ptr ${okSlot}`);
+
+    const outer = this.label("selscan"), inner = this.label("selnext"), body = this.label("selbody");
+    const tryp = this.label("seltry"), hit = this.label("selhit"), step = this.label("selstep");
+    const wait = this.label("selwait"), miss = this.label("selmiss"), done = this.label("seldone");
+
+    this.terminate(`br label %${outer}`);
+    // outer: re-read the mailbox length (it can grow while we scan) and resume the cursor
+    this.to(this.block(outer));
+    const lenI = this.fresh(); this.emit(`${lenI} = call i64 @nt_mbox_count()`);
+    const lenD = this.fresh(); this.emit(`${lenD} = sitofp i64 ${lenI} to double`);
+    const sc = this.fresh(); this.emit(`${sc} = load double, ptr ${scanned}`);
+    this.emit(`store double ${sc}, ptr ${iSlot}`);
+    this.terminate(`br label %${inner}`);
+
+    this.to(this.block(inner));
+    const i0 = this.fresh(); this.emit(`${i0} = load double, ptr ${iSlot}`);
+    const more = this.fresh(); this.emit(`${more} = fcmp olt double ${i0}, ${lenD}`);
+    this.terminate(`br i1 ${more}, label %${body}, label %${wait}`);
+
+    // body: only messages of this receive's kind are candidates (an exit signal or a
+    // number sent to a string receive is left in the mailbox, not misread).
+    this.to(this.block(body));
+    const iD = this.fresh(); this.emit(`${iD} = load double, ptr ${iSlot}`);
+    const iI = this.fresh(); this.emit(`${iI} = fptosi double ${iD} to i64`);
+    const k = this.fresh(); this.emit(`${k} = call i64 @nt_mbox_peek_kind(i64 ${iI})`);
+    const kOk = this.fresh(); this.emit(`${kOk} = icmp eq i64 ${k}, ${kind}`);
+    this.terminate(`br i1 ${kOk}, label %${tryp}, label %${step}`);
+
+    this.to(this.block(tryp));
+    const rawSlot = this.fresh(); this.emit(`${rawSlot} = call i64 @nt_mbox_peek_slot(i64 ${iI})`);
+    const v = this.fromSlot(rawSlot, base);
+    const p = this.callClosureWith(pred.v, pred.ty, [{ v, ty: base }]);
+    this.terminate(`br i1 ${p.v}, label %${hit}, label %${step}`);
+
+    this.to(this.block(hit));
+    this.emit(`call void @nt_mbox_take(i64 ${iI})`);
+    this.emit(`store ${llvmTy(base)} ${v}, ptr ${res}`);
+    this.emit(`store i1 true, ptr ${okSlot}`);
+    this.terminate(`br label %${done}`);
+
+    this.to(this.block(step));
+    const iN = this.fresh(); this.emit(`${iN} = fadd double ${iD}, ${llvmDouble(1)}`);
+    this.emit(`store double ${iN}, ptr ${iSlot}`);
+    this.terminate(`br label %${inner}`);
+
+    // wait: nothing in the queue matched — block until something we haven't examined
+    // arrives (or the timeout fires), then rescan from where we stopped.
+    this.to(this.block(wait));
+    this.emit(`store double ${lenD}, ptr ${scanned}`);
+    const got = this.fresh();
+    this.emit(`${got} = call i32 @nt_mbox_wait_from(i64 ${lenI}, double ${ms}, i32 ${hasT ? 1 : 0})`);
+    const gotB = this.fresh(); this.emit(`${gotB} = icmp ne i32 ${got}, 0`);
+    this.terminate(`br i1 ${gotB}, label %${outer}, label %${miss}`);
+
+    this.to(this.block(miss));
+    this.terminate(`br label %${done}`);
+
+    this.to(this.block(done));
+    const okV = this.fresh(); this.emit(`${okV} = load i1, ptr ${okSlot}`);
+    const rv = this.fresh(); this.emit(`${rv} = load ${llvmTy(base)}, ptr ${res}`);
+    if (!nullable) return { v: rv, ty: base };   // blocking form: only reachable on a match
+    const timedOut = this.fresh(); this.emit(`${timedOut} = xor i1 ${okV}, true`);
+    return { v: this.genTimeoutBox(timedOut, this.slotNoRetain({ v: rv, ty: base }), retTy), ty: retTy };
   }
 
   private genUserCall(name: string, args: Expr[]): Val {

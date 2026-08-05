@@ -103,7 +103,19 @@ const ACTOR_BUILTINS = new Set([
   "spawn", "send", "receive", "self", "__drain",
   // v2 registry / links / monitors / trap + fault injection; v3 supervision
   "register", "whereis", "link", "monitor", "trapExit", "exit", "__crash", "__kill", "supervise",
+  // v4 selective receive (receiveMatch(pred, timeoutMs?)); receive gained an optional timeout
+  "receiveMatch",
 ]);
+
+/** B3 v4: the message types an actor can send/receive today — `number` (v0) and
+ *  `string` (v4, deep-copied on send). `T | undefined` (a timeout result) narrows to
+ *  its base. Anything else — objects, arrays, Dyn — is refused with a code rather
+ *  than shipped through the 8-byte slot without a deep copy. */
+export function actorMsgTy(t?: Ty): Ty {
+  const base = t === undefined ? "number" : isNullableTy(t) ? baseTy(t) : t;
+  if (base === "number" || base === "string") return base;
+  throw nyi(NYI.CLOSURE, `actor message of type ${base} (messages are number | string; structured messages need the deep-copy-on-send walk)`);
+}
 
 export function check(program: Program): CheckedProgram {
   const functions = new Map<string, Sig>();
@@ -468,6 +480,11 @@ class Checker {
           return "boolean";
         }
         if (EQUALITY.has(e.op)) {
+          // A2 nullable vs the `undefined` / `null` literal — the idiomatic TS
+          // nullish test (`if (m === undefined)`). It is a TAG comparison on the
+          // tagged pair, never truthiness, so `0` / `""` / `false` compare false.
+          if (isNullableTy(l) && (r === "undefined" || r === "null")) return "boolean";
+          if (isNullableTy(r) && (l === "undefined" || l === "null")) return "boolean";
           if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`);
           return "boolean";
         }
@@ -602,7 +619,7 @@ class Checker {
         return "{message:string}";
       }
       case "AsExpr": { this.type(e.expr, scope); return e.ty; } // identity retype
-      case "CallExpr": return this.inferCall(e, scope);
+      case "CallExpr": return this.inferCall(e, scope, hint);
     }
   }
 
@@ -630,7 +647,7 @@ class Checker {
     return undefined; // variadic builtin / method
   }
 
-  private inferCall(e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope): Ty {
+  private inferCall(e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope, hint?: Ty): Ty {
     // Expand a single spread argument: `f(...[a,b])` inline; `f(...arr)` → f(arr[0]..arr[n-1]).
     if (e.args.length === 1 && e.args[0]!.kind === "SpreadExpr") {
       const arg = (e.args[0] as Extract<Expr, { kind: "SpreadExpr" }>).argument;
@@ -668,9 +685,36 @@ class Checker {
     // user binding of the same name (these are recognized like Math.*/console.log).
     if (e.callee.kind === "Identifier" && ACTOR_BUILTINS.has(e.callee.name) && !scope.lookup(e.callee.name)) {
       const name = e.callee.name;
-      if (name === "receive" || name === "self") {
-        if (e.args.length !== 0) throw typeError(`${name}() takes no arguments`);
-        return name === "self" ? "number" : "number"; // v0: number pid / message
+      if (name === "self") {
+        if (e.args.length !== 0) throw typeError("self() takes no arguments");
+        return "number"; // pid
+      }
+      // v4 receive: `receive()` blocks; `receive(ms)` is Erlang's `after` and yields
+      // `T | undefined` (A2 nullable) so a timeout is observably distinct from any real
+      // message. The message type T comes from CONTEXT (the declared type of the binding
+      // — `const m: string = receive()`), defaulting to number, and is checked at
+      // runtime against the sender's kind, so it can never be a miscompile.
+      if (name === "receive") {
+        if (e.args.length > 1) throw typeError("receive(timeoutMs?) takes at most one argument");
+        const base = actorMsgTy(hint);
+        if (e.args.length === 0) return base;
+        if (this.type(e.args[0]!, scope) !== "number") throw typeError("receive: the timeout must be a number (ms)");
+        return makeNullable("undefined", base);
+      }
+      // v4 selective receive: `receiveMatch(pred)` takes the FIRST message satisfying
+      // `pred`, leaving the rest queued in order (OTP's save queue). T comes from the
+      // predicate's parameter type. `receiveMatch(pred, ms)` adds the timeout.
+      if (name === "receiveMatch") {
+        if (e.args.length < 1 || e.args.length > 2)
+          throw typeError("receiveMatch(pred, timeoutMs?) takes one or two arguments");
+        const predTy = this.type(e.args[0]!, scope);
+        if (!isFuncTy(predTy) || funcParams(predTy).length !== 1)
+          throw typeError("receiveMatch: pred must be a one-argument function (msg) => boolean");
+        if (funcRet(predTy) !== "boolean") throw typeError("receiveMatch: pred must return boolean");
+        const base = actorMsgTy(funcParams(predTy)[0]!);
+        if (e.args.length === 1) return base;
+        if (this.type(e.args[1]!, scope) !== "number") throw typeError("receiveMatch: the timeout must be a number (ms)");
+        return makeNullable("undefined", base);
       }
       if (name === "__drain") {
         if (e.args.length !== 0) throw typeError("__drain() takes no arguments");
@@ -747,17 +791,16 @@ class Checker {
       if (name === "send") {
         if (e.args.length !== 2) throw typeError("send(to, msg) takes two arguments");
         if (this.type(e.args[0]!, scope) !== "number") throw typeError("send: pid must be a number");
-        if (this.type(e.args[1]!, scope) !== "number") throw nyi(NYI.CLOSURE, "send of a non-number message (v0 actors carry number messages)");
+        actorMsgTy(this.type(e.args[1]!, scope)); // number | string (v4); else a code
         return "void";
       }
       // spawn(body, arg): body is (msg) => void; returns the new pid (number).
-      const expected = makeFuncTy(["number"], "void"); // v0 message type
+      const expected = makeFuncTy(["number"], "void"); // default message type
       const bodyTy = this.typeArg(e.args[0]!, expected, scope);
       if (!isFuncTy(bodyTy) || funcParams(bodyTy).length !== 1) throw typeError("spawn: body must be a one-argument function");
       // The body's return value is ignored (the actor entry trampoline discards it),
       // so any inferred return type is fine — nativets defaults empty blocks to number.
-      const msgTy = funcParams(bodyTy)[0]!;
-      if (msgTy !== "number") throw nyi(NYI.CLOSURE, "spawn body with a non-number message (v0 actors carry number messages)");
+      const msgTy = actorMsgTy(funcParams(bodyTy)[0]!);
       if (e.args.length !== 2) throw typeError("spawn(body, arg) takes two arguments");
       if (this.type(e.args[1]!, scope) !== msgTy) throw typeError(`spawn: arg type must match the body's parameter (${msgTy})`);
       return "number"; // pid

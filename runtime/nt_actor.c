@@ -53,7 +53,10 @@
 
 typedef enum { NT_RUNNABLE, NT_RUNNING, NT_BLOCKED, NT_DEAD } NtStatus;
 
-typedef struct NtMboxNode { NtMsg msg; NtPid from; struct NtMboxNode *next; } NtMboxNode;
+/* v4: a mailbox node carries the message KIND (number / string) alongside the
+ * slot, so a receive can (a) reject a kind it was not compiled for instead of
+ * reinterpreting the bits, and (b) skip non-matching kinds during a selective scan. */
+typedef struct NtMboxNode { NtMsg msg; NtPid from; int kind; struct NtMboxNode *next; } NtMboxNode;
 
 #define NT_MAX_LINKS   64
 #define NT_MAX_MONS    64
@@ -85,6 +88,11 @@ typedef struct NtActor {
   int         last_valid; NtPid last_from; int64_t last_val;
   /* ---- v1: reduction-counted preemption ---- */
   int64_t     reductions;              /* budget remaining this slice; refills to NT_CONTEXT_REDS */
+  /* ---- v4: message kind + virtual-clock receive timeouts ---- */
+  int         last_kind;               /* kind of the last dequeued message (crash record) */
+  int64_t     deadline;                /* virtual-ms deadline while BLOCKED (if has_deadline) */
+  int         has_deadline;
+  int         timed_out;               /* the scheduler fired this actor's deadline */
 } NtActor;
 
 typedef struct NtRqNode { NtPid pid; struct NtRqNode *next; } NtRqNode;
@@ -165,7 +173,7 @@ static int rq_pop(NtPid *out) {
 
 static void mbox_push_from(NtActor *a, NtMsg m, NtPid from) {
   NtMboxNode *n = (NtMboxNode *)malloc(sizeof(NtMboxNode));
-  n->msg = m; n->from = from; n->next = NULL;
+  n->msg = m; n->from = from; n->kind = NT_MSG_NUM; n->next = NULL;
   if (a->mbox_tail) a->mbox_tail->next = n; else a->mbox_head = n;
   a->mbox_tail = n;
 }
@@ -207,6 +215,28 @@ static void actor_trampoline(void) {
   swapcontext(&self->ctx, &g_sched_ctx);
 }
 
+/* v4: fire the earliest pending receive-timeout, if any. Called ONLY when the run
+ * queue is empty — i.e. nothing runnable could still send us a message — so the
+ * VIRTUAL clock advances only at quiescence. That makes timeouts deterministic (no
+ * wall-clock sleeping, no flaky schedules) while preserving the semantics that
+ * matter: a timeout fires exactly when no message can still arrive in time.
+ * Ties break on the lowest pid, keeping the wake order a pure function of the program. */
+static int64_t g_now_ms;                 /* virtual clock (ms since nt_sched_init) */
+static int fire_earliest_timeout(void) {
+  NtActor *best = NULL;
+  for (int64_t i = 0; i < g_nactors; i++) {
+    NtActor *a = g_actors[i];
+    if (!a || a->status != NT_BLOCKED || !a->has_deadline) continue;
+    if (!best || a->deadline < best->deadline) best = a;   /* `<` ⇒ lowest pid wins ties */
+  }
+  if (!best) return 0;
+  if (best->deadline > g_now_ms) g_now_ms = best->deadline; /* jump the virtual clock */
+  best->timed_out = 1;
+  best->status = NT_RUNNABLE;
+  rq_push(best->pid);
+  return 1;
+}
+
 /* The scheduler: pick RUNNABLE actors FIFO; idle-return to main when empty. */
 static void scheduler_loop(void) {
   for (;;) {
@@ -217,6 +247,8 @@ static void scheduler_loop(void) {
       a->status = NT_RUNNING;
       g_current = a;
       swapcontext(&g_sched_ctx, &a->ctx);        /* run until it yields/dies */
+    } else if (fire_earliest_timeout()) {
+      continue;                                  /* v4: quiescent ⇒ a timeout is now due */
     } else {
       /* run queue empty: resume whoever entered the scheduler (main). */
       g_current = g_main;
@@ -259,6 +291,7 @@ void nt_sched_init(void) {
   g_nactors = 0;
   g_rq_head = g_rq_tail = NULL;
   g_nreg = 0;
+  g_now_ms = 0;                            /* v4: virtual clock starts at 0 */
 
   g_main = actor_alloc(/*with_stack=*/0);  /* actor 0 uses the native/main stack */
   g_current = g_main;
@@ -409,6 +442,24 @@ static void deliver_to(NtActor *peer, NtPid from, int64_t reason) {
   if (peer->status == NT_BLOCKED) { peer->status = NT_RUNNABLE; rq_push(peer->pid); }
 }
 
+/* The triggering message — the last message this actor dequeued, printed in the
+ * message's own KIND (v4: numbers and strings). This is the causal tag that makes a
+ * crash record actionable: "which message killed it". */
+static void print_triggering_message(NtActor *a) {
+  if (!a || !a->last_valid) {
+    fprintf(stderr, "triggering-message:  (none — external signal)\n");
+    return;
+  }
+  fprintf(stderr, "triggering-message:\n    from pid=%lld\n", (long long)a->last_from);
+  if (a->last_kind == NT_MSG_STR) {
+    const char *s = (const char *)(intptr_t)a->last_val;
+    fprintf(stderr, "    \"%s\"\n", s ? s : "");
+  } else {
+    double mv; memcpy(&mv, &a->last_val, sizeof(mv)); /* number msg = double bits */
+    fprintf(stderr, "    %g\n", mv);
+  }
+}
+
 /* Reduced crash record (v2): who / why / triggering message. The supervisor
  * augments this with supervisor + restart decision at v3 (emit_sup_record). */
 static void emit_crash_record(NtActor *a, int64_t reason) {
@@ -422,12 +473,7 @@ static void emit_crash_record(NtActor *a, int64_t reason) {
   else
     fprintf(stderr, "reason:       abnormal exit (code=%lld)\n", (long long)reason);
   fprintf(stderr, "stacktrace:   <synchronous; single-actor call stack>\n");
-  if (a->last_valid) {
-    double mv; memcpy(&mv, &a->last_val, sizeof(mv)); /* v0 msg = number (double bits) */
-    fprintf(stderr, "triggering-message:\n    from pid=%lld\n    %g\n",
-            (long long)a->last_from, mv);
-  } else
-    fprintf(stderr, "triggering-message:  (none — external signal)\n");
+  print_triggering_message(a);
   fprintf(stderr, "seed:         NATIVETS_SCHED_SEED=%s\n", seed ? seed : "(unset)");
   fprintf(stderr,
     "========================================================================\n");
@@ -577,13 +623,16 @@ static NtPid sup_start_child(NtChild *c) {
   return pid;
 }
 
-static void emit_sup_record(NtSup *s, NtChild *c, int64_t reason, const char *decision) {
+/* ONE structured record per supervised crash: who died (the DEAD pid + its id), why,
+ * the message that triggered it (v4), the supervisor, and the restart decision. */
+static void emit_sup_record(NtSup *s, NtChild *c, NtPid dead, int64_t reason, const char *decision) {
   const char *seed = getenv("NATIVETS_SCHED_SEED");
   fprintf(stderr,
     "=== nativets actor crash ===============================================\n");
-  fprintf(stderr, "actor:        pid=%lld name=\"%s\"\n", (long long)c->pid, c->id);
+  fprintf(stderr, "actor:        pid=%lld name=\"%s\"\n", (long long)dead, c->id);
   if (reason == NT_REASON_KILL) fprintf(stderr, "reason:       killed (brutal __kill)\n");
   else fprintf(stderr, "reason:       abnormal exit (code=%lld)\n", (long long)reason);
+  print_triggering_message((dead >= 0 && dead < g_nactors) ? g_actors[dead] : NULL);
   fprintf(stderr, "supervisor:   pid=%lld strategy=one_for_one\n", (long long)s->pid);
   fprintf(stderr, "decision:     %s\n", decision);
   fprintf(stderr, "seed:         NATIVETS_SCHED_SEED=%s\n", seed ? seed : "(unset)");
@@ -634,11 +683,11 @@ static void sup_body(void *env, int64_t arg) {
         c->restart_kind == NT_RESTART_TRANSIENT ? abnormal : 0;
 
     if (!want_restart) {
-      emit_sup_record(s, c, reason, "NO RESTART (normal/temporary child)");
+      emit_sup_record(s, c, dead, reason, "NO RESTART (normal/temporary child)");
       continue;
     }
     if (intensity_exceeded(s)) {
-      emit_sup_record(s, c, reason,
+      emit_sup_record(s, c, dead, reason,
         "INTENSITY EXCEEDED — supervisor exiting :shutdown");
       /* terminate remaining children, then the supervisor exits :shutdown. */
       for (int i = 0; i < s->nchildren; i++)
@@ -649,7 +698,7 @@ static void sup_body(void *env, int64_t arg) {
     }
     record_restart(s);
     NtPid np = sup_start_child(c);
-    emit_sup_record(s, c, reason, "RESTART (one_for_one)");
+    emit_sup_record(s, c, dead, reason, "RESTART (one_for_one)");
     (void)np;
   }
 }
@@ -657,4 +706,167 @@ static void sup_body(void *env, int64_t arg) {
 NtPid nt_sup_start(int64_t handle) {
   NtSup *s = &g_sups[handle];
   return nt_spawn_closure((NtClosureFn)sup_body, (void *)s, 0);
+}
+
+/* ============================================================================
+ * v4 — selective receive + save queue, receive timeouts, string messages.
+ *
+ * Three additions, all driven from codegen (see src/codegen.ts):
+ *
+ *  1. TYPED slots. Every compiler-sent message carries a KIND (number / string).
+ *     A receive is compiled for one kind; a mismatch is a hard runtime error
+ *     (reject-don't-miscompile) rather than reinterpreting a pointer as a double.
+ *  2. DEEP COPY on send for strings. The receiver must never alias the sender's
+ *     string, so nt_send_typed copies it into a fresh allocation registered in
+ *     runtime.c's refcount side-table at rc=1 — the receiving local then owns it
+ *     and releases it at scope exit, exactly like any other produced string.
+ *  3. SELECTIVE receive. The mailbox is a list, not just a queue: codegen scans it
+ *     (peek kind/slot, apply the TS predicate, take the first match) and everything
+ *     that did not match simply STAYS in place, in order — the OTP save queue,
+ *     restored for the next receive by construction. Messages that arrive during a
+ *     scan land at the tail and are picked up by the next pass (the scan resumes at
+ *     the first not-yet-examined index, exactly like BEAM's save-queue restart).
+ * ========================================================================== */
+
+extern void nt_str_register(void *p);    /* runtime.c: join the string RC table at rc=1 */
+
+static int g_timed_out;                  /* did the last receive / mailbox wait time out? */
+
+static int64_t mbox_count_of(NtActor *a) {
+  int64_t n = 0;
+  for (NtMboxNode *p = a->mbox_head; p; p = p->next) n++;
+  return n;
+}
+
+static NtMboxNode *mbox_at(NtActor *a, int64_t i) {
+  NtMboxNode *p = a->mbox_head;
+  while (p && i-- > 0) p = p->next;
+  return p;
+}
+
+/* The raw 8-byte slot a TS receive should see for this node. An exit/DOWN signal is
+ * an NT_LIST [pid, reason]; v0-compatibly it surfaces as the dead peer's pid encoded
+ * as double bits (see nt_receive_slot). Ordinary messages carry their slot verbatim. */
+static int64_t node_slot(NtMboxNode *n) {
+  if (n->msg.tag == NT_LIST && n->msg.u.list.len >= 1) {
+    double d = (double)n->msg.u.list.items[0].u.i;
+    int64_t bits; memcpy(&bits, &d, sizeof(bits));
+    return bits;
+  }
+  return n->msg.u.i;
+}
+static int node_kind(NtMboxNode *n) {
+  return (n->msg.tag == NT_LIST) ? NT_MSG_NUM : n->kind;   /* signals are numbers */
+}
+
+static const char *kind_name(int k) { return k == NT_MSG_STR ? "string" : "number"; }
+
+/* A receive compiled for kind X met a message of kind Y. There is no sound way to
+ * continue (the bits mean different things), so fail loudly instead of miscompiling. */
+static void kind_mismatch(int got, int want) {
+  fprintf(stderr,
+    "nativets: actor pid=%lld received a %s message but this receive expects %s\n"
+    "  (actor messages are statically typed: annotate the receive, e.g. "
+    "`const m: string = receive()`)\n",
+    (long long)(g_current ? g_current->pid : -1), kind_name(got), kind_name(want));
+  exit(70);
+}
+
+/* Deep-copy a string message so the receiver cannot alias the sender's buffer. */
+static int64_t copy_str_slot(int64_t slot) {
+  const char *s = (const char *)(intptr_t)slot;
+  if (!s) return 0;
+  size_t n = strlen(s);
+  char *d = (char *)malloc(n + 1);
+  memcpy(d, s, n + 1);
+  nt_str_register(d);        /* rc=1: the receiving local becomes the owner */
+  return (int64_t)(intptr_t)d;
+}
+
+/* Record the causal tag (triggering message) used by the crash record. */
+static void note_last(NtActor *a, NtMboxNode *n) {
+  a->last_valid = 1;
+  a->last_from = n->from;
+  a->last_val = node_slot(n);
+  a->last_kind = node_kind(n);
+}
+
+/* Block the current actor until its mailbox holds MORE than `n` messages, or the
+ * (virtual) deadline expires. Returns 1 if messages are available, 0 on timeout.
+ * `after 0` (ms <= 0) polls without ever blocking, matching Erlang. */
+static int wait_for_more(int64_t n, double ms, int has_timeout) {
+  NtActor *a = g_current;
+  if (mbox_count_of(a) > n) return 1;
+  if (has_timeout && ms <= 0) return 0;
+  if (has_timeout) { a->has_deadline = 1; a->deadline = g_now_ms + (int64_t)ms; }
+  for (;;) {
+    a->timed_out = 0;
+    a->status = NT_BLOCKED;
+    yield_to_sched();                       /* scheduler runs others / fires timeouts */
+    a = g_current;                          /* same actor, resumed */
+    if (mbox_count_of(a) > n) { a->has_deadline = 0; return 1; }
+    if (a->timed_out) { a->has_deadline = 0; a->timed_out = 0; return 0; }
+  }
+}
+
+/* ---- compiler entry points ---- */
+
+/* spawn with a typed argument (a string arg is deep-copied like a sent message). */
+NtPid nt_spawn_typed(NtClosureFn body, void *env, int64_t slot, int64_t kind) {
+  return nt_spawn_closure(body, env, kind == NT_MSG_STR ? copy_str_slot(slot) : slot);
+}
+
+void nt_send_typed(NtPid to, int64_t slot, int64_t kind) {
+  if (to < 0 || to >= g_nactors) return;      /* unknown pid: drop (BEAM-ish) */
+  NtActor *a = g_actors[to];
+  if (a->status == NT_DEAD) return;
+  int64_t payload = (kind == NT_MSG_STR) ? copy_str_slot(slot) : slot;
+  mbox_push_from(a, nt_int(payload), g_current ? g_current->pid : -1);
+  a->mbox_tail->kind = (int)kind;
+  if (a->status == NT_BLOCKED) { a->status = NT_RUNNABLE; rq_push(a->pid); }
+}
+
+/* Blocking / timed FIFO receive of a message of kind `kind`. On timeout returns 0
+ * and sets the timed-out flag (codegen reads it via nt_recv_timed_out). */
+int64_t nt_recv_timed(int64_t kind, double ms, int32_t has_timeout) {
+  g_timed_out = 0;
+  if (!wait_for_more(0, ms, has_timeout)) { g_timed_out = 1; return 0; }
+  NtActor *a = g_current;
+  NtMboxNode *h = a->mbox_head;
+  if (node_kind(h) != (int)kind) kind_mismatch(node_kind(h), (int)kind);
+  note_last(a, h);
+  int64_t slot = node_slot(h);
+  mbox_pop(a);
+  return slot;
+}
+
+int32_t nt_recv_timed_out(void) { return g_timed_out; }
+
+/* ---- selective-receive primitives (the scan loop itself is emitted by codegen,
+ *      so the TS predicate is called through the ordinary closure ABI) ---- */
+
+int64_t nt_mbox_count(void)             { return mbox_count_of(g_current); }
+int64_t nt_mbox_peek_slot(int64_t i)    { NtMboxNode *n = mbox_at(g_current, i); return n ? node_slot(n) : 0; }
+int64_t nt_mbox_peek_kind(int64_t i)    { NtMboxNode *n = mbox_at(g_current, i); return n ? (int64_t)node_kind(n) : -1; }
+
+/* Remove the i-th message (the selective match). Everything before it stays put and
+ * in order — that IS the save queue, restored for the next receive for free. */
+void nt_mbox_take(int64_t i) {
+  NtActor *a = g_current;
+  NtMboxNode *prev = NULL, *n = a->mbox_head;
+  while (n && i-- > 0) { prev = n; n = n->next; }
+  if (!n) return;
+  note_last(a, n);
+  if (prev) prev->next = n->next; else a->mbox_head = n->next;
+  if (a->mbox_tail == n) a->mbox_tail = prev;
+  free(n);
+}
+
+/* Block until the mailbox holds more than `n` messages (i.e. something we have not
+ * scanned yet arrived), or the timeout fires. Returns 1 / 0 respectively. */
+int32_t nt_mbox_wait_from(int64_t n, double ms, int32_t has_timeout) {
+  g_timed_out = 0;
+  if (wait_for_more(n, ms, has_timeout)) return 1;
+  g_timed_out = 1;
+  return 0;
 }
