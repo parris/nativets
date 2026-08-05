@@ -243,6 +243,7 @@ class Parser {
     const params: Param[] = [];
     if (!this.at(")")) {
       do {
+        if (this.at(")")) break; // trailing comma in the param list
         let rest = false;
         if (this.at("...")) { this.eat("..."); rest = true; }
         const pname = this.expectIdent();
