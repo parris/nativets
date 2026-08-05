@@ -410,7 +410,7 @@ export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type
  * inheritance (only `extends Error`), and there are no polymorphic references, so
  * "does this value's runtime class chain contain C" has one answer per site, and the
  * checker fills it into `result`. `C` must be a class the compiler can name (a user
- * class, or `Array`/`Map`/`Set`/`Uint8Array`); anything else is rejected (NT1021)
+ * class, or `Array`/`Map`/`Set`/`Uint8Array`); anything else is rejected (NT1022)
  * rather than guessed.
  */
 export interface InstanceOfExpr { kind: "InstanceOfExpr"; object: Expr; className: string; result?: boolean; ty?: Ty; }

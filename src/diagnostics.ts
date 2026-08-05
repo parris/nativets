@@ -124,7 +124,7 @@ export const NYI = {
   // right operand whose class membership a static type cannot decide: `Error` (nativets
   // models it structurally as `{message:string}`, so an Error and a plain record with a
   // `message` are indistinguishable), `Object`/`Function`, and any non-class value.
-  INSTANCEOF: { code: "NT1021", milestone: "later", hint: "`x instanceof C` works for a user class and for Array/Map/Set/Uint8Array; for an Error, compare a discriminant field (e.g. `e.code !== undefined`) instead" },
+  INSTANCEOF: { code: "NT1022", milestone: "later", hint: "`x instanceof C` works for a user class and for Array/Map/Set/Uint8Array; for an Error, compare a discriminant field (e.g. `e.code !== undefined`) instead" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

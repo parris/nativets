@@ -80,10 +80,10 @@ describe("what parses is not what is ALLOWED — precise codes, never a guess", 
     expect(codeOf(`const a: number[] = [1, 2]; a[0] = 9;`)).toBe("NT1606");
   });
 
-  test("`instanceof Error` is NT1021 — nativets models Error structurally, so it cannot decide", () => {
+  test("`instanceof Error` is NT1022 — nativets models Error structurally, so it cannot decide", () => {
     // `new Error(m)` IS `{message:string}` here (Stage 18), so an Error and a plain
     // record carrying a `message` are the same static type. Answering would be a guess.
-    expect(codeOf(`const e = new Error("x"); console.log(e instanceof Error);`)).toBe("NT1021");
+    expect(codeOf(`const e = new Error("x"); console.log(e instanceof Error);`)).toBe("NT1022");
     // The suggested discriminant check does compile.
     expect(codeOf(`class E { code: string; constructor(c: string) { this.code = c; } }\nconst e = new E("NT1"); console.log(e.code === "NT1");`)).toBe(null);
   });
@@ -95,9 +95,9 @@ describe("what parses is not what is ALLOWED — precise codes, never a guess", 
     expect(codeOf(`const o = { a: 1, b: 2 }; delete o["a"]; console.log(o.b);`)).toBe("NT1606");
   });
 
-  test("`instanceof` against a non-class / computed right operand is NT1021, not a guess", () => {
-    expect(codeOf(`const x = 1; console.log(x instanceof Object);`)).toBe("NT1021");
-    expect(codeOf(`const x = 1; const C = 2; console.log(x instanceof 3);`)).toBe("NT1021");
-    expect(codeOf(`const x = 1; console.log(x instanceof Function);`)).toBe("NT1021");
+  test("`instanceof` against a non-class / computed right operand is NT1022, not a guess", () => {
+    expect(codeOf(`const x = 1; console.log(x instanceof Object);`)).toBe("NT1022");
+    expect(codeOf(`const x = 1; const C = 2; console.log(x instanceof 3);`)).toBe("NT1022");
+    expect(codeOf(`const x = 1; console.log(x instanceof Function);`)).toBe("NT1022");
   });
 });

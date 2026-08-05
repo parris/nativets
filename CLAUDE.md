@@ -679,7 +679,7 @@ real statement and closed one at a time (fixtures in `test/selfhost-parse/`, gat
    everything else is `NT1606`.
 5. **`instanceof`** — decided at compile time from the static type (a value's static type IS its
    exact class here). Undecidable right operands, notably `Error` (modelled structurally as
-   `{message:string}`), are refused with the new **`NT1021`**.
+   `{message:string}`), are refused with the new **`NT1022`**.
 6. **binding patterns in parameters** (`([k, v]) => …`) — the Stage-15 declaration desugaring
    extended to parameter position.
 

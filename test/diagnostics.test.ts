@@ -5,9 +5,28 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { formatDiagnostic } from "../src/diagnostics.ts";
+import { formatDiagnostic, NYI } from "../src/diagnostics.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { NTError } from "../src/diagnostics.ts";
+
+/*
+ * The NT code space is the project's public taxonomy: `coverage` groups blockers BY code,
+ * and docs/divergences.md indexes by code. Two features sharing one code silently corrupts
+ * both. This actually happened — two parallel lanes each minted NT1021 (actor message types
+ * and `instanceof`), on different lines, so git merged them without a conflict and neither
+ * branch could see it. `instanceof` was renumbered to NT1022; this guard makes the next
+ * collision a test failure instead of a merge that looks clean.
+ */
+describe("NT code space", () => {
+  test("every NYI entry has a UNIQUE code", () => {
+    const byCode = new Map<string, string[]>();
+    for (const [name, spec] of Object.entries(NYI)) {
+      byCode.set(spec.code, [...(byCode.get(spec.code) ?? []), name]);
+    }
+    const collisions = [...byCode].filter(([, names]) => names.length > 1);
+    expect(collisions).toEqual([]);
+  });
+});
 
 describe("multi-span diagnostics", () => {
   test("formatDiagnostic renders primary + secondary spans against the source", () => {

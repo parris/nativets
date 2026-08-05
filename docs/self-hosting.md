@@ -104,7 +104,7 @@ The ×11 `NT0001` bucket was six small, concrete gaps, closed one at a time agai
    writable; every other field/element is `NT1606`. (`parser.ts` ×1, `coverage.ts` ×1)
 5. **`instanceof`**, decided at COMPILE TIME from the static type — exact, because a value's static
    type IS its class in this subset. Right operands a static type cannot decide are refused with the
-   new **`NT1021`**, notably `instanceof Error` (nativets models `Error` structurally as
+   new **`NT1022`**, notably `instanceof Error` (nativets models `Error` structurally as
    `{message:string}`, so an Error and a plain record with a `message` are the same type). (`cli.ts` ×1)
 6. **Binding patterns in parameter position** (`([k, v]) => …`) — the Stage-15 declaration
    desugaring extended to parameters, arrows/functions/methods/constructors alike. (`ownership.ts` ×1)
