@@ -210,6 +210,31 @@ export function runWithNodeURL(source: string): RunResult {
   }
 }
 
+/* ============================================================
+ * Decorators — differential harness. `@@name` is a nativets COMPILE-TIME attribute
+ * (`#[derive]`-shaped), which is not valid TypeScript, so node cannot parse it. But an
+ * `@@mutable` class IS exactly a plain TS class (node's classes are mutable), so the
+ * oracle is the same source with the attribute lines mechanically stripped — the same
+ * "polyfill the oracle" trick as URL_POLYFILL above.
+ *
+ * Runtime `@wrapper` decorators are NOT stripped here: their node oracle is the
+ * hand-written explicit wrapper application (see test/decorators.test.ts), because
+ * node's own decorator semantics differ from ours (see docs/decorators.md).
+ * ============================================================ */
+
+/** Strip `@@attribute` lines — the mechanical desugaring that makes node the oracle. */
+export function stripAttributes(source: string): string {
+  return source
+    .split("\n")
+    .filter((l) => !/^\s*@@[A-Za-z_$][A-Za-z0-9_$]*\s*$/.test(l))
+    .join("\n");
+}
+
+/** The oracle for an `@@attribute` fixture: node on the attribute-stripped source. */
+export function runWithNodeAttrs(source: string): RunResult {
+  return runWithNode(stripAttributes(source));
+}
+
 /** Compile a Host-I/O fixture and run the binary with the same argv/stdin/env. */
 export async function compileAndRunIO(source: string, io: IOInput = {}): Promise<RunResult> {
   const dir = scratch("run-io");

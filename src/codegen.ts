@@ -849,6 +849,14 @@ class FnGen {
       const ty = sig.params[i]!;
       this.emit(`store ${llvmTy(ty)} %${p.name}, ptr ${this.addr(p.name)}`);
     });
+    // COPY-ON-WRITE setter (decorators lane): an ordinary class's field-assigning method
+    // operates on a fresh SHALLOW copy of the receiver, so the caller's instance is
+    // untouched and `return this` yields the new one. Emitted inline (a constant number
+    // of slots), so no runtime function and no link gate. Slots are copied verbatim: a
+    // heap-valued field is shared with the original, which is the same convention every
+    // other container follows (a container frees its handle, never its elements) — a
+    // residual leak at worst, never a double free.
+    if (fn.copyThis) this.emitThisCopy(sig.params[0]!);
     this.emitStrInit();
     this.genStmts(fn.body);
     if (!this.terminated) {
@@ -858,6 +866,23 @@ class FnGen {
     }
     const params = fn.params.map((p, i) => `${llvmTy(sig.params[i]!)} %${p.name}`).join(", ");
     return this.assemble(`define ${llvmTy(this.retTy)} @${userSym(fn.name)}(${params})`, b0);
+  }
+
+  /** `this = shallowCopy(this)` — the copy-on-write setter prologue (docs/decorators.md). */
+  private emitThisCopy(thisTy: Ty): void {
+    const n = objectFields(thisTy).length;
+    const src = this.fresh();
+    this.emit(`${src} = load ptr, ptr ${this.addr("this")}`);
+    const dst = this.fresh();
+    this.emit(`${dst} = call ptr @nt_obj_new(double ${llvmDouble(Math.max(n, 1))})`);
+    for (let i = 0; i < n; i++) {
+      const sp = this.fresh(), v = this.fresh(), dp = this.fresh();
+      this.emit(`${sp} = getelementptr i64, ptr ${src}, i64 ${i}`);
+      this.emit(`${v} = load i64, ptr ${sp}`);
+      this.emit(`${dp} = getelementptr i64, ptr ${dst}, i64 ${i}`);
+      this.emit(`store i64 ${v}, ptr ${dp}`);
+    }
+    this.emit(`store ptr ${dst}, ptr ${this.addr("this")}`);
   }
 
   genMain(body: Stmt[], endDrops: string[]): string {

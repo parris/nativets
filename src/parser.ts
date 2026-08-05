@@ -8,7 +8,7 @@
  */
 
 import { lex, type Token } from "./lexer.ts";
-import { parseError, nyi, NYI, mutationError } from "./diagnostics.ts";
+import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnostics.ts";
 import { makeNullable, makeMapTy, makeSetTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -45,6 +45,13 @@ const PARAM_ACCESS = new Set(["private", "public", "protected", "readonly"]);
 // Class-member modifiers/accessors that change semantics — still deferred (NT1015).
 const REJECTED_MEMBER_MODS = new Set(["static", "abstract", "declare", "override", "get", "set", "async"]);
 const SCALARS = new Set(["number", "boolean", "string", "void", "undefined", "null"]);
+/**
+ * Compile-time class ATTRIBUTES (`@@name`) the checker understands. An attribute changes
+ * how a class is CHECKED and COMPILED and has zero runtime footprint — so an unknown one
+ * must never be silently ignored (NT1023), the way a misspelled `#[derive]` is a hard
+ * error in Rust rather than a comment. See docs/decorators.md.
+ */
+const KNOWN_ATTRS = new Set(["mutable"]);
 
 class Parser {
   private pos = 0;
@@ -59,8 +66,13 @@ class Parser {
   /** Top-level functions synthesized from class members (ctor + methods), appended to
    *  the program body after parsing so they hoist like ordinary function declarations. */
   private hoistedFns: Stmt[] = [];
-  /** True while parsing a constructor body — enables `this.field = expr` (FieldAssign). */
-  private inCtor = false;
+  /** True while parsing a class member body in which `this.field = expr` (FieldAssign) is
+   *  legal — the constructor (building the instance) and, since the decorators lane, any
+   *  METHOD. A method that assigns a field is a "setter": for an `@@mutable` class it
+   *  mutates in place, for an ordinary class it copy-on-writes (docs/decorators.md). */
+  private thisWritable = false;
+  /** Set when the member body currently being parsed assigned `this.f` at least once. */
+  private thisAssigned = false;
   /**
    * async/await (networking tier). nativets has no event loop and no promises, so
    * `async` is ERASED and `await` is an IDENTITY pass-through over an
@@ -77,6 +89,11 @@ class Parser {
   /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
    *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
   private inErrorCtor = false;
+  /** Decorators parsed immediately before a declaration, consumed by `parseClass`. */
+  private pendingDecorators: { attrs: string[]; wrappers: string[] } | null = null;
+  /** Classes carrying `@@mutable` — TRUE in-place mutation (see docs/decorators.md).
+   *  Published on the Program so the ownership pass and the checker can see it. */
+  private readonly mutableClasses = new Set<string>();
   /** Module surface (SH1): `import` declarations and the export table. Empty for an
    *  ordinary single-file program, in which case `parseProgram` leaves them off the
    *  Program entirely — so every existing single-module path is untouched. */
@@ -153,6 +170,9 @@ class Parser {
     // register + hoist alongside ordinary functions for the checker/codegen.
     body.push(...this.hoistedFns);
     const program: Program = { kind: "Program", body };
+    // `@@mutable` classes (decorators lane). Attached only when the source used the
+    // attribute, so an ordinary program's Program is byte-identical to what it was.
+    if (this.mutableClasses.size) program.mutableClasses = [...this.mutableClasses];
     // Only attach the module surface when the source actually used it, so a
     // single-file program's Program is byte-identical to what it always was.
     if (this.imports.length) program.imports = this.imports;
@@ -499,8 +519,46 @@ class Parser {
     throw nyi(NYI.MODULE, `'export' of a '${this.peek().value || this.peek().type}' declaration at ${kw.line}:${kw.col}`);
   }
 
+  /**
+   * A decorated declaration — the two sigils (docs/decorators.md):
+   *   `@@name`  compile-time ATTRIBUTE (checker-visible, zero runtime footprint)
+   *   `@name`   runtime WRAPPER (an ordinary user function returning the replacement)
+   * Both bind to the declaration that follows; only a `class` (optionally `export`ed)
+   * can be decorated at statement level — anything else is NT1023 rather than ignored.
+   */
+  private parseDecorated(): Stmt {
+    const attrs: string[] = [];
+    const wrappers: string[] = [];
+    while (this.at("@@") || this.at("@")) {
+      const sig = this.next();
+      const t = this.peek();
+      const name = this.expectIdent();
+      if (sig.value === "@@") {
+        if (!KNOWN_ATTRS.has(name)) {
+          throw decoratorError(
+            `unknown compile-time attribute '@@${name}' at ${t.line}:${t.col}`,
+            `known attributes: ${[...KNOWN_ATTRS].map((a) => `@@${a}`).join(", ")}. ` +
+            "`@@` is a compile-time attribute the compiler reads (it changes how the class is checked and compiled), so an unrecognized one is an error, never a comment. For a runtime wrapper use the single-`@` form",
+          );
+        }
+        attrs.push(name);
+      } else {
+        wrappers.push(name);
+      }
+    }
+    this.pendingDecorators = { attrs, wrappers };
+    if (this.at("export")) return this.parseExport();
+    if (this.at("class") && this.peek(1).type === "ident") return this.parseClass();
+    const t = this.peek();
+    throw decoratorError(
+      `decorator on a '${t.value || t.type}' declaration at ${t.line}:${t.col}`,
+      "decorators attach to a `class` (either sigil) or to a class METHOD (`@wrapper m() { … }`) — not to a function, variable or statement",
+    );
+  }
+
   // ---- statements ----
   parseStatement(): Stmt {
+    if (this.at("@@") || this.at("@")) return this.parseDecorated();
     // Module syntax. `import`/`export` only start a declaration at statement level;
     // `import(` in a TYPE is handled by parseImportType, and an expression starting
     // with the identifier `export` is not valid TS, so no lookahead guard is needed
@@ -752,8 +810,15 @@ class Parser {
   // class name (`Point{x:number,y:number}`). Each method + the constructor lower to a
   // top-level function taking the instance as an explicit first `this` param.
   private parseClass(): Stmt {
+    const dec = this.pendingDecorators;
+    this.pendingDecorators = null;
     this.eat("class");
     const name = this.expectIdent();
+    // `@@mutable` — TRUE in-place mutation: a field-assigning method mutates the receiver
+    // and every handle observes it. Without it a field-assigning method is COPY-ON-WRITE
+    // (it returns a new instance). See docs/decorators.md.
+    const isMutable = !!dec?.attrs.includes("mutable");
+    if (isMutable) this.mutableClasses.add(name);
     if (this.at("<")) throw nyi(NYI.CLASS_FEATURE, `generic class '${name}' (type parameters)`);
     // Only `extends Error` is supported: nativets models Error as `{message:string}`, so the
     // subclass inherits a `message` field and `super(msg)` sets it. General user-class
@@ -766,10 +831,16 @@ class Parser {
       extendsError = true;
     }
     if (this.at("implements")) throw nyi(NYI.CLASS_FEATURE, "class 'implements' clause");
+    // A method may name its OWN class in a signature (`bump(): Counter`) — the very shape a
+    // setter needs — but the instance type is not known until the fields are parsed. So the
+    // class name resolves to a self MARKER inside its own body and is substituted for the
+    // real instance type once it exists (below). Without this, `Counter` erased to `number`.
+    const selfMarker = `#self:${name}#` as Ty;
+    this.typeAliases.set(name, selfMarker);
     this.eat("{");
     const fields: { key: string; ty: Ty }[] = [];
     const fieldInits: { field: string; value: Expr }[] = []; // declared-and-initialized fields → ctor prelude
-    const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[] }[] = [];
+    const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[]; setter: boolean }[] = [];
     let ctorParams: Param[] | null = null;
     let ctorBody: Stmt[] = [];
     while (!this.at("}") && this.peek().type !== "eof") {
@@ -796,9 +867,9 @@ class Parser {
         const patternPrelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
         for (const p of ctorParams) if (p.rest) throw nyi(NYI.CLASS_FEATURE, "rest parameter in a constructor");
         if (this.at(":")) { this.eat(":"); this.parseType(); } // ctor return annot (ignored)
-        this.inCtor = true; this.inErrorCtor = extendsError;
+        this.thisWritable = true; this.inErrorCtor = extendsError;
         ctorBody = [...patternPrelude, ...this.parseBlock()];
-        this.inCtor = false; this.inErrorCtor = false;
+        this.thisWritable = false; this.inErrorCtor = false;
         continue;
       }
       if (this.at("(")) {
@@ -806,7 +877,13 @@ class Parser {
         const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
         let returnAnnot: Ty | undefined;
         if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
-        methods.push({ name: member, params, returnAnnot, body: [...prelude, ...this.parseBlock()] });
+        // A METHOD may assign `this.f` too. Whether it does is the whole distinction
+        // between a plain method and a SETTER (docs/decorators.md), so record it.
+        this.thisWritable = true; this.thisAssigned = false;
+        const body = [...prelude, ...this.parseBlock()];
+        const setter = this.thisAssigned;
+        this.thisWritable = false; this.thisAssigned = false;
+        methods.push({ name: member, params, returnAnnot, body, setter });
         continue;
       }
       // field declaration: `name: Type;` / `name = init;` / `name: Type = init;` (optional `?`).
@@ -866,22 +943,65 @@ class Parser {
       for (const f of fields) if (!covered.has(f.key)) throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
     }
 
+    for (const f of fields) {
+      if (f.ty.includes(selfMarker)) throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has its own class as its type (a self-referential instance shape)`);
+    }
     const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
     this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
+    const emitted: FuncDecl[] = [];
     // Constructor → `C.constructor(this, …ctorParams): void` (caller allocates `this`).
-    this.hoistedFns.push({
+    emitted.push({
       kind: "FuncDecl", name: `${name}.constructor`,
       params: [thisParam, ...(ctorParams ?? [])], returnAnnot: "void", body: ctorBody,
     } as FuncDecl);
     // Each method → `C.method(this, …params)`.
     for (const m of methods) {
-      this.hoistedFns.push({
+      const fn = {
         kind: "FuncDecl", name: `${name}.${m.name}`,
         params: [thisParam, ...m.params], returnAnnot: m.returnAnnot, body: m.body,
-      } as FuncDecl);
+      } as FuncDecl;
+      if (m.setter) { fn.setter = true; this.lowerSetter(fn, name, isMutable, selfMarker); }
+      emitted.push(fn);
     }
+    // Substitute the self MARKER for the real instance type, everywhere it reached.
+    mapTypesDeep(emitted, (t) => (t.includes(selfMarker) ? (t.split(selfMarker).join(objTy) as Ty) : t));
+    this.hoistedFns.push(...emitted);
     return { kind: "MultiStmt", stmts: [] }; // the declaration itself is erased
+  }
+
+  /**
+   * A SETTER — a method that assigns `this.f` — in the two flavors (docs/decorators.md):
+   *
+   *  - `@@mutable` class: TRUE in-place mutation. The body is emitted as written; the
+   *    receiver really changes and every handle observes it.
+   *  - ordinary class: COPY-ON-WRITE. `copyThis` makes the method operate on a fresh
+   *    shallow copy of the receiver, so the caller's instance is unchanged and the NEW
+   *    instance is what comes back. Because the copy is the only observable result, an
+   *    ordinary setter may only ever hand back `this` — returning anything else (or
+   *    `void`) would throw the copy away, so it is rejected rather than miscompiled.
+   *
+   * Decision 2 — a setter that does not return gets an IMPLICIT `return this`: the new
+   * instance for an ordinary class, the mutated receiver for an `@@mutable` one.
+   */
+  private lowerSetter(fn: FuncDecl, cls: string, isMutable: boolean, selfTy: Ty): void {
+    const returns = valueReturns(fn.body);
+    if (!isMutable) {
+      fn.copyThis = true;
+      const bad = returns.find((r) => !(r.kind === "Identifier" && r.name === "this"));
+      if (bad || (fn.returnAnnot !== undefined && fn.returnAnnot !== selfTy)) {
+        throw decoratorError(
+          `method '${cls}.${fn.name.split(".")[1]}' assigns a field, so it produces a NEW ${cls}, but it does not return one`,
+          `an ordinary (undecorated) class is immutable: a field-assigning method copies the instance and must hand the copy back — write \`return this;\` (or nothing, which inserts it) and annotate \`: ${cls}\`. To mutate the receiver in place instead, put \`@@mutable\` on the class`,
+        );
+      }
+    }
+    if (returns.length === 0) {
+      fn.body = [...fn.body, { kind: "ReturnStmt", argument: this.ident("this") }];
+      if (fn.returnAnnot === undefined || fn.returnAnnot === "void") fn.returnAnnot = selfTy;
+    } else if (fn.returnAnnot === undefined && returns.every((r) => r.kind === "Identifier" && r.name === "this")) {
+      fn.returnAnnot = selfTy;
+    }
   }
 
   private parseReturn(): Stmt {
@@ -1168,9 +1288,10 @@ class Parser {
       if (left.kind === "MemberExpr") {
         // The ONE allowed field assignment: `this.field = v` while building an instance
         // inside a constructor. Everywhere else `o.f = v` stays rejected (immutability),
-        // and a method (parsed with inCtor=false) mutating `this` falls through here too.
-        if (this.inCtor && t.value === "=" && left.object.kind === "Identifier" && left.object.name === "this") {
+        // and a method of a class is writable too (the setter lowering, docs/decorators.md).
+        if (this.thisWritable && t.value === "=" && left.object.kind === "Identifier" && left.object.name === "this") {
           this.next();
+          this.thisAssigned = true;
           return { kind: "FieldAssign", object: left.object, field: left.property, value: this.parseAssign() };
         }
         throw mutationError("objects are immutable: `o.f = v` would mutate the object in place", "use `{ ...o, f: v }` — returns a NEW object; the original is unchanged");
@@ -1303,8 +1424,11 @@ class Parser {
    * `Uint8Array` element and rejects an immutable array/object element.
    */
   private updateTarget(target: Expr): Expr {
-    if (target.kind === "MemberExpr" && !(this.inCtor && target.object.kind === "Identifier" && target.object.name === "this"))
-      throw mutationError("objects are immutable: `o.f++` would mutate the object in place", "use `{ ...o, f: o.f + 1 }` — returns a NEW object; the original is unchanged");
+    if (target.kind === "MemberExpr") {
+      if (!(this.thisWritable && target.object.kind === "Identifier" && target.object.name === "this"))
+        throw mutationError("objects are immutable: `o.f++` would mutate the object in place", "use `{ ...o, f: o.f + 1 }` — returns a NEW object; the original is unchanged");
+      this.thisAssigned = true;
+    }
     return target;
   }
 
@@ -1512,6 +1636,28 @@ function skipQuoted(raw: string, i: number): [string, number] {
     out += ch; i++;
   }
   return [out + q, i + 1];
+}
+
+/** Every `return <expr>` in a statement list, recursively. Expressions are not walked,
+ *  so a nested arrow's own returns (a different function) are correctly ignored. */
+function valueReturns(list: Stmt[]): Expr[] {
+  const out: Expr[] = [];
+  const walk = (stmts: Stmt[]): void => {
+    for (const s of stmts) {
+      switch (s.kind) {
+        case "ReturnStmt": if (s.argument) out.push(s.argument); break;
+        case "IfStmt": walk(s.consequent); if (s.alternate) walk(s.alternate); break;
+        case "WhileStmt": case "DoWhileStmt": case "ForStmt": case "ForOfStmt": case "ForInStmt":
+        case "BlockStmt": walk(s.body); break;
+        case "SwitchStmt": for (const c of s.cases) walk(c.body); break;
+        case "TryStmt": walk(s.block); if (s.handler) walk(s.handler); if (s.finalizer) walk(s.finalizer); break;
+        case "MultiStmt": walk(s.stmts); break;
+        default: break;
+      }
+    }
+  };
+  walk(list);
+  return out;
 }
 
 function decodeEscape(ch: string): string {

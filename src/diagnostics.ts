@@ -152,6 +152,19 @@ export function emptyArrayError(): NTError {
   });
 }
 
+/**
+ * Decorators (NT1023). nativets has TWO sigils with two mechanisms (docs/decorators.md):
+ * `@@name` is a COMPILE-TIME attribute the checker reads (Rust `#[derive]`-shaped, zero
+ * runtime footprint) and `@name` is a real RUNTIME wrapper (Python-shaped: an ordinary
+ * user function that takes the thing being decorated and returns the replacement).
+ * This code refuses everything outside that surface — an UNKNOWN `@@attribute` (never
+ * silently ignored: an attribute that changes how a class compiles cannot be a comment),
+ * a decorator in a position we do not lower, and a decorated shape we cannot make sound.
+ */
+export function decoratorError(message: string, hint: string): NTError {
+  return new NTError({ code: "NT1023", message, milestone: "later", hint });
+}
+
 export function typeError(message: string): NTError {
   return new NTError({ code: "NT2001", message });
 }
