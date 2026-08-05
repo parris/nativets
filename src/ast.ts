@@ -269,7 +269,9 @@ export interface ArrowFunction {
   liftedName?: string; // @arrow_N assigned during codegen
 }
 
-export interface Param { name: string; annot?: Ty; default?: Expr; rest?: boolean; }
+// `paramProp` marks a constructor *parameter property* (`constructor(private x: T)`):
+// the parser desugars it into a class field + a `this.x = x` init in the ctor body.
+export interface Param { name: string; annot?: Ty; default?: Expr; rest?: boolean; paramProp?: boolean; }
 
 export interface Declarator { name: string; annot?: Ty; init: Expr; ty?: Ty; }
 export interface VarDecl {
