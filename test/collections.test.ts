@@ -270,6 +270,20 @@ console.log(two.toSorted().join(","), two.toSorted((x: string, y: string) => (x 
     await matchesNode(src);
   });
 
+  test("a BLOCK-bodied comparator compiles (lifted arrows must not drop enclosing locals)", async () => {
+    // Regression: the ownership pass attaches the ENCLOSING scope's drop list to a
+    // `return` inside a block-bodied arrow; the lifted @arrow_N then loaded an
+    // undefined `%words.addr`. Lifted arrows now emit no enclosing-scope drops.
+    const src = `
+const words: string[] = ["pear", "fig", "banana"];
+const ranked = words.toSorted((a: string, b: string) => {
+  if (a.length !== b.length) { return a.length - b.length; }
+  return a < b ? -1 : (a > b ? 1 : 0);
+});
+console.log(ranked.join(","), words.join(","));`;
+    await matchesNode(src);
+  });
+
   test("`.sort()` is refused (it mutates) with a pointer at `.toSorted()`", () => {
     expect(codeOf("const a = [3, 1, 2];\na.sort();")).toBe("NT1606");
     expect(codeOf("const a = [3, 1, 2];\na.sort((x: number, y: number) => x - y);")).toBe("NT1606");

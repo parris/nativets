@@ -528,7 +528,16 @@ class FnGen {
   }
 
   /** Emit deterministic drops (RAII frees) for owned linear locals. */
+  /** Set while generating a LIFTED arrow body (`@arrow_N`). The ownership pass walks
+   *  arrow bodies inside their enclosing function, so a `return` inside a block-bodied
+   *  arrow carries the ENCLOSING scope's drop list — locals that do not exist (and are
+   *  not owned) in the lifted function. Dropping them there emitted a load of an
+   *  undefined `%x.addr` (clang: "use of undefined value"). Suppress drops in a lifted
+   *  arrow: conservative (the enclosing owner still frees at its own scope exit). */
+  private liftedArrow = false;
+
   private emitDrops(names: string[]): void {
+    if (this.liftedArrow) return;
     for (const n of names) {
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr %${n}.addr`);
@@ -633,6 +642,7 @@ class FnGen {
   /** Generate a lifted arrow `define <ret> @name(ptr %__clo, params) { ... }`. */
   genArrow(name: string, arrow: ArrowFunction): string {
     this.reset();
+    this.liftedArrow = true; // see `liftedArrow`: enclosing-scope drops don't apply here
     this.retTy = arrow.retTy ?? "number";
     const paramTys = arrow.paramTys ?? [];
     this.captures = new Map((arrow.captures ?? []).map((c, i) => [c.name, { index: i, ty: c.ty }]));
