@@ -421,7 +421,7 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   `JSON.stringify` walk shape (nested objects/arrays become new references, like node).
   **Refused, not approximated:** the remaining in-place mutators `.fill`/`.sort`/`.splice`/
   `.shift`/`.unshift`/`.copyWithin` are `NT1606` with the immutable replacement in the hint
-  (arrays are immutable, Stage 29); `toFixed`/`toString` require literal in-range arguments so
+  (arrays are immutable, Stage 29 — `.sort` points at the ordering lane's `.toSorted()`); `toFixed`/`toString` require literal in-range arguments so
   node's `RangeError` is unreachable rather than emulated. Non-ASCII stays on the documented
   UTF-8-byte index space (§A.2), now pinned by a behavioral test.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS

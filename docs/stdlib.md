@@ -97,11 +97,11 @@ even a side-effecting callback observes node's exact call order.
 **Rejected on purpose** (arrays are immutable — Stage 29): `fill`, `sort`, `splice`, `shift`,
 `unshift`, `copyWithin` all mutate in place in node, so each is refused with **`NT1606`**
 naming the immutable replacement (`.with` / `.slice` + spread / `.map`), exactly like
-`.push`/`.pop`. `.toSorted` is not implemented yet.
+`.push`/`.pop` (`.sort`'s hint names the ES2023 copying `.toSorted()`).
 
 **Still open in Batch 1's spirit** (deferred, each needs more than a fill): `new Date()` and the
 date-component API, `Array.from` of an array-*like* or with a `mapFn`, `.flat(depth)` beyond one
-level (chain `.flat().flat()`), `Array.prototype.toSorted`/`toReversed`, `String#normalize`, and
+level (chain `.flat().flat()`), `String#normalize`, and
 anything RegExp-shaped.
 
 ### Batch 2 — needs a bytes type first

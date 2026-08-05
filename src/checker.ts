@@ -1112,7 +1112,7 @@ class Checker {
       // The rest of node's in-place mutators (stdlib Batch 1): same treatment as
       // .push/.pop — refuse and name the immutable replacement.
       case "fill": throw mutationError("arrays are immutable: `.fill` would overwrite the array in place", "build a new array instead, e.g. `arr.map(() => v)` for a same-length fill, or `arr.with(i, v)` for one slot");
-      case "sort": throw mutationError("arrays are immutable: `.sort` would reorder the array in place", "sorting must produce a NEW array — `.toSorted()` is not implemented yet; sort a copy you build yourself");
+      case "sort": throw mutationError("arrays are immutable: `.sort` would reorder the array in place", "sorting must produce a NEW array — use the ES2023 copying form `.toSorted()` (non-mutating in node too)");
       case "splice": throw mutationError("arrays are immutable: `.splice` would mutate the array in place", "use `.slice(0, i)` / `.slice(j)` plus spread — `[...a.slice(0, i), ...a.slice(j)]`");
       case "shift": throw mutationError("arrays are immutable: `.shift` would mutate the array in place", "use `arr.slice(1)` for the shorter array, or `arr[0]` for the first element");
       case "unshift": throw mutationError("arrays are immutable: `.unshift` would mutate the array in place", "build a new array instead: `[x, ...arr]`");
