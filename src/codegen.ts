@@ -369,6 +369,11 @@ class FnGen {
    *  inside stores the per-element result and branches to the callback's join, rather
    *  than returning from the enclosing function. */
   private hofReturnStack: { slot: string; done: string; ty: Ty }[] = [];
+  /** Per-inlining counter: gives each inlined HOF callback a frame-unique name suffix
+   *  (see freshenHofArrow) so two sibling callbacks reusing a param/local name — possibly
+   *  at DIFFERENT types — each get their own correctly-typed slot instead of colliding in
+   *  the flat frame (addLocal keeps the first type → a silent miscompile). */
+  private hofSeq = 0;
 
   constructor(private mod: ModuleGen) {}
 
@@ -2142,6 +2147,138 @@ class FnGen {
     return (arrow.retTy ?? (arrow.exprBody ? (arrow.body as Expr).ty : "number") ?? "number") as Ty;
   }
 
+  /** Collect the names an arrow's block body BINDS in the flat frame (params handled by
+   *  the caller) — VarDecls, for-loop/for-of/for-in vars, catch params — WITHOUT descending
+   *  into nested arrows (those are their own binders). Mirrors collectLocals's shape. */
+  private collectBoundNames(body: Stmt[], out: Set<string>): void {
+    for (const s of body) {
+      switch (s.kind) {
+        case "VarDecl": for (const d of s.decls) out.add(d.name); break;
+        case "IfStmt": this.collectBoundNames(s.consequent, out); if (s.alternate) this.collectBoundNames(s.alternate, out); break;
+        case "WhileStmt": case "DoWhileStmt": this.collectBoundNames(s.body, out); break;
+        case "ForStmt":
+          if (s.init && (s.init as VarDecl).kind === "VarDecl") for (const d of (s.init as VarDecl).decls) out.add(d.name);
+          this.collectBoundNames(s.body, out); break;
+        case "ForOfStmt": out.add(s.name); this.collectBoundNames(s.body, out); break;
+        case "ForInStmt": out.add(s.name); this.collectBoundNames(s.body, out); break;
+        case "SwitchStmt": for (const c of s.cases) this.collectBoundNames(c.body, out); break;
+        case "BlockStmt": this.collectBoundNames(s.body, out); break;
+        case "MultiStmt": this.collectBoundNames(s.stmts, out); break;
+        case "TryStmt":
+          if (s.param) out.add(s.param);
+          this.collectBoundNames(s.block, out);
+          if (s.handler) this.collectBoundNames(s.handler, out);
+          if (s.finalizer) this.collectBoundNames(s.finalizer, out); break;
+        default: break;
+      }
+    }
+  }
+
+  /** Alpha-rename an inlined HOF callback's OWN bound names (params + block-body locals) to
+   *  frame-unique names, rewriting every reference. HOF callbacks are inlined into the
+   *  enclosing function's single flat frame, where locals are keyed by source name; two
+   *  sibling callbacks that reuse a name — e.g. two `.reduce((acc, x) => …)` with `acc` a
+   *  number in one and a string in the other — would otherwise collide, and `addLocal`'s
+   *  "already declared" guard keeps the FIRST type, so the second reads its value at the
+   *  wrong LLVM type (a string ptr as a double → garbage). A per-inlining suffix gives each
+   *  its own correctly-typed slot. The suffix contains a `.` (illegal in a source identifier)
+   *  so it can never collide with a real variable. Scope-aware: a NESTED arrow/function that
+   *  re-binds a name shadows it (its subtree keeps the inner binding). Mutates in place — each
+   *  source arrow is inlined exactly once. Enclosing captures (names it does NOT bind) are
+   *  left untouched, so they still resolve to the enclosing frame. */
+  private freshenHofArrow(arrow: Extract<Expr, { kind: "ArrowFunction" }>): void {
+    const suffix = `.h${this.hofSeq++}`;
+    const bound = new Set<string>();
+    for (const p of arrow.params) bound.add(p.name);
+    if (!arrow.exprBody) this.collectBoundNames(arrow.body as Stmt[], bound);
+    if (bound.size === 0) return;
+    const map = new Map<string, string>();
+    for (const n of bound) map.set(n, n + suffix);
+    for (const p of arrow.params) { if (p.default) this.subExpr(p.default, map); p.name = map.get(p.name)!; }
+    if (arrow.exprBody) this.subExpr(arrow.body as Expr, map);
+    else this.subStmts(arrow.body as Stmt[], map);
+  }
+
+  /** The names a nested arrow/function binds — remove from the active rename map for its
+   *  subtree so an inner re-binding (shadow) isn't rewritten to the outer's fresh name. */
+  private childRenameMap(params: { name: string }[], body: Expr | Stmt[], exprBody: boolean, map: Map<string, string>): Map<string, string> {
+    const shadow = new Set<string>();
+    for (const p of params) shadow.add(p.name);
+    if (!exprBody) this.collectBoundNames(body as Stmt[], shadow);
+    const child = new Map(map);
+    for (const n of shadow) child.delete(n);
+    return child;
+  }
+
+  private subStmts(stmts: Stmt[], map: Map<string, string>): void {
+    for (const s of stmts) this.subStmt(s, map);
+  }
+
+  private subStmt(s: Stmt, map: Map<string, string>): void {
+    switch (s.kind) {
+      case "VarDecl": for (const d of s.decls) { this.subExpr(d.init, map); if (map.has(d.name)) d.name = map.get(d.name)!; } break;
+      case "ReturnStmt": if (s.argument) this.subExpr(s.argument, map); break;
+      case "IfStmt": this.subExpr(s.test, map); this.subStmts(s.consequent, map); if (s.alternate) this.subStmts(s.alternate, map); break;
+      case "WhileStmt": this.subExpr(s.test, map); this.subStmts(s.body, map); break;
+      case "DoWhileStmt": this.subStmts(s.body, map); this.subExpr(s.test, map); break;
+      case "ForStmt":
+        if (s.init) { if ((s.init as VarDecl).kind === "VarDecl") this.subStmt(s.init as VarDecl, map); else this.subExpr(s.init as Expr, map); }
+        if (s.test) this.subExpr(s.test, map);
+        if (s.update) this.subExpr(s.update, map);
+        this.subStmts(s.body, map); break;
+      case "ForOfStmt": this.subExpr(s.iterable, map); if (map.has(s.name)) s.name = map.get(s.name)!; this.subStmts(s.body, map); break;
+      case "ForInStmt": this.subExpr(s.object, map); if (map.has(s.name)) s.name = map.get(s.name)!; this.subStmts(s.body, map); break;
+      case "SwitchStmt": this.subExpr(s.discriminant, map); for (const c of s.cases) { if (c.test) this.subExpr(c.test, map); this.subStmts(c.body, map); } break;
+      case "ThrowStmt": this.subExpr(s.argument, map); break;
+      case "TryStmt":
+        this.subStmts(s.block, map);
+        if (s.handler) this.subStmts(s.handler, map);
+        if (s.param && map.has(s.param)) s.param = map.get(s.param)!;
+        if (s.finalizer) this.subStmts(s.finalizer, map); break;
+      case "ExprStmt": this.subExpr(s.expr, map); break;
+      case "BlockStmt": this.subStmts(s.body, map); break;
+      case "MultiStmt": this.subStmts(s.stmts, map); break;
+      case "FuncDecl": {
+        const child = this.childRenameMap(s.params, s.body, false, map);
+        for (const p of s.params) if (p.default) this.subExpr(p.default, child);
+        this.subStmts(s.body, child); break;
+      }
+      default: break; // BreakStmt / ContinueStmt
+    }
+  }
+
+  private subExpr(e: Expr, map: Map<string, string>): void {
+    switch (e.kind) {
+      case "Identifier": if (map.has(e.name)) e.name = map.get(e.name)!; return;
+      case "UpdateExpr": if (map.has(e.target)) e.target = map.get(e.target)!; return;
+      case "AssignExpr": this.subExpr(e.value, map); if (map.has(e.target)) e.target = map.get(e.target)!; return;
+      case "TemplateLiteral": for (const x of e.exprs) this.subExpr(x, map); return;
+      case "ArrayLiteral": for (const x of e.elements) this.subExpr(x, map); return;
+      case "ObjectLiteral": for (const p of e.properties) this.subExpr(p.value, map); return;
+      case "SpreadExpr": this.subExpr(e.argument, map); return;
+      case "MemberExpr": this.subExpr(e.object, map); return;
+      case "IndexExpr": this.subExpr(e.object, map); this.subExpr(e.index, map); return;
+      case "UnaryExpr": this.subExpr(e.operand, map); return;
+      case "BinaryExpr": this.subExpr(e.left, map); this.subExpr(e.right, map); return;
+      case "LogicalExpr": this.subExpr(e.left, map); this.subExpr(e.right, map); return;
+      case "SequenceExpr": for (const x of e.exprs) this.subExpr(x, map); return;
+      case "ConditionalExpr": this.subExpr(e.test, map); this.subExpr(e.consequent, map); this.subExpr(e.alternate, map); return;
+      case "FieldAssign": this.subExpr(e.object, map); this.subExpr(e.value, map); return;
+      case "TypeofExpr": this.subExpr(e.operand, map); return;
+      case "CallExpr": this.subExpr(e.callee, map); for (const a of e.args) this.subExpr(a, map); return;
+      case "NewExpr": for (const a of e.args) this.subExpr(a, map); return;
+      case "AsExpr": this.subExpr(e.expr, map); return;
+      case "ArrowFunction": {
+        const child = this.childRenameMap(e.params, e.body, e.exprBody, map);
+        for (const p of e.params) if (p.default) this.subExpr(p.default, child);
+        if (e.exprBody) this.subExpr(e.body as Expr, child);
+        else this.subStmts(e.body as Stmt[], child);
+        return;
+      }
+      default: return; // literals
+    }
+  }
+
   /** Allocate a block-body callback's own locals before the loop, null-initializing
    *  its string locals (mirrors emitStrInit for the frame) so a 0-iteration loop or a
    *  conditional bind releases null (a no-op), never garbage. Expression bodies have
@@ -2171,6 +2308,7 @@ class FnGen {
   }
 
   private genMap(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+    this.freshenHofArrow(arrow); // unique per-inlining slots — no cross-callback name collision
     const el = elemTy(recv.ty);
     const R = this.hofRetTy(arrow);
     const p = arrow.params[0]!.name;
@@ -2187,6 +2325,7 @@ class FnGen {
   }
 
   private genFilter(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+    this.freshenHofArrow(arrow); // unique per-inlining slots — no cross-callback name collision
     const el = elemTy(recv.ty);
     const p = arrow.params[0]!.name;
     this.addLocal(p, el);
@@ -2208,6 +2347,7 @@ class FnGen {
   }
 
   private genReduce(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>, initExpr: Expr): Val {
+    this.freshenHofArrow(arrow); // unique per-inlining slots — no cross-callback name collision
     const el = elemTy(recv.ty);
     const accName = arrow.params[0]!.name;
     const xName = arrow.params[1]!.name;
