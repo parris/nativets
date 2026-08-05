@@ -150,12 +150,6 @@ const DECLARES = [
   "declare double @nt_obj_live()",
   "declare ptr @nt_str_split(ptr, ptr)",
   "declare ptr @nt_arr_reverse(ptr)",
-  // Host I/O FFI: CLI args / env / stdin. libc-only, cross-links unchanged.
-  "declare void @nt_init_args(i32, ptr)",
-  "declare ptr @nt_argv()",
-  "declare ptr @nt_getenv(ptr)",
-  "declare ptr @nt_read_line()",
-  "declare ptr @nt_read_stdin()",
   // Networking tier (L-d): libcurl-backed HTTP(S) client (host/Linux only; conditionally linked).
   // Return the response body (rc-string); write the numeric status through the trailing double*.
   "declare ptr @nt_http_post(ptr, ptr, ptr, ptr)",
@@ -2181,9 +2175,6 @@ class FnGen {
       case "__arrLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_live()`); return { v: t, ty: "number" }; }
       case "__objLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_obj_live()`); return { v: t, ty: "number" }; }
       case "__strLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_str_live()`); return { v: t, ty: "number" }; }
-      // Host I/O stdin builtins — return a fresh (rc-tracked) heap string.
-      case "readLine": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_line()`); return { v: t, ty: "string" }; }
-      case "readStdin": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_read_stdin()`); return { v: t, ty: "string" }; }
       // Networking tier (L-d): HTTP(S) client → {status:number, body:string}.
       case "httpGet": return this.genHttp("nt_http_get", args, false);
       case "httpPost": return this.genHttp("nt_http_post", args, true);
