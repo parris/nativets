@@ -98,7 +98,11 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
   MPSC mailboxes.
 - **v2:** `link`/`monitor` + exit-signal propagation (`trap_exit`).
 - **v3:** `one_for_one` **supervisor** + restart intensity (default 1/5 s → escalate by self-exit).
-- **v4:** selective `receive` + save queue + timeouts. **v5:** work-stealing, dirty pool,
+- **v4 ✅ (Stage 33):** selective `receive` (`receiveMatch(pred[, ms])`) + save queue + timeouts
+  (`receive(ms) -> T | undefined`, on a virtual clock that advances only at quiescence), plus
+  **string messages** deep-copied on send. Structured/`Dyn` messages remain deferred: they need the
+  type-driven deep-copy walk AND a shape tag on the wire (an 8-byte slot cannot distinguish two
+  object types across independently-typed actors). **v5:** work-stealing, dirty pool,
   epoll/kqueue **async IO poller** (park actors as WAITING, wake on readiness).
 - **Good tracebacks (the JS-async fix):** on crash emit ONE record — pid+name, reason +
   synchronous stacktrace, **the triggering message**, state snapshot, supervisor + restart

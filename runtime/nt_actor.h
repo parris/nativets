@@ -137,4 +137,36 @@ void    nt_sup_add_child(int64_t handle, const char *id, void *start_closure,
                          const char *restart); /* restart string -> kind */
 NtPid   nt_sup_start(int64_t handle); /* spawn the supervisor actor; returns its pid */
 
+/* ============================================================================
+ * v4 — selective receive + save queue, receive timeouts, richer messages.
+ *
+ * MESSAGE KINDS. Every compiler-sent message carries a kind so a receive compiled
+ * for one type never reinterprets another's bits (a mismatch is a hard runtime
+ * error, not a miscompile). Strings are DEEP-COPIED on send (and on spawn), so a
+ * receiver never aliases the sender's buffer; the copy joins runtime.c's string
+ * refcount table at rc=1 and the receiving local releases it at scope exit.
+ *
+ * TIMEOUTS run on a VIRTUAL clock that only advances when the run queue is empty:
+ * a timeout fires exactly when nothing runnable could still send, which preserves
+ * `after`-semantics while keeping the schedule deterministic (no wall-clock sleep).
+ *
+ * SELECTIVE RECEIVE is driven from codegen: it scans the mailbox (peek kind/slot,
+ * call the TS predicate through the ordinary closure ABI, take the first match).
+ * Non-matching messages simply stay in place, in order — the OTP save queue,
+ * restored for the next receive by construction. Messages arriving mid-scan land
+ * at the tail and are picked up by the next pass.
+ * ========================================================================== */
+#define NT_MSG_NUM 0
+#define NT_MSG_STR 1
+
+NtPid   nt_spawn_typed(NtClosureFn body, void *env, int64_t slot, int64_t kind);
+void    nt_send_typed(NtPid to, int64_t slot, int64_t kind);
+int64_t nt_recv_timed(int64_t kind, double ms, int32_t has_timeout); /* 0 + flag on timeout */
+int32_t nt_recv_timed_out(void);          /* did the last receive/wait time out? */
+int64_t nt_mbox_count(void);              /* messages currently queued for self() */
+int64_t nt_mbox_peek_slot(int64_t i);     /* i-th message payload (no dequeue) */
+int64_t nt_mbox_peek_kind(int64_t i);     /* i-th message kind (-1 if out of range) */
+void    nt_mbox_take(int64_t i);          /* remove the i-th message (the match) */
+int32_t nt_mbox_wait_from(int64_t n, double ms, int32_t has_timeout); /* block for msg > n */
+
 #endif /* NT_ACTOR_H */
