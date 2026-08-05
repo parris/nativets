@@ -28,7 +28,19 @@ hand-off explicit and to satisfy the checker.
 | **NT1601** | E0382 | use of moved value | ✅ implemented |
 | **NT1602** | E0505 | cannot move while borrowed (for-of borrow live) | ✅ implemented |
 | **NT1603** | E0502 | cannot mutate while borrowed (iterator invalidation) | ✅ implemented |
-| — | E0507 / E0508 | move out of borrow / array element | ⏳ later |
+| **NT1604** | E0507 | move out of borrowed content (a for-of element, a by-borrow param, a `@@mutable` alias or method result) | ✅ implemented |
+| **NT1605** | E0508 | move out of a linear array element (`arr[i]`) | ✅ implemented |
+| **NT1607** | E0596 | cannot mutate through a borrow — a `@@mutable` setter needs an OWNED receiver | ✅ implemented |
+
+**`@@mutable` classes (Stage 45, `docs/decorators.md`).** The one place a value mutates in
+place. The linear model keeps it single-owner with **only the owner may mutate**: `const b = a`
+(and a method RESULT, which *is* the receiver) is an **alias/borrow, not a move**, so ownership
+never leaves the original binding and the value is dropped exactly once; an alias is a borrow
+binding, so letting it escape is **NT1604**; calling a **setter** through an alias, a by-borrow
+parameter, a `for-of` element, a container element, a callback parameter or a capture is
+**NT1607**; and reassigning an owner something still aliases is **NT1602** (≈ E0506). This
+proves no double-free / use-after-free from aliasing; it is deliberately *not* full `&mut`
+exclusivity (the owner may mutate while an alias is live — that is the specified behaviour).
 
 **Borrows (phase 2, done for for-of).** A `for-of (const x of arr)` holds a borrow of `arr`
 for the whole loop body. Inside the body: reads (`.length`, `arr[i]`, `.includes`) are shared

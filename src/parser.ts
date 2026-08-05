@@ -963,9 +963,11 @@ class Parser {
       for (const f of fields) if (!covered.has(f.key)) throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
     }
 
-    for (const f of fields) {
-      if (f.ty.includes(selfMarker)) throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has its own class as its type (a self-referential instance shape)`);
-    }
+    // A FIELD naming its own class is a self-referential instance shape, which our
+    // structural object types cannot express — it keeps the pre-existing erasure to
+    // `number` rather than becoming a new rejection (the self marker exists for method
+    // SIGNATURES, which is where a setter needs it).
+    for (const f of fields) if (f.ty.includes(selfMarker)) f.ty = f.ty.split(selfMarker).join("number") as Ty;
     const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
     this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };

@@ -90,31 +90,40 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     expect(r.blockers).toEqual([]);
   });
 
-  test("NT0001 is CLEARED — every statement in src/ now parses", () => {
+  test("NT0001 is CLEARED everywhere except ONE unmasked regex literal", () => {
     // The NT0001 "unparsed statement" bucket was the #1 self-host blocker at x11 once
     // Stage 36 cleared NT1013. It was never one feature; the six causes were extracted
     // from real statements and closed one at a time (see test/selfhost-parse.test.ts):
     // paren-vs-arrow lookahead, nested template literals, radix/separator numeric
     // literals, `++`/`--` on a member or index target, `instanceof`, binding patterns in
     // parameters — plus parenthesized types and `delete`. Whole tree: ZERO.
+    //
+    // Re-measured after the DECORATORS lane (Stage 45) made `this.f = v` legal inside a
+    // class METHOD: `class Checker` now parses PAST the field assignment that used to
+    // stop it, and reaches `t.replace(/[^A-Za-z0-9_]/g, "_")` — a REGEX LITERAL, which
+    // nativets genuinely does not have (no RegExp, Tier C). So this is not a regression
+    // in the parser; it is a previously-masked blocker becoming visible, which is what
+    // burning down an earlier one is supposed to do. Everything else still parses.
     for (const f of SRC_MODULES) {
       const r = coverage(src(f));
-      const nt0001 = r.blockers.filter((b) => b.code === "NT0001");
-      expect({ file: f, nt0001 }).toEqual({ file: f, nt0001: [] });
+      const nt0001 = r.blockers.filter((b) => b.code === "NT0001").length;
+      expect({ file: f, nt0001 }).toEqual({ file: f, nt0001: f === "checker.ts" ? 1 : 0 });
     }
   });
 
   test("the frontier is now NT1606 field mutation — a SOURCE refactor, not a missing feature", () => {
     // Re-measured after the NT0001 burn-down. What blocks src/ is no longer syntax: it
-    // is `this.f = v` / `this.f++` inside class methods (objects are immutable since
-    // Stage 29 — only a constructor may write fields), which is a property of how the
-    // compiler is WRITTEN. The residue is 2x NT1015 (a `static` member, a class field
-    // needing an annotation) and 1x NT1009 (a general union).
+    // is field mutation `o.f = v` / `o.f++` on a value the compiler treats as a plain
+    // record (objects are immutable since Stage 29), which is a property of how the
+    // compiler is WRITTEN. (Stage 45 made `this.f = v` legal in a class method, so what
+    // is left is genuinely non-`this` mutation.) The residue is 2x NT1015 (a `static`
+    // member, a class field needing an annotation), NT1009 (general unions), and the one
+    // unmasked regex literal above.
     const hist = new Map<string, number>();
     for (const f of SRC_MODULES) {
       for (const b of coverage(src(f)).blockers) hist.set(b.code, (hist.get(b.code) ?? 0) + b.count);
     }
-    expect([...hist.keys()].sort()).toEqual(["NT1009", "NT1015", "NT1606"]);
+    expect([...hist.keys()].sort()).toEqual(["NT0001", "NT1009", "NT1015", "NT1606"]);
     expect(hist.get("NT1606")).toBeGreaterThan(hist.get("NT1015")!);
   });
 

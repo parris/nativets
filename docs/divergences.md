@@ -58,6 +58,36 @@ Rules:
   `JSON.stringify`, destructuring, spread-call expansion) keep the internal non-panicking
   accessor, so nothing pays twice and in-bounds programs are behaviourally unchanged.
 
+### Decorators — a class method that assigns a field (`docs/decorators.md`)
+
+Full design in `docs/decorators.md`; these are the three places node cannot be the oracle.
+
+- **An ordinary (undecorated) class is COPY-ON-WRITE, not mutating.** In TypeScript
+  `p.moveTo(3, 4)` mutates `p`. In nativets a field-assigning method **copies the instance,
+  modifies the copy, and hands it back**; the receiver is unchanged. This is the same
+  immutable-by-default rule arrays and objects took in Stage 29, extended to classes, and it is
+  the owner's chosen idiom for guaranteed immutability. Opt out per class with the `@@mutable`
+  attribute, which restores TS's semantics exactly (and *is* node-differential: an `@@mutable`
+  class is a plain TS class, so the oracle is the same source with the attribute line stripped).
+  The copy-on-write behaviour has no node desugaring, so it is pinned behaviorally with exact
+  stdout in `test/decorators.test.ts`.
+- **A field-assigning method with no `return` returns the instance, not `undefined`.** Decision 2:
+  the implicit return is `this` (the new instance, or the mutated receiver). So a return-less
+  setter **chains** — `a.bump().bump()` works here and is a `TypeError` in node. The *mutation*
+  half of that is still node-differential; only the chaining is ours.
+- **`@wrapper` decorators are not node's decorators.** The wrapper is applied **once**, at the
+  class declaration (Python's `m = w(m)`), it receives the method with the **receiver as its
+  first parameter** (methods lower to top-level functions taking `this`), a **class** decorator
+  wraps the **constructor** (`(instance, …args) => instance`), and stacked decorators apply
+  **bottom-up** — `@a @b m` ≡ `a(b(m))`, Python's order. The oracle for each of these is the
+  hand-written explicit wrapper application, which is exactly what the compiler emits.
+
+Refusals, never approximations: an unknown `@@attribute` (`NT1023` — an attribute changes how a
+class compiles, so a misspelled one cannot be a comment), an ordinary setter that returns
+anything but the instance (`NT1023` — the copy would be lost), and the `@@mutable` aliasing
+shapes whose ownership cannot be established (`NT1607` / `NT1604` / `NT1602` — see
+`docs/ownership.md` and `docs/decorators.md`).
+
 ### stdlib Batch 1 — what cannot match node, and what we do instead
 
 The Batch-1 stdlib (`docs/stdlib.md`) is node-differential everywhere except these, all of
