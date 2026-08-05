@@ -19,16 +19,14 @@
 //     local (`list = [...list, item]`), never `.push`. Completing an item
 //     rebuilds the whole list with `.map`, producing a NEW record for every
 //     element (`{ ...t, done: ... }`) — never `arr[i] = v` or `o.f = v`.
-//   - Empty array literals `[]` are unsupported (the element type can't be
-//     inferred), so the list is seeded with a sentinel record at index 0
-//     (id = -1) and real todos start at index 1. The sentinel is skipped when
-//     printing, so it never appears in the output.
+//   - The list starts genuinely EMPTY: `let list: Todo[] = []` — an empty array
+//     literal takes its element type from the annotation (no sentinel record).
 //   - Object array elements are LINEAR: you can't bind one to a local
 //     (`const t = list[i]` would move it out — NT1605), so `.map` rebuilds
 //     the list by copying each record's fields into a fresh record instead.
 
 // A single todo. `id` is a stable integer; `done` is its completion flag;
-// `text` is the label. The sentinel uses id = -1.
+// `text` is the label.
 type Todo = { id: number; done: boolean; text: string };
 
 // Complete the todo whose id === target, returning a brand-new list. Every
@@ -48,8 +46,8 @@ function complete(list: Todo[], target: number): Todo[] {
 //   list         no-op marker (the final list is always printed at the end)
 const args: string[] = process.argv.slice(2);
 
-// Seed with a sentinel so the array is never an (unsupported) empty literal.
-let list: Todo[] = [{ id: -1, done: false, text: "" }];
+// The annotation supplies the element type of the empty literal.
+let list: Todo[] = [];
 let nextId: number = 0;
 
 let i: number = 0;
@@ -68,12 +66,9 @@ while (i < args.length) {
   }
 }
 
-// --- Print the final list (skipping the id = -1 sentinel). ---
+// --- Print the final list. ---
 console.log("todos:");
 for (const t of list) {
-  if (t.id < 0) {
-    continue;
-  }
   const status: string = t.done ? "x" : " ";
   console.log(t.id + ". [" + status + "] " + t.text);
 }

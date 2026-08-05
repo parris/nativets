@@ -106,6 +106,25 @@ export function nyi(spec: NyiSpec, what: string): NTError {
   return new NTError({ code: spec.code, message: `${what} is not supported yet`, milestone: spec.milestone, hint: spec.hint });
 }
 
+/**
+ * A bare `[]` with nothing to infer from and no contextual type (NT1001). nativets takes
+ * an empty array literal's element type from CONTEXT — a binding/field annotation, a
+ * declared return type, a parameter type, an assignment target, or the other arm of a
+ * `?:`/`??`. With none of those it is genuinely ambiguous, so we reject rather than guess
+ * (`[]` is not `never[]` here) — and name the three ways to supply the missing type.
+ */
+export function emptyArrayError(): NTError {
+  return new NTError({
+    code: NYI.ARRAY.code,
+    milestone: NYI.ARRAY.milestone,
+    message: "cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context",
+    hint:
+      "supply the element type — annotate the binding (`const xs: number[] = []`), " +
+      "annotate the return type (`function f(): number[] { return []; }`), " +
+      "or write a non-empty literal (`const xs = [1, 2]`)",
+  });
+}
+
 export function typeError(message: string): NTError {
   return new NTError({ code: "NT2001", message });
 }

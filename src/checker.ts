@@ -10,7 +10,7 @@
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
-import { NTError, NYI, nyi, typeError, mutationError } from "./diagnostics.ts";
+import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
 
@@ -341,14 +341,15 @@ class Checker {
       case "ArrayLiteral": {
         if (e.elements.length === 0) {
           // Empty `[]` has no element to infer from — take the element type from
-          // CONTEXT (a variable/param annotation, a return type, or an assignment
-          // target). With no context we still reject (don't guess).
+          // CONTEXT: a binding/field annotation, a declared return type, a parameter
+          // type, an assignment target, or the other arm of a `?:`/`??`. With no
+          // context we still reject (don't guess) — see `emptyArrayError`.
           if (hint && isArrayTy(hint)) {
             const el = elemTy(hint);
             if (el !== "number" && el !== "string" && el !== "boolean" && !isObjectTy(el) && !isArrayTy(el)) throw nyi(NYI.ARRAY, `arrays of ${el}`);
             return hint;
           }
-          throw nyi(NYI.ARRAY, "empty array literals (cannot infer element type)");
+          throw emptyArrayError();
         }
         const tys = e.elements.map((el) => {
           if (el.kind === "SpreadExpr") {
@@ -372,7 +373,10 @@ class Checker {
             if (!isObjectTy(st)) throw typeError("can only spread an object into an object literal");
             for (const f of objectFields(st)) put(f.key, f.ty);
           } else {
-            put(p.key, this.type(p.value, scope));
+            // An annotated target type is the context for each property value, so
+            // `const o: {xs: number[]} = { xs: [] }` types the empty literal.
+            const want = hint && isObjectTy(hint) ? fieldType(hint, p.key) : undefined;
+            put(p.key, this.type(p.value, scope, want ? baseTy(want) : undefined));
           }
         }
         return objectType(fields);
@@ -481,7 +485,14 @@ class Checker {
       }
       case "LogicalExpr": {
         const l = this.type(e.left, scope);
-        const r = this.type(e.right, scope);
+        // For `??` the LEFT operand is the context for the right (`maybeArr ?? []` gets
+        // its element type from `maybeArr`'s base type); a definitely-nullish left falls
+        // back to the surrounding context.
+        const rhint = e.op !== "??" ? hint
+          : isNullableTy(l) ? baseTy(l)
+          : l === "null" || l === "undefined" ? hint
+          : l;
+        const r = this.type(e.right, scope, rhint);
         if (e.op === "??") {
           // `??` collapses to the non-nullish arm. Left may be definitely-nullish
           // (static → right), a runtime-nullable `T | ...` (runtime tag branch →
@@ -503,8 +514,17 @@ class Checker {
       }
       case "ConditionalExpr": {
         this.type(e.test, scope);
-        const a = this.type(e.consequent, scope);
-        const b = this.type(e.alternate, scope);
+        // Each arm sees the surrounding context; additionally an empty `[]` arm takes
+        // its element type from the OTHER arm (`flag ? [1, 2] : []`), so type the
+        // non-empty arm first and feed its type back.
+        let a: Ty, b: Ty;
+        if (isEmptyArrayLit(e.consequent) && !isEmptyArrayLit(e.alternate)) {
+          b = this.type(e.alternate, scope, hint);
+          a = this.type(e.consequent, scope, hint ?? b);
+        } else {
+          a = this.type(e.consequent, scope, hint);
+          b = this.type(e.alternate, scope, hint ?? a);
+        }
         if (a !== b) throw typeError(`Ternary branches differ: ${a} vs ${b}`);
         return a;
       }
@@ -545,7 +565,7 @@ class Checker {
         if (!isObjectTy(ot)) throw typeError(`cannot assign field on non-object type ${ot}`);
         const ft = fieldType(ot, e.field);
         if (!ft) throw typeError(`Property '${e.field}' does not exist on ${ot}`);
-        const vt = this.type(e.value, scope);
+        const vt = this.type(e.value, scope, baseTy(ft)); // field type is the context (e.g. `items: number[] = []`)
         if (vt !== ft && !this.assignable(ft, vt)) throw typeError(`cannot assign ${vt} to field '${e.field}' of type ${ft}`);
         return ft;
       }
@@ -1118,7 +1138,9 @@ class Checker {
   }
 
   private typeArg(a: Expr, expected: Ty, scope: Scope): Ty {
-    return a.kind === "ArrowFunction" ? this.typeArrow(a, expected, scope) : this.type(a, scope);
+    // The parameter type is the CONTEXT for the argument: it types an arrow's params
+    // (closures) and supplies the element type of an empty `[]` (e.g. `g([])`).
+    return a.kind === "ArrowFunction" ? this.typeArrow(a, expected, scope) : this.type(a, scope, baseTy(expected));
   }
 
   private checkArgs(args: Expr[], sig: MethodSig, scope: Scope, label: string): void {
@@ -1129,6 +1151,11 @@ class Checker {
       if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`);
     });
   }
+}
+
+/** A bare `[]` — the one expression whose type must come from context, not from itself. */
+function isEmptyArrayLit(e: Expr): boolean {
+  return e.kind === "ArrayLiteral" && e.elements.length === 0;
 }
 
 /** Collect every identifier name referenced in an expression (for capture analysis). */
