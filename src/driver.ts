@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import { parse } from "./parser.ts";
+import { linkProgram } from "./modules.ts";
 import { check } from "./checker.ts";
 import { codegen } from "./codegen.ts";
 import { analyzeOwnership, type OwnDiag } from "./ownership.ts";
@@ -61,16 +62,22 @@ import guiSource from "../runtime/nt_gui.c" with { type: "text" };
 
 export type Target = "host" | "ios" | "ios-sim" | "android" | "wasm" | "windows";
 
-/** Options for a native build. `static` produces a fully static binary (no dynamic libc). */
-export interface BuildOpts { target?: Target; static?: boolean }
+/**
+ * Options for a native build. `static` produces a fully static binary (no dynamic
+ * libc); `entryPath` is the entry file's path on disk — the anchor `import`
+ * specifiers resolve against (SH1 modules). Omit it for a module-less source.
+ */
+export interface BuildOpts { target?: Target; static?: boolean; entryPath?: string }
 
 const IOS_VERSION = "18.0";
 const ANDROID_API = 24;
 
 export class BuildError extends Error {}
 
-export function sourceToIR(source: string): string {
-  const checked = check(parse(source));
+export function sourceToIR(source: string, entryPath?: string): string {
+  // SH1: resolve + merge the import graph into ONE Program (a no-op returning
+  // `parse(source)` when the entry declares no imports), then compile as usual.
+  const checked = check(linkProgram(source, entryPath));
   const own = analyzeOwnership(checked);
   if (own.length) {
     const d = own[0]!;
@@ -87,8 +94,8 @@ export function sourceToIR(source: string): string {
 }
 
 /** Ownership diagnostics for a source (for tests / the coverage of the move checker). */
-export function ownershipCheck(source: string): OwnDiag[] {
-  return analyzeOwnership(check(parse(source)));
+export function ownershipCheck(source: string, entryPath?: string): OwnDiag[] {
+  return analyzeOwnership(check(linkProgram(source, entryPath)));
 }
 
 function sdkPath(sdk: string): string {
@@ -318,10 +325,10 @@ export function linkArgv(
   return { args, warning };
 }
 
-function writeIR(source: string): { dir: string; ll: string; rt: string; actor: string | null; extra: string[] } {
+function writeIR(source: string, entryPath?: string): { dir: string; ll: string; rt: string; actor: string | null; extra: string[] } {
   const dir = mkdtempSync(join(tmpdir(), "nativets-build-"));
   const ll = join(dir, "module.ll");
-  const ir = sourceToIR(source);
+  const ir = sourceToIR(source, entryPath);
   writeFileSync(ll, ir);
   const rt = join(dir, "runtime.c");
   writeFileSync(rt, runtimeSource); // embedded runtime → self-contained executable
@@ -401,7 +408,7 @@ function run(cc: string, args: string[]): void {
 
 export async function buildBinary(source: string, outPath: string, opts: BuildOpts = {}): Promise<void> {
   const target = opts.target ?? "host";
-  const { dir, ll, rt, actor, extra } = writeIR(source);
+  const { dir, ll, rt, actor, extra } = writeIR(source, opts.entryPath);
   // Actors need the ucontext-based cooperative scheduler (nt_actor.c); wasm32-wasi has no
   // ucontext, so gate here with a clear error instead of a cryptic link failure. Ordinary
   // (non-actor) programs link fine — the actor runtime is only pulled in when used.
@@ -419,9 +426,9 @@ export async function buildBinary(source: string, outPath: string, opts: BuildOp
   }
 }
 
-export async function buildObject(source: string, outPath: string, target: Target): Promise<void> {
+export async function buildObject(source: string, outPath: string, target: Target, entryPath?: string): Promise<void> {
   const { cc, flags } = toolchainFor(target);
-  const { dir, ll } = writeIR(source);
+  const { dir, ll } = writeIR(source, entryPath);
   try {
     run(cc, [...flags, "-c", ll, "-o", outPath]);
   } finally {

@@ -454,4 +454,43 @@ export interface MultiStmt { kind: "MultiStmt"; stmts: Stmt[]; }
 export interface BreakStmt { kind: "BreakStmt"; }
 export interface ContinueStmt { kind: "ContinueStmt"; }
 
-export interface Program { kind: "Program"; body: Stmt[]; endDrops?: string[]; }
+/* ---- modules (SH1) -------------------------------------------------------
+ * A module's import/export surface lives OUTSIDE the statement stream: `import`
+ * declarations bind names, they do not execute, and `export` is a marker on an
+ * ordinary declaration. The linker (src/modules.ts) reads these, resolves the
+ * graph from the entry file, and merges every module into ONE Program (with
+ * per-module renaming) — so the checker/ownership/codegen passes never see a
+ * module at all. Type-only imports/exports are erased here, not later.
+ */
+
+/**
+ * One `{ imported as local }` binding of an import clause. `typeOnly` marks a
+ * binding that exists only in type space (`import type { T }`, or an inline
+ * `import { type T, x }`): it seeds the importer's type aliases but binds no value.
+ */
+export interface ImportSpec { imported: string; local: string; typeOnly?: boolean; }
+
+/** `import { a, b as c } from "./m.ts"` — `specs` empty ⇒ side-effect-only import. */
+export interface ImportDecl { source: string; specs: ImportSpec[]; line: number; }
+
+/**
+ * A module's export table. `values` maps an exported name to the LOCAL name that
+ * backs it (`export { a as b }` ⇒ b→a); `reexports` maps an exported name to a
+ * binding in another module (`export { x } from "./y.ts"`); `types` carries the
+ * erased type-level exports (`export type`/`interface`/`class`) so an importing
+ * module's annotations resolve to the same shape.
+ */
+export interface ExportTable {
+  values: Map<string, string>;
+  reexports: Map<string, { source: string; imported: string; line: number }>;
+  types: Map<string, Ty>;
+}
+
+export interface Program {
+  kind: "Program";
+  body: Stmt[];
+  endDrops?: string[];
+  /** Present only when the source declared imports (the linker's input). */
+  imports?: ImportDecl[];
+  exports?: ExportTable;
+}

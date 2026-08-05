@@ -1,5 +1,20 @@
 # Divergences & unsupported features
 
+### Modules (SH1) — a whole-program link, and no import cycles
+
+`import`/`export` across `.ts` files are compiled by resolving the graph from the entry file and
+merging every module into ONE program (`src/modules.ts`). For an **acyclic** graph this matches
+node exactly — same evaluation order (post-order DFS), each module's top level run **once**, same
+bindings. Two deliberate differences:
+
+- **Import cycles are refused** (`NT1702`, naming the cycle). ESM permits them via live bindings
+  and a TDZ; a whole-program link has no such machinery, so we reject rather than pick an order
+  that silently differs from node. Break the cycle with a third shared module.
+- **Only relative `./`/`../` specifiers with an explicit extension resolve.** There is no
+  `node_modules`/bare-specifier resolution, no `export default`, no `import * as ns`, no
+  `export * from`, and no dynamic `import()` — each is `NT1017` with a hint naming the supported
+  form. (`NT1701` = unreadable module, `NT1703` = no such export.)
+
 `node` is our oracle. Two kinds of "we differ from node" exist, tracked separately.
 
 ## A. Semantic divergences (we compile it, but differ deliberately)

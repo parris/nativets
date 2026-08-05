@@ -47,15 +47,22 @@ function hasFlag(args: string[], name: string): boolean {
 const [, , cmd, file, ...rest] = process.argv;
 if (!cmd || !file) usage();
 
-const source = readFileSync(file, "utf8");
+// The entry file's path anchors `import "./x.ts"` resolution (SH1 modules).
+let source: string;
+try {
+  source = readFileSync(file, "utf8");
+} catch {
+  console.error(`error: cannot read '${file}'`);
+  process.exit(1);
+}
 
 if (cmd === "emit") {
-  process.stdout.write(await guard(() => sourceToIR(source)));
+  process.stdout.write(await guard(() => sourceToIR(source, file)));
   process.exit(0);
 }
 
 if (cmd === "coverage") {
-  const report = coverage(source);
+  const report = coverage(source, file);
   console.log(renderCoverage(source, report));
   process.exit(report.compiles ? 0 : 1);
 }
@@ -64,7 +71,7 @@ if (cmd === "build") {
   const out = getFlag(rest, "-o") ?? basename(file).replace(/\.ts$/, "");
   const target = (getFlag(rest, "--target") ?? "host") as Target;
   const isStatic = hasFlag(rest, "--static");
-  await guard(() => buildBinary(source, out, { target, static: isStatic }));
+  await guard(() => buildBinary(source, out, { target, static: isStatic, entryPath: file }));
   console.error(`wrote ${out}`);
   process.exit(0);
 }
@@ -73,7 +80,7 @@ if (cmd === "run") {
   const dir = mkdtempSync(join(tmpdir(), "nativets-cli-"));
   try {
     const bin = join(dir, "prog");
-    await guard(() => buildBinary(source, bin, { target: "host" }));
+    await guard(() => buildBinary(source, bin, { target: "host", entryPath: file }));
     // Forward CLI args after the source file to the program as process.argv[2..]
     // (a leading `--` separator is dropped): `nativets run chat.ts -- --key $KEY`.
     const fwd = rest[0] === "--" ? rest.slice(1) : rest;

@@ -310,7 +310,12 @@ class ModuleGen {
   private strDefs: string[] = [];
   readonly liftedFns: string[] = [];
   private arrowCounter = 0;
-  constructor(readonly functions: Map<string, Sig>) {}
+  /** Module-level bindings promoted to LLVM globals (SH1): the ones a function body
+   *  reads. `main` uses the global as their storage; every other frame loads from it. */
+  constructor(readonly functions: Map<string, Sig>, readonly globals: Map<string, Ty> = new Map()) {}
+
+  /** `@nt.g.<name>` — the storage symbol of a promoted module-level binding. */
+  static globalSym(name: string): string { return `@nt.g.${name}`; }
 
   /** Lambda-lift an arrow to a top-level function `@arrow_N(ptr env, params)`. Idempotent. */
   liftArrow(arrow: ArrowFunction): string {
@@ -418,6 +423,10 @@ class ModuleGen {
       "",
       ...this.strDefs,
       this.strDefs.length ? "" : null,
+      // Module-level bindings read from inside a function (SH1). Zero-initialized and
+      // written by `main` when the declaration executes, in module (dependency) order.
+      ...[...this.globals].map(([n, t]) => `${ModuleGen.globalSym(n)} = internal global ${llvmTy(t)} ${defaultZero(t)}`),
+      this.globals.size ? "" : null,
       ...this.liftedFns.flatMap((f) => [f, ""]), // lifted arrows (populated during gen)
       ...fns.flatMap((f) => [f, ""]),
       main,
@@ -466,8 +475,23 @@ class FnGen {
    *  at DIFFERENT types — each get their own correctly-typed slot instead of colliding in
    *  the flat frame (addLocal keeps the first type → a silent miscompile). */
   private hofSeq = 0;
+  /** In the `main` frame: the module-level bindings whose storage IS the LLVM global
+   *  (so the declaration's store and every top-level read/write hit the same cell a
+   *  function body reads). Empty in every other frame. */
+  private globalVars = new Set<string>();
 
   constructor(private mod: ModuleGen) {}
+
+  /**
+   * The storage address of a variable. Normally its frame alloca `%x.addr`; for a
+   * module-level binding promoted to a global (SH1) it is `@nt.g.x` — in `main`
+   * (which owns the declaration) and in any function that reads it.
+   */
+  private addr(name: string): string {
+    if (this.globalVars.has(name)) return ModuleGen.globalSym(name);
+    if (!this.varTypes.has(name) && this.mod.globals.has(name)) return ModuleGen.globalSym(name);
+    return `%${name}.addr`;
+  }
 
   /** Read a captured variable from the closure env (slot index+1; slot 0 is the fn ptr). */
   private readCapture(name: string): Val {
@@ -525,6 +549,7 @@ class FnGen {
     this.finallyStack = [];
     this.hofReturnStack = [];
     this.strLocals = new Set();
+    this.globalVars = new Set();
   }
 
   // ---- string reference counting (value-semantics strings) ----
@@ -543,14 +568,14 @@ class FnGen {
   /** Zero-init string locals so an unassigned/conditionally-assigned one releases
    *  as null (a no-op) rather than loading garbage. */
   private emitStrInit(): void {
-    for (const n of this.strLocals) this.emit(`store ptr null, ptr %${n}.addr`);
+    for (const n of this.strLocals) this.emit(`store ptr null, ptr ${this.addr(n)}`);
   }
   /** Release owned string locals at scope exit (except one transferred out). */
   private emitStrDrops(exclude?: string): void {
     for (const n of this.strLocals) {
       if (n === exclude) continue;
       const p = this.fresh();
-      this.emit(`${p} = load ptr, ptr %${n}.addr`);
+      this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       this.emit(`call void @nt_str_release(ptr ${p})`);
     }
   }
@@ -577,7 +602,7 @@ class FnGen {
     if (this.liftedArrow) return;
     for (const n of names) {
       const p = this.fresh();
-      this.emit(`${p} = load ptr, ptr %${n}.addr`);
+      this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       // Move-aware RAII: objects free via nt_obj_free, arrays via nt_arr_free.
       const free = isObjectTy(this.varTypes.get(n) ?? "number") ? "nt_obj_free" : "nt_arr_free";
       this.emit(`call void @${free}(ptr ${p})`);
@@ -585,7 +610,10 @@ class FnGen {
   }
 
   private addLocal(name: string, ty: Ty): void {
-    if (!this.varTypes.has(name)) { this.varTypes.set(name, ty); this.alloca(name, ty); }
+    if (this.varTypes.has(name)) return;
+    this.varTypes.set(name, ty);
+    // A promoted module-level binding lives in its LLVM global, not a frame slot.
+    if (!this.globalVars.has(name)) this.alloca(name, ty);
   }
 
   private collectLocals(body: Stmt[]): void {
@@ -647,7 +675,7 @@ class FnGen {
     this.to(b0);
     fn.params.forEach((p, i) => {
       const ty = sig.params[i]!;
-      this.emit(`store ${llvmTy(ty)} %${p.name}, ptr %${p.name}.addr`);
+      this.emit(`store ${llvmTy(ty)} %${p.name}, ptr ${this.addr(p.name)}`);
     });
     this.emitStrInit();
     this.genStmts(fn.body);
@@ -663,6 +691,8 @@ class FnGen {
   genMain(body: Stmt[], endDrops: string[]): string {
     this.reset();
     this.retTy = "number";
+    // `main` owns the module-level declarations, so its storage for them IS the global.
+    this.globalVars = new Set(this.mod.globals.keys());
     this.collectLocals(body);
     const b0 = this.block(this.label("L"));
     this.to(b0);
@@ -687,7 +717,7 @@ class FnGen {
     if (!arrow.exprBody) this.collectLocals(arrow.body as Stmt[]);
     const b0 = this.block(this.label("L"));
     this.to(b0);
-    arrow.params.forEach((p, i) => this.emit(`store ${llvmTy(paramTys[i]!)} %${p.name}, ptr %${p.name}.addr`));
+    arrow.params.forEach((p, i) => this.emit(`store ${llvmTy(paramTys[i]!)} %${p.name}, ptr ${this.addr(p.name)}`));
     this.emitStrInit();
     if (arrow.exprBody) {
       const bodyVal = this.genExpr(arrow.body as Expr);
@@ -722,7 +752,7 @@ class FnGen {
           // RC: an aliased string (identifier/field/index/literal) gains a new owner
           // → retain. A fresh producer is consumed (its rc=1 transfers to this local).
           if (ty === "string" && this.strLocals.has(d.name)) this.retainStrBind(d.init, val.v);
-          this.emit(`store ${llvmTy(ty)} ${val.v}, ptr %${d.name}.addr`);
+          this.emit(`store ${llvmTy(ty)} ${val.v}, ptr ${this.addr(d.name)}`);
         }
         return;
       }
@@ -881,20 +911,20 @@ class FnGen {
         if (isStr) {
           const ch = this.fresh();
           this.emit(`${ch} = call ptr @js_str_char_at(ptr ${src.v}, double ${iB})`);
-          this.emit(`store ptr ${ch}, ptr %${s.name}.addr`);
+          this.emit(`store ptr ${ch}, ptr ${this.addr(s.name)}`);
         } else if (isBytes) {
           const by = this.fresh();
           this.emit(`${by} = call double @nt_bytes_get(ptr ${src.v}, double ${iB})`);
-          this.emit(`store double ${by}, ptr %${s.name}.addr`);
+          this.emit(`store double ${by}, ptr ${this.addr(s.name)}`);
         } else {
           const slot = this.fresh();
           this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src.v}, double ${iB})`);
-          this.emit(`store ${llvmTy(el)} ${this.fromSlot(slot, el)}, ptr %${s.name}.addr`);
+          this.emit(`store ${llvmTy(el)} ${this.fromSlot(slot, el)}, ptr ${this.addr(s.name)}`);
           if (mapV) { // entries: value = map.get(key) for this step's key slot
             const vt = s.valTy ?? "number";
             const vs = this.fresh();
             this.emit(`${vs} = call i64 @nt_map_get_slot(ptr ${mapV.v}, i32 ${this.keyTag(el)}, i64 ${slot})`);
-            this.emit(`store ${llvmTy(vt)} ${this.fromSlot(vs, vt)}, ptr %${s.name2}.addr`);
+            this.emit(`store ${llvmTy(vt)} ${this.fromSlot(vs, vt)}, ptr ${this.addr(s.name2!)}`);
           }
         }
         this.loops.push({ brk: endLbl, cont: updLbl });
@@ -963,7 +993,7 @@ class FnGen {
         this.emit(`${iB} = load double, ptr ${idx}`);
         const slot = this.fresh();
         this.emit(`${slot} = call i64 @nt_arr_get(ptr ${arr}, double ${iB})`);
-        this.emit(`store ptr ${this.fromSlot(slot, "string")}, ptr %${s.name}.addr`);
+        this.emit(`store ptr ${this.fromSlot(slot, "string")}, ptr ${this.addr(s.name)}`);
         this.loops.push({ brk: endLbl, cont: updLbl });
         this.genStmts(s.body);
         this.loops.pop();
@@ -982,7 +1012,7 @@ class FnGen {
         const h = this.tryHandlers[this.tryHandlers.length - 1];
         if (!h) throw new Error("throw outside a try (unsupported)");
         const v = this.genExpr(s.argument);
-        if (h.excVar) this.emit(`store ${llvmTy(h.eType)} ${v.v}, ptr %${h.excVar}.addr`);
+        if (h.excVar) this.emit(`store ${llvmTy(h.eType)} ${v.v}, ptr ${this.addr(h.excVar)}`);
         this.terminate(`br label %${h.catchLbl}`);
         return;
       }
@@ -1343,7 +1373,7 @@ class FnGen {
         if (this.captures.has(e.name)) return this.readCapture(e.name);
         const ty = this.varTypes.get(e.name) ?? (e.ty ?? "number");
         const t = this.fresh();
-        this.emit(`${t} = load ${llvmTy(ty)}, ptr %${e.name}.addr`);
+        this.emit(`${t} = load ${llvmTy(ty)}, ptr ${this.addr(e.name)}`);
         return { v: t, ty };
       }
 
@@ -1456,10 +1486,10 @@ class FnGen {
           return { v: e.prefix ? nv : cur.v, ty: "number" };
         }
         const old = this.fresh();
-        this.emit(`${old} = load double, ptr %${e.target}.addr`);
+        this.emit(`${old} = load double, ptr ${this.addr(e.target)}`);
         const nv = this.fresh();
         this.emit(`${nv} = ${e.op === "++" ? "fadd" : "fsub"} double ${old}, 1.0`);
-        this.emit(`store double ${nv}, ptr %${e.target}.addr`);
+        this.emit(`store double ${nv}, ptr ${this.addr(e.target)}`);
         return { v: e.prefix ? nv : old, ty: "number" };
       }
 
@@ -1612,25 +1642,25 @@ class FnGen {
           // outlives the assignment (safe if it escapes); the previous value is left
           // to leak (a conservative over-retention) rather than risk a premature free.
           if (ty === "string" && this.strLocals.has(e.target)) this.retainStrBind(e.value, val.v);
-          this.emit(`store ${llvmTy(ty)} ${val.v}, ptr %${e.target}.addr`);
+          this.emit(`store ${llvmTy(ty)} ${val.v}, ptr ${this.addr(e.target)}`);
           return { v: val.v, ty };
         }
         if (e.op === "+=" && ty === "string") {
           const old = this.fresh();
-          this.emit(`${old} = load ptr, ptr %${e.target}.addr`);
+          this.emit(`${old} = load ptr, ptr ${this.addr(e.target)}`);
           const rv = this.coerceToString(this.genExpr(e.value));
           const cat = this.concat(old, rv);
-          this.emit(`store ptr ${cat}, ptr %${e.target}.addr`);
+          this.emit(`store ptr ${cat}, ptr ${this.addr(e.target)}`);
           return { v: cat, ty: "string" };
         }
         const old = this.fresh();
-        this.emit(`${old} = load double, ptr %${e.target}.addr`);
+        this.emit(`${old} = load double, ptr ${this.addr(e.target)}`);
         const rv = this.genExpr(e.value);
         const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
         const t = this.fresh();
         if (bare in ARITH) this.emit(`${t} = ${ARITH[bare]} double ${old}, ${rv.v}`);
         else this.emit(`${t} = call double @${BITFN[bare]}(double ${old}, double ${rv.v})`);
-        this.emit(`store double ${t}, ptr %${e.target}.addr`);
+        this.emit(`store double ${t}, ptr ${this.addr(e.target)}`);
         return { v: t, ty: "number" };
       }
 
@@ -1879,7 +1909,7 @@ class FnGen {
       const vt = this.varTypes.get(e.callee.name);
       if (vt && isFuncTy(vt)) {
         const clo = this.fresh();
-        this.emit(`${clo} = load ptr, ptr %${e.callee.name}.addr`);
+        this.emit(`${clo} = load ptr, ptr ${this.addr(e.callee.name)}`);
         return this.genCallValueFrom(clo, vt, e.args);
       }
       return this.genUserCall(e.callee.name, e.args);
@@ -1988,7 +2018,7 @@ class FnGen {
       if (h.excVar && h.eType === "string") {
         const m = this.fresh();
         this.emit(`${m} = call ptr @nt_exc_message()`);
-        this.emit(`store ptr ${m}, ptr %${h.excVar}.addr`);
+        this.emit(`store ptr ${m}, ptr ${this.addr(h.excVar)}`);
       }
       this.emit(`call void @nt_exc_clear()`);
       this.terminate(`br label %${h.catchLbl}`);
@@ -2412,7 +2442,7 @@ class FnGen {
       const slot = this.fresh();
       this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src}, double ${iB})`);
       const v = this.fromSlot(slot, el);
-      this.emit(`store ${llvmTy(el)} ${v}, ptr %${pName}.addr`);
+      this.emit(`store ${llvmTy(el)} ${v}, ptr ${this.addr(pName)}`);
       return v;
     };
     return { idx, cond, upd, end, elem };
@@ -2576,7 +2606,7 @@ class FnGen {
     if (arrow.exprBody) return;
     const before = new Set(this.strLocals);
     this.collectLocals(arrow.body as Stmt[]);
-    for (const n of this.strLocals) if (!before.has(n)) this.emit(`store ptr null, ptr %${n}.addr`);
+    for (const n of this.strLocals) if (!before.has(n)) this.emit(`store ptr null, ptr ${this.addr(n)}`);
   }
 
   /** Emit an inlined HOF callback body and yield its result Val (type `retTy`). An
@@ -2644,16 +2674,16 @@ class FnGen {
     const A = init.ty;
     this.addLocal(accName, A);
     this.addLocal(xName, el);
-    this.emit(`store ${llvmTy(A)} ${init.v}, ptr %${accName}.addr`); // pre-loop init
+    this.emit(`store ${llvmTy(A)} ${init.v}, ptr ${this.addr(accName)}`); // pre-loop init
     this.prepHofLocals(arrow);
     const L = this.hofLoop(recv, "red", () => {});
     L.elem(el, xName);
     const rv = this.genHofBody(arrow, A);
-    this.emit(`store ${llvmTy(A)} ${rv.v}, ptr %${accName}.addr`);
+    this.emit(`store ${llvmTy(A)} ${rv.v}, ptr ${this.addr(accName)}`);
     this.hofStep(L.idx, L.upd, L.cond);
     this.to(this.block(L.end));
     const t = this.fresh();
-    this.emit(`${t} = load ${llvmTy(A)}, ptr %${accName}.addr`);
+    this.emit(`${t} = load ${llvmTy(A)}, ptr ${this.addr(accName)}`);
     return { v: t, ty: A };
   }
 
@@ -3290,5 +3320,5 @@ class FnGen {
 }
 
 export function codegen(checked: CheckedProgram): string {
-  return new ModuleGen(checked.functions).build(checked.program);
+  return new ModuleGen(checked.functions, checked.globals).build(checked.program);
 }

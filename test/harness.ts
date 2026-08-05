@@ -10,7 +10,7 @@
  * Everything shells out through src/driver.ts, the compiler's public API.
  */
 
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -64,6 +64,32 @@ export function runWithNode(source: string): RunResult {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/* ============================================================
+ * Modules (SH1) — a multi-module program cannot be a single `source` string: the
+ * entry file's PATH is what `import "./util.ts"` resolves against. These two run the
+ * same entry file through node and through nativets, so the differential oracle is
+ * unchanged (node resolves `./x.ts` imports natively).
+ * ============================================================ */
+
+/** Compile a multi-module entry FILE to a host binary and run it. */
+export async function compileAndRunFile(entryPath: string, args: string[] = []): Promise<RunResult> {
+  const dir = scratch("run-mod");
+  try {
+    const bin = join(dir, "prog");
+    await buildBinary(readFileSync(entryPath, "utf8"), bin, { target: "host", entryPath });
+    const proc = spawnSync(bin, args, { encoding: "utf8" });
+    return { stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", exitCode: proc.status ?? -1 };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** The oracle for a multi-module program: `node entry.ts` in its own directory. */
+export function runWithNodeFile(entryPath: string, args: string[] = []): RunResult {
+  const proc = spawnSync("node", [entryPath, ...args], { encoding: "utf8" });
+  return { stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", exitCode: proc.status ?? -1 };
 }
 
 /** Cross-compile to an object file and return `file`'s description of its arch. */

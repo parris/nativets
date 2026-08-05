@@ -29,6 +29,9 @@ conveniences, not requirements.
 `nativets coverage src/*.ts` today fails at **parse time on ~line 10 of every file** — before any
 type or codegen analysis can even run:
 
+*(Historical snapshot — `import`/`export`/`type`/`interface`/`class` have since landed; see the
+milestones below.)*
+
 | File | First blocker |
 |------|---------------|
 | `lexer.ts`, `ast.ts`, `checker.ts`, `codegen.ts`, `coverage.ts` | `type` alias / `import type` |
@@ -94,7 +97,8 @@ Four modules — `lexer.ts`, `diagnostics.ts`, `driver.ts`, `coverage-preprocess
 
 ## Gap tiers (what blocks parse → types → semantics → runtime)
 
-- **Tier 0 — parse/surface.** `#!` shebang; `import`/`export`; `import type`; `type` aliases;
+- **Tier 0 — parse/surface.** `#!` shebang; ~~`import`/`export`; `import type`~~ (**done, SH1**);
+  `type` aliases;
   `interface`; `enum`; `as const`/`satisfies`; some template-literal escapes. *(Every file dies
   here today.)*
 - **Tier 1 — type system.** **Discriminated unions** (`type Expr = NumberLiteral | ...` + exhaustive
@@ -123,11 +127,33 @@ Four modules — `lexer.ts`, `diagnostics.ts`, `driver.ts`, `coverage-preprocess
   histogram** over `src/` grouped by NT code + frequency — converting "self-hosting" into a
   gradient we can burn down, exactly like the gap corpus. Also stand up the 3-stage bootstrap
   test harness (initially expected-to-fail).
-- **SH1 — One module in, one module out.** Rather than a full native module system first, add a
-  **bundling step**: pre-concatenate/tree-shake `src/` into a single self-contained `.ts`
-  (a bundler already does this — `bun build` produces exactly this today), so nativets only ever
-  sees one module. Defer a native `import`/`export`/linker to later. Handle the `#!` shebang +
-  template escapes here.
+- **SH1 ✅ — A real module system (`import` / `export`).** Superseded the "bundle it first" plan:
+  nativets now resolves the import graph itself. `src/modules.ts` is a **whole-program linker** —
+  from the entry file it resolves every `./relative.ts` specifier, loads each module **exactly
+  once**, orders them by dependency (post-order DFS, matching ESM evaluation order), alpha-renames
+  each non-entry module's top-level bindings with a per-module prefix, and merges everything into
+  **ONE `Program`**. The checker, ownership pass and codegen are unchanged — they still see a
+  single program and still emit a single triple-free `.ll`.
+
+  - **Supported surface.** `import { a, b as c } from "./m.ts"`; `import type { T } from …` and
+    inline `import { type T, x }` (erased, but the type still resolves in the importer);
+    `import "./m.ts"` (side-effect only); `export` of `function` / `const` / `let` / `class` /
+    `type` / `interface`; `export { a as b }`; and the re-export `export { x } from "./y.ts"`.
+  - **Module scope is real.** A module's functions see its module-level bindings — an
+    `export const` read from inside an exported function was the forcing case. Bindings a function
+    body actually reads are promoted to LLVM globals (`@nt.g.<name>`), written by `main` in module
+    order; everything else stays a `main` local, so single-file IR is byte-identical to before.
+  - **Refused, never miscompiled.** `export default`, `import * as ns`, `export * from`, dynamic
+    `import()`, and bare/`node_modules` specifiers → **NT1017** with a hint naming the supported
+    form. Graph defects get the new **NT17xx** band: **NT1701** unreadable module, **NT1702**
+    import cycle (named, in order — it never hangs), **NT1703** no such export (listing what IS
+    exported).
+  - Tests: `test/modules.test.ts` + `test/modules/` (node is still the oracle — it resolves the
+    same `./x.ts` specifiers). Multi-module dogfood apps: `examples/roman-modular/` (the single-file
+    `examples/roman.ts` rebuilt as three modules, asserted byte-identical) and `examples/inventory/`.
+
+  Still open from the original SH1 scope: the `#!` shebang and the remaining template-literal
+  escapes.
 - **SH2 — Discriminated unions + `type`/`interface` (the crux).** Tagged-union types with exhaustive
   `switch (node.kind)`, literal-union types, and erased `type`/`interface` aliases. This unlocks
   representing the AST natively and is the single biggest type-system lift.

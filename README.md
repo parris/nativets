@@ -70,6 +70,30 @@ You write TypeScript syntax and it means what you'd expect. The supported langua
 
 There is no interpreter and no runtime engine in the output. The checker infers a type for every expression and codegen is type-directed; the result is one native executable that links only against the platform's libc. And `node` is the oracle for all of it — every feature above ships with fixtures whose native output is diffed against `node`.
 
+### Real modules, one binary
+
+A program is a graph of files, not a single file. `import`/`export` work as you'd expect, with the
+same explicit relative specifiers `node` itself resolves — so `node main.ts` remains the oracle for
+a multi-module program:
+
+```ts
+// math.ts
+export const TAU = 6.283185307179586;
+export function area(r: number): number { return (TAU / 2) * r * r; }
+
+// main.ts
+import { area, TAU } from "./math.ts";
+console.log(TAU, area(2));
+```
+
+There is no separate compilation and no linker step you can see: the compiler resolves the graph
+from the entry file, loads each module exactly once (a diamond's shared module runs once), runs
+module top-levels in dependency order, and merges everything into **one** LLVM module — renaming
+per-module so two files may each declare their own `helper`. `export default`, `import * as ns`,
+bare/`node_modules` specifiers, dynamic `import()`, and import **cycles** are refused with a
+diagnostic rather than silently given some other meaning. See `examples/inventory/` and
+`examples/roman-modular/`.
+
 ### Runtime types
 
 TypeScript's types vanish at runtime, so dynamic data (a parsed request, a config file) enters your program unchecked. nativets keeps the static types **and** validates at the boundary. `JSON.parse(s)` returns a dynamic value; narrowing it with `x as T` emits a validator — generated from `T`'s static shape, io-ts/zod in spirit — that walks the value, checks every scalar tag, requires every object field, and recurses into arrays. On a shape mismatch it **throws a `TypeError`**; on success it hands back a statically-typed `T`.
