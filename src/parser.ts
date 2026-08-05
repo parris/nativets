@@ -63,6 +63,7 @@ class Parser {
   private resolveNamed(id: string): Ty {
     const alias = this.typeAliases.get(id);
     if (alias) return alias;
+    if (id === "Uint8Array" || id === "TextEncoder" || id === "TextDecoder") return id as Ty; // stdlib batch-2 bytes types
     return (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty;
   }
 
@@ -763,10 +764,14 @@ class Parser {
     const left = this.parsePipe();
     const t = this.peek();
     if (t.type === "punct" && ASSIGN_OPS.has(t.value)) {
-      // Immutable-by-default (Phase B): element/field assignment mutates in place,
-      // which the model forbids. Reject with NT1606 pointing at the CoW replacement.
-      if (left.kind === "IndexExpr")
-        throw mutationError("arrays are immutable: `arr[i] = v` would mutate the array in place", "use `arr.with(i, v)` — returns a NEW array; the original is unchanged");
+      // Element assignment `obj[i] = v`: DEFER the mutability decision to the checker.
+      // Immutable arrays/objects are rejected there (NT1606); a genuinely-mutable
+      // `Uint8Array` (node allows `u[i] = v`) is accepted. The parser can't know the
+      // type, so it emits an IndexAssign and lets type inference decide.
+      if (left.kind === "IndexExpr") {
+        const op = this.next().value as any;
+        return { kind: "IndexAssign", op, object: left.object, index: left.index, value: this.parseAssign() };
+      }
       if (left.kind === "MemberExpr") {
         // The ONE allowed field assignment: `this.field = v` while building an instance
         // inside a constructor. Everywhere else `o.f = v` stays rejected (immutability),

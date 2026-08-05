@@ -241,6 +241,11 @@ class Analyzer {
         this.expr(e.object, state, false);
         this.expr(e.value, state, true);
         return;
+      case "IndexAssign": // `u[i] = v` (Uint8Array only reaches here — arrays/objects rejected in the checker)
+        this.expr(e.object, state, false);
+        this.expr(e.index, state, false);
+        this.expr(e.value, state, false);
+        return;
       case "MemberExpr": this.expr(e.object, state, false); return;
       case "IndexExpr":
         // Reading `arr[i]` in a CONSUMING position (binding / return / move) when the element

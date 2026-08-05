@@ -87,6 +87,17 @@ export function isMapTy(t: Ty): boolean { return typeof t === "string" && t.star
 export function isSetTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("Set<") && t.endsWith(">"); }
 export function makeMapTy(k: Ty, v: Ty): Ty { return `Map<${k},${v}>` as Ty; }
 export function makeSetTy(el: Ty): Ty { return `Set<${el}>` as Ty; }
+/**
+ * Bytes value type (stdlib batch 2). `Uint8Array` is a compact byte buffer (NtBytes*),
+ * `TextEncoder`/`TextDecoder` are stateless singleton handles — all three lowered to
+ * `ptr`. Kept as plain reserved type names (no `{`/`[]`/`(`/`<`/`?`), so none of the
+ * structural predicates match them.
+ */
+export function isBytesTy(t: Ty): boolean { return t === "Uint8Array"; }
+export function isTextEncoderTy(t: Ty): boolean { return t === "TextEncoder"; }
+export function isTextDecoderTy(t: Ty): boolean { return t === "TextDecoder"; }
+export function isBytesRefTy(t: Ty): boolean { return t === "Uint8Array" || t === "TextEncoder" || t === "TextDecoder"; }
+
 export function mapKeyTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[0] as Ty; }
 export function mapValTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[1] as Ty; }
 export function setElemTy(t: Ty): Ty { return t.slice(4, -1) as Ty; }
@@ -145,6 +156,7 @@ export type Expr =
   | ConditionalExpr
   | SequenceExpr
   | AssignExpr
+  | IndexAssign
   | FieldAssign
   | TypeofExpr
   | SpreadExpr
@@ -241,6 +253,22 @@ export interface AssignExpr {
   kind: "AssignExpr";
   op: AssignOp;
   target: string;
+  value: Expr;
+  ty?: Ty;
+}
+
+/**
+ * Element assignment `obj[index] = value` (and compound `obj[i] += v`). The parser emits
+ * this for ANY index target and DEFERS the mutability decision to the checker: for an
+ * immutable array/object it is rejected (NT1606, the "sharp turn"); for a `Uint8Array`
+ * (a genuinely mutable typed array — node allows `u[i] = v`) it is allowed and lowered
+ * to `nt_bytes_set` with JS ToUint8 wrap. `ty` is the element type (number for bytes).
+ */
+export interface IndexAssign {
+  kind: "IndexAssign";
+  op: AssignOp;
+  object: Expr;
+  index: Expr;
   value: Expr;
   ty?: Ty;
 }
