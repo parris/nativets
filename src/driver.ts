@@ -36,7 +36,7 @@ import hamtSource from "../runtime/nt_hamt.c" with { type: "text" };
 import hamtHeader from "../runtime/nt_hamt.h" with { type: "text" };
 import mapsetSource from "../runtime/nt_mapset.c" with { type: "text" };
 
-export type Target = "host" | "ios" | "ios-sim" | "android";
+export type Target = "host" | "ios" | "ios-sim" | "android" | "windows";
 
 /** Options for a native build. `static` produces a fully static binary (no dynamic libc). */
 export interface BuildOpts { target?: Target; static?: boolean }
@@ -104,6 +104,11 @@ function targetFlags(target: Target): string[] {
     case "ios": return ["-target", `arm64-apple-ios${IOS_VERSION}`, "-isysroot", sdkPath("iphoneos")];
     case "ios-sim": return ["-target", `arm64-apple-ios${IOS_VERSION}-simulator`, "-isysroot", sdkPath("iphonesimulator")];
     case "android": return [];
+    // Windows x86-64 PE via clang's MSVC/UCRT target. IR carries no triple, so clang stamps
+    // this in. Header-free IR compiles to a COFF object on any host (the local arch check);
+    // LINKING a full .exe needs the Windows SDK + lld-link, so it links natively on a Windows
+    // runner (or a mingw sysroot). No -isysroot: the Windows SDK is discovered by clang itself.
+    case "windows": return ["-target", "x86_64-pc-windows-msvc"];
   }
 }
 
@@ -122,6 +127,9 @@ export function supportsStatic(target: Target): boolean {
     case "android": return true;
     case "ios":
     case "ios-sim": return false;
+    // Windows links dynamically against the UCRT/MSVCRT (no fully-static libc archive in the
+    // default toolchain), so `--static` falls back to the dynamic default there, like Apple.
+    case "windows": return false;
     // `host` is Apple only when we're building on macOS; on a Linux host it's a Linux ELF.
     case "host": return process.platform !== "darwin";
   }
@@ -159,8 +167,10 @@ export function linkArgv(
     ...(files.actor ? [files.actor] : []),
     ...(files.extra ?? []),
     ...staticFlags,
-    // -lm: libm is separate on Android NDK (fmod/floor/...); harmless on macOS/iOS.
-    "-lm",
+    // -lm: libm is separate on Android NDK (fmod/floor/...); harmless on macOS/iOS. Windows
+    // folds the math functions into the UCRT/MSVCRT (no separate m.lib), so omit it there —
+    // lld-link would otherwise fail resolving a nonexistent `m.lib`.
+    ...(target === "windows" ? [] : ["-lm"]),
     "-o",
     files.out,
   ];

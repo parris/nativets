@@ -21,8 +21,10 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdint.h>
+#ifndef _WIN32
 #include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
 #include <termios.h>  /* tcgetattr/tcsetattr — raw-mode single-key input   */
+#endif                /* Windows has neither; the raw-key TUI path is a no-op there (see below) */
 
 /* ---- allocation (never-free; see header comment) ---- */
 
@@ -909,10 +911,18 @@ const char *nt_read_line(void) {
  * from the SAME lazily-slurped stdin buffer + cursor that readLine/readStdin use,
  * so a piped keystroke script is deterministic and matches the node oracle
  * byte-for-byte. libc/termios only, so it cross-compiles unchanged. */
+/* Windows has no termios: raw single-key mode degrades to a no-op and readKey serves bytes
+ * from the same lazily-slurped stdin buffer (the piped path below) — so plain-stdout and
+ * line/stdin-reading programs build and run, but a live single-keystroke TUI does not. */
+#ifndef _WIN32
 static struct termios g_saved_termios;
 static int            g_raw_active = 0;
+#endif
 
 void nt_raw_mode(int32_t on) {
+#ifdef _WIN32
+  (void)on;   /* no termios on Windows — raw mode is a no-op */
+#else
   if (on) {
     if (g_raw_active) return;
     if (!isatty(STDIN_FILENO)) return;                 /* piped: no-op */
@@ -927,9 +937,11 @@ void nt_raw_mode(int32_t on) {
     tcsetattr(STDIN_FILENO, TCSANOW, &g_saved_termios);
     g_raw_active = 0;
   }
+#endif
 }
 
 const char *nt_read_key(void) {
+#ifndef _WIN32
   if (isatty(STDIN_FILENO)) {
     /* Live terminal: one un-buffered byte straight from fd 0. */
     unsigned char c;
@@ -937,7 +949,8 @@ const char *nt_read_key(void) {
     if (n <= 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
     char *o = alloc_str(1); o[0] = (char)c; o[1] = '\0'; return o;
   }
-  /* Piped (not a tty): one byte from the shared slurp buffer + cursor. */
+#endif
+  /* Piped (not a tty) or Windows: one byte from the shared slurp buffer + cursor. */
   stdin_load();
   if (g_stdin_pos >= g_stdin_len) { char *o = alloc_str(0); o[0] = '\0'; return o; }
   char *o = alloc_str(1); o[0] = g_stdin[g_stdin_pos]; o[1] = '\0';

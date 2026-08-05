@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /*
  * nativets CLI
- *   nativets build <file.ts> [-o out] [--target host|ios|android]
+ *   nativets build <file.ts> [-o out] [--target host|ios|android|windows]
  *   nativets run   <file.ts>
  *   nativets emit  <file.ts>            print LLVM IR to stdout
  */
@@ -29,7 +29,7 @@ async function guard<T>(fn: () => Promise<T> | T): Promise<T> {
 }
 
 function usage(): never {
-  console.error("usage: nativets <build|run|emit|coverage> <file.ts> [-o out] [--target host|ios|ios-sim|android] [--static]");
+  console.error("usage: nativets <build|run|emit|coverage> <file.ts> [-o out] [--target host|ios|ios-sim|android|windows] [--static]");
   process.exit(2);
 }
 
