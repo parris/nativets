@@ -216,17 +216,21 @@ const DECLARES = [
   "declare i32 @nt_gui_mouse_pressed()",
   "declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)",
   // --- B2 immutable Map/Set (nt_hamt via scalar-ABI wrappers in nt_mapset.c) ---
-  "declare ptr @nt_map_new()",
+  // The TS-level handle is nt_mapset.c's NtColl (HAMT + insertion-order key log),
+  // so construction/size/iteration go through the nt_coll_* wrappers.
+  "declare ptr @nt_coll_map_new()",
   "declare ptr @nt_map_put_slot(ptr, i32, i64, i64)",
   "declare i64 @nt_map_get_slot(ptr, i32, i64)",
   "declare i32 @nt_map_has_slot(ptr, i32, i64)",
   "declare ptr @nt_map_remove_slot(ptr, i32, i64)",
-  "declare i64 @nt_map_size(ptr)",
-  "declare ptr @nt_set_new()",
+  "declare ptr @nt_coll_set_new()",
   "declare ptr @nt_set_add_slot(ptr, i32, i64)",
   "declare i32 @nt_set_has_slot(ptr, i32, i64)",
   "declare ptr @nt_set_remove_slot(ptr, i32, i64)",
-  "declare i64 @nt_set_size(ptr)",
+  "declare i64 @nt_coll_size(ptr)",
+  // insertion-ordered iteration → a real NtArray of key/value slots
+  "declare ptr @nt_coll_keys(ptr)",
+  "declare ptr @nt_coll_values(ptr)",
   // --- stdlib batch 2: bytes (Uint8Array + TextEncoder/TextDecoder, nt_bytes.c) ---
   "declare ptr @nt_bytes_new(double)",
   "declare ptr @nt_bytes_from_arr(ptr)",
@@ -516,6 +520,7 @@ class FnGen {
           break;
         case "ForOfStmt":
           this.addLocal(s.name, s.elemTy ?? "string");
+          if (s.name2) this.addLocal(s.name2, s.valTy ?? "number"); // `for (const [k, v] of map)`
           this.collectLocals(s.body);
           break;
         case "ForInStmt":
@@ -755,7 +760,12 @@ class FnGen {
         return;
       }
       case "ForOfStmt": {
-        const src = this.genExpr(s.iterable);
+        // `for (const [k, v] of map)`: the checker left `iterable` as the MAP, so
+        // walk its insertion-ordered key array and look each value up per step.
+        const mapV = s.name2 ? this.genExpr(s.iterable) : null;
+        const src = mapV
+          ? (() => { const a = this.fresh(); this.emit(`${a} = call ptr @nt_coll_keys(ptr ${mapV.v})`); return { v: a, ty: `${s.elemTy ?? "string"}[]` as Ty }; })()
+          : this.genExpr(s.iterable);
         const isStr = src.ty === "string";
         const isBytes = isBytesTy(src.ty);
         const el = s.elemTy ?? "string";
@@ -790,6 +800,12 @@ class FnGen {
           const slot = this.fresh();
           this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src.v}, double ${iB})`);
           this.emit(`store ${llvmTy(el)} ${this.fromSlot(slot, el)}, ptr %${s.name}.addr`);
+          if (mapV) { // entries: value = map.get(key) for this step's key slot
+            const vt = s.valTy ?? "number";
+            const vs = this.fresh();
+            this.emit(`${vs} = call i64 @nt_map_get_slot(ptr ${mapV.v}, i32 ${this.keyTag(el)}, i64 ${slot})`);
+            this.emit(`store ${llvmTy(vt)} ${this.fromSlot(vs, vt)}, ptr %${s.name2}.addr`);
+          }
         }
         this.loops.push({ brk: endLbl, cont: updLbl });
         this.genStmts(s.body);
@@ -1277,7 +1293,7 @@ class FnGen {
         }
         if ((isMapTy(obj.ty) || isSetTy(obj.ty)) && e.property === "size") {
           const sz = this.fresh();
-          this.emit(`${sz} = call i64 @${isMapTy(obj.ty) ? "nt_map_size" : "nt_set_size"}(ptr ${obj.v})`);
+          this.emit(`${sz} = call i64 @nt_coll_size(ptr ${obj.v})`);
           const d = this.fresh();
           this.emit(`${d} = sitofp i64 ${sz} to double`);
           return { v: d, ty: "number" };
@@ -1536,8 +1552,8 @@ class FnGen {
       }
       case "NewExpr": {
         // Immutable collections (B2): fresh empty handle from the nt_hamt runtime.
-        if (e.callee === "Map") { const m = this.fresh(); this.emit(`${m} = call ptr @nt_map_new()`); return { v: m, ty: e.ty! }; }
-        if (e.callee === "Set") { const s = this.fresh(); this.emit(`${s} = call ptr @nt_set_new()`); return { v: s, ty: e.ty! }; }
+        if (e.callee === "Map") { const m = this.fresh(); this.emit(`${m} = call ptr @nt_coll_map_new()`); return { v: m, ty: e.ty! }; }
+        if (e.callee === "Set") { const s = this.fresh(); this.emit(`${s} = call ptr @nt_coll_set_new()`); return { v: s, ty: e.ty! }; }
         // Bytes (stdlib batch 2): `new Uint8Array(n)` -> zero-filled; `new Uint8Array([..])`
         // -> from the number array (each ToUint8). TextEncoder/TextDecoder are stateless
         // (no runtime object), represented by a null sentinel ptr.
@@ -1668,9 +1684,12 @@ class FnGen {
           return { v: isArrayTy(at) ? "true" : "false", ty: "boolean" };
         }
         if (p === "from") {
-          const s = this.genExpr(e.args[0]!).v;
+          const a = this.genExpr(e.args[0]!);
           const t = this.fresh();
-          this.emit(`${t} = call ptr @nt_arr_from_str(ptr ${s})`);
+          // Array.from(arrayLike) COPIES (node): a Map/Set iterator is already a
+          // fresh array, but `Array.from(arr)` must not alias its source.
+          if (isArrayTy(a.ty)) { this.emit(`${t} = call ptr @nt_arr_copy(ptr ${a.v})`); return { v: t, ty: a.ty }; }
+          this.emit(`${t} = call ptr @nt_arr_from_str(ptr ${a.v})`);
           return { v: t, ty: "string[]" };
         }
       }
@@ -2045,6 +2064,13 @@ class FnGen {
     const tag = this.keyTag(k);
     const keySlot = () => this.toSlot(this.genExpr(args[0]!)); // arg[0] typed as k
     switch (method) {
+      // Iterators → a real array of key/value slots in INSERTION order (the key log
+      // in nt_mapset.c), so for-of / spread / Array.from all match node's order.
+      case "keys": case "values": {
+        const a = this.fresh();
+        this.emit(`${a} = call ptr @nt_coll_${method}(ptr ${recv.v})`);
+        return { v: a, ty: `${method === "keys" ? k : v}[]` as Ty };
+      }
       case "set": {
         const ks = keySlot();
         const vs = this.toSlot(this.genExpr(args[1]!));
@@ -2091,6 +2117,13 @@ class FnGen {
     const tag = this.keyTag(el);
     const elSlot = () => this.toSlot(this.genExpr(args[0]!));
     switch (method) {
+      // `.values()`/`.keys()` are the same thing for a Set: its elements, in
+      // insertion order (node's guarantee, kept by nt_mapset.c's key log).
+      case "keys": case "values": {
+        const a = this.fresh();
+        this.emit(`${a} = call ptr @nt_coll_keys(ptr ${recv.v})`);
+        return { v: a, ty: `${el}[]` as Ty };
+      }
       case "add": {
         const es = elSlot();
         const t = this.fresh();

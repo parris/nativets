@@ -7,7 +7,7 @@
  * supported programs.
  */
 
-import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
+import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError } from "./diagnostics.ts";
@@ -149,7 +149,38 @@ export function check(program: Program): CheckedProgram {
 class Checker {
   private loopDepth = 0;
   private switchDepth = 0;
+  /**
+   * Call nodes allowed to be a Map/Set ITERATOR (`m.keys()/.values()/.entries()`).
+   * node returns a lazy Iterator object there; we return a real array, so the two
+   * agree exactly in `for-of` / `[...it]` / `Array.from(it)` and nowhere else
+   * (`it.length` is 2 for us, `undefined` in node). Rather than diverge silently,
+   * the iterator is only typed in those three positions — anywhere else it is an
+   * NT1014 rejection. This set records the positions as they are checked.
+   */
+  private iterOk = new Set<Expr>();
   constructor(private functions: Map<string, Sig>) {}
+
+  /** Whitelist `e` as an iteration position (see `iterOk`). */
+  private markIter(e: Expr): void {
+    if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") this.iterOk.add(e);
+  }
+
+  /**
+   * An iteration position (`for-of`, `[...x]`, `Array.from(x)`): whitelist an
+   * explicit iterator call, and rewrite a Set used DIRECTLY as an iterable to
+   * `set.values()` so everything downstream sees a plain array. A Map used
+   * directly is refused — node yields `[key, value]` pairs there and we have no
+   * tuple type (`for (const [k, v] of m)` is the supported spelling).
+   */
+  private asIterable(e: Expr, scope: Scope, ctx: string): { expr: Expr; ty: Ty } {
+    this.markIter(e);
+    const t = this.type(e, scope);
+    if (isMapTy(t)) throw nyi(NYI.COLLECTION, `${ctx} over a Map (node yields [key, value] pairs — use \`for (const [k, v] of m)\`, \`m.keys()\` or \`m.values()\`)`);
+    if (!isSetTy(t)) return { expr: e, ty: t };
+    const call = { kind: "CallExpr", callee: { kind: "MemberExpr", object: e, property: "values" }, args: [] } as Expr;
+    this.markIter(call);
+    return { expr: call, ty: this.type(call, scope) };
+  }
 
   checkFunction(fn: FuncDecl, base: Scope): void {
     for (const p of fn.params) base.declare(p.name, p.annot ?? (p.default ? "number" : "number"), false);
@@ -264,7 +295,16 @@ class Checker {
         return;
       }
       case "ForOfStmt": {
-        const it = this.type(s.iterable, scope);
+        // --- Map/Set iteration, INSERTION-ORDERED (see nt_mapset.c's key log) ----
+        // `for (const [k, v] of m)` / `of m.entries()` binds both names: the loop
+        // walks the insertion-ordered keys and looks each value up (no tuple type
+        // needed). `for (const x of set)` is rewritten to `set.values()`, so it
+        // reuses the ordinary array for-of. `for (const x of map)` (one name) is
+        // refused — node binds a [k, v] array there, which we cannot represent.
+        if (s.name2) { this.checkMapEntriesLoop(s, scope, ret); return; }
+        const iter = this.asIterable(s.iterable, scope, "for-of");
+        s.iterable = iter.expr;
+        const it = iter.ty;
         const el: Ty = it === "string" ? "string" : isArrayTy(it) ? elemTy(it) : isBytesTy(it) ? "number" : (() => { throw nyi(NYI.FOR_OF_NONSTRING, `for-of over ${it}`); })();
         s.elemTy = el;
         const inner = scope.child();
@@ -352,7 +392,10 @@ class Checker {
         }
         const tys = e.elements.map((el) => {
           if (el.kind === "SpreadExpr") {
-            const st = this.type(el.argument, scope);
+            // [...map.keys()] / [...set] — an iteration position (a Set spreads its elements).
+            const sp = this.asIterable(el.argument, scope, "spread");
+            el.argument = sp.expr;
+            const st = sp.ty;
             if (!isArrayTy(st)) throw typeError("can only spread an array into an array literal");
             return elemTy(st);
           }
@@ -840,7 +883,12 @@ class Checker {
       }
       if (p === "from") {
         if (e.args.length !== 1) throw typeError("Array.from expects 1 argument");
-        if (this.type(e.args[0]!, scope) !== "string") throw nyi(NYI.ARRAY, "Array.from of a non-string");
+        // Array.from(map.keys()) / Array.from(set) — an iteration position.
+        const from = this.asIterable(e.args[0]!, scope, "Array.from");
+        e.args[0] = from.expr;
+        const at = from.ty;
+        if (isArrayTy(at)) return at;                     // arrays / Map-Set iterators → a copy
+        if (at !== "string") throw nyi(NYI.ARRAY, "Array.from of a non-string");
         return "string[]";
       }
       throw nyi(NYI.OBJECT, `Array.${p}`);
@@ -882,8 +930,8 @@ class Checker {
         });
         return msig.ret;
       }
-      if (isMapTy(recv)) return this.inferMapMethod(recv, e.callee.property, e.args, scope);
-      if (isSetTy(recv)) return this.inferSetMethod(recv, e.callee.property, e.args, scope);
+      if (isMapTy(recv)) return this.inferMapMethod(recv, e.callee.property, e.args, scope, e);
+      if (isSetTy(recv)) return this.inferSetMethod(recv, e.callee.property, e.args, scope, e);
       // Bytes (stdlib batch 2): TextEncoder#encode(string) -> Uint8Array (UTF-8);
       // TextDecoder#decode(Uint8Array) -> string (UTF-8).
       if (isTextEncoderTy(recv)) {
@@ -957,8 +1005,37 @@ class Checker {
   }
 
   /** Immutable Map methods (B2): .set/.get/.has/.delete. `.set`/`.delete` return a NEW map. */
-  private inferMapMethod(recv: Ty, method: string, args: Expr[], scope: Scope): Ty {
+  /**
+   * `for (const [k, v] of m)` / `of m.entries()`. Strips a trailing `.entries()` so
+   * `iterable` is the Map itself, then binds k:K and v:V for the body. Iteration is
+   * insertion-ordered (the runtime's key log), matching node exactly.
+   */
+  private checkMapEntriesLoop(s: ForOfStmt, scope: Scope, ret: Ty): void {
+    let src = s.iterable;
+    if (src.kind === "CallExpr" && src.callee.kind === "MemberExpr" && src.callee.property === "entries" && src.args.length === 0
+        && isMapTy(this.type(src.callee.object, scope))) src = src.callee.object;
+    const t = this.type(src, scope);
+    if (!isMapTy(t)) throw nyi(NYI.DESTRUCTURE, `for-of with a \`[a, b]\` binding over ${t} (only Map entries are supported)`);
+    s.iterable = src;
+    s.elemTy = mapKeyTy(t);
+    s.valTy = mapValTy(t);
+    const inner = scope.child();
+    inner.declare(s.name, s.elemTy, false);
+    inner.declare(s.name2!, s.valTy, false);
+    this.loopDepth++; this.checkBlock(s.body, inner, ret); this.loopDepth--;
+  }
+
+  private inferMapMethod(recv: Ty, method: string, args: Expr[], scope: Scope, node: Expr): Ty {
     const k = mapKeyTy(recv), v = mapValTy(recv);
+    // Iterators (insertion-ordered) — a real K[] / V[] array, valid only in an
+    // iteration position (for-of / Array.from / [...spread]); see `iterOk`.
+    if (method === "keys" || method === "values" || method === "entries") {
+      if (args.length !== 0) throw typeError(`.${method} takes no arguments`);
+      if (!this.iterOk.has(node)) throw nyi(NYI.COLLECTION, `a Map iterator outside for-of / Array.from / [...spread] (\`.${method}()\`)`);
+      if (method === "entries") throw nyi(NYI.COLLECTION, "`.entries()` outside `for (const [k, v] of …)` (no tuple type yet)");
+      return `${method === "keys" ? k : v}[]` as Ty;
+    }
+    if (method === "forEach") throw nyi(NYI.COLLECTION, "Map .forEach (use `for (const [k, v] of map)` — insertion-ordered, same visit order)");
     const argTys = args.map((a) => this.type(a, scope));
     const needKey = (i: number) => { if (argTys[i] !== k) throw typeError(`.${method} key expects ${k}, got ${argTys[i]}`); };
     switch (method) {
@@ -972,8 +1049,15 @@ class Checker {
   }
 
   /** Immutable Set methods (B2): .add/.has/.delete. `.add`/`.delete` return a NEW set. */
-  private inferSetMethod(recv: Ty, method: string, args: Expr[], scope: Scope): Ty {
+  private inferSetMethod(recv: Ty, method: string, args: Expr[], scope: Scope, node: Expr): Ty {
     const el = setElemTy(recv);
+    // node's Set iterators: `.values()`/`.keys()` are the same thing (the elements).
+    if (method === "keys" || method === "values") {
+      if (args.length !== 0) throw typeError(`.${method} takes no arguments`);
+      if (!this.iterOk.has(node)) throw nyi(NYI.COLLECTION, `a Set iterator outside for-of / Array.from / [...spread] (\`.${method}()\`)`);
+      return `${el}[]` as Ty;
+    }
+    if (method === "forEach") throw nyi(NYI.COLLECTION, "Set .forEach (use `for (const v of set)` — insertion-ordered, same visit order)");
     const argTys = args.map((a) => this.type(a, scope));
     const needEl = () => { if (args.length !== 1) throw typeError(`.${method} expects (value)`); if (argTys[0] !== el) throw typeError(`.${method} expects ${el}, got ${argTys[0]}`); };
     switch (method) {
