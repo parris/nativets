@@ -24,7 +24,7 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
-import { isArrayTy, isObjectTy, setBlockDrops } from "./ast.ts";
+import { isArrayTy, isObjectTy, setBlockDrops, classTag } from "./ast.ts";
 
 /** The linear (single-owner, move-checked + dropped) types: heap aggregates. */
 function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t); }
@@ -35,12 +35,40 @@ export const OWN_CODES = {
   MUTATE_WHILE_BORROWED: "NT1603", // ≈ E0502 (iterator invalidation)
   MOVE_OUT_OF_BORROW: "NT1604",  // ≈ E0507 (move out of a for-of element / by-borrow param)
   MOVE_OUT_OF_ARRAY: "NT1605",   // ≈ E0508 (move out of a linear array element `arr[i]`)
+  MUTATE_THROUGH_BORROW: "NT1607", // ≈ E0596 (`@@mutable` setter called on a handle we don't own)
 } as const;
+
+/**
+ * `@@mutable` classes (decorators lane) — the exclusive-access rule.
+ *
+ * An `@@mutable` instance really mutates, and every handle observes it. Two adjustments
+ * to the linear model make that both expressible AND single-owner:
+ *
+ *  1. `const b = a` is an ALIAS (a borrow), not a move — that is what "every alias
+ *     observes it" means. Ownership stays with the original binding, which is the one
+ *     and only place the value is dropped, so aliasing can never double-free. An alias
+ *     is registered as a borrow binding, so moving out of it (returning it, `move(b)`,
+ *     storing it into a container) is the existing NT1604 — it can never outlive its
+ *     owner by escaping.
+ *  2. Only an OWNER may mutate (`&mut self`). Calling a SETTER — a method that assigns
+ *     `this.f` — through anything the analysis does not know we own (an alias, a
+ *     by-borrow parameter, a `for-of` element) is NT1607.
+ */
+export interface MutableInfo {
+  /** Class tags carrying `@@mutable`. */
+  classes: Set<string>;
+  /** `Class.method` names that assign a field (setters), across all classes. */
+  setters: Set<string>;
+  /** Just the METHOD names of the above — the conservative check for a receiver whose
+   *  type the pass cannot resolve (a container element, a callback parameter). */
+  setterProps: Set<string>;
+}
+const NO_MUTABLE: MutableInfo = { classes: new Set(), setters: new Set(), setterProps: new Set() };
 
 /** Methods that mutate an array in place (so they conflict with a live borrow). */
 const MUTATING = new Set(["push", "pop"]);
 
-export interface OwnDiag { code: string; message: string; line: number; movedAt?: number; }
+export interface OwnDiag { code: string; message: string; line: number; movedAt?: number; hint?: string; }
 
 /**
  * `moved` is MAY-move (join = OR) — the lattice the use-after-move check reads, so a
@@ -80,6 +108,13 @@ function lineOf(e: Expr): number {
   }
 }
 
+/** Peel a method CHAIN back to what it started from: `a.bump().bump()` ⇒ `a`. */
+function chainRoot(e: Expr): Expr {
+  let cur = e;
+  while (cur.kind === "CallExpr" && cur.callee.kind === "MemberExpr") cur = cur.callee.object;
+  return cur;
+}
+
 function isMoveCall(e: Expr): boolean {
   return e.kind === "CallExpr" && e.callee.kind === "Identifier" && e.callee.name === "move";
 }
@@ -96,8 +131,33 @@ class Analyzer {
      *  free the old value (the closure may outlive the assignment). Conservative:
      *  over-approximated by "mentioned anywhere inside any arrow in this scope". */
     private captured: Set<string> = new Set(),
+    /** `@@mutable` classes + their setters, and the static type of every tracked name —
+     *  what the exclusive-access rule above is decided from. */
+    private mutable: MutableInfo = NO_MUTABLE,
+    private varTy: Map<string, import("./ast.ts").Ty> = new Map(),
+    /** alias name → the binding that OWNS the value (`const b = a` ⇒ b → a). */
+    private aliasOf: Map<string, string> = new Map(),
   ) {
     for (const p of paramBorrows) this.borrowBindings.add(p);
+    for (const a of aliasOf.keys()) this.borrowBindings.add(a); // an alias may never escape
+    for (const owner of aliasOf.values()) if (owner) this.aliasedOwners.add(owner);
+  }
+
+  /** Owners that something else aliases — reassigning one would dangle the alias. */
+  private readonly aliasedOwners = new Set<string>();
+
+  /** Is this type an instance of an `@@mutable` class? */
+  private isMutableInstance(ty: import("./ast.ts").Ty): boolean {
+    if (!this.mutable.classes.size || !isObjectTy(ty)) return false;
+    const tag = classTag(ty);
+    return tag !== undefined && this.mutable.classes.has(tag);
+  }
+
+  /** The `@@mutable` class tag of a name's static type, if it has one. */
+  private mutableClassOf(name: string): string | undefined {
+    const ty = this.varTy.get(name);
+    if (ty === undefined || !this.isMutableInstance(ty)) return undefined;
+    return classTag(ty);
   }
 
   /** Collection mode: record every name an arrow body mentions (pass 1). */
@@ -163,7 +223,7 @@ class Analyzer {
    *  function to return. Move-aware — a local moved out of the block is not dropped.
    *  `break`/`continue`/`throw` jump past the drop point: a leak, never a double free. */
   private scoped(list: Stmt[], state: State): void {
-    const declared = declaredLinear(list).filter((n) => this.linear.has(n));
+    const declared = declaredLinear(list, new Set(this.aliasOf.keys())).filter((n) => this.linear.has(n));
     if (declared.length === 0) { this.seq(list, state); return; }
     this.scopes.push(declared);
     this.seq(list, state);
@@ -175,7 +235,9 @@ class Analyzer {
     switch (s.kind) {
       case "VarDecl":
         for (const d of s.decls) {
-          this.expr(d.init, state, true);
+          // An ALIAS of an `@@mutable` instance (`const b = a`) BORROWS — it does not
+          // consume `a`, and it is never an owner, so it is never dropped either.
+          this.expr(d.init, state, !this.aliasOf.has(d.name));
           if (isLinearTy(d.ty ?? "number")) state.set(d.name, { moved: false, must: false });
         }
         return;
@@ -296,6 +358,50 @@ class Analyzer {
       }
       case "CallExpr": {
         if (isMoveCall(e)) { this.expr(e.args[0]!, state, true); return; }
+        // A method call on a `@@mutable` instance hands back the RECEIVER (`return this`),
+        // which the caller still owns — so its result is a BORROW. Consuming it (returning
+        // it out of this function, storing it in a container, `move`ing it) would create a
+        // second owner of a value someone else drops: E0507.
+        if (consume && e.callee.kind === "MemberExpr" && e.ty !== undefined && this.isMutableInstance(e.ty)) {
+          this.report({
+            code: OWN_CODES.MOVE_OUT_OF_BORROW,
+            message: `cannot move out of \`${classTag(e.ty)}.${e.callee.property}(…)\`: a method of a \`@@mutable\` class returns a BORROW of its receiver, which the caller still owns`,
+            line: lineOf(e.callee),
+            hint: "bind it (`const b = x.m();` is an alias, not an owner) or call the method for its effect; to hand a value out of this scope, return the OWNING binding instead",
+          });
+          return;
+        }
+        // `@@mutable` EXCLUSIVE ACCESS: a setter really mutates the receiver, so it needs
+        // ownership (Rust's `&mut self`). The receiver is resolved through a method chain
+        // (`a.bump().bump()` is still `a`) down to a binding; anything else — an array or
+        // field element, an arrow parameter, a capture — is ownership we cannot establish,
+        // so it is refused rather than mutated blind. Recognized by the setter's NAME,
+        // which is why the whole block is inert unless the program has `@@mutable` classes.
+        if (e.callee.kind === "MemberExpr" && this.mutable.setterProps.has(e.callee.property)) {
+          const root = chainRoot(e.callee.object);
+          const recv = root.kind === "Identifier" && this.varTy.has(root.name) ? root.name : null;
+          if (recv === null) {
+            this.report({
+              code: OWN_CODES.MUTATE_THROUGH_BORROW,
+              message: `cannot call the \`@@mutable\` setter \`${e.callee.property}\` here: its receiver is not a binding whose ownership this scope can establish`,
+              line: lineOf(e.callee),
+              hint: "a setter mutates in place, so it needs an OWNED receiver — a local bound to `new C(…)` in this scope. Container elements, closure captures and callback parameters cannot be proved unique, so they are refused rather than mutated blind",
+            });
+            return;
+          }
+          const tag = this.mutableClassOf(recv);
+          if (tag !== undefined && this.mutable.setters.has(`${tag}.${e.callee.property}`) && this.borrowBindings.has(recv)) {
+            const owner = this.aliasOf.get(recv);
+            this.report({
+              code: OWN_CODES.MUTATE_THROUGH_BORROW,
+              message: `cannot mutate \`${recv}\` through a borrow: \`${tag}.${e.callee.property}\` assigns a field, so it needs exclusive (owning) access`,
+              line: lineOf(e.callee),
+              hint: owner !== undefined && owner !== ""
+                ? `\`${recv}\` is an alias of \`${owner}\`, which still owns the value — call the setter on \`${owner}\`, or make \`${recv}\` the owner with \`const ${recv} = move(${owner})\``
+                : `\`${recv}\` is borrowed (a parameter, an alias, or a \`for-of\` element) and its owner is elsewhere — mutate it where it is owned, or return a new value instead`,
+            });
+          }
+        }
         if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier") {
           const recv = e.callee.object.name;
           if (this.linear.has(recv) && this.isBorrowed(recv) && MUTATING.has(e.callee.property)) {
@@ -308,6 +414,17 @@ class Analyzer {
       }
       case "AssignExpr":
         this.expr(e.value, state, true);
+        // Reassigning a binding that something else ALIASES would free the old value out
+        // from under the alias (`let b = a; a = new C();` ⇒ `b` dangles). rustc's E0506.
+        if (this.aliasedOwners.has(e.target)) {
+          this.report({
+            code: OWN_CODES.MOVE_WHILE_BORROWED,
+            message: `cannot assign to \`${e.target}\` because it is borrowed (an alias of it is still live)`,
+            line: 0,
+            hint: "an alias of a `@@mutable` value borrows from its owner for the rest of the scope; reassigning the owner would leave the alias dangling. Scope the alias more tightly, or mutate through the owner instead of rebinding it",
+          });
+          return;
+        }
         if (this.linear.has(e.target)) {
           // RAII on REASSIGNMENT (B2 step 4): the old value is about to become
           // unreachable, so this scope must free it — unless it was moved out (the new
@@ -370,14 +487,67 @@ class Analyzer {
 }
 
 /** Linear locals declared DIRECTLY in this statement list (a `MultiStmt` is a
- *  scope-less group — the destructuring/swap desugaring — so it counts as direct). */
-function declaredLinear(list: Stmt[]): string[] {
+ *  scope-less group — the destructuring/swap desugaring — so it counts as direct).
+ *  `aliases` (non-owning `@@mutable` handles) are never owners, so never dropped. */
+function declaredLinear(list: Stmt[], aliases: Set<string>): string[] {
   const out: string[] = [];
   for (const s of list) {
-    if (s.kind === "VarDecl") { for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out.push(d.name); }
-    else if (s.kind === "MultiStmt") out.push(...declaredLinear(s.stmts));
+    if (s.kind === "VarDecl") { for (const d of s.decls) if (isLinearTy(d.ty ?? "number") && !aliases.has(d.name)) out.push(d.name); }
+    else if (s.kind === "MultiStmt") out.push(...declaredLinear(s.stmts, aliases));
   }
   return out;
+}
+
+/**
+ * Every `const b = a` whose static type is an `@@mutable` class instance — an ALIAS,
+ * not a move (docs/decorators.md). Recorded as alias → owner. Aliases are excluded
+ * from the owned/droppable sets everywhere, so the value is still freed exactly once,
+ * by the original binding, and can never be double-freed through a second handle.
+ */
+function collectAliases(stmts: Stmt[], isMutableTy: (t: import("./ast.ts").Ty) => boolean, out: Map<string, string>): void {
+  for (const s of stmts) {
+    switch (s.kind) {
+      case "VarDecl":
+        // A binding is an ALIAS when the value came from somewhere that still owns it:
+        // another binding (`const b = a`) or a METHOD CALL on one (`const c = a.bump()`
+        // hands back the receiver). `new C(…)` — and a factory function's return — are
+        // fresh values, so those bindings are real owners and get the usual drop.
+        for (const d of s.decls) {
+          if (!isMutableTy(d.ty ?? "number")) continue;
+          if (d.init.kind === "Identifier") out.set(d.name, d.init.name);
+          else if (d.init.kind === "CallExpr" && d.init.callee.kind === "MemberExpr") {
+            const base = d.init.callee.object;
+            out.set(d.name, base.kind === "Identifier" ? base.name : "");
+          }
+        }
+        break;
+      case "IfStmt": collectAliases(s.consequent, isMutableTy, out); if (s.alternate) collectAliases(s.alternate, isMutableTy, out); break;
+      case "WhileStmt": case "DoWhileStmt": case "ForOfStmt": case "ForInStmt": case "BlockStmt": collectAliases(s.body, isMutableTy, out); break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectAliases([s.init as Stmt], isMutableTy, out); collectAliases(s.body, isMutableTy, out); break;
+      case "SwitchStmt": for (const c of s.cases) collectAliases(c.body, isMutableTy, out); break;
+      case "TryStmt": collectAliases(s.block, isMutableTy, out); if (s.handler) collectAliases(s.handler, isMutableTy, out); if (s.finalizer) collectAliases(s.finalizer, isMutableTy, out); break;
+      case "MultiStmt": collectAliases(s.stmts, isMutableTy, out); break;
+      default: break;
+    }
+  }
+}
+
+/** Static type of every name bound in a scope — what the `@@mutable` rules read. */
+function collectVarTys(stmts: Stmt[], out: Map<string, import("./ast.ts").Ty>): void {
+  for (const s of stmts) {
+    switch (s.kind) {
+      case "VarDecl": for (const d of s.decls) if (d.ty !== undefined) out.set(d.name, d.ty); break;
+      case "IfStmt": collectVarTys(s.consequent, out); if (s.alternate) collectVarTys(s.alternate, out); break;
+      case "WhileStmt": case "DoWhileStmt": case "BlockStmt": collectVarTys(s.body, out); break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectVarTys([s.init as Stmt], out); collectVarTys(s.body, out); break;
+      case "ForOfStmt": if (s.elemTy !== undefined) out.set(s.name, s.elemTy); collectVarTys(s.body, out); break;
+      case "ForInStmt": collectVarTys(s.body, out); break;
+      case "SwitchStmt": for (const c of s.cases) collectVarTys(c.body, out); break;
+      case "TryStmt": collectVarTys(s.block, out); if (s.handler) collectVarTys(s.handler, out); if (s.finalizer) collectVarTys(s.finalizer, out); break;
+      case "MultiStmt": collectVarTys(s.stmts, out); break;
+      default: break;
+    }
+  }
 }
 
 function collectLinear(stmts: Stmt[], out: Set<string>): void {
@@ -399,23 +569,64 @@ function collectLinear(stmts: Stmt[], out: Set<string>): void {
 export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   const diags: OwnDiag[] = [];
 
-  const runScope = (body: Stmt[], params: { name: string; ty: import("./ast.ts").Ty }[]): string[] => {
+  // `@@mutable` classes (decorators lane) and their setters. Empty for every program that
+  // does not use the attribute, in which case every rule below is inert.
+  const mutable: MutableInfo = {
+    classes: new Set(checked.program.mutableClasses ?? []),
+    setters: new Set(),
+    setterProps: new Set(),
+  };
+  for (const s of checked.program.body) {
+    if (s.kind !== "FuncDecl" || !s.setter) continue;
+    const [tag, m] = [s.name.split(".")[0]!, s.name.split(".").slice(1).join(".")];
+    if (!mutable.classes.has(tag)) continue; // an ordinary class's setter copies — nothing to guard
+    mutable.setters.add(s.name);
+    mutable.setterProps.add(m.replace(/\$inner$/, ""));
+  }
+  const isMutableTy = (t: import("./ast.ts").Ty): boolean => {
+    if (!mutable.classes.size || !isObjectTy(t)) return false;
+    const tag = classTag(t);
+    return tag !== undefined && mutable.classes.has(tag);
+  };
+
+  /**
+   * `this` inside a SETTER, and inside any method of a `@@mutable` class, is UNTRACKED.
+   *   - `@@mutable`: the receiver is the caller's, and `return this` hands the same
+   *     borrow back — the call-site rules above (alias binding / no consuming a method
+   *     result) are what keep it single-owner, so tracking `this` here would only
+   *     produce spurious moves.
+   *   - ordinary copy-on-write setter: `this` is the METHOD's private fresh copy, so
+   *     returning it is a legitimate transfer, not a move out of the caller's value.
+   */
+  const untrackedThis = (fn: FuncDecl): boolean =>
+    fn.params[0]?.name === "this" && (fn.setter === true || fn.untrackThis === true || mutable.classes.has(fn.name.split(".")[0]!));
+
+  const runScope = (body: Stmt[], params: { name: string; ty: import("./ast.ts").Ty }[], untrack: Set<string> = new Set()): string[] => {
+    const aliases = new Map<string, string>();
+    if (mutable.classes.size) collectAliases(body, isMutableTy, aliases);
+    const varTy = new Map<string, import("./ast.ts").Ty>();
+    if (mutable.classes.size) {
+      for (const p of params) varTy.set(p.name, p.ty);
+      collectVarTys(body, varTy);
+    }
     const linear = new Set<string>();
     for (const p of params) if (isLinearTy(p.ty)) linear.add(p.name);
     collectLinear(body, linear);
+    for (const a of aliases.keys()) linear.delete(a); // an alias owns nothing
+    for (const u of untrack) linear.delete(u);
     // Droppable = linear locals declared directly in this scope (NOT params — those
-    // are borrowed, the caller owns them).
+    // are borrowed, the caller owns them; NOT `@@mutable` aliases — the original owns them).
     const topLevel: string[] = [];
-    for (const s of body) if (s.kind === "VarDecl") for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) topLevel.push(d.name);
+    for (const s of body) if (s.kind === "VarDecl") for (const d of s.decls) if (isLinearTy(d.ty ?? "number") && !aliases.has(d.name)) topLevel.push(d.name);
     // Linear params are BORROWED (the caller owns + drops them) — moving one out is E0507.
-    const paramBorrows = params.filter((p) => isLinearTy(p.ty)).map((p) => p.name);
-    const entry = (): State => new Map(params.filter((p) => isLinearTy(p.ty)).map((p) => [p.name, { moved: false, must: false }]));
+    const paramBorrows = params.filter((p) => isLinearTy(p.ty) && !untrack.has(p.name)).map((p) => p.name);
+    const entry = (): State => new Map(params.filter((p) => isLinearTy(p.ty) && !untrack.has(p.name)).map((p) => [p.name, { moved: false, must: false }]));
     // Pass 1 (discard): which names does a closure body mention? Those pointers may be
     // copied into a closure env that outlives the binding, so they are never freed on
     // reassignment. Diagnostics from this pass are dropped — pass 2 is the real one.
-    const scan = new Analyzer(linear, topLevel, paramBorrows);
+    const scan = new Analyzer(linear, topLevel, paramBorrows, new Set(), mutable, varTy, aliases);
     scan.seq(body, entry());
-    const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames);
+    const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames, mutable, varTy, aliases);
     const st = entry();
     a.seq(body, st);
     const end = a.ownedTopLevel(st); // computed BEFORE marking: it can add to condDrops
@@ -430,7 +641,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   for (const s of checked.program.body) {
     if (s.kind === "FuncDecl") {
       const sig = checked.functions.get(s.name)!;
-      s.endDrops = runScope(s.body, s.params.map((p, i) => ({ name: p.name, ty: sig.params[i]! })));
+      s.endDrops = runScope(s.body, s.params.map((p, i) => ({ name: p.name, ty: sig.params[i]! })), untrackedThis(s) ? new Set(["this"]) : new Set());
     }
   }
   return diags;

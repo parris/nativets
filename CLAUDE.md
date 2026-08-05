@@ -668,6 +668,43 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   any arrow body (a closure env holds a second pointer), module-level bindings promoted to globals
   (a function may have returned the pointer), temporaries in non-chain positions, and array/object
   **elements** (a container frees its handle, not what its slots point at).
+- **Stage 45 ✅ (decorators: `@@` compile-time attributes + `@` runtime wrappers, and mutable
+  classes)** Two sigils, two mechanisms (`docs/decorators.md`). **`@@name`** is a **compile-time
+  ATTRIBUTE** the compiler reads — Rust's `#[derive]`, zero runtime footprint; an **unknown one is
+  `NT1023`**, never a comment, because an attribute changes how a class compiles. **`@name`** is a
+  real **runtime WRAPPER** — Python's `m = w(m)` — on a class or a method. The one attribute is
+  **`@@mutable`**: TRUE in-place mutation, where every handle observes the change. Consequently a
+  class **method may now assign `this.f`** (it was `NT1606`), in two flavors: an `@@mutable` class
+  mutates the receiver, an **ordinary class COPY-ON-WRITEs** — codegen rebinds `this` to a fresh
+  shallow copy on entry (`FuncDecl.copyThis`), so the caller's instance is unchanged and the method
+  hands back the NEW one; a setter that would throw that copy away is `NT1023`. A setter with no
+  `return` gets an **implicit `return this`** (both flavors), so it chains. Also fixed: a method
+  may now name its own class in a signature (`bump(): Counter`) — it used to erase to `number`
+  — via a self-type marker substituted once the instance shape exists.
+  **The safety story (the crux):** `@@mutable` puts mutation back into a linear model, so
+  `src/ownership.ts` keeps it single-owner with **only the owner may mutate**. `const b = a` (and
+  a method RESULT, which is the receiver) is an **ALIAS/borrow, not a move** — ownership never
+  leaves the original binding, so the value is dropped exactly once (`__objLive()` → 0) and
+  aliasing cannot double-free; an alias is a borrow binding, so letting it escape is the existing
+  **NT1604**. Calling a **setter** through anything whose ownership the pass cannot establish — an
+  alias, a by-borrow **parameter**, a `for-of` element, a container element, a callback parameter,
+  a capture — is the new **NT1607** (≈ rustc E0596); reassigning an aliased owner is **NT1602**
+  (≈ E0506). Receivers resolve through method chains, so `a.bump().bump()` is still `a`. What this
+  does **not** prove: it is not full `&mut` exclusivity (the owner may mutate while an alias is
+  live — that IS the feature), the container/callback check is name-based so it can over-refuse,
+  and aliases borrow for the whole scope (no NLL). **`@` wrappers** lower a decorated method to
+  `C.m$inner` + a module-level `const __dec_C_m = w((self, …p) => C.m$inner(self, …p))` applied
+  **once** + a forwarding `C.m`, so the wrapper is an ordinary `(fn) => fn` user function over the
+  method's own signature with the **receiver as its first parameter**, and wrapper state persists
+  across calls. A **class** decorator wraps the **CONSTRUCTOR** (`(instance, …args) => instance`;
+  `new C(…)` now uses the returned instance). **Stacked decorators apply BOTTOM-UP, like Python**:
+  `@a @b m` ≡ `a(b(m))`. Refused: a decorated method with no return annotation or a rest/default
+  param, `@@` on a member, `@` on a field. `@@mutable` survives the module linker (renamed with
+  its class). Two small enabling fixes elsewhere: calling a function-typed **module-level global**
+  from inside a function (was an ICE), and `new C(…)` honoring a constructor that returns the
+  instance. Tests: `test/decorators.test.ts` (25) — node-differential wherever a mechanical
+  desugaring exists (attribute-stripped source; hand-written explicit wrapper application),
+  behavioral with exact stdout where it does not.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
@@ -692,9 +729,10 @@ longer syntax at all:
 
 | Blocker | × | What it actually is |
 |---|---|---|
-| `NT1606` | 8 | `this.f = v` / `this.f++` field mutation in `Parser`/`Checker`/`FnGen`/`Analyzer`/`coverage` — a *source* refactor (or a language decision about mutable class fields), not a missing feature |
+| `NT1606` | 8 | field mutation `o.f = v` / `o.f++` on a plain record in `Parser`/`Checker`/`FnGen`/`Analyzer`/`coverage` — a *source* refactor, not a missing feature. (Stage 45 made `this.f = v` legal inside a class METHOD, so what remains is genuinely non-`this` mutation.) |
+| `NT1009` | 3 | general unions (`Record<string, number \| "var">`, an intersection type) |
 | `NT1015` | 2 | a `static` member in `ModuleGen`; a class field needing a type annotation in `modules.ts` |
-| `NT1009` | 1 | a general union (`Record<string, number \| "var">`) |
+| `NT0001` | 1 | **unmasked by Stage 45**: `class Checker` now parses past its field assignment and reaches `t.replace(/[^A-Za-z0-9_]/g, "_")` — a **regex literal**, which nativets does not have (no RegExp, Tier C). Not a parser regression; a previously-hidden blocker becoming visible. |
 
 The `NT0001` bucket was ×11 and was never one feature — six concrete gaps, each extracted from a
 real statement and closed one at a time (fixtures in `test/selfhost-parse/`, gate in

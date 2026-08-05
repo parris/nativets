@@ -462,6 +462,20 @@ export interface FuncDecl {
   // TEMPLATE — it is never checked or emitted itself; the checker replaces it with one
   // fully-concrete specialization per distinct instantiation (see `monomorphize`).
   typeParams?: string[];
+  /** Decorators lane: a COPY-ON-WRITE setter lowered from an ordinary (undecorated)
+   *  class method that assigns `this.f`. Codegen rebinds `this` to a fresh shallow copy
+   *  of the receiver on entry, so the caller's instance is unchanged and the method's
+   *  `return this` hands back the NEW instance. `@@mutable` classes never set it —
+   *  their setters mutate the receiver in place. See docs/decorators.md. */
+  copyThis?: boolean;
+  /** Decorators lane: this class method ASSIGNS a field (`this.f = …` / `this.f++`) —
+   *  a "setter". For an `@@mutable` class that is real in-place mutation, so the
+   *  ownership pass requires the receiver to be OWNED (Rust's `&mut self`). */
+  setter?: boolean;
+  /** Decorators lane: `this` must not be move-tracked in this frame — it is either the
+   *  method's own private copy (copy-on-write setter) or a borrow it legitimately hands
+   *  straight back (`return this` from a decorated constructor / an `@@mutable` method). */
+  untrackThis?: boolean;
 }
 
 export interface ReturnStmt { kind: "ReturnStmt"; argument: Expr | null; drops?: string[]; }
@@ -548,4 +562,9 @@ export interface Program {
   /** Present only when the source declared imports (the linker's input). */
   imports?: ImportDecl[];
   exports?: ExportTable;
+  /** Class names carrying the `@@mutable` compile-time attribute (decorators lane).
+   *  Present only when the source used the attribute. A mutable class's instances
+   *  mutate IN PLACE, so the ownership pass treats their bindings differently
+   *  (alias-not-move + owner-only mutation) — see docs/decorators.md. */
+  mutableClasses?: string[];
 }

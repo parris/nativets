@@ -314,6 +314,10 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
 
   const mods = new Map<string, ModuleInfo>();
   const body: Stmt[] = [];
+  /** `@@mutable` class names, under their FINAL (post-rename) names. Losing these across
+   *  the link would silently downgrade a mutable class to copy-on-write, so they travel
+   *  with the merged program (see docs/decorators.md). */
+  const mutableClasses = new Set<string>();
 
   order.forEach((path, i) => {
     const source = sources.get(path)!;
@@ -360,6 +364,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
         if (classes.has(n)) tags.set(n, `${prefix}${n}`);
       }
     }
+    for (const c of program.mutableClasses ?? []) mutableClasses.add(names.get(c) ?? c);
     new Renamer(names, tags).program(program);
 
     // 4. Publish this module's export table under the final names.
@@ -381,7 +386,9 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     body.push(...program.body);
   });
 
-  return { kind: "Program", body };
+  const merged: Program = { kind: "Program", body };
+  if (mutableClasses.size) merged.mutableClasses = [...mutableClasses];
+  return merged;
 }
 
 /** The module paths an entry file pulls in, in evaluation order (for tooling/tests). */
