@@ -126,9 +126,10 @@ Constraint (owner's decision): **no tracing/refcount GC, and no manual free.**
   (conditionally-created / temporary arrays are not yet freed — safe, may leak). **Borrows are
   implemented for `for-of`:** the loop borrows its array for the body, so mutating it
   (`NT1603` ≈ E0502, iterator invalidation) or moving it (`NT1602` ≈ E0505) inside is rejected.
-  **Still to do:** drops for nested/temporary values, general borrows beyond for-of, and
-  move-out-of-borrow/array (E0507/E0508). Owned strings/objects are still on the never-free
-  placeholder.
+  Drops now also cover **nested blocks, reassignment, temporaries and conditionally-moved values**
+  (Stage 41 — see the ledger and `docs/ownership.md` for the drop-point table and the four
+  remaining, deliberate, leak-not-dangle boundaries). **Still to do:** general borrows beyond
+  for-of, and recursive drops for container *elements*.
 
 ## The red-green-refactor loop
 
@@ -574,6 +575,38 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   (arrays are immutable, Stage 29 — `.sort` points at the ordering lane's `.toSorted()`); `toFixed`/`toString` require literal in-range arguments so
   node's `RangeError` is unreachable rather than emulated. Non-ASCII stays on the documented
   UTF-8-byte index space (§A.2), now pinned by a behavioral test.
+- **Stage 41 ✅ (B2 step 4 / Phase C: refcounting + transients — the last big leaks closed)**
+  Stage 38 left two knowingly-accepted holes; both are gone. **(a) The drop pass reached only
+  top-level locals**, so loop reassignment and unbound temporaries leaked (and, past 32 elements,
+  leaked trie nodes with them). Drops now happen at **four** points, all computed by the ownership
+  pass so they stay move-aware: scope exit (as before), a `return` (now every **active** scope,
+  not just the top level), a **nested block's** fall-through exit (`Stmt[].blockDrops` — a
+  loop-body local is freed each iteration), and **reassignment** (`AssignExpr.dropOld` — the
+  superseded value is freed after the RHS is evaluated). Unbound **temporaries** are freed where a
+  chain consumes them (`s.split(",").length`, `xs.map(f).filter(g)` — only syntactically fresh
+  producers, and never `.reverse`, which returns its receiver). **Conditional moves get a drop
+  flag** (rustc's E0382 machinery): the lattice now tracks MAY-move (join OR, what the
+  use-after-move check reads) *and* MUST-move (join AND), and a value moved on only some paths is
+  still dropped — under a flag that costs nothing, since the move **nulls the slot**
+  (`Identifier.nullOnMove`) and `free(NULL)` is a no-op, so the pointer IS the flag.
+  **(b) No transients**: `nt_pv_push_own` now mutates the tail **in place** when the vector header's
+  rc is 1 **and** its tail leaf's rc is 1 — uniquely owned ⇒ unobservable — and otherwise falls
+  back to the persistent push, so *old-version-unchanged holds by construction, decided by the
+  refcount*. Linear ownership is what makes the fast path the common one: `x = [...x, e]` compiles
+  to a **consuming append** (`nt_arr_extend_own`) because the ownership pass proves the old value
+  is dead, so the storage is MOVED and the trailing push finds rc = 1. Measured on 200k
+  loop-appends: **87.9 MB → 5.3 MB** peak RSS, **200001 → 0** abandoned handles, **217660 → 0**
+  trie-node allocations, ~5× faster; on an already-frozen array, 320 appends allocate **30** nodes
+  instead of ~320 (309 written in place). Also fixed a pre-existing **use-after-free**: array-literal
+  elements were borrows, so `return [o1, o2]` freed both objects while the escaping array still
+  pointed at them — elements now MOVE, like object-literal fields. Nothing observable changed
+  (every case is node-differential); gated by `test/transients.test.ts`, including an
+  **ASan+UBSan** run of a program exercising every new drop path and C-level vector 23 in
+  `test/runtime/pvec_test.c`. Deliberately still conservative (leak, never a double free or a
+  dangling pointer): values escaping a block via `break`/`continue`/`throw`, names mentioned inside
+  any arrow body (a closure env holds a second pointer), module-level bindings promoted to globals
+  (a function may have returned the pointer), temporaries in non-chain positions, and array/object
+  **elements** (a container frees its handle, not what its slots point at).
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 

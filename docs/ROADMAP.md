@@ -114,13 +114,19 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
 
 ## Phase C — Finish the memory model
 
-- **Make objects and strings linear** (currently never-free placeholders like the old array
-  path): move-check + deterministic drop, as arrays already have.
-- **Drops for nested-scope and temporary values** (block-scoped drop points / drop flags for
-  conditional moves) — arrays currently only drop top-level owned locals.
-- **Move-out-of-borrow / array-element** (`E0507`/`E0508` analogues).
-- Reconcile with B2/B4: reference counting + transients supersede parts of this; decide the final
-  model (linear ownership for uniquely-owned, rc for shared-immutable).
+- ✅ **Objects are linear** (Stage 23); **strings are refcounted**, not linear (Stage 30 — JS
+  value semantics beat move-checking for a `Copy`-ish type).
+- ✅ **Drops for nested-scope and temporary values** (B2 step 4, Stage 41): block-scoped drop
+  points (`Stmt[].blockDrops`), RAII on reassignment (`AssignExpr.dropOld`), drop flags for
+  conditional moves (the move nulls the slot; `free(NULL)` is the flag), and unbound array
+  temporaries freed where the chain consumes them.
+- ✅ **Move-out-of-borrow / array-element** (`E0507`/`E0508` → NT1604/NT1605, Stage 28).
+- Reconciled with B2/B4: **linear ownership for uniquely-owned handles, refcounting for
+  shared-immutable storage** (trie nodes, strings) — and `rc == 1` is what licenses transients.
+- **Still open:** values escaping through a `break`/`continue`/`throw` out of a block, temporaries
+  in non-chain positions (call arguments), array/object ELEMENTS (an array does not recursively
+  free what its slots point at), and module-level bindings a function may have aliased. All are
+  leaks by construction, never a double free or a dangling pointer.
 
 ---
 
