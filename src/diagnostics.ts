@@ -143,6 +143,18 @@ export function typeError(message: string): NTError {
 }
 
 /**
+ * A statically-known out-of-bounds index (NT2002). An out-of-range index PANICS at
+ * runtime (docs/divergences.md) — but when BOTH the length and the index are known at
+ * compile time, deferring to a runtime abort would be a worse diagnostic for the same
+ * certain fault. So we reject: compile-time beats runtime, `coverage` surfaces it, and
+ * the program never gets built. A real user error, hence the NT2xxx type-error band —
+ * not the NT1xxx "not yet implemented" gradient.
+ */
+export function boundsError(message: string, hint: string): NTError {
+  return new NTError({ code: "NT2002", message, hint });
+}
+
+/**
  * In-place mutation of an array/object is rejected (NT1606). nativets' data model
  * is immutable-by-default (Phase B "sharp turn", a deliberate divergence from node):
  * arrays and objects are values that are never mutated in place. `.push`/`.pop`,

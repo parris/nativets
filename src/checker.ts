@@ -11,7 +11,7 @@ import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt } from "./as
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
-import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError } from "./diagnostics.ts";
+import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
 
@@ -28,7 +28,37 @@ export interface CheckedProgram {
   globals: Map<string, Ty>;
 }
 
-interface Binding { ty: Ty; constant: boolean; }
+/* ------------------------------------------------------------------
+ * Statically-known out-of-bounds (NT2002).
+ *
+ * An out-of-range index panics at runtime. When the length AND the index are both
+ * compile-time constants the fault is certain, so we reject the program instead —
+ * compile-time beats runtime for the same defect (reject-don't-miscompile).
+ * Deliberately narrow: a literal array/string (or a `const` bound to one) indexed by
+ * a numeric literal. Anything less certain is left to the runtime panic.
+ * ------------------------------------------------------------------ */
+
+/** The length of an expression whose size is fixed at compile time, else undefined. */
+function literalLength(e: Expr): number | undefined {
+  if (e.kind === "ArrayLiteral") {
+    return e.elements.some((x) => x.kind === "SpreadExpr") ? undefined : e.elements.length;
+  }
+  // String indices address UTF-8 BYTES here (docs/divergences.md §A.2), so measure bytes.
+  if (e.kind === "StringLiteral") return Buffer.byteLength(e.value, "utf8");
+  return undefined;
+}
+
+/** A literal index, including a negated one (`a[-1]`, which parses as unary minus). */
+function literalIndex(e: Expr): number | undefined {
+  if (e.kind === "NumberLiteral") return e.value;
+  if (e.kind === "UnaryExpr" && e.op === "-" && e.operand.kind === "NumberLiteral") return -e.operand.value;
+  return undefined;
+}
+
+/** `len` is set only for a `const` bound to a literal of statically-known length (an
+ *  array literal without spreads, or a string literal) — it feeds the NT2002
+ *  compile-time out-of-bounds rejection. */
+interface Binding { ty: Ty; constant: boolean; len?: number }
 
 class Scope {
   private vars = new Map<string, Binding>();
@@ -39,7 +69,7 @@ class Scope {
   readonly hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
-  declare(name: string, ty: Ty, constant: boolean): void { this.vars.set(name, { ty, constant }); }
+  declare(name: string, ty: Ty, constant: boolean, len?: number): void { this.vars.set(name, { ty, constant, len }); }
   own(name: string): Binding | undefined { return this.vars.get(name); }
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
@@ -482,6 +512,30 @@ class Checker {
     }
   }
 
+  /**
+   * Reject `a[5]` on a known-3-long `a` at COMPILE TIME (NT2002) rather than letting it
+   * reach the runtime panic. Only fires when both sides are certain: a literal (or a
+   * `const` bound to a literal) indexed by a numeric literal. See literalLength above.
+   */
+  private checkStaticBounds(e: Extract<Expr, { kind: "IndexExpr" }>, ot: Ty, scope: Scope): void {
+    const idx = literalIndex(e.index);
+    if (idx === undefined) return;
+    let len = literalLength(e.object);
+    if (len === undefined && e.object.kind === "Identifier") {
+      const b = scope.lookup(e.object.name);
+      if (b?.constant) len = b.len;
+    }
+    if (len === undefined) return;
+    if (idx >= 0 && idx < len && Number.isInteger(idx)) return;
+    const what = ot === "string" ? "a string" : isBytesTy(ot) ? "a Uint8Array" : "an array";
+    throw boundsError(
+      `index ${idx} is out of bounds for ${what} of length ${len}`,
+      `valid indices are 0..${len - 1}` +
+        (len === 0 ? " (there are none — it is empty)" : "") +
+        `; use \`.at(${idx})\` if you want \`undefined\` instead of a panic`,
+    );
+  }
+
   /** Resolve `.prop` on a NON-nullable base (object field, or string/array `.length`). */
   private fieldOnBase(base: Ty, prop: string): Ty {
     if ((base === "string" || isArrayTy(base)) && prop === "length") return "number";
@@ -506,7 +560,8 @@ class Checker {
           // which sets the literal's own inferred `.ty`, so it must overwrite here.
           if (d.annot) this.retypeLiteral(d.init, d.annot);
           d.ty = d.annot ?? t;
-          scope.declare(d.name, d.ty, s.declKind === "const");
+          scope.declare(d.name, d.ty, s.declKind === "const",
+            s.declKind === "const" ? literalLength(d.init) : undefined);
         }
         return;
       case "FuncDecl": return;
@@ -749,6 +804,7 @@ class Checker {
         }
         const it = this.type(e.index, scope);
         if (it !== "number") throw typeError("index must be number");
+        this.checkStaticBounds(e, ot, scope);
         if (isArrayTy(ot)) return elemTy(ot);
         if (ot === "string") return "string";
         if (isBytesTy(ot)) return "number"; // Uint8Array element read -> 0..255

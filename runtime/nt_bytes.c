@@ -64,13 +64,31 @@ NtBytes *nt_bytes_from_arr(void *arrp) {
 
 double nt_bytes_get(NtBytes *b, double id) {
   int64_t i = (int64_t)id;
-  if (i < 0 || i >= b->len) return 0;      /* OOB read is `undefined` in JS; 0 here (kept in-bounds by fixtures) */
+  if (i < 0 || i >= b->len) return 0;      /* internal accessor: in-bounds by construction */
   return (double)b->data[i];
 }
 
 void nt_bytes_set(NtBytes *b, double id, double v) {
   int64_t i = (int64_t)id;
-  if (i < 0 || i >= b->len) return;        /* OOB write is a silent no-op for typed arrays */
+  if (i < 0 || i >= b->len) return;        /* internal accessor: in-bounds by construction */
+  b->data[i] = to_uint8(v);
+}
+
+/* `u[i]` / `u[i] = v` as WRITTEN in the source. A typed array's OOB read is `undefined`
+ * in JS and its OOB WRITE is a SILENT NO-OP — the worst of the old policies, because the
+ * program then reads back a value it believes it stored. Both panic here. (Declared in
+ * runtime.c, which is always linked; nt_bytes.c is linked only when a program uses bytes.) */
+extern void nt_panic_bounds(const char *what, double len, double idx, const char *loc);
+
+double nt_bytes_index(NtBytes *b, double id, const char *loc) {
+  int64_t i = (int64_t)id;
+  if (!(id == id) || i < 0 || i >= b->len) nt_panic_bounds("Uint8Array index", (double)b->len, id, loc);
+  return (double)b->data[i];
+}
+
+void nt_bytes_index_set(NtBytes *b, double id, double v, const char *loc) {
+  int64_t i = (int64_t)id;
+  if (!(id == id) || i < 0 || i >= b->len) nt_panic_bounds("Uint8Array index", (double)b->len, id, loc);
   b->data[i] = to_uint8(v);
 }
 

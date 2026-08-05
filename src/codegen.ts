@@ -12,7 +12,7 @@
 
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { isConsoleLog } from "./checker.ts";
-import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
+import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 import { isOptChainExpr } from "./checker.ts";
@@ -151,6 +151,11 @@ const DECLARES = [
   "declare ptr @nt_arr_new(double)",
   "declare double @nt_arr_push(ptr, i64)",
   "declare i64 @nt_arr_get(ptr, double)",
+  // Bounds-PANIC accessors — used only where the programmer wrote the index (the
+  // extra `ptr` is the interned "file:line:col" the panic reports).
+  "declare i64 @nt_arr_index(ptr, double, ptr)",
+  "declare ptr @nt_str_index(ptr, double, ptr)",
+  "declare void @nt_panic_bounds(ptr, double, double, ptr)",
   "declare i64 @nt_arr_pop(ptr)",
   "declare double @nt_arr_len(ptr)",
   "declare ptr @nt_arr_join_num(ptr, ptr)",
@@ -165,7 +170,7 @@ const DECLARES = [
   "declare ptr @nt_arr_to_sorted(ptr, i32)",
   "declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)",
   "declare ptr @nt_arr_to_reversed(ptr)",
-  "declare ptr @nt_arr_with(ptr, double, i64)",
+  "declare ptr @nt_arr_with(ptr, double, i64, ptr)",
   "declare void @nt_arr_free(ptr)",
   "declare double @nt_arr_live()",
   // structural-sharing witnesses (B2 step 2): live / cumulative persistent-vector nodes
@@ -283,6 +288,9 @@ const DECLARES = [
   "declare ptr @nt_bytes_from_arr(ptr)",
   "declare double @nt_bytes_get(ptr, double)",
   "declare void @nt_bytes_set(ptr, double, double)",
+  // bounds-PANIC element read/write for a written `u[i]` / `u[i] = v`
+  "declare double @nt_bytes_index(ptr, double, ptr)",
+  "declare void @nt_bytes_index_set(ptr, double, double, ptr)",
   "declare double @nt_bytes_len(ptr)",
   "declare ptr @nt_bytes_encode(ptr)",
   "declare ptr @nt_bytes_decode(ptr)",
@@ -550,6 +558,16 @@ class FnGen {
     if (!b.terminated) { b.lines.push("  " + line); b.terminated = true; }
   }
   private get terminated(): boolean { return this.blocks[this.cur]!.terminated; }
+
+  /**
+   * The interned `file:line:col` a bounds panic reports, or `null` when this index
+   * was SYNTHESIZED by a desugaring (destructuring, spread-call expansion) rather
+   * than written — those keep the internal, non-panicking accessor.
+   */
+  private locArg(loc?: Loc): string | null {
+    if (!loc) return null;
+    return this.mod.intern(`${loc.file ?? "<input>"}:${loc.line}:${loc.col}`);
+  }
 
   /** v1 reduction-counted preemption: emit a safepoint (budget tick + maybe-yield)
    *  at loop back-edges and function-call sites. Emitted ONLY in programs that use
@@ -1302,19 +1320,28 @@ class FnGen {
           return { v: this.fromSlot(slot, ft), ty: ft };
         }
         const idx = this.genExpr(e.index);
+        // A WRITTEN index (`e.loc` set by the parser) reads through the bounds-PANIC
+        // accessor; a synthesized one (destructuring, spread-call) keeps the plain read.
+        const loc = this.locArg(e.loc);
         if (obj.ty === "string") {
           const t = this.fresh();
-          this.emit(`${t} = call ptr @js_str_char_at(ptr ${obj.v}, double ${idx.v})`);
+          this.emit(loc
+            ? `${t} = call ptr @nt_str_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
+            : `${t} = call ptr @js_str_char_at(ptr ${obj.v}, double ${idx.v})`);
           return { v: t, ty: "string" };
         }
         if (isBytesTy(obj.ty)) {
           const t = this.fresh();
-          this.emit(`${t} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
+          this.emit(loc
+            ? `${t} = call double @nt_bytes_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
+            : `${t} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
           return { v: t, ty: "number" };
         }
         const el = elemTy(obj.ty);
         const slot = this.fresh();
-        this.emit(`${slot} = call i64 @nt_arr_get(ptr ${obj.v}, double ${idx.v})`);
+        this.emit(loc
+          ? `${slot} = call i64 @nt_arr_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
+          : `${slot} = call i64 @nt_arr_get(ptr ${obj.v}, double ${idx.v})`);
         return { v: this.fromSlot(slot, el), ty: el };
       }
 
@@ -1707,19 +1734,25 @@ class FnGen {
         // clamps/wraps to a byte in the runtime (JS ToUint8). Evaluate obj + index once.
         const obj = this.genExpr(e.object);
         const idx = this.genExpr(e.index);
+        // An out-of-range typed-array write used to be a SILENT no-op; it panics now.
+        const loc = this.locArg(e.loc);
         let out: string;
         if (e.op === "=") {
           out = this.genExpr(e.value).v;
         } else {
           const cur = this.fresh();
-          this.emit(`${cur} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
+          this.emit(loc
+            ? `${cur} = call double @nt_bytes_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
+            : `${cur} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
           const rv = this.genExpr(e.value);
           const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
           out = this.fresh();
           if (bare in ARITH) this.emit(`${out} = ${ARITH[bare]} double ${cur}, ${rv.v}`);
           else this.emit(`${out} = call double @${BITFN[bare]}(double ${cur}, double ${rv.v})`);
         }
-        this.emit(`call void @nt_bytes_set(ptr ${obj.v}, double ${idx.v}, double ${out})`);
+        this.emit(loc
+          ? `call void @nt_bytes_index_set(ptr ${obj.v}, double ${idx.v}, double ${out}, ptr ${loc})`
+          : `call void @nt_bytes_set(ptr ${obj.v}, double ${idx.v}, double ${out})`);
         return { v: out, ty: "number" };
       }
       case "FieldAssign": {
@@ -1985,7 +2018,7 @@ class FnGen {
         }
         return { v: t, ty: "string" };
       }
-      if (isArrayTy(recv.ty)) return this.genArrayMethod(e.callee.property, recv, e.args);
+      if (isArrayTy(recv.ty)) return this.genArrayMethod(e.callee.property, recv, e.args, e.loc);
       return this.genStringMethod(e.callee.property, recv, e.args);
     }
     if (e.callee.kind === "Identifier") {
@@ -2533,7 +2566,7 @@ class FnGen {
     }
   }
 
-  private genArrayMethod(method: string, recv: Val, args: Expr[]): Val {
+  private genArrayMethod(method: string, recv: Val, args: Expr[], loc?: Loc): Val {
     const el = elemTy(recv.ty);
     const numeric = el === "number";
     switch (method) {
@@ -2617,10 +2650,12 @@ class FnGen {
       case "with": {
         // Immutable update (CoW): full copy of the flat block with slot i replaced.
         // Receiver is borrowed + unchanged; result is a fresh owned array (drops once).
+        // Out of range PANICS: it used to leave the copy untouched, so the program
+        // carried on with an array it believed it had updated (node throws RangeError).
         const idx = this.genExpr(args[0]!).v;
         const slot = this.toSlot(this.genExpr(args[1]!));
         const t = this.fresh();
-        this.emit(`${t} = call ptr @nt_arr_with(ptr ${recv.v}, double ${idx}, i64 ${slot})`);
+        this.emit(`${t} = call ptr @nt_arr_with(ptr ${recv.v}, double ${idx}, i64 ${slot}, ptr ${this.locArg(loc) ?? "null"})`);
         return { v: t, ty: recv.ty };
       }
       case "slice": {
