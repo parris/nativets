@@ -15,26 +15,31 @@ import { join } from "node:path";
 
 import { sourceToIR, buildBinary, type Target } from "./driver.ts";
 import { coverage, renderCoverage } from "./coverage.ts";
-import { NTError } from "./diagnostics.ts";
+import { NTError, formatDiagnostic } from "./diagnostics.ts";
 
 /** Run a compile action, printing NT diagnostics cleanly instead of a stack trace. */
 async function guard<T>(fn: () => Promise<T> | T): Promise<T> {
   try {
     return await fn();
   } catch (e) {
-    if (e instanceof NTError) { console.error(`error[${e.diag.code}]: ${e.diag.message}`); process.exit(1); }
+    // Render multi-span diagnostics against the source (rustc-style caret underlines).
+    if (e instanceof NTError) { console.error(formatDiagnostic(e.diag, source)); process.exit(1); }
     throw e;
   }
 }
 
 function usage(): never {
-  console.error("usage: nativets <build|run|emit|coverage> <file.ts> [-o out] [--target host|ios|ios-sim|android]");
+  console.error("usage: nativets <build|run|emit|coverage> <file.ts> [-o out] [--target host|ios|ios-sim|android] [--static]");
   process.exit(2);
 }
 
 function getFlag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
+}
+
+function hasFlag(args: string[], name: string): boolean {
+  return args.includes(name);
 }
 
 const [, , cmd, file, ...rest] = process.argv;
@@ -56,7 +61,8 @@ if (cmd === "coverage") {
 if (cmd === "build") {
   const out = getFlag(rest, "-o") ?? basename(file).replace(/\.ts$/, "");
   const target = (getFlag(rest, "--target") ?? "host") as Target;
-  await guard(() => buildBinary(source, out, { target }));
+  const isStatic = hasFlag(rest, "--static");
+  await guard(() => buildBinary(source, out, { target, static: isStatic }));
   console.error(`wrote ${out}`);
   process.exit(0);
 }

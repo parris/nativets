@@ -20,7 +20,7 @@ import { parse } from "./parser.ts";
 import { check } from "./checker.ts";
 import { codegen } from "./codegen.ts";
 import { analyzeOwnership, type OwnDiag } from "./ownership.ts";
-import { NTError } from "./diagnostics.ts";
+import { NTError, type DiagSpan } from "./diagnostics.ts";
 // Embed the C runtime as text so a `bun build --compile` single executable is
 // self-contained (no runtime/runtime.c on disk needed at run time).
 import runtimeSource from "../runtime/runtime.c" with { type: "text" };
@@ -38,6 +38,9 @@ import mapsetSource from "../runtime/nt_mapset.c" with { type: "text" };
 
 export type Target = "host" | "ios" | "ios-sim" | "android";
 
+/** Options for a native build. `static` produces a fully static binary (no dynamic libc). */
+export interface BuildOpts { target?: Target; static?: boolean }
+
 const IOS_VERSION = "18.0";
 const ANDROID_API = 24;
 
@@ -48,7 +51,14 @@ export function sourceToIR(source: string): string {
   const own = analyzeOwnership(checked);
   if (own.length) {
     const d = own[0]!;
-    throw new NTError({ code: d.code, message: `${d.message}${d.movedAt ? ` (moved at line ${d.movedAt}, used at line ${d.line})` : ` (line ${d.line})`}` });
+    // Multi-span diagnostic (rustc-style): a use-after-move points at BOTH the use and the
+    // earlier move; the single-line-location codes point at just their one line. The primary
+    // caret is the offending use/move; the secondary "-" underline is the move that caused it.
+    const spans: DiagSpan[] = [
+      { line: d.line, label: d.movedAt ? "value used here after move" : "occurs here", primary: true },
+    ];
+    if (d.movedAt) spans.push({ line: d.movedAt, label: "value moved here" });
+    throw new NTError({ code: d.code, message: d.message, spans });
   }
   return codegen(checked);
 }
@@ -78,13 +88,83 @@ export function androidClang(): string {
 
 interface Toolchain { cc: string; flags: string[] }
 
-function toolchainFor(target: Target): Toolchain {
+/** The C compiler to invoke for a target (the NDK wrapper resolves an Android clang). */
+function ccFor(target: Target): string {
+  return target === "android" ? androidClang() : "clang";
+}
+
+/**
+ * The `-target`/`-isysroot` flags for a target — pure and NDK-independent (the Android
+ * NDK clang wrapper bakes in its own target triple, so it needs no `-target` flag). Kept
+ * separate from `ccFor` so link-arg construction is testable without an NDK on the box.
+ */
+function targetFlags(target: Target): string[] {
   switch (target) {
-    case "host": return { cc: "clang", flags: [] };
-    case "ios": return { cc: "clang", flags: ["-target", `arm64-apple-ios${IOS_VERSION}`, "-isysroot", sdkPath("iphoneos")] };
-    case "ios-sim": return { cc: "clang", flags: ["-target", `arm64-apple-ios${IOS_VERSION}-simulator`, "-isysroot", sdkPath("iphonesimulator")] };
-    case "android": return { cc: androidClang(), flags: [] };
+    case "host": return [];
+    case "ios": return ["-target", `arm64-apple-ios${IOS_VERSION}`, "-isysroot", sdkPath("iphoneos")];
+    case "ios-sim": return ["-target", `arm64-apple-ios${IOS_VERSION}-simulator`, "-isysroot", sdkPath("iphonesimulator")];
+    case "android": return [];
   }
+}
+
+function toolchainFor(target: Target): Toolchain {
+  return { cc: ccFor(target), flags: targetFlags(target) };
+}
+
+/**
+ * Whether a target can produce a *fully* static binary (no dynamic libc dependency).
+ * Apple platforms ship no static libc archive (`crt0.o` static linking is unsupported),
+ * so macOS/iOS keep the default single-file *dynamic*-libc binary; Linux-family targets
+ * (Android, and a Linux host) support `-static`.
+ */
+export function supportsStatic(target: Target): boolean {
+  switch (target) {
+    case "android": return true;
+    case "ios":
+    case "ios-sim": return false;
+    // `host` is Apple only when we're building on macOS; on a Linux host it's a Linux ELF.
+    case "host": return process.platform !== "darwin";
+  }
+}
+
+/**
+ * Resolve the link-mode flags for a `--static` request. Returns `-static` when the target
+ * supports it, otherwise no flag plus a warning (we fall back to the dynamic default rather
+ * than failing the build). Pure — the unit-test surface for the `--static` plumbing.
+ */
+export function resolveStatic(target: Target, requested: boolean): { flags: string[]; warning?: string } {
+  if (!requested) return { flags: [] };
+  if (supportsStatic(target)) return { flags: ["-static"] };
+  return {
+    flags: [],
+    warning: `--static: a fully static libc binary is not supported on the '${target}' (Apple) target; producing the default dynamic-libc binary instead`,
+  };
+}
+
+/**
+ * Build the clang link argv for a program (everything after the compiler name). Pure and
+ * NDK-independent, so a test can assert the flags produced for a target + `--static` without
+ * a Linux box or an installed NDK. `buildBinary` pairs it with `ccFor` to actually link.
+ */
+export function linkArgv(
+  target: Target,
+  files: { ll: string; rt: string; actor?: string | null; extra?: string[]; out: string },
+  opts: { static?: boolean } = {},
+): { args: string[]; warning?: string } {
+  const { flags: staticFlags, warning } = resolveStatic(target, opts.static ?? false);
+  const args = [
+    ...targetFlags(target),
+    files.ll,
+    files.rt,
+    ...(files.actor ? [files.actor] : []),
+    ...(files.extra ?? []),
+    ...staticFlags,
+    // -lm: libm is separate on Android NDK (fmod/floor/...); harmless on macOS/iOS.
+    "-lm",
+    "-o",
+    files.out,
+  ];
+  return { args, warning };
 }
 
 function writeIR(source: string): { dir: string; ll: string; rt: string; actor: string | null; extra: string[] } {
@@ -123,12 +203,14 @@ function run(cc: string, args: string[]): void {
   if (r.status !== 0) throw new BuildError(`${cc} failed (${r.status}):\n${r.stderr}`);
 }
 
-export async function buildBinary(source: string, outPath: string, opts: { target?: Target } = {}): Promise<void> {
-  const { cc, flags } = toolchainFor(opts.target ?? "host");
+export async function buildBinary(source: string, outPath: string, opts: BuildOpts = {}): Promise<void> {
+  const target = opts.target ?? "host";
+  const cc = ccFor(target);
   const { dir, ll, rt, actor, extra } = writeIR(source);
   try {
-    // -lm: libm is separate on Android NDK (fmod/floor/...); harmless on macOS/iOS.
-    run(cc, [...flags, ll, rt, ...(actor ? [actor] : []), ...extra, "-lm", "-o", outPath]);
+    const { args, warning } = linkArgv(target, { ll, rt, actor, extra, out: outPath }, { static: opts.static });
+    if (warning) console.error(`warning: ${warning}`);
+    run(cc, args);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
