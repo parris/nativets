@@ -39,12 +39,16 @@ export function makeNullable(which: "undefined" | "null", base: Ty): Ty {
 /** Split on `sep` at nesting depth 0 (respecting (), [], {}) — for nested types. */
 export function splitTopLevel(s: string, sep: string): string[] {
   const out: string[] = [];
-  let depth = 0, start = 0;
+  let depth = 0, angle = 0, start = 0; // `angle` tracks `Map<…>`/`Set<…>` generic brackets
   for (let i = 0; i < s.length; i++) {
     const c = s[i]!;
     if (c === "(" || c === "[" || c === "{") depth++;
     else if (c === ")" || c === "]" || c === "}") depth--;
-    else if (c === sep && depth === 0) { out.push(s.slice(start, i)); start = i + 1; }
+    else if (c === "<") angle++;
+    // `>` closes a generic only when one is open — so the `>` of a function type's `=>`
+    // (angle === 0) is left alone and never miscounts depth.
+    else if (c === ">" && angle > 0) angle--;
+    else if (c === sep && depth === 0 && angle === 0) { out.push(s.slice(start, i)); start = i + 1; }
   }
   out.push(s.slice(start));
   return out;

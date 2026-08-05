@@ -419,6 +419,23 @@ class Parser {
     return { kind: "FuncDecl", name, params, returnAnnot, body: this.parseBlock() };
   }
 
+  /** Infer a class field's type from its initializer when it carries no annotation.
+   *  Handles the shapes the accepted subset can lower — scalar literals and immutable
+   *  collections. Anything else is deferred (NT1015) with a hint to add an annotation. */
+  private inferFieldTy(init: Expr, field: string): Ty {
+    switch (init.kind) {
+      case "NumberLiteral": return "number";
+      case "BooleanLiteral": return "boolean";
+      case "StringLiteral": case "TemplateLiteral": return "string";
+      case "NewExpr": {
+        if (init.callee === "Map") return makeMapTy(init.typeArgs?.[0] ?? "string", init.typeArgs?.[1] ?? "number");
+        if (init.callee === "Set") return makeSetTy(init.typeArgs?.[0] ?? "string");
+        break;
+      }
+    }
+    throw nyi(NYI.CLASS_FEATURE, `cannot infer a type for class field '${field}' from its initializer; add a type annotation (\`${field}: T = …\`)`);
+  }
+
   // ---- classes (minimal: fields + constructor + methods; no inheritance/static/
   // getters/access-modifiers/parameter-properties/field-initializers — those are
   // deferred with NT1015). A class INSTANCE is a heap object whose slots are the
@@ -442,6 +459,7 @@ class Parser {
     if (this.at("implements")) throw nyi(NYI.CLASS_FEATURE, "class 'implements' clause");
     this.eat("{");
     const fields: { key: string; ty: Ty }[] = [];
+    const fieldInits: { field: string; value: Expr }[] = []; // declared-and-initialized fields → ctor prelude
     const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[] }[] = [];
     let ctorParams: Param[] | null = null;
     let ctorBody: Stmt[] = [];
@@ -480,16 +498,25 @@ class Parser {
         methods.push({ name: member, params, returnAnnot, body: this.parseBlock() });
         continue;
       }
-      // field declaration: `name: Type;` (optional `?`); initializers are deferred
+      // field declaration: `name: Type;` / `name = init;` / `name: Type = init;` (optional `?`).
+      // A field type comes from its annotation if present, else is inferred from the initializer
+      // (`inferFieldTy`). An initializer is desugared into `this.name = init` prepended to the
+      // constructor (after parameter-property inits) — mirroring the TS class-field semantics.
       if (this.at("?")) this.eat("?");
-      let ty: Ty = "number";
+      let ty: Ty | undefined;
       if (this.at(":")) { this.eat(":"); ty = this.parseType(); }
-      else throw nyi(NYI.CLASS_FEATURE, `class field '${member}' needs a type annotation`);
-      if (this.at("=")) throw nyi(NYI.CLASS_FEATURE, `class field initializer on '${member}' (assign it in the constructor instead)`);
+      let init: Expr | undefined;
+      if (this.at("=")) { this.eat("="); init = this.parseAssign(); }
       if (this.at(";")) this.eat(";");
+      if (ty === undefined) {
+        if (init === undefined) throw nyi(NYI.CLASS_FEATURE, `class field '${member}' needs a type annotation`);
+        ty = this.inferFieldTy(init, member);
+      }
       fields.push({ key: member, ty });
+      if (init !== undefined) fieldInits.push({ field: member, value: init });
     }
     this.eat("}");
+    const hadExplicitCtor = ctorParams !== null; // captured before any ctor synthesis below
 
     // Parameter properties (`constructor(private x: T)`): declare a field `x` and initialize
     // it (`this.x = x`) at the top of the ctor body — the TS desugaring.
@@ -499,7 +526,16 @@ class Parser {
       fields.push({ key: p.name, ty: p.annot ?? "number" });
       paramPropInits.push({ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: p.name, value: this.ident(p.name) } });
     }
-    if (paramPropInits.length) ctorBody = [...paramPropInits, ...ctorBody];
+    // Field initializers (`name = init`): `this.name = init`, in declaration order, prepended
+    // after the parameter-property inits and before the explicit ctor body (TS field-init order).
+    const fieldInitStmts: Stmt[] = fieldInits.map(fi => ({
+      kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: fi.field, value: fi.value },
+    }) as Stmt);
+    const prelude = [...paramPropInits, ...fieldInitStmts];
+    // A class with initializers but no explicit constructor gets a synthesized zero-arg ctor
+    // that runs just the inits (paramProps imply an explicit ctor, so `prelude` is field-inits).
+    if (ctorParams === null && prelude.length) ctorParams = [];
+    if (prelude.length) ctorBody = [...prelude, ...ctorBody];
 
     // `extends Error` inherits a `message: string` field (slot 0); `super(msg)` sets it.
     if (extendsError) fields.unshift({ key: "message", ty: "string" });
@@ -511,10 +547,13 @@ class Parser {
       ctorBody = [{ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: "message", value: this.ident("message") } }];
     }
 
-    // Reject-don't-miscompile: fields are only initialized by the constructor, so a class
-    // with fields but no constructor would leave instance slots uninitialized (node reads
-    // them as `undefined`). Refuse it rather than emit garbage.
-    if (fields.length > 0 && ctorParams === null) throw nyi(NYI.CLASS_FEATURE, `class '${name}' declares fields but has no constructor to initialize them`);
+    // Reject-don't-miscompile: fields are only initialized by the constructor. Without an
+    // explicit ctor, only initialized (and, for Error subclasses, `message`) fields are set;
+    // any other field would be uninitialized garbage — refuse rather than emit it.
+    if (!hadExplicitCtor) {
+      const covered = new Set([...fieldInits.map(fi => fi.field), ...(extendsError ? ["message"] : [])]);
+      for (const f of fields) if (!covered.has(f.key)) throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
+    }
 
     const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
     this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
