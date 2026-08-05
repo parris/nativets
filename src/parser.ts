@@ -210,7 +210,7 @@ class Parser {
     const t = this.peek();
     if (t.type === "str") { this.next(); base = "string"; }        // string-literal type: "a"
     else if (t.type === "num") { this.next(); base = "number"; }   // numeric-literal type: 0
-    else if (this.at("(")) base = this.parseFuncType();
+    else if (this.at("(")) base = this.parseParenOrFuncType();
     else if (this.at("{")) base = this.parseObjectType();
     else if (this.at("[")) base = this.parseTupleType();
     else if (this.at("import")) base = this.parseImportType();    // inline import type: import("m").T
@@ -281,6 +281,21 @@ class Parser {
     this.eat("]");
     return `${tys[0] ?? "number"}[]` as Ty;
   }
+  /**
+   * A leading `(` in type position is either a function type's parameter list
+   * (`(a: T) => U`) or a PARENTHESIZED type (`(() => Scope) | null`, `(number)[]`).
+   * Parens carry no meaning of their own — they only group — so try the function-type
+   * grammar and fall back to "parse a type, expect `)`", which is transparent.
+   */
+  private parseParenOrFuncType(): Ty {
+    const save = this.pos;
+    try { return this.parseFuncType(); } catch { this.pos = save; }
+    this.eat("(");
+    const inner = this.parseType();
+    this.eat(")");
+    return inner;
+  }
+
   private parseFuncType(): Ty {
     this.eat("(");
     const params: Ty[] = [];
@@ -1043,14 +1058,17 @@ class Parser {
     return !!nxt && [",", ")", ":", "?", "="].includes(nxt.value);
   }
 
-  /** Scan a return-type annotation from `i` for the `=>` that makes it an arrow. */
+  /** Scan a return-type annotation from `i` for the `=>` that makes it an arrow. In TYPE
+   *  position `<…>` is always a type-argument list, so it nests like any other bracket
+   *  (`(x): Map<string, number> => …` must not stop at that comma). */
   private annotEndsInArrow(i: number): boolean {
     let depth = 0;
     for (; i < this.toks.length; i++) {
       const v = this.toks[i]!.value;
-      if (v === "(" || v === "[" || v === "{") depth++;
+      if (v === "(" || v === "[" || v === "{" || v === "<") depth++;
       else if (v === ")" || v === "]" || v === "}") { if (depth === 0) return false; depth--; }
-      else if (depth === 0) {
+      else if (v === ">" || v === ">>" || v === ">>>") depth -= v.length;
+      else if (depth <= 0) {
         if (v === "=>") return true;
         if (v === ";" || v === "," || v === ":" || v === "?" || v === "=") return false;
       }
@@ -1229,6 +1247,14 @@ class Parser {
       return operand;
     }
     if (this.at("typeof")) { this.eat("typeof"); return { kind: "TypeofExpr", operand: this.parseUnary() }; }
+    // `delete o.k` removes a key IN PLACE. Objects are immutable (Stage 29), so it
+    // cannot mean what node means — refuse it the same way as `o.f = v`, naming the
+    // mutation rather than reporting the statement as unparseable.
+    if (this.at("delete") && this.startsExpression(this.peek(1))) {
+      this.eat("delete");
+      this.parseUnary();
+      throw mutationError("objects are immutable: `delete o.k` would remove a key in place", "rebuild without the key — e.g. `Object.keys(o).filter((x) => x !== k)` — or keep a nullable field and set it to undefined");
+    }
     if (this.at("new")) {
       this.eat("new");
       const callee = this.expectIdent();

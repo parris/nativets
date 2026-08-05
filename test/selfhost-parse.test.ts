@@ -88,6 +88,13 @@ describe("what parses is not what is ALLOWED — precise codes, never a guess", 
     expect(codeOf(`class E { code: string; constructor(c: string) { this.code = c; } }\nconst e = new E("NT1"); console.log(e.code === "NT1");`)).toBe(null);
   });
 
+  test("`delete o.k` is NT1606 — it is a mutation, named as one instead of 'unparsed'", () => {
+    // src/checker.ts's `delete spec.typeParams`. Objects are immutable (Stage 29), so
+    // removing a key in place cannot mean what node means; the hint is the rebuild.
+    expect(codeOf(`const o = { a: 1, b: 2 }; delete o.a; console.log(o.b);`)).toBe("NT1606");
+    expect(codeOf(`const o = { a: 1, b: 2 }; delete o["a"]; console.log(o.b);`)).toBe("NT1606");
+  });
+
   test("`instanceof` against a non-class / computed right operand is NT1021, not a guess", () => {
     expect(codeOf(`const x = 1; console.log(x instanceof Object);`)).toBe("NT1021");
     expect(codeOf(`const x = 1; const C = 2; console.log(x instanceof 3);`)).toBe("NT1021");
