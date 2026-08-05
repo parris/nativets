@@ -11,6 +11,7 @@ import type { Program, Stmt, Expr } from "./ast.ts";
 import { parse } from "./parser.ts";
 import { check } from "./checker.ts";
 import { NTError, NYI } from "./diagnostics.ts";
+import { preprocessForCoverage } from "./coverage-preprocess.ts";
 
 export interface Blocker { code: string; feature: string; milestone: string; hint: string; count: number; }
 export interface CoverageReport {
@@ -23,14 +24,32 @@ export interface CoverageReport {
 
 type Spec = { code: string; milestone: string; hint: string };
 
-export function coverage(source: string): CoverageReport {
-  let program: Program;
-  try {
-    program = parse(source);
-  } catch (e) {
-    const diag = e instanceof NTError ? e.diag : { code: "NT0001", message: String(e) };
-    return { parsed: false, compiles: false, statements: 0, firstError: { code: diag.code, message: diag.message }, blockers: [] };
+/**
+ * Classify a per-statement parse failure into a blocker spec + feature label.
+ *
+ * A feature-level NYI thrown by the parser (a general union type, an optional call, …)
+ * carries its own NT1xxx code, so pass it through. A raw `NT0001` is syntax outside the
+ * accepted subset; we sharpen the biggest self-hosting bucket — generic type
+ * arguments (`Record<…>`, `f<T>(…)`) — into the `GENERIC` milestone so the histogram
+ * names it, and otherwise report it honestly as an unparsed statement.
+ */
+function classifyParseFailure(text: string, diag: { code: string; message: string; milestone?: string; hint?: string }): { spec: Spec; feature: string } {
+  if (diag.code !== "NT0001") {
+    return { spec: { code: diag.code, milestone: diag.milestone ?? "later", hint: diag.hint ?? "" }, feature: diag.message };
   }
+  if (/[A-Za-z_$][\w$]*\s*<[\s\w$\[\].,|?]*>/.test(text)) {
+    return { spec: { code: NYI.GENERIC.code, milestone: NYI.GENERIC.milestone, hint: NYI.GENERIC.hint }, feature: "generic type arguments" };
+  }
+  return { spec: { code: "NT0001", milestone: "later", hint: "syntax outside the accepted single-file subset" }, feature: "unparsed statement" };
+}
+
+export function coverage(source: string): CoverageReport {
+  // Coverage-only pre-strip: survive the module/type preamble (shebang, import,
+  // export, type/interface, class) and regex literals that the real lexer/parser
+  // reject, so a self-hosting source reaches a feature-level histogram instead of a
+  // Tier-0 parse death. Normal programs carry none of this, so they pass through
+  // essentially untouched (one statement per top-level statement).
+  const pre = preprocessForCoverage(source);
 
   const found = new Map<string, Blocker>();
   const flag = (spec: Spec, feature: string) => {
@@ -39,6 +58,12 @@ export function coverage(source: string): CoverageReport {
     b.count++;
     found.set(key, b);
   };
+  // Constructs the pre-strip erased that are real blockers (classes → NT1012).
+  for (const b of pre.stripped) {
+    const e = found.get(b.code);
+    if (e) e.count += b.count;
+    else found.set(b.code, { ...b });
+  }
 
   let statements = 0;
   const walkStmt = (s: Stmt): void => {
@@ -73,7 +98,9 @@ export function coverage(source: string): CoverageReport {
       case "ObjectLiteral": for (const p of e.properties) walkExpr(p.value); break;
       case "SpreadExpr": walkExpr(e.argument); break;
       case "IndexExpr": walkExpr(e.object); walkExpr(e.index); break;
-      case "MemberExpr": if ((e as any).optional) flag(NYI.OPTIONAL_CHAIN, "optional chaining"); walkExpr(e.object); break;
+      // Optional chaining `?.` is supported (Stage 21) — no longer a blocker; the
+      // checker is the authority on any nullable shape it can't handle.
+      case "MemberExpr": walkExpr(e.object); break;
       case "TemplateLiteral": e.exprs.forEach(walkExpr); break;
       case "SequenceExpr": e.exprs.forEach(walkExpr); break;
       case "UnaryExpr": walkExpr(e.operand); break;
@@ -84,28 +111,52 @@ export function coverage(source: string): CoverageReport {
       case "ConditionalExpr": walkExpr(e.test); walkExpr(e.consequent); walkExpr(e.alternate); break;
       case "AssignExpr": walkExpr(e.value); break;
       case "CallExpr": walkExpr(e.callee); e.args.forEach(walkExpr); break;
+      // Arrow functions / closures are supported (Stage 13) — no longer a blocker; walk
+      // the body so nested unsupported constructs are still surfaced by the checker.
       case "ArrowFunction":
-        flag(NYI.CLOSURE, "arrow function");
         if (e.exprBody) walkExpr(e.body as Expr); else (e.body as Stmt[]).forEach(walkStmt);
         break;
       default: break;
     }
   };
 
-  program.body.forEach(walkStmt);
-
-  let compiles = true;
+  // Parse each surviving top-level statement in isolation (recovery): a single
+  // un-parseable statement is reported as a blocker rather than blanking the file.
+  // Survivors are reassembled into one Program so the checker sees whole-program scope.
+  const body: Stmt[] = [];
   let firstError: { code: string; message: string } | undefined;
-  try {
-    check(parse(source));
-  } catch (e) {
-    compiles = false;
-    if (e instanceof NTError) firstError = { code: e.diag.code, message: e.diag.message };
-    else firstError = { code: "NT9001", message: String(e) };
+  let parseFailures = 0;
+  for (const st of pre.statements) {
+    let prog: Program;
+    try {
+      prog = parse(st.text);
+    } catch (e) {
+      parseFailures++;
+      const diag = e instanceof NTError ? e.diag : { code: "NT0001", message: String(e) };
+      const { spec, feature } = classifyParseFailure(st.text, diag);
+      flag(spec, feature);
+      if (!firstError) firstError = { code: spec.code, message: diag.message };
+      continue;
+    }
+    body.push(...prog.body);
   }
 
+  body.forEach(walkStmt);
+
+  // The real semantic verdict comes from the checker over the reassembled survivors.
+  let checkPassed = true;
+  try {
+    check({ kind: "Program", body });
+  } catch (e) {
+    checkPassed = false;
+    const err = e instanceof NTError ? { code: e.diag.code, message: e.diag.message } : { code: "NT9001", message: String(e) };
+    if (!firstError) firstError = err;
+  }
+
+  const parsed = body.length > 0 || pre.stripped.length > 0;
+  const compiles = parsed && checkPassed && parseFailures === 0 && pre.stripped.length === 0;
   const blockers = [...found.values()].sort((a, b) => a.milestone.localeCompare(b.milestone) || b.count - a.count);
-  return { parsed: true, compiles, statements, firstError, blockers };
+  return { parsed, compiles, statements, firstError, blockers };
 }
 
 /** Render a coverage report as a human-readable string. */
