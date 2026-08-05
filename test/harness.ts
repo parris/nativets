@@ -119,6 +119,15 @@ const STDIN_POLYFILL = [
   "    if (nl < 0) { const r = __buf.slice(__pos); __pos = __buf.length; return r; }",
   "    const r = __buf.slice(__pos, nl); __pos = nl + 1; return r;",
   "  };",
+  // readKey: next single char from the shared cursor ("" at EOF), mirroring the
+  // runtime's non-tty degrade path (one byte at a time). rawMode is a no-op for
+  // piped stdin (not a tty), matching the runtime.
+  "  globalThis.readKey = function () {",
+  "    __load();",
+  '    if (__pos >= __buf.length) return "";',
+  "    const r = __buf.slice(__pos, __pos + 1); __pos += 1; return r;",
+  "  };",
+  "  globalThis.rawMode = function () {};",
   "})();",
   "",
 ].join("\n");

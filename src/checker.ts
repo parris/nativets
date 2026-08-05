@@ -59,6 +59,8 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   // Host I/O FFI (stdin): the node oracle gets these via a harness polyfill prelude.
   readLine: { min: 0, max: 0, argTys: [], ret: "string" },  // next stdin line (no newline), "" at EOF
   readStdin: { min: 0, max: 0, argTys: [], ret: "string" }, // all remaining stdin
+  readKey: { min: 0, max: 0, argTys: [], ret: "string" },   // next single keypress (raw), "" at EOF
+  rawMode: { min: 1, max: 1, argTys: ["boolean"], ret: "void" }, // enter/leave terminal raw mode
 };
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 const ACTOR_BUILTINS = new Set([
