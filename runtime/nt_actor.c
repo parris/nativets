@@ -200,7 +200,7 @@ typedef struct NtSched {
   char            *stack;
   NT_FIBER_FIELD
   pthread_t        thread;
-  int              ran;              /* did this scheduler ever run an actor? (test hook) */
+  _Atomic int      ran;              /* did this scheduler ever run an actor? (test hook) */
 } NtSched;
 
 /* ---- scheduler globals ---- */
@@ -657,7 +657,7 @@ static void scheduler_loop(void) {
         atomic_fetch_sub(&g_inflight, 1);      /* stale entry (dead / already taken) */
         continue;
       }
-      s->ran = 1;
+      atomic_store(&s->ran, 1);
       g_current = a;
       NT_FIBER_SWITCH(a);
       swapcontext(&s->ctx, &a->ctx);           /* run until it yields/dies */
@@ -771,7 +771,7 @@ double nt_schedulers(void)   { return (double)g_nsched; }
 double nt_sched_steals(void) { return (double)atomic_load(&g_steals); }
 double nt_sched_used(void) {                 /* how many schedulers actually ran an actor */
   int used = 0;
-  for (int i = 0; i < g_nsched; i++) if (g_scheds[i].ran) used++;
+  for (int i = 0; i < g_nsched; i++) if (atomic_load(&g_scheds[i].ran)) used++;
   return (double)used;
 }
 
@@ -861,26 +861,34 @@ void nt_drain(void) {
 /* ======================= registry ======================= */
 
 void nt_register(const char *name, NtPid pid) {
+  /* v6: shared across scheduler threads (a supervisor re-registers a restarted child from
+   * whichever thread ran it, while other actors look names up). Same lock as the table. */
+  if (g_mt) pthread_mutex_lock(&g_tab_lock);
   for (int i = 0; i < g_nreg; i++) {
     if (strcmp(g_reg[i].name, name) == 0) {
       g_reg[i].pid = pid;
       { NtActor *t = actor_at(pid); if (t) t->name = g_reg[i].name; }
+      if (g_mt) pthread_mutex_unlock(&g_tab_lock);
       return;
     }
   }
-  if (g_nreg >= NT_MAX_REG) return;
+  if (g_nreg >= NT_MAX_REG) { if (g_mt) pthread_mutex_unlock(&g_tab_lock); return; }
   size_t n = strlen(name);
   g_reg[g_nreg].name = (char *)malloc(n + 1);
   memcpy(g_reg[g_nreg].name, name, n + 1);
   g_reg[g_nreg].pid = pid;
   { NtActor *t = actor_at(pid); if (t) t->name = g_reg[g_nreg].name; }
   g_nreg++;
+  if (g_mt) pthread_mutex_unlock(&g_tab_lock);
 }
 
 NtPid nt_whereis(const char *name) {
+  NtPid found = 0;                            /* 0 == absent (pid 0 is never registered) */
+  if (g_mt) pthread_mutex_lock(&g_tab_lock);
   for (int i = 0; i < g_nreg; i++)
-    if (strcmp(g_reg[i].name, name) == 0) return g_reg[i].pid;
-  return 0;   /* absent */
+    if (strcmp(g_reg[i].name, name) == 0) { found = g_reg[i].pid; break; }
+  if (g_mt) pthread_mutex_unlock(&g_tab_lock);
+  return found;
 }
 
 /* ======================= compiler-facing ABI ======================= */
@@ -1106,7 +1114,9 @@ static NtSup g_sups[NT_MAX_SUPS];
 static int   g_nsups;
 
 int64_t nt_sup_new(int64_t max_restarts, int64_t max_seconds, int64_t strategy) {
+  if (g_mt) pthread_mutex_lock(&g_tab_lock);
   int h = g_nsups++;
+  if (g_mt) pthread_mutex_unlock(&g_tab_lock);
   NtSup *s = &g_sups[h];
   memset(s, 0, sizeof(*s));
   s->used = 1;
