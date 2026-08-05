@@ -60,6 +60,42 @@ console.log(__arrLive(), __pvNodes());`;
   });
 });
 
+describe("memory safety: an array literal OWNS its elements", () => {
+  test("returning [o1, o2] does not free the objects it points at", async () => {
+    // Regression: array-literal elements were BORROWS, so `return [o1, o2]` dropped
+    // both objects at scope exit while the escaping array still held their pointers —
+    // a genuine use-after-free (it printed 4e-323 instead of 111). Elements now MOVE
+    // into the array, exactly like object-literal fields.
+    const src = `
+function mk(): { a: number }[] {
+  const o1: { a: number } = { a: 111 };
+  const o2: { a: number } = { a: 222 };
+  return [o1, o2];
+}
+const xs: { a: number }[] = mk();
+const filler: number[] = [9, 9, 9, 9, 9, 9, 9, 9];
+console.log(xs[0].a, xs[1].a, filler.length);`;
+    const { ours, oracle } = await expectMatchesNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.stdout).toBe("111 222 8\n");
+  });
+
+  test("a nested array literal keeps its inner arrays alive", async () => {
+    const src = `
+function grid(): number[][] {
+  const row1: number[] = [1, 2, 3];
+  const row2: number[] = [4, 5, 6];
+  return [row1, row2];
+}
+const g: number[][] = grid();
+const filler: string[] = "abcdefgh".split("");
+console.log(g[0][2], g[1][0], g.length, filler.length);`;
+    const { ours, oracle } = await expectMatchesNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.stdout).toBe("3 4 2 8\n");
+  });
+});
+
 describe("transients: rc == 1 ⇒ mutate in place", () => {
   test("a consuming append to a trie-backed array writes the tail in place", async () => {
     // `a` is frozen into the trie by the first `.with`; the loop then reassigns it, so

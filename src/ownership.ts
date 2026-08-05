@@ -286,7 +286,14 @@ class Analyzer {
         this.expr(e.test, state, false); this.expr(e.consequent, state, false); this.expr(e.alternate, state, false);
         return;
       case "TemplateLiteral": for (const x of e.exprs) this.expr(x, state, false); return;
-      case "ArrayLiteral": for (const el of e.elements) this.expr(el, state, false); return;
+      case "ArrayLiteral":
+        // An element MOVES into the array (the same rule ObjectLiteral fields follow):
+        // the array now holds the only reference, so the source binding must not be
+        // dropped at scope exit. Treating elements as borrows was a use-after-free —
+        // `return [o1, o2]` freed both objects while the returned array pointed at them.
+        // A `...spread` source is COPIED, so it stays owned (borrow).
+        for (const el of e.elements) this.expr(el, state, el.kind !== "SpreadExpr");
+        return;
       case "SpreadExpr": this.expr(e.argument, state, false); return; // spread copies (borrow)
       case "NewExpr": for (const a of e.args) this.expr(a, state, false); return;
       case "AsExpr": this.expr(e.expr, state, false); return;
