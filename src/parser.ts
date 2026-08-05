@@ -34,10 +34,25 @@ const SCALARS = new Set(["number", "boolean", "string", "void", "undefined", "nu
 class Parser {
   private pos = 0;
   private tmpCounter = 0;
+  /**
+   * Type-level aliases (`type X = …` / `interface X { … }`), recorded at parse time
+   * and substituted wherever `X` appears in an annotation. Purely type-level — the
+   * declarations themselves are ERASED (no runtime footprint), so this map is their
+   * entire trace. Unknown named types still fall back to `number`, as before.
+   */
+  private typeAliases = new Map<string, Ty>();
   constructor(private toks: Token[]) {}
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
   private ident(name: string): Expr { return { kind: "Identifier", name }; }
+
+  /** Resolve a named type to a concrete `Ty`: a recorded alias, `Error`, a scalar,
+   *  else `number` (unknown named types erase to number, matching prior behavior). */
+  private resolveNamed(id: string): Ty {
+    const alias = this.typeAliases.get(id);
+    if (alias) return alias;
+    return (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty;
+  }
 
   private peek(o = 0): Token { return this.toks[this.pos + o]!; }
   private next(): Token { return this.toks[this.pos++]!; }
@@ -71,38 +86,58 @@ class Parser {
   }
 
   // ---- types (permissive; we only need scalars precisely) ----
-  // A type is a union of atoms. The only unions in the A2 subset are the two
-  // restricted NULLABLE shapes `T | undefined` / `T | null` (either arm order);
-  // a general union / intersection / >2-arm union is rejected with an NYI code
-  // (never miscompiled) — see the checker's §5 note and the Excluded table.
+  // A type is a union of atoms. The supported unions are the two restricted
+  // NULLABLE shapes `T | undefined` / `T | null` (either arm order) and a union of
+  // literal atoms that COLLAPSE to one base (`"a" | "b" | "c"` → string) — the arms
+  // dedupe to a single type. A general/heterogeneous >2-arm union is rejected with
+  // an NYI code (never miscompiled) — see the checker's §5 note and the Excluded table.
   private parseType(): Ty {
+    if (this.at("|")) this.next(); // leading union bar: `type X = | A | B`
     const arms: Ty[] = [this.parseTypeAtom()];
     let sawIntersect = false;
     while (this.at("|") || this.at("&")) { if (this.at("&")) sawIntersect = true; this.next(); arms.push(this.parseTypeAtom()); }
     if (arms.length === 1) return arms[0]!;
-    if (!sawIntersect && arms.length === 2) {
-      const [a, b] = arms as [Ty, Ty];
+    const uniq = [...new Set(arms)];
+    if (uniq.length === 1) return uniq[0]!; // collapsed literal union (all arms identical)
+    if (!sawIntersect && uniq.length === 2) {
+      const [a, b] = uniq as [Ty, Ty];
       if (a === "undefined" || a === "null") return makeNullable(a, b);
       if (b === "undefined" || b === "null") return makeNullable(b, a);
     }
     throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null' are supported)`);
   }
-  // A single type atom: function / object / tuple / scalar-or-named, plus `[]` suffixes.
+  // A single type atom: literal / function / object / tuple / import-type /
+  // scalar-or-named, plus `[]` suffixes.
   private parseTypeAtom(): Ty {
     let base: Ty;
-    if (this.at("(")) base = this.parseFuncType();
+    const t = this.peek();
+    if (t.type === "str") { this.next(); base = "string"; }        // string-literal type: "a"
+    else if (t.type === "num") { this.next(); base = "number"; }   // numeric-literal type: 0
+    else if (this.at("(")) base = this.parseFuncType();
     else if (this.at("{")) base = this.parseObjectType();
     else if (this.at("[")) base = this.parseTupleType();
+    else if (this.at("import")) base = this.parseImportType();    // inline import type: import("m").T
     else {
       const id = this.expectIdent();
-      if ((id === "Map" || id === "Set") && this.at("<")) {
+      if (id === "true" || id === "false") base = "boolean";       // boolean-literal type
+      else if ((id === "Map" || id === "Set") && this.at("<")) {
         const a = this.parseTypeArgs();
         base = (id === "Map" ? `Map<${a[0] ?? "string"},${a[1] ?? "number"}>` : `Set<${a[0] ?? "string"}>`) as Ty;
-      } else base = (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty;
+      } else base = this.resolveNamed(id);
     }
     let suffix = "";
     while (this.at("[")) { this.eat("["); this.eat("]"); suffix += "[]"; } // T[], T[][]
     return (base + suffix) as Ty;
+  }
+  // Inline import type `import("./mod").Name` (optionally qualified) — erased to the
+  // referenced named type (an alias if known, else `number`). The module path is dropped.
+  private parseImportType(): Ty {
+    this.eat("import"); this.eat("(");
+    this.next(); // module path string literal
+    this.eat(")"); this.eat(".");
+    let name = this.expectIdent();
+    while (this.at(".")) { this.eat("."); name = this.expectIdent(); } // import("m").Ns.Type
+    return this.resolveNamed(name);
   }
   // generic type-argument list `<T, U>` (Map/Set only in this subset)
   private parseTypeArgs(): Ty[] {
@@ -139,6 +174,7 @@ class Parser {
     const fields: string[] = [];
     if (!this.at("}")) {
       do {
+        if (this.at("}")) break; // tolerate a trailing `,`/`;` separator (interface bodies)
         const key = this.expectIdent();
         const optional = this.at("?"); // `{ a?: T }` ≡ `{ a: T | undefined }`
         if (optional) this.eat("?");
@@ -152,8 +188,51 @@ class Parser {
     return `{${fields.join(",")}}` as Ty;
   }
 
+  // Skip an erased generic type-parameter list `<T, U extends V>` (balanced angles).
+  private skipGenerics(): void {
+    this.eat("<");
+    let depth = 1;
+    while (depth > 0 && this.peek().type !== "eof") {
+      const v = this.next().value;
+      if (v === "<") depth++;
+      else if (v === ">") depth--;
+      else if (v === ">>") depth -= 2;   // `>>` token closing two nested params
+      else if (v === ">>>") depth -= 3;
+    }
+  }
+
+  // `type X = <type>;` — record the alias, erase the declaration. RHS uses the normal
+  // type grammar (so `type Dir = "n" | "s"` collapses to string; a general union throws NYI).
+  private parseTypeAlias(): Stmt {
+    this.eat("type");
+    const name = this.expectIdent();
+    if (this.at("<")) this.skipGenerics(); // erased type params
+    this.eat("=");
+    const rhs = this.parseType();
+    if (this.at(";")) this.eat(";");
+    this.typeAliases.set(name, rhs);
+    return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
+  }
+
+  // `interface X [extends …] { fields }` — record the structural record, erase the
+  // declaration. Field-only bodies (`k: T` / `k?: T`, `,`/`;`-separated); reuses the
+  // object-type grammar. Uses of `X` in annotations resolve to this shape.
+  private parseInterface(): Stmt {
+    this.eat("interface");
+    const name = this.expectIdent();
+    if (this.at("<")) this.skipGenerics();
+    if (this.at("extends")) { this.eat("extends"); this.parseType(); while (this.at(",")) { this.eat(","); this.parseType(); } }
+    const shape = this.parseObjectType();
+    this.typeAliases.set(name, shape);
+    return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
+  }
+
   // ---- statements ----
   parseStatement(): Stmt {
+    // Type-level declarations — parsed, recorded, and ERASED (no runtime). Guarded so
+    // `type`/`interface` used as ordinary identifiers still parse as expressions.
+    if (this.at("type") && this.peek(1).type === "ident" && (this.peek(2).value === "=" || this.peek(2).value === "<")) return this.parseTypeAlias();
+    if (this.at("interface") && this.peek(1).type === "ident") return this.parseInterface();
     if (this.at("let") || this.at("const")) { const d = this.parseVarDecl(); this.eat(";"); return d; }
     if (this.at("function")) return this.parseFuncDecl();
     if (this.at("return")) return this.parseReturn();
@@ -211,29 +290,41 @@ class Parser {
     return { kind: "VarDecl", declKind, decls };
   }
 
-  // `const [a, b, ...rest] = expr` → __d = expr; a = __d[0]; b = __d[1]; rest = __d.slice(2)
+  // `const [a, , ...rest] = expr` → __d = expr; a = __d[0]; rest = __d.slice(2)
+  // Elision holes (a bare `,`) advance the positional index without binding.
   private parseArrayDestructure(declKind: "let" | "const"): VarDecl {
     this.eat("[");
-    const elems: { name: string; rest: boolean }[] = [];
-    if (!this.at("]")) {
-      do {
-        if (this.at("]")) break;
-        let rest = false;
-        if (this.at("...")) { this.eat("..."); rest = true; }
-        elems.push({ name: this.expectIdent(), rest });
-      } while (this.at(",") && (this.eat(","), true));
+    const elems: { name: string | null; rest: boolean }[] = [];
+    while (!this.at("]")) {
+      if (this.at(",")) { elems.push({ name: null, rest: false }); this.eat(","); continue; } // hole
+      let rest = false;
+      if (this.at("...")) { this.eat("..."); rest = true; }
+      elems.push({ name: this.expectIdent(), rest });
+      if (this.at(",")) this.eat(","); else break;
     }
     this.eat("]"); this.eat("=");
     const init = this.parseAssign();
     const tmp = this.freshTmp();
     const decls: Declarator[] = [{ name: tmp, init }];
     elems.forEach((el, i) => {
+      if (el.name === null) return; // elision hole — no binding
       const init: Expr = el.rest
         ? { kind: "CallExpr", callee: { kind: "MemberExpr", object: this.ident(tmp), property: "slice" }, args: [{ kind: "NumberLiteral", value: i }] }
         : { kind: "IndexExpr", object: this.ident(tmp), index: { kind: "NumberLiteral", value: i } };
       decls.push({ name: el.name, init });
     });
     return { kind: "VarDecl", declKind, decls };
+  }
+
+  // Build a Param, applying optional-param (`x?: T`) erasure: an optional param is a
+  // nullable `T | undefined` with an implicit `undefined` default, so it can be omitted
+  // (mirrors the optional-field `{ a?: T }` encoding).
+  private mkParam(name: string, annot: Ty | undefined, def: Expr | undefined, rest: boolean, optional: boolean): Param {
+    if (optional) {
+      annot = makeNullable("undefined", annot ?? "number");
+      if (!def) def = { kind: "UndefinedLiteral" };
+    }
+    return { name, annot, default: def, rest };
   }
 
   private parseFuncDecl(): Stmt {
@@ -247,11 +338,12 @@ class Parser {
         let rest = false;
         if (this.at("...")) { this.eat("..."); rest = true; }
         const pname = this.expectIdent();
+        const optional = this.at("?"); if (optional) this.eat("?"); // `f(x?: T)`
         let annot: Ty | undefined;
         if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
         let def: Expr | undefined;
         if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
-        params.push({ name: pname, annot, default: def, rest });
+        params.push(this.mkParam(pname, annot, def, rest, optional));
       } while (this.at(",") && (this.eat(","), true));
     }
     this.eat(")");
@@ -423,11 +515,12 @@ class Parser {
           let rest = false;
           if (this.at("...")) { this.eat("..."); rest = true; }
           const name = this.expectIdent();
+          const optional = this.at("?"); if (optional) this.eat("?"); // `(x?: T) =>`
           let annot: Ty | undefined;
           if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
           let def: Expr | undefined;
           if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
-          params.push({ name, annot, default: def, rest });
+          params.push(this.mkParam(name, annot, def, rest, optional));
         } while (this.at(",") && (this.eat(","), true));
       }
       this.eat(")");
