@@ -156,11 +156,42 @@ NtPid   nt_sup_start(int64_t handle); /* spawn the supervisor actor; returns its
  * restored for the next receive by construction. Messages arriving mid-scan land
  * at the tail and are picked up by the next pass.
  * ========================================================================== */
-#define NT_MSG_NUM 0
-#define NT_MSG_STR 1
+#define NT_MSG_NUM    0
+#define NT_MSG_STR    1
+#define NT_MSG_STRUCT 2   /* v5: a record/array, deep-copied by codegen, carries a shape */
+
+/* ============================================================================
+ * v5 — STRUCTURED messages (records / arrays).
+ *
+ * A message rides in ONE 8-byte slot plus a coarse kind tag. Sender and receiver
+ * are typed INDEPENDENTLY, so a slot + a coarse tag cannot distinguish two different
+ * record types across actors — shipping objects on that basis would be a soundness
+ * hole. v5 closes it with two additions, both supplied by codegen:
+ *
+ *   1. DEEP COPY ON SEND. The compiler emits its type-driven deep-copy walk (the
+ *      Stage-40 structuredClone walk, with strings copied into fresh RC-registered
+ *      allocations) BEFORE nt_send_struct, so the receiver's value shares nothing
+ *      with the sender's heap. Isolation is the actor model's whole point, and our
+ *      immutability makes the copy semantically invisible.
+ *   2. A SHAPE TAG ON THE WIRE. Every structured message carries `shape` — the
+ *      compiler's canonical type encoding for the value (e.g. `{kind:string,n:number}`)
+ *      as a static string. A receive is compiled for exactly one shape and compares
+ *      it; a mismatch is a hard runtime reject naming both shapes (exit 70), never a
+ *      reinterpreted pointer. A SELECTIVE receive treats a foreign shape like a
+ *      foreign kind — it is skipped and left in the mailbox, not misread.
+ *
+ * `render` is an optional codegen-emitted `char *(int64_t slot)` that renders the
+ * value (JSON) for the CRASH RECORD, so "which message killed this actor" stays
+ * readable for structured messages. It is called only while printing a crash record.
+ * ========================================================================== */
+typedef char *(*NtMsgRender)(int64_t slot);
 
 NtPid   nt_spawn_typed(NtClosureFn body, void *env, int64_t slot, int64_t kind);
 void    nt_send_typed(NtPid to, int64_t slot, int64_t kind);
+void    nt_send_struct(NtPid to, int64_t slot, const char *shape, void *render);
+int64_t nt_recv_struct(const char *shape, double ms, int32_t has_timeout); /* 0 + flag on timeout */
+int32_t nt_mbox_shape_ok(int64_t i, const char *shape); /* i-th message is this shape? */
+char   *nt_msg_str_copy(const char *s);   /* string leaf of the structured deep copy */
 int64_t nt_recv_timed(int64_t kind, double ms, int32_t has_timeout); /* 0 + flag on timeout */
 int32_t nt_recv_timed_out(void);          /* did the last receive/wait time out? */
 int64_t nt_mbox_count(void);              /* messages currently queued for self() */

@@ -15,11 +15,14 @@
  *     send() to a BLOCKED actor flips it RUNNABLE and enqueues it — that is the
  *     BLOCKED->RUNNABLE wakeup edge.
  *
- * FLAG for later Dyn integration: NtMsg is a v0 placeholder. When codegen wires
- * this up, the message value should become the compiler's `Dyn` tagged value and
- * msg_deepcopy() should be replaced by (or generated as) a type-driven recursive
- * walk — the same shape we already emit for JSON.stringify. The deep-copy-on-send
- * contract (isolation) MUST be preserved regardless of representation.
+ * MESSAGE VALUES (resolved in v5): NtMsg stays the internal carrier for the C-level
+ * API and for exit/DOWN signals, but a COMPILER-sent message is a raw 8-byte slot plus
+ * a kind tag and — for a record/array — a SHAPE tag. The deep copy the original FLAG
+ * asked for is type-driven and emitted by CODEGEN (the same walk as structuredClone /
+ * JSON.stringify), because only the compiler knows the type of a slot. The
+ * deep-copy-on-send contract (isolation) is preserved for every message kind:
+ * numbers are values, strings are copied here (copy_str_slot), records/arrays are
+ * copied by codegen before nt_send_struct.
  */
 
 #ifdef __APPLE__
@@ -56,7 +59,13 @@ typedef enum { NT_RUNNABLE, NT_RUNNING, NT_BLOCKED, NT_DEAD } NtStatus;
 /* v4: a mailbox node carries the message KIND (number / string) alongside the
  * slot, so a receive can (a) reject a kind it was not compiled for instead of
  * reinterpreting the bits, and (b) skip non-matching kinds during a selective scan. */
-typedef struct NtMboxNode { NtMsg msg; NtPid from; int kind; struct NtMboxNode *next; } NtMboxNode;
+/* v5: a STRUCTURED message additionally carries its SHAPE (the compiler's canonical
+ * type encoding, a static string) and an optional renderer for the crash record. */
+typedef struct NtMboxNode {
+  NtMsg msg; NtPid from; int kind;
+  const char *shape; NtMsgRender render;
+  struct NtMboxNode *next;
+} NtMboxNode;
 
 #define NT_MAX_LINKS   64
 #define NT_MAX_MONS    64
@@ -90,6 +99,8 @@ typedef struct NtActor {
   int64_t     reductions;              /* budget remaining this slice; refills to NT_CONTEXT_REDS */
   /* ---- v4: message kind + virtual-clock receive timeouts ---- */
   int         last_kind;               /* kind of the last dequeued message (crash record) */
+  const char *last_shape;              /* v5: its shape, and how to render it, for the record */
+  NtMsgRender last_render;
   int64_t     deadline;                /* virtual-ms deadline while BLOCKED (if has_deadline) */
   int         has_deadline;
   int         timed_out;               /* the scheduler fired this actor's deadline */
@@ -174,6 +185,7 @@ static int rq_pop(NtPid *out) {
 static void mbox_push_from(NtActor *a, NtMsg m, NtPid from) {
   NtMboxNode *n = (NtMboxNode *)malloc(sizeof(NtMboxNode));
   n->msg = m; n->from = from; n->kind = NT_MSG_NUM; n->next = NULL;
+  n->shape = NULL; n->render = NULL;
   if (a->mbox_tail) a->mbox_tail->next = n; else a->mbox_head = n;
   a->mbox_tail = n;
 }
@@ -451,7 +463,14 @@ static void print_triggering_message(NtActor *a) {
     return;
   }
   fprintf(stderr, "triggering-message:\n    from pid=%lld\n", (long long)a->last_from);
-  if (a->last_kind == NT_MSG_STR) {
+  if (a->last_kind == NT_MSG_STRUCT) {
+    /* v5: a structured message is rendered by a codegen-emitted JSON walk for THIS
+     * shape (the runtime cannot walk a slot block on its own), so the record still
+     * answers "which message killed it" for records and arrays. */
+    char *r = a->last_render ? a->last_render(a->last_val) : NULL;
+    fprintf(stderr, "    %s\n", r ? r : "<structured>");
+    fprintf(stderr, "    (shape %s)\n", a->last_shape ? a->last_shape : "?");
+  } else if (a->last_kind == NT_MSG_STR) {
     const char *s = (const char *)(intptr_t)a->last_val;
     fprintf(stderr, "    \"%s\"\n", s ? s : "");
   } else {
@@ -759,7 +778,9 @@ static int node_kind(NtMboxNode *n) {
   return (n->msg.tag == NT_LIST) ? NT_MSG_NUM : n->kind;   /* signals are numbers */
 }
 
-static const char *kind_name(int k) { return k == NT_MSG_STR ? "string" : "number"; }
+static const char *kind_name(int k) {
+  return k == NT_MSG_STR ? "string" : k == NT_MSG_STRUCT ? "structured" : "number";
+}
 
 /* A receive compiled for kind X met a message of kind Y. There is no sound way to
  * continue (the bits mean different things), so fail loudly instead of miscompiling. */
@@ -769,6 +790,21 @@ static void kind_mismatch(int got, int want) {
     "  (actor messages are statically typed: annotate the receive, e.g. "
     "`const m: string = receive()`)\n",
     (long long)(g_current ? g_current->pid : -1), kind_name(got), kind_name(want));
+  exit(70);
+}
+
+/* v5: same discipline one level finer. Both sides are structured, but a slot alone
+ * cannot tell two record types apart — so the SHAPE travels with the message and a
+ * receive compiled for another shape stops here instead of reading the wrong slots. */
+static void shape_mismatch(const char *got, const char *want) {
+  fprintf(stderr,
+    "nativets: actor pid=%lld received a structured message of shape\n"
+    "    %s\n"
+    "  but this receive expects\n"
+    "    %s\n"
+    "  (actor messages are statically typed: annotate the receive with the shape the\n"
+    "   sender sends, e.g. `const m: { kind: string, n: number } = receive()`)\n",
+    (long long)(g_current ? g_current->pid : -1), got ? got : "?", want ? want : "?");
   exit(70);
 }
 
@@ -783,12 +819,21 @@ static int64_t copy_str_slot(int64_t slot) {
   return (int64_t)(intptr_t)d;
 }
 
+/* v5: the STRING leaf of codegen's structured deep-copy walk. A record's strings must
+ * be copied too, or the receiver's private object would still point into the sender's
+ * (refcounted, releasable) buffer — the copy joins the RC table at rc=1. */
+char *nt_msg_str_copy(const char *s) {
+  return (char *)(intptr_t)copy_str_slot((int64_t)(intptr_t)s);
+}
+
 /* Record the causal tag (triggering message) used by the crash record. */
 static void note_last(NtActor *a, NtMboxNode *n) {
   a->last_valid = 1;
   a->last_from = n->from;
   a->last_val = node_slot(n);
   a->last_kind = node_kind(n);
+  a->last_shape = n->shape;      /* v5: NULL for number/string messages */
+  a->last_render = n->render;
 }
 
 /* Block the current actor until its mailbox holds MORE than `n` messages, or the
@@ -841,6 +886,48 @@ int64_t nt_recv_timed(int64_t kind, double ms, int32_t has_timeout) {
 }
 
 int32_t nt_recv_timed_out(void) { return g_timed_out; }
+
+/* ---- v5: structured messages ---- */
+
+/* Enqueue a structured message. The payload was ALREADY deep-copied by the caller
+ * (codegen emits the type-driven clone before this call — the runtime has no type
+ * information to walk a slot block), so this just carries the private copy plus its
+ * shape and renderer. Wake logic is shared with every other send. */
+void nt_send_struct(NtPid to, int64_t slot, const char *shape, void *render) {
+  if (to < 0 || to >= g_nactors) return;      /* unknown pid: drop (BEAM-ish) */
+  NtActor *a = g_actors[to];
+  if (a->status == NT_DEAD) return;
+  mbox_push_from(a, nt_int(slot), g_current ? g_current->pid : -1);
+  a->mbox_tail->kind = NT_MSG_STRUCT;
+  a->mbox_tail->shape = shape;
+  a->mbox_tail->render = (NtMsgRender)render;
+  if (a->status == NT_BLOCKED) { a->status = NT_RUNNABLE; rq_push(a->pid); }
+}
+
+/* Blocking / timed FIFO receive of a STRUCTURED message of shape `shape`. A wrong
+ * kind or a wrong shape is a hard reject (see kind_mismatch / shape_mismatch) — the
+ * bits mean different things, so there is no sound way to continue. */
+int64_t nt_recv_struct(const char *shape, double ms, int32_t has_timeout) {
+  g_timed_out = 0;
+  if (!wait_for_more(0, ms, has_timeout)) { g_timed_out = 1; return 0; }
+  NtActor *a = g_current;
+  NtMboxNode *h = a->mbox_head;
+  if (node_kind(h) != NT_MSG_STRUCT) kind_mismatch(node_kind(h), NT_MSG_STRUCT);
+  if (!h->shape || strcmp(h->shape, shape) != 0) shape_mismatch(h->shape, shape);
+  note_last(a, h);
+  int64_t slot = node_slot(h);
+  mbox_pop(a);
+  return slot;
+}
+
+/* Selective-receive predicate over the wire tag: is the i-th queued message a
+ * structured message of exactly this shape? A foreign shape answers 0 and is simply
+ * SKIPPED (left in the mailbox, in order) — the save queue, not a misread. */
+int32_t nt_mbox_shape_ok(int64_t i, const char *shape) {
+  NtMboxNode *n = mbox_at(g_current, i);
+  if (!n || node_kind(n) != NT_MSG_STRUCT || !n->shape) return 0;
+  return strcmp(n->shape, shape) == 0;
+}
 
 /* ---- selective-receive primitives (the scan loop itself is emitted by codegen,
  *      so the TS predicate is called through the ordinary closure ABI) ---- */

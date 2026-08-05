@@ -100,10 +100,19 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
 - **v3:** `one_for_one` **supervisor** + restart intensity (default 1/5 s → escalate by self-exit).
 - **v4 ✅ (Stage 33):** selective `receive` (`receiveMatch(pred[, ms])`) + save queue + timeouts
   (`receive(ms) -> T | undefined`, on a virtual clock that advances only at quiescence), plus
-  **string messages** deep-copied on send. Structured/`Dyn` messages remain deferred: they need the
-  type-driven deep-copy walk AND a shape tag on the wire (an 8-byte slot cannot distinguish two
-  object types across independently-typed actors). **v5:** work-stealing, dirty pool,
-  epoll/kqueue **async IO poller** (park actors as WAITING, wake on readiness).
+  **string messages** deep-copied on send.
+- **v5 ✅ (Stage 41) — STRUCTURED messages.** Records and arrays are sendable, which is what makes
+  actors usable for real programs (`{kind:"work", payload}` dispatch). The two things v4 named as
+  missing are both there: (a) the **type-driven deep copy** at the send/spawn site — the Stage-40
+  `structuredClone` walk, extended to copy string leaves, so the receiver shares nothing with the
+  sender's heap; and (b) a **shape tag on the wire** — the canonical type encoding travels with
+  the message, a receive compiled for another shape is a hard runtime reject naming both shapes
+  (exit 70), and a *selective* receive skips a foreign shape and leaves it queued in order.
+  Crash records render the structured triggering message (a codegen-emitted per-shape JSON
+  renderer, called only while printing a record). Un-copyable message types (a closure, a
+  Map/Set/bytes/Response handle) are **`NT1021`** at compile time.
+- **v6 (deferred):** M:N scheduler threads + work-stealing, dirty pool, lock-free MPSC mailboxes,
+  and the epoll/kqueue **async IO poller** (park actors as WAITING, wake on readiness).
 - **Good tracebacks (the JS-async fix):** on crash emit ONE record — pid+name, reason +
   synchronous stacktrace, **the triggering message**, state snapshot, supervisor + restart
   decision. Tag every message with origin pid for a causal chain.

@@ -1,0 +1,13 @@
+-- priority dispatch
+  jobs:   thumbnail#1
+  jobs: ! invoice#3
+  jobs:   index#2
+job 1: 200 thumbnail ok
+job 3: 200 invoice ok
+job 2: 200 index ok
+-- crash + restart
+  jobs:   render#4
+job 4: TIMEOUT
+-- after restart
+  jobs:   thumbnail#5
+job 5: 200 thumbnail ok

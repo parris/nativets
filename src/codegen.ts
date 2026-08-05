@@ -15,7 +15,7 @@ import { isConsoleLog } from "./checker.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
-import { isOptChainExpr } from "./checker.ts";
+import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
 
@@ -35,10 +35,18 @@ const ACTOR_BUILTINS = new Set([
   "receiveMatch",
 ]);
 
-/** B3 v4 message kind tag (must match NT_MSG_NUM / NT_MSG_STR in runtime/nt_actor.h).
+/** B3 v4/v5 message kind tag (must match NT_MSG_NUM/STR/STRUCT in runtime/nt_actor.h).
  *  Sent alongside every message so a receive compiled for one type can never
- *  reinterpret another's bits — a mismatch is a runtime error, not a miscompile. */
-function msgKind(ty: Ty): number { return baseTy(ty) === "string" ? 1 : 0; }
+ *  reinterpret another's bits — a mismatch is a runtime error, not a miscompile.
+ *  A STRUCTURED message additionally carries its shape (see `msgShape`), because the
+ *  coarse kind alone cannot tell two different record types apart. */
+function msgKind(ty: Ty): number {
+  const b = baseTy(ty);
+  return b === "string" ? 1 : isStructMsgTy(b) ? 2 : 0;
+}
+/** The shape tag that travels with a structured message: the compiler's canonical type
+ *  encoding, which IS structural identity here (two types are the same iff equal). */
+function msgShape(ty: Ty): string { return baseTy(ty); }
 
 /** Does the program call any actor builtin? (Drives the nt_sched_init prologue in
  *  @main.) A structural walk over the plain-object AST — order/shape-agnostic. */
@@ -328,6 +336,13 @@ const ACTOR_V4_DECLARES = [
   "declare i64 @nt_mbox_peek_kind(i64)",
   "declare void @nt_mbox_take(i64)",
   "declare i32 @nt_mbox_wait_from(i64, double, i32)",
+  // v5 structured messages: the payload is deep-copied HERE (codegen) and travels with
+  // its shape tag, which the receive verifies; `nt_msg_str_copy` is the string leaf of
+  // that copy walk. Same actor-usage gate, so non-actor IR stays byte-identical.
+  "declare void @nt_send_struct(i64, i64, ptr, ptr)",
+  "declare i64 @nt_recv_struct(ptr, double, i32)",
+  "declare i32 @nt_mbox_shape_ok(i64, ptr)",
+  "declare ptr @nt_msg_str_copy(ptr)",
 ];
 
 interface Val { v: string; ty: Ty; }
@@ -384,6 +399,22 @@ class ModuleGen {
         `}`,
       ].join("\n"),
     );
+    return name;
+  }
+
+  private msgRenderers = new Map<string, string>();
+
+  /** B3 v5: lazily emit `ptr @nt_msg_render_N(i64 %slot)` — the crash record's renderer
+   *  for a structured message of type `ty`. The runtime cannot walk a slot block (it has
+   *  no types), so the compiler hands it a per-shape function that JSON-renders the
+   *  value; it is called only while printing a crash record. */
+  msgRenderer(ty: Ty): string {
+    const key = ty;
+    const existing = this.msgRenderers.get(key);
+    if (existing) return existing;
+    const name = `nt_msg_render_${this.msgRenderers.size}`;
+    this.msgRenderers.set(key, name);
+    this.liftedFns.push(new FnGen(this).genMsgRender(name, ty));
     return name;
   }
 
@@ -574,7 +605,7 @@ class FnGen {
    *  actors, so non-actor programs keep byte-identical IR; the runtime tick is itself
    *  a no-op unless a spawned actor is running. */
   private emitSafepoint(): void {
-    if (this.mod.usesActors) this.emit(`call void @nt_reduction_tick()`);
+    if (this.mod.usesActors && !this.noSafepoints) this.emit(`call void @nt_reduction_tick()`);
   }
 
   private reset(): void {
@@ -634,6 +665,10 @@ class FnGen {
    *  undefined `%x.addr` (clang: "use of undefined value"). Suppress drops in a lifted
    *  arrow: conservative (the enclosing owner still frees at its own scope exit). */
   private liftedArrow = false;
+
+  /** Suppress preemption safepoints in this function (B3 v5 message renderers run from
+   *  inside the runtime's crash-record printer — yielding there would be catastrophic). */
+  private noSafepoints = false;
 
   private emitDrops(names: string[]): void {
     if (this.liftedArrow) return;
@@ -765,6 +800,23 @@ class FnGen {
     }
     const params = ["ptr %__clo", ...arrow.params.map((p, i) => `${llvmTy(paramTys[i]!)} %${p.name}`)].join(", ");
     return this.assemble(`define ${llvmTy(this.retTy)} @${name}(${params})`, b0);
+  }
+
+  /** B3 v5: generate a structured-message renderer `ptr @name(i64 %slot)` — unpack the
+   *  slot as `ty` and JSON-render it (the same walk `JSON.stringify` uses). Safepoints
+   *  are suppressed: this runs from the runtime while it is printing a crash record, so
+   *  it must never yield to the scheduler mid-record. */
+  genMsgRender(name: string, ty: Ty): string {
+    this.reset();
+    this.liftedArrow = true;
+    this.noSafepoints = true;
+    this.retTy = "string";
+    const b0 = this.block(this.label("L"));
+    this.to(b0);
+    const v = this.fromSlot("%slot", ty);
+    const s = this.genJsonStringify({ v, ty });
+    this.terminate(`ret ptr ${s.v}`);
+    return this.assemble(`define ptr @${name}(i64 %slot)`, b0);
   }
 
   private assemble(header: string, firstBlock: number): string {
@@ -2408,8 +2460,17 @@ class FnGen {
    *  type-directed walk shape as JSON.stringify). Scalars/strings are values and
    *  pass through; an object becomes a fresh slot block with each field cloned;
    *  an array becomes a fresh vector with each element cloned in a loop. */
-  private genDeepClone(v: Val): Val {
+  private genDeepClone(v: Val, copyStrings = false): Val {
     const ty = v.ty;
+    // B3 v5: for an actor message the copy must reach STRINGS too — a receiver whose
+    // record pointed into the sender's (refcounted, releasable) buffer would not be
+    // isolated. structuredClone itself leaves strings alone: they are immutable values
+    // within one actor, so sharing them there is unobservable.
+    if (ty === "string" && copyStrings) {
+      const t = this.fresh();
+      this.emit(`${t} = call ptr @nt_msg_str_copy(ptr ${v.v})`);
+      return { v: t, ty };
+    }
     if (isObjectTy(ty)) {
       const fields = objectFields(ty);
       const obj = this.fresh();
@@ -2419,7 +2480,7 @@ class FnGen {
         this.emit(`${gep} = getelementptr i64, ptr ${v.v}, i64 ${i}`);
         const slot = this.fresh();
         this.emit(`${slot} = load i64, ptr ${gep}`);
-        const cloned = this.genDeepClone({ v: this.fromSlot(slot, f.ty), ty: f.ty });
+        const cloned = this.genDeepClone({ v: this.fromSlot(slot, f.ty), ty: f.ty }, copyStrings);
         const dst = this.fresh();
         this.emit(`${dst} = getelementptr i64, ptr ${obj}, i64 ${i}`);
         this.emit(`store i64 ${this.toSlot(cloned)}, ptr ${dst}`);
@@ -2429,7 +2490,8 @@ class FnGen {
     if (isArrayTy(ty)) {
       const el = elemTy(ty);
       // A scalar element array is a flat block — one runtime copy is already deep.
-      if (!isObjectTy(el) && !isArrayTy(el)) {
+      // (Not for a message's `string[]`: the elements themselves must be copied.)
+      if (!isObjectTy(el) && !isArrayTy(el) && !(copyStrings && el === "string")) {
         const t = this.fresh();
         this.emit(`${t} = call ptr @nt_arr_copy(ptr ${v.v})`);
         return { v: t, ty };
@@ -2451,7 +2513,7 @@ class FnGen {
       this.to(this.block(body));
       const slot = this.fresh();
       this.emit(`${slot} = call i64 @nt_arr_get(ptr ${v.v}, double ${iC})`);
-      const cloned = this.genDeepClone({ v: this.fromSlot(slot, el), ty: el });
+      const cloned = this.genDeepClone({ v: this.fromSlot(slot, el), ty: el }, copyStrings);
       this.emit(`call double @nt_arr_push(ptr ${out}, i64 ${this.toSlot(cloned)})`);
       const iN = this.fresh();
       this.emit(`${iN} = fadd double ${iC}, 1.0`);
@@ -3362,7 +3424,9 @@ class FnGen {
         const fn = this.genExpr(args[0]!);              // ptr: [fn_ptr, caps...]
         const argTy = funcParams(fn.ty)[0] ?? "number"; // the body's message type
         const entry = this.mod.actorEntry(argTy);
-        const slot = this.slotNoRetain(this.genExpr(args[1]!));
+        // v5: a structured spawn arg is deep-copied HERE (the runtime has no types to
+        // walk with); number/string args are copied by the runtime as before.
+        const slot = this.slotNoRetain(this.msgValue(this.genExpr(args[1]!)));
         const pidI = this.fresh();
         this.emit(`${pidI} = call i64 @nt_spawn_typed(ptr @${entry}, ptr ${fn.v}, i64 ${slot}, i64 ${msgKind(argTy)})`);
         const pid = this.fresh();
@@ -3374,9 +3438,18 @@ class FnGen {
         const pidI = this.fresh();
         this.emit(`${pidI} = fptosi double ${pidV} to i64`);
         const msg = this.genExpr(args[1]!);
-        // No retain: the runtime DEEP-COPIES a string message, so the receiver owns a
-        // private copy and the sender's own local keeps its existing ownership.
-        const slot = this.slotNoRetain(msg);
+        // No retain: a message is DEEP-COPIED before it is enqueued (strings by the
+        // runtime, records/arrays by `msgValue` below), so the receiver owns a private
+        // value and the sender's own local keeps exactly the ownership it had.
+        const slot = this.slotNoRetain(this.msgValue(msg));
+        if (isStructMsgTy(msg.ty)) {
+          // v5: the SHAPE travels with the message so the receive can verify it got what
+          // it was compiled for, plus a renderer for the crash record.
+          const shape = this.mod.intern(msgShape(msg.ty));
+          const render = this.mod.msgRenderer(msg.ty);
+          this.emit(`call void @nt_send_struct(i64 ${pidI}, i64 ${slot}, ptr ${shape}, ptr @${render})`);
+          return { v: "", ty: "void" };
+        }
         this.emit(`call void @nt_send_typed(i64 ${pidI}, i64 ${slot}, i64 ${msgKind(msg.ty)})`);
         return { v: "", ty: "void" };
       }
@@ -3386,14 +3459,20 @@ class FnGen {
         const rt: Ty = retTy ?? "number";
         const base = baseTy(rt);
         const kind = msgKind(base);
+        // v5: a structured receive checks the SHAPE, not just the coarse kind.
+        const shape = isStructMsgTy(base) ? this.mod.intern(msgShape(base)) : null;
+        const recv = (ms: string, has: number) => {
+          const t = this.fresh();
+          if (shape) this.emit(`${t} = call i64 @nt_recv_struct(ptr ${shape}, double ${ms}, i32 ${has})`);
+          else this.emit(`${t} = call i64 @nt_recv_timed(i64 ${kind}, double ${ms}, i32 ${has})`);
+          return t;
+        };
         if (args.length === 0) {
-          const slot = this.fresh();
-          this.emit(`${slot} = call i64 @nt_recv_timed(i64 ${kind}, double ${llvmDouble(0)}, i32 0)`);
+          const slot = recv(llvmDouble(0), 0);
           return { v: this.fromSlot(slot, base), ty: base };
         }
         const ms = this.genExpr(args[0]!).v;
-        const slot = this.fresh();
-        this.emit(`${slot} = call i64 @nt_recv_timed(i64 ${kind}, double ${ms}, i32 1)`);
+        const slot = recv(ms, 1);
         const flag = this.fresh(); this.emit(`${flag} = call i32 @nt_recv_timed_out()`);
         const to = this.fresh(); this.emit(`${to} = icmp ne i32 ${flag}, 0`);
         return { v: this.genTimeoutBox(to, slot, rt), ty: rt };
@@ -3521,6 +3600,15 @@ class FnGen {
   /** Pack a value into a raw 8-byte slot WITHOUT the string retain `toSlot` adds.
    *  For handoffs where the CALLEE takes its own copy — an actor send/spawn deep-copies
    *  a string message — so the sender keeps exactly the ownership it already had. */
+  /** B3 v5: the value that actually goes on the wire. Isolation is the actor model's
+   *  whole point, so a STRUCTURED message is deep-copied at the send/spawn site with the
+   *  type-driven walk (the Stage-40 `structuredClone` walk, extended to copy string
+   *  leaves) — the receiver shares nothing with the sender's heap. Numbers are values and
+   *  strings are copied by the runtime, so both pass straight through. */
+  private msgValue(val: Val): Val {
+    return isStructMsgTy(val.ty) ? this.genDeepClone(val, /*copyStrings=*/true) : val;
+  }
+
   private slotNoRetain(val: Val): string {
     if (val.ty !== "string") return this.toSlot(val);
     const t = this.fresh();
@@ -3594,8 +3682,14 @@ class FnGen {
     this.to(this.block(body));
     const iD = this.fresh(); this.emit(`${iD} = load double, ptr ${iSlot}`);
     const iI = this.fresh(); this.emit(`${iI} = fptosi double ${iD} to i64`);
-    const k = this.fresh(); this.emit(`${k} = call i64 @nt_mbox_peek_kind(i64 ${iI})`);
-    const kOk = this.fresh(); this.emit(`${kOk} = icmp eq i64 ${k}, ${kind}`);
+    // v5: for a structured receive the wire tag is the SHAPE, not the coarse kind. A
+    // foreign shape (or a number/string) is simply skipped and left queued in order —
+    // the save queue — rather than handed to a predicate compiled for other slots.
+    const tag = this.fresh();
+    if (isStructMsgTy(base)) this.emit(`${tag} = call i32 @nt_mbox_shape_ok(i64 ${iI}, ptr ${this.mod.intern(msgShape(base))})`);
+    else this.emit(`${tag} = call i64 @nt_mbox_peek_kind(i64 ${iI})`);
+    const kOk = this.fresh();
+    this.emit(isStructMsgTy(base) ? `${kOk} = icmp ne i32 ${tag}, 0` : `${kOk} = icmp eq i64 ${tag}, ${kind}`);
     this.terminate(`br i1 ${kOk}, label %${tryp}, label %${step}`);
 
     this.to(this.block(tryp));

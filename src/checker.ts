@@ -181,14 +181,44 @@ const ACTOR_BUILTINS = new Set([
   "receiveMatch",
 ]);
 
-/** B3 v4: the message types an actor can send/receive today — `number` (v0) and
- *  `string` (v4, deep-copied on send). `T | undefined` (a timeout result) narrows to
- *  its base. Anything else — objects, arrays, Dyn — is refused with a code rather
- *  than shipped through the 8-byte slot without a deep copy. */
+/** B3 v5: is `t` a STRUCTURED message type — a record or an array, sent by a
+ *  type-driven deep copy (the structuredClone walk) with its shape on the wire? */
+export function isStructMsgTy(t: Ty): boolean { return isObjectTy(t) || isArrayTy(t); }
+
+/** Every leaf of a structured message must itself be copyable and re-typable by the
+ *  receiver: scalars, strings, and nested records/arrays of those. A function value
+ *  captures the SENDER's environment (copying it would break isolation), and the
+ *  reference handles (Map/Set, Uint8Array, Response, Dyn, nullable boxes) have no
+ *  deep-copy walk — so they are refused, never shipped as a raw pointer. */
+function msgLeafOk(t: Ty): boolean {
+  if (t === "number" || t === "string" || t === "boolean") return true;
+  if (isObjectTy(t)) return objectFields(t).every((f) => msgLeafOk(f.ty));
+  if (isArrayTy(t)) return msgLeafOk(elemTy(t));
+  return false;
+}
+
+/** B3 v4/v5: the message types an actor can send/receive — `number` (v0), `string`
+ *  (v4) and, since v5, STRUCTURED records/arrays of those (deep-copied on send, with
+ *  a shape tag so a receive can verify it got the shape it was compiled for).
+ *  `T | undefined` (a timeout result) narrows to its base. Anything else is refused
+ *  with a code rather than shipped through the 8-byte slot uncopied. */
 export function actorMsgTy(t?: Ty): Ty {
   const base = t === undefined ? "number" : isNullableTy(t) ? baseTy(t) : t;
   if (base === "number" || base === "string") return base;
-  throw nyi(NYI.CLOSURE, `actor message of type ${base} (messages are number | string; structured messages need the deep-copy-on-send walk)`);
+  if (isStructMsgTy(base) && msgLeafOk(base)) return base;
+  throw nyi(NYI.ACTOR_MSG, `actor message of type ${base}`);
+}
+
+/** The type of a value that is actually PUT ON THE WIRE (a `send`/`spawn` argument, or
+ *  a `receiveMatch` predicate's parameter). Unlike a receive ANNOTATION — where
+ *  `T | undefined` legitimately means "a T, or a timeout" — a nullable is not unwrapped
+ *  here: `T | undefined` is a two-slot tagged BOX, so sending one would put the box
+ *  pointer on the wire for a receiver expecting a T. A message is always present, so
+ *  unwrap it first (`send(pid, x ?? fallback)`). */
+export function actorSendTy(t: Ty): Ty {
+  if (isNullableTy(t))
+    throw nyi(NYI.ACTOR_MSG, `actor message of type \`${baseTy(t)} | ${nullishKind(t)}\` (a message is always present — unwrap it first, e.g. \`send(pid, x ?? fallback)\`)`);
+  return actorMsgTy(t);
 }
 
 export function check(program: Program): CheckedProgram {
@@ -1097,7 +1127,7 @@ class Checker {
         if (!isFuncTy(predTy) || funcParams(predTy).length !== 1)
           throw typeError("receiveMatch: pred must be a one-argument function (msg) => boolean");
         if (funcRet(predTy) !== "boolean") throw typeError("receiveMatch: pred must return boolean");
-        const base = actorMsgTy(funcParams(predTy)[0]!);
+        const base = actorSendTy(funcParams(predTy)[0]!);
         if (e.args.length === 1) return base;
         if (this.type(e.args[1]!, scope) !== "number") throw typeError("receiveMatch: the timeout must be a number (ms)");
         return makeNullable("undefined", base);
@@ -1177,7 +1207,7 @@ class Checker {
       if (name === "send") {
         if (e.args.length !== 2) throw typeError("send(to, msg) takes two arguments");
         if (this.type(e.args[0]!, scope) !== "number") throw typeError("send: pid must be a number");
-        actorMsgTy(this.type(e.args[1]!, scope)); // number | string (v4); else a code
+        actorSendTy(this.type(e.args[1]!, scope)); // number | string | record/array; else a code
         return "void";
       }
       // spawn(body, arg): body is (msg) => void; returns the new pid (number).
@@ -1186,7 +1216,7 @@ class Checker {
       if (!isFuncTy(bodyTy) || funcParams(bodyTy).length !== 1) throw typeError("spawn: body must be a one-argument function");
       // The body's return value is ignored (the actor entry trampoline discards it),
       // so any inferred return type is fine — nativets defaults empty blocks to number.
-      const msgTy = actorMsgTy(funcParams(bodyTy)[0]!);
+      const msgTy = actorSendTy(funcParams(bodyTy)[0]!);
       if (e.args.length !== 2) throw typeError("spawn(body, arg) takes two arguments");
       if (this.type(e.args[1]!, scope) !== msgTy) throw typeError(`spawn: arg type must match the body's parameter (${msgTy})`);
       return "number"; // pid
