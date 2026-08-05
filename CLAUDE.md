@@ -168,6 +168,29 @@ to a node-runnable `.ts` fixture (node stays the oracle). Known references per a
 Bias the borrowed generators to the reference's known danger zones (e.g. the flat→trie
 size boundary ~32 and hash collisions for HAMT).
 
+### Parallel integration — merge hygiene (SMOKE-TEST before you commit a merge)
+
+When integrating parallel worktree agents, **a green branch is not a green merge** — a merge (esp.
+after resolving conflicts) can introduce breakage that neither side had. The classic one: two lanes
+each append the *same* `declare` line / `case` to a shared list, and the 3-way merge keeps **both**,
+producing a duplicate — e.g. `invalid redefinition of function` from LLVM, which breaks **every**
+build even though both branches were green. So, after every merge:
+
+1. **Before committing the merge**, run a **smoke build** — `bun run src/cli.ts run <trivial.ts>`
+   (`console.log("hi")`). If a merge duplicated a `declare`/`case`/symbol it fails here instantly,
+   before it's in history. (Also grep the merged `DECLARES` / `genGlobal` for duplicates:
+   `grep 'declare ' src/codegen.ts | sort | uniq -d`.)
+2. Then run the **feature tests** for the merged lane, then the **full suite** (`bun test`), checking
+   REAL (non-snapshot) failures only.
+3. Regenerate IR snapshots **once** after all codegen-touching lanes for a round have landed (not
+   per-merge) — `bun test --update-snapshots` after behavior is re-verified.
+4. **Shared hot spots** to merge carefully: codegen `DECLARES` + `genGlobal`, `driver.ts`
+   `toolchainFor`/`linkArgv` (targets + conditional links), `checker.ts` `GLOBAL_FUNCS`, `ast.ts`
+   type predicates. Prefer resolving host-io/shared duplication to **one** canonical copy (main's),
+   keeping only each lane's genuinely-new additions.
+5. Tell each worktree agent to `git merge main` **first** (worktrees can branch from a stale base),
+   and to keep additions grouped/additive so these merges stay trivial.
+
 ---
 
 ## Test taxonomy
