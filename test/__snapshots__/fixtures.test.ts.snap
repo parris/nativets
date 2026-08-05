@@ -41,6 +41,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -160,6 +163,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -283,6 +289,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -403,6 +412,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -523,6 +535,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -644,6 +659,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -766,6 +784,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -891,6 +912,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -1025,6 +1049,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -1145,6 +1172,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -1408,6 +1438,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -1600,6 +1633,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -1760,6 +1796,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -1847,6 +1886,7 @@ entry:
   %__d3.addr = alloca ptr
   br label %L0
 L0:
+  store ptr null, ptr %name.addr
   %t0 = call ptr @nt_arr_new(double 0x4014000000000000)
   %t1 = bitcast double 0x4024000000000000 to i64
   call double @nt_arr_push(ptr %t0, i64 %t1)
@@ -1881,85 +1921,89 @@ L0:
   call void @js_print_str(ptr %t17)
   call void @js_print_newline()
   %t18 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t19 = ptrtoint ptr @.str.1 to i64
-  %t20 = getelementptr i64, ptr %t18, i64 0
-  store i64 %t19, ptr %t20
-  %t21 = bitcast double 0x4045000000000000 to i64
-  %t22 = getelementptr i64, ptr %t18, i64 1
-  store i64 %t21, ptr %t22
+  %rc19 = call ptr @nt_str_retain(ptr @.str.1)
+  %t20 = ptrtoint ptr @.str.1 to i64
+  %t21 = getelementptr i64, ptr %t18, i64 0
+  store i64 %t20, ptr %t21
+  %t22 = bitcast double 0x4045000000000000 to i64
+  %t23 = getelementptr i64, ptr %t18, i64 1
+  store i64 %t22, ptr %t23
   store ptr %t18, ptr %__d1.addr
-  %t23 = load ptr, ptr %__d1.addr
-  %t24 = getelementptr i64, ptr %t23, i64 0
-  %t25 = load i64, ptr %t24
-  %t26 = inttoptr i64 %t25 to ptr
-  store ptr %t26, ptr %name.addr
-  %t27 = load ptr, ptr %__d1.addr
-  %t28 = getelementptr i64, ptr %t27, i64 1
-  %t29 = load i64, ptr %t28
-  %t30 = bitcast i64 %t29 to double
-  store double %t30, ptr %age.addr
-  %t31 = load ptr, ptr %name.addr
-  call void @js_print_str(ptr %t31)
-  %t32 = load double, ptr %age.addr
+  %t24 = load ptr, ptr %__d1.addr
+  %t25 = getelementptr i64, ptr %t24, i64 0
+  %t26 = load i64, ptr %t25
+  %t27 = inttoptr i64 %t26 to ptr
+  %rc28 = call ptr @nt_str_retain(ptr %t27)
+  store ptr %t27, ptr %name.addr
+  %t29 = load ptr, ptr %__d1.addr
+  %t30 = getelementptr i64, ptr %t29, i64 1
+  %t31 = load i64, ptr %t30
+  %t32 = bitcast i64 %t31 to double
+  store double %t32, ptr %age.addr
+  %t33 = load ptr, ptr %name.addr
+  call void @js_print_str(ptr %t33)
+  %t34 = load double, ptr %age.addr
   call void @js_print_sep()
-  call void @js_print_num(double %t32)
+  call void @js_print_num(double %t34)
   call void @js_print_newline()
-  %t33 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t34 = bitcast double 0x3FF0000000000000 to i64
-  %t35 = getelementptr i64, ptr %t33, i64 0
-  store i64 %t34, ptr %t35
-  %t36 = bitcast double 0x4000000000000000 to i64
-  %t37 = getelementptr i64, ptr %t33, i64 1
+  %t35 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t36 = bitcast double 0x3FF0000000000000 to i64
+  %t37 = getelementptr i64, ptr %t35, i64 0
   store i64 %t36, ptr %t37
-  store ptr %t33, ptr %__d2.addr
-  %t38 = load ptr, ptr %__d2.addr
-  %t39 = getelementptr i64, ptr %t38, i64 0
-  %t40 = load i64, ptr %t39
-  %t41 = bitcast i64 %t40 to double
-  store double %t41, ptr %px.addr
-  %t42 = load ptr, ptr %__d2.addr
-  %t43 = getelementptr i64, ptr %t42, i64 1
-  %t44 = load i64, ptr %t43
-  %t45 = bitcast i64 %t44 to double
-  store double %t45, ptr %py.addr
-  %t46 = load double, ptr %px.addr
-  call void @js_print_num(double %t46)
-  %t47 = load double, ptr %py.addr
+  %t38 = bitcast double 0x4000000000000000 to i64
+  %t39 = getelementptr i64, ptr %t35, i64 1
+  store i64 %t38, ptr %t39
+  store ptr %t35, ptr %__d2.addr
+  %t40 = load ptr, ptr %__d2.addr
+  %t41 = getelementptr i64, ptr %t40, i64 0
+  %t42 = load i64, ptr %t41
+  %t43 = bitcast i64 %t42 to double
+  store double %t43, ptr %px.addr
+  %t44 = load ptr, ptr %__d2.addr
+  %t45 = getelementptr i64, ptr %t44, i64 1
+  %t46 = load i64, ptr %t45
+  %t47 = bitcast i64 %t46 to double
+  store double %t47, ptr %py.addr
+  %t48 = load double, ptr %px.addr
+  call void @js_print_num(double %t48)
+  %t49 = load double, ptr %py.addr
   call void @js_print_sep()
-  call void @js_print_num(double %t47)
+  call void @js_print_num(double %t49)
   call void @js_print_newline()
   store double 0x3FF0000000000000, ptr %a.addr
   store double 0x4000000000000000, ptr %b.addr
-  %t48 = call ptr @nt_arr_new(double 0x4000000000000000)
-  %t49 = load double, ptr %b.addr
-  %t50 = bitcast double %t49 to i64
-  call double @nt_arr_push(ptr %t48, i64 %t50)
-  %t51 = load double, ptr %a.addr
+  %t50 = call ptr @nt_arr_new(double 0x4000000000000000)
+  %t51 = load double, ptr %b.addr
   %t52 = bitcast double %t51 to i64
-  call double @nt_arr_push(ptr %t48, i64 %t52)
-  store ptr %t48, ptr %__d3.addr
-  %t53 = load ptr, ptr %__d3.addr
-  %t54 = call i64 @nt_arr_get(ptr %t53, double 0x0000000000000000)
-  %t55 = bitcast i64 %t54 to double
-  store double %t55, ptr %a.addr
-  %t56 = load ptr, ptr %__d3.addr
-  %t57 = call i64 @nt_arr_get(ptr %t56, double 0x3FF0000000000000)
-  %t58 = bitcast i64 %t57 to double
-  store double %t58, ptr %b.addr
-  %t59 = load double, ptr %a.addr
-  call void @js_print_num(double %t59)
-  %t60 = load double, ptr %b.addr
+  call double @nt_arr_push(ptr %t50, i64 %t52)
+  %t53 = load double, ptr %a.addr
+  %t54 = bitcast double %t53 to i64
+  call double @nt_arr_push(ptr %t50, i64 %t54)
+  store ptr %t50, ptr %__d3.addr
+  %t55 = load ptr, ptr %__d3.addr
+  %t56 = call i64 @nt_arr_get(ptr %t55, double 0x0000000000000000)
+  %t57 = bitcast i64 %t56 to double
+  store double %t57, ptr %a.addr
+  %t58 = load ptr, ptr %__d3.addr
+  %t59 = call i64 @nt_arr_get(ptr %t58, double 0x3FF0000000000000)
+  %t60 = bitcast i64 %t59 to double
+  store double %t60, ptr %b.addr
+  %t61 = load double, ptr %a.addr
+  call void @js_print_num(double %t61)
+  %t62 = load double, ptr %b.addr
   call void @js_print_sep()
-  call void @js_print_num(double %t60)
+  call void @js_print_num(double %t62)
   call void @js_print_newline()
-  %t61 = load ptr, ptr %__d0.addr
-  call void @nt_arr_free(ptr %t61)
-  %t62 = load ptr, ptr %rest.addr
-  call void @nt_arr_free(ptr %t62)
-  %t63 = load ptr, ptr %__d1.addr
-  call void @nt_obj_free(ptr %t63)
-  %t64 = load ptr, ptr %__d2.addr
-  call void @nt_obj_free(ptr %t64)
+  %t63 = load ptr, ptr %__d0.addr
+  call void @nt_arr_free(ptr %t63)
+  %t64 = load ptr, ptr %rest.addr
+  call void @nt_arr_free(ptr %t64)
+  %t65 = load ptr, ptr %__d1.addr
+  call void @nt_obj_free(ptr %t65)
+  %t66 = load ptr, ptr %__d2.addr
+  call void @nt_obj_free(ptr %t66)
+  %t67 = load ptr, ptr %name.addr
+  call void @nt_str_release(ptr %t67)
   ret i32 0
 }
 "
@@ -2006,6 +2050,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -2248,6 +2295,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -2368,90 +2418,94 @@ L0:
   %t2 = bitcast double 0x401C000000000000 to i64
   %t3 = getelementptr i64, ptr %t1, i64 0
   store i64 %t2, ptr %t3
-  %t4 = ptrtoint ptr @.str.0 to i64
-  %t5 = getelementptr i64, ptr %t1, i64 1
-  store i64 %t4, ptr %t5
-  %t6 = call ptr @nt_arr_new(double 0x4008000000000000)
-  %t7 = ptrtoint ptr @.str.1 to i64
-  call double @nt_arr_push(ptr %t6, i64 %t7)
-  %t8 = ptrtoint ptr @.str.2 to i64
-  call double @nt_arr_push(ptr %t6, i64 %t8)
-  %t9 = ptrtoint ptr @.str.3 to i64
-  call double @nt_arr_push(ptr %t6, i64 %t9)
-  %t10 = ptrtoint ptr %t6 to i64
-  %t11 = getelementptr i64, ptr %t1, i64 2
-  store i64 %t10, ptr %t11
-  %t12 = ptrtoint ptr %t1 to i64
-  %t13 = getelementptr i64, ptr %t0, i64 0
-  store i64 %t12, ptr %t13
+  %rc4 = call ptr @nt_str_retain(ptr @.str.0)
+  %t5 = ptrtoint ptr @.str.0 to i64
+  %t6 = getelementptr i64, ptr %t1, i64 1
+  store i64 %t5, ptr %t6
+  %t7 = call ptr @nt_arr_new(double 0x4008000000000000)
+  %rc8 = call ptr @nt_str_retain(ptr @.str.1)
+  %t9 = ptrtoint ptr @.str.1 to i64
+  call double @nt_arr_push(ptr %t7, i64 %t9)
+  %rc10 = call ptr @nt_str_retain(ptr @.str.2)
+  %t11 = ptrtoint ptr @.str.2 to i64
+  call double @nt_arr_push(ptr %t7, i64 %t11)
+  %rc12 = call ptr @nt_str_retain(ptr @.str.3)
+  %t13 = ptrtoint ptr @.str.3 to i64
+  call double @nt_arr_push(ptr %t7, i64 %t13)
+  %t14 = ptrtoint ptr %t7 to i64
+  %t15 = getelementptr i64, ptr %t1, i64 2
+  store i64 %t14, ptr %t15
+  %t16 = ptrtoint ptr %t1 to i64
+  %t17 = getelementptr i64, ptr %t0, i64 0
+  store i64 %t16, ptr %t17
   store ptr %t0, ptr %data.addr
-  %t14 = load ptr, ptr %data.addr
-  %t15 = getelementptr i64, ptr %t14, i64 0
-  %t16 = load i64, ptr %t15
-  %t17 = inttoptr i64 %t16 to ptr
-  %t18 = getelementptr i64, ptr %t17, i64 0
-  %t19 = load i64, ptr %t18
-  %t20 = bitcast i64 %t19 to double
-  call void @js_print_num(double %t20)
-  %t21 = load ptr, ptr %data.addr
+  %t18 = load ptr, ptr %data.addr
+  %t19 = getelementptr i64, ptr %t18, i64 0
+  %t20 = load i64, ptr %t19
+  %t21 = inttoptr i64 %t20 to ptr
   %t22 = getelementptr i64, ptr %t21, i64 0
   %t23 = load i64, ptr %t22
-  %t24 = inttoptr i64 %t23 to ptr
-  %t25 = getelementptr i64, ptr %t24, i64 1
-  %t26 = load i64, ptr %t25
-  %t27 = inttoptr i64 %t26 to ptr
-  call void @js_print_sep()
-  call void @js_print_str(ptr %t27)
-  call void @js_print_newline()
-  %t28 = load ptr, ptr %data.addr
-  %t29 = getelementptr i64, ptr %t28, i64 0
+  %t24 = bitcast i64 %t23 to double
+  call void @js_print_num(double %t24)
+  %t25 = load ptr, ptr %data.addr
+  %t26 = getelementptr i64, ptr %t25, i64 0
+  %t27 = load i64, ptr %t26
+  %t28 = inttoptr i64 %t27 to ptr
+  %t29 = getelementptr i64, ptr %t28, i64 1
   %t30 = load i64, ptr %t29
   %t31 = inttoptr i64 %t30 to ptr
-  %t32 = getelementptr i64, ptr %t31, i64 2
-  %t33 = load i64, ptr %t32
-  %t34 = inttoptr i64 %t33 to ptr
-  %t35 = call i64 @nt_arr_get(ptr %t34, double 0x4000000000000000)
-  %t36 = inttoptr i64 %t35 to ptr
-  call void @js_print_str(ptr %t36)
-  %t37 = load ptr, ptr %data.addr
-  %t38 = getelementptr i64, ptr %t37, i64 0
-  %t39 = load i64, ptr %t38
+  call void @js_print_sep()
+  call void @js_print_str(ptr %t31)
+  call void @js_print_newline()
+  %t32 = load ptr, ptr %data.addr
+  %t33 = getelementptr i64, ptr %t32, i64 0
+  %t34 = load i64, ptr %t33
+  %t35 = inttoptr i64 %t34 to ptr
+  %t36 = getelementptr i64, ptr %t35, i64 2
+  %t37 = load i64, ptr %t36
+  %t38 = inttoptr i64 %t37 to ptr
+  %t39 = call i64 @nt_arr_get(ptr %t38, double 0x4000000000000000)
   %t40 = inttoptr i64 %t39 to ptr
-  %t41 = getelementptr i64, ptr %t40, i64 2
-  %t42 = load i64, ptr %t41
-  %t43 = inttoptr i64 %t42 to ptr
-  %t44 = call double @nt_arr_len(ptr %t43)
+  call void @js_print_str(ptr %t40)
+  %t41 = load ptr, ptr %data.addr
+  %t42 = getelementptr i64, ptr %t41, i64 0
+  %t43 = load i64, ptr %t42
+  %t44 = inttoptr i64 %t43 to ptr
+  %t45 = getelementptr i64, ptr %t44, i64 2
+  %t46 = load i64, ptr %t45
+  %t47 = inttoptr i64 %t46 to ptr
+  %t48 = call double @nt_arr_len(ptr %t47)
   call void @js_print_sep()
-  call void @js_print_num(double %t44)
+  call void @js_print_num(double %t48)
   call void @js_print_newline()
-  %t45 = call ptr @nt_arr_new(double 0x4008000000000000)
-  %t46 = bitcast double 0x3FF0000000000000 to i64
-  call double @nt_arr_push(ptr %t45, i64 %t46)
-  %t47 = bitcast double 0x4000000000000000 to i64
-  call double @nt_arr_push(ptr %t45, i64 %t47)
-  %t48 = bitcast double 0x4008000000000000 to i64
-  call double @nt_arr_push(ptr %t45, i64 %t48)
-  %t49 = call double @sum(ptr %t45)
-  call void @js_print_num(double %t49)
-  %t50 = call ptr @nt_arr_new(double 0x3FF0000000000000)
-  %t51 = call double @sum(ptr %t50)
+  %t49 = call ptr @nt_arr_new(double 0x4008000000000000)
+  %t50 = bitcast double 0x3FF0000000000000 to i64
+  call double @nt_arr_push(ptr %t49, i64 %t50)
+  %t51 = bitcast double 0x4000000000000000 to i64
+  call double @nt_arr_push(ptr %t49, i64 %t51)
+  %t52 = bitcast double 0x4008000000000000 to i64
+  call double @nt_arr_push(ptr %t49, i64 %t52)
+  %t53 = call double @sum(ptr %t49)
+  call void @js_print_num(double %t53)
+  %t54 = call ptr @nt_arr_new(double 0x3FF0000000000000)
+  %t55 = call double @sum(ptr %t54)
   call void @js_print_sep()
-  call void @js_print_num(double %t51)
-  %t52 = call ptr @nt_arr_new(double 0x4010000000000000)
-  %t53 = bitcast double 0x4024000000000000 to i64
-  call double @nt_arr_push(ptr %t52, i64 %t53)
-  %t54 = bitcast double 0x4034000000000000 to i64
-  call double @nt_arr_push(ptr %t52, i64 %t54)
-  %t55 = bitcast double 0x403E000000000000 to i64
-  call double @nt_arr_push(ptr %t52, i64 %t55)
-  %t56 = bitcast double 0x4044000000000000 to i64
-  call double @nt_arr_push(ptr %t52, i64 %t56)
-  %t57 = call double @sum(ptr %t52)
+  call void @js_print_num(double %t55)
+  %t56 = call ptr @nt_arr_new(double 0x4010000000000000)
+  %t57 = bitcast double 0x4024000000000000 to i64
+  call double @nt_arr_push(ptr %t56, i64 %t57)
+  %t58 = bitcast double 0x4034000000000000 to i64
+  call double @nt_arr_push(ptr %t56, i64 %t58)
+  %t59 = bitcast double 0x403E000000000000 to i64
+  call double @nt_arr_push(ptr %t56, i64 %t59)
+  %t60 = bitcast double 0x4044000000000000 to i64
+  call double @nt_arr_push(ptr %t56, i64 %t60)
+  %t61 = call double @sum(ptr %t56)
   call void @js_print_sep()
-  call void @js_print_num(double %t57)
+  call void @js_print_num(double %t61)
   call void @js_print_newline()
-  %t58 = load ptr, ptr %data.addr
-  call void @nt_obj_free(ptr %t58)
+  %t62 = load ptr, ptr %data.addr
+  call void @nt_obj_free(ptr %t62)
   ret i32 0
 }
 "
@@ -2498,6 +2552,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -2648,144 +2705,147 @@ jse6:
   %t26 = bitcast double 0x3FF0000000000000 to i64
   %t27 = getelementptr i64, ptr %t25, i64 0
   store i64 %t26, ptr %t27
-  %t28 = ptrtoint ptr @.str.4 to i64
-  %t29 = getelementptr i64, ptr %t25, i64 1
-  store i64 %t28, ptr %t29
-  %t30 = call ptr @nt_arr_new(double 0x4000000000000000)
-  %t31 = zext i1 true to i64
-  call double @nt_arr_push(ptr %t30, i64 %t31)
-  %t32 = zext i1 false to i64
-  call double @nt_arr_push(ptr %t30, i64 %t32)
-  %t33 = ptrtoint ptr %t30 to i64
-  %t34 = getelementptr i64, ptr %t25, i64 2
-  store i64 %t33, ptr %t34
-  %t35 = call ptr @js_str_concat(ptr @.str.5, ptr @.str.6)
-  %t36 = getelementptr i64, ptr %t25, i64 0
-  %t37 = load i64, ptr %t36
-  %t38 = bitcast i64 %t37 to double
-  %t39 = call ptr @js_num_to_str(double %t38)
-  %t40 = call ptr @js_str_concat(ptr %t35, ptr %t39)
-  %t41 = call ptr @js_str_concat(ptr %t40, ptr @.str.2)
-  %t42 = call ptr @js_str_concat(ptr %t41, ptr @.str.7)
-  %t43 = getelementptr i64, ptr %t25, i64 1
-  %t44 = load i64, ptr %t43
-  %t45 = inttoptr i64 %t44 to ptr
-  %t46 = call ptr @js_json_quote(ptr %t45)
-  %t47 = call ptr @js_str_concat(ptr %t42, ptr %t46)
-  %t48 = call ptr @js_str_concat(ptr %t47, ptr @.str.2)
-  %t49 = call ptr @js_str_concat(ptr %t48, ptr @.str.8)
-  %t50 = getelementptr i64, ptr %t25, i64 2
-  %t51 = load i64, ptr %t50
-  %t52 = inttoptr i64 %t51 to ptr
+  %rc28 = call ptr @nt_str_retain(ptr @.str.4)
+  %t29 = ptrtoint ptr @.str.4 to i64
+  %t30 = getelementptr i64, ptr %t25, i64 1
+  store i64 %t29, ptr %t30
+  %t31 = call ptr @nt_arr_new(double 0x4000000000000000)
+  %t32 = zext i1 true to i64
+  call double @nt_arr_push(ptr %t31, i64 %t32)
+  %t33 = zext i1 false to i64
+  call double @nt_arr_push(ptr %t31, i64 %t33)
+  %t34 = ptrtoint ptr %t31 to i64
+  %t35 = getelementptr i64, ptr %t25, i64 2
+  store i64 %t34, ptr %t35
+  %t36 = call ptr @js_str_concat(ptr @.str.5, ptr @.str.6)
+  %t37 = getelementptr i64, ptr %t25, i64 0
+  %t38 = load i64, ptr %t37
+  %t39 = bitcast i64 %t38 to double
+  %t40 = call ptr @js_num_to_str(double %t39)
+  %t41 = call ptr @js_str_concat(ptr %t36, ptr %t40)
+  %t42 = call ptr @js_str_concat(ptr %t41, ptr @.str.2)
+  %t43 = call ptr @js_str_concat(ptr %t42, ptr @.str.7)
+  %t44 = getelementptr i64, ptr %t25, i64 1
+  %t45 = load i64, ptr %t44
+  %t46 = inttoptr i64 %t45 to ptr
+  %t47 = call ptr @js_json_quote(ptr %t46)
+  %t48 = call ptr @js_str_concat(ptr %t43, ptr %t47)
+  %t49 = call ptr @js_str_concat(ptr %t48, ptr @.str.2)
+  %t50 = call ptr @js_str_concat(ptr %t49, ptr @.str.8)
+  %t51 = getelementptr i64, ptr %t25, i64 2
+  %t52 = load i64, ptr %t51
+  %t53 = inttoptr i64 %t52 to ptr
   store ptr @.str.1, ptr %s9
   store double 0x0000000000000000, ptr %s10
-  %t53 = call double @nt_arr_len(ptr %t52)
+  %t54 = call double @nt_arr_len(ptr %t53)
   br label %js11
 js11:
-  %t54 = load double, ptr %s10
-  %t55 = fcmp olt double %t54, %t53
-  br i1 %t55, label %jsb12, label %jse14
+  %t55 = load double, ptr %s10
+  %t56 = fcmp olt double %t55, %t54
+  br i1 %t56, label %jsb12, label %jse14
 jsb12:
-  %t56 = load double, ptr %s10
-  %t57 = fcmp oeq double %t56, 0.0
-  br i1 %t57, label %jsa16, label %jsc15
+  %t57 = load double, ptr %s10
+  %t58 = fcmp oeq double %t57, 0.0
+  br i1 %t58, label %jsa16, label %jsc15
 jsc15:
-  %t58 = load ptr, ptr %s9
-  %t59 = call ptr @js_str_concat(ptr %t58, ptr @.str.2)
-  store ptr %t59, ptr %s9
+  %t59 = load ptr, ptr %s9
+  %t60 = call ptr @js_str_concat(ptr %t59, ptr @.str.2)
+  store ptr %t60, ptr %s9
   br label %jsa16
 jsa16:
-  %t60 = load double, ptr %s10
-  %t61 = call i64 @nt_arr_get(ptr %t52, double %t60)
-  %t62 = trunc i64 %t61 to i1
-  %t63 = zext i1 %t62 to i32
-  %t64 = call ptr @js_bool_to_str(i32 %t63)
-  %t65 = load ptr, ptr %s9
-  %t66 = call ptr @js_str_concat(ptr %t65, ptr %t64)
-  store ptr %t66, ptr %s9
+  %t61 = load double, ptr %s10
+  %t62 = call i64 @nt_arr_get(ptr %t53, double %t61)
+  %t63 = trunc i64 %t62 to i1
+  %t64 = zext i1 %t63 to i32
+  %t65 = call ptr @js_bool_to_str(i32 %t64)
+  %t66 = load ptr, ptr %s9
+  %t67 = call ptr @js_str_concat(ptr %t66, ptr %t65)
+  store ptr %t67, ptr %s9
   br label %jsu13
 jsu13:
-  %t67 = load double, ptr %s10
-  %t68 = fadd double %t67, 1.0
-  store double %t68, ptr %s10
+  %t68 = load double, ptr %s10
+  %t69 = fadd double %t68, 1.0
+  store double %t69, ptr %s10
   br label %js11
 jse14:
-  %t69 = load ptr, ptr %s9
-  %t70 = call ptr @js_str_concat(ptr %t69, ptr @.str.3)
-  %t71 = call ptr @js_str_concat(ptr %t49, ptr %t70)
-  %t72 = call ptr @js_str_concat(ptr %t71, ptr @.str.9)
-  call void @js_print_str(ptr %t72)
+  %t70 = load ptr, ptr %s9
+  %t71 = call ptr @js_str_concat(ptr %t70, ptr @.str.3)
+  %t72 = call ptr @js_str_concat(ptr %t50, ptr %t71)
+  %t73 = call ptr @js_str_concat(ptr %t72, ptr @.str.9)
+  call void @js_print_str(ptr %t73)
   call void @js_print_newline()
-  %t73 = call ptr @nt_obj_new(double 0x3FF0000000000000)
-  %t74 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t75 = bitcast double 0x4014000000000000 to i64
-  %t76 = getelementptr i64, ptr %t74, i64 0
-  store i64 %t75, ptr %t76
-  %t77 = call ptr @nt_arr_new(double 0x4000000000000000)
-  %t78 = ptrtoint ptr @.str.10 to i64
-  call double @nt_arr_push(ptr %t77, i64 %t78)
-  %t79 = ptrtoint ptr @.str.11 to i64
-  call double @nt_arr_push(ptr %t77, i64 %t79)
-  %t80 = ptrtoint ptr %t77 to i64
-  %t81 = getelementptr i64, ptr %t74, i64 1
-  store i64 %t80, ptr %t81
-  %t82 = ptrtoint ptr %t74 to i64
-  %t83 = getelementptr i64, ptr %t73, i64 0
-  store i64 %t82, ptr %t83
-  %t84 = call ptr @js_str_concat(ptr @.str.5, ptr @.str.12)
-  %t85 = getelementptr i64, ptr %t73, i64 0
-  %t86 = load i64, ptr %t85
-  %t87 = inttoptr i64 %t86 to ptr
-  %t88 = call ptr @js_str_concat(ptr @.str.5, ptr @.str.13)
-  %t89 = getelementptr i64, ptr %t87, i64 0
-  %t90 = load i64, ptr %t89
-  %t91 = bitcast i64 %t90 to double
-  %t92 = call ptr @js_num_to_str(double %t91)
-  %t93 = call ptr @js_str_concat(ptr %t88, ptr %t92)
-  %t94 = call ptr @js_str_concat(ptr %t93, ptr @.str.2)
-  %t95 = call ptr @js_str_concat(ptr %t94, ptr @.str.14)
-  %t96 = getelementptr i64, ptr %t87, i64 1
-  %t97 = load i64, ptr %t96
-  %t98 = inttoptr i64 %t97 to ptr
+  %t74 = call ptr @nt_obj_new(double 0x3FF0000000000000)
+  %t75 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t76 = bitcast double 0x4014000000000000 to i64
+  %t77 = getelementptr i64, ptr %t75, i64 0
+  store i64 %t76, ptr %t77
+  %t78 = call ptr @nt_arr_new(double 0x4000000000000000)
+  %rc79 = call ptr @nt_str_retain(ptr @.str.10)
+  %t80 = ptrtoint ptr @.str.10 to i64
+  call double @nt_arr_push(ptr %t78, i64 %t80)
+  %rc81 = call ptr @nt_str_retain(ptr @.str.11)
+  %t82 = ptrtoint ptr @.str.11 to i64
+  call double @nt_arr_push(ptr %t78, i64 %t82)
+  %t83 = ptrtoint ptr %t78 to i64
+  %t84 = getelementptr i64, ptr %t75, i64 1
+  store i64 %t83, ptr %t84
+  %t85 = ptrtoint ptr %t75 to i64
+  %t86 = getelementptr i64, ptr %t74, i64 0
+  store i64 %t85, ptr %t86
+  %t87 = call ptr @js_str_concat(ptr @.str.5, ptr @.str.12)
+  %t88 = getelementptr i64, ptr %t74, i64 0
+  %t89 = load i64, ptr %t88
+  %t90 = inttoptr i64 %t89 to ptr
+  %t91 = call ptr @js_str_concat(ptr @.str.5, ptr @.str.13)
+  %t92 = getelementptr i64, ptr %t90, i64 0
+  %t93 = load i64, ptr %t92
+  %t94 = bitcast i64 %t93 to double
+  %t95 = call ptr @js_num_to_str(double %t94)
+  %t96 = call ptr @js_str_concat(ptr %t91, ptr %t95)
+  %t97 = call ptr @js_str_concat(ptr %t96, ptr @.str.2)
+  %t98 = call ptr @js_str_concat(ptr %t97, ptr @.str.14)
+  %t99 = getelementptr i64, ptr %t90, i64 1
+  %t100 = load i64, ptr %t99
+  %t101 = inttoptr i64 %t100 to ptr
   store ptr @.str.1, ptr %s17
   store double 0x0000000000000000, ptr %s18
-  %t99 = call double @nt_arr_len(ptr %t98)
+  %t102 = call double @nt_arr_len(ptr %t101)
   br label %js19
 js19:
-  %t100 = load double, ptr %s18
-  %t101 = fcmp olt double %t100, %t99
-  br i1 %t101, label %jsb20, label %jse22
+  %t103 = load double, ptr %s18
+  %t104 = fcmp olt double %t103, %t102
+  br i1 %t104, label %jsb20, label %jse22
 jsb20:
-  %t102 = load double, ptr %s18
-  %t103 = fcmp oeq double %t102, 0.0
-  br i1 %t103, label %jsa24, label %jsc23
+  %t105 = load double, ptr %s18
+  %t106 = fcmp oeq double %t105, 0.0
+  br i1 %t106, label %jsa24, label %jsc23
 jsc23:
-  %t104 = load ptr, ptr %s17
-  %t105 = call ptr @js_str_concat(ptr %t104, ptr @.str.2)
-  store ptr %t105, ptr %s17
+  %t107 = load ptr, ptr %s17
+  %t108 = call ptr @js_str_concat(ptr %t107, ptr @.str.2)
+  store ptr %t108, ptr %s17
   br label %jsa24
 jsa24:
-  %t106 = load double, ptr %s18
-  %t107 = call i64 @nt_arr_get(ptr %t98, double %t106)
-  %t108 = inttoptr i64 %t107 to ptr
-  %t109 = call ptr @js_json_quote(ptr %t108)
-  %t110 = load ptr, ptr %s17
-  %t111 = call ptr @js_str_concat(ptr %t110, ptr %t109)
-  store ptr %t111, ptr %s17
+  %t109 = load double, ptr %s18
+  %t110 = call i64 @nt_arr_get(ptr %t101, double %t109)
+  %t111 = inttoptr i64 %t110 to ptr
+  %t112 = call ptr @js_json_quote(ptr %t111)
+  %t113 = load ptr, ptr %s17
+  %t114 = call ptr @js_str_concat(ptr %t113, ptr %t112)
+  store ptr %t114, ptr %s17
   br label %jsu21
 jsu21:
-  %t112 = load double, ptr %s18
-  %t113 = fadd double %t112, 1.0
-  store double %t113, ptr %s18
+  %t115 = load double, ptr %s18
+  %t116 = fadd double %t115, 1.0
+  store double %t116, ptr %s18
   br label %js19
 jse22:
-  %t114 = load ptr, ptr %s17
-  %t115 = call ptr @js_str_concat(ptr %t114, ptr @.str.3)
-  %t116 = call ptr @js_str_concat(ptr %t95, ptr %t115)
-  %t117 = call ptr @js_str_concat(ptr %t116, ptr @.str.9)
-  %t118 = call ptr @js_str_concat(ptr %t84, ptr %t117)
-  %t119 = call ptr @js_str_concat(ptr %t118, ptr @.str.9)
-  call void @js_print_str(ptr %t119)
+  %t117 = load ptr, ptr %s17
+  %t118 = call ptr @js_str_concat(ptr %t117, ptr @.str.3)
+  %t119 = call ptr @js_str_concat(ptr %t98, ptr %t118)
+  %t120 = call ptr @js_str_concat(ptr %t119, ptr @.str.9)
+  %t121 = call ptr @js_str_concat(ptr %t87, ptr %t120)
+  %t122 = call ptr @js_str_concat(ptr %t121, ptr @.str.9)
+  call void @js_print_str(ptr %t122)
   call void @js_print_newline()
   ret i32 0
 }
@@ -2833,6 +2893,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -2923,35 +2986,36 @@ L0:
 then6:
   %t2 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t3 = getelementptr i64, ptr %t2, i64 0
-  %t4 = ptrtoint ptr @.str.0 to i64
-  store i64 %t4, ptr %t3
+  %rc4 = call ptr @nt_str_retain(ptr @.str.0)
+  %t5 = ptrtoint ptr @.str.0 to i64
+  store i64 %t5, ptr %t3
   store ptr %t2, ptr %e.addr
   br label %catch1
 endif7:
-  %t5 = load double, ptr %n.addr
-  %t6 = call ptr @js_num_to_str(double %t5)
-  %t7 = call ptr @js_str_concat(ptr @.str.1, ptr %t6)
-  store ptr %t7, ptr %s5
+  %t6 = load double, ptr %n.addr
+  %t7 = call ptr @js_num_to_str(double %t6)
+  %t8 = call ptr @js_str_concat(ptr @.str.1, ptr %t7)
+  store ptr %t8, ptr %s5
   store double 0x3FF0000000000000, ptr %s4
   br label %finally3
 catch1:
-  %t8 = load ptr, ptr %e.addr
-  %t9 = getelementptr i64, ptr %t8, i64 0
-  %t10 = load i64, ptr %t9
-  %t11 = inttoptr i64 %t10 to ptr
-  %t12 = call ptr @js_str_concat(ptr @.str.2, ptr %t11)
-  store ptr %t12, ptr %s5
+  %t9 = load ptr, ptr %e.addr
+  %t10 = getelementptr i64, ptr %t9, i64 0
+  %t11 = load i64, ptr %t10
+  %t12 = inttoptr i64 %t11 to ptr
+  %t13 = call ptr @js_str_concat(ptr @.str.2, ptr %t12)
+  store ptr %t13, ptr %s5
   store double 0x3FF0000000000000, ptr %s4
   br label %finally3
 finally3:
   call void @js_print_str(ptr @.str.3)
   call void @js_print_newline()
-  %t13 = load double, ptr %s4
-  %t14 = fcmp oeq double %t13, 0x3FF0000000000000
-  br i1 %t14, label %finret8, label %endtry2
+  %t14 = load double, ptr %s4
+  %t15 = fcmp oeq double %t14, 0x3FF0000000000000
+  br i1 %t15, label %finret8, label %endtry2
 finret8:
-  %t15 = load ptr, ptr %s5
-  ret ptr %t15
+  %t16 = load ptr, ptr %s5
+  ret ptr %t16
 endtry2:
   ret ptr null
 }
@@ -3026,6 +3090,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -3272,6 +3339,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -3405,6 +3475,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -3554,6 +3627,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -3689,6 +3765,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -3845,6 +3924,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -3984,6 +4066,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -4123,6 +4208,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -4461,6 +4549,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -4621,6 +4712,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -4711,8 +4805,10 @@ exc3:
   call void @nt_exc_clear()
   br label %catch1
 cont4:
+  %rc5 = call ptr @nt_str_retain(ptr @.str.0)
   ret ptr @.str.0
 catch1:
+  %rc6 = call ptr @nt_str_retain(ptr @.str.1)
   ret ptr @.str.1
 endtry2:
   ret ptr null
@@ -4774,6 +4870,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -4987,6 +5086,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -5127,6 +5229,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -5365,43 +5470,44 @@ cont14:
   %t97 = call ptr @nt_dyn_require_field(ptr %t92, ptr @.str.8)
   %t98 = call ptr @nt_dyn_as_string(ptr %t97)
   %t99 = getelementptr i64, ptr %t96, i64 0
-  %t100 = ptrtoint ptr %t98 to i64
-  store i64 %t100, ptr %t99
-  %t101 = call ptr @nt_dyn_require_field(ptr %t92, ptr @.str.9)
-  %t102 = call i32 @nt_dyn_as_bool(ptr %t101)
-  %t103 = trunc i32 %t102 to i1
-  %t104 = getelementptr i64, ptr %t96, i64 1
-  %t105 = zext i1 %t103 to i64
-  store i64 %t105, ptr %t104
-  %t106 = call i32 @nt_exc_pending()
-  %t107 = icmp ne i32 %t106, 0
-  br i1 %t107, label %exc15, label %cont16
+  %rc100 = call ptr @nt_str_retain(ptr %t98)
+  %t101 = ptrtoint ptr %t98 to i64
+  store i64 %t101, ptr %t99
+  %t102 = call ptr @nt_dyn_require_field(ptr %t92, ptr @.str.9)
+  %t103 = call i32 @nt_dyn_as_bool(ptr %t102)
+  %t104 = trunc i32 %t103 to i1
+  %t105 = getelementptr i64, ptr %t96, i64 1
+  %t106 = zext i1 %t104 to i64
+  store i64 %t106, ptr %t105
+  %t107 = call i32 @nt_exc_pending()
+  %t108 = icmp ne i32 %t107, 0
+  br i1 %t108, label %exc15, label %cont16
 exc15:
   call void @nt_exc_abort()
   unreachable
 cont16:
   store ptr %t96, ptr %u.addr
-  %t108 = load ptr, ptr %u.addr
-  %t109 = getelementptr i64, ptr %t108, i64 0
-  %t110 = load i64, ptr %t109
-  %t111 = inttoptr i64 %t110 to ptr
-  call void @js_print_str(ptr %t111)
-  %t112 = load ptr, ptr %u.addr
-  %t113 = getelementptr i64, ptr %t112, i64 1
-  %t114 = load i64, ptr %t113
-  %t115 = trunc i64 %t114 to i1
+  %t109 = load ptr, ptr %u.addr
+  %t110 = getelementptr i64, ptr %t109, i64 0
+  %t111 = load i64, ptr %t110
+  %t112 = inttoptr i64 %t111 to ptr
+  call void @js_print_str(ptr %t112)
+  %t113 = load ptr, ptr %u.addr
+  %t114 = getelementptr i64, ptr %t113, i64 1
+  %t115 = load i64, ptr %t114
+  %t116 = trunc i64 %t115 to i1
   call void @js_print_sep()
-  %t116 = zext i1 %t115 to i32
-  call void @js_print_bool(i32 %t116)
+  %t117 = zext i1 %t116 to i32
+  call void @js_print_bool(i32 %t117)
   call void @js_print_newline()
-  %t117 = load ptr, ptr %p.addr
-  call void @nt_obj_free(ptr %t117)
-  %t118 = load ptr, ptr %q.addr
+  %t118 = load ptr, ptr %p.addr
   call void @nt_obj_free(ptr %t118)
-  %t119 = load ptr, ptr %c.addr
+  %t119 = load ptr, ptr %q.addr
   call void @nt_obj_free(ptr %t119)
-  %t120 = load ptr, ptr %u.addr
+  %t120 = load ptr, ptr %c.addr
   call void @nt_obj_free(ptr %t120)
+  %t121 = load ptr, ptr %u.addr
+  call void @nt_obj_free(ptr %t121)
   ret i32 0
 }
 "
@@ -5448,6 +5554,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -5578,6 +5687,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -5793,6 +5905,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -5878,6 +5993,7 @@ entry:
   %s2 = alloca double
   br label %L0
 L0:
+  store ptr null, ptr %s.addr
   %t0 = call ptr @nt_obj_new(double 0x4000000000000000)
   %t1 = bitcast double 0x4014000000000000 to i64
   %t2 = getelementptr i64, ptr %t0, i64 0
@@ -5960,6 +6076,8 @@ cont10:
   call void @js_print_newline()
   %t47 = load ptr, ptr %obj.addr
   call void @nt_obj_free(ptr %t47)
+  %t48 = load ptr, ptr %s.addr
+  call void @nt_str_release(ptr %t48)
   ret i32 0
 }
 "
@@ -6006,6 +6124,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -6165,6 +6286,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -6299,6 +6423,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -6457,6 +6584,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -6616,6 +6746,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -6823,6 +6956,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -7001,6 +7137,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -7228,6 +7367,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -7366,6 +7508,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -7554,6 +7699,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -7736,6 +7884,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -7881,6 +8032,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -8090,6 +8244,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -8344,6 +8501,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -8506,89 +8666,90 @@ nce12:
   call void @js_print_num(double %t42)
   call void @js_print_newline()
   %t43 = call ptr @nt_obj_new(double 0x3FF0000000000000)
-  %t44 = ptrtoint ptr @.str.1 to i64
-  %t45 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t46 = getelementptr i64, ptr %t45, i64 0
-  store i64 2, ptr %t46
-  %t47 = getelementptr i64, ptr %t45, i64 1
-  store i64 %t44, ptr %t47
-  %t48 = ptrtoint ptr %t45 to i64
-  %t49 = getelementptr i64, ptr %t43, i64 0
-  store i64 %t48, ptr %t49
+  %rc44 = call ptr @nt_str_retain(ptr @.str.1)
+  %t45 = ptrtoint ptr @.str.1 to i64
+  %t46 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t47 = getelementptr i64, ptr %t46, i64 0
+  store i64 2, ptr %t47
+  %t48 = getelementptr i64, ptr %t46, i64 1
+  store i64 %t45, ptr %t48
+  %t49 = ptrtoint ptr %t46 to i64
+  %t50 = getelementptr i64, ptr %t43, i64 0
+  store i64 %t49, ptr %t50
   store ptr %t43, ptr %p.addr
-  %t50 = load ptr, ptr %p.addr
-  %t51 = getelementptr i64, ptr %t50, i64 0
-  %t52 = load i64, ptr %t51
-  %t53 = inttoptr i64 %t52 to ptr
-  %t55 = getelementptr i64, ptr %t53, i64 0
-  %t56 = load i64, ptr %t55
-  %t54 = icmp ult i64 %t56, 2
-  br i1 %t54, label %nc14, label %ncl15
+  %t51 = load ptr, ptr %p.addr
+  %t52 = getelementptr i64, ptr %t51, i64 0
+  %t53 = load i64, ptr %t52
+  %t54 = inttoptr i64 %t53 to ptr
+  %t56 = getelementptr i64, ptr %t54, i64 0
+  %t57 = load i64, ptr %t56
+  %t55 = icmp ult i64 %t57, 2
+  br i1 %t55, label %nc14, label %ncl15
 nc14:
   store ptr @.str.0, ptr %s13
   br label %nce16
 ncl15:
-  %t57 = getelementptr i64, ptr %t53, i64 1
-  %t58 = load i64, ptr %t57
-  %t59 = inttoptr i64 %t58 to ptr
-  store ptr %t59, ptr %s13
+  %t58 = getelementptr i64, ptr %t54, i64 1
+  %t59 = load i64, ptr %t58
+  %t60 = inttoptr i64 %t59 to ptr
+  store ptr %t60, ptr %s13
   br label %nce16
 nce16:
-  %t60 = load ptr, ptr %s13
-  call void @js_print_str(ptr %t60)
+  %t61 = load ptr, ptr %s13
+  call void @js_print_str(ptr %t61)
   call void @js_print_newline()
-  %t61 = load ptr, ptr %p.addr
-  %t62 = getelementptr i64, ptr %t61, i64 0
-  %t63 = load i64, ptr %t62
-  %t64 = inttoptr i64 %t63 to ptr
-  %t66 = getelementptr i64, ptr %t64, i64 0
-  %t67 = load i64, ptr %t66
-  %t65 = icmp ult i64 %t67, 2
-  br i1 %t65, label %ocnull18, label %occ20
+  %t62 = load ptr, ptr %p.addr
+  %t63 = getelementptr i64, ptr %t62, i64 0
+  %t64 = load i64, ptr %t63
+  %t65 = inttoptr i64 %t64 to ptr
+  %t67 = getelementptr i64, ptr %t65, i64 0
+  %t68 = load i64, ptr %t67
+  %t66 = icmp ult i64 %t68, 2
+  br i1 %t66, label %ocnull18, label %occ20
 occ20:
-  %t68 = getelementptr i64, ptr %t64, i64 1
-  %t69 = load i64, ptr %t68
-  %t70 = inttoptr i64 %t69 to ptr
-  %t71 = call double @js_str_len(ptr %t70)
-  %t72 = bitcast double %t71 to i64
-  %t73 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t74 = getelementptr i64, ptr %t73, i64 0
-  store i64 2, ptr %t74
-  %t75 = getelementptr i64, ptr %t73, i64 1
-  store i64 %t72, ptr %t75
-  store ptr %t73, ptr %s17
+  %t69 = getelementptr i64, ptr %t65, i64 1
+  %t70 = load i64, ptr %t69
+  %t71 = inttoptr i64 %t70 to ptr
+  %t72 = call double @js_str_len(ptr %t71)
+  %t73 = bitcast double %t72 to i64
+  %t74 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t75 = getelementptr i64, ptr %t74, i64 0
+  store i64 2, ptr %t75
+  %t76 = getelementptr i64, ptr %t74, i64 1
+  store i64 %t73, ptr %t76
+  store ptr %t74, ptr %s17
   br label %ocend19
 ocnull18:
-  %t76 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t77 = getelementptr i64, ptr %t76, i64 0
-  store i64 0, ptr %t77
-  %t78 = getelementptr i64, ptr %t76, i64 1
+  %t77 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t78 = getelementptr i64, ptr %t77, i64 0
   store i64 0, ptr %t78
-  store ptr %t76, ptr %s17
+  %t79 = getelementptr i64, ptr %t77, i64 1
+  store i64 0, ptr %t79
+  store ptr %t77, ptr %s17
   br label %ocend19
 ocend19:
-  %t79 = load ptr, ptr %s17
-  %t81 = getelementptr i64, ptr %t79, i64 0
-  %t82 = load i64, ptr %t81
-  %t80 = icmp ult i64 %t82, 2
-  br i1 %t80, label %nc22, label %ncl23
+  %t80 = load ptr, ptr %s17
+  %t82 = getelementptr i64, ptr %t80, i64 0
+  %t83 = load i64, ptr %t82
+  %t81 = icmp ult i64 %t83, 2
+  br i1 %t81, label %nc22, label %ncl23
 nc22:
   store double 0x0000000000000000, ptr %s21
   br label %nce24
 ncl23:
-  %t83 = getelementptr i64, ptr %t79, i64 1
-  %t84 = load i64, ptr %t83
-  %t85 = bitcast i64 %t84 to double
-  store double %t85, ptr %s21
+  %t84 = getelementptr i64, ptr %t80, i64 1
+  %t85 = load i64, ptr %t84
+  %t86 = bitcast i64 %t85 to double
+  store double %t86, ptr %s21
   br label %nce24
 nce24:
-  %t86 = load double, ptr %s21
-  call void @js_print_num(double %t86)
+  %t87 = load double, ptr %s21
+  call void @js_print_num(double %t87)
   call void @js_print_newline()
-  %t87 = load ptr, ptr %o.addr
-  call void @nt_obj_free(ptr %t87)
-  %t88 = load ptr, ptr %p.addr
+  %t88 = load ptr, ptr %o.addr
   call void @nt_obj_free(ptr %t88)
+  %t89 = load ptr, ptr %p.addr
+  call void @nt_obj_free(ptr %t89)
   ret i32 0
 }
 "
@@ -8635,6 +8796,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -8825,6 +8989,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -9019,6 +9186,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -9355,6 +9525,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -9530,6 +9703,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -9698,6 +9874,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -9863,6 +10042,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -9943,45 +10125,49 @@ entry:
   br label %L0
 L0:
   %t0 = call ptr @nt_arr_new(double 0x4008000000000000)
-  %t1 = ptrtoint ptr @.str.0 to i64
-  call double @nt_arr_push(ptr %t0, i64 %t1)
-  %t2 = ptrtoint ptr @.str.1 to i64
+  %rc1 = call ptr @nt_str_retain(ptr @.str.0)
+  %t2 = ptrtoint ptr @.str.0 to i64
   call double @nt_arr_push(ptr %t0, i64 %t2)
-  %t3 = ptrtoint ptr @.str.2 to i64
-  call double @nt_arr_push(ptr %t0, i64 %t3)
+  %rc3 = call ptr @nt_str_retain(ptr @.str.1)
+  %t4 = ptrtoint ptr @.str.1 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t4)
+  %rc5 = call ptr @nt_str_retain(ptr @.str.2)
+  %t6 = ptrtoint ptr @.str.2 to i64
+  call double @nt_arr_push(ptr %t0, i64 %t6)
   store ptr %t0, ptr %a.addr
-  %t4 = load ptr, ptr %a.addr
-  %t5 = ptrtoint ptr @.str.3 to i64
-  %t6 = call ptr @nt_arr_with(ptr %t4, double 0x4000000000000000, i64 %t5)
-  store ptr %t6, ptr %b.addr
-  %t7 = load ptr, ptr %b.addr
-  %t8 = call ptr @nt_arr_join_str(ptr %t7, ptr @.str.4)
-  call void @js_print_str(ptr %t8)
+  %t7 = load ptr, ptr %a.addr
+  %rc8 = call ptr @nt_str_retain(ptr @.str.3)
+  %t9 = ptrtoint ptr @.str.3 to i64
+  %t10 = call ptr @nt_arr_with(ptr %t7, double 0x4000000000000000, i64 %t9)
+  store ptr %t10, ptr %b.addr
+  %t11 = load ptr, ptr %b.addr
+  %t12 = call ptr @nt_arr_join_str(ptr %t11, ptr @.str.4)
+  call void @js_print_str(ptr %t12)
   call void @js_print_newline()
-  %t9 = load ptr, ptr %a.addr
-  %t10 = call ptr @nt_arr_join_str(ptr %t9, ptr @.str.4)
-  call void @js_print_str(ptr %t10)
-  call void @js_print_newline()
-  %t11 = load ptr, ptr %a.addr
-  %t12 = load ptr, ptr %b.addr
-  %t13 = icmp eq ptr %t11, %t12
-  %t14 = zext i1 %t13 to i32
-  call void @js_print_bool(i32 %t14)
+  %t13 = load ptr, ptr %a.addr
+  %t14 = call ptr @nt_arr_join_str(ptr %t13, ptr @.str.4)
+  call void @js_print_str(ptr %t14)
   call void @js_print_newline()
   %t15 = load ptr, ptr %a.addr
-  %t16 = call i64 @nt_arr_get(ptr %t15, double 0x4000000000000000)
-  %t17 = inttoptr i64 %t16 to ptr
-  call void @js_print_str(ptr %t17)
-  %t18 = load ptr, ptr %b.addr
-  %t19 = call i64 @nt_arr_get(ptr %t18, double 0x4000000000000000)
-  %t20 = inttoptr i64 %t19 to ptr
-  call void @js_print_sep()
-  call void @js_print_str(ptr %t20)
+  %t16 = load ptr, ptr %b.addr
+  %t17 = icmp eq ptr %t15, %t16
+  %t18 = zext i1 %t17 to i32
+  call void @js_print_bool(i32 %t18)
   call void @js_print_newline()
-  %t21 = load ptr, ptr %a.addr
-  call void @nt_arr_free(ptr %t21)
+  %t19 = load ptr, ptr %a.addr
+  %t20 = call i64 @nt_arr_get(ptr %t19, double 0x4000000000000000)
+  %t21 = inttoptr i64 %t20 to ptr
+  call void @js_print_str(ptr %t21)
   %t22 = load ptr, ptr %b.addr
-  call void @nt_arr_free(ptr %t22)
+  %t23 = call i64 @nt_arr_get(ptr %t22, double 0x4000000000000000)
+  %t24 = inttoptr i64 %t23 to ptr
+  call void @js_print_sep()
+  call void @js_print_str(ptr %t24)
+  call void @js_print_newline()
+  %t25 = load ptr, ptr %a.addr
+  call void @nt_arr_free(ptr %t25)
+  %t26 = load ptr, ptr %b.addr
+  call void @nt_arr_free(ptr %t26)
   ret i32 0
 }
 "
@@ -10028,6 +10214,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -10105,40 +10294,46 @@ entry:
   br label %L0
 L0:
   %t0 = call ptr @nt_map_new()
-  %t1 = ptrtoint ptr @.str.0 to i64
-  %t2 = bitcast double 0x4024000000000000 to i64
-  %t3 = call ptr @nt_map_put_slot(ptr %t0, i32 1, i64 %t1, i64 %t2)
-  %t4 = ptrtoint ptr @.str.1 to i64
-  %t5 = bitcast double 0x4034000000000000 to i64
-  %t6 = call ptr @nt_map_put_slot(ptr %t3, i32 1, i64 %t4, i64 %t5)
-  %t7 = ptrtoint ptr @.str.0 to i64
-  %t8 = bitcast double 0x4058C00000000000 to i64
-  %t9 = call ptr @nt_map_put_slot(ptr %t6, i32 1, i64 %t7, i64 %t8)
-  store ptr %t9, ptr %m.addr
-  %t10 = load ptr, ptr %m.addr
-  %t11 = ptrtoint ptr @.str.0 to i64
-  %t12 = call i64 @nt_map_get_slot(ptr %t10, i32 1, i64 %t11)
-  %t13 = bitcast i64 %t12 to double
-  call void @js_print_num(double %t13)
-  %t14 = load ptr, ptr %m.addr
-  %t15 = ptrtoint ptr @.str.1 to i64
-  %t16 = call i32 @nt_map_has_slot(ptr %t14, i32 1, i64 %t15)
-  %t17 = icmp ne i32 %t16, 0
-  call void @js_print_sep()
-  %t18 = zext i1 %t17 to i32
-  call void @js_print_bool(i32 %t18)
-  %t19 = load ptr, ptr %m.addr
-  %t20 = ptrtoint ptr @.str.2 to i64
-  %t21 = call i32 @nt_map_has_slot(ptr %t19, i32 1, i64 %t20)
+  %rc1 = call ptr @nt_str_retain(ptr @.str.0)
+  %t2 = ptrtoint ptr @.str.0 to i64
+  %t3 = bitcast double 0x4024000000000000 to i64
+  %t4 = call ptr @nt_map_put_slot(ptr %t0, i32 1, i64 %t2, i64 %t3)
+  %rc5 = call ptr @nt_str_retain(ptr @.str.1)
+  %t6 = ptrtoint ptr @.str.1 to i64
+  %t7 = bitcast double 0x4034000000000000 to i64
+  %t8 = call ptr @nt_map_put_slot(ptr %t4, i32 1, i64 %t6, i64 %t7)
+  %rc9 = call ptr @nt_str_retain(ptr @.str.0)
+  %t10 = ptrtoint ptr @.str.0 to i64
+  %t11 = bitcast double 0x4058C00000000000 to i64
+  %t12 = call ptr @nt_map_put_slot(ptr %t8, i32 1, i64 %t10, i64 %t11)
+  store ptr %t12, ptr %m.addr
+  %t13 = load ptr, ptr %m.addr
+  %rc14 = call ptr @nt_str_retain(ptr @.str.0)
+  %t15 = ptrtoint ptr @.str.0 to i64
+  %t16 = call i64 @nt_map_get_slot(ptr %t13, i32 1, i64 %t15)
+  %t17 = bitcast i64 %t16 to double
+  call void @js_print_num(double %t17)
+  %t18 = load ptr, ptr %m.addr
+  %rc19 = call ptr @nt_str_retain(ptr @.str.1)
+  %t20 = ptrtoint ptr @.str.1 to i64
+  %t21 = call i32 @nt_map_has_slot(ptr %t18, i32 1, i64 %t20)
   %t22 = icmp ne i32 %t21, 0
   call void @js_print_sep()
   %t23 = zext i1 %t22 to i32
   call void @js_print_bool(i32 %t23)
   %t24 = load ptr, ptr %m.addr
-  %t25 = call i64 @nt_map_size(ptr %t24)
-  %t26 = sitofp i64 %t25 to double
+  %rc25 = call ptr @nt_str_retain(ptr @.str.2)
+  %t26 = ptrtoint ptr @.str.2 to i64
+  %t27 = call i32 @nt_map_has_slot(ptr %t24, i32 1, i64 %t26)
+  %t28 = icmp ne i32 %t27, 0
   call void @js_print_sep()
-  call void @js_print_num(double %t26)
+  %t29 = zext i1 %t28 to i32
+  call void @js_print_bool(i32 %t29)
+  %t30 = load ptr, ptr %m.addr
+  %t31 = call i64 @nt_map_size(ptr %t30)
+  %t32 = sitofp i64 %t31 to double
+  call void @js_print_sep()
+  call void @js_print_num(double %t32)
   call void @js_print_newline()
   ret i32 0
 }
@@ -10186,6 +10381,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -10279,56 +10477,62 @@ forbody2:
   %t4 = load double, ptr %i.addr
   %t5 = call ptr @js_num_to_str(double %t4)
   %t6 = call ptr @js_str_concat(ptr @.str.0, ptr %t5)
-  %t7 = ptrtoint ptr %t6 to i64
-  %t8 = load double, ptr %i.addr
+  %rc7 = call ptr @nt_str_retain(ptr %t6)
+  %t8 = ptrtoint ptr %t6 to i64
   %t9 = load double, ptr %i.addr
-  %t10 = fmul double %t8, %t9
-  %t11 = bitcast double %t10 to i64
-  %t12 = call ptr @nt_map_put_slot(ptr %t3, i32 1, i64 %t7, i64 %t11)
-  store ptr %t12, ptr %m.addr
+  %t10 = load double, ptr %i.addr
+  %t11 = fmul double %t9, %t10
+  %t12 = bitcast double %t11 to i64
+  %t13 = call ptr @nt_map_put_slot(ptr %t3, i32 1, i64 %t8, i64 %t12)
+  store ptr %t13, ptr %m.addr
   br label %forupd3
 forupd3:
-  %t13 = load double, ptr %i.addr
-  %t14 = fadd double %t13, 0x3FF0000000000000
-  store double %t14, ptr %i.addr
+  %t14 = load double, ptr %i.addr
+  %t15 = fadd double %t14, 0x3FF0000000000000
+  store double %t15, ptr %i.addr
   br label %for1
 endfor4:
-  %t15 = load ptr, ptr %m.addr
-  %t16 = call i64 @nt_map_size(ptr %t15)
-  %t17 = sitofp i64 %t16 to double
-  call void @js_print_num(double %t17)
-  %t18 = load ptr, ptr %m.addr
-  %t19 = ptrtoint ptr @.str.1 to i64
-  %t20 = call i64 @nt_map_get_slot(ptr %t18, i32 1, i64 %t19)
-  %t21 = bitcast i64 %t20 to double
+  %t16 = load ptr, ptr %m.addr
+  %t17 = call i64 @nt_map_size(ptr %t16)
+  %t18 = sitofp i64 %t17 to double
+  call void @js_print_num(double %t18)
+  %t19 = load ptr, ptr %m.addr
+  %rc20 = call ptr @nt_str_retain(ptr @.str.1)
+  %t21 = ptrtoint ptr @.str.1 to i64
+  %t22 = call i64 @nt_map_get_slot(ptr %t19, i32 1, i64 %t21)
+  %t23 = bitcast i64 %t22 to double
   call void @js_print_sep()
-  call void @js_print_num(double %t21)
-  %t22 = load ptr, ptr %m.addr
-  %t23 = ptrtoint ptr @.str.2 to i64
-  %t24 = call i64 @nt_map_get_slot(ptr %t22, i32 1, i64 %t23)
-  %t25 = bitcast i64 %t24 to double
+  call void @js_print_num(double %t23)
+  %t24 = load ptr, ptr %m.addr
+  %rc25 = call ptr @nt_str_retain(ptr @.str.2)
+  %t26 = ptrtoint ptr @.str.2 to i64
+  %t27 = call i64 @nt_map_get_slot(ptr %t24, i32 1, i64 %t26)
+  %t28 = bitcast i64 %t27 to double
   call void @js_print_sep()
-  call void @js_print_num(double %t25)
-  %t26 = load ptr, ptr %m.addr
-  %t27 = ptrtoint ptr @.str.3 to i64
-  %t28 = call i64 @nt_map_get_slot(ptr %t26, i32 1, i64 %t27)
-  %t29 = bitcast i64 %t28 to double
+  call void @js_print_num(double %t28)
+  %t29 = load ptr, ptr %m.addr
+  %rc30 = call ptr @nt_str_retain(ptr @.str.3)
+  %t31 = ptrtoint ptr @.str.3 to i64
+  %t32 = call i64 @nt_map_get_slot(ptr %t29, i32 1, i64 %t31)
+  %t33 = bitcast i64 %t32 to double
   call void @js_print_sep()
-  call void @js_print_num(double %t29)
-  %t30 = load ptr, ptr %m.addr
-  %t31 = ptrtoint ptr @.str.4 to i64
-  %t32 = call i32 @nt_map_has_slot(ptr %t30, i32 1, i64 %t31)
-  %t33 = icmp ne i32 %t32, 0
-  call void @js_print_sep()
-  %t34 = zext i1 %t33 to i32
-  call void @js_print_bool(i32 %t34)
-  %t35 = load ptr, ptr %m.addr
-  %t36 = ptrtoint ptr @.str.5 to i64
-  %t37 = call i32 @nt_map_has_slot(ptr %t35, i32 1, i64 %t36)
+  call void @js_print_num(double %t33)
+  %t34 = load ptr, ptr %m.addr
+  %rc35 = call ptr @nt_str_retain(ptr @.str.4)
+  %t36 = ptrtoint ptr @.str.4 to i64
+  %t37 = call i32 @nt_map_has_slot(ptr %t34, i32 1, i64 %t36)
   %t38 = icmp ne i32 %t37, 0
   call void @js_print_sep()
   %t39 = zext i1 %t38 to i32
   call void @js_print_bool(i32 %t39)
+  %t40 = load ptr, ptr %m.addr
+  %rc41 = call ptr @nt_str_retain(ptr @.str.5)
+  %t42 = ptrtoint ptr @.str.5 to i64
+  %t43 = call i32 @nt_map_has_slot(ptr %t40, i32 1, i64 %t42)
+  %t44 = icmp ne i32 %t43, 0
+  call void @js_print_sep()
+  %t45 = zext i1 %t44 to i32
+  call void @js_print_bool(i32 %t45)
   call void @js_print_newline()
   ret i32 0
 }
@@ -10376,6 +10580,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -10455,29 +10662,33 @@ L0:
   %t0 = call ptr @nt_map_new()
   store ptr %t0, ptr %m.addr
   %t1 = load ptr, ptr %m.addr
-  %t2 = ptrtoint ptr @.str.0 to i64
-  %t3 = bitcast double 0x3FF0000000000000 to i64
-  %t4 = call ptr @nt_map_put_slot(ptr %t1, i32 1, i64 %t2, i64 %t3)
-  %t5 = ptrtoint ptr @.str.1 to i64
-  %t6 = bitcast double 0x4000000000000000 to i64
-  %t7 = call ptr @nt_map_put_slot(ptr %t4, i32 1, i64 %t5, i64 %t6)
-  store ptr %t7, ptr %m2.addr
-  %t8 = load ptr, ptr %m2.addr
-  %t9 = ptrtoint ptr @.str.0 to i64
-  %t10 = call i64 @nt_map_get_slot(ptr %t8, i32 1, i64 %t9)
-  %t11 = bitcast i64 %t10 to double
-  call void @js_print_num(double %t11)
-  %t12 = load ptr, ptr %m2.addr
-  %t13 = ptrtoint ptr @.str.1 to i64
-  %t14 = call i64 @nt_map_get_slot(ptr %t12, i32 1, i64 %t13)
-  %t15 = bitcast i64 %t14 to double
+  %rc2 = call ptr @nt_str_retain(ptr @.str.0)
+  %t3 = ptrtoint ptr @.str.0 to i64
+  %t4 = bitcast double 0x3FF0000000000000 to i64
+  %t5 = call ptr @nt_map_put_slot(ptr %t1, i32 1, i64 %t3, i64 %t4)
+  %rc6 = call ptr @nt_str_retain(ptr @.str.1)
+  %t7 = ptrtoint ptr @.str.1 to i64
+  %t8 = bitcast double 0x4000000000000000 to i64
+  %t9 = call ptr @nt_map_put_slot(ptr %t5, i32 1, i64 %t7, i64 %t8)
+  store ptr %t9, ptr %m2.addr
+  %t10 = load ptr, ptr %m2.addr
+  %rc11 = call ptr @nt_str_retain(ptr @.str.0)
+  %t12 = ptrtoint ptr @.str.0 to i64
+  %t13 = call i64 @nt_map_get_slot(ptr %t10, i32 1, i64 %t12)
+  %t14 = bitcast i64 %t13 to double
+  call void @js_print_num(double %t14)
+  %t15 = load ptr, ptr %m2.addr
+  %rc16 = call ptr @nt_str_retain(ptr @.str.1)
+  %t17 = ptrtoint ptr @.str.1 to i64
+  %t18 = call i64 @nt_map_get_slot(ptr %t15, i32 1, i64 %t17)
+  %t19 = bitcast i64 %t18 to double
   call void @js_print_sep()
-  call void @js_print_num(double %t15)
-  %t16 = load ptr, ptr %m2.addr
-  %t17 = call i64 @nt_map_size(ptr %t16)
-  %t18 = sitofp i64 %t17 to double
+  call void @js_print_num(double %t19)
+  %t20 = load ptr, ptr %m2.addr
+  %t21 = call i64 @nt_map_size(ptr %t20)
+  %t22 = sitofp i64 %t21 to double
   call void @js_print_sep()
-  call void @js_print_num(double %t18)
+  call void @js_print_num(double %t22)
   call void @js_print_newline()
   ret i32 0
 }
@@ -10525,6 +10736,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -10602,38 +10816,44 @@ entry:
   br label %L0
 L0:
   %t0 = call ptr @nt_set_new()
-  %t1 = ptrtoint ptr @.str.0 to i64
-  %t2 = call ptr @nt_set_add_slot(ptr %t0, i32 1, i64 %t1)
-  %t3 = ptrtoint ptr @.str.1 to i64
-  %t4 = call ptr @nt_set_add_slot(ptr %t2, i32 1, i64 %t3)
-  %t5 = ptrtoint ptr @.str.0 to i64
-  %t6 = call ptr @nt_set_add_slot(ptr %t4, i32 1, i64 %t5)
-  store ptr %t6, ptr %s.addr
-  %t7 = load ptr, ptr %s.addr
+  %rc1 = call ptr @nt_str_retain(ptr @.str.0)
+  %t2 = ptrtoint ptr @.str.0 to i64
+  %t3 = call ptr @nt_set_add_slot(ptr %t0, i32 1, i64 %t2)
+  %rc4 = call ptr @nt_str_retain(ptr @.str.1)
+  %t5 = ptrtoint ptr @.str.1 to i64
+  %t6 = call ptr @nt_set_add_slot(ptr %t3, i32 1, i64 %t5)
+  %rc7 = call ptr @nt_str_retain(ptr @.str.0)
   %t8 = ptrtoint ptr @.str.0 to i64
-  %t9 = call i32 @nt_set_has_slot(ptr %t7, i32 1, i64 %t8)
-  %t10 = icmp ne i32 %t9, 0
-  %t11 = zext i1 %t10 to i32
-  call void @js_print_bool(i32 %t11)
-  %t12 = load ptr, ptr %s.addr
-  %t13 = ptrtoint ptr @.str.1 to i64
-  %t14 = call i32 @nt_set_has_slot(ptr %t12, i32 1, i64 %t13)
-  %t15 = icmp ne i32 %t14, 0
-  call void @js_print_sep()
-  %t16 = zext i1 %t15 to i32
-  call void @js_print_bool(i32 %t16)
-  %t17 = load ptr, ptr %s.addr
-  %t18 = ptrtoint ptr @.str.2 to i64
-  %t19 = call i32 @nt_set_has_slot(ptr %t17, i32 1, i64 %t18)
+  %t9 = call ptr @nt_set_add_slot(ptr %t6, i32 1, i64 %t8)
+  store ptr %t9, ptr %s.addr
+  %t10 = load ptr, ptr %s.addr
+  %rc11 = call ptr @nt_str_retain(ptr @.str.0)
+  %t12 = ptrtoint ptr @.str.0 to i64
+  %t13 = call i32 @nt_set_has_slot(ptr %t10, i32 1, i64 %t12)
+  %t14 = icmp ne i32 %t13, 0
+  %t15 = zext i1 %t14 to i32
+  call void @js_print_bool(i32 %t15)
+  %t16 = load ptr, ptr %s.addr
+  %rc17 = call ptr @nt_str_retain(ptr @.str.1)
+  %t18 = ptrtoint ptr @.str.1 to i64
+  %t19 = call i32 @nt_set_has_slot(ptr %t16, i32 1, i64 %t18)
   %t20 = icmp ne i32 %t19, 0
   call void @js_print_sep()
   %t21 = zext i1 %t20 to i32
   call void @js_print_bool(i32 %t21)
   %t22 = load ptr, ptr %s.addr
-  %t23 = call i64 @nt_set_size(ptr %t22)
-  %t24 = sitofp i64 %t23 to double
+  %rc23 = call ptr @nt_str_retain(ptr @.str.2)
+  %t24 = ptrtoint ptr @.str.2 to i64
+  %t25 = call i32 @nt_set_has_slot(ptr %t22, i32 1, i64 %t24)
+  %t26 = icmp ne i32 %t25, 0
   call void @js_print_sep()
-  call void @js_print_num(double %t24)
+  %t27 = zext i1 %t26 to i32
+  call void @js_print_bool(i32 %t27)
+  %t28 = load ptr, ptr %s.addr
+  %t29 = call i64 @nt_set_size(ptr %t28)
+  %t30 = sitofp i64 %t29 to double
+  call void @js_print_sep()
+  call void @js_print_num(double %t30)
   call void @js_print_newline()
   ret i32 0
 }
@@ -10681,6 +10901,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -10835,6 +11058,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -11035,6 +11261,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -11211,6 +11440,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -11555,6 +11787,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -11829,6 +12064,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -11898,10 +12136,10 @@ declare i64 @nt_sup_start(i64)
 
 define i32 @main() {
 entry:
+  %base.addr = alloca ptr
   %items.addr = alloca ptr
   %it.addr = alloca ptr
   %total.addr = alloca double
-  %last.addr = alloca ptr
   %s1 = alloca double
   %acc.addr = alloca double
   %s6 = alloca double
@@ -11920,89 +12158,92 @@ L0:
   store i64 %t6, ptr %t7
   %t8 = ptrtoint ptr %t5 to i64
   call double @nt_arr_push(ptr %t0, i64 %t8)
-  store ptr %t0, ptr %items.addr
-  %t9 = load ptr, ptr %items.addr
-  %t10 = call ptr @nt_obj_new(double 0x3FF0000000000000)
-  %t11 = bitcast double 0x4008000000000000 to i64
-  %t12 = getelementptr i64, ptr %t10, i64 0
-  store i64 %t11, ptr %t12
-  %t13 = ptrtoint ptr %t10 to i64
-  %t14 = call double @nt_arr_push(ptr %t9, i64 %t13)
-  %t15 = load ptr, ptr %items.addr
-  %t16 = call ptr @nt_obj_new(double 0x3FF0000000000000)
-  %t17 = bitcast double 0x4010000000000000 to i64
-  %t18 = getelementptr i64, ptr %t16, i64 0
-  store i64 %t17, ptr %t18
-  %t19 = ptrtoint ptr %t16 to i64
-  %t20 = call double @nt_arr_push(ptr %t15, i64 %t19)
-  %t21 = load ptr, ptr %items.addr
-  %t22 = call double @nt_arr_len(ptr %t21)
-  call void @js_print_num(double %t22)
+  store ptr %t0, ptr %base.addr
+  %t9 = call ptr @nt_arr_new(double 0x4008000000000000)
+  %t10 = load ptr, ptr %base.addr
+  call void @nt_arr_extend(ptr %t9, ptr %t10)
+  %t11 = call ptr @nt_obj_new(double 0x3FF0000000000000)
+  %t12 = bitcast double 0x4008000000000000 to i64
+  %t13 = getelementptr i64, ptr %t11, i64 0
+  store i64 %t12, ptr %t13
+  %t14 = ptrtoint ptr %t11 to i64
+  call double @nt_arr_push(ptr %t9, i64 %t14)
+  %t15 = call ptr @nt_obj_new(double 0x3FF0000000000000)
+  %t16 = bitcast double 0x4010000000000000 to i64
+  %t17 = getelementptr i64, ptr %t15, i64 0
+  store i64 %t16, ptr %t17
+  %t18 = ptrtoint ptr %t15 to i64
+  call double @nt_arr_push(ptr %t9, i64 %t18)
+  store ptr %t9, ptr %items.addr
+  %t19 = load ptr, ptr %items.addr
+  %t20 = call double @nt_arr_len(ptr %t19)
+  call void @js_print_num(double %t20)
   call void @js_print_newline()
-  %t23 = load ptr, ptr %items.addr
+  %t21 = load ptr, ptr %items.addr
   store double 0x0000000000000000, ptr %s1
-  %t24 = call double @nt_arr_len(ptr %t23)
+  %t22 = call double @nt_arr_len(ptr %t21)
   br label %of2
 of2:
-  %t25 = load double, ptr %s1
-  %t26 = fcmp olt double %t25, %t24
-  br i1 %t26, label %ofbody3, label %endof5
+  %t23 = load double, ptr %s1
+  %t24 = fcmp olt double %t23, %t22
+  br i1 %t24, label %ofbody3, label %endof5
 ofbody3:
-  %t27 = load double, ptr %s1
-  %t28 = call i64 @nt_arr_get(ptr %t23, double %t27)
-  %t29 = inttoptr i64 %t28 to ptr
-  store ptr %t29, ptr %it.addr
-  %t30 = load ptr, ptr %it.addr
-  %t31 = getelementptr i64, ptr %t30, i64 0
-  %t32 = load i64, ptr %t31
-  %t33 = bitcast i64 %t32 to double
-  call void @js_print_num(double %t33)
+  %t25 = load double, ptr %s1
+  %t26 = call i64 @nt_arr_get(ptr %t21, double %t25)
+  %t27 = inttoptr i64 %t26 to ptr
+  store ptr %t27, ptr %it.addr
+  %t28 = load ptr, ptr %it.addr
+  %t29 = getelementptr i64, ptr %t28, i64 0
+  %t30 = load i64, ptr %t29
+  %t31 = bitcast i64 %t30 to double
+  call void @js_print_num(double %t31)
   call void @js_print_newline()
   br label %ofupd4
 ofupd4:
-  %t34 = load double, ptr %s1
-  %t35 = fadd double %t34, 1.0
-  store double %t35, ptr %s1
+  %t32 = load double, ptr %s1
+  %t33 = fadd double %t32, 1.0
+  store double %t33, ptr %s1
   br label %of2
 endof5:
-  %t36 = load ptr, ptr %items.addr
+  %t34 = load ptr, ptr %items.addr
   store double 0x0000000000000000, ptr %acc.addr
-  %t37 = call double @nt_arr_len(ptr %t36)
+  %t35 = call double @nt_arr_len(ptr %t34)
   store double 0x0000000000000000, ptr %s6
   br label %red7
 red7:
-  %t38 = load double, ptr %s6
-  %t39 = fcmp olt double %t38, %t37
-  br i1 %t39, label %redb8, label %rede10
+  %t36 = load double, ptr %s6
+  %t37 = fcmp olt double %t36, %t35
+  br i1 %t37, label %redb8, label %rede10
 redb8:
-  %t40 = load double, ptr %s6
-  %t41 = call i64 @nt_arr_get(ptr %t36, double %t40)
-  %t42 = inttoptr i64 %t41 to ptr
-  store ptr %t42, ptr %it.addr
-  %t43 = load double, ptr %acc.addr
-  %t44 = load ptr, ptr %it.addr
-  %t45 = getelementptr i64, ptr %t44, i64 0
-  %t46 = load i64, ptr %t45
-  %t47 = bitcast i64 %t46 to double
-  %t48 = fadd double %t43, %t47
-  store double %t48, ptr %acc.addr
+  %t38 = load double, ptr %s6
+  %t39 = call i64 @nt_arr_get(ptr %t34, double %t38)
+  %t40 = inttoptr i64 %t39 to ptr
+  store ptr %t40, ptr %it.addr
+  %t41 = load double, ptr %acc.addr
+  %t42 = load ptr, ptr %it.addr
+  %t43 = getelementptr i64, ptr %t42, i64 0
+  %t44 = load i64, ptr %t43
+  %t45 = bitcast i64 %t44 to double
+  %t46 = fadd double %t41, %t45
+  store double %t46, ptr %acc.addr
   br label %redu9
 redu9:
-  %t49 = load double, ptr %s6
-  %t50 = fadd double %t49, 1.0
-  store double %t50, ptr %s6
+  %t47 = load double, ptr %s6
+  %t48 = fadd double %t47, 1.0
+  store double %t48, ptr %s6
   br label %red7
 rede10:
-  %t51 = load double, ptr %acc.addr
-  store double %t51, ptr %total.addr
-  %t52 = load double, ptr %total.addr
-  call void @js_print_num(double %t52)
+  %t49 = load double, ptr %acc.addr
+  store double %t49, ptr %total.addr
+  %t50 = load double, ptr %total.addr
+  call void @js_print_num(double %t50)
   call void @js_print_newline()
-  %t53 = load ptr, ptr %items.addr
-  %t54 = call i64 @nt_arr_pop(ptr %t53)
-  %t55 = inttoptr i64 %t54 to ptr
-  store ptr %t55, ptr %last.addr
-  %t56 = load ptr, ptr %last.addr
+  %t51 = load ptr, ptr %items.addr
+  %t52 = load ptr, ptr %items.addr
+  %t53 = call double @nt_arr_len(ptr %t52)
+  %t54 = fsub double %t53, 0x3FF0000000000000
+  %t55 = call i64 @nt_arr_get(ptr %t51, double %t54)
+  %t56 = inttoptr i64 %t55 to ptr
   %t57 = getelementptr i64, ptr %t56, i64 0
   %t58 = load i64, ptr %t57
   %t59 = bitcast i64 %t58 to double
@@ -12012,10 +12253,418 @@ rede10:
   call void @js_print_sep()
   call void @js_print_num(double %t61)
   call void @js_print_newline()
-  %t62 = load ptr, ptr %items.addr
+  %t62 = load ptr, ptr %base.addr
   call void @nt_arr_free(ptr %t62)
-  %t63 = load ptr, ptr %last.addr
-  call void @nt_obj_free(ptr %t63)
+  %t63 = load ptr, ptr %items.addr
+  call void @nt_arr_free(ptr %t63)
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures stage29-string-rc/alias-value-semantics.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_with(ptr, double, i64)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare ptr @nt_map_new()
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare i64 @nt_map_size(ptr)
+declare ptr @nt_set_new()
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_set_size(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+
+@.str.0 = private unnamed_addr constant [1 x i8] c"\\00"
+@.str.1 = private unnamed_addr constant [3 x i8] c"ab\\00"
+
+define ptr @repeatJoin(ptr %word, double %n) {
+entry:
+  %word.addr = alloca ptr
+  %n.addr = alloca double
+  %out.addr = alloca ptr
+  %i.addr = alloca double
+  %t.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %word, ptr %word.addr
+  store double %n, ptr %n.addr
+  store ptr null, ptr %out.addr
+  store ptr null, ptr %t.addr
+  %rc0 = call ptr @nt_str_retain(ptr @.str.0)
+  store ptr @.str.0, ptr %out.addr
+  store double 0x0000000000000000, ptr %i.addr
+  br label %for1
+for1:
+  %t1 = load double, ptr %i.addr
+  %t2 = load double, ptr %n.addr
+  %t3 = fcmp olt double %t1, %t2
+  br i1 %t3, label %forbody2, label %endfor4
+forbody2:
+  %t4 = load ptr, ptr %word.addr
+  %rc5 = call ptr @nt_str_retain(ptr %t4)
+  store ptr %t4, ptr %t.addr
+  %t6 = load ptr, ptr %out.addr
+  %t7 = load ptr, ptr %t.addr
+  %t8 = call ptr @js_str_concat(ptr %t6, ptr %t7)
+  store ptr %t8, ptr %out.addr
+  %t9 = load ptr, ptr %out.addr
+  %t10 = load ptr, ptr %word.addr
+  %t11 = call ptr @js_str_concat(ptr %t9, ptr %t10)
+  store ptr %t11, ptr %out.addr
+  br label %forupd3
+forupd3:
+  %t12 = load double, ptr %i.addr
+  %t13 = fadd double %t12, 0x3FF0000000000000
+  store double %t13, ptr %i.addr
+  br label %for1
+endfor4:
+  %t14 = load ptr, ptr %out.addr
+  %t15 = load ptr, ptr %t.addr
+  call void @nt_str_release(ptr %t15)
+  ret ptr %t14
+}
+
+define i32 @main() {
+entry:
+  %a.addr = alloca ptr
+  %b.addr = alloca ptr
+  %c.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr null, ptr %a.addr
+  store ptr null, ptr %b.addr
+  store ptr null, ptr %c.addr
+  %rc0 = call ptr @nt_str_retain(ptr @.str.1)
+  store ptr @.str.1, ptr %a.addr
+  %t1 = load ptr, ptr %a.addr
+  %rc2 = call ptr @nt_str_retain(ptr %t1)
+  store ptr %t1, ptr %b.addr
+  %t3 = load ptr, ptr %a.addr
+  %t4 = load ptr, ptr %b.addr
+  %t5 = call ptr @js_str_concat(ptr %t3, ptr %t4)
+  store ptr %t5, ptr %c.addr
+  %t6 = load ptr, ptr %c.addr
+  call void @js_print_str(ptr %t6)
+  call void @js_print_newline()
+  %t7 = load ptr, ptr %c.addr
+  %t8 = call ptr @repeatJoin(ptr %t7, double 0x4008000000000000)
+  call void @js_print_str(ptr %t8)
+  call void @js_print_newline()
+  %t9 = load ptr, ptr %a.addr
+  call void @js_print_str(ptr %t9)
+  %t10 = load ptr, ptr %b.addr
+  call void @js_print_sep()
+  call void @js_print_str(ptr %t10)
+  %t11 = load ptr, ptr %c.addr
+  call void @js_print_sep()
+  call void @js_print_str(ptr %t11)
+  call void @js_print_newline()
+  %t12 = load ptr, ptr %a.addr
+  call void @nt_str_release(ptr %t12)
+  %t13 = load ptr, ptr %b.addr
+  call void @nt_str_release(ptr %t13)
+  %t14 = load ptr, ptr %c.addr
+  call void @nt_str_release(ptr %t14)
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures stage29-string-rc/loop-concat.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_with(ptr, double, i64)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare ptr @nt_map_new()
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare i64 @nt_map_size(ptr)
+declare ptr @nt_set_new()
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_set_size(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+
+@.str.0 = private unnamed_addr constant [5 x i8] c"row-\\00"
+@.str.1 = private unnamed_addr constant [2 x i8] c"|\\00"
+@.str.2 = private unnamed_addr constant [1 x i8] c"\\00"
+@.str.3 = private unnamed_addr constant [2 x i8] c"\\0A\\00"
+
+define ptr @label(double %i) {
+entry:
+  %i.addr = alloca double
+  %base.addr = alloca ptr
+  %up.addr = alloca ptr
+  %alias.addr = alloca ptr
+  br label %L0
+L0:
+  store double %i, ptr %i.addr
+  store ptr null, ptr %base.addr
+  store ptr null, ptr %up.addr
+  store ptr null, ptr %alias.addr
+  %t0 = load double, ptr %i.addr
+  %t1 = call ptr @js_num_to_str(double %t0)
+  %t2 = call ptr @js_str_concat(ptr @.str.0, ptr %t1)
+  store ptr %t2, ptr %base.addr
+  %t3 = load ptr, ptr %base.addr
+  %t4 = call ptr @js_str_upper(ptr %t3)
+  store ptr %t4, ptr %up.addr
+  %t5 = load ptr, ptr %up.addr
+  %rc6 = call ptr @nt_str_retain(ptr %t5)
+  store ptr %t5, ptr %alias.addr
+  %t7 = load ptr, ptr %alias.addr
+  %t8 = call ptr @js_str_slice(ptr %t7, double 0x0000000000000000, double 0x4014000000000000)
+  %t9 = call ptr @js_str_concat(ptr %t8, ptr @.str.1)
+  %t10 = load ptr, ptr %base.addr
+  %t11 = call ptr @js_str_concat(ptr %t9, ptr %t10)
+  %t12 = load ptr, ptr %base.addr
+  call void @nt_str_release(ptr %t12)
+  %t13 = load ptr, ptr %up.addr
+  call void @nt_str_release(ptr %t13)
+  %t14 = load ptr, ptr %alias.addr
+  call void @nt_str_release(ptr %t14)
+  ret ptr %t11
+}
+
+define i32 @main() {
+entry:
+  %acc.addr = alloca ptr
+  %i.addr = alloca double
+  %s.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr null, ptr %acc.addr
+  store ptr null, ptr %s.addr
+  %rc0 = call ptr @nt_str_retain(ptr @.str.2)
+  store ptr @.str.2, ptr %acc.addr
+  store double 0x0000000000000000, ptr %i.addr
+  br label %for1
+for1:
+  %t1 = load double, ptr %i.addr
+  %t2 = fcmp olt double %t1, 0x4020000000000000
+  br i1 %t2, label %forbody2, label %endfor4
+forbody2:
+  %t3 = load double, ptr %i.addr
+  %t4 = call ptr @label(double %t3)
+  store ptr %t4, ptr %s.addr
+  %t5 = load ptr, ptr %acc.addr
+  %t6 = load ptr, ptr %s.addr
+  %t7 = call ptr @js_str_concat(ptr %t5, ptr %t6)
+  %t8 = call ptr @js_str_concat(ptr %t7, ptr @.str.3)
+  store ptr %t8, ptr %acc.addr
+  br label %forupd3
+forupd3:
+  %t9 = load double, ptr %i.addr
+  %t10 = fadd double %t9, 0x3FF0000000000000
+  store double %t10, ptr %i.addr
+  br label %for1
+endfor4:
+  %t11 = load ptr, ptr %acc.addr
+  call void @js_print_str(ptr %t11)
+  call void @js_print_newline()
+  %t12 = load ptr, ptr %acc.addr
+  %t13 = call double @js_str_len(ptr %t12)
+  call void @js_print_num(double %t13)
+  call void @js_print_newline()
+  %t14 = load ptr, ptr %acc.addr
+  call void @nt_str_release(ptr %t14)
+  %t15 = load ptr, ptr %s.addr
+  call void @nt_str_release(ptr %t15)
   ret i32 0
 }
 "
@@ -12062,6 +12711,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -12187,6 +12839,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -12309,6 +12964,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -12387,18 +13045,22 @@ entry:
   %n.addr = alloca double
   br label %L0
 L0:
+  store ptr null, ptr %name.addr
+  %rc0 = call ptr @nt_str_retain(ptr @.str.0)
   store ptr @.str.0, ptr %name.addr
   store double 0x4045000000000000, ptr %n.addr
-  %t0 = load ptr, ptr %name.addr
-  %t1 = call ptr @js_str_concat(ptr @.str.1, ptr %t0)
-  %t2 = call ptr @js_str_concat(ptr %t1, ptr @.str.2)
-  %t3 = load double, ptr %n.addr
-  %t4 = fmul double %t3, 0x4000000000000000
-  %t5 = call ptr @js_num_to_str(double %t4)
-  %t6 = call ptr @js_str_concat(ptr %t2, ptr %t5)
-  %t7 = call ptr @js_str_concat(ptr %t6, ptr @.str.3)
-  call void @js_print_str(ptr %t7)
+  %t1 = load ptr, ptr %name.addr
+  %t2 = call ptr @js_str_concat(ptr @.str.1, ptr %t1)
+  %t3 = call ptr @js_str_concat(ptr %t2, ptr @.str.2)
+  %t4 = load double, ptr %n.addr
+  %t5 = fmul double %t4, 0x4000000000000000
+  %t6 = call ptr @js_num_to_str(double %t5)
+  %t7 = call ptr @js_str_concat(ptr %t3, ptr %t6)
+  %t8 = call ptr @js_str_concat(ptr %t7, ptr @.str.3)
+  call void @js_print_str(ptr %t8)
   call void @js_print_newline()
+  %t9 = load ptr, ptr %name.addr
+  call void @nt_str_release(ptr %t9)
   ret i32 0
 }
 "
@@ -12445,6 +13107,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -12576,6 +13241,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -12717,6 +13385,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -12849,6 +13520,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -12976,6 +13650,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -13123,6 +13800,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -13271,6 +13951,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -13408,6 +14091,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -13485,6 +14171,7 @@ entry:
   %xs.addr = alloca ptr
   %sum.addr = alloca double
   %x.addr = alloca double
+  %ys.addr = alloca ptr
   %words.addr = alloca ptr
   %s1 = alloca double
   br label %L0
@@ -13526,58 +14213,64 @@ ofupd4:
   store double %t17, ptr %s1
   br label %of2
 endof5:
-  %t18 = load ptr, ptr %xs.addr
-  %t19 = bitcast double 0x4022000000000000 to i64
-  %t20 = call double @nt_arr_push(ptr %t18, i64 %t19)
+  %t18 = call ptr @nt_arr_new(double 0x4000000000000000)
+  %t19 = load ptr, ptr %xs.addr
+  call void @nt_arr_extend(ptr %t18, ptr %t19)
+  %t20 = bitcast double 0x4022000000000000 to i64
+  call double @nt_arr_push(ptr %t18, i64 %t20)
+  store ptr %t18, ptr %ys.addr
   %t21 = load double, ptr %sum.addr
   call void @js_print_num(double %t21)
-  %t22 = load ptr, ptr %xs.addr
+  %t22 = load ptr, ptr %ys.addr
   %t23 = call double @nt_arr_len(ptr %t22)
   call void @js_print_sep()
   call void @js_print_num(double %t23)
-  %t24 = load ptr, ptr %xs.addr
+  %t24 = load ptr, ptr %ys.addr
   %t25 = call ptr @nt_arr_join_num(ptr %t24, ptr @.str.0)
   call void @js_print_sep()
   call void @js_print_str(ptr %t25)
   call void @js_print_newline()
-  %t26 = load ptr, ptr %xs.addr
+  %t26 = load ptr, ptr %ys.addr
   %t27 = call i32 @nt_arr_includes_num(ptr %t26, double 0x4010000000000000)
   %t28 = icmp ne i32 %t27, 0
   %t29 = zext i1 %t28 to i32
   call void @js_print_bool(i32 %t29)
-  %t30 = load ptr, ptr %xs.addr
+  %t30 = load ptr, ptr %ys.addr
   %t31 = call double @nt_arr_indexof_num(ptr %t30, double 0x4014000000000000)
   call void @js_print_sep()
   call void @js_print_num(double %t31)
   %t32 = load ptr, ptr %xs.addr
-  %t33 = call i64 @nt_arr_pop(ptr %t32)
-  %t34 = bitcast i64 %t33 to double
+  %t33 = call double @nt_arr_len(ptr %t32)
   call void @js_print_sep()
-  call void @js_print_num(double %t34)
+  call void @js_print_num(double %t33)
   call void @js_print_newline()
-  %t35 = call ptr @nt_arr_new(double 0x4000000000000000)
+  %t34 = call ptr @nt_arr_new(double 0x4000000000000000)
+  %rc35 = call ptr @nt_str_retain(ptr @.str.1)
   %t36 = ptrtoint ptr @.str.1 to i64
-  call double @nt_arr_push(ptr %t35, i64 %t36)
-  %t37 = ptrtoint ptr @.str.2 to i64
-  call double @nt_arr_push(ptr %t35, i64 %t37)
-  store ptr %t35, ptr %words.addr
-  %t38 = load ptr, ptr %words.addr
-  %t39 = call i64 @nt_arr_get(ptr %t38, double 0x3FF0000000000000)
-  %t40 = inttoptr i64 %t39 to ptr
-  call void @js_print_str(ptr %t40)
-  %t41 = load ptr, ptr %words.addr
-  %t42 = call ptr @nt_arr_join_str(ptr %t41, ptr @.str.3)
+  call double @nt_arr_push(ptr %t34, i64 %t36)
+  %rc37 = call ptr @nt_str_retain(ptr @.str.2)
+  %t38 = ptrtoint ptr @.str.2 to i64
+  call double @nt_arr_push(ptr %t34, i64 %t38)
+  store ptr %t34, ptr %words.addr
+  %t39 = load ptr, ptr %words.addr
+  %t40 = call i64 @nt_arr_get(ptr %t39, double 0x3FF0000000000000)
+  %t41 = inttoptr i64 %t40 to ptr
+  call void @js_print_str(ptr %t41)
+  %t42 = load ptr, ptr %words.addr
+  %t43 = call ptr @nt_arr_join_str(ptr %t42, ptr @.str.3)
   call void @js_print_sep()
-  call void @js_print_str(ptr %t42)
-  %t43 = load ptr, ptr %words.addr
-  %t44 = call double @nt_arr_len(ptr %t43)
+  call void @js_print_str(ptr %t43)
+  %t44 = load ptr, ptr %words.addr
+  %t45 = call double @nt_arr_len(ptr %t44)
   call void @js_print_sep()
-  call void @js_print_num(double %t44)
+  call void @js_print_num(double %t45)
   call void @js_print_newline()
-  %t45 = load ptr, ptr %xs.addr
-  call void @nt_arr_free(ptr %t45)
-  %t46 = load ptr, ptr %words.addr
+  %t46 = load ptr, ptr %xs.addr
   call void @nt_arr_free(ptr %t46)
+  %t47 = load ptr, ptr %ys.addr
+  call void @nt_arr_free(ptr %t47)
+  %t48 = load ptr, ptr %words.addr
+  call void @nt_arr_free(ptr %t48)
   ret i32 0
 }
 "
@@ -13624,6 +14317,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
@@ -13707,108 +14403,122 @@ entry:
   %s1 = alloca double
   br label %L0
 L0:
+  store ptr null, ptr %ks.addr
   %t0 = call ptr @nt_obj_new(double 0x4008000000000000)
-  %t1 = ptrtoint ptr @.str.0 to i64
-  %t2 = getelementptr i64, ptr %t0, i64 0
-  store i64 %t1, ptr %t2
-  %t3 = bitcast double 0x4042000000000000 to i64
-  %t4 = getelementptr i64, ptr %t0, i64 1
-  store i64 %t3, ptr %t4
-  %t5 = zext i1 true to i64
-  %t6 = getelementptr i64, ptr %t0, i64 2
-  store i64 %t5, ptr %t6
+  %rc1 = call ptr @nt_str_retain(ptr @.str.0)
+  %t2 = ptrtoint ptr @.str.0 to i64
+  %t3 = getelementptr i64, ptr %t0, i64 0
+  store i64 %t2, ptr %t3
+  %t4 = bitcast double 0x4042000000000000 to i64
+  %t5 = getelementptr i64, ptr %t0, i64 1
+  store i64 %t4, ptr %t5
+  %t6 = zext i1 true to i64
+  %t7 = getelementptr i64, ptr %t0, i64 2
+  store i64 %t6, ptr %t7
   store ptr %t0, ptr %p.addr
-  %t7 = load ptr, ptr %p.addr
-  %t8 = getelementptr i64, ptr %t7, i64 0
-  %t9 = load i64, ptr %t8
-  %t10 = inttoptr i64 %t9 to ptr
-  call void @js_print_str(ptr %t10)
-  %t11 = load ptr, ptr %p.addr
-  %t12 = getelementptr i64, ptr %t11, i64 1
-  %t13 = load i64, ptr %t12
-  %t14 = bitcast i64 %t13 to double
+  %t8 = load ptr, ptr %p.addr
+  %t9 = getelementptr i64, ptr %t8, i64 0
+  %t10 = load i64, ptr %t9
+  %t11 = inttoptr i64 %t10 to ptr
+  call void @js_print_str(ptr %t11)
+  %t12 = load ptr, ptr %p.addr
+  %t13 = getelementptr i64, ptr %t12, i64 1
+  %t14 = load i64, ptr %t13
+  %t15 = bitcast i64 %t14 to double
   call void @js_print_sep()
-  call void @js_print_num(double %t14)
-  %t15 = load ptr, ptr %p.addr
-  %t16 = getelementptr i64, ptr %t15, i64 2
-  %t17 = load i64, ptr %t16
-  %t18 = trunc i64 %t17 to i1
+  call void @js_print_num(double %t15)
+  %t16 = load ptr, ptr %p.addr
+  %t17 = getelementptr i64, ptr %t16, i64 2
+  %t18 = load i64, ptr %t17
+  %t19 = trunc i64 %t18 to i1
   call void @js_print_sep()
-  %t19 = zext i1 %t18 to i32
-  call void @js_print_bool(i32 %t19)
+  %t20 = zext i1 %t19 to i32
+  call void @js_print_bool(i32 %t20)
   call void @js_print_newline()
-  %t20 = call ptr @nt_obj_new(double 0x4008000000000000)
-  %t21 = bitcast double 0x3FF0000000000000 to i64
-  %t22 = getelementptr i64, ptr %t20, i64 0
-  store i64 %t21, ptr %t22
-  %t23 = bitcast double 0x4000000000000000 to i64
-  %t24 = getelementptr i64, ptr %t20, i64 1
-  store i64 %t23, ptr %t24
-  %t25 = bitcast double 0x4008000000000000 to i64
-  %t26 = getelementptr i64, ptr %t20, i64 2
-  store i64 %t25, ptr %t26
-  store ptr %t20, ptr %o.addr
-  %t27 = load ptr, ptr %o.addr
-  %t28 = call ptr @nt_arr_new(double 0x4008000000000000)
-  %t29 = ptrtoint ptr @.str.1 to i64
-  call double @nt_arr_push(ptr %t28, i64 %t29)
-  %t30 = ptrtoint ptr @.str.2 to i64
-  call double @nt_arr_push(ptr %t28, i64 %t30)
-  %t31 = ptrtoint ptr @.str.3 to i64
-  call double @nt_arr_push(ptr %t28, i64 %t31)
-  %t32 = call ptr @nt_arr_join_str(ptr %t28, ptr @.str.4)
-  call void @js_print_str(ptr %t32)
-  %t33 = load ptr, ptr %o.addr
-  %t34 = call ptr @nt_arr_new(double 0x4008000000000000)
-  %t35 = ptrtoint ptr @.str.1 to i64
-  call double @nt_arr_push(ptr %t34, i64 %t35)
-  %t36 = ptrtoint ptr @.str.2 to i64
-  call double @nt_arr_push(ptr %t34, i64 %t36)
-  %t37 = ptrtoint ptr @.str.3 to i64
-  call double @nt_arr_push(ptr %t34, i64 %t37)
-  %t38 = call double @nt_arr_len(ptr %t34)
-  call void @js_print_sep()
-  call void @js_print_num(double %t38)
-  call void @js_print_newline()
-  store ptr @.str.5, ptr %ks.addr
-  %t39 = load ptr, ptr %o.addr
-  %t40 = call ptr @nt_arr_new(double 0x4008000000000000)
-  %t41 = ptrtoint ptr @.str.1 to i64
-  call double @nt_arr_push(ptr %t40, i64 %t41)
+  %t21 = call ptr @nt_obj_new(double 0x4008000000000000)
+  %t22 = bitcast double 0x3FF0000000000000 to i64
+  %t23 = getelementptr i64, ptr %t21, i64 0
+  store i64 %t22, ptr %t23
+  %t24 = bitcast double 0x4000000000000000 to i64
+  %t25 = getelementptr i64, ptr %t21, i64 1
+  store i64 %t24, ptr %t25
+  %t26 = bitcast double 0x4008000000000000 to i64
+  %t27 = getelementptr i64, ptr %t21, i64 2
+  store i64 %t26, ptr %t27
+  store ptr %t21, ptr %o.addr
+  %t28 = load ptr, ptr %o.addr
+  %t29 = call ptr @nt_arr_new(double 0x4008000000000000)
+  %rc30 = call ptr @nt_str_retain(ptr @.str.1)
+  %t31 = ptrtoint ptr @.str.1 to i64
+  call double @nt_arr_push(ptr %t29, i64 %t31)
+  %rc32 = call ptr @nt_str_retain(ptr @.str.2)
+  %t33 = ptrtoint ptr @.str.2 to i64
+  call double @nt_arr_push(ptr %t29, i64 %t33)
+  %rc34 = call ptr @nt_str_retain(ptr @.str.3)
+  %t35 = ptrtoint ptr @.str.3 to i64
+  call double @nt_arr_push(ptr %t29, i64 %t35)
+  %t36 = call ptr @nt_arr_join_str(ptr %t29, ptr @.str.4)
+  call void @js_print_str(ptr %t36)
+  %t37 = load ptr, ptr %o.addr
+  %t38 = call ptr @nt_arr_new(double 0x4008000000000000)
+  %rc39 = call ptr @nt_str_retain(ptr @.str.1)
+  %t40 = ptrtoint ptr @.str.1 to i64
+  call double @nt_arr_push(ptr %t38, i64 %t40)
+  %rc41 = call ptr @nt_str_retain(ptr @.str.2)
   %t42 = ptrtoint ptr @.str.2 to i64
-  call double @nt_arr_push(ptr %t40, i64 %t42)
-  %t43 = ptrtoint ptr @.str.3 to i64
-  call double @nt_arr_push(ptr %t40, i64 %t43)
+  call double @nt_arr_push(ptr %t38, i64 %t42)
+  %rc43 = call ptr @nt_str_retain(ptr @.str.3)
+  %t44 = ptrtoint ptr @.str.3 to i64
+  call double @nt_arr_push(ptr %t38, i64 %t44)
+  %t45 = call double @nt_arr_len(ptr %t38)
+  call void @js_print_sep()
+  call void @js_print_num(double %t45)
+  call void @js_print_newline()
+  %rc46 = call ptr @nt_str_retain(ptr @.str.5)
+  store ptr @.str.5, ptr %ks.addr
+  %t47 = load ptr, ptr %o.addr
+  %t48 = call ptr @nt_arr_new(double 0x4008000000000000)
+  %rc49 = call ptr @nt_str_retain(ptr @.str.1)
+  %t50 = ptrtoint ptr @.str.1 to i64
+  call double @nt_arr_push(ptr %t48, i64 %t50)
+  %rc51 = call ptr @nt_str_retain(ptr @.str.2)
+  %t52 = ptrtoint ptr @.str.2 to i64
+  call double @nt_arr_push(ptr %t48, i64 %t52)
+  %rc53 = call ptr @nt_str_retain(ptr @.str.3)
+  %t54 = ptrtoint ptr @.str.3 to i64
+  call double @nt_arr_push(ptr %t48, i64 %t54)
   store double 0x0000000000000000, ptr %s1
-  %t44 = call double @nt_arr_len(ptr %t40)
+  %t55 = call double @nt_arr_len(ptr %t48)
   br label %in2
 in2:
-  %t45 = load double, ptr %s1
-  %t46 = fcmp olt double %t45, %t44
-  br i1 %t46, label %inbody3, label %endin5
+  %t56 = load double, ptr %s1
+  %t57 = fcmp olt double %t56, %t55
+  br i1 %t57, label %inbody3, label %endin5
 inbody3:
-  %t47 = load double, ptr %s1
-  %t48 = call i64 @nt_arr_get(ptr %t40, double %t47)
-  %t49 = inttoptr i64 %t48 to ptr
-  store ptr %t49, ptr %k.addr
-  %t50 = load ptr, ptr %ks.addr
-  %t51 = load ptr, ptr %k.addr
-  %t52 = call ptr @js_str_concat(ptr %t50, ptr %t51)
-  store ptr %t52, ptr %ks.addr
+  %t58 = load double, ptr %s1
+  %t59 = call i64 @nt_arr_get(ptr %t48, double %t58)
+  %t60 = inttoptr i64 %t59 to ptr
+  store ptr %t60, ptr %k.addr
+  %t61 = load ptr, ptr %ks.addr
+  %t62 = load ptr, ptr %k.addr
+  %t63 = call ptr @js_str_concat(ptr %t61, ptr %t62)
+  store ptr %t63, ptr %ks.addr
   br label %inupd4
 inupd4:
-  %t53 = load double, ptr %s1
-  %t54 = fadd double %t53, 1.0
-  store double %t54, ptr %s1
+  %t64 = load double, ptr %s1
+  %t65 = fadd double %t64, 1.0
+  store double %t65, ptr %s1
   br label %in2
 endin5:
-  %t55 = load ptr, ptr %ks.addr
-  call void @js_print_str(ptr %t55)
+  %t66 = load ptr, ptr %ks.addr
+  call void @js_print_str(ptr %t66)
   call void @js_print_newline()
-  %t56 = load ptr, ptr %p.addr
-  call void @nt_obj_free(ptr %t56)
-  %t57 = load ptr, ptr %o.addr
-  call void @nt_obj_free(ptr %t57)
+  %t67 = load ptr, ptr %p.addr
+  call void @nt_obj_free(ptr %t67)
+  %t68 = load ptr, ptr %o.addr
+  call void @nt_obj_free(ptr %t68)
+  %t69 = load ptr, ptr %ks.addr
+  call void @nt_str_release(ptr %t69)
   ret i32 0
 }
 "
@@ -13855,6 +14565,9 @@ declare ptr @js_str_repeat(ptr, double)
 declare ptr @js_str_pad_start(ptr, double, ptr)
 declare i32 @js_str_includes(ptr, ptr)
 declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)

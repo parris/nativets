@@ -349,7 +349,36 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   consuming a linear element). Analysis-only in `src/ownership.ts` (a `borrowBindings` set + an
   `IndexExpr`-in-consuming-position check for linear element types); reading a Copy element
   (`number[]`/`string[]`) or a field (`arr[i].x`) is fine. **Params are borrows** (the caller owns
-  them). rustc-compiletest cases in `test/ownership/`. String-element variant waits on strings-linear.
+  them). rustc-compiletest cases in `test/ownership/`. (String-element variant is moot now that
+  strings are RC, not linear — see Stage 30.)
+- **Stage 29 ✅ (B2: immutable-by-default — the "sharp turn")** Arrays and objects are immutable:
+  in-place mutation `arr.push(x)`/`arr.pop()`, `arr[i] = v` (+ compound), and `o.f = v` are
+  **rejected with `NT1606`** (reject-don't-miscompile) pointing at the immutable replacement
+  (`.with` / `[...a, x]` / `{...o, f: v}`). Chosen over silent non-mutating returns (node's `.push`
+  returns length, `.pop` an element — rejecting keeps everything else node-differential). A
+  deliberate **node divergence** (Phase B). Consequence: `NT1603` iterator-invalidation is now
+  unreachable (can't mutate during iteration if you can't mutate). `.reverse` still mutates
+  (matches node — flagged for later). Full-copy semantics (structural sharing still a follow-on).
+- **Stage 30 ✅ (Phase C / B2 step 4: RC strings — string leak fixed)** Heap strings are reclaimed
+  by **reference counting**, keeping JS value-semantics (free copy/alias — strings are RC, **not**
+  linear/move-checked, which supersedes the old strings-linear plan). A runtime pointer→refcount
+  **side-table** (no header on strings): producers register at rc=1; codegen emits **retain** at
+  aliasing binds / heap-slot stores and **release** at scope exit; a pointer not in the table (a
+  `@.str` **literal**) makes retain/release no-ops, so literals are never freed. `nt_str_live()`
+  balances to 0 (`test/str-rc.test.ts`); conservative over-retention where ownership is unclear
+  (safe residual leak, never a double-free/UAF). Not thread-safe (fine for the cooperative
+  scheduler; a B3 M:N runtime would need a lock).
+- **Stage 31 ✅ (B3 v1: reduction-counted preemption)** Actors get a reduction budget
+  (`CONTEXT_REDS=2000`); codegen emits `nt_reduction_tick()` **safepoints** at loop back-edges +
+  call sites, yielding to the scheduler when exhausted (re-enqueue at run-queue tail via ucontext).
+  Gated on actor-usage → **non-actor programs are byte-identical**. Fairness/interleave tests prove
+  preemption. M:N OS threads + lock-free MPSC mailboxes deferred (v1.1).
+- **Stage 32 ✅ (distribution + diagnostics)** **`--static`** flag: fully-static ELF for
+  Android/Linux; macOS/iOS warn + fall back to dynamic (full static libc unsupported there);
+  toolchain refactored into a unit-tested `linkArgv()`. **Multi-span rustc-style diagnostics**:
+  `NT1601` use-after-move now points at both the use (primary) and the earlier move (secondary).
+  Plus a **GitHub Actions release workflow** (build self-contained macOS/Linux binaries + publish a
+  Release on a version bump) and `test/assets/smoke.ll` now tracked (fixes a CI/worktree flake).
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
