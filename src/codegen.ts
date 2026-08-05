@@ -12,6 +12,7 @@
 
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { isConsoleLog } from "./checker.ts";
+import { blockDrops } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
@@ -620,6 +621,10 @@ class FnGen {
       if (this.terminated) break;
       this.genStmt(s);
     }
+    // Block-scoped RAII: free the linear locals this NESTED list declared (empty for a
+    // function/module body — those use endDrops). Skipped when the block already
+    // terminated (return/break/continue), which is a leak, never a double free.
+    if (!this.terminated) this.emitDrops(blockDrops(list));
   }
 
   /** Emit deterministic drops (RAII frees) for owned linear locals. */

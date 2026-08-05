@@ -430,6 +430,21 @@ export interface FuncDecl {
 }
 
 export interface ReturnStmt { kind: "ReturnStmt"; argument: Expr | null; drops?: string[]; }
+
+/**
+ * BLOCK-SCOPED drops (B2 step 4). A nested statement list (an `if` arm, a loop body, a
+ * `switch` case, a `try` block) owns the linear locals it declares directly, and frees
+ * them at its own fall-through exit — the RAII scope exit, one level down from
+ * `FuncDecl.endDrops`. Every block-owning statement already holds a plain `Stmt[]`, so
+ * the set is attached to the LIST rather than adding a field to a dozen statement kinds.
+ * `structuredClone` (generic specialization) runs BEFORE ownership, so nothing is lost.
+ */
+export function setBlockDrops(list: Stmt[], names: string[]): void {
+  (list as Stmt[] & { blockDrops?: string[] }).blockDrops = names;
+}
+export function blockDrops(list: Stmt[]): string[] {
+  return (list as Stmt[] & { blockDrops?: string[] }).blockDrops ?? [];
+}
 export interface IfStmt { kind: "IfStmt"; test: Expr; consequent: Stmt[]; alternate: Stmt[] | null; }
 export interface WhileStmt { kind: "WhileStmt"; test: Expr; body: Stmt[]; }
 export interface DoWhileStmt { kind: "DoWhileStmt"; body: Stmt[]; test: Expr; }

@@ -60,6 +60,80 @@ console.log(__arrLive(), __pvNodes());`;
   });
 });
 
+describe("leak 2: block-scoped values are dropped at their own scope exit", () => {
+  test("a loop-body local is freed every iteration, not leaked 50 times", async () => {
+    const src = `
+function work(n: number): number {
+  let s: number = 0;
+  for (let i = 0; i < n; i = i + 1) {
+    const t: number[] = [i, i + 1, i + 2];
+    s = s + t.length + t[0];
+  }
+  return s;
+}
+console.log(work(50));
+console.log(__arrLive(), __objLive());`;
+    const r = await compileAndRun(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("1375\n0 0\n"); // 50*3 + (0+1+...+49)
+  });
+
+  test("a conditional block's local is freed on the path that created it", async () => {
+    const src = `
+function f(c: boolean): number {
+  let s: number = 0;
+  if (c) {
+    const t: { a: number } = { a: 7 };
+    s = s + t.a;
+  } else {
+    const u: number[] = [1, 2];
+    s = s + u.length;
+  }
+  return s;
+}
+console.log(f(true), f(false));
+console.log(__arrLive(), __objLive());`;
+    const r = await compileAndRun(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("7 2\n0 0\n");
+  });
+
+  test("a return from inside a nested block still frees that block's local", async () => {
+    const src = `
+function f(c: boolean): number {
+  const outer: number[] = [1, 2, 3];
+  if (c) {
+    const inner: number[] = [4, 5];
+    return outer.length + inner.length;
+  }
+  return outer.length;
+}
+console.log(f(true), f(false));
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("5 3\n0\n");
+  });
+
+  test("a nested value moved OUT of its block is not double-freed", async () => {
+    const src = `
+function pick(c: boolean): number[] {
+  let out: number[] = [];
+  if (c) {
+    const t: number[] = [1, 2, 3];
+    out = t;            // moves: t must NOT be dropped at block exit
+  }
+  return out;
+}
+function run(): number { const v: number[] = pick(true); return v.length; }
+console.log(run(), pick(false).length);
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("3 0\n1\n"); // the unbound pick(false) temp is the residual
+  });
+});
+
 describe("memory safety: an array literal OWNS its elements", () => {
   test("returning [o1, o2] does not free the objects it points at", async () => {
     // Regression: array-literal elements were BORROWS, so `return [o1, o2]` dropped

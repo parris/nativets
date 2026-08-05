@@ -24,7 +24,7 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
-import { isArrayTy, isObjectTy } from "./ast.ts";
+import { isArrayTy, isObjectTy, setBlockDrops } from "./ast.ts";
 
 /** The linear (single-owner, move-checked + dropped) types: heap aggregates. */
 function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t); }
@@ -111,9 +111,35 @@ class Analyzer {
     return this.topLevel.filter((n) => state.has(n) && !state.get(n)!.moved);
   }
 
+  /** Linear locals of every ACTIVE scope that are still owned — what a `return` from
+   *  inside a nested block must free (innermost first). */
+  private ownedInScope(state: State): string[] {
+    const owned = (n: string) => state.has(n) && !state.get(n)!.moved;
+    const out: string[] = [];
+    for (let i = this.scopes.length - 1; i >= 0; i--) out.push(...this.scopes[i]!.filter(owned));
+    out.push(...this.ownedTopLevel(state));
+    return out;
+  }
+
+  /** Stack of nested block scopes (their directly-declared linear locals). */
+  private scopes: string[][] = [];
+
   private report(d: OwnDiag): void { if (this.collecting) this.diags.push(d); }
 
   seq(stmts: Stmt[], state: State): void { for (const s of stmts) this.stmt(s, state); }
+
+  /** A NESTED statement list: its own linear locals are freed at its fall-through exit
+   *  (`blockDrops`), so a value that never leaves the block does not wait for the
+   *  function to return. Move-aware — a local moved out of the block is not dropped.
+   *  `break`/`continue`/`throw` jump past the drop point: a leak, never a double free. */
+  private scoped(list: Stmt[], state: State): void {
+    const declared = declaredLinear(list).filter((n) => this.linear.has(n));
+    if (declared.length === 0) { this.seq(list, state); return; }
+    this.scopes.push(declared);
+    this.seq(list, state);
+    this.scopes.pop();
+    setBlockDrops(list, declared.filter((n) => state.has(n) && !state.get(n)!.moved));
+  }
 
   private stmt(s: Stmt, state: State): void {
     switch (s.kind) {
@@ -126,28 +152,28 @@ class Analyzer {
       case "ExprStmt": this.expr(s.expr, state, false); return;
       case "ReturnStmt":
         if (s.argument) this.expr(s.argument, state, true); // returning a bare value moves it out
-        s.drops = this.ownedTopLevel(state); // free everything still owned before returning
+        s.drops = this.ownedInScope(state); // free everything still owned before returning
         return;
       case "IfStmt": {
         this.expr(s.test, state, false);
         const s1 = clone(state);
-        this.seq(s.consequent, s1);
+        this.scoped(s.consequent, s1);
         const s2 = clone(state);
-        if (s.alternate) this.seq(s.alternate, s2);
+        if (s.alternate) this.scoped(s.alternate, s2);
         assignInto(state, merge(s1, s2));
         return;
       }
       case "WhileStmt":
-        this.loop(state, (st) => { this.expr(s.test, st, false); this.seq(s.body, st); });
+        this.loop(state, (st) => { this.expr(s.test, st, false); this.scoped(s.body, st); });
         return;
       case "DoWhileStmt":
-        this.loop(state, (st) => { this.seq(s.body, st); this.expr(s.test, st, false); });
+        this.loop(state, (st) => { this.scoped(s.body, st); this.expr(s.test, st, false); });
         return;
       case "ForStmt": {
         if (s.init) { if ((s.init as any).kind === "VarDecl") this.stmt(s.init as Stmt, state); else this.expr(s.init as Expr, state, false); }
         this.loop(state, (st) => {
           if (s.test) this.expr(s.test, st, false);
-          this.seq(s.body, st);
+          this.scoped(s.body, st);
           if (s.update) this.expr(s.update, st, false);
         });
         return;
@@ -161,28 +187,28 @@ class Analyzer {
         // moving it out of the loop is E0507 (NT1604).
         const elemBorrow = s.elemTy !== undefined && isLinearTy(s.elemTy);
         if (elemBorrow) this.borrowBindings.add(s.name);
-        this.loop(state, (st) => { this.seq(s.body, st); });
+        this.loop(state, (st) => { this.scoped(s.body, st); });
         if (elemBorrow) this.borrowBindings.delete(s.name);
         if (bv) this.popBorrow(bv);
         return;
       }
       case "SwitchStmt": {
         this.expr(s.discriminant, state, false);
-        const merged = s.cases.map((c) => { const cs = clone(state); this.seq(c.body, cs); return cs; });
+        const merged = s.cases.map((c) => { const cs = clone(state); this.scoped(c.body, cs); return cs; });
         for (const m of merged) assignInto(state, merge(state, m));
         return;
       }
       case "ForInStmt":
         this.expr(s.object, state, false);
-        this.loop(state, (st) => { this.seq(s.body, st); });
+        this.loop(state, (st) => { this.scoped(s.body, st); });
         return;
-      case "BlockStmt": this.seq(s.body, state); return;
-      case "MultiStmt": this.seq(s.stmts, state); return;
+      case "BlockStmt": this.scoped(s.body, state); return;
+      case "MultiStmt": this.seq(s.stmts, state); return; // scope-less group: its decls belong to the enclosing block
       case "ThrowStmt": this.expr(s.argument, state, false); return;
       case "TryStmt":
-        this.seq(s.block, state);
-        if (s.handler) this.seq(s.handler, state);
-        if (s.finalizer) this.seq(s.finalizer, state);
+        this.scoped(s.block, state);
+        if (s.handler) this.scoped(s.handler, state);
+        if (s.finalizer) this.scoped(s.finalizer, state);
         return;
       case "BreakStmt": case "ContinueStmt": case "FuncDecl":
         return;
@@ -308,6 +334,17 @@ class Analyzer {
       default: return; // literals, update (numeric), unreachable kinds
     }
   }
+}
+
+/** Linear locals declared DIRECTLY in this statement list (a `MultiStmt` is a
+ *  scope-less group — the destructuring/swap desugaring — so it counts as direct). */
+function declaredLinear(list: Stmt[]): string[] {
+  const out: string[] = [];
+  for (const s of list) {
+    if (s.kind === "VarDecl") { for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out.push(d.name); }
+    else if (s.kind === "MultiStmt") out.push(...declaredLinear(s.stmts));
+  }
+  return out;
 }
 
 function collectLinear(stmts: Stmt[], out: Set<string>): void {
