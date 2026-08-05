@@ -35,6 +35,11 @@ import actorHeader from "../runtime/nt_actor.h" with { type: "text" };
 import hamtSource from "../runtime/nt_hamt.c" with { type: "text" };
 import hamtHeader from "../runtime/nt_hamt.h" with { type: "text" };
 import mapsetSource from "../runtime/nt_mapset.c" with { type: "text" };
+// The HTTP(S) client primitive (networking tier, L-d), backed by libcurl. Linked (with
+// `-lcurl`) ONLY when a program uses httpGet/httpPost — so non-HTTP programs and their
+// iOS/Android cross-builds are unaffected. Networking is HOST/LINUX ONLY for now; iOS/
+// Android need the platform HTTP stack (NSURLSession/OkHttp), a follow-on.
+import httpSource from "../runtime/nt_http.c" with { type: "text" };
 
 export type Target = "host" | "ios" | "ios-sim" | "android";
 
@@ -184,6 +189,18 @@ function writeIR(source: string): { dir: string; ll: string; rt: string; actor: 
     const mapset = join(dir, "nt_mapset.c");
     writeFileSync(mapset, mapsetSource);
     extra.push(hamt, mapset);
+  }
+  // HTTP client (L-d): link nt_http.c + libcurl ONLY when a program calls httpGet/httpPost.
+  // `-lcurl` follows nt_http.c in the link line (the .c references curl symbols), matching
+  // the GNU-ld "library after the object that needs it" ordering. Host/Linux only — libcurl
+  // is present on macOS/Linux CI; the conditional link keeps every other build (incl. the
+  // iOS/Android cross-builds) free of the curl dependency.
+  // Match the CALL site, not the (always-present) `declare` line, so nt_http.c + libcurl
+  // are pulled in ONLY when the program actually calls the builtin.
+  if (ir.includes("call ptr @nt_http_post(") || ir.includes("call ptr @nt_http_get(")) {
+    const http = join(dir, "nt_http.c");
+    writeFileSync(http, httpSource);
+    extra.push(http, "-lcurl");
   }
   // Link the v0 actor runtime ONLY when the program uses actors (codegen emits the
   // nt_sched_init prologue exactly then). It relies on ucontext (makecontext/

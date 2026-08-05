@@ -61,6 +61,10 @@ const GLOBAL_FUNCS: Record<string, MethodSig> = {
   readStdin: { min: 0, max: 0, argTys: [], ret: "string" }, // all remaining stdin
   readKey: { min: 0, max: 0, argTys: [], ret: "string" },   // next single keypress (raw), "" at EOF
   rawMode: { min: 1, max: 1, argTys: ["boolean"], ret: "void" }, // enter/leave terminal raw mode
+  // Networking tier (L-d): libcurl-backed HTTP(S) client. `headers` is a newline-joined
+  // list of "Name: Value" lines. Returns {status, body}; host/Linux only (see driver.ts).
+  httpGet: { min: 2, max: 2, argTys: ["string", "string"], ret: "{status:number,body:string}" },
+  httpPost: { min: 3, max: 3, argTys: ["string", "string", "string"], ret: "{status:number,body:string}" },
 };
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 const ACTOR_BUILTINS = new Set([
