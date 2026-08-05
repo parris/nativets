@@ -125,6 +125,10 @@ const DECLARES = [
   "declare ptr @js_str_pad_start(ptr, double, ptr)",
   "declare i32 @js_str_includes(ptr, ptr)",
   "declare double @js_str_index_of(ptr, ptr)",
+  // string reference counting (value-semantics strings; rc side-table in the runtime)
+  "declare ptr @nt_str_retain(ptr)",
+  "declare void @nt_str_release(ptr)",
+  "declare double @nt_str_live()",
   // arrays
   "declare ptr @nt_arr_new(double)",
   "declare double @nt_arr_push(ptr, i64)",
@@ -302,6 +306,9 @@ class FnGen {
   private loops: { brk: string; cont: string }[] = [];
   /** In a lifted arrow: captured var name -> its slot in the closure env (%__clo). */
   private captures = new Map<string, { index: number; ty: Ty }>();
+  /** String-typed VarDecl locals in this frame — reference-counted: retained on
+   *  bind/alias, released at scope exit. Params are excluded (the caller owns them). */
+  private strLocals = new Set<string>();
   /** Active catch targets (a `throw` branches to the innermost). */
   private tryHandlers: { catchLbl: string; excVar: string | null; eType: Ty }[] = [];
   /** Active finally blocks (a `return` inside runs finally first, mode=1). */
@@ -355,6 +362,35 @@ class FnGen {
     this.captures = new Map();
     this.tryHandlers = [];
     this.finallyStack = [];
+    this.strLocals = new Set();
+  }
+
+  // ---- string reference counting (value-semantics strings) ----
+  /** A string EXPRESSION that mints a fresh heap string (already registered rc=1
+   *  by the runtime). Binding one CONSUMES it (no retain); anything else — an
+   *  identifier/field/index/literal alias — BORROWS an existing owner and must
+   *  retain. Classifying non-producers as borrows is the safe default (a needless
+   *  retain only leaks; a missing one could free a still-referenced string). */
+  private isStrProducer(e: Expr): boolean {
+    return e.kind === "CallExpr" || e.kind === "TemplateLiteral" || (e.kind === "BinaryExpr" && e.op === "+");
+  }
+  /** Emit a retain unless the initializer is a fresh producer being consumed. */
+  private retainStrBind(init: Expr, v: string): void {
+    if (!this.isStrProducer(init)) this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${v})`);
+  }
+  /** Zero-init string locals so an unassigned/conditionally-assigned one releases
+   *  as null (a no-op) rather than loading garbage. */
+  private emitStrInit(): void {
+    for (const n of this.strLocals) this.emit(`store ptr null, ptr %${n}.addr`);
+  }
+  /** Release owned string locals at scope exit (except one transferred out). */
+  private emitStrDrops(exclude?: string): void {
+    for (const n of this.strLocals) {
+      if (n === exclude) continue;
+      const p = this.fresh();
+      this.emit(`${p} = load ptr, ptr %${n}.addr`);
+      this.emit(`call void @nt_str_release(ptr ${p})`);
+    }
   }
 
   /** Generate a statement sequence, stopping once the block is terminated
@@ -385,7 +421,10 @@ class FnGen {
     for (const s of body) {
       switch (s.kind) {
         case "VarDecl":
-          for (const d of s.decls) this.addLocal(d.name, d.ty ?? "number");
+          for (const d of s.decls) {
+            this.addLocal(d.name, d.ty ?? "number");
+            if ((d.ty ?? "number") === "string") this.strLocals.add(d.name);
+          }
           break;
         case "IfStmt":
           this.collectLocals(s.consequent);
@@ -438,9 +477,11 @@ class FnGen {
       const ty = sig.params[i]!;
       this.emit(`store ${llvmTy(ty)} %${p.name}, ptr %${p.name}.addr`);
     });
+    this.emitStrInit();
     this.genStmts(fn.body);
     if (!this.terminated) {
       this.emitDrops(fn.endDrops ?? []);
+      this.emitStrDrops();
       this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`);
     }
     const params = fn.params.map((p, i) => `${llvmTy(sig.params[i]!)} %${p.name}`).join(", ");
@@ -455,8 +496,9 @@ class FnGen {
     this.to(b0);
     // Bring up the v0 actor scheduler + actor 0 (main) before any actor call.
     if (this.mod.usesActors) this.emit(`call void @nt_sched_init()`);
+    this.emitStrInit();
     this.genStmts(body);
-    if (!this.terminated) { this.emitDrops(endDrops); this.terminate("ret i32 0"); }
+    if (!this.terminated) { this.emitDrops(endDrops); this.emitStrDrops(); this.terminate("ret i32 0"); }
     return this.assemble("define i32 @main()", b0);
   }
 
@@ -471,12 +513,13 @@ class FnGen {
     const b0 = this.block(this.label("L"));
     this.to(b0);
     arrow.params.forEach((p, i) => this.emit(`store ${llvmTy(paramTys[i]!)} %${p.name}, ptr %${p.name}.addr`));
+    this.emitStrInit();
     if (arrow.exprBody) {
       const bodyVal = this.genExpr(arrow.body as Expr);
       this.terminate(`ret ${llvmTy(this.retTy)} ${bodyVal.v}`);
     } else {
       this.genStmts(arrow.body as Stmt[]);
-      if (!this.terminated) this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`);
+      if (!this.terminated) { this.emitStrDrops(); this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`); }
     }
     const params = ["ptr %__clo", ...arrow.params.map((p, i) => `${llvmTy(paramTys[i]!)} %${p.name}`)].join(", ");
     return this.assemble(`define ${llvmTy(this.retTy)} @${name}(${params})`, b0);
@@ -501,6 +544,9 @@ class FnGen {
         for (const d of s.decls) {
           const ty = d.ty ?? "number";
           const val = this.coerce(this.genExpr(d.init), ty);
+          // RC: an aliased string (identifier/field/index/literal) gains a new owner
+          // → retain. A fresh producer is consumed (its rc=1 transfers to this local).
+          if (ty === "string" && this.strLocals.has(d.name)) this.retainStrBind(d.init, val.v);
           this.emit(`store ${llvmTy(ty)} ${val.v}, ptr %${d.name}.addr`);
         }
         return;
@@ -518,9 +564,21 @@ class FnGen {
         if (s.argument) {
           const val = this.genExpr(s.argument);
           this.emitDrops(s.drops ?? []); // free owned locals before returning (not the moved-out value)
+          // RC strings: a returned local TRANSFERS its ownership to the caller (exclude it
+          // from release). A returned borrow (param/field/index) is retained so the caller
+          // gets an owned +1; a returned producer already carries its rc=1 and escapes.
+          if (val.ty === "string") {
+            const arg = s.argument;
+            const xfer = arg.kind === "Identifier" && this.strLocals.has(arg.name) ? arg.name : undefined;
+            if (!xfer && !this.isStrProducer(arg)) this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
+            this.emitStrDrops(xfer);
+          } else {
+            this.emitStrDrops();
+          }
           this.terminate(`ret ${llvmTy(val.ty)} ${val.v}`);
         } else {
           this.emitDrops(s.drops ?? []);
+          this.emitStrDrops();
           this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`);
         }
         return;
@@ -835,6 +893,12 @@ class FnGen {
 
   /** Pack a value into a 64-bit array slot. */
   private toSlot(val: Val): string {
+    // RC: a string packed into a heap slot (array element, object field, closure
+    // capture, map entry, nullable box) gains a persistent owner → retain. These
+    // slot owners are never released (arrays/objects don't reclaim their string
+    // elements), so this is a conservative, leak-safe over-retain that guarantees a
+    // slot never holds a dangling pointer after a local owner is dropped.
+    if (val.ty === "string") this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
     const t = this.fresh();
     if (val.ty === "number") this.emit(`${t} = bitcast double ${val.v} to i64`);
     else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
@@ -1285,6 +1349,10 @@ class FnGen {
         const ty = this.varTypes.get(e.target) ?? "number";
         if (e.op === "=") {
           const val = this.coerce(this.genExpr(e.value), ty); // box into a nullable slot if needed
+          // RC: reassigning a string local. Retain an aliased borrow so the new value
+          // outlives the assignment (safe if it escapes); the previous value is left
+          // to leak (a conservative over-retention) rather than risk a premature free.
+          if (ty === "string" && this.strLocals.has(e.target)) this.retainStrBind(e.value, val.v);
           this.emit(`store ${llvmTy(ty)} ${val.v}, ptr %${e.target}.addr`);
           return { v: val.v, ty };
         }
@@ -2014,6 +2082,7 @@ class FnGen {
       case "move": return this.genExpr(args[0]!); // ownership marker; runtime identity
       case "__arrLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_live()`); return { v: t, ty: "number" }; }
       case "__objLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_obj_live()`); return { v: t, ty: "number" }; }
+      case "__strLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_str_live()`); return { v: t, ty: "number" }; }
 
       // --- B3 v0 actors ---
       case "spawn": {
