@@ -42,6 +42,37 @@ class-based, discriminated-union-heavy* TypeScript; nativets accepts a *single-f
 class-less, expression-oriented* subset. Whole subsystems are missing. That's fine — the plan
 below sequences them.
 
+### Re-measured after M3 (generic functions — Stage 33)
+
+`coverage` over `src/*.ts` now reports, whole-tree:
+
+| Code | × | What it actually is |
+|------|---|---------------------|
+| `NT0001` | 15 | statements outside the accepted subset — see the named causes below |
+| `NT1606` | 4 | `this.f = v` / `o.f = v` field mutation inside `Checker`/`ModuleGen`/`FnGen`/`Analyzer` |
+| `NT1009` | 1 | a general union type (`Record<string, number \| "var">` in `checker.ts`) |
+| `NT1013` | **0** | **cleared** — generic type args erase (SH2) and generic functions monomorphize (M3) |
+
+**The `NT1013` count was never real.** `coverage.classifyParseFailure` used to re-label any
+unparsed statement whose *text* matched `Name<…>` as "generic type arguments". Every one of the
+hits it produced over `src/` was a misattribution of an unrelated failure — `class Parser { …
+this.pos++ }`, `async function guard<T>` (blocked on `await`), a `\` escape in `codegen.ts`. That
+heuristic is removed; a histogram that names the wrong feature aims the burn-down at the wrong
+thing. `NT0001` is now reported honestly, and the *named* residual causes, in frequency order, are:
+
+1. **`await` / `async`** (`cli.ts` ×4) — the largest single bucket, and the whole of `cli.ts`.
+2. **postfix `++`/`--` on a member or index target** (`this.pos++`, `b.count++`) — `UpdateExpr`
+   only models an identifier target. `parser.ts` ×1, `coverage.ts` ×1.
+3. **binding patterns in parameters / `for-of`** (`([k, v]) => …`, `for (const [k, v] of m)`) —
+   destructuring is a *declaration* desugaring only. `ownership.ts` ×2.
+4. **a parenthesized expression misread as an arrow parameter list** (`(t.slice(2) as Ty)` in a
+   ternary arm) — a `looksLikeArrow` lookahead gap. `ast.ts` ×2.
+5. **template-literal / string escapes** — a nested template in `ast.ts`, `\\22` in `codegen.ts`.
+6. **`delete o.k`** and a couple of class-body shapes in `checker.ts`.
+
+Four modules — `lexer.ts`, `diagnostics.ts`, `driver.ts`, `coverage-preprocess.ts` — now report
+**no blockers at all** at statement granularity.
+
 ---
 
 ## The strategic fork
@@ -67,9 +98,11 @@ below sequences them.
   `interface`; `enum`; `as const`/`satisfies`; some template-literal escapes. *(Every file dies
   here today.)*
 - **Tier 1 — type system.** **Discriminated unions** (`type Expr = NumberLiteral | ...` + exhaustive
-  `switch (e.kind)`) — the AST is the forcing function and the crux of the whole effort; **generics**
-  (`<T>` functions, and `class Map<K,V>`-style — value `Map`/`Set` already land in Stage 25);
-  interface types (erased); literal-union types (`"a" | "b"`); `readonly`; index signatures.
+  `switch (e.kind)`) — the AST is the forcing function and the crux of the whole effort;
+  ~~**generics** (`<T>` functions…)~~ **DONE** — type arguments erase (SH2) and `<T>` *functions*
+  monomorphize (M3 / Stage 33); value `Map`/`Set` landed in Stage 25; generic *classes* remain
+  deferred (`NT1015`).
+  Interface types (erased); literal-union types (`"a" | "b"`); `readonly`; index signatures.
   Hope to avoid mapped/conditional types (audit shows the compiler mostly doesn't need them).
 - **Tier 2 — semantics.** **Classes** — the compiler uses plain classes (`Checker`, `Scope`,
   `ModuleGen`, `FnGen`) with fields, methods, `this`, and constructors, but **no inheritance** — so
@@ -109,6 +142,9 @@ below sequences them.
 - **SH5 — Close the tail.** Run the SH0 gradient again; burn down remaining Tier-1 features the
   source actually uses (generics beyond `Map`/`Set`, specific string/array methods, spread/
   destructuring — mostly already supported). Keep going until `coverage src/<bundle>.ts` is clean.
+  **Generics are DONE (M3 / Stage 33):** generic function definitions monomorphize (one
+  specialization per instantiated type tuple), so `NT1013` is cleared — see the re-measured
+  histogram below.
 - **SH6 — Module-by-module self-compile.** Compile `lexer` → `parser` → `checker` → `codegen` → …
   each under nativets and **differential-test its output against the `bun`-run version** (same
   discipline as everything else: the existing compiler is the oracle for the self-hosted one).

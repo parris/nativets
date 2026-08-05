@@ -47,33 +47,46 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     expect(r.blockers.some((b) => b.code === "NT1015")).toBe(false);
   });
 
-  test("parser.ts — SH3.6 cleared the class field-initializer NT1015; frontier is now NT1013 generics", () => {
+  test("parser.ts — SH3.6 cleared the class field-initializer NT1015; M3 cleared NT1013", () => {
     // SH3.5 cleared modifier/extends NT1015; SH3.6 then cleared class *field initializers*
-    // (`private pos = 0;`). parser.ts no longer surfaces ANY NT1012/NT1015 class blocker — its
-    // next self-host blocker has advanced to NT1013 (generic type arguments, M3 monomorphization).
+    // (`private pos = 0;`). M3 (monomorphization) then cleared the NT1013 that stood behind
+    // them — see the whole-tree assertion below for why that NT1013 was never real.
     const r = coverage(src("parser.ts"));
     expect(r.parsed).toBe(true);
     expect(r.blockers.some((b) => b.code === "NT1015")).toBe(false);
     expect(r.blockers.some((b) => b.code === "NT1012")).toBe(false);
-    expect(r.blockers.some((b) => b.code === "NT1013")).toBe(true);
+    expect(r.blockers.some((b) => b.code === "NT1013")).toBe(false);
   });
 
-  test("generic type arguments PARSE + ERASE cleanly (SH2 invariant)", () => {
-    // SH2's win: generic *type arguments* on types and calls erase to a supported shape —
-    // `Map<K,V>`, `Set<T>`, and call-site type args compile with no NT1013. We assert this on a
-    // focused snippet rather than on codegen.ts: that megafile also contains generic *function
-    // definitions* (`function f<T>(…)`), which are true monomorphization and remain deferred to
-    // M3 (a residual NT1013). Asserting absence-in-codegen.ts was fragile position-dependent
-    // sampling of a file that doesn't fully single-file-parse; this tests the real capability.
+  test("generics are no longer a self-host blocker anywhere in src/ (M3)", () => {
+    // SH2 made generic type ARGUMENTS erase; M3 makes generic FUNCTION DEFINITIONS
+    // monomorphize. Re-measured after M3, NO src module reports an NT1013 — and the ones
+    // that used to were MISATTRIBUTIONS: `coverage` re-labelled any unparsed statement whose
+    // text matched `Name<…>` as "generic type arguments", so `class Parser { … this.pos++ }`
+    // and `async function guard<T>` (blocked on `await`) both showed up as generics. That
+    // heuristic is gone (see `classifyParseFailure`), so this assertion is now meaningful.
+    for (const f of SRC_MODULES) {
+      const r = coverage(src(f));
+      const nt1013 = r.blockers.filter((b) => b.code === "NT1013");
+      expect({ file: f, nt1013 }).toEqual({ file: f, nt1013: [] });
+    }
+  });
+
+  test("generic FUNCTION DEFINITIONS compile — one specialization per instantiation (M3)", () => {
+    // The capability itself, on a focused snippet: a generic used at two different types,
+    // inference through an array parameter, and explicit call-site type args.
     const r = coverage(
       "const m = new Map<string, number>();\n" +
       "const s = new Set<number>();\n" +
-      "function id(x: number): number { return x; }\n" +
-      "const n: number = id(3);\n" +
-      "console.log(n);\n"
+      "function id<T>(x: T): T { return x; }\n" +
+      "function first<T>(xs: T[]): T { return xs[0]; }\n" +
+      "const ns: number[] = [1, 2];\n" +
+      "console.log(id(3) + first(ns));\n" +
+      "console.log(id<string>(\"a\") + id(\"b\"));\n"
     );
     expect(r.parsed).toBe(true);
-    expect(r.blockers.some((b) => b.code === "NT1013")).toBe(false);
+    expect(r.compiles).toBe(true);
+    expect(r.blockers).toEqual([]);
   });
 
   test("every src module reaches analysis (no file dies on the module preamble)", () => {

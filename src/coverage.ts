@@ -10,7 +10,7 @@
 import type { Program, Stmt, Expr } from "./ast.ts";
 import { parse } from "./parser.ts";
 import { check } from "./checker.ts";
-import { NTError, NYI } from "./diagnostics.ts";
+import { NTError } from "./diagnostics.ts";
 import { preprocessForCoverage } from "./coverage-preprocess.ts";
 
 export interface Blocker { code: string; feature: string; milestone: string; hint: string; count: number; }
@@ -29,16 +29,19 @@ type Spec = { code: string; milestone: string; hint: string };
  *
  * A feature-level NYI thrown by the parser (a general union type, an optional call, …)
  * carries its own NT1xxx code, so pass it through. A raw `NT0001` is syntax outside the
- * accepted subset; we sharpen the biggest self-hosting bucket — generic type
- * arguments (`Record<…>`, `f<T>(…)`) — into the `GENERIC` milestone so the histogram
- * names it, and otherwise report it honestly as an unparsed statement.
+ * accepted subset, and is reported honestly as an unparsed statement.
+ *
+ * NOTE (M3): this used to re-label any `NT0001` statement whose TEXT matched `Name<…>` as
+ * an `NT1013` generics blocker. That heuristic is gone. Generic type arguments erase (SH2)
+ * and generic FUNCTION definitions now monomorphize (M3), so a `<…>` in a statement no
+ * longer implies generics are what blocked it — re-measured, every `NT1013` it reported
+ * over `src/*.ts` was a MISATTRIBUTION of an unrelated failure (`this.pos++` on a member
+ * target, `await`, a `\` escape). A blocker histogram that names the wrong feature is
+ * worse than one that says "unparsed": it sends the burn-down at the wrong thing.
  */
-function classifyParseFailure(text: string, diag: { code: string; message: string; milestone?: string; hint?: string }): { spec: Spec; feature: string } {
+function classifyParseFailure(_text: string, diag: { code: string; message: string; milestone?: string; hint?: string }): { spec: Spec; feature: string } {
   if (diag.code !== "NT0001") {
     return { spec: { code: diag.code, milestone: diag.milestone ?? "later", hint: diag.hint ?? "" }, feature: diag.message };
-  }
-  if (/[A-Za-z_$][\w$]*\s*<[\s\w$\[\].,|?]*>/.test(text)) {
-    return { spec: { code: NYI.GENERIC.code, milestone: NYI.GENERIC.milestone, hint: NYI.GENERIC.hint }, feature: "generic type arguments" };
   }
   return { spec: { code: "NT0001", milestone: "later", hint: "syntax outside the accepted single-file subset" }, feature: "unparsed statement" };
 }

@@ -402,6 +402,25 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   `NT1601` use-after-move now points at both the use (primary) and the earlier move (secondary).
   Plus a **GitHub Actions release workflow** (build self-contained macOS/Linux binaries + publish a
   Release on a version bump) and `test/assets/smoke.ll` now tracked (fixes a CI/worktree flake).
+- **Stage 33 ✅ (M3: generic functions by monomorphization — NT1013 cleared)** `function f<T>(x: T): T`
+  is compiled, not erased. The parser RECORDS the type-parameter list (`FuncDecl.typeParams`) and
+  resolves an in-scope `T` to the marker type `#T` (un-representable by construction, so it can
+  never be silently lowered); call-site type args are recorded on `CallExpr.typeArgs`. The checker
+  treats a generic decl as a **template**: at each call it resolves the type-argument tuple —
+  explicit `f<string>(…)`, or **inferred** by structural unification of the parameter patterns
+  against the argument types (through `T[]`, `(t: T) => U`, `{k: T}`, `Map`/`Set`, nullable) — then
+  emits ONE **specialization** per distinct tuple: a `structuredClone` of the template with `#T`
+  substituted through every type-bearing AST field, registered under a mangled name (`id$number`,
+  `id$string`), with the call's callee rewritten to it. Instantiations are memoized on
+  (function, type-tuple), so **self-recursion terminates** (bodies are checked in a drain loop
+  after registration). Templates are spliced OUT of the program, so **a generic nobody calls emits
+  nothing**; specializations are ordinary `FuncDecl`s, so the ownership pass, deterministic drop
+  and codegen treat them exactly like hand-written concrete functions (verified: `NT1605` reported
+  per-specialization, `__arrLive()` → 0). Rejected, never miscompiled: uninferrable type args,
+  **polymorphic recursion** (self-call at a bigger type — capped at 200 instantiations), a generic
+  used as a **value**, and a surviving `#T` (all `NT1013`); generic **classes** stay `NT1015`.
+  Generic **arrows** are values with no call site to specialize, so they take their CONTEXTUAL
+  parameter type where they have one and otherwise keep the pre-M3 erasure to `number`.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 

@@ -9,7 +9,7 @@
 
 import { lex, type Token } from "./lexer.ts";
 import { parseError, nyi, NYI, mutationError } from "./diagnostics.ts";
-import { makeNullable, makeMapTy, makeSetTy, objectType } from "./ast.ts";
+import { makeNullable, makeMapTy, makeSetTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
 } from "./ast.ts";
@@ -58,9 +58,23 @@ class Parser {
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
   private ident(name: string): Expr { return { kind: "Identifier", name }; }
 
-  /** Resolve a named type to a concrete `Ty`: a recorded alias, `Error`, a scalar,
-   *  else `number` (unknown named types erase to number, matching prior behavior). */
+  /**
+   * In-scope generic type parameters (M3). Pushed while parsing a generic function's
+   * signature + body, so a use of `T` in an annotation resolves to the MARKER `#T`
+   * (which the checker later substitutes per instantiation) instead of erasing to
+   * `number`. Empty for ordinary code, so nothing else changes.
+   */
+  private typeParamScopes: Set<string>[] = [];
+  private inTypeParamScope(id: string): boolean {
+    for (let i = this.typeParamScopes.length - 1; i >= 0; i--) if (this.typeParamScopes[i]!.has(id)) return true;
+    return false;
+  }
+
+  /** Resolve a named type to a concrete `Ty`: an in-scope type parameter marker, a
+   *  recorded alias, `Error`, a scalar, else `number` (unknown named types erase to
+   *  number, matching prior behavior). */
   private resolveNamed(id: string): Ty {
+    if (this.inTypeParamScope(id)) return typeParamTy(id);
     const alias = this.typeAliases.get(id);
     if (alias) return alias;
     if (id === "Uint8Array" || id === "TextEncoder" || id === "TextDecoder") return id as Ty; // stdlib batch-2 bytes types
@@ -233,18 +247,29 @@ class Parser {
     return `{${fields.join(",")}}` as Ty;
   }
 
-  // Skip an erased generic type-parameter list `<T, U extends V>` (balanced angles).
-  private skipGenerics(): void {
+  // Consume a generic type-parameter list `<T, U extends V, W = X>` (balanced angles)
+  // and return the declared PARAMETER NAMES. Constraints (`extends V`) and defaults
+  // (`= X`) are erased: monomorphization specializes on the types that actually flow,
+  // so a constraint adds no information the instantiation doesn't already carry.
+  private parseTypeParamList(): string[] {
+    const names: string[] = [];
     this.eat("<");
     let depth = 1;
+    let expectName = true; // at depth 1, the token right after `<` or `,` is a param name
     while (depth > 0 && this.peek().type !== "eof") {
-      const v = this.next().value;
+      const t = this.next();
+      const v = t.value;
       if (v === "<") depth++;
       else if (v === ">") depth--;
       else if (v === ">>") depth -= 2;   // `>>` token closing two nested params
       else if (v === ">>>") depth -= 3;
+      else if (depth === 1 && v === ",") expectName = true;
+      else if (depth === 1 && expectName && t.type === "ident") { names.push(v); expectName = false; }
     }
+    return names;
   }
+  // Skip an erased generic type-parameter list (names discarded).
+  private skipGenerics(): void { this.parseTypeParamList(); }
 
   // `type X = <type>;` — record the alias, erase the declaration. RHS uses the normal
   // type grammar (so `type Dir = "n" | "s"` collapses to string; a general union throws NYI).
@@ -413,11 +438,22 @@ class Parser {
   private parseFuncDecl(): Stmt {
     this.eat("function");
     const name = this.expectIdent();
-    if (this.at("<")) this.skipGenerics(); // erased generic type-parameter list `f<T, U>`
-    const params = this.parseParamList();
-    let returnAnnot: Ty | undefined;
-    if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
-    return { kind: "FuncDecl", name, params, returnAnnot, body: this.parseBlock() };
+    // M3: a generic type-parameter list `f<T, U>` is RECORDED (not erased). Its names are
+    // in scope for the whole signature + body, so annotations mentioning them resolve to
+    // `#T` markers and the checker can monomorphize per call site.
+    const typeParams = this.at("<") ? this.parseTypeParamList() : [];
+    if (typeParams.length) this.typeParamScopes.push(new Set(typeParams));
+    try {
+      const params = this.parseParamList();
+      let returnAnnot: Ty | undefined;
+      if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
+      const body = this.parseBlock();
+      return typeParams.length
+        ? { kind: "FuncDecl", name, params, returnAnnot, body, typeParams }
+        : { kind: "FuncDecl", name, params, returnAnnot, body };
+    } finally {
+      if (typeParams.length) this.typeParamScopes.pop();
+    }
   }
 
   /** Infer a class field's type from its initializer when it carries no annotation.
@@ -759,7 +795,26 @@ class Parser {
     // Generic arrow `<T>(x: T): T => x` — a leading `<` can only start a generic arrow
     // in this subset (no JSX / old-style casts), so it is unambiguous: erase the type-param
     // list and parse the arrow that follows.
-    if (this.at("<")) { this.skipGenerics(); return this.parseArrow(); }
+    if (this.at("<")) {
+      // An arrow is a VALUE, so it has no single instantiation site to specialize (M3
+      // monomorphizes DECLARATIONS). Its type params are still brought into scope so the
+      // annotations become `#T` markers — the checker then prefers the CONTEXTUAL type
+      // where there is one, and otherwise erases the marker to `number` (pre-M3 behavior).
+      const tps = this.parseTypeParamList();
+      if (tps.length) this.typeParamScopes.push(new Set(tps));
+      let arrow: Expr;
+      try { arrow = this.parseArrow(); } finally { if (tps.length) this.typeParamScopes.pop(); }
+      if (tps.length && arrow.kind === "ArrowFunction") {
+        // A marker is only meaningful on the arrow's OWN parameter annotations (where the
+        // checker substitutes the contextual type). Everywhere else inside the arrow there
+        // is nothing to resolve it against, so erase to `number` right here — a `#T` must
+        // never reach the checker or codegen.
+        const own = arrow.params.map((p) => p.annot);
+        mapTypesDeep(arrow, eraseTypeParams);
+        arrow.params.forEach((p, i) => { if (own[i] !== undefined) p.annot = own[i]; });
+      }
+      return arrow;
+    }
     if (this.looksLikeArrow()) return this.parseArrow();
     const left = this.parsePipe();
     const t = this.peek();
@@ -879,21 +934,23 @@ class Parser {
   // binary parser reads `<` as comparison. This matches TS/Node's rule (a following `(`
   // is what promotes `<...>` to type args), keeping ordinary comparisons (`i < n`,
   // `x < f(y)`, `a < b > c`) untouched.
-  private tryCallTypeArgs(): boolean {
+  private tryCallTypeArgs(): Ty[] | null {
     const save = this.pos;
+    let tys: Ty[];
     try {
-      this.parseTypeArgs();
+      tys = this.parseTypeArgs();
     } catch {
       this.pos = save;
-      return false;
+      return null;
     }
-    if (this.at("(")) return true;
+    if (this.at("(")) return tys;
     this.pos = save;
-    return false;
+    return null;
   }
 
   private parsePostfix(start?: Expr): Expr {
     let expr = start ?? this.parsePrimary();
+    let pendingTypeArgs: Ty[] | null = null; // explicit `f<T>` awaiting its `(` (M3)
     for (;;) {
       if (this.at(".")) {
         this.eat(".");
@@ -920,10 +977,14 @@ class Parser {
           } while (this.at(",") && (this.eat(","), true));
         }
         this.eat(")");
-        expr = { kind: "CallExpr", callee: expr, args };
-      } else if (this.at("<") && this.tryCallTypeArgs()) {
-        // Call-site type arguments `f<T>(x)` / `foo<string>()` — parsed and ERASED.
-        // Only committed when a balanced `<...>` is immediately followed by `(` (a call),
+        expr = pendingTypeArgs
+          ? { kind: "CallExpr", callee: expr, args, typeArgs: pendingTypeArgs }
+          : { kind: "CallExpr", callee: expr, args };
+        pendingTypeArgs = null;
+      } else if (this.at("<") && (pendingTypeArgs = this.tryCallTypeArgs())) {
+        // Call-site type arguments `f<T>(x)` / `foo<string>()` — RECORDED on the call so
+        // M3 can pin the instantiation explicitly (they were previously erased). Only
+        // committed when a balanced `<...>` is immediately followed by `(` (a call),
         // otherwise `<` is left for the binary parser to read as less-than (see helper).
         continue; // the following `(` is handled by the call branch next iteration
       } else if ((this.at("++") || this.at("--")) && expr.kind === "Identifier") {

@@ -9,6 +9,7 @@
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy } from "./ast.ts";
+import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError } from "./diagnostics.ts";
 
@@ -113,9 +114,15 @@ export function check(program: Program): CheckedProgram {
     for (const n of BUILTIN_NUMBERS) s.declare(n, "number", true);
     return s;
   };
+  // M3: a generic declaration is a TEMPLATE, not a function. Register it with the
+  // monomorphizer instead of the signature table; it is never checked or emitted as
+  // written — only its specializations are (and a generic nobody calls emits nothing).
+  for (const s of program.body) {
+    if (s.kind === "FuncDecl" && s.typeParams?.length) c.declareGeneric(s, builtins);
+  }
 
   for (const s of program.body) {
-    if (s.kind !== "FuncDecl") continue;
+    if (s.kind !== "FuncDecl" || s.typeParams?.length) continue;
     if (functions.has(s.name)) throw typeError(`Duplicate function '${s.name}'`);
     let rest = false;
     s.params.forEach((p, i) => { if (p.rest) { if (i !== s.params.length - 1) throw typeError("rest parameter must be last"); rest = true; } });
@@ -134,7 +141,7 @@ export function check(program: Program): CheckedProgram {
 
   // pass 2: infer return types for unannotated functions (e.g. ones returning closures)
   for (const s of program.body) {
-    if (s.kind === "FuncDecl" && !s.returnAnnot) {
+    if (s.kind === "FuncDecl" && !s.typeParams?.length && !s.returnAnnot) {
       const inferred = c.inferReturnType(s, builtins());
       s.returnTy = inferred;
       functions.get(s.name)!.ret = inferred;
@@ -142,14 +149,165 @@ export function check(program: Program): CheckedProgram {
   }
 
   c.checkBlock(program.body, builtins());
-  for (const s of program.body) if (s.kind === "FuncDecl") c.checkFunction(s, builtins());
+  for (const s of program.body) if (s.kind === "FuncDecl" && !s.typeParams?.length) c.checkFunction(s, builtins());
+  // M3: check every specialization that got instantiated above (checking one body can
+  // instantiate more generics, so drain to a fixpoint), then SPLICE the templates out of
+  // the program and the concrete specializations in — from here on the rest of the
+  // pipeline (ownership, drops, codegen) sees only ordinary functions.
+  c.drainInstantiations(builtins);
+  program.body = [
+    ...program.body.filter((s) => !(s.kind === "FuncDecl" && s.typeParams?.length)),
+    ...c.specializations(),
+  ];
+  // Belt-and-braces: a `#T` marker has no lowering, so if one somehow survived
+  // specialization it must be REJECTED here, never handed to codegen.
+  mapTypesDeep(program.body, (t) => {
+    if (hasTypeParam(t)) throw nyi(NYI.GENERIC, `unresolved generic type parameter '${t}' survived monomorphization`);
+    return t;
+  });
   return { program, functions };
+}
+
+/** Expansion budget — a monomorphizable program needs a handful; only polymorphic
+ *  recursion (an unbounded family of instantiations) can reach this. */
+const MAX_INSTANTIATIONS = 200;
+
+/** Clone a generic template into a fully-concrete specialization named `name`. */
+function specializeDecl(tmpl: FuncDecl, name: string, bindings: Map<string, Ty>): FuncDecl {
+  const spec = structuredClone({ ...tmpl, name, typeParams: undefined }) as FuncDecl;
+  delete spec.typeParams;
+  mapTypesDeep(spec, (t) => substTypeParams(t, bindings));
+  return spec;
 }
 
 class Checker {
   private loopDepth = 0;
   private switchDepth = 0;
   constructor(private functions: Map<string, Sig>) {}
+
+  /* ============================================================
+   * M3 — monomorphization of generic functions.
+   *
+   * A generic `function f<T>(x: T): T` is a TEMPLATE: it is never checked or emitted as
+   * written (its annotations carry `#T` markers, which have no lowering). Instead, every
+   * call site resolves a concrete type-argument tuple — from explicit call-site type args
+   * (`f<string>(…)`) or by unifying the parameter patterns against the argument types —
+   * and gets rewritten to call a SPECIALIZATION: a clone of the template with `#T`
+   * substituted throughout, registered under a mangled name (`f$string`).
+   *
+   * Instantiations are memoized on (function, type-tuple), so a self-recursive call at
+   * the same instantiation reuses the in-progress specialization instead of expanding
+   * forever. Bodies are checked in a drain loop AFTER registration, which is what makes
+   * the recursive case terminate.
+   * ============================================================ */
+
+  /** Templates by name (declared generics), plus the builtin-scope factory to check with. */
+  private generics = new Map<string, FuncDecl>();
+  private genericBase: (() => Scope) | null = null;
+  /** (name, type-tuple) → mangled specialization name. */
+  private instances = new Map<string, string>();
+  /** Specializations in emission order, and the queue of ones whose body is unchecked. */
+  private specialized: FuncDecl[] = [];
+  private pending: FuncDecl[] = [];
+
+  declareGeneric(fn: FuncDecl, base: () => Scope): void {
+    if (this.generics.has(fn.name) || this.functions.has(fn.name)) throw typeError(`Duplicate function '${fn.name}'`);
+    this.generics.set(fn.name, fn);
+    this.genericBase = base;
+  }
+  specializations(): FuncDecl[] { return this.specialized; }
+
+  /** Check every queued specialization body; checking one may enqueue more. */
+  drainInstantiations(base: () => Scope): void {
+    while (this.pending.length) {
+      const fn = this.pending.shift()!;
+      this.checkFunction(fn, base());
+    }
+  }
+
+  /** A mangled, LLVM-safe, collision-free name for one instantiation (`first$string__`). */
+  private mangle(base: string, args: Ty[]): string {
+    const stem = `${base}$${args.map((t) => t.replace(/[^A-Za-z0-9_]/g, "_")).join("$")}`;
+    let name = stem, n = 2;
+    while (this.functions.has(name) || this.generics.has(name)) name = `${stem}_${n++}`;
+    return name;
+  }
+
+  /**
+   * Resolve the type arguments for a call to generic `name`, instantiate (or reuse) the
+   * matching specialization, REWRITE the call's callee to it, and return its signature.
+   * The caller then type-checks the arguments against that fully-concrete signature, so
+   * an argument mismatch is reported exactly like any ordinary call.
+   */
+  private instantiate(name: string, e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope): Sig {
+    const tmpl = this.generics.get(name)!;
+    const tps = tmpl.typeParams!;
+    const bindings = new Map<string, Ty>();
+
+    if (e.typeArgs?.length) {
+      // Explicit call-site type args pin the instantiation positionally.
+      if (e.typeArgs.length > tps.length) throw typeError(`'${name}' takes ${tps.length} type argument(s), got ${e.typeArgs.length}`);
+      e.typeArgs.forEach((t, i) => bindings.set(tps[i]!, t));
+    }
+    const patterns = tmpl.params.map((p) => p.annot ?? "number");
+    // Round 1 — plain arguments. An ARROW argument is deferred: it needs the (possibly
+    // still-unbound) parameter pattern as its contextual type before it can be typed.
+    e.args.forEach((a, i) => {
+      const pat = patterns[Math.min(i, patterns.length - 1)];
+      if (!pat || !hasTypeParam(pat) || a.kind === "ArrowFunction") return;
+      unifyTypeParams(tmpl.params[i]?.rest ? elemTy(pat) : pat, this.type(a, scope), bindings);
+    });
+    // Round 2 — arrow arguments, now that the other parameters have bound what they can:
+    // `mapAll<T, U>(xs: T[], f: (t: T) => U)` learns T from `xs`, types the arrow with
+    // `(number) => ?`, and learns U from the arrow's inferred return type.
+    e.args.forEach((a, i) => {
+      const pat = patterns[i];
+      if (a.kind !== "ArrowFunction" || !pat || !hasTypeParam(pat)) return;
+      const ctx = substTypeParams(pat, bindings);
+      if (!isFuncTy(ctx) || funcParams(ctx).some(hasTypeParam)) return; // params still unknown → reported below
+      unifyTypeParams(pat, this.typeArrow(a, ctx, scope), bindings);
+    });
+
+    const missing = tps.filter((t) => !bindings.has(t));
+    if (missing.length) {
+      throw nyi(NYI.GENERIC, `cannot infer type argument${missing.length > 1 ? "s" : ""} ${missing.map((m) => `'${m}'`).join(", ")} for generic function '${name}'; pass them explicitly (\`${name}<${tps.join(", ")}>(…)\`)`);
+    }
+    const typeArgs = tps.map((t) => bindings.get(t)!);
+    for (const t of typeArgs) {
+      if (hasTypeParam(t)) throw nyi(NYI.GENERIC, `generic function '${name}' instantiated with an unresolved type parameter (nested generics are not supported)`);
+    }
+
+    const key = `${name}|${typeArgs.join("|")}`;
+    const memo = this.instances.get(key);
+    if (memo) { (e.callee as { name: string }).name = memo; return this.functions.get(memo)!; }
+
+    // POLYMORPHIC RECURSION (`f<T>` calling `f<T[]>`) has no finite monomorphization —
+    // each level demands a strictly bigger type. Memoization can't see it (every key is
+    // new), so cap the expansion and reject rather than diverge.
+    if (this.specialized.length >= MAX_INSTANTIATIONS) {
+      throw nyi(NYI.GENERIC, `too many generic instantiations while specializing '${name}' (>${MAX_INSTANTIATIONS}); a generic that calls itself at a DIFFERENT type argument (polymorphic recursion) cannot be monomorphized`);
+    }
+    const mangled = this.mangle(name, typeArgs);
+    this.instances.set(key, mangled); // BEFORE cloning — self-recursion resolves here
+    const spec = specializeDecl(tmpl, mangled, bindings);
+    const params: Ty[] = spec.params.map((p) => p.annot ?? (p.default ? this.type(p.default, this.genericBase!()) : "number"));
+    spec.params.forEach((p, i) => { if (p.default && p.annot) this.type(p.default, this.genericBase!(), params[i]); });
+    const fixed = spec.params.length - (spec.params.at(-1)?.rest ? 1 : 0);
+    const sig: Sig = {
+      params,
+      ret: spec.returnAnnot ?? "number",
+      required: spec.params.slice(0, fixed).filter((p) => !p.default).length,
+      defaults: spec.params.map((p) => p.default ?? null),
+      rest: !!spec.params.at(-1)?.rest,
+    };
+    spec.returnTy = sig.ret;
+    this.functions.set(mangled, sig);
+    this.specialized.push(spec);
+    if (!spec.returnAnnot) { sig.ret = this.inferReturnType(spec, this.genericBase!()); spec.returnTy = sig.ret; }
+    this.pending.push(spec); // body checked in the drain loop (keeps recursion finite)
+    (e.callee as { name: string }).name = mangled;
+    return sig;
+  }
 
   checkFunction(fn: FuncDecl, base: Scope): void {
     for (const p of fn.params) base.declare(p.name, p.annot ?? (p.default ? "number" : "number"), false);
@@ -386,6 +544,12 @@ class Checker {
       }
       case "Identifier": {
         const b = scope.lookup(e.name);
+        // M3: a generic declaration has no single type, so it cannot be used as a VALUE —
+        // monomorphization specializes at CALL sites. Say so precisely instead of
+        // reporting it as undefined.
+        if (!b && this.generics.has(e.name)) {
+          throw nyi(NYI.GENERIC, `generic function '${e.name}' used as a value; a generic is specialized at its CALL site — call it directly (\`${e.name}(…)\`) or wrap it in a concrete arrow`);
+        }
         if (!b) throw typeError(`'${e.name}' is not defined`);
         return b.ty;
       }
@@ -923,7 +1087,12 @@ class Checker {
         return funcRet(bound.ty);
       }
 
-      const sig = this.functions.get(e.callee.name);
+      // M3: a call to a GENERIC declaration resolves its type arguments, instantiates the
+      // matching specialization, and rewrites the callee to it — after which the argument
+      // checking below is exactly the ordinary concrete-signature path.
+      const sig = this.generics.has(e.callee.name)
+        ? this.instantiate(e.callee.name, e, scope)
+        : this.functions.get(e.callee.name);
       if (!sig) throw nyi(NYI.CLOSURE, `call to '${e.callee.name}' (function values / unknown callee)`);
       if (sig.rest) {
         const fixed = sig.params.length - 1;
@@ -1065,6 +1234,11 @@ class Checker {
   private typeArrow(arrow: ArrowFunction, expected: Ty | undefined, scope: Scope): Ty {
     const expParams = expected && isFuncTy(expected) ? funcParams(expected) : undefined;
     const paramTys = arrow.params.map((p, i) => {
+      // M3: an arrow's OWN type parameters (`<T>(x: T) => …`) leave `#T` markers. An arrow
+      // is a value, so there is no instantiation site to specialize on: prefer the
+      // contextual type where the arrow is used as an argument, and otherwise erase the
+      // marker to `number` (the pre-M3 behavior, kept so generic arrows still compile).
+      if (p.annot && hasTypeParam(p.annot)) p.annot = expParams?.[i] ?? eraseTypeParams(p.annot); // resolve the marker IN the AST
       const t = p.annot ?? expParams?.[i];
       if (!t) throw typeError(`cannot infer type of arrow parameter '${p.name}'`);
       return t;
