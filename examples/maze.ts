@@ -119,7 +119,7 @@ while (head < queue.length) {
         const nkey: string = nr + "," + nc;
         if (!visited.has(nkey)) {
           visited = visited.add(nkey);
-          dist = dist.set(nkey, dist.get(key) + 1);
+          dist = dist.set(nkey, (dist.get(key) ?? 0) + 1);
           parent = parent.set(nkey, code); // reached nkey from cell `code`
           queue = [...queue, nr * COLS + nc]; // functional enqueue (no .push)
         }
@@ -129,7 +129,7 @@ while (head < queue.length) {
   }
 }
 
-const answer: number = dist.get(endKey);
+const answer: number = dist.get(endKey) ?? -1;
 
 // ---------------------------------------------------------------------------
 // Reconstruct the path by walking `parent` back from E to S, collecting the
@@ -137,13 +137,13 @@ const answer: number = dist.get(endKey);
 // ---------------------------------------------------------------------------
 
 let pathSet = new Set<string>().add(endKey);
-let pc: number = parent.get(endKey); // code of end's parent (-1 if end is start)
+let pc: number = parent.get(endKey) ?? -1; // code of end's parent (-1 if end is start)
 while (pc >= 0) {
   const pr: number = Math.floor(pc / COLS);
   const pcol: number = pc - pr * COLS;
   const pkey: string = pr + "," + pcol;
   pathSet = pathSet.add(pkey);
-  pc = parent.get(pkey);
+  pc = parent.get(pkey) ?? -1;
 }
 
 // ---------------------------------------------------------------------------
