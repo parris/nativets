@@ -117,3 +117,94 @@ main();
 `;
   expect(await expectMatchesNode(src)).toBe("200\ntrue\nhello from mock\n");
 });
+
+// ---------------------------------------------------------------------------
+// 2. `await res.json()` → the Stage-20 `Dyn`, narrowed with `dyn as T` (the
+//    killer combination: fetch + generated runtime validation).
+// ---------------------------------------------------------------------------
+test("await res.json() narrows with `as T` (matches node)", async () => {
+  const port = await startServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ name: "ada", age: 36, tags: ["math", "code"] }));
+  });
+
+  const src = `
+async function main() {
+  const res = await fetch("http://127.0.0.1:${port}/user");
+  const user = (await res.json()) as { name: string, age: number, tags: string[] };
+  console.log(user.name);
+  console.log(user.age);
+  console.log(user.tags[1]);
+}
+main();
+`;
+  expect(await expectMatchesNode(src)).toBe("ada\n36\ncode\n");
+});
+
+// ---------------------------------------------------------------------------
+// 3. `fetch(url, { method, headers, body })` — POST a JSON body with custom headers.
+// ---------------------------------------------------------------------------
+test("fetch POST sends method, headers and body (matches node)", async () => {
+  const port = await startServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      res.writeHead(201, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        method: req.method,
+        key: req.headers["x-api-key"] ?? "MISSING",
+        type: req.headers["content-type"] ?? "MISSING",
+        echo: body,
+      }));
+    });
+  });
+
+  const src = `
+async function main() {
+  const res = await fetch("http://127.0.0.1:${port}/echo", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "sekret" },
+    body: "{\\"hi\\":1}",
+  });
+  console.log(res.status);
+  console.log(res.ok);
+  const seen = (await res.json()) as { method: string, key: string, type: string, echo: string };
+  console.log(seen.method);
+  console.log(seen.key);
+  console.log(seen.type);
+  console.log(seen.echo);
+}
+main();
+`;
+  expect(await expectMatchesNode(src)).toBe(
+    `201\ntrue\nPOST\nsekret\napplication/json\n{"hi":1}\n`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 4. Response headers — `res.headers.get(name)` is case-insensitive (per spec) and
+//    returns `string | null`, so `??` composes; `.has(name)` is the boolean form.
+// ---------------------------------------------------------------------------
+test("res.headers.get is case-insensitive and null on a miss (matches node)", async () => {
+  const port = await startServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json", "x-request-id": "abc-123" });
+    res.end("{}");
+  });
+
+  const src = `
+async function main() {
+  const res = await fetch("http://127.0.0.1:${port}/h");
+  console.log(res.headers.get("content-type"));
+  console.log(res.headers.get("Content-Type"));
+  console.log(res.headers.get("X-REQUEST-ID"));
+  console.log(res.headers.get("x-missing"));
+  console.log(res.headers.get("x-missing") ?? "none");
+  console.log(res.headers.has("x-request-id"));
+  console.log(res.headers.has("x-missing"));
+}
+main();
+`;
+  expect(await expectMatchesNode(src)).toBe(
+    "application/json\napplication/json\nabc-123\nnull\nnone\ntrue\nfalse\n",
+  );
+});
