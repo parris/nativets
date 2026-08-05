@@ -13,9 +13,15 @@
  * spawn keeps the loop free to service the in-process server.
  */
 
-import { test, expect, afterEach } from "bun:test";
+import { test as _test, expect, afterEach } from "bun:test";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+
+// nt_http.c #includes <curl/curl.h>, so these tests need libcurl's dev headers.
+// Where absent (a dev box / CI without libcurl-dev) SKIP rather than hard-fail the
+// whole suite — networking is an optional host feature (see docs/divergences.md).
+const HAS_LIBCURL = spawnSync("clang", ["-fsyntax-only", "-x", "c", "-"], { input: "#include <curl/curl.h>\n" }).status === 0;
+const test = HAS_LIBCURL ? _test : _test.skip;
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

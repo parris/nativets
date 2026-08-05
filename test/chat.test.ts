@@ -12,9 +12,14 @@
  * request.
  */
 
-import { test, expect, afterEach } from "bun:test";
+import { test as _test, expect, afterEach } from "bun:test";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+
+// The chat app links nt_http.c (libcurl). Skip where libcurl dev headers are absent
+// rather than hard-failing the suite (see test/http.test.ts / docs/divergences.md).
+const HAS_LIBCURL = spawnSync("clang", ["-fsyntax-only", "-x", "c", "-"], { input: "#include <curl/curl.h>\n" }).status === 0;
+const test = HAS_LIBCURL ? _test : _test.skip;
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
