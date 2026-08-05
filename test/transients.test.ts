@@ -29,6 +29,7 @@
 
 import { test, expect, describe } from "bun:test";
 import { compileAndRun, expectMatchesNode } from "./harness.ts";
+import { ownershipCheck } from "../src/driver.ts";
 
 /** The idiomatic immutable loop-append (node-runnable: `[...a, i]` is plain ES). */
 const BUILD = `
@@ -131,6 +132,56 @@ console.log(__arrLive());`;
     const r = await compileAndRun(src);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe("3 0\n1\n"); // the unbound pick(false) temp is the residual
+  });
+});
+
+describe("leak 3: a conditionally-moved value still gets dropped (drop flags)", () => {
+  test("moved on one branch only — freed on the branch that kept it", async () => {
+    // rustc compiles this with a runtime DROP FLAG. Our equivalent is cheaper and needs
+    // no extra slot: a move NULLS the variable, and free(NULL) is a no-op — so the drop
+    // can be emitted unconditionally and the pointer IS the flag.
+    const src = `
+function f(c: boolean): number {
+  const a: number[] = [1, 2, 3];
+  let b: number[] = [];
+  if (c) { b = move(a); }
+  return b.length;
+}
+console.log(f(true), f(false));
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("3 0\n0\n");
+  });
+
+  test("conditionally moved in a loop, over many iterations", async () => {
+    const src = `
+function f(n: number): number {
+  let kept: number = 0;
+  for (let i = 0; i < n; i = i + 1) {
+    const t: { a: number } = { a: i };
+    let sink: { a: number } = { a: -1 };
+    if (i % 2 === 0) { sink = move(t); }
+    kept = kept + sink.a;
+  }
+  return kept;
+}
+console.log(f(10));
+console.log(__arrLive(), __objLive());`;
+    const r = await compileAndRun(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("15\n0 0\n"); // 0+2+4+6+8 evens, -1 five times => 20-5
+  });
+
+  test("a conditional move is still a use-after-move error on the other path", async () => {
+    // The drop flag must not weaken the CHECK: reading a maybe-moved value stays NT1601.
+    const src = `
+const a: number[] = [1, 2, 3];
+let b: number[] = [];
+if (a.length > 0) { b = move(a); }
+console.log(a.length, b.length);`;
+    const diags = ownershipCheck(src);
+    expect(diags.map((d) => d.code)).toEqual(["NT1601"]);
   });
 });
 

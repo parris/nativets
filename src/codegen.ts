@@ -1468,6 +1468,9 @@ class FnGen {
         const ty = this.varTypes.get(e.name) ?? (e.ty ?? "number");
         const t = this.fresh();
         this.emit(`${t} = load ${llvmTy(ty)}, ptr ${this.addr(e.name)}`);
+        // Drop flag: this read moves the value out, and the binding is still dropped on
+        // some other path — null the slot so that drop frees nothing (see nullOnMove).
+        if (e.nullOnMove && !this.liftedArrow) this.emit(`store ptr null, ptr ${this.addr(e.name)}`);
         return { v: t, ty };
       }
 

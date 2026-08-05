@@ -300,7 +300,13 @@ export interface ObjectLiteral { kind: "ObjectLiteral"; properties: ObjectProper
 export interface SpreadExpr { kind: "SpreadExpr"; argument: Expr; ty?: Ty; }
 
 export interface Loc { line: number; col: number; }
-export interface Identifier { kind: "Identifier"; name: string; ty?: Ty; loc?: Loc; }
+export interface Identifier {
+  kind: "Identifier"; name: string; ty?: Ty; loc?: Loc;
+  /** Ownership drop flag (B2 step 4): this read MOVES the value out of a binding that
+   *  is dropped on some other path, so the slot is nulled here. `free(NULL)` is a
+   *  no-op, which makes the pointer itself rustc's runtime drop flag. */
+  nullOnMove?: boolean;
+}
 
 export interface MemberExpr {
   kind: "MemberExpr";
