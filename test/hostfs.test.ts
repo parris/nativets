@@ -13,9 +13,12 @@
 import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { compileAndRunIO, runWithNodeIO, emitIR, type IOInput } from "./harness.ts";
+import { compileAndRunIO, runWithNodeIO, compileAndRunFile, runWithNodeFile, emitIR, type IOInput } from "./harness.ts";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 import { NTError } from "../src/diagnostics.ts";
 
 /** The NT code a source is refused with, or null if it compiles. */
@@ -505,6 +508,22 @@ console.log(args.length + " " + args[0]);
 
   test("an option that would change behaviour is refused, not ignored", () => {
     expect(rejects(`import { spawnSync } from "node:child_process";\nconst r = spawnSync("echo", ["x"], { encoding: "utf8", cwd: "/tmp" });\nconsole.log(r.status);\n`)).toBe("NT1028");
+  });
+});
+
+/*
+ * The linker (SH1) merges every module into ONE Program, so a host builtin imported
+ * by a NON-entry module has to survive that merge — which is exactly the shape the
+ * compiler's own source has (src/modules.ts imports node:fs, src/cli.ts is the entry).
+ */
+describe("host imports survive the module linker", () => {
+  test("a non-entry module's node: imports work after the merge", async () => {
+    const dir = scratch();
+    const entry = join(HERE, "hostfs", "host-modules", "main.ts");
+    const oracle = runWithNodeFile(entry, [dir]);
+    const ours = await compileAndRunFile(entry, [dir]);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
   });
 });
 

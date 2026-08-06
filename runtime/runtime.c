@@ -2001,6 +2001,10 @@ const char *nt_file_url_to_path(const char *u) {
  * No shell is involved: the argument vector is passed through verbatim, so a
  * filename with a space, a `*` or a `$` is a single literal argument (node's
  * `spawnSync(cmd, args)` without `shell: true` behaves the same way).
+ *
+ * `nt_host_spawn`, NOT `nt_spawn`: `nt_actor.c` already exports `nt_spawn` for the
+ * ACTOR spawn, and an actor program links both translation units — the collision is
+ * a duplicate-symbol link failure in every actor program, not a compile error here.
  * ============================================================ */
 
 /* Append `n` bytes to a growing buffer (the stdout/stderr collectors). */
@@ -2026,7 +2030,7 @@ static const char *spawn_buf_str(SpawnBuf *b) {
 }
 
 #if !defined(_WIN32) && !defined(__wasi__)
-const char *nt_spawn(const char *cmd, NtArray *args, double *status_out, const char **stderr_out) {
+const char *nt_host_spawn(const char *cmd, NtArray *args, double *status_out, const char **stderr_out) {
   SpawnBuf out = { NULL, 0, 0 }, err = { NULL, 0, 0 };
   *status_out = -1.0;                 /* the spawn-failed value; see docs/divergences.md */
   *stderr_out = "";
@@ -2091,7 +2095,7 @@ const char *nt_spawn(const char *cmd, NtArray *args, double *status_out, const c
 }
 #else
 /* Windows / WASI: no fork/exec. Report the spawn failure rather than pretend. */
-const char *nt_spawn(const char *cmd, NtArray *args, double *status_out, const char **stderr_out) {
+const char *nt_host_spawn(const char *cmd, NtArray *args, double *status_out, const char **stderr_out) {
   (void)cmd; (void)args;
   *status_out = -1.0;
   *stderr_out = "spawnSync is not available on this platform";

@@ -339,7 +339,7 @@ const DECLARES = [
   "declare ptr @nt_mkdtemp(ptr)",
   "declare ptr @nt_readdir(ptr)",
   "declare void @nt_rm(ptr, i32, i32)",
-  "declare ptr @nt_spawn(ptr, ptr, ptr, ptr)",
+  "declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)",
   "declare ptr @nt_path_join(ptr, ptr)",
   "declare ptr @nt_path_resolve(ptr, ptr)",
   "declare ptr @nt_path_dirname(ptr)",
@@ -4275,7 +4275,7 @@ class FnGen {
         const gErr = this.fresh();
         this.emit(`${gErr} = getelementptr i64, ptr ${res}, i64 2`);
         const out = this.fresh();
-        this.emit(`${out} = call ptr @nt_spawn(ptr ${cmd}, ptr ${argv}, ptr ${gStatus}, ptr ${gErr})`);
+        this.emit(`${out} = call ptr @nt_host_spawn(ptr ${cmd}, ptr ${argv}, ptr ${gStatus}, ptr ${gErr})`);
         const gOut = this.fresh();
         this.emit(`${gOut} = getelementptr i64, ptr ${res}, i64 1`);
         this.emit(`store i64 ${this.toSlot({ v: out, ty: "string" })}, ptr ${gOut}`);
