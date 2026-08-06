@@ -111,3 +111,92 @@ jobs:
             exit 1
           fi
           echo "windows smoke OK"
+
+  # ---- Always-available compiler build -------------------------------------
+  #
+  # WHY THIS EXISTS: `release.yml` only fires on a VERSION BUMP, and package.json is
+  # still the `0.0.0` placeholder — so it has never run and there is no binary to pull
+  # anywhere. This job builds the self-contained compiler on EVERY push/PR and uploads
+  # it as a workflow artifact, so every commit has a downloadable `nativets`.
+  #
+  # `bun run compile` bundles the TypeScript compiler + the embedded C runtime into one
+  # executable. It needs only bun to BUILD; the produced binary needs only a system
+  # `clang` to RUN (it shells out to clang to link the .ll it emits).
+  build:
+    name: build (${{ matrix.asset }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset: nativets-macos-arm64
+            bin: nativets
+          - os: ubuntu-latest
+            asset: nativets-linux-x64
+            bin: nativets
+          - os: windows-latest
+            asset: nativets-windows-x64.exe
+            bin: nativets.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Build self-contained nativets binary
+        run: bun run compile
+      - name: Name the platform asset
+        shell: bash # git-bash on windows-latest, so `mv` works uniformly across the matrix
+        run: mv "${{ matrix.bin }}" "${{ matrix.asset }}"
+      # Prove the thing we ship actually compiles and runs a program, not just that it
+      # bundled. POSIX-only runtime deps mean the native link is host-only, so the
+      # end-to-end check runs on macOS/Linux; Windows keeps the bundle-only gate above.
+      - name: Smoke test the built compiler
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y clang
+          fi
+          ./"${{ matrix.asset }}" run ci/smoke.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  # ---- Rolling `dev` prerelease --------------------------------------------
+  #
+  # Workflow artifacts require a GitHub login to download and expire; a release asset
+  # has a STABLE, public URL. This keeps a `dev` prerelease pinned to the tip of main:
+  #
+  #   https://github.com/<owner>/<repo>/releases/download/dev/nativets-macos-arm64
+  #
+  # It is a PRERELEASE, so it never becomes "latest" and never shadows the real
+  # version-bump releases that `release.yml` publishes. Gated on the full differential
+  # suite passing, so `dev` is always a green build.
+  dev-release:
+    name: dev-release
+    needs: [test, build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/replace the `dev` tag + release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Replace the rolling `dev` release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Delete-and-recreate (with --cleanup-tag) rather than uploading over the top:
+          # it is idempotent and cannot leave assets from an older commit behind.
+          gh release delete dev --yes --cleanup-tag || true
+          gh release create dev dist/* \
+            --prerelease \
+            --title "dev (main @ ${GITHUB_SHA:0:7})" \
+            --notes "Rolling build of \`main\` (${GITHUB_SHA:0:7}). Not a stable release — see the tagged versions for those.
+
+          Needs a system \`clang\` on PATH to link. Usage: \`nativets run file.ts\`, \`nativets build file.ts -o prog\`, \`nativets coverage file.ts\`."
