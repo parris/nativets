@@ -222,6 +222,27 @@ describe("regex literals lex (so they are a named refusal, not a lexer crash)", 
     }
   });
 
+  // BORROWED: tc39/test262 test/language/literals/regexp/7.8.5-1.js — "A
+  // RegularExpressionBackslashSequence may not contain a LineTerminator." Skipping the
+  // escaped character blindly scanned straight past the newline and swallowed the next
+  // line; test262 found that, a hand-written case would not have.
+  test("test262 7.8.5-1: a backslash sequence may not contain a line terminator", () => {
+    expect(() => lex("const a = /\\\n n/;")).toThrow();
+  });
+
+  // BORROWED: tc39/test262 test/language/literals/regexp/S7.8.5_A2.1_T1.js — patterns
+  // that are legal and must lex as ONE token (spaces, punctuation, unicode escapes).
+  test("test262 S7.8.5_A2.1_T1: ordinary patterns lex as one token", () => {
+    for (const [src, want] of [
+      ["const a = /aa/;", "/aa/"],
+      ["const a = /,;/;", "/,;/"],
+      ["const a = /  /;", "/  /"],
+      ["const a = /a\\u0041/;", "/a\\u0041/"],
+    ] as const) {
+      expect(lex(src).find((t) => t.type === "regex")!.value).toBe(want);
+    }
+  });
+
   test("an unterminated `/` on a line stays division (no runaway consumption)", () => {
     // `a / b` split across lines must not swallow the newline looking for a closer.
     expect(lex("const x = a /\n  b;").some((t) => t.type === "regex")).toBe(false);
@@ -248,5 +269,48 @@ describe("postfix `!` — TypeScript's non-null assertion", () => {
   // rather than silently becoming `a!b.c()`.
   test("a newline before `!` is NOT a postfix assertion", () => {
     expect(() => parse("const a = b\n!c;")).toThrow();
+  });
+});
+
+/*
+ * BORROWED CORPUS — the TypeScript conformance suite (microsoft/TypeScript,
+ * tests/cases/compiler/). CLAUDE.md's rule is to mine the reference's suite rather than
+ * invent cases; these are its actual non-null-assertion tests, mapped to node-runnable
+ * nativets source. node ERASES `!`, so node remains the byte-for-byte oracle.
+ *
+ * Mining these immediately found two shapes the hand-written cases missed —
+ * `x!++` and `m! && m[0]` — both recorded below.
+ */
+describe("borrowed: TypeScript conformance non-null assertion cases", () => {
+  test("nonNullReferenceMatching.ts — `!` mid-chain, parenthesized, and on a paren expr", () => {
+    for (const src of [
+      "const a = o.b!.c;",            // this.props.thumbYProps!.elementRef
+      "const a = (o.b!.c);",          // (this.props.thumbYProps!.elementRef)
+      "const a = ((o).b!.c)!;",       // ((this.props).thumbYProps!.elementRef)!
+    ]) expect(() => parse(src)).not.toThrow();
+  });
+
+  test("nonNullFullInference.ts — `last!;` stands alone as an expression statement", () => {
+    expect(() => parse("let last = 1;\nlast;\nlast!;")).not.toThrow();
+  });
+
+  test("nonnullAssertionPropegatesContextualType.ts — `f(...)!` into a typed binding", () => {
+    expect(() => parse('const r: number = m.get("k")!;')).not.toThrow();
+  });
+
+  // constWithNonNull.ts is `x!++`. `!` yields a VALUE, not an lvalue, so incrementing
+  // THROUGH an assertion has no meaning here. It is refused at parse — a located error,
+  // never a miscompile — and recorded so the refusal is deliberate rather than accidental.
+  test("constWithNonNull.ts — `x!++` is REFUSED, not miscompiled", () => {
+    expect(() => parse("let x = 1;\nx!++;")).toThrow();
+  });
+
+  // narrowingWithNonNullExpression.ts asserts `m!` narrows m for the REST of the
+  // expression (`m! && m[0]`). nativets narrows the EXPRESSION, not the binding — it has
+  // no control-flow narrowing — so the second `m` is still nullable. `m![0]` is the
+  // working spelling. Recorded as a known gap, not silently passed.
+  test("narrowingWithNonNullExpression.ts — `!` does NOT narrow later uses (known gap)", () => {
+    expect(() => parse("const a = m! && m[0];")).not.toThrow(); // parses
+    // but the second `m` keeps its nullable type — see docs/self-hosting.md.
   });
 });
