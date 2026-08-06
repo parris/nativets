@@ -163,6 +163,10 @@ const HOST_FUNCS: Record<string, MethodSig> = {
   // node's 2-arg `basename(p, ext)` strips a suffix; only the 1-arg form is implemented.
   basename: { min: 1, max: 1, argTys: ["string"], ret: "string" },
   relative: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
+  // node:os / node:url — the last two the compiler's own source imports.
+  tmpdir: { min: 0, max: 0, argTys: [], ret: "string" },
+  homedir: { min: 0, max: 0, argTys: [], ret: "string" },
+  fileURLToPath: { min: 1, max: 1, argTys: ["string"], ret: "string" },
 };
 
 const GLOBAL_FUNCS: Record<string, MethodSig> = {

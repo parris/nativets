@@ -412,6 +412,62 @@ console.log(relative("/proj", join(dir, "./checker.ts")));
   });
 });
 
+/*
+ * node:os and node:url — the last two the compiler's own source imports. Both
+ * return machine-specific paths, so the fixtures print DERIVED facts (absolute,
+ * exists, a scratch path built from them) that are identical on both sides.
+ */
+describe("node:os — tmpdir / homedir", () => {
+  test("both are absolute directories that exist", async () => {
+    await differential(
+      `import { tmpdir, homedir } from "node:os";
+import { existsSync } from "node:fs";
+const t = tmpdir();
+const h = homedir();
+console.log(t.startsWith("/"), existsSync(t));
+console.log(h.startsWith("/"), existsSync(h));
+`,
+    );
+  });
+
+  test("the driver's own shape: a scratch directory under tmpdir", async () => {
+    await differential(
+      `import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
+const d = mkdtempSync(join(tmpdir(), "nativets-sh4-"));
+console.log(existsSync(d));
+rmSync(d, { recursive: true, force: true });
+console.log(existsSync(d));
+`,
+    );
+  });
+});
+
+describe("node:url — fileURLToPath", () => {
+  test("a file: URL becomes a filesystem path", async () => {
+    await differential(
+      `import { fileURLToPath } from "node:url";
+console.log(fileURLToPath("file:///a/b/c.ts"));
+console.log(fileURLToPath("file:///a/b%20c/d.ts"));
+console.log(fileURLToPath("file:///"));
+`,
+    );
+  });
+
+  test("a non-file URL throws, catchably", async () => {
+    await differential(
+      `import { fileURLToPath } from "node:url";
+try {
+  console.log(fileURLToPath("https://example.com/a"));
+} catch (e) {
+  console.log("caught");
+}
+`,
+    );
+  });
+});
+
 describe("spawnSync: the documented divergence + the closed options surface", () => {
   /*
    * node reports a spawn FAILURE as `status: null` plus an `.error` property. A

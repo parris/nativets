@@ -621,6 +621,8 @@ export interface ExportTable {
 export const HOST_MODULES: Record<string, readonly string[]> = {
   "node:fs": ["readFileSync", "writeFileSync", "existsSync", "mkdtempSync", "readdirSync", "rmSync"],
   "node:path": ["join", "dirname", "basename", "resolve", "relative"],
+  "node:os": ["tmpdir", "homedir"],
+  "node:url": ["fileURLToPath"],
   "node:child_process": ["spawnSync"],
 };
 

@@ -345,6 +345,9 @@ const DECLARES = [
   "declare ptr @nt_path_dirname(ptr)",
   "declare ptr @nt_path_basename(ptr)",
   "declare ptr @nt_path_relative(ptr, ptr)",
+  "declare ptr @nt_os_tmpdir()",
+  "declare ptr @nt_os_homedir()",
+  "declare ptr @nt_file_url_to_path(ptr)",
   // --- GUI FFI (raylib-backed, north-star C-d): flat scalar ABI, conditionally linked ---
   // Booleans come back as i32 (0/1) and are lowered to i1 via `icmp ne`. nt_gui.c + -lraylib
   // are pulled in ONLY when one of these is CALLED (see driver.ts) — non-GUI programs and
@@ -4302,6 +4305,17 @@ class FnGen {
       case "dirname": case "basename": {
         const t = this.fresh();
         this.emit(`${t} = call ptr @nt_path_${name}(ptr ${this.genExpr(args[0]!).v})`);
+        return { v: t, ty: "string" };
+      }
+      case "tmpdir": case "homedir": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_os_${name}()`);
+        return { v: t, ty: "string" };
+      }
+      case "fileURLToPath": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_file_url_to_path(ptr ${this.genExpr(args[0]!).v})`);
+        this.emitExcCheck(); // node throws for a non-file scheme / an encoded separator
         return { v: t, ty: "string" };
       }
       case "relative": {

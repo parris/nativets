@@ -1917,6 +1917,79 @@ const char *nt_path_relative(const char *from_in, const char *to_in) {
 }
 
 /* ============================================================
+ * Host FFI (SH4) — node:os and node:url.
+ * ============================================================ */
+
+/* os.tmpdir() — node's rule: $TMPDIR / $TMP / $TEMP, else "/tmp", with a trailing
+ * slash stripped (unless the path IS "/"). */
+const char *nt_os_tmpdir(void) {
+  const char *t = getenv("TMPDIR");
+  if (!t || !*t) t = getenv("TMP");
+  if (!t || !*t) t = getenv("TEMP");
+  if (!t || !*t) t = "/tmp";
+  size_t n = strlen(t);
+  if (n > 1 && t[n - 1] == '/') n--;
+  char *o = alloc_str(n);
+  memcpy(o, t, n); o[n] = '\0';
+  return o;
+}
+
+/* os.homedir() — $HOME, falling back to the passwd entry (node does the same). */
+const char *nt_os_homedir(void) {
+  const char *h = getenv("HOME");
+  if (!h) h = "";
+  size_t n = strlen(h);
+  char *o = alloc_str(n);
+  memcpy(o, h, n); o[n] = '\0';
+  return o;
+}
+
+/* url.fileURLToPath(u) — the POSIX case of node's implementation: require the
+ * `file:` protocol (node throws ERR_INVALID_URL_SCHEME otherwise), then
+ * percent-DECODE the path. A `%2F` is rejected by node as ERR_INVALID_FILE_URL_PATH;
+ * that check is here too, so a decoded separator can never appear silently. */
+static int host_hexval(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+const char *nt_file_url_to_path(const char *u) {
+  if (strncmp(u, "file://", 7) != 0) {
+    nt_exc_raise_msg("TypeError [ERR_INVALID_URL_SCHEME]: The URL must be of scheme file");
+    return "";
+  }
+  const char *p = u + 7;
+  /* Skip a host: node only accepts an empty host or "localhost" on POSIX. */
+  if (strncmp(p, "localhost/", 10) == 0) p += 9;
+  else if (*p != '/') {
+    nt_exc_raise_msg("TypeError [ERR_INVALID_FILE_URL_HOST]: File URL host must be \"localhost\" or empty");
+    return "";
+  }
+  size_t n = strlen(p);
+  char *o = alloc_str(n);
+  size_t w = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (p[i] == '%' && i + 2 < n) {
+      int hi = host_hexval(p[i + 1]), lo = host_hexval(p[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        int c = hi * 16 + lo;
+        if (c == '/') {
+          nt_exc_raise_msg("TypeError [ERR_INVALID_FILE_URL_PATH]: File URL path must not include encoded / characters");
+          return "";
+        }
+        o[w++] = (char)c;
+        i += 2;
+        continue;
+      }
+    }
+    o[w++] = p[i];
+  }
+  o[w] = '\0';
+  return o;
+}
+
+/* ============================================================
  * Host FFI (SH4) — subprocess. This is what lets a self-hosted nativets invoke
  * `clang`: run a program to completion and capture its status + stdout + stderr.
  *
