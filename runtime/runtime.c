@@ -25,6 +25,10 @@
 #include <time.h>     /* clock_gettime / time — Date.now */
 #include <errno.h>    /* host FFI (SH4): node-identical fs error codes/messages */
 #include <sys/stat.h> /* host FFI (SH4): existsSync — POSIX stat, cross-links */
+#if !defined(_WIN32) && !defined(__wasi__)
+#include <sys/wait.h> /* host FFI (SH4): spawnSync — fork/execvp/waitpid + poll */
+#include <poll.h>
+#endif
 #ifndef _WIN32
 #include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
 #if !defined(__wasi__)
@@ -1594,6 +1598,116 @@ int32_t nt_path_exists(const char *path) {
   struct stat st;
   return stat(path, &st) == 0 ? 1 : 0;
 }
+
+/* ============================================================
+ * Host FFI (SH4) — subprocess. This is what lets a self-hosted nativets invoke
+ * `clang`: run a program to completion and capture its status + stdout + stderr.
+ *
+ * fork + execvp + two pipes + waitpid, all POSIX — no posix_spawn (absent below
+ * Android API 28) and no libc extensions, so the block cross-links like the rest.
+ * Both pipes are drained with poll(2) rather than one-then-the-other: a child that
+ * fills the pipe it is NOT being read from would otherwise block forever.
+ *
+ * No shell is involved: the argument vector is passed through verbatim, so a
+ * filename with a space, a `*` or a `$` is a single literal argument (node's
+ * `spawnSync(cmd, args)` without `shell: true` behaves the same way).
+ * ============================================================ */
+
+/* Append `n` bytes to a growing buffer (the stdout/stderr collectors). */
+typedef struct { char *p; size_t len, cap; } SpawnBuf;
+static void spawn_buf_add(SpawnBuf *b, const char *src, size_t n) {
+  if (b->len + n + 1 > b->cap) {
+    size_t nc = b->cap ? b->cap : 4096;
+    while (b->len + n + 1 > nc) nc *= 2;
+    char *np = (char *)nativets_alloc(nc);
+    if (b->p) memcpy(np, b->p, b->len);
+    b->p = np; b->cap = nc;
+  }
+  memcpy(b->p + b->len, src, n);
+  b->len += n;
+  b->p[b->len] = '\0';
+}
+/* Hand a collector's bytes to TS as an rc-tracked heap string ("" when empty). */
+static const char *spawn_buf_str(SpawnBuf *b) {
+  char *o = alloc_str(b->len);
+  if (b->len) memcpy(o, b->p, b->len);
+  o[b->len] = '\0';
+  return o;
+}
+
+#if !defined(_WIN32) && !defined(__wasi__)
+const char *nt_spawn(const char *cmd, NtArray *args, double *status_out, const char **stderr_out) {
+  SpawnBuf out = { NULL, 0, 0 }, err = { NULL, 0, 0 };
+  *status_out = -1.0;                 /* the spawn-failed value; see docs/divergences.md */
+  *stderr_out = "";
+
+  int64_t n = (int64_t)nt_arr_len(args);
+  char **argv = (char **)nativets_alloc(sizeof(char *) * (size_t)(n + 2));
+  argv[0] = (char *)cmd;
+  for (int64_t i = 0; i < n; i++) argv[i + 1] = (char *)(intptr_t)nt_arr_get(args, (double)i);
+  argv[n + 1] = NULL;
+
+  int po[2], pe[2];
+  if (pipe(po) != 0) return spawn_buf_str(&out);
+  if (pipe(pe) != 0) { close(po[0]); close(po[1]); return spawn_buf_str(&out); }
+
+  fflush(stdout); fflush(stderr);     /* the child inherits our buffers otherwise */
+  pid_t pid = fork();
+  if (pid < 0) { close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); return spawn_buf_str(&out); }
+  if (pid == 0) {
+    /* Child: wire the write ends onto fd 1/2 and exec. A failed execvp exits 127,
+     * which is what a shell reports for "command not found"; the parent turns that
+     * into the spawn-failure status below (node reports `null` + `.error`). */
+    dup2(po[1], STDOUT_FILENO);
+    dup2(pe[1], STDERR_FILENO);
+    close(po[0]); close(po[1]); close(pe[0]); close(pe[1]);
+    execvp(cmd, argv);
+    _exit(127);
+  }
+
+  close(po[1]); close(pe[1]);
+  struct pollfd fds[2];
+  fds[0].fd = po[0]; fds[1].fd = pe[0];
+  int open_fds = 2;
+  while (open_fds > 0) {
+    fds[0].events = fds[0].fd >= 0 ? POLLIN : 0;
+    fds[1].events = fds[1].fd >= 0 ? POLLIN : 0;
+    if (poll(fds, 2, -1) < 0) { if (errno == EINTR) continue; break; }
+    for (int i = 0; i < 2; i++) {
+      if (fds[i].fd < 0 || !fds[i].revents) continue;
+      char buf[4096];
+      ssize_t r = read(fds[i].fd, buf, sizeof buf);
+      if (r > 0) { spawn_buf_add(i == 0 ? &out : &err, buf, (size_t)r); continue; }
+      if (r < 0 && errno == EINTR) continue;
+      close(fds[i].fd); fds[i].fd = -1; open_fds--;
+    }
+  }
+  if (fds[0].fd >= 0) close(fds[0].fd);
+  if (fds[1].fd >= 0) close(fds[1].fd);
+
+  int st = 0;
+  while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { /* retry */ }
+  if (WIFEXITED(st)) {
+    int code = WEXITSTATUS(st);
+    /* execvp never ran the program: report the spawn failure, not a real exit 127. */
+    *status_out = (code == 127 && out.len == 0 && err.len == 0) ? -1.0 : (double)code;
+  } else {
+    /* Killed by a signal. node reports `status: null` + `.signal`; a number type
+     * cannot hold null, so this is -1 too (documented divergence). */
+    *status_out = -1.0;
+  }
+  *stderr_out = spawn_buf_str(&err);
+  return spawn_buf_str(&out);
+}
+#else
+/* Windows / WASI: no fork/exec. Report the spawn failure rather than pretend. */
+const char *nt_spawn(const char *cmd, NtArray *args, double *status_out, const char **stderr_out) {
+  (void)cmd; (void)args;
+  *status_out = -1.0;
+  *stderr_out = "spawnSync is not available on this platform";
+  char *o = alloc_str(0); o[0] = '\0'; return o;
+}
+#endif
 
 /* ============================================================
  * stdlib (web standards) — Batch 1

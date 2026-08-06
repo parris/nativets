@@ -166,6 +166,109 @@ console.log(existsSync(p) ? readFileSync(p, "utf8") : "no such file");
   });
 });
 
+/*
+ * The point of the whole milestone: a self-hosted nativets has to RUN `clang`.
+ * `spawnSync` is the node API the driver already uses, so the shape below is the
+ * shape src/driver.ts calls — status + captured stdout/stderr, `encoding: "utf8"`.
+ */
+describe("node:child_process — spawnSync", () => {
+  test("captures stdout and a zero status", async () => {
+    await differential(
+      `import { spawnSync } from "node:child_process";
+const r = spawnSync("echo", ["hello", "world"], { encoding: "utf8" });
+console.log(r.status);
+console.log(JSON.stringify(r.stdout));
+console.log(JSON.stringify(r.stderr));
+`,
+    );
+  });
+
+  test("reports a non-zero exit status", async () => {
+    await differential(
+      `import { spawnSync } from "node:child_process";
+const r = spawnSync("sh", ["-c", "exit 3"], { encoding: "utf8" });
+console.log(r.status);
+`,
+    );
+  });
+
+  test("captures stderr separately from stdout", async () => {
+    await differential(
+      `import { spawnSync } from "node:child_process";
+const r = spawnSync("sh", ["-c", "echo out; echo err 1>&2"], { encoding: "utf8" });
+console.log(JSON.stringify(r.stdout));
+console.log(JSON.stringify(r.stderr));
+console.log(r.status);
+`,
+    );
+  });
+
+  test("arguments are passed through verbatim — no shell, so no word splitting", async () => {
+    await differential(
+      `import { spawnSync } from "node:child_process";
+const r = spawnSync("echo", ["a b", "c*d", "$HOME"], { encoding: "utf8" });
+console.log(JSON.stringify(r.stdout));
+`,
+    );
+  });
+
+  test("the real thing: compile and run a C program through clang", async () => {
+    const dir = scratch();
+    const src = join(dir, "hi.c");
+    const bin = join(dir, "hi");
+    writeFileSync(src, '#include <stdio.h>\nint main(void){puts("from clang");return 0;}\n');
+    await differential(
+      `import { spawnSync } from "node:child_process";
+const build = spawnSync("clang", [process.argv[2], "-o", process.argv[3]], { encoding: "utf8" });
+console.log("build status " + build.status);
+const run = spawnSync(process.argv[3], [], { encoding: "utf8" });
+console.log(run.stdout.trim());
+`,
+      { args: [src, bin] },
+    );
+  });
+});
+
+describe("spawnSync: the documented divergence + the closed options surface", () => {
+  /*
+   * node reports a spawn FAILURE as `status: null` plus an `.error` property. A
+   * `number` cannot hold null, and typing status as `number | null` would break the
+   * idiomatic `r.status !== 0` the compiler's own driver is written with — so a
+   * failure to spawn (and death by signal) is -1. See docs/divergences.md. This
+   * case is therefore BEHAVIORAL, not differential: node prints `null`, we print -1.
+   */
+  test("a command that does not exist is status -1 (node: null), and does not throw", async () => {
+    const ours = await compileAndRunIO(
+      `import { spawnSync } from "node:child_process";
+const r = spawnSync("nativets-no-such-command", [], { encoding: "utf8" });
+console.log(r.status);
+console.log("still running");
+`,
+    );
+    expect(ours.exitCode).toBe(0);
+    expect(ours.stdout).toBe("-1\nstill running\n");
+  });
+
+  test("the argument array is BORROWED, not consumed — it is usable afterwards", async () => {
+    await differential(
+      `import { spawnSync } from "node:child_process";
+const args = ["one", "two"];
+const r = spawnSync("echo", args, { encoding: "utf8" });
+console.log(r.stdout.trim());
+console.log(args.length + " " + args[0]);
+`,
+    );
+  });
+
+  test("spawnSync without the options object is refused (node yields Buffers)", () => {
+    expect(rejects(`import { spawnSync } from "node:child_process";\nconst r = spawnSync("echo", ["x"]);\nconsole.log(r.status);\n`)).toBe("NT1028");
+  });
+
+  test("an option that would change behaviour is refused, not ignored", () => {
+    expect(rejects(`import { spawnSync } from "node:child_process";\nconst r = spawnSync("echo", ["x"], { encoding: "utf8", cwd: "/tmp" });\nconsole.log(r.status);\n`)).toBe("NT1028");
+  });
+});
+
 describe("the host FFI surface is closed — outside it is NT1028, never half-implemented", () => {
   test("a `node:` module with no native implementation", () => {
     expect(rejects(`import { createHash } from "node:crypto";\nconsole.log(typeof createHash);\n`)).toBe("NT1028");

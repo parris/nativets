@@ -336,6 +336,7 @@ const DECLARES = [
   "declare ptr @nt_read_file(ptr)",
   "declare void @nt_write_file(ptr, ptr)",
   "declare i32 @nt_path_exists(ptr)",
+  "declare ptr @nt_spawn(ptr, ptr, ptr, ptr)",
   // --- GUI FFI (raylib-backed, north-star C-d): flat scalar ABI, conditionally linked ---
   // Booleans come back as i32 (0/1) and are lowered to i1 via `icmp ne`. nt_gui.c + -lraylib
   // are pulled in ONLY when one of these is CALLED (see driver.ts) — non-GUI programs and
@@ -4225,6 +4226,26 @@ class FnGen {
         const t = this.fresh();
         this.emit(`${t} = icmp ne i32 ${r}, 0`);
         return { v: t, ty: "boolean" };
+      }
+      case "spawnSync": {
+        // Same shape as genFetch: allocate the result block, hand C the slot pointers
+        // it fills (status as a raw double, stderr as a ptr) and store the returned
+        // stdout. Slot order matches HOST_FUNCS' field order: 0 status, 1 stdout,
+        // 2 stderr. The options object is compile-time only ({ encoding: "utf8" }).
+        const cmd = this.genExpr(args[0]!).v;
+        const argv = this.genExpr(args[1]!).v;
+        const res = this.fresh();
+        this.emit(`${res} = call ptr @nt_obj_new(double ${llvmDouble(3)})`);
+        const gStatus = this.fresh();
+        this.emit(`${gStatus} = getelementptr i64, ptr ${res}, i64 0`);
+        const gErr = this.fresh();
+        this.emit(`${gErr} = getelementptr i64, ptr ${res}, i64 2`);
+        const out = this.fresh();
+        this.emit(`${out} = call ptr @nt_spawn(ptr ${cmd}, ptr ${argv}, ptr ${gStatus}, ptr ${gErr})`);
+        const gOut = this.fresh();
+        this.emit(`${gOut} = getelementptr i64, ptr ${res}, i64 1`);
+        this.emit(`store i64 ${this.toSlot({ v: out, ty: "string" })}, ptr ${gOut}`);
+        return { v: res, ty: "{status:number,stdout:string,stderr:string}" };
       }
     }
     // Unreachable: the checker only admits a name that HOST_FUNCS has a signature for.

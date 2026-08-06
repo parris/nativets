@@ -620,6 +620,7 @@ export interface ExportTable {
  */
 export const HOST_MODULES: Record<string, readonly string[]> = {
   "node:fs": ["readFileSync", "writeFileSync", "existsSync"],
+  "node:child_process": ["spawnSync"],
 };
 
 export interface Program {

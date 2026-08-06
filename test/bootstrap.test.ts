@@ -161,11 +161,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
       const code = /\[(NT\d+)\]/.exec(error)?.[1] ?? "other";
       (byCode[code] ??= []).push(m);
     }
-    // NT1017 (`node:fs`) is the SH4 host-FFI story; NT1027 is the regex refusal; the
-    // NT0001 survivors are a template-literal TYPE (`\`${string}[]\`` in ast.ts, which
-    // coverage.ts sees through the link) and `satisfies` in parser.ts.
-    expect(Object.keys(byCode).sort()).toEqual(["NT0001", "NT1009", "NT1015", "NT1017", "NT1027"]);
-    expect(byCode["NT1017"]!.sort()).toEqual(["cli.ts", "driver.ts", "modules.ts"]);
+    // NT1027 is the regex refusal; the NT0001 survivors are a template-literal TYPE
+    // (`\`${string}[]\`` in ast.ts, which coverage.ts sees through the link) and
+    // `satisfies` in parser.ts. NT1017 is GONE: SH4 made `node:` specifiers resolve to
+    // compiler builtins, so the same three modules now stop on NT1028 — a NAMED member
+    // of the host FFI that has no implementation yet, not "modules are unsupported".
+    expect(Object.keys(byCode).sort()).toEqual(["NT0001", "NT1009", "NT1015", "NT1027", "NT1028"]);
+    expect(byCode["NT1017"]).toBeUndefined();
+    expect(byCode["NT1028"]!.sort()).toEqual(["cli.ts", "driver.ts", "modules.ts"]);
     // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
     // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
     // working, not a regression — the phase table above is what must never go backwards.

@@ -144,6 +144,11 @@ const HOST_FUNCS: Record<string, MethodSig> = {
   writeFileSync: { min: 2, max: 2, argTys: ["string", "string"], ret: "void" },
   // `existsSync(path)` REPORTS rather than throws — it is the guard in front of a read.
   existsSync: { min: 1, max: 1, argTys: ["string"], ret: "boolean" },
+  // node:child_process — `spawnSync(cmd, args, { encoding: "utf8" })`. The options
+  // object is validated by VALUE (checkHostCall): every other node option changes what
+  // the call does, so an ignored one would be a silent divergence. Field order here IS
+  // the slot order codegen writes.
+  spawnSync: { min: 3, max: 3, argTys: ["string", "string[]", null], ret: "{status:number,stdout:string,stderr:string}" },
 };
 
 const GLOBAL_FUNCS: Record<string, MethodSig> = {
@@ -2122,13 +2127,30 @@ class Checker {
       if (!enc || enc.kind !== "StringLiteral" || enc.value !== "utf8")
         throw nyi(NYI.HOSTMOD, `readFileSync without the literal encoding "utf8" (node returns a Buffer, which has no representation here — write \`readFileSync(path, "utf8")\`)`);
     }
+    if (name === "spawnSync") {
+      // Exactly `{ encoding: "utf8" }`. Every other node option (cwd, env, input,
+      // shell, timeout, maxBuffer) CHANGES what the call does, so accepting and
+      // ignoring one would be a silent divergence — refuse instead.
+      const opts = args[2];
+      const props = opts?.kind === "ObjectLiteral" ? opts.properties : null;
+      const bad = !props
+        || props.length !== 1
+        || props[0]!.key !== "encoding"
+        || props[0]!.value.kind !== "StringLiteral"
+        || props[0]!.value.value !== "utf8";
+      if (bad)
+        throw nyi(NYI.HOSTMOD, `spawnSync with options other than the literal \`{ encoding: "utf8" }\` (without it node yields Buffers, and every other option — cwd/env/input/shell/timeout — changes what the call does)`);
+    }
   }
 
   private checkArgs(args: Expr[], sig: MethodSig, scope: Scope, label: string): void {
     if (args.length < sig.min || args.length > sig.max) throw typeError(`${label} expects ${sig.min}..${sig.max} args, got ${args.length}`);
     args.forEach((a, i) => {
-      const at = this.type(a, scope);
+      // The declared argument type is the CONTEXT for the argument, so a bare `[]`
+      // takes its element type from it (Stage 33) — `spawnSync(cmd, [], …)` is the
+      // forcing case. `null` in argTys means "any type", hence no hint.
       const want = sig.argTys[i];
+      const at = want ? this.type(a, scope, want) : this.type(a, scope);
       if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`);
     });
   }
