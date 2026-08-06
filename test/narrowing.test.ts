@@ -32,12 +32,18 @@ async function expectNode(source: string): Promise<void> {
   expect(ours.exitCode).toBe(oracle.exitCode);
 }
 
-/** Assert the source is REFUSED, with the given diagnostic code. */
-function expectRejected(source: string, code: string): void {
+/**
+ * Assert the source is REFUSED with the given code — and that the message mentions
+ * `needle`, so a case meant to prove "this is NOT narrowed" cannot pass by being
+ * rejected for some unrelated reason.
+ */
+function expectRejected(source: string, code: string, needle: string): void {
   let err: unknown;
   try { sourceToIR(source); } catch (e) { err = e; }
   expect(err).toBeInstanceOf(NTError);
-  expect(formatDiagnostic(err as NTError)).toContain(code);
+  const text = formatDiagnostic(err as NTError);
+  expect(text).toContain(code);
+  expect(text).toContain(needle);
 }
 
 describe("narrowing 1 — `if (x !== undefined)` / `!== null`", () => {
@@ -106,7 +112,7 @@ if (x === undefined) {
 let x: number | undefined = 1;
 if (x !== undefined) { console.log(x + 1); }
 console.log(x + 1);
-`, "NT2001");
+`, "NT2001", "?Unumber");
   });
 
   test("an object binding narrows for field access", async () => {
@@ -127,7 +133,7 @@ if (x !== undefined) {
   x = undefined;
   console.log(x + 1);
 }
-`, "NT2001");
+`, "NT2001", "?Unumber");
   });
 });
 
@@ -173,8 +179,7 @@ function f(x: number | undefined): number {
   if (x !== undefined) return x;
   return x + 1;
 }
-console.log(f(1));
-`, "NT2001");
+`, "NT2001", "?Unumber");
   });
 
   test("an `else` that exits narrows after the if", async () => {
@@ -214,7 +219,118 @@ function f(x: number | undefined): number {
   x = undefined;
   return x + 1;
 }
-console.log(f(1));
-`, "NT2001");
+`, "NT2001", "?Unumber");
+  });
+});
+
+describe("narrowing 3 — the fact persists to the right of `&&`", () => {
+  // TypeScript: compiler/narrowingWithNonNullExpression.ts — `m! && m[0]`, where the
+  // SECOND `m` is narrowed by the assertion in the first. Its own `''.match('')` needs
+  // RegExp, so the case is transposed onto the operand types our `&&` accepts; the
+  // shape (assert, then use the bare binding to the right) is the same.
+  test("`x! && x` — the assertion narrows the right operand", async () => {
+    await expectNode(`
+const s: string | undefined = "abc";
+console.log(s! && s);
+const n: number | undefined = 5;
+console.log(n! && n + 1);
+`);
+  });
+
+  test("an assertion nested in the left operand narrows too", async () => {
+    await expectNode(`
+const m: string | undefined = "hello";
+console.log(m!.length > 0 && m.length > 1);
+console.log(m!.length > 99 && m.length > 1);
+`);
+  });
+
+  test("`x !== undefined && <use>` — the guard narrows the right operand", async () => {
+    await expectNode(`
+let x: number | undefined = 10;
+console.log(x !== undefined && x > 3);
+x = 1;
+console.log(x !== undefined && x > 3);
+x = undefined;
+console.log(x !== undefined && x > 3);
+`);
+  });
+
+  test("`x === undefined || <use>` narrows the right operand (the dual)", async () => {
+    await expectNode(`
+let x: number | undefined = 10;
+console.log(x === undefined || x > 3);
+x = 1;
+console.log(x === undefined || x > 3);
+x = undefined;
+console.log(x === undefined || x > 3);
+`);
+  });
+
+  test("a narrowing guard as an `if` test narrows the body", async () => {
+    await expectNode(`
+let x: number | undefined = 9;
+if (x !== undefined && x > 3) {
+  console.log("big", x);
+}
+`);
+  });
+
+  test("a `?:` arm is narrowed by its test", async () => {
+    await expectNode(`
+let s: string | undefined = "hi";
+console.log(s !== undefined ? s.toUpperCase() : "-");
+s = undefined;
+console.log(s !== undefined ? s.toUpperCase() : "-");
+`);
+  });
+
+  test("`||` does NOT carry the positive fact to its right operand", () => {
+    // The right operand of `||` runs when the left was FALSE, i.e. when `x` IS
+    // nullish — narrowing there would be exactly wrong.
+    expectRejected(`
+function f(x: number | undefined): boolean {
+  return x !== undefined || x + 1 > 3;
+}
+`, "NT2001", "?Unumber");
+  });
+
+  // TypeScript: compiler/narrowingPastLastAssignment.ts — narrowings are not preserved
+  // into an inner function for a `let` (it may run after a later assignment); a `const`
+  // cannot be invalidated, so it is.
+  test("a `const` narrowing crosses into a closure; a `let` one does not", async () => {
+    await expectNode(`
+const c: number | undefined = 4;
+if (c !== undefined) {
+  const f = () => c + 1;
+  console.log(f());
+}
+`);
+    expectRejected(`
+let m: number | undefined = 4;
+if (m !== undefined) {
+  const f = () => m + 1;
+  console.log(f());
+}
+`, "NT2001", "?Unumber");
+  });
+
+  test("a name assigned inside ANY arrow is never narrowed", () => {
+    expectRejected(`
+let x: number | undefined = 1;
+const clear = () => { x = undefined; };
+if (x !== undefined) {
+  clear();
+  console.log(x + 1);
+}
+`, "NT2001", "?Unumber");
+  });
+
+  test("`??` does NOT carry a guard fact to its right operand", () => {
+    expectRejected(`
+let x: number | undefined = 1;
+let y: number | undefined = 2;
+console.log((y !== undefined ? 1 : 2) ?? (x + 1));
+`, "NT2001", "?Unumber");
   });
 });

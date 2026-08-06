@@ -452,9 +452,9 @@ class Checker {
    * evaluated unconditionally in the test (which holds on BOTH branches). Facts about a
    * name the region assigns are dropped.
    */
-  private factsFor(test: Expr, scope: Scope, positive: boolean, region: Stmt[] | Expr): NarrowFact[] {
+  private factsFor(test: Expr, scope: Scope, positive: boolean, region: Stmt[] | Expr, guards = true): NarrowFact[] {
     const out: NarrowFact[] = [];
-    this.guardFacts(test, scope, positive, out);
+    if (guards) this.guardFacts(test, scope, positive, out);
     this.assertFacts(test, scope, out);
     if (!out.length) return out;
     const assigned = new Set<string>();
@@ -1192,7 +1192,15 @@ class Checker {
           : isNullableTy(l) ? baseTy(l)
           : l === "null" || l === "undefined" ? hint
           : l;
-        const r = this.type(e.right, scope, rhint);
+        // Control-flow narrowing across the short circuit: the right operand only runs
+        // when the left decided the branch, so it sees that branch's facts — `&&` the
+        // TRUE ones (`m! && m[0]`, `x !== undefined && x > 3`), `||` the FALSE ones.
+        // `??` gets no guard fact (its right operand runs when the left IS nullish), but
+        // an `x!` assertion in the left holds for it too — the left ran to completion.
+        const r = this.withFacts(
+          this.factsFor(e.left, scope, e.op === "&&", e.right, e.op !== "??"),
+          () => this.type(e.right, scope, rhint),
+        );
         if (e.op === "??") {
           // `??` collapses to the non-nullish arm. Left may be definitely-nullish
           // (static → right), a runtime-nullable `T | ...` (runtime tag branch →
@@ -1217,13 +1225,17 @@ class Checker {
         // Each arm sees the surrounding context; additionally an empty `[]` arm takes
         // its element type from the OTHER arm (`flag ? [1, 2] : []`), so type the
         // non-empty arm first and feed its type back.
+        // Each arm is also NARROWED by the test, exactly as an `if` branch is
+        // (`x !== undefined ? x.toUpperCase() : "-"`).
+        const yes = <T>(f: () => T) => this.withFacts(this.factsFor(e.test, scope, true, e.consequent), f);
+        const no = <T>(f: () => T) => this.withFacts(this.factsFor(e.test, scope, false, e.alternate), f);
         let a: Ty, b: Ty;
         if (isEmptyArrayLit(e.consequent) && !isEmptyArrayLit(e.alternate)) {
-          b = this.type(e.alternate, scope, hint);
-          a = this.type(e.consequent, scope, hint ?? b);
+          b = no(() => this.type(e.alternate, scope, hint));
+          a = yes(() => this.type(e.consequent, scope, hint ?? b));
         } else {
-          a = this.type(e.consequent, scope, hint);
-          b = this.type(e.alternate, scope, hint ?? a);
+          a = yes(() => this.type(e.consequent, scope, hint));
+          b = no(() => this.type(e.alternate, scope, hint ?? a));
         }
         if (a !== b) throw typeError(`Ternary branches differ: ${a} vs ${b}`);
         return a;
@@ -2212,13 +2224,17 @@ class Checker {
     arrow.paramTys = paramTys;
     const inner = scope.child();
     arrow.params.forEach((p, i) => inner.declare(p.name, paramTys[i]!, false));
-    let retTy: Ty;
-    if (arrow.exprBody) {
-      retTy = this.type(arrow.body as Expr, inner);
-    } else {
-      retTy = this.inferBlockReturn(arrow.body as Stmt[], inner);
-      this.checkBlock(arrow.body as Stmt[], inner.child(), retTy);
-    }
+    // An arrow used as a VALUE may escape and run long after the guard that narrowed an
+    // enclosing binding, so a `let` narrowing stops at this boundary (a `const` one
+    // cannot be invalidated, so it crosses). TypeScript draws the line in the same
+    // place. The INLINED HOF callbacks (`typeArrowBody`) run inside the expression that
+    // creates them, so they are not a boundary.
+    const retTy: Ty = this.inArrow(() => {
+      if (arrow.exprBody) return this.type(arrow.body as Expr, inner);
+      const t = this.inferBlockReturn(arrow.body as Stmt[], inner);
+      this.checkBlock(arrow.body as Stmt[], inner.child(), t);
+      return t;
+    });
     arrow.retTy = retTy;
     arrow.captures = this.computeCaptures(arrow, scope);
     const ty = makeFuncTy(paramTys, retTy);
