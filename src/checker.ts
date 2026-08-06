@@ -15,6 +15,8 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // Stage 47 (console.log of compound values): the handle-type predicates the
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
+// SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
+import { isUnionTy, unionDiscriminant, unionMemberFor, unionTagValues, unionWidenedMembers, widenLiteralTys } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError } from "./diagnostics.ts";
 
@@ -542,6 +544,17 @@ class Checker {
    */
   private assignable(target: Ty, source: Ty): boolean {
     if (target === source) return true;
+    // SH2: a union value IS one of its members' object blocks — there is no box — so
+    // what flows in must have EXACTLY a member's layout. Deliberately identity, not the
+    // structural rule below: a record that is merely structurally compatible with a
+    // member could have a different slot layout, and accepting it would miscompile
+    // every subsequent field read. (An object LITERAL reaches here already retyped to
+    // the member the context selected — see `unionMemberForLiteral`.)
+    if (isUnionTy(target)) {
+      const members = unionWidenedMembers(target);
+      if (isUnionTy(source)) return unionWidenedMembers(source).every((m) => members.includes(m));
+      return members.includes(source);
+    }
     if (isNullableTy(target)) {
       const which = nullishKind(target);
       if (source === which) return true;                 // undefined→?U / null→?N
@@ -601,8 +614,40 @@ class Checker {
     );
   }
 
+  /**
+   * Which member of the union `u` does this object literal construct? Answered from the
+   * TAG the literal actually writes, not from its structure: two members can be
+   * structurally ambiguous (`{k:"a",n:number} | {k:"b",n:number}`), a tag never is.
+   */
+  private unionMemberForLiteral(e: Extract<Expr, { kind: "ObjectLiteral" }>, u: Ty): Ty | undefined {
+    const d = unionDiscriminant(u);
+    if (!d) return undefined;
+    const tags = unionTagValues(u).map((v) => `"${v}"`).join(" | ");
+    const p = e.properties.find((p) => !p.spread && p.key === d.key);
+    if (!p || p.value.kind !== "StringLiteral") {
+      throw typeError(
+        `an object literal for ${showUnion(u)} must set '${d.key}' to one of the literals ${tags}` +
+          ` — that tag is what selects the member (and, at runtime, IS the value's type)`,
+      );
+    }
+    const m = unionMemberFor(u, p.value.value);
+    if (!m) throw typeError(`'${d.key}: "${p.value.value}"' matches no member of ${showUnion(u)} (expected ${tags})`);
+    return m;
+  }
+
   /** Resolve `.prop` on a NON-nullable base (object field, or string/array `.length`). */
   private fieldOnBase(base: Ty, prop: string): Ty {
+    // SH2: only the DISCRIMINANT is readable on an un-narrowed union — it is the one
+    // field guaranteed to exist, at the same slot, in every member. Everything else
+    // needs a narrowing first; say so instead of guessing a member.
+    if (isUnionTy(base)) {
+      const d = unionDiscriminant(base)!;
+      if (prop === d.key) return "string";
+      throw typeError(
+        `Property '${prop}' does not exist on ${showUnion(base)} — narrow it first ` +
+          `(\`if (x.${d.key} === "…")\` or \`switch (x.${d.key})\`), then the member's fields are available`,
+      );
+    }
     if ((base === "string" || isArrayTy(base)) && prop === "length") return "number";
     if (isObjectTy(base)) {
       const ft = fieldType(base, prop);
@@ -633,7 +678,7 @@ class Checker {
       case "ReturnStmt":
         if (s.argument) {
           const t = this.type(s.argument, scope, ret === "void" ? undefined : ret); // return type is the context (e.g. `return []`)
-          if (ret !== "void" && t !== ret) throw typeError(`return type ${t} does not match declared ${ret}`);
+          if (ret !== "void" && !this.fitsParam(ret, t)) throw typeError(`return type ${t} does not match declared ${ret}`);
         }
         return;
       case "IfStmt":
@@ -779,6 +824,12 @@ class Checker {
         return `${first}[]`;
       }
       case "ObjectLiteral": {
+        // SH2: when the context wants a UNION, the literal's own tag says which member
+        // it is, and that member becomes the context from here down. This is the one
+        // place a union value is created, and the selection is syntactic (the tag the
+        // programmer wrote) rather than structural — two members can be structurally
+        // ambiguous, a tag never is.
+        const ctx = hint !== undefined && isUnionTy(hint) ? this.unionMemberForLiteral(e, hint) : hint;
         const fields: { key: string; ty: Ty }[] = [];
         const put = (key: string, ty: Ty) => { const f = fields.find((f) => f.key === key); if (f) f.ty = ty; else fields.push({ key, ty }); };
         for (const p of e.properties) {
@@ -789,11 +840,14 @@ class Checker {
           } else {
             // An annotated target type is the context for each property value, so
             // `const o: {xs: number[]} = { xs: [] }` types the empty literal.
-            const want = hint && isObjectTy(hint) ? fieldType(hint, p.key) : undefined;
+            const want = ctx && isObjectTy(ctx) ? fieldType(ctx, p.key) : undefined;
             put(p.key, this.type(p.value, scope, want ? baseTy(want) : undefined));
           }
         }
         const lit = objectType(fields);
+        // The selected member wins as the literal's type, so codegen builds the member's
+        // declared slot layout (and any optional field it omitted is still allocated).
+        if (hint !== undefined && isUnionTy(hint) && ctx !== undefined && isObjectTy(ctx) && this.assignable(ctx, lit)) return ctx;
         // Contextual TAGGING (`@@mutable` records). A record's values come from object
         // literals, and the tag is what makes its mutability nominal — so where the
         // context asks for a tagged record and the literal fits it, the literal IS one.
@@ -872,6 +926,7 @@ class Checker {
         if ((ot === "string" || isArrayTy(ot) || isBytesTy(ot)) && e.property === "length") return "number";
         if ((isMapTy(ot) || isSetTy(ot)) && e.property === "size") return "number";
         if (ot === "Dyn") return "Dyn"; // dynamic field access — runtime tag check
+        if (isUnionTy(ot)) return this.fieldOnBase(ot, e.property); // SH2: the discriminant, or "narrow it first"
         if (isObjectTy(ot)) {
           const ft = fieldType(ot, e.property);
           if (!ft) throw typeError(`Property '${e.property}' does not exist on ${ot}`);
@@ -882,6 +937,10 @@ class Checker {
       case "IndexExpr": {
         const ot = this.type(e.object, scope);
         if (ot === "Dyn") { this.type(e.index, scope); return "Dyn"; } // dynamic element/field — runtime tag check
+        if (isUnionTy(ot)) { // SH2: `u["kind"]` is the same read as `u.kind`
+          if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
+          return this.fieldOnBase(ot, e.index.value);
+        }
         if (isObjectTy(ot)) {
           if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
           const ft = fieldType(ot, e.index.value);
@@ -1706,7 +1765,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = i < fixed ? sig.params[i]! : restElem;
           const at = this.typeArg(a, exp, scope);
-          if (at !== exp) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`);
+          if (!this.fitsParam(exp, at)) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`);
         });
         return sig.ret;
       }
@@ -1715,7 +1774,7 @@ class Checker {
       }
       e.args.forEach((a, i) => {
         const at = this.typeArg(a, sig.params[i]!, scope); // contextual: function-typed params type their arrow args
-        if (at !== sig.params[i]) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`);
+        if (!this.fitsParam(sig.params[i]!, at)) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`);
       });
       return sig.ret;
     }
@@ -1724,7 +1783,7 @@ class Checker {
     if (isFuncTy(ct)) {
       const ps = funcParams(ct);
       if (e.args.length !== ps.length) throw typeError(`call expects ${ps.length} arguments, got ${e.args.length}`);
-      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (at !== ps[i]) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`); });
+      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsParam(ps[i]!, at)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`); });
       return funcRet(ct);
     }
     throw nyi(NYI.CLOSURE, "unsupported call target");
@@ -2063,6 +2122,17 @@ class Checker {
     return caps;
   }
 
+  /**
+   * Does an argument / return value of type `actual` fit a declared `expected`?
+   * Type IDENTITY, as it always was — widened by exactly one rule, for SH2: a member
+   * of a discriminated union fits the union, because a union value simply IS its
+   * member's object block. Deliberately not the general `assignable` relation, whose
+   * structural-object and nullable arms would accept values codegen does not box here.
+   */
+  private fitsParam(expected: Ty, actual: Ty): boolean {
+    return actual === expected || (isUnionTy(expected) && this.assignable(expected, actual));
+  }
+
   private typeArg(a: Expr, expected: Ty, scope: Scope): Ty {
     // The parameter type is the CONTEXT for the argument: it types an arrow's params
     // (closures) and supplies the element type of an empty `[]` (e.g. `g([])`).
@@ -2078,6 +2148,9 @@ class Checker {
     });
   }
 }
+
+/** A union rendered the way it was written (`A | B`), for diagnostics. */
+function showUnion(t: Ty): string { return unionWidenedMembers(t).join(" | "); }
 
 /** A bare `[]` — the one expression whose type must come from context, not from itself. */
 function isEmptyArrayLit(e: Expr): boolean {

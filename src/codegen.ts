@@ -18,6 +18,9 @@ import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
+// SH2 (discriminated unions): a union value IS its member's object block, so every
+// lowering below treats it exactly like an object pointer.
+import { isUnionTy, unionDiscriminant } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
@@ -100,6 +103,7 @@ function freshArray(e: Expr): boolean {
 }
 
 function llvmTy(ty: Ty): string {
+  if (isUnionTy(ty)) return "ptr"; // SH2: the member object block itself — there is no box
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*; URL/URLSearchParams = the URL/query TEXT
   switch (ty) {
     case "Date": return "double"; // stdlib batch 3: a Date IS its time value (epoch ms)
@@ -121,6 +125,7 @@ function llvmTy(ty: Ty): string {
 function userSym(name: string): string { return name === "main" ? "nt_user_main" : name; }
 
 function defaultZero(ty: Ty): string {
+  if (isUnionTy(ty)) return "null";
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "null";
   switch (ty) {
     case "number": return "0x0000000000000000";
@@ -1421,7 +1426,7 @@ class FnGen {
     if (val.ty === "string") this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
     const t = this.fresh();
     if (val.ty === "number" || isDateTy(val.ty)) this.emit(`${t} = bitcast double ${val.v} to i64`); // a Date IS a double (batch 3)
-    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    else if (isUnionTy(val.ty) || val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -1430,7 +1435,7 @@ class FnGen {
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
     if (ty === "number" || isDateTy(ty)) this.emit(`${t} = bitcast i64 ${slot} to double`); // a Date IS a double (batch 3)
-    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    else if (isUnionTy(ty) || ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
@@ -1763,6 +1768,16 @@ class FnGen {
           const d = this.fresh();
           this.emit(`${d} = sitofp i64 ${sz} to double`);
           return { v: d, ty: "number" };
+        }
+        // SH2: on an un-narrowed union only the DISCRIMINANT is readable, and it sits at
+        // the same slot in every member (that requirement is what lets the union go
+        // unboxed) — so this is an ordinary slot load, of a string.
+        if (isUnionTy(obj.ty)) {
+          const gep = this.fresh();
+          this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${unionDiscriminant(obj.ty)!.index}`);
+          const slot = this.fresh();
+          this.emit(`${slot} = load i64, ptr ${gep}`);
+          return { v: this.fromSlot(slot, "string"), ty: "string" };
         }
         if (isObjectTy(obj.ty)) {
           const idx = fieldIndex(obj.ty, e.property);
