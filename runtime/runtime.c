@@ -196,7 +196,11 @@ void nt_panic_bounds(const char *what, double len, double idx, const char *loc) 
 
 /* ---- console.log building blocks ---- */
 
+/* console.log's number renderer is util.inspect's `formatNumber`, NOT String():
+ * it prints negative zero as "-0" (`String(-0)` is "0"). Only console.log reaches
+ * here — template literals / string coercion keep js_num_to_str. */
 void js_print_num(double v) {
+  if (v == 0.0 && signbit(v)) { fputs("-0", stdout); return; }
   char buf[64];
   js_number_to_string(v, buf, sizeof(buf));
   fputs(buf, stdout);
@@ -237,6 +241,8 @@ int32_t js_str_cmp(const char *a, const char *b) {
   int r = strcmp(a, b);
   return r < 0 ? -1 : (r > 0 ? 1 : 0);
 }
+
+const char *nt_insp_num(double v); /* util.inspect's formatNumber (see the inspect block) */
 
 /* number -> string, allocated (for template literals / string coercion) */
 const char *js_num_to_str(double v) {
@@ -1092,16 +1098,20 @@ NtDyn *nt_dyn_elem(NtDyn *d, double i) {
   return (NtDyn *)(intptr_t)nt_arr_get((NtArray *)d->arr, i);
 }
 
-/* console.log of an un-narrowed Dyn: scalars print like node; compound values
- * (arrays/objects) would need util.inspect emulation (deferred, danger zone D5). */
+const char *nt_dyn_inspect(NtDyn *d, double indent); /* defined with the inspect block below */
+
+/* console.log of an un-narrowed Dyn. A top-level SCALAR prints bare (node prints a
+ * top-level string unquoted); a compound goes through util.inspect, exactly like a
+ * statically-typed object/array. Before Stage 47 the compound case printed the
+ * literal "[object]" — a silent wrong answer. */
 void nt_dyn_print(NtDyn *d) {
   if (!d) { fputs("undefined", stdout); return; }
   switch (d->tag) {
-    case DYN_NUM:  fputs(js_num_to_str(d->num), stdout); break;
+    case DYN_NUM:  fputs(nt_insp_num(d->num), stdout); break; /* -0 prints as -0 */
     case DYN_BOOL: fputs(d->boolean ? "true" : "false", stdout); break;
     case DYN_STR:  fputs(d->str, stdout); break;
     case DYN_NULL: fputs("null", stdout); break;
-    default:       fputs("[object]", stdout); break;
+    default:       fputs(nt_dyn_inspect(d, 0), stdout); break;
   }
 }
 
@@ -2332,4 +2342,328 @@ static const char *uri_decode(const char *s, int keep_reserved) {
 }
 const char *nt_decode_uri_component(const char *s) { return uri_decode(s, 0); }
 const char *nt_decode_uri(const char *s) { return uri_decode(s, 1); }
+
+/* ============================================================
+ * util.inspect — node's `console.log` rendering of COMPOUND values.
+ *
+ * Before this existed, `console.log(obj)` printed the object POINTER through
+ * `fputs`, i.e. usually a bare newline: a silent wrong answer, the failure mode
+ * this project exists to avoid. What follows is a faithful port of node's
+ * `lib/internal/util/inspect.js` (`reduceToSingleString` / `isBelowBreakLength` /
+ * `groupArrayElements` / `strEscape` / `formatNumber`) at console.log's defaults —
+ * breakLength 80, compact 3, depth 2, maxArrayLength 100 — so the output is
+ * byte-identical to node's.
+ *
+ * Split of work: CODEGEN walks the STATIC type and produces one already-rendered
+ * string per entry (the JSON.stringify walk is the precedent); this builder owns
+ * only the width / line-breaking decision, which depends on the rendered widths
+ * and so can only be made at runtime. `open` carries node's `braces[0]` INCLUDING
+ * any prefix (`Map(2) {`, `Point {`) — node measures that prefix as part of the
+ * brace, and the empty rendering is exactly `open + close`.
+ *
+ * NOTE: widths are counted in BYTES, matching String#length's documented UTF-8
+ * byte-orientation everywhere else in nativets (docs/divergences.md §A.2); node
+ * counts UTF-16 units. Identical for ASCII.
+ * ============================================================ */
+
+#define NT_INSP_BREAK 80
+#define NT_INSP_COMPACT 3
+#define NT_INSP_MAXARR 100
+
+typedef struct {
+  const char **items;
+  int64_t n, cap;
+  const char *open, *close;
+  int64_t indent;     /* node's ctx.indentationLvl at this value */
+  int32_t isArray;    /* kArrayExtrasType => eligible for column grouping */
+  int32_t numericPad; /* every element is a number => padStart (node's `order`) */
+} NtInsp;
+
+NtInsp *nt_insp_new(const char *open, const char *close, double indent, double isArray, double numericPad) {
+  NtInsp *b = (NtInsp *)nativets_alloc(sizeof(NtInsp));
+  b->cap = 8; b->n = 0;
+  b->items = (const char **)nativets_alloc((size_t)b->cap * sizeof(char *));
+  b->open = open; b->close = close;
+  b->indent = (int64_t)indent;
+  b->isArray = (int32_t)isArray;
+  b->numericPad = (int32_t)numericPad;
+  return b;
+}
+
+void nt_insp_add(NtInsp *b, const char *entry) {
+  if (b->n == b->cap) {
+    int64_t nc = b->cap * 2;
+    const char **ni = (const char **)nativets_alloc((size_t)nc * sizeof(char *));
+    memcpy(ni, b->items, (size_t)b->n * sizeof(char *));
+    b->items = ni; b->cap = nc;
+  }
+  b->items[b->n++] = entry ? entry : "";
+}
+
+/* node: isBelowBreakLength(ctx, output, start, base) with base === ''. */
+static int insp_below_break(NtInsp *b, size_t start) {
+  size_t total = (size_t)b->n + start;
+  if (total + (size_t)b->n > NT_INSP_BREAK) return 0;
+  for (int64_t i = 0; i < b->n; i++) {
+    total += strlen(b->items[i]);
+    if (total > NT_INSP_BREAK) return 0;
+  }
+  return 1;
+}
+
+static void sb_pad(SB *s, size_t n) { for (size_t i = 0; i < n; i++) sb_append(s, " ", 1); }
+
+/* node: groupArrayElements — lay short array entries out in aligned columns.
+ * Returns 1 when the entries were regrouped into `*out` (`*outN` lines), 0 when
+ * node leaves the output untouched (which also re-enables the single-line path). */
+static int insp_group(NtInsp *b, const char ***out, int64_t *outN) {
+  int64_t outputLength = b->n;
+  if (NT_INSP_MAXARR < b->n) outputLength--;              /* exclude "... n more items" */
+  const size_t sep = 2;
+  size_t totalLength = 0, maxLength = 0;
+  size_t *dataLen = (size_t *)nativets_alloc((size_t)(outputLength > 0 ? outputLength : 1) * sizeof(size_t));
+  for (int64_t i = 0; i < outputLength; i++) {
+    size_t len = strlen(b->items[i]);
+    dataLen[i] = len;
+    totalLength += len + sep;
+    if (maxLength < len) maxLength = len;
+  }
+  double actualMax = (double)(maxLength + sep);
+  if (!(actualMax * 3 + (double)b->indent < NT_INSP_BREAK &&
+        ((double)totalLength / actualMax > 5.0 || maxLength <= 6))) return 0;
+
+  const double approxCharHeights = 2.5;
+  double averageBias = sqrt(actualMax - (double)totalLength / (double)b->n);
+  double biasedMax = actualMax - 3 - averageBias;
+  if (biasedMax < 1) biasedMax = 1;
+  /* Math.round is floor(x + 0.5) in JS (js_math_round), NOT C's round(). */
+  double c0 = floor(sqrt(approxCharHeights * biasedMax * (double)outputLength) / biasedMax + 0.5);
+  double c1 = floor(((double)NT_INSP_BREAK - (double)b->indent) / actualMax);
+  double cd = c0 < c1 ? c0 : c1;
+  if (cd > NT_INSP_COMPACT * 4) cd = NT_INSP_COMPACT * 4;
+  if (cd > 15) cd = 15;
+  int64_t columns = (int64_t)cd;
+  if (columns <= 1) return 0;
+
+  size_t *maxLineLength = (size_t *)nativets_alloc((size_t)columns * sizeof(size_t));
+  for (int64_t i = 0; i < columns; i++) {
+    size_t lineLength = 0;
+    /* node walks j over the FULL output but reads dataLen[j], which is `undefined`
+     * past outputLength (the "... n more items" entry) and so never widens a column. */
+    for (int64_t j = i; j < outputLength; j += columns)
+      if (dataLen[j] > lineLength) lineLength = dataLen[j];
+    maxLineLength[i] = lineLength + sep;
+  }
+  int padStart = b->numericPad != 0;
+
+  int64_t lines = 0;
+  int64_t capLines = (outputLength + columns - 1) / columns + 2;
+  const char **tmp = (const char **)nativets_alloc((size_t)(capLines > 0 ? capLines : 1) * sizeof(char *));
+  for (int64_t i = 0; i < outputLength; i += columns) {
+    int64_t max = i + columns < outputLength ? i + columns : outputLength;
+    SB line; sb_init(&line);
+    int64_t j = i;
+    for (; j < max - 1; j++) {
+      size_t padding = maxLineLength[j - i];              /* no colors => output[j].length == dataLen[j] */
+      size_t cell = dataLen[j] + sep;                     /* the padded unit is `${output[j]}, ` */
+      if (padStart && cell < padding) sb_pad(&line, padding - cell);
+      sb_append(&line, b->items[j], dataLen[j]);
+      sb_append(&line, ", ", 2);
+      if (!padStart && cell < padding) sb_pad(&line, padding - cell);
+    }
+    if (padStart) {
+      size_t padding = maxLineLength[j - i] - sep;
+      if (dataLen[j] < padding) sb_pad(&line, padding - dataLen[j]);
+    }
+    sb_append(&line, b->items[j], dataLen[j]);
+    tmp[lines++] = sb_finish(&line);
+  }
+  if (NT_INSP_MAXARR < b->n) tmp[lines++] = b->items[outputLength];
+  *out = tmp; *outN = lines;
+  return 1;
+}
+
+/* node: reduceToSingleString with base === '' and ctx.compact === 3. The
+ * `ctx.currentDepth - recurseTimes < ctx.compact` guard is always satisfied at
+ * ctx.depth 2 (nothing deeper than 2 levels is ever formatted), so it is omitted. */
+const char *nt_insp_done(NtInsp *b) {
+  SB s;
+  if (b->n == 0) {
+    sb_init(&s);
+    sb_append(&s, b->open, strlen(b->open));
+    sb_append(&s, b->close, strlen(b->close));
+    return sb_finish_rc(&s);
+  }
+  const char **items = b->items;
+  int64_t n = b->n;
+  int grouped = 0;
+  if (b->isArray && b->n > 6) {
+    const char **g; int64_t gn;
+    if (insp_group(b, &g, &gn)) { items = g; n = gn; grouped = 1; }
+  }
+  if (!grouped) {
+    size_t start = (size_t)b->n + (size_t)b->indent + strlen(b->open) + 10;
+    if (insp_below_break(b, start)) {
+      int nl = 0;
+      for (int64_t i = 0; i < n && !nl; i++) if (strchr(items[i], '\n')) nl = 1;
+      if (!nl) {
+        sb_init(&s);
+        sb_append(&s, b->open, strlen(b->open));
+        sb_append(&s, " ", 1);
+        for (int64_t i = 0; i < n; i++) {
+          if (i) sb_append(&s, ", ", 2);
+          sb_append(&s, items[i], strlen(items[i]));
+        }
+        sb_append(&s, " ", 1);
+        sb_append(&s, b->close, strlen(b->close));
+        return sb_finish_rc(&s);
+      }
+    }
+  }
+  sb_init(&s);
+  sb_append(&s, b->open, strlen(b->open));
+  for (int64_t i = 0; i < n; i++) {
+    if (i) sb_append(&s, ",", 1);
+    sb_append(&s, "\n", 1);
+    sb_pad(&s, (size_t)b->indent + 2);
+    sb_append(&s, items[i], strlen(items[i]));
+  }
+  sb_append(&s, "\n", 1);
+  sb_pad(&s, (size_t)b->indent);
+  sb_append(&s, b->close, strlen(b->close));
+  return sb_finish_rc(&s);
+}
+
+/* node's formatNumber: inspect renders -0 as "-0" (String(-0) is "0"). */
+const char *nt_insp_num(double v) {
+  if (v == 0.0 && signbit(v)) { char *o = alloc_str(2); memcpy(o, "-0", 3); return o; }
+  return js_num_to_str(v);
+}
+
+/* node's strEscape: prefer ', fall back to " then ` to avoid escaping the quote,
+ * and escape control chars / DEL / the chosen quote / backslash. */
+static const char *const insp_meta[32] = {
+  "\\x00", "\\x01", "\\x02", "\\x03", "\\x04", "\\x05", "\\x06", "\\x07",
+  "\\b",   "\\t",   "\\n",   "\\x0B", "\\f",   "\\r",   "\\x0E", "\\x0F",
+  "\\x10", "\\x11", "\\x12", "\\x13", "\\x14", "\\x15", "\\x16", "\\x17",
+  "\\x18", "\\x19", "\\x1A", "\\x1B", "\\x1C", "\\x1D", "\\x1E", "\\x1F",
+};
+
+const char *nt_insp_str(const char *s) {
+  char quote = '\'';
+  if (strchr(s, '\'')) {
+    if (!strchr(s, '"')) quote = '"';
+    else if (!strchr(s, '`') && !strstr(s, "${")) quote = '`';
+  }
+  SB b; sb_init(&b);
+  sb_append(&b, &quote, 1);
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    unsigned char c = *p;
+    char ch = (char)c;
+    if (c < 0x20) sb_append(&b, insp_meta[c], strlen(insp_meta[c]));
+    else if (c == 0x7f) sb_append(&b, "\\x7F", 4);
+    else if (ch == quote) { sb_append(&b, "\\", 1); sb_append(&b, &ch, 1); }
+    else if (ch == '\\') sb_append(&b, "\\\\", 2);
+    else sb_append(&b, &ch, 1);
+  }
+  sb_append(&b, &quote, 1);
+  return sb_finish_rc(&b);
+}
+
+/* An object key: bare when it matches node's keyStrRegExp
+ * (/^[a-zA-Z_][a-zA-Z_0-9]*$/ — note `$` is NOT allowed there), else quoted like
+ * a string. Codegen calls this on the compile-time-known key so the rule has one
+ * implementation shared with the Dyn walk below. */
+const char *nt_insp_key(const char *k) {
+  int bare = (k[0] >= 'a' && k[0] <= 'z') || (k[0] >= 'A' && k[0] <= 'Z') || k[0] == '_';
+  for (const char *p = k; bare && *p; p++) {
+    char c = *p;
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) bare = 0;
+  }
+  return bare ? k : nt_insp_str(k);
+}
+
+/* `Map(3) {` / `Set(0) {` — the size is a runtime value, so the prefix is too. */
+const char *nt_insp_coll_open(const char *name, double size) {
+  SB b; sb_init(&b);
+  sb_append(&b, name, strlen(name));
+  sb_append(&b, "(", 1);
+  char num[64]; js_number_to_string(size, num, sizeof(num));
+  sb_append(&b, num, strlen(num));
+  sb_append(&b, ") {", 3);
+  return sb_finish_rc(&b);
+}
+
+/* `... 3 more items` when an array exceeds maxArrayLength (100). */
+const char *nt_insp_more(double remaining) {
+  SB b; sb_init(&b);
+  char num[64]; js_number_to_string(remaining, num, sizeof(num));
+  sb_append(&b, "... ", 4);
+  sb_append(&b, num, strlen(num));
+  if (remaining > 1) sb_append(&b, " more items", 11); else sb_append(&b, " more item", 10);
+  return sb_finish_rc(&b);
+}
+
+/* `key: value` — one object entry. */
+const char *nt_insp_entry(const char *key, const char *val) {
+  const char *k = nt_insp_key(key);
+  SB b; sb_init(&b);
+  sb_append(&b, k, strlen(k));
+  sb_append(&b, ": ", 2);
+  sb_append(&b, val, strlen(val));
+  return sb_finish_rc(&b);
+}
+
+/* `key => value` — one Map entry. */
+const char *nt_insp_pair(const char *key, const char *val) {
+  SB b; sb_init(&b);
+  sb_append(&b, key, strlen(key));
+  sb_append(&b, " => ", 4);
+  sb_append(&b, val, strlen(val));
+  return sb_finish_rc(&b);
+}
+
+/* ---- Dyn (a JSON.parse result): the same algorithm, but the shape is known only
+ * at runtime, so the whole walk lives here rather than in codegen. ---- */
+static const char *nt_dyn_inspect_at(NtDyn *d, int64_t depth, int64_t indent) {
+  if (!d) return "undefined";
+  switch (d->tag) {
+    case DYN_NULL: return "null";
+    case DYN_BOOL: return d->boolean ? "true" : "false";
+    case DYN_NUM:  return nt_insp_num(d->num);
+    case DYN_STR:  return nt_insp_str(d->str);
+    case DYN_ARR: {
+      NtArray *a = (NtArray *)d->arr;
+      int64_t len = (int64_t)nt_arr_len(a);
+      if (len == 0) return "[]";
+      if (depth > 2) return "[Array]";
+      int64_t n = len < NT_INSP_MAXARR ? len : NT_INSP_MAXARR;
+      int allNum = 1;
+      for (int64_t i = 0; i < n; i++) {
+        NtDyn *e = (NtDyn *)(intptr_t)nt_arr_get(a, (double)i);
+        if (!e || e->tag != DYN_NUM) { allNum = 0; break; }
+      }
+      NtInsp *b = nt_insp_new("[", "]", (double)indent, 1, allNum ? 1 : 0);
+      for (int64_t i = 0; i < n; i++)
+        nt_insp_add(b, nt_dyn_inspect_at((NtDyn *)(intptr_t)nt_arr_get(a, (double)i), depth + 1, indent + 2));
+      if (len > n) nt_insp_add(b, nt_insp_more((double)(len - n)));
+      return nt_insp_done(b);
+    }
+    case DYN_OBJ: {
+      NtDynObj *o = (NtDynObj *)d->obj;
+      if (o->len == 0) return "{}";
+      if (depth > 2) return "[Object]";
+      NtInsp *b = nt_insp_new("{", "}", (double)indent, 0, 0);
+      for (int32_t i = 0; i < o->len; i++)
+        nt_insp_add(b, nt_insp_entry(o->keys[i], nt_dyn_inspect_at(o->vals[i], depth + 1, indent + 2)));
+      return nt_insp_done(b);
+    }
+  }
+  return "undefined";
+}
+
+/* The rendered form of a Dyn at a given indentation level (0 at the top level). */
+const char *nt_dyn_inspect(NtDyn *d, double indent) {
+  return nt_dyn_inspect_at(d, (int64_t)indent / 2, (int64_t)indent);
+}
 

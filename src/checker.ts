@@ -12,6 +12,9 @@ import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isF
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
+// Stage 47 (console.log of compound values): the handle-type predicates the
+// inspectability walk needs to refuse a value it cannot render exactly like node.
+import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError } from "./diagnostics.ts";
 
@@ -1157,7 +1160,11 @@ class Checker {
     if (isConsoleLog(e)) {
       for (const a of e.args) {
         const at = this.type(a, scope);
-        if (isArrayTy(at)) throw nyi(NYI.ARRAY, "console.log of an array (node's array formatting)");
+        // Stage 47: compound values (objects, class instances, arrays, Map/Set, Dyn)
+        // render through node's util.inspect, generated from the static type in
+        // codegen. What is left below is what has NO node-identical rendering here —
+        // each refused, never printed as a raw pointer.
+        checkInspectable(at, at);
         // node prints a Uint8Array with a size-dependent, column-grouped multi-line
         // layout for 7+ elements (not statically known here) — not cheap to match
         // byte-for-byte, so reject rather than guess (reject-don't-miscompile).
@@ -1170,6 +1177,9 @@ class Checker {
         // A URL/URLSearchParams inspects as `URL { href: …, … }` — refused, not guessed.
         if (isUrlTy(at) || isSearchParamsTy(at))
           throw nyi(NYI.WEBAPI, `console.log of a ${at} (node prints an inspected \`${at} { … }\`; print a component, e.g. \`u.href\`-less \`u.origin + u.pathname\`, or \`${at === "URL" ? "u.searchParams" : "p"}.toString()\`)`);
+        // The net: no argument type may reach codegen without a renderer. Printing a
+        // heap handle used to emit the raw pointer — i.e. nothing at all.
+        if (!isPrintableTy(at)) throw nyi(NYI.INSPECT, `console.log of a ${at}`);
       }
       return "void";
     }
@@ -2063,5 +2073,52 @@ export function isConsoleLog(e: Expr): boolean {
     e.callee.object.kind === "Identifier" &&
     e.callee.object.name === "console" &&
     e.callee.property === "log"
+  );
+}
+
+/**
+ * Can `console.log` render this type EXACTLY as node does? (Stage 47.)
+ *
+ * The walk mirrors what codegen will actually print, so it stops where node's own
+ * renderer stops: below `depth 2` a compound prints as `[Object]`/`[Array]`, so what
+ * it contains is never reached and never needs to be renderable. Anything reachable
+ * that has no node-identical form is refused with `NT1025` — the one thing we must
+ * never do is print nothing (or a raw pointer), which is what this replaced.
+ */
+export function checkInspectable(ty: Ty, root: Ty, depth = 0): void {
+  // A HANDLE type at the ROOT keeps its own long-standing diagnostic (NT1016 bytes,
+  // NT1002 Response/Headers, NT1024 URL), applied by the caller right after this walk;
+  // here we catch the same types NESTED inside a printed value, plus function values
+  // anywhere (node names a function from its binding — a name our lifted arrows lack).
+  if (ty !== root) {
+    const what = () => nyi(NYI.INSPECT, `console.log of a ${isFuncTy(ty) ? "function value" : ty} inside \`${root}\``);
+    if (isFuncTy(ty) || isBytesRefTy(ty) || isFetchRefTy(ty) || isUrlRefTy(ty)) throw what();
+  } else if (isFuncTy(ty)) {
+    throw nyi(NYI.INSPECT, "console.log of a function value");
+  }
+  if (isNullableTy(ty)) return checkInspectable(baseTy(ty), root, depth);
+  if (depth >= INSPECT_DEPTH_LIMIT) return; // rendered as `[Object]`/`[Array]`; contents unread
+  if (isArrayTy(ty)) return checkInspectable(elemTy(ty), root, depth + 1);
+  if (isSetTy(ty)) return checkInspectable(setElemTy(ty), root, depth + 1);
+  if (isMapTy(ty)) {
+    checkInspectable(mapKeyTy(ty), root, depth + 1);
+    return checkInspectable(mapValTy(ty), root, depth + 1);
+  }
+  if (isObjectTy(ty)) for (const f of objectFields(ty)) checkInspectable(f.ty, root, depth + 1);
+}
+/** node's `util.inspect` default `depth` — a compound below it renders as a placeholder. */
+const INSPECT_DEPTH_LIMIT = 3;
+
+/**
+ * The safety net behind `console.log`: does codegen have a renderer for this type at
+ * all? Anything not on this list used to fall through to `js_print_str` on the raw
+ * value — which for a heap handle printed a POINTER (usually nothing at all). A type
+ * that reaches here unlisted is refused, never printed.
+ */
+export function isPrintableTy(t: Ty): boolean {
+  return (
+    t === "number" || t === "boolean" || t === "string" || t === "undefined" || t === "void" ||
+    t === "null" || t === "Dyn" || isDateTy(t) || isNullableTy(t) ||
+    isObjectTy(t) || isArrayTy(t) || isMapTy(t) || isSetTy(t)
   );
 }
