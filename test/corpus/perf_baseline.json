@@ -124,28 +124,68 @@
   },
   "link": {
     "primes.ts": {
-      "bytes": 113616
+      "bytes": 113616,
+      "arrLive": 1,
+      "objLive": 0,
+      "strLive": 74,
+      "pvNodes": 5,
+      "pvAllocs": 212
     },
     "matrix.ts": {
-      "bytes": 114016
+      "bytes": 114016,
+      "arrLive": 21,
+      "objLive": 0,
+      "strLive": 112,
+      "pvNodes": 0,
+      "pvAllocs": 0
     },
     "sudoku.ts": {
-      "bytes": 113984
+      "bytes": 113984,
+      "arrLive": 8385,
+      "objLive": 0,
+      "strLive": 498,
+      "pvNodes": 0,
+      "pvAllocs": 0
     },
     "life.ts": {
-      "bytes": 113976
+      "bytes": 113976,
+      "arrLive": 111,
+      "objLive": 0,
+      "strLive": 1200,
+      "pvNodes": 0,
+      "pvAllocs": 0
     },
     "maze.ts": {
-      "bytes": 133224
+      "bytes": 133224,
+      "arrLive": 4,
+      "objLive": 33,
+      "strLive": 835,
+      "pvNodes": 0,
+      "pvAllocs": 0
     },
     "wordfreq.ts": {
-      "bytes": 133328
+      "bytes": 133328,
+      "arrLive": 3,
+      "objLive": 86,
+      "strLive": 231,
+      "pvNodes": 0,
+      "pvAllocs": 0
     },
     "stackvm.ts": {
-      "bytes": 113664
+      "bytes": 113664,
+      "arrLive": 0,
+      "objLive": 0,
+      "strLive": 53,
+      "pvNodes": 0,
+      "pvAllocs": 0
     },
     "json-pretty.ts": {
-      "bytes": 113696
+      "bytes": 113696,
+      "arrLive": 5,
+      "objLive": 2,
+      "strLive": 74,
+      "pvNodes": 0,
+      "pvAllocs": 0
     }
   }
 }

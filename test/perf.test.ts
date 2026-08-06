@@ -456,6 +456,64 @@ describe.skipIf(UPDATE)("perf: runtime allocation counters (deterministic)", () 
   });
 });
 
+/* ============================================================
+ * Wall clock — REPORTED, never asserted.
+ *
+ * This is Bun's `bench/` posture (mitata prints a table; nothing in CI fails on it) and
+ * estone's (a score emitted for a dashboard to trend; the suite passes as long as it
+ * finishes inside its timetrap). rustc-perf collects wall time too, but its own docs say
+ * instruction counts are the default *because they vary least* — and it runs on dedicated
+ * hardware, which this repo does not have.
+ *
+ * The measured justification, taken on this machine at load average ~600 while five
+ * agents shared it: over 20 warm iterations of the SAME `sourceToIR` call,
+ *
+ *     primes.ts     min 0.36ms   median 0.67ms   max 5.40ms    (max/median +705%)
+ *     matrix.ts     min 1.16ms   median 3.29ms   max 20.37ms   (max/median +520%)
+ *     maze.ts       min 1.06ms   median 1.25ms   max 4.14ms    (max/median +230%)
+ *     tictactoe.ts  min 1.17ms   median 1.29ms   max 6.76ms    (max/median +423%)
+ *     infixcalc.ts  min 1.21ms   median 1.48ms   max 13.23ms   (max/median +792%)
+ *
+ * Any tolerance loose enough to survive that (>8x) is far too loose to catch a real 2x
+ * compile-time regression, so an assertion here would be theatre that fails randomly.
+ * We print min and median — rustc-perf keeps the MINIMUM of its iterations for the same
+ * reason: the minimum is the sample least contaminated by other load.
+ * ============================================================ */
+
+const TIMING_ITERATIONS = 7;
+
+export function minAndMedian(samples: number[]): { min: number; median: number } {
+  const s = [...samples].sort((a, b) => a - b);
+  return { min: s[0]!, median: s[Math.floor(s.length / 2)]! };
+}
+
+describe.skipIf(UPDATE)("perf: compile wall clock (REPORT ONLY — never fails)", () => {
+  test("reports compile time per program", () => {
+    const rows: string[] = [];
+    let totalMin = 0;
+    for (const name of IR_CORPUS) {
+      const src = readFileSync(join(EXAMPLES, name), "utf8");
+      sourceToIR(src); // warm
+      const samples: number[] = [];
+      for (let i = 0; i < TIMING_ITERATIONS; i++) {
+        const t0 = Bun.nanoseconds();
+        sourceToIR(src);
+        samples.push((Bun.nanoseconds() - t0) / 1e6);
+      }
+      const { min, median } = minAndMedian(samples);
+      totalMin += min;
+      rows.push(`  ${name.padEnd(18)} min ${min.toFixed(2).padStart(7)}ms   median ${median.toFixed(2).padStart(7)}ms   ${(measured[name]!.instrs / min).toFixed(0).padStart(6)} IR-instr/ms`);
+    }
+    console.log(
+      `\ncompile wall clock (informational — NOT a gate; see the block comment for why):\n` +
+        `${rows.join("\n")}\n  ${"corpus total (min)".padEnd(18)} ${totalMin.toFixed(1)}ms over ${IR_CORPUS.length} programs\n`,
+    );
+    // The ONLY time-based assertion, and it is estone's: the work must complete at all.
+    // Deliberately ~100x the observed total, so it means "hung", never "the box was busy".
+    expect(totalMin).toBeLessThan(60_000);
+  });
+});
+
 function mapOf<K extends keyof IrStats>(stats: Record<string, IrStats>, key: K): Record<string, number> {
   const out: Record<string, number> = {};
   for (const [k, v] of Object.entries(stats)) out[k] = v[key];
