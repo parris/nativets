@@ -10,7 +10,17 @@
  * exactly. Each case reinitializes the scheduler for independence.
  *
  * We include the module source directly so the single-file build command works.
+ *
+ * Stand-ins for the runtime.c symbols nt_actor.c references, so that single-file build
+ * links. THIS LIST MUST TRACK nt_actor.c and it goes stale silently — nothing in `bun test`
+ * builds this file, so it had rotted to an undefined-symbol link error (`nt_rt_lock`,
+ * `nt_str_register`, `nt_num_to_buf`) before anyone noticed. Same list as poll_test.c.
  */
+#include <stdio.h>
+void (*nt_rt_lock)(int acquire) = 0;
+void nt_str_register(void *p) { (void)p; }
+void nt_num_to_buf(double v, char *out, unsigned long out_len) { snprintf(out, out_len, "%g", v); }
+
 #include "../../runtime/nt_actor.c"
 
 #include <stdio.h>

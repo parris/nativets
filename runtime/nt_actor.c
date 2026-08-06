@@ -781,9 +781,51 @@ double nt_sched_used(void) {                 /* how many schedulers actually ran
   return (double)used;
 }
 
+/* Scheduler THREADS are created exactly once per process (see nt_sched_init). */
+static int g_threads_started;
+
 void nt_sched_init(void) {
-  /* Fresh state each init so test cases are independent (never-free: we leak
-   * the previous run's actors/queues, which is fine for v0). */
+  /* Fresh actor state each init so test cases are independent (never-free: we leak the
+   * previous run's actors/queues, which is fine for v0).
+   *
+   * RE-INIT IS DELICATE ONCE THREADS EXIST. The v0..v5 version rebuilt the scheduler
+   * wholesale on every call, which was harmless with no threads. Under M:N it is a
+   * use-after-free: the worker threads from the previous init are still alive and running
+   * scheduler_loop on these very NtSched structs, so memsetting them wipes the `index` a
+   * live worker is using (making it believe it is scheduler 0 and resume `main`'s ucontext
+   * from the WRONG OS THREAD — an instant SIGBUS/SIGSEGV), reinitializes a mutex it may
+   * hold, and swaps out the stack it is executing on. Measured: ~2/60 crashes with two
+   * inits, 0/60 with one. So the threads and their structs are built ONCE and only the
+   * per-run state is reset below.
+   *
+   * PRECONDITION for a repeat call: the previous run reached quiescence (i.e. nt_drain
+   * returned). That holds for the C test harnesses, which are the only repeat callers —
+   * a COMPILED program calls this exactly once, from @main's prologue. */
+  if (!g_threads_started) {
+    g_nsched = resolve_nsched();
+    g_mt = g_nsched > 1;
+    if (g_mt) { rc_lock_init(); nt_rt_lock = rc_lock_hook; } /* RC safety under M:N */
+    for (int i = 0; i < g_nsched; i++) {
+      NtSched *s = &g_scheds[i];
+      memset(s, 0, sizeof(*s));
+      s->index = i;
+      pthread_mutex_init(&s->lock, NULL);
+      s->stack = (char *)malloc(NT_STACK_SIZE);
+    }
+  } else {
+    /* Repeat init: leave every NtSched (and every live worker) alone; just drop whatever
+     * is left in the run queues. Taking each lock keeps this safe against a worker that is
+     * concurrently probing for work to steal. */
+    for (int i = 0; i < g_nsched; i++) {
+      NtSched *s = &g_scheds[i];
+      pthread_mutex_lock(&s->lock);
+      NtRqNode *n = s->head;
+      while (n) { NtRqNode *nx = n->next; free(n); n = nx; }
+      s->head = s->tail = NULL;
+      pthread_mutex_unlock(&s->lock);
+    }
+  }
+
   atomic_store(&g_nactors, 0);
   g_nreg = 0;
   g_now_ms = 0;                            /* v4: virtual clock starts at 0 */
@@ -791,23 +833,14 @@ void nt_sched_init(void) {
   atomic_store(&g_steals, 0);
   atomic_store(&g_io_waiters, 0);
 
-  g_nsched = resolve_nsched();
-  g_mt = g_nsched > 1;
-  if (g_mt) { rc_lock_init(); nt_rt_lock = rc_lock_hook; } /* RC safety under M:N */
-
-  for (int i = 0; i < g_nsched; i++) {
-    NtSched *s = &g_scheds[i];
-    memset(s, 0, sizeof(*s));
-    s->index = i;
-    pthread_mutex_init(&s->lock, NULL);
-    s->stack = (char *)malloc(NT_STACK_SIZE);
-  }
   t_sched = &g_scheds[0];                   /* the program's own thread drives scheduler 0 */
 
   g_main = actor_alloc(/*with_stack=*/0);   /* actor 0 uses the native/main stack */
   g_current = g_main;
   NT_FIBER_HERE(g_main);                    /* main runs on the process's own fiber */
 
+  /* Scheduler 0's context is only ever run by THIS thread, and this thread is here rather
+   * than inside scheduler_loop, so rebuilding it is safe even on a repeat init. */
   getcontext(&g_scheds[0].ctx);
   g_scheds[0].ctx.uc_stack.ss_sp = g_scheds[0].stack;
   g_scheds[0].ctx.uc_stack.ss_size = NT_STACK_SIZE;
@@ -815,8 +848,11 @@ void nt_sched_init(void) {
   makecontext(&g_scheds[0].ctx, scheduler_loop, 0);
   NT_FIBER_NEW(&g_scheds[0]);
 
-  for (int i = 1; i < g_nsched; i++)        /* the M:N workers (none when g_nsched == 1) */
-    pthread_create(&g_scheds[i].thread, NULL, sched_thread_main, &g_scheds[i]);
+  if (!g_threads_started) {
+    for (int i = 1; i < g_nsched; i++)      /* the M:N workers (none when g_nsched == 1) */
+      pthread_create(&g_scheds[i].thread, NULL, sched_thread_main, &g_scheds[i]);
+    g_threads_started = 1;
+  }
 }
 
 NtPid nt_spawn(NtActorFn body, NtMsg arg) {
