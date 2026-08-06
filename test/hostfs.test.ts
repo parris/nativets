@@ -229,6 +229,89 @@ console.log(run.stdout.trim());
   });
 });
 
+/*
+ * node:path — pure string algorithms, ported from node's own lib/path.js (posix),
+ * so node is the oracle directly. The cases below are node's danger zones: `..`
+ * above the root, empty and trailing segments, and a relative path whose common
+ * prefix is not a whole segment.
+ */
+describe("node:path", () => {
+  test("join", async () => {
+    await differential(
+      `import { join } from "node:path";
+console.log(join("a", "b"));
+console.log(join("/a/", "/b/"));
+console.log(join("a", "..", "b"));
+console.log(join("a", "b", "..", "..", "..", "c"));
+console.log(join("", "b"));
+console.log(join("a", ""));
+console.log(join(".", "b"));
+console.log(join("/", "x"));
+console.log(join("a/b", "../c"));
+console.log(join("a", "b/"));
+console.log(join("a/./b"));
+console.log(join("/a//b/../c"));
+`,
+    );
+  });
+
+  test("dirname and basename", async () => {
+    await differential(
+      `import { dirname, basename } from "node:path";
+console.log(dirname("/a/b/c.ts"));
+console.log(dirname("a/b"));
+console.log(dirname("a"));
+console.log(dirname("/a"));
+console.log(dirname("/"));
+console.log(dirname(""));
+console.log(dirname("/a/b/"));
+console.log(basename("/a/b/c.ts"));
+console.log(basename("c.ts"));
+console.log(basename("/a/b/"));
+console.log(basename("/"));
+console.log(JSON.stringify(basename("")));
+`,
+    );
+  });
+
+  test("resolve is absolute, against the working directory", async () => {
+    await differential(
+      `import { resolve } from "node:path";
+console.log(resolve("/a/b", "c"));
+console.log(resolve("/a/b", "/c"));
+console.log(resolve("/a/b/c", "../d"));
+console.log(resolve("/a", ""));
+console.log(resolve("/a/./b/"));
+`,
+    );
+  });
+
+  test("relative", async () => {
+    await differential(
+      `import { relative } from "node:path";
+console.log(JSON.stringify(relative("/a/b/c", "/a/b/c")));
+console.log(relative("/a/b/c", "/a/b/d"));
+console.log(relative("/a/b", "/a/b/c/d"));
+console.log(relative("/a/b/c/d", "/a/b"));
+console.log(relative("/a/bb", "/a/b"));
+console.log(relative("/", "/a/b"));
+`,
+    );
+  });
+
+  test("the driver's own shape: dirname of a module + join of a relative import", async () => {
+    await differential(
+      `import { dirname, join, relative } from "node:path";
+const entry = "/proj/src/cli.ts";
+const dir = dirname(entry);
+console.log(join(dir, "./parser.ts"));
+console.log(join(dir, "../runtime/runtime.c"));
+console.log(relative("/proj", join(dir, "./checker.ts")));
+`,
+    );
+  });
+});
+
 describe("spawnSync: the documented divergence + the closed options surface", () => {
   /*
    * node reports a spawn FAILURE as `status: null` plus an `.error` property. A

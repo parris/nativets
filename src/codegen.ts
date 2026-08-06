@@ -337,6 +337,11 @@ const DECLARES = [
   "declare void @nt_write_file(ptr, ptr)",
   "declare i32 @nt_path_exists(ptr)",
   "declare ptr @nt_spawn(ptr, ptr, ptr, ptr)",
+  "declare ptr @nt_path_join(ptr, ptr)",
+  "declare ptr @nt_path_resolve(ptr, ptr)",
+  "declare ptr @nt_path_dirname(ptr)",
+  "declare ptr @nt_path_basename(ptr)",
+  "declare ptr @nt_path_relative(ptr, ptr)",
   // --- GUI FFI (raylib-backed, north-star C-d): flat scalar ABI, conditionally linked ---
   // Booleans come back as i32 (0/1) and are lowered to i1 via `icmp ne`. nt_gui.c + -lraylib
   // are pulled in ONLY when one of these is CALLED (see driver.ts) — non-GUI programs and
@@ -4246,6 +4251,38 @@ class FnGen {
         this.emit(`${gOut} = getelementptr i64, ptr ${res}, i64 1`);
         this.emit(`store i64 ${this.toSlot({ v: out, ty: "string" })}, ptr ${gOut}`);
         return { v: res, ty: "{status:number,stdout:string,stderr:string}" };
+      }
+      // node:path — pure string work; nothing here can fail, so no exception check.
+      case "join": case "resolve": {
+        // node's variadic form, LEFT-FOLDED over the binary primitive.
+        const fn = name === "join" ? "nt_path_join" : "nt_path_resolve";
+        let acc = this.genExpr(args[0]!).v;
+        if (args.length === 1) {
+          // Still a real call: node's 1-argument `join`/`resolve` NORMALIZES ("a/./b"
+          // → "a/b"). `resolve` takes a null second part; `join` an empty one.
+          const t = this.fresh();
+          const snd = name === "resolve" ? "null" : this.mod.intern("");
+          this.emit(`${t} = call ptr @${fn}(ptr ${acc}, ptr ${snd})`);
+          return { v: t, ty: "string" };
+        }
+        for (let i = 1; i < args.length; i++) {
+          const next = this.genExpr(args[i]!).v;
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @${fn}(ptr ${acc}, ptr ${next})`);
+          acc = t;
+        }
+        return { v: acc, ty: "string" };
+      }
+      case "dirname": case "basename": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_path_${name}(ptr ${this.genExpr(args[0]!).v})`);
+        return { v: t, ty: "string" };
+      }
+      case "relative": {
+        const a = this.genExpr(args[0]!).v, b = this.genExpr(args[1]!).v;
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_path_relative(ptr ${a}, ptr ${b})`);
+        return { v: t, ty: "string" };
       }
     }
     // Unreachable: the checker only admits a name that HOST_FUNCS has a signature for.

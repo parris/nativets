@@ -1600,6 +1600,246 @@ int32_t nt_path_exists(const char *path) {
 }
 
 /* ============================================================
+ * Host FFI (SH4) — node:path (POSIX).
+ *
+ * A faithful port of node's own `lib/path.js` posix implementation, function for
+ * function (`normalizeString`, `join`, `dirname`, `basename`, `resolve`,
+ * `relative`), because the edge cases are the whole point: `..` above the root,
+ * empty and trailing segments, and a common prefix that is not a whole segment.
+ * Pure string work plus getcwd(3) for `resolve` — no allocation beyond the result,
+ * and nothing platform-specific, so it cross-links with the rest.
+ *
+ * Windows paths are deliberately NOT modelled: `path` here is `path.posix`.
+ * ============================================================ */
+
+/* node's normalizeString(path, allowAboveRoot, '/', isPosixPathSeparator).
+ * Writes into `res` (caller-allocated, >= strlen(path)+1) and returns its length. */
+static size_t path_normalize_string(const char *path, int allowAboveRoot, char *res) {
+  size_t n = strlen(path), rl = 0;
+  size_t lastSegmentLength = 0;
+  long lastSlash = -1;
+  int dots = 0;
+  char code = 0;
+  res[0] = '\0';
+  for (size_t i = 0; i <= n; ++i) {
+    if (i < n) code = path[i];
+    else if (code == '/') break;
+    else code = '/';
+
+    if (code == '/') {
+      if (lastSlash == (long)i - 1 || dots == 1) {
+        /* NOOP: an empty segment or "." */
+      } else if (dots == 2) {
+        int trailing_dotdot = rl >= 2 && lastSegmentLength == 2 && res[rl - 1] == '.' && res[rl - 2] == '.';
+        if (!trailing_dotdot) {
+          if (rl > 2) {
+            /* drop the last segment */
+            long lastSlashIndex = -1;
+            for (long k = (long)rl - 1; k >= 0; k--) if (res[k] == '/') { lastSlashIndex = k; break; }
+            if (lastSlashIndex == -1) { rl = 0; res[0] = '\0'; lastSegmentLength = 0; }
+            else {
+              rl = (size_t)lastSlashIndex; res[rl] = '\0';
+              long prev = -1;
+              for (long k = (long)rl - 1; k >= 0; k--) if (res[k] == '/') { prev = k; break; }
+              lastSegmentLength = (size_t)((long)rl - 1 - prev);
+            }
+            lastSlash = (long)i; dots = 0; continue;
+          } else if (rl != 0) {
+            rl = 0; res[0] = '\0'; lastSegmentLength = 0;
+            lastSlash = (long)i; dots = 0; continue;
+          }
+        }
+        if (allowAboveRoot) {
+          if (rl > 0) { res[rl++] = '/'; }
+          res[rl++] = '.'; res[rl++] = '.'; res[rl] = '\0';
+          lastSegmentLength = 2;
+        }
+      } else {
+        size_t seglen = i - (size_t)(lastSlash + 1);
+        if (rl > 0) res[rl++] = '/';
+        memcpy(res + rl, path + lastSlash + 1, seglen);
+        rl += seglen; res[rl] = '\0';
+        lastSegmentLength = seglen;
+      }
+      lastSlash = (long)i;
+      dots = 0;
+    } else if (code == '.' && dots != -1) {
+      ++dots;
+    } else {
+      dots = -1;
+    }
+  }
+  return rl;
+}
+
+/* node's path.posix.normalize, into a fresh rc-tracked string. */
+static const char *path_normalize(const char *path) {
+  size_t n = strlen(path);
+  if (n == 0) { char *o = alloc_str(1); o[0] = '.'; o[1] = '\0'; return o; }
+  int isAbsolute = path[0] == '/';
+  int trailing = path[n - 1] == '/';
+  char *buf = (char *)nativets_alloc(n + 4);
+  size_t rl = path_normalize_string(path, !isAbsolute, buf);
+  if (rl == 0) {
+    if (isAbsolute) { char *o = alloc_str(1); o[0] = '/'; o[1] = '\0'; return o; }
+    if (trailing) { char *o = alloc_str(2); o[0] = '.'; o[1] = '/'; o[2] = '\0'; return o; }
+    char *o = alloc_str(1); o[0] = '.'; o[1] = '\0'; return o;
+  }
+  size_t extra = (isAbsolute ? 1 : 0) + (trailing ? 1 : 0);
+  char *o = alloc_str(rl + extra);
+  size_t w = 0;
+  if (isAbsolute) o[w++] = '/';
+  memcpy(o + w, buf, rl); w += rl;
+  if (trailing) o[w++] = '/';
+  o[w] = '\0';
+  return o;
+}
+
+/* path.join(a, b). Variadic join is a LEFT FOLD of this in codegen: normalize is
+ * idempotent and `..` resolves left to right, so folding gives node's answer for
+ * the whole list (pinned by the differential corpus in test/hostfs.test.ts). */
+const char *nt_path_join(const char *a, const char *b) {
+  size_t la = strlen(a), lb = strlen(b);
+  if (la == 0 && lb == 0) { char *o = alloc_str(1); o[0] = '.'; o[1] = '\0'; return o; }
+  if (la == 0) return path_normalize(b);
+  if (lb == 0) return path_normalize(a);
+  char *j = (char *)nativets_alloc(la + lb + 2);
+  memcpy(j, a, la); j[la] = '/'; memcpy(j + la + 1, b, lb); j[la + 1 + lb] = '\0';
+  return path_normalize(j);
+}
+
+const char *nt_path_dirname(const char *path) {
+  size_t n = strlen(path);
+  if (n == 0) { char *o = alloc_str(1); o[0] = '.'; o[1] = '\0'; return o; }
+  int hasRoot = path[0] == '/';
+  long end = -1;
+  int matchedSlash = 1;
+  for (long i = (long)n - 1; i >= 1; --i) {
+    if (path[i] == '/') { if (!matchedSlash) { end = i; break; } }
+    else matchedSlash = 0;
+  }
+  if (end == -1) {
+    char *o = alloc_str(1);
+    o[0] = hasRoot ? '/' : '.'; o[1] = '\0'; return o;
+  }
+  if (hasRoot && end == 1) { char *o = alloc_str(2); o[0] = '/'; o[1] = '/'; o[2] = '\0'; return o; }
+  char *o = alloc_str((size_t)end);
+  memcpy(o, path, (size_t)end); o[end] = '\0';
+  return o;
+}
+
+/* path.basename(path) — the one-argument form (the `ext` argument is refused by
+ * the checker rather than silently ignored). */
+const char *nt_path_basename(const char *path) {
+  size_t n = strlen(path);
+  long start = 0, end = -1;
+  int matchedSlash = 1;
+  for (long i = (long)n - 1; i >= 0; --i) {
+    if (path[i] == '/') { if (!matchedSlash) { start = i + 1; break; } }
+    else if (end == -1) { matchedSlash = 0; end = i + 1; }
+  }
+  if (end == -1) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  size_t len = (size_t)(end - start);
+  char *o = alloc_str(len);
+  memcpy(o, path + start, len); o[len] = '\0';
+  return o;
+}
+
+/* path.resolve(a) / path.resolve(a, b) — b may be NULL. Absolute by construction:
+ * scans right to left and prepends the working directory when nothing is absolute. */
+const char *nt_path_resolve(const char *a, const char *b) {
+  char cwd[4096];
+  if (!getcwd(cwd, sizeof cwd)) { cwd[0] = '/'; cwd[1] = '\0'; }
+  const char *parts[3];
+  int np = 0;
+  parts[np++] = a;
+  if (b) parts[np++] = b;
+
+  size_t cap = strlen(cwd) + 2;
+  for (int i = 0; i < np; i++) cap += strlen(parts[i]) + 1;
+  char *acc = (char *)nativets_alloc(cap + 1);
+  acc[0] = '\0';
+  size_t al = 0;
+  int absolute = 0;
+  for (int i = np - 1; i >= -1 && !absolute; i--) {
+    const char *p = i >= 0 ? parts[i] : cwd;
+    size_t lp = strlen(p);
+    if (lp == 0) continue;
+    /* acc = p + "/" + acc */
+    memmove(acc + lp + 1, acc, al + 1);
+    memcpy(acc, p, lp);
+    acc[lp] = '/';
+    al += lp + 1;
+    absolute = p[0] == '/';
+  }
+  char *buf = (char *)nativets_alloc(al + 4);
+  size_t rl = path_normalize_string(acc, !absolute, buf);
+  if (absolute) {
+    char *o = alloc_str(rl + 1);
+    o[0] = '/'; memcpy(o + 1, buf, rl); o[rl + 1] = '\0';
+    return o;
+  }
+  if (rl == 0) { char *o = alloc_str(1); o[0] = '.'; o[1] = '\0'; return o; }
+  char *o = alloc_str(rl);
+  memcpy(o, buf, rl); o[rl] = '\0';
+  return o;
+}
+
+/* path.relative(from, to) — both resolved to absolute first, then the longest
+ * common SEGMENT prefix decides how many `..` steps precede the remainder. */
+const char *nt_path_relative(const char *from_in, const char *to_in) {
+  if (strcmp(from_in, to_in) == 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  const char *from = nt_path_resolve(from_in, NULL);
+  const char *to = nt_path_resolve(to_in, NULL);
+  if (strcmp(from, to) == 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+
+  size_t fromStart = 1, fromEnd = strlen(from);
+  size_t fromLen = fromEnd - fromStart;
+  size_t toStart = 1, toLen = strlen(to) - toStart;
+  size_t length = fromLen < toLen ? fromLen : toLen;
+  long lastCommonSep = -1;
+  size_t i = 0;
+  for (; i < length; i++) {
+    char fc = from[fromStart + i];
+    if (fc != to[toStart + i]) break;
+    else if (fc == '/') lastCommonSep = (long)i;
+  }
+  if (i == length) {
+    if (toLen > length) {
+      if (to[toStart + i] == '/') {
+        const char *tail = to + toStart + i + 1;
+        size_t tl = strlen(tail);
+        char *o = alloc_str(tl); memcpy(o, tail, tl); o[tl] = '\0'; return o;
+      }
+      if (i == 0) {
+        const char *tail = to + toStart + i;
+        size_t tl = strlen(tail);
+        char *o = alloc_str(tl); memcpy(o, tail, tl); o[tl] = '\0'; return o;
+      }
+    } else if (fromLen > length) {
+      if (from[fromStart + i] == '/') lastCommonSep = (long)i;
+      else if (i == 0) lastCommonSep = 0;
+    }
+  }
+  /* One ".." per remaining segment of `from`, then the rest of `to`. */
+  size_t ups = 0;
+  for (size_t k = fromStart + (size_t)(lastCommonSep + 1); k <= fromEnd; ++k)
+    if (k == fromEnd || from[k] == '/') ups++;
+  const char *tail = to + toStart + (size_t)lastCommonSep;
+  size_t tl = strlen(tail);
+  size_t need = ups * 3 + tl + 1;
+  char *o = alloc_str(need);
+  size_t w = 0;
+  for (size_t u = 0; u < ups; u++) {
+    if (w > 0) o[w++] = '/';
+    o[w++] = '.'; o[w++] = '.';
+  }
+  memcpy(o + w, tail, tl); w += tl;
+  o[w] = '\0';
+  return o;
+}
+
+/* ============================================================
  * Host FFI (SH4) — subprocess. This is what lets a self-hosted nativets invoke
  * `clang`: run a program to completion and capture its status + stdout + stderr.
  *

@@ -149,6 +149,15 @@ const HOST_FUNCS: Record<string, MethodSig> = {
   // the call does, so an ignored one would be a silent divergence. Field order here IS
   // the slot order codegen writes.
   spawnSync: { min: 3, max: 3, argTys: ["string", "string[]", null], ret: "{status:number,stdout:string,stderr:string}" },
+  // node:path (POSIX). `join`/`resolve` are variadic in node and are LEFT-FOLDED over
+  // the binary runtime primitive here (normalize is idempotent and `..` resolves left
+  // to right, so the fold is node's answer — pinned by the differential corpus).
+  join: { min: 1, max: 8, argTys: ["string", "string", "string", "string", "string", "string", "string", "string"], ret: "string" },
+  resolve: { min: 1, max: 8, argTys: ["string", "string", "string", "string", "string", "string", "string", "string"], ret: "string" },
+  dirname: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  // node's 2-arg `basename(p, ext)` strips a suffix; only the 1-arg form is implemented.
+  basename: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  relative: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
 };
 
 const GLOBAL_FUNCS: Record<string, MethodSig> = {
