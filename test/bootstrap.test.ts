@@ -94,7 +94,10 @@ const BASELINE: Record<string, Phase> = {
   "checker.ts": "parse",
   "codegen.ts": "parse",
   "coverage.ts": "ir",
-  "ownership.ts": "parse",
+  // RATCHET MOVE (regex removal): `/\$inner$/` was ownership.ts's first blocker. Now it
+  // lexes and parses, and stops where the whole-program link takes it — NT1009, the
+  // scalar union in checker.ts, i.e. the same crux as checker.ts itself.
+  "ownership.ts": "ir",
   "driver.ts": "parse",
   "cli.ts": "parse",
   "modules.ts": "parse",
@@ -175,7 +178,8 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // working, not a regression — the phase table above is what must never go backwards.
     // It is now shrinking as the compiler's own regex uses are rewritten as character
     // scanning (nativets has no RegExp, so its source may not use one).
-    expect(byCode["NT1027"]!.sort()).toEqual(["coverage-preprocess.ts", "lexer.ts", "ownership.ts"]);
+    expect(byCode["NT1027"]!.sort()).toEqual(["coverage-preprocess.ts", "lexer.ts"]);
+    expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
     // Unmasked by that rewrite: diagnostics.ts now gets all the way to the checker.
     expect(byCode["NT2001"]!.sort()).toEqual(["diagnostics.ts"]);
     expect(byCode["NT0001"]!.sort()).toEqual(["ast.ts", "coverage.ts", "parser.ts"]);
