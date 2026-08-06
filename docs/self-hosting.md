@@ -208,8 +208,10 @@ the last three **class features** (`static`, `get`), and two small syntax gaps (
 - **Tier 3 — runtime / host.** A small **host FFI**: read/write files (`readFileSync`/
   `writeFileSync`), **spawn a subprocess** (`spawnSync` to invoke `clang`), argv, `process.exit`,
   path join/basename, `TextEncoder`. `Map`/`Set`, `JSON`, strings, arrays, closures, `try/catch`
-  are already supported. **Audit for regex** in the lexer — if present, either add regex or rewrite
-  the scanner char-by-char (likely already char-by-char).
+  are already supported. ~~**Audit for regex** in the lexer — if present, either add regex or rewrite
+  the scanner char-by-char (likely already char-by-char).~~ **DONE:** the audit found 29 regex
+  literals across 8 of the 12 modules (the lexer's scanner was *not* already char-by-char), and all
+  29 are now explicit character scanning. `test/no-regex.test.ts` keeps them out.
 
 ---
 
@@ -255,7 +257,7 @@ visible for the first time:**
 |---|---|---|
 | `NT0001` | `ast`, `lexer`, `parser`, `ownership`, `coverage` | the postfix **`!` non-null assertion** (TS-only, erased at runtime — should be cheap) and one `satisfies` |
 | `NT1017` | `driver`, `cli`, `modules` | **`node:fs` and friends** — the host FFI, i.e. milestone **SH4** |
-| `NT1027` | `diagnostics`, `coverage-preprocess` | genuine regex uses (2 modules, not 8) |
+| `NT1027` | `diagnostics`, `coverage-preprocess` | genuine regex uses (2 modules, not 8) — **since removed; see the regex-removal re-measurement below** |
 | `NT1009` | `checker` | a general union — still the crux (the AST *is* a discriminated union) |
 | `NT1015` | `codegen` | a `static` member |
 
@@ -305,6 +307,38 @@ the union arm of it has two remaining pieces rather than one:
 `coverage src/checker.ts` reports the same one `NT1009` before and after; what it does show is
 **347 → 355 statements analyzed**, and `coverage src/ast.ts` **182 → 257** — the union
 declarations and everything downstream of them now get as far as being analyzed at all.
+
+### Re-measured after the REGEX REMOVAL — `NT1027` is gone from the frontier entirely
+
+nativets has no `RegExp` and never will (a permanent Tier-C refusal, `docs/divergences.md`),
+so a compiler written with regexes cannot compile itself. All **29** regex literals in
+`src/` — spread over **8** of the 12 modules — are now explicit character scanning.
+`test/no-regex.test.ts` is the lint that keeps them out, with an empty table.
+
+| Module | Before | After |
+|---|---|---|
+| `diagnostics.ts` | `parse` — `NT1027` `/^\s*/` | **`ir`** — `NT2001`, `diag.spans.length` after `!diag.spans \|\|` (nullable narrowing does not flow across `\|\|`) |
+| `ownership.ts` | `parse` — `NT1027` `/\$inner$/` | **`ir`** — `NT1009`, the scalar union in `checker.ts` via the link |
+| `lexer.ts` | `parse` — `NT1027` the `@@name` pragma | **`ir`** — `NT1014`, `new Set([…])` for `REGEX_AFTER_KEYWORD` |
+| `coverage-preprocess.ts` | `parse` — `NT1027` `/[A-Za-z_$]/` | **`ir`** — `NT0001`, the same template-literal TYPE as `ast.ts` |
+| `ast.ts` (6), `driver.ts` (7), `modules.ts`, `cli.ts` | regex-free now, but their FIRST blocker was already something else | unchanged (`NT0001` line 14, `NT1017` `node:fs` ×3) |
+
+Four modules moved `parse` → `ir`; four had a nearer blocker and did not move. Nothing
+regressed. The blocker count *rose*, which is the ratchet working: clearing a blocker
+unmasks what was behind it.
+
+**What this measurement does NOT establish.** A byte-identical-IR diff over every fixture
+is the natural way to prove a compiler source rewrite is observationally null, and it is
+**far too weak on its own**. Mutating each rewritten predicate in turn — drop `$` from the
+identifier class, drop `\r` from `\s`, drop `_` from the hex class, accept a one-digit `\x`
+escape, accept `A-Z` in regex flags, drop the pragma's trailing `\s*$` — changes the IR of
+**zero** of the 121 fixtures and the tokens of **zero** compiler modules. Five of the six
+are invisible to the entire existing corpus; the sixth is caught only by **tc39/test262**
+(`early-err-bad-flag.js`, whose flag is uppercase). So the evidence that actually carries
+weight is (a) old-vs-new token streams over 1,105 files including 702 borrowed test262
+cases, (b) exhaustive BMP sweeps of every rewritten class, and (c) compiling each new
+helper **with nativets itself** — which is what caught the two blockers this lane nearly
+planted (a nullable-returning callback type, and an `arr.push`).
 
 ---
 

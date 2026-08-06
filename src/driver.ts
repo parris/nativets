@@ -74,6 +74,99 @@ const ANDROID_API = 24;
 
 export class BuildError extends Error {}
 
+/*
+ * Text scanning, spelled out — the same discipline as `src/lexer.ts`. nativets has no
+ * `RegExp` (docs/divergences.md), so the compiler's own source may not use one; the
+ * driver's toolchain probes and its conditional-link matching are string scans.
+ * `test/no-regex.test.ts` pins each helper against the pattern it replaced — including
+ * the conditional-link scans, whose failure mode is a runtime object silently missing
+ * from the link line.
+ */
+
+/** `[A-Za-z0-9_]` — regex `\w`. Note it does NOT include `$`, so `\b` is exactly this. */
+function isWordChar(c: string): boolean {
+  return (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "_";
+}
+/** ECMAScript `\s` — WhiteSpace + LineTerminator, by code unit. */
+function isSpaceChar(c: string): boolean {
+  const n = c.charCodeAt(0);
+  if (n === 9 || n === 10 || n === 11 || n === 12 || n === 13 || n === 32) return true;
+  return (
+    n === 0xa0 || n === 0x1680 || (n >= 0x2000 && n <= 0x200a) ||
+    n === 0x2028 || n === 0x2029 || n === 0x202f || n === 0x205f ||
+    n === 0x3000 || n === 0xfeff
+  );
+}
+
+/**
+ * Index of the first `\bword\b` in `hay`, or -1 — `word` must start and end with word
+ * characters (every caller's does), so the `\b`s reduce to "the neighbours are not `\w`".
+ */
+function wordIndex(hay: string, word: string): number {
+  for (let i = 0; i + word.length <= hay.length; i++) {
+    if (!hay.startsWith(word, i)) continue;
+    const beforeOk = i === 0 || !isWordChar(hay[i - 1]!);
+    const end = i + word.length;
+    const afterOk = end === hay.length || !isWordChar(hay[end]!);
+    if (beforeOk && afterOk) return i;
+  }
+  return -1;
+}
+
+/** `/\bword\b/.test(hay)`. */
+function hasWord(hay: string, word: string): boolean { return wordIndex(hay, word) >= 0; }
+
+/**
+ * `/\bcall\b[^\n]*<prefix>/.test(ir)` for any of `prefixes` — does the IR CALL a runtime
+ * symbol with one of these prefixes? Matched at the call site, never at the always-present
+ * `declare` line, which is what makes each runtime object conditionally linked.
+ *
+ * `[^\n]*` cannot cross a line, so this is a per-line question; and a `call` later in a
+ * line is followed by strictly less text than the first one, so only the first needs
+ * checking.
+ */
+function irCallsAny(ir: string, prefixes: string[]): boolean {
+  for (const line of ir.split("\n")) {
+    const at = wordIndex(line, "call");
+    if (at < 0) continue;
+    const rest = line.slice(at + 4);
+    for (const p of prefixes) if (rest.includes(p)) return true;
+  }
+  return false;
+}
+
+/**
+ * `s.split(/\s+/)` for an ALREADY-TRIMMED, non-empty `s` — runs of whitespace separate
+ * tokens and there are no empty entries. (On untrimmed input `split` would yield a leading
+ * `""`; the one caller trims and checks non-empty first.)
+ */
+function splitWhitespace(s: string): string[] {
+  // `[...out, tok]`, not `out.push(tok)`: arrays are immutable (Stage 29) and `.push` is
+  // NT1606, so the push spelling would be a self-hosting blocker planted by the very lane
+  // removing one. Token counts here are a handful of link flags.
+  let out: string[] = [];
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && isSpaceChar(s[i]!)) i++;
+    if (i >= s.length) break;
+    const start = i;
+    while (i < s.length && !isSpaceChar(s[i]!)) i++;
+    out = [...out, s.slice(start, i)];
+  }
+  return out;
+}
+
+/** `^aarch64-linux-android\d+-clang$` — an NDK aarch64 clang, at any API level. */
+function isAndroidClangName(f: string): boolean {
+  const prefix = "aarch64-linux-android";
+  const suffix = "-clang";
+  if (!f.startsWith(prefix) || !f.endsWith(suffix)) return false;
+  const api = f.slice(prefix.length, f.length - suffix.length);
+  if (api.length === 0) return false; // `\d+` needs at least one digit
+  for (let i = 0; i < api.length; i++) if (api[i]! < "0" || api[i]! > "9") return false;
+  return true;
+}
+
 export function sourceToIR(source: string, entryPath?: string): string {
   // SH1: resolve + merge the import graph into ONE Program (a no-op returning
   // `parse(source)` when the entry declares no imports), then compile as usual.
@@ -111,7 +204,7 @@ export function androidClang(): string {
   const bin = join(ndkBase, ndk, "toolchains/llvm/prebuilt/darwin-x86_64/bin");
   const wanted = `aarch64-linux-android${ANDROID_API}-clang`;
   if (existsSync(join(bin, wanted))) return join(bin, wanted);
-  const any = readdirSync(bin).filter((f) => /^aarch64-linux-android\d+-clang$/.test(f)).sort();
+  const any = readdirSync(bin).filter((f) => isAndroidClangName(f)).sort();
   if (!any.length) throw new BuildError("No aarch64 Android clang in NDK");
   return join(bin, any[0]!);
 }
@@ -138,7 +231,7 @@ function wasiSdkRoots(): string[] {
 /** Whether `cc` (a clang) has the WebAssembly backend — Apple's system clang does NOT. */
 function clangSupportsWasm(cc: string): boolean {
   const r = spawnSync(cc, ["--print-targets"], { encoding: "utf8" });
-  return r.status === 0 && /\bwasm32\b/.test(r.stdout ?? "");
+  return r.status === 0 && hasWord(r.stdout ?? "", "wasm32");
 }
 
 /**
@@ -196,7 +289,7 @@ export function raylibLinkFlags(): string[] {
   let flags: string[] | null = null;
   const pc = spawnSync("pkg-config", ["--libs", "raylib"], { encoding: "utf8" });
   if (pc.status === 0 && (pc.stdout ?? "").trim()) {
-    flags = (pc.stdout as string).trim().split(/\s+/);
+    flags = splitWhitespace((pc.stdout as string).trim());
   } else {
     const libDirs = [
       "/opt/homebrew/lib", "/opt/homebrew/opt/raylib/lib",
@@ -337,7 +430,7 @@ function writeIR(source: string, entryPath?: string): { dir: string; ll: string;
   const extra: string[] = [];
   // Match the CALL site, not the (always-present) `declare` line — collections are
   // reached through the nt_coll_*/nt_map_*_slot/nt_set_*_slot wrappers.
-  if (/\bcall\b[^\n]*@nt_(coll|map|set)_/.test(ir)) {
+  if (irCallsAny(ir, ["@nt_coll_", "@nt_map_", "@nt_set_"])) {
     writeFileSync(join(dir, "nt_hamt.h"), hamtHeader); // quote-included by both .c files
     const hamt = join(dir, "nt_hamt.c");
     writeFileSync(hamt, hamtSource);
@@ -349,7 +442,7 @@ function writeIR(source: string, entryPath?: string): { dir: string; ll: string;
   // actually uses arrays — matched at a CALL site (`call … @nt_arr_*`), never the
   // always-present `declare`, exactly like the bytes/curl/gui lanes. `-D` is position-
   // independent for clang, so it may ride in `extra` with the source files.
-  if (/\bcall\b[^\n]*@nt_arr_/.test(ir)) {
+  if (irCallsAny(ir, ["@nt_arr_"])) {
     writeFileSync(join(dir, "nt_pvec.h"), pvecHeader); // quote-included by runtime.c + the .c
     const pvec = join(dir, "nt_pvec.c");
     writeFileSync(pvec, pvecSource);
@@ -358,7 +451,7 @@ function writeIR(source: string, entryPath?: string): { dir: string; ll: string;
   // Bytes (stdlib batch 2): link nt_bytes.c ONLY when a program uses Uint8Array /
   // TextEncoder / TextDecoder (codegen emits `call … @nt_bytes_*` exactly then).
   // libc-only, so it cross-links to every target unchanged.
-  if (/\bcall\b[^\n]*@nt_bytes_/.test(ir)) {
+  if (irCallsAny(ir, ["@nt_bytes_"])) {
     writeFileSync(join(dir, "nt_bytes.h"), bytesHeader); // quote-included by the .c
     const bytes = join(dir, "nt_bytes.c");
     writeFileSync(bytes, bytesSource);
@@ -383,7 +476,7 @@ function writeIR(source: string, entryPath?: string): { dir: string; ll: string;
   // (pkg-config / Homebrew / /usr/local / /opt) or throws a clear BuildError. HOST-DESKTOP
   // ONLY: GUI programs are not cross-built (iOS/Android/wasm need platform UI bindings), so
   // non-GUI programs and every cross-build stay entirely raylib-free.
-  if (/\bcall\b[^\n]*@nt_gui_/.test(ir)) {
+  if (irCallsAny(ir, ["@nt_gui_"])) {
     const gui = join(dir, "nt_gui.c");
     writeFileSync(gui, guiSource);
     extra.push(gui, ...raylibLinkFlags());

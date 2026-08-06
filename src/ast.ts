@@ -150,6 +150,27 @@ export function mapKeyTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[
 export function mapValTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[1] as Ty; }
 export function setElemTy(t: Ty): Ty { return t.slice(4, -1) as Ty; }
 
+/*
+ * Character classes, spelled out — the same discipline as `src/lexer.ts`. nativets has no
+ * `RegExp` (docs/divergences.md), so the compiler's own source may not use one. Kept local
+ * to the module rather than shared, so the import graph the bootstrap measurement walks is
+ * unchanged. `test/no-regex.test.ts` pins each against the regex it replaced.
+ */
+/** `[A-Za-z_$]`. */
+function isIdentStart(c: string): boolean {
+  return (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || c === "_" || c === "$";
+}
+/** `[A-Za-z0-9_$]` (= `[\w$]`). */
+function isIdentPart(c: string): boolean {
+  return isIdentStart(c) || (c >= "0" && c <= "9");
+}
+/** `^[A-Za-z_$][\w$]*$` — is the WHOLE of `s` a plain identifier? */
+function isIdentifier(s: string): boolean {
+  if (s.length === 0 || !isIdentStart(s[0]!)) return false;
+  for (let i = 1; i < s.length; i++) if (!isIdentPart(s[i]!)) return false;
+  return true;
+}
+
 /**
  * Class instance types (minimal classes) are structural object types with a leading
  * class-name TAG: `Name{field:ty,...}` (e.g. `Point{x:number,y:number}`). The `{...}`
@@ -162,13 +183,13 @@ export function classTag(t: Ty): string | undefined {
   const i = t.indexOf("{");
   if (i <= 0 || !t.endsWith("}")) return undefined;
   const tag = t.slice(0, i);
-  return /^[A-Za-z_$][\w$]*$/.test(tag) ? tag : undefined;
+  return isIdentifier(tag) ? tag : undefined;
 }
 export function isObjectTy(t: Ty): boolean {
   if (typeof t !== "string" || isNullableTy(t) || t.endsWith("[]")) return false;
   const i = t.indexOf("{");
   if (i < 0 || !t.endsWith("}")) return false;
-  return i === 0 || /^[A-Za-z_$][\w$]*$/.test(t.slice(0, i)); // untagged literal or class-tagged
+  return i === 0 || isIdentifier(t.slice(0, i)); // untagged literal or class-tagged
 }
 /** Parse an object type into ordered [key, type] fields (nesting-aware; tag-tolerant). */
 export function objectFields(t: Ty): { key: string; ty: Ty }[] {
@@ -221,7 +242,11 @@ export function stringLitTy(v: string): Ty { return `"${v}"` as Ty; }
  * of these would corrupt every downstream parse. Rejected with a diagnostic rather
  * than mis-split — see the parser.
  */
-export function tagValueIsEncodable(v: string): boolean { return !/[,{}<>|[\]()"\\]/.test(v); }
+const TAG_FORBIDDEN = ",{}<>|[]()\"\\"; // the class `[,{}<>|[\]()"\\]`, as a character set
+export function tagValueIsEncodable(v: string): boolean {
+  for (let i = 0; i < v.length; i++) if (TAG_FORBIDDEN.includes(v[i]!)) return false;
+  return true;
+}
 
 export function isUnionTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("U<") && t.endsWith(">"); }
 export function unionMembers(t: Ty): Ty[] { return splitTopLevel(t.slice(2, -1), "|") as Ty[]; }
@@ -320,22 +345,55 @@ function matchAngle(s: string, open: number): number {
  * with a user-written type name.
  * ============================================================ */
 
-const TYPE_PARAM_RE = /^#[A-Za-z_$][\w$]*$/;
 /** The marker type for type parameter `name` (`T` → `#T`). */
 export function typeParamTy(name: string): Ty { return `#${name}` as Ty; }
-/** Is `t` EXACTLY a bare type parameter (`#T`, not `#T[]`)? */
-export function isTypeParamTy(t: Ty): boolean { return typeof t === "string" && TYPE_PARAM_RE.test(t); }
+/** Is `t` EXACTLY a bare type parameter (`^#[A-Za-z_$][\w$]*$` — `#T`, not `#T[]`)? */
+export function isTypeParamTy(t: Ty): boolean {
+  return typeof t === "string" && t.startsWith("#") && isIdentifier(t.slice(1));
+}
+
+/**
+ * Rewrite every `#Name` marker in `t`, left to right, exactly as `/#([A-Za-z_$][\w$]*)/g`
+ * did: non-overlapping, replacements are never rescanned, and a `#` not followed by an
+ * identifier start is left alone (the scan resumes at the very next character, so `##T`
+ * still rewrites the SECOND `#T`). A bound marker becomes its binding; an UNBOUND one
+ * becomes `number` when `eraseUnbound`, and is otherwise left as the marker.
+ *
+ * Deliberately a `Map` + a flag rather than a rename CALLBACK: a callback returning
+ * `string | undefined` would need a nullable-returning function type, which nativets does
+ * not accept at a call site (it rejects a plain `(s) => string` argument against it). That
+ * would have planted a self-hosting blocker BEHIND ast.ts's current one, where the
+ * bootstrap ratchet could not see it. Concrete types only.
+ */
+const EMPTY_BINDINGS = new Map<string, Ty>();
+function mapTypeParams(t: string, bindings: Map<string, Ty>, eraseUnbound: boolean): string {
+  let out = "";
+  let i = 0;
+  while (i < t.length) {
+    if (t[i] !== "#" || i + 1 >= t.length || !isIdentStart(t[i + 1]!)) {
+      out += t[i];
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < t.length && isIdentPart(t[j]!)) j++;
+    const bound = bindings.get(t.slice(i + 1, j));
+    out += bound ?? (eraseUnbound ? "number" : t.slice(i, j));
+    i = j;
+  }
+  return out;
+}
 /** Does `t` mention any type parameter anywhere (`#T[]`, `(#T)=>#U`, `{a:#T}`)? */
 export function hasTypeParam(t: Ty): boolean { return typeof t === "string" && t.includes("#"); }
 /** Substitute bound type parameters through `t`; unbound ones are left as markers. */
 export function substTypeParams(t: Ty, bindings: Map<string, Ty>): Ty {
   if (!hasTypeParam(t)) return t;
-  return t.replace(/#([A-Za-z_$][\w$]*)/g, (m, n: string) => bindings.get(n) ?? m) as Ty;
+  return mapTypeParams(t, bindings, false) as Ty;
 }
 /** Erase any REMAINING type parameters to `number` (the pre-M3 fallback, kept for
  *  generic ARROWS, which are values and so have no instantiation site to specialize). */
 export function eraseTypeParams(t: Ty): Ty {
-  return hasTypeParam(t) ? (t.replace(/#[A-Za-z_$][\w$]*/g, "number") as Ty) : t;
+  return hasTypeParam(t) ? (mapTypeParams(t, EMPTY_BINDINGS, true) as Ty) : t;
 }
 /**
  * Structural unification of a parameter PATTERN (which may mention `#T`) against a

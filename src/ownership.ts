@@ -655,7 +655,8 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     const [tag, m] = [s.name.split(".")[0]!, s.name.split(".").slice(1).join(".")];
     if (!mutable.classes.has(tag)) continue; // an ordinary class's setter copies — nothing to guard
     mutable.setters.add(s.name);
-    mutable.setterProps.add(m.replace(/\$inner$/, ""));
+    // `s.replace(/\$inner$/, "")` — the suffix, without a RegExp (nativets has none).
+    mutable.setterProps.add(m.endsWith("$inner") ? m.slice(0, m.length - "$inner".length) : m);
   }
   const isMutableTy = (t: import("./ast.ts").Ty): boolean => {
     if (!mutable.classes.size || !isObjectTy(t)) return false;

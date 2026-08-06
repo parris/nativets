@@ -68,7 +68,9 @@ if (cmd === "coverage") {
 }
 
 if (cmd === "build") {
-  const out = getFlag(rest, "-o") ?? basename(file).replace(/\.ts$/, "");
+  // `.replace(/\.ts$/, "")` — the suffix, without a RegExp (nativets has none).
+  const base = basename(file);
+  const out = getFlag(rest, "-o") ?? (base.endsWith(".ts") ? base.slice(0, -3) : base);
   const target = (getFlag(rest, "--target") ?? "host") as Target;
   const isStatic = hasFlag(rest, "--static");
   await guard(() => buildBinary(source, out, { target, static: isStatic, entryPath: file }));

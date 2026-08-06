@@ -84,17 +84,31 @@ const msg = (e: unknown) => String((e as Error)?.message ?? e).split("\n")[0]!.t
  */
 const BASELINE: Record<string, Phase> = {
   "ast.ts": "parse",
-  "lexer.ts": "parse",
-  "diagnostics.ts": "parse",
+  // RATCHET MOVE (regex removal): the scanner's seven character-class regexes are now
+  // spelled-out predicates. lexer.ts reaches `ir` and stops on NT1014 — `new
+  // Set([...])` for REGEX_AFTER_KEYWORD, which predates this change and was masked by it.
+  "lexer.ts": "ir",
+  // RATCHET MOVE (regex removal): `formatDiagnostic`'s `^\s*` was the module's first
+  // blocker. Rewritten as a character scan, it now reaches `ir` and stops on the next
+  // thing behind it — NT2001, `diag.spans.length` in `!diag.spans || diag.spans.length
+  // === 0`, i.e. nullable narrowing does not flow across `||`.
+  "diagnostics.ts": "ir",
   "parser.ts": "parse",
   "checker.ts": "parse",
   "codegen.ts": "parse",
   "coverage.ts": "ir",
-  "ownership.ts": "parse",
+  // RATCHET MOVE (regex removal): `/\$inner$/` was ownership.ts's first blocker. Now it
+  // lexes and parses, and stops where the whole-program link takes it — NT1009, the
+  // scalar union in checker.ts, i.e. the same crux as checker.ts itself.
+  "ownership.ts": "ir",
   "driver.ts": "parse",
   "cli.ts": "parse",
   "modules.ts": "parse",
-  "coverage-preprocess.ts": "parse",
+  // RATCHET MOVE (regex removal): the coverage preprocess is itself now regex-free, so
+  // the module whose job is to make `src/` measurable is measurable too. It reaches `ir`
+  // and stops on the SAME NT0001 as ast.ts — the template-literal TYPE — which it sees
+  // through the whole-program link.
+  "coverage-preprocess.ts": "ir",
 };
 
 describe("SH0: bootstrap frontier (ratchet — a module may improve, never regress)", () => {
@@ -161,34 +175,52 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
       const code = /\[(NT\d+)\]/.exec(error)?.[1] ?? "other";
       (byCode[code] ??= []).push(m);
     }
-    // NT1027 is the regex refusal; the NT0001 survivors are a template-literal TYPE
-    // (`\`${string}[]\`` in ast.ts, which coverage.ts sees through the link) and
-    // `satisfies` in parser.ts.
-    //
-    // THE HOST FFI IS NO LONGER A BLOCKER (SH4). `node:` specifiers resolve to compiler
-    // builtins, and every member driver/cli/modules import is implemented, so all three
-    // moved past it: two now stop on a REGEX and driver.ts on a different NT1017 — the
-    // bun text-asset import `import runtimeSource from "…/runtime.c" with {type:"text"}`,
-    // which is a bundler feature, not a `node:` module. NT1028 does not appear at all.
-    expect(Object.keys(byCode).sort()).toEqual(["NT0001", "NT1009", "NT1015", "NT1017", "NT1027"]);
-    expect(byCode["NT1028"]).toBeUndefined();
-    expect(byCode["NT1017"]!.sort()).toEqual(["driver.ts"]);
-    // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts,
-    // and to 6 when SH4 cleared the host FFI in cli.ts and modules.ts: clearing a blocker
-    // UNMASKS what sat behind it. The count going up is the ratchet working, not a
-    // regression — the phase table above is what must never go backwards.
-    expect(byCode["NT1027"]!.sort()).toEqual(["cli.ts", "coverage-preprocess.ts", "diagnostics.ts", "lexer.ts", "modules.ts", "ownership.ts"]);
-    expect(byCode["NT0001"]!.sort()).toEqual(["ast.ts", "coverage.ts", "parser.ts"]);
+    // NT1017 (`node:fs`) is the SH4 host-FFI story; NT1027 is the regex refusal; the
+    // NT0001 survivors are a template-literal TYPE (`\`${string}[]\`` in ast.ts, which
+    // coverage.ts sees through the link) and `satisfies` in parser.ts.
+    expect(Object.keys(byCode).sort()).toEqual(
+      ["NT0001", "NT1009", "NT1014", "NT1015", "NT1017", "NT2001"],
+    );
+    // MEASURED AFTER THE MERGE, not carried over from either branch: SH4 landed between
+    // this lane's base and here, so `modules.ts` is past the host FFI and stops on
+    // NT1015 instead. driver.ts's NT1017 is a DIFFERENT one — the bun text-asset import
+    // `import runtimeSource from "…/runtime.c" with {type:"text"}`, a bundler feature
+    // rather than a `node:` module, and an open SH7 question (the self-hosted compiler
+    // still has to embed its runtime somehow).
+    expect(byCode["NT1017"]!.sort()).toEqual(["cli.ts", "driver.ts"]);
+    // Unmasked by the lexer rewrite: `new Set([...])` for REGEX_AFTER_KEYWORD.
+    expect(byCode["NT1014"]!.sort()).toEqual(["lexer.ts"]);
+    // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
+    // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
+    // working, not a regression — the phase table above is what must never go backwards.
+    // NT1027 is now GONE: every regex the compiler's own source used has been rewritten
+    // as character scanning (nativets has no RegExp, so its source may not use one).
+    // `test/no-regex.test.ts` is the shrink-only lint that keeps it that way.
+    expect(byCode["NT1027"]).toBeUndefined();
+    expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
+    // Unmasked by that rewrite: diagnostics.ts now gets all the way to the checker.
+    expect(byCode["NT2001"]!.sort()).toEqual(["diagnostics.ts"]);
+    expect(byCode["NT0001"]!.sort()).toEqual(
+      ["ast.ts", "coverage-preprocess.ts", "coverage.ts", "parser.ts"],
+    );
   });
 
   test("coverage's preprocess still hides the regex blocker (histogram reads optimistic)", async () => {
     const { coverage } = await import("../src/coverage.ts");
-    // cli.ts stops at `node:fs`, but coverage reports zero blockers — its preprocess
-    // strips module syntax AND regexes, so the histogram cannot see either.
-    expect(phaseOf("cli.ts").phase).toBe("parse");
+    // The enduring claim, stated so it survives the frontier moving: coverage reports
+    // cli.ts as CLEAN — parsed, zero blockers — while the real pipeline still refuses it.
+    // Its preprocess strips module syntax (and, before the removal, regexes), so the
+    // histogram cannot see what actually stops the module.
+    //
+    // Deliberately NOT asserted here: which phase cli.ts reaches, or which code stops it.
+    // Both move as blockers clear (SH4 pushed cli.ts past `node:fs` and therefore past
+    // parse), and an assertion on them makes this test fail for the *good* reason —
+    // progress — which trains people to edit it rather than read it. The gap between
+    // "coverage says clean" and "the compiler refuses it" is the invariant.
     const r = coverage(read("cli.ts"));
     expect(r.parsed).toBe(true);
     expect(r.blockers.length).toBe(0);
+    expect(() => sourceToIR(read("cli.ts"), new URL("cli.ts", SRC).pathname)).toThrow();
   });
 });
 

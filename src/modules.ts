@@ -51,12 +51,53 @@ interface ModuleInfo {
 
 /* ---------------------------------------------------------------- renaming */
 
+/*
+ * Character classes, spelled out — the same discipline as `src/lexer.ts`. nativets has no
+ * `RegExp` (docs/divergences.md), so the compiler's own source may not use one.
+ */
+/** `[A-Za-z_$]`. */
+function isIdentStart(c: string): boolean {
+  return (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || c === "_" || c === "$";
+}
+/** `[A-Za-z0-9_$]` (= `[\w$]`). */
+function isIdentPart(c: string): boolean {
+  return isIdentStart(c) || (c >= "0" && c <= "9");
+}
+
+/**
+ * `s.replace(/([A-Za-z_$][\w$]*)\{/g, …)` — rewrite every class tag in a type encoding.
+ *
+ * A maximal identifier run is what the regex matches: `[\w$]*` is greedy, and backtracking
+ * can never help, because giving a word character back only exposes another word character
+ * where `\{` must be. So the question at each identifier is simply "is the character right
+ * after the run a `{`?" — and when it is not, every start position inside that run fails
+ * identically, so the scan skips the whole run exactly as the engine's own restarts do.
+ */
+function rewriteTags(t: string, tags: Map<string, string>): string {
+  let out = "";
+  let i = 0;
+  while (i < t.length) {
+    if (!isIdentStart(t[i]!)) { out += t[i]; i++; continue; }
+    let j = i;
+    while (j < t.length && isIdentPart(t[j]!)) j++;
+    const name = t.slice(i, j);
+    if (t[j] === "{") {
+      out += `${tags.get(name) ?? name}{`;
+      i = j + 1;
+    } else {
+      out += name;
+      i = j;
+    }
+  }
+  return out;
+}
+
 /** Rewrite class-instance tags inside a Ty (`Point{x:number}` → `_m1_Point{x:number}`). */
 function rewriteTy<T extends Ty | undefined>(t: T, tags: Map<string, string>): T {
   if (t === undefined || tags.size === 0) return t;
   // A tag is an identifier immediately followed by `{`. Field names are followed by
   // `:`, so `{a:{b:number}}` never matches — only genuine class tags do.
-  return (t as string).replace(/([A-Za-z_$][\w$]*)\{/g, (m, name: string) => `${tags.get(name) ?? name}{`) as T;
+  return rewriteTags(t as string, tags) as T;
 }
 
 /**
