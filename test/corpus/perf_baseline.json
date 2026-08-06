@@ -1,0 +1,204 @@
+{
+  "note": "nativets performance baseline — DETERMINISTIC metrics only (see test/perf.test.ts for the methodology and the reference projects it came from). Regenerate with NATIVETS_PERF_UPDATE=1 bun test test/perf.test.ts, and review the diff: an unexplained jump is the regression this file exists to catch.",
+  "ir": {
+    "base64.ts": {
+      "instrs": 69,
+      "funcs": 1,
+      "bytes": 11357
+    },
+    "brainfuck.ts": {
+      "instrs": 319,
+      "funcs": 6,
+      "bytes": 22007
+    },
+    "calculator.ts": {
+      "instrs": 593,
+      "funcs": 9,
+      "bytes": 31929
+    },
+    "csv.ts": {
+      "instrs": 495,
+      "funcs": 2,
+      "bytes": 30092
+    },
+    "diff.ts": {
+      "instrs": 325,
+      "funcs": 3,
+      "bytes": 23214
+    },
+    "infixcalc.ts": {
+      "instrs": 770,
+      "funcs": 11,
+      "bytes": 39408
+    },
+    "jobs.ts": {
+      "instrs": 782,
+      "funcs": 10,
+      "bytes": 41319
+    },
+    "json-pretty.ts": {
+      "instrs": 347,
+      "funcs": 3,
+      "bytes": 24947
+    },
+    "life.ts": {
+      "instrs": 482,
+      "funcs": 9,
+      "bytes": 27416
+    },
+    "markdown.ts": {
+      "instrs": 502,
+      "funcs": 4,
+      "bytes": 31048
+    },
+    "matrix.ts": {
+      "instrs": 621,
+      "funcs": 10,
+      "bytes": 34614
+    },
+    "maze.ts": {
+      "instrs": 638,
+      "funcs": 1,
+      "bytes": 34715
+    },
+    "primes.ts": {
+      "instrs": 123,
+      "funcs": 1,
+      "bytes": 13520
+    },
+    "roman.ts": {
+      "instrs": 292,
+      "funcs": 4,
+      "bytes": 21110
+    },
+    "router.ts": {
+      "instrs": 456,
+      "funcs": 9,
+      "bytes": 28004
+    },
+    "rpn.ts": {
+      "instrs": 219,
+      "funcs": 4,
+      "bytes": 17373
+    },
+    "rule110.ts": {
+      "instrs": 226,
+      "funcs": 6,
+      "bytes": 17707
+    },
+    "stackvm.ts": {
+      "instrs": 421,
+      "funcs": 2,
+      "bytes": 27291
+    },
+    "sudoku.ts": {
+      "instrs": 577,
+      "funcs": 8,
+      "bytes": 33890
+    },
+    "tictactoe.ts": {
+      "instrs": 664,
+      "funcs": 9,
+      "bytes": 37090
+    },
+    "todo.ts": {
+      "instrs": 230,
+      "funcs": 2,
+      "bytes": 17411
+    },
+    "units.ts": {
+      "instrs": 348,
+      "funcs": 7,
+      "bytes": 24160
+    },
+    "vigenere.ts": {
+      "instrs": 284,
+      "funcs": 2,
+      "bytes": 19602
+    },
+    "wordfreq.ts": {
+      "instrs": 355,
+      "funcs": 4,
+      "bytes": 22156
+    }
+  },
+  "alloc": {
+    "primes.ts": {
+      "arrLive": 1,
+      "objLive": 0,
+      "strLive": 74,
+      "pvNodes": 5,
+      "pvAllocs": 212
+    },
+    "matrix.ts": {
+      "arrLive": 21,
+      "objLive": 0,
+      "strLive": 112,
+      "pvNodes": 0,
+      "pvAllocs": 0
+    },
+    "sudoku.ts": {
+      "arrLive": 8385,
+      "objLive": 0,
+      "strLive": 498,
+      "pvNodes": 0,
+      "pvAllocs": 0
+    },
+    "life.ts": {
+      "arrLive": 111,
+      "objLive": 0,
+      "strLive": 1200,
+      "pvNodes": 0,
+      "pvAllocs": 0
+    },
+    "maze.ts": {
+      "arrLive": 4,
+      "objLive": 33,
+      "strLive": 835,
+      "pvNodes": 0,
+      "pvAllocs": 0
+    },
+    "wordfreq.ts": {
+      "arrLive": 3,
+      "objLive": 86,
+      "strLive": 231,
+      "pvNodes": 0,
+      "pvAllocs": 0
+    },
+    "stackvm.ts": {
+      "arrLive": 0,
+      "objLive": 0,
+      "strLive": 53,
+      "pvNodes": 0,
+      "pvAllocs": 0
+    },
+    "json-pretty.ts": {
+      "arrLive": 5,
+      "objLive": 2,
+      "strLive": 74,
+      "pvNodes": 0,
+      "pvAllocs": 0
+    }
+  },
+  "binarySize": {
+    "darwin-arm64": {
+      "primes.ts": 113616,
+      "matrix.ts": 114016,
+      "sudoku.ts": 113984,
+      "life.ts": 113976,
+      "maze.ts": 133224,
+      "wordfreq.ts": 133328,
+      "stackvm.ts": 113664,
+      "json-pretty.ts": 113696
+    }
+  },
+  "anchors": {
+    "append-200k": "__nt_perf 0 0 0 0 0",
+    "with-path-copy": "__nt_anchor 2 2 3 4 1 2002"
+  },
+  "anchorRss": {
+    "darwin-arm64": {
+      "append-200k": 5308416
+    }
+  }
+}
