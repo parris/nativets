@@ -1169,6 +1169,9 @@ class Checker {
         return "{message:string}";
       }
       case "AsExpr": { this.type(e.expr, scope); return e.ty; } // identity retype
+      // `expr!` NARROWS away the nullable arm — that is the point of the operator, and
+      // why it cannot simply be erased. On a non-nullable operand it is the identity.
+      case "NonNullExpr": return baseTy(this.type(e.expr, scope, hint));
       case "InstanceOfExpr": {
         // `x instanceof C`, decided here and folded to a constant by codegen. A value's
         // static type IS its exact class in this subset (user classes don't inherit, and
@@ -2103,6 +2106,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "SpreadExpr": collectIdents(e.argument, out); return;
     case "SequenceExpr": e.exprs.forEach((x) => collectIdents(x, out)); return;
     case "AsExpr": collectIdents(e.expr, out); return;
+    case "NonNullExpr": collectIdents(e.expr, out); return;
     case "InstanceOfExpr": collectIdents(e.object, out); return; // the class name is not a value
     case "ArrowFunction": if (e.exprBody) collectIdents(e.body as Expr, out); return;
     default: return; // literals

@@ -295,6 +295,7 @@ export type Expr =
   | ArrowFunction
   | NewExpr
   | AsExpr
+  | NonNullExpr
   | InstanceOfExpr
   | CallExpr;
 
@@ -457,6 +458,14 @@ export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
 export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; loc?: Loc; }
 export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
+/**
+ * `expr!` — TypeScript's NON-NULL ASSERTION. Unlike `as`, it is not an identity: it
+ * NARROWS `T | undefined` / `T | null` to `T`, which is the whole reason it exists and
+ * why erasing it is not enough (`const v: number = m.get(k)!` must typecheck). On a
+ * value that is not nullable it IS the identity. `loc` drives the runtime panic when the
+ * assertion is false — see the codegen comment.
+ */
+export interface NonNullExpr { kind: "NonNullExpr"; expr: Expr; loc?: Loc; }
 
 /**
  * `x instanceof C` — decided at COMPILE TIME from the static type of `x`.

@@ -342,6 +342,27 @@ void nt_panic_bounds(const char *what, double len, double idx, const char *loc) 
   abort();
 }
 
+/* `expr!` — TypeScript's non-null assertion, on an A2 tagged pair [tag, value]
+ * (tag 0 = undefined, 1 = null, >=2 = present). Unwraps to the value slot.
+ *
+ * A FALSE assertion panics, deliberately, on the Stage-41 reasoning: tsc/node ERASE `!`,
+ * so node hands back `undefined` and the program computes on from a value that was never
+ * there. Unwrapping the box regardless would be worse still — a phantom `0` or a dangling
+ * pointer rather than an honest `undefined`. `!` is the programmer ASSERTING the value is
+ * present; this is what it costs when that is wrong. Use `?? fallback` or an
+ * `x === undefined` test to handle absence instead. */
+int64_t nt_nonnull(const int64_t *box, const char *loc) {
+  if (box && box[0] >= 2) return box[1];
+  fflush(stdout);
+  fprintf(stderr, "panic: non-null assertion failed: the value is %s\n",
+          (box && box[0] == 1) ? "null" : "undefined");
+  if (loc && *loc) fprintf(stderr, "  at %s\n", loc);
+  fprintf(stderr, "  help: `!` asserts a value is present; use `?? fallback`, or test "
+                  "`x === undefined` / `x === null`, to handle absence instead\n");
+  fflush(stderr);
+  abort();
+}
+
 /* ---- console.log building blocks ---- */
 
 /* The same conversion, exported for the other runtime translation units (the

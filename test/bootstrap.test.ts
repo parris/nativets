@@ -161,11 +161,16 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
       const code = /\[(NT\d+)\]/.exec(error)?.[1] ?? "other";
       (byCode[code] ??= []).push(m);
     }
-    // `!` non-null assertions and other unparsed statements; node: builtins (`node:fs`)
-    // are the SH4 host-FFI story; NT1027 is the regex refusal this lane introduced.
+    // NT1017 (`node:fs`) is the SH4 host-FFI story; NT1027 is the regex refusal; the
+    // NT0001 survivors are a template-literal TYPE (`\`${string}[]\`` in ast.ts, which
+    // coverage.ts sees through the link) and `satisfies` in parser.ts.
     expect(Object.keys(byCode).sort()).toEqual(["NT0001", "NT1009", "NT1015", "NT1017", "NT1027"]);
     expect(byCode["NT1017"]!.sort()).toEqual(["cli.ts", "driver.ts", "modules.ts"]);
-    expect(byCode["NT1027"]!.sort()).toEqual(["coverage-preprocess.ts", "diagnostics.ts"]);
+    // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
+    // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
+    // working, not a regression — the phase table above is what must never go backwards.
+    expect(byCode["NT1027"]!.sort()).toEqual(["coverage-preprocess.ts", "diagnostics.ts", "lexer.ts", "ownership.ts"]);
+    expect(byCode["NT0001"]!.sort()).toEqual(["ast.ts", "coverage.ts", "parser.ts"]);
   });
 
   test("coverage's preprocess still hides the regex blocker (histogram reads optimistic)", async () => {
@@ -220,5 +225,28 @@ describe("regex literals lex (so they are a named refusal, not a lexer crash)", 
   test("an unterminated `/` on a line stays division (no runaway consumption)", () => {
     // `a / b` split across lines must not swallow the newline looking for a closer.
     expect(lex("const x = a /\n  b;").some((t) => t.type === "regex")).toBe(false);
+  });
+});
+
+describe("postfix `!` — TypeScript's non-null assertion", () => {
+  // node/tsc ERASE `!`, so every accepted case here is node-differential: the same
+  // source runs unchanged under node.
+  test("it parses in every postfix position", () => {
+    for (const src of [
+      "const a = xs[0]!;", "const a = o.f!;", "const a = o!.f;",
+      "const a = f()!;", "const a = xs[0]![1]!;", "const a = m.get(k)!.length;",
+    ]) expect(() => parse(src)).not.toThrow();
+  });
+
+  test("it does not disturb prefix `!`, `!=` or `!==`", () => {
+    for (const src of ["const a = !b;", "const a = !!b;", "const a = x != y;", "const a = x !== y;"]) {
+      expect(() => parse(src)).not.toThrow();
+    }
+  });
+
+  // TypeScript forbids a line terminator before `!`, so this stays two statements
+  // rather than silently becoming `a!b.c()`.
+  test("a newline before `!` is NOT a postfix assertion", () => {
+    expect(() => parse("const a = b\n!c;")).toThrow();
   });
 });

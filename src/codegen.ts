@@ -212,6 +212,8 @@ const DECLARES = [
   // Bounds-PANIC accessors — used only where the programmer wrote the index (the
   // extra `ptr` is the interned "file:line:col" the panic reports).
   "declare i64 @nt_arr_index(ptr, double, ptr)",
+  // `expr!` — unwrap the A2 tagged pair, PANIC when the assertion is false (Stage 41 shape)
+  "declare i64 @nt_nonnull(ptr, ptr)",
   "declare ptr @nt_str_index(ptr, double, ptr)",
   "declare void @nt_panic_bounds(ptr, double, double, ptr)",
   "declare i64 @nt_arr_pop(ptr)",
@@ -2050,6 +2052,26 @@ class FnGen {
         if (e.expr.ty === "Dyn") return this.genDynNarrow(this.genExpr(e.expr).v, e.ty);
         return { v: this.genExpr(e.expr).v, ty: e.ty };
       }
+      /**
+       * `expr!` — the non-null assertion. On a non-nullable operand it is the identity.
+       * On a nullable it UNWRAPS the A2 tagged pair to the bare value.
+       *
+       * What happens when the assertion is FALSE is a deliberate divergence, and it
+       * follows Stage 41 exactly. TypeScript erases `!`, so node hands back `undefined`
+       * and the program computes on with a value that was never there — the silent wrong
+       * answer this project refuses. Unwrapping a tag-0 box would be strictly worse (a
+       * phantom `0` / dangling pointer rather than an honest `undefined`). So a false
+       * assertion PANICS at the `!`, with the same stderr + exit-134 shape as an
+       * out-of-bounds index. `!` is an assertion; this is what asserting means.
+       */
+      case "NonNullExpr": {
+        const inner = this.genExpr(e.expr);
+        if (!isNullableTy(inner.ty)) return inner; // identity — nothing to narrow
+        const base = baseTy(inner.ty);
+        const slot = this.fresh();
+        this.emit(`${slot} = call i64 @nt_nonnull(ptr ${inner.v}, ptr ${this.locArg(e.loc) ?? "null"})`);
+        return { v: this.fromSlot(slot, base), ty: base };
+      }
       case "InstanceOfExpr": {
         // The checker already decided the test from the static type; emit the constant.
         // The left operand is still evaluated — it may have side effects (`f() instanceof C`).
@@ -3724,6 +3746,7 @@ class FnGen {
       case "CallExpr": this.subExpr(e.callee, map); for (const a of e.args) this.subExpr(a, map); return;
       case "NewExpr": for (const a of e.args) this.subExpr(a, map); return;
       case "AsExpr": this.subExpr(e.expr, map); return;
+      case "NonNullExpr": this.subExpr(e.expr, map); return;
       case "InstanceOfExpr": this.subExpr(e.object, map); return;
       case "ArrowFunction": {
         const child = this.childRenameMap(e.params, e.body, e.exprBody, map);
