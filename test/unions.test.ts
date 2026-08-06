@@ -147,6 +147,64 @@ console.log(f({ kind: "square", size: 1 }));
   });
 });
 
+describe("exhaustiveness — a missing arm that would silently produce a value is diagnosed", () => {
+  // The rule is deliberately exactly as wide as the DEFECT. Falling out of a switch is
+  // ordinary JavaScript and node runs it fine; what node does NOT do is hand back a
+  // number. Falling off the end of a `number` function returns `undefined` in node and
+  // `0` here (a pre-existing, general divergence) — so the ONE shape that must be
+  // covered is the switch that is the function's tail with every arm returning.
+  const tail = (cases: string) => `${SHAPES}function area(s: Shape): number {
+  switch (s.kind) {
+${cases}
+  }
+}
+console.log(area({ kind: "circle", radius: 2 }));
+`;
+
+  test("a tail switch missing a member is NT2001 and NAMES the missing tags", () => {
+    const src = tail(`    case "square": return s.size * s.size;
+    case "rectangle": return s.width * s.height;`);
+    expect(codeOf(src)).toBe("NT2001");
+    expect(messageOf(src)).toContain(`"circle"`);
+  });
+
+  test("covering every member typechecks, and so does covering the rest with `default`", () => {
+    expect(codeOf(tail(`    case "square": return s.size * s.size;
+    case "rectangle": return s.width * s.height;
+    case "circle": return s.radius;`))).toBe(null);
+    expect(codeOf(tail(`    case "square": return s.size * s.size;
+    default: return 0;`))).toBe(null);
+  });
+
+  test("empty-body FALLTHROUGH still counts as covering its tag", () => {
+    expect(codeOf(tail(`    case "square":
+    case "rectangle":
+      return 4;
+    case "circle": return s.radius;`))).toBe(null);
+  });
+
+  test("a switch that is NOT the tail needs no coverage — the next statement IS the fallback", () => {
+    const withFallback = `${SHAPES}function area(s: Shape): number {
+  switch (s.kind) {
+    case "square": return s.size * s.size;
+  }
+  return 0;
+}
+console.log(area({ kind: "circle", radius: 2 }));
+`;
+    expect(codeOf(withFallback)).toBe(null);
+    // ...nor does one whose arms deliberately fall out of the switch rather than return
+    const notTotal = `${SHAPES}function show(s: Shape): void {
+  switch (s.kind) {
+    case "square": console.log("sq"); break;
+  }
+}
+show({ kind: "circle", radius: 1 });
+`;
+    expect(codeOf(notTotal)).toBe(null);
+  });
+});
+
 describe("what a union may BE — refused, never guessed at", () => {
   test("a union of object types with no usable discriminant is NT1009, and says why", () => {
     // no shared field at all

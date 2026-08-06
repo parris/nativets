@@ -528,6 +528,45 @@ class Checker {
   checkFunction(fn: FuncDecl, base: Scope): void {
     for (const p of fn.params) base.declare(p.name, p.annot ?? (p.default ? "number" : "number"), false);
     this.checkBlock(fn.body, base, fn.returnTy ?? "number");
+    this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
+  }
+
+  /**
+   * SH2 exhaustiveness. Deliberately exactly as wide as the DEFECT it removes, and no
+   * wider: falling out of a `switch` is ordinary JavaScript, and a switch with a
+   * statement after it, or with arms that `break`, is code node runs correctly and we
+   * must not reject. The one shape that goes WRONG is the switch that is a function's
+   * TAIL with every arm returning or throwing: an uncovered member falls off the end of
+   * the function, where node yields `undefined` and nativets yields a value (`0` for a
+   * `number` return — a pre-existing general divergence). That is a silent wrong answer,
+   * and here — uniquely — the compiler knows the complete set of possibilities, so it
+   * can name the missing ones instead of guessing.
+   *
+   * Everything is read off the AST types the checker just filled in, so no scope is
+   * needed: `switch (s.kind)`'s receiver carries the un-narrowed union on `.object.ty`.
+   */
+  private checkExhaustiveTailSwitch(fn: FuncDecl, ret: Ty): void {
+    if (ret === "void") return;
+    const last = fn.body[fn.body.length - 1];
+    if (!last || last.kind !== "SwitchStmt") return;
+    const d = last.discriminant;
+    if (d.kind !== "MemberExpr" || d.object.ty === undefined || !isUnionTy(d.object.ty)) return;
+    const u = d.object.ty;
+    if (unionDiscriminant(u)!.key !== d.property) return;
+    if (last.cases.some((c) => c.test === null)) return; // a `default` covers everything left
+    // Only a switch every arm of which LEAVES the function is one the author wrote to be
+    // total; an arm that merely breaks is choosing to fall out, and is left alone. An
+    // empty body is fine — it falls into the next case, which is still inside the switch.
+    const total = last.cases.every((c, i) => (c.body.length === 0 && i < last.cases.length - 1) || leavesFunction(c.body));
+    if (!total) return;
+    const covered = new Set(last.cases.map((c) => (c.test && c.test.kind === "StringLiteral" ? c.test.value : "")));
+    const missing = unionTagValues(u).filter((v) => !covered.has(v));
+    if (missing.length === 0) return;
+    throw typeError(
+      `'${fn.name}' can fall off its end: this switch over ${showUnion(u)} returns from every case but does not cover ` +
+        `${missing.map((v) => `'${d.property}: "${v}"'`).join(", ")} — add ${missing.length === 1 ? "that case" : "those cases"}, ` +
+        `a \`default:\`, or a \`return\` after the switch (node would yield \`undefined\` here, which this return type cannot represent)`,
+    );
   }
 
   checkBlock(body: Stmt[], scope: Scope, ret: Ty = "void"): void {
@@ -2245,6 +2284,14 @@ class Checker {
 function endsControlFlow(body: Stmt[]): boolean {
   const last = body[body.length - 1];
   return last !== undefined && (last.kind === "BreakStmt" || last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "ContinueStmt");
+}
+
+/** Does this case body definitely LEAVE the enclosing function (as opposed to merely
+ *  leaving the switch, which `break` does)? Conservative in the safe direction: an
+ *  unrecognized shape means "not total", so the exhaustiveness check stands down. */
+function leavesFunction(body: Stmt[]): boolean {
+  const last = body[body.length - 1];
+  return last !== undefined && (last.kind === "ReturnStmt" || last.kind === "ThrowStmt");
 }
 
 /** A union rendered the way it was written (`A | B`), for diagnostics. */
