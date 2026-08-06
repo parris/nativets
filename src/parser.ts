@@ -1658,7 +1658,20 @@ class Parser {
     let expr = start ?? this.parsePrimary();
     let pendingTypeArgs: Ty[] | null = null; // explicit `f<T>` awaiting its `(` (M3)
     for (;;) {
-      if (this.at(".")) {
+      if (this.at("!") && this.peek().line === this.toks[this.pos - 1]!.line) {
+        // Postfix `!` — TypeScript's NON-NULL ASSERTION. It is a type-level claim with no
+        // runtime meaning (tsc and node both erase it), so it parses and is DROPPED: the
+        // operand's own type flows through unchanged, and node stays the oracle because
+        // node runs the same source with the `!` stripped.
+        //
+        // Two things keep this from swallowing a PREFIX `!`. It is only consulted in the
+        // postfix loop, i.e. immediately after a complete operand, where a prefix `!`
+        // cannot appear; and TypeScript forbids a line terminator before it, so
+        // `a` NEWLINE `!b.c()` stays two statements — hence the same-line check.
+        // `a != b` / `a !== b` are single tokens and never reach here.
+        const bang = this.eat("!");
+        expr = { kind: "NonNullExpr", expr, loc: { line: bang.line, col: bang.col, file: this.file } };
+      } else if (this.at(".")) {
         this.eat(".");
         expr = { kind: "MemberExpr", object: expr, property: this.expectIdent() };
       } else if (this.at("?.")) {
