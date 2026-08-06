@@ -111,6 +111,116 @@ const LINK_CORPUS = [
 ];
 
 /* ============================================================
+ * ANCHORS — the two places this project has a MEASURED before/after from a real fix.
+ *
+ * The corpus above answers "did anything drift". These two answer "is the specific win
+ * we already paid for still there", which is a sharper question and the one a regression
+ * gate is actually for. Both come from Stage 44 (B2 step 4, transients + refcounting).
+ *
+ * Why these are not duplicates of the existing suite: `test/sharing.test.ts` already pins
+ * the path-copy node costs exactly (`"2 2 3 4"`) and `test/transients.test.ts` pins the
+ * 10k loop-append at `0 0 0`. What is NOT covered anywhere is (a) **peak RSS**, the metric
+ * the original 87.9 MB -> 5.3 MB result was stated in, and (b) the **200k scale**, 20x
+ * beyond the largest existing case. Those are the new signal; the node costs are carried
+ * here too, but as BASELINE DATA rather than a second hardcoded string, so a change shows
+ * up as a reviewable diff instead of an edited assertion.
+ * ============================================================ */
+
+/** Builds an n-element array by immutable loop-append — the transient fast path. */
+const BUILD_HELPER = `
+function build(n: number): number[] {
+  let a: number[] = [];
+  for (let i = 0; i < n; i = i + 1) { a = [...a, i]; }
+  return a;
+}`;
+
+/** An n-element array built WITHOUT loop reassignment: a flat block the first `.with` freezes. */
+const BIG_HELPER = `
+function big(n: number): number[] {
+  return "x".repeat(n).split("").map((c: string) => 1);
+}`;
+
+interface Anchor {
+  name: string;
+  what: string;
+  source: string;
+  /** Exact expected stdout of the counter line, when the anchor asserts one directly. */
+  measuresRss: boolean;
+}
+
+const ANCHORS: Anchor[] = [
+  {
+    name: "append-200k",
+    what:
+      "200k immutable loop-appends. Before Stage 44 this peaked at 87.9 MB with 200001 " +
+      "abandoned handles and 217660 trie-node allocations; after, 5.3 MB and 0/0/0. The " +
+      "consuming append (nt_arr_extend_own) is only reachable because ownership proves the " +
+      "old value dead, so losing it silently is exactly the regression worth a sentinel.",
+    source: `${BUILD_HELPER}
+function work(): number { const t: number[] = build(200000); return t[199999]; }
+console.log(work());
+console.log("__nt_perf", __arrLive(), __objLive(), __strLive(), __pvNodes(), __pvAllocs());`,
+    measuresRss: true,
+  },
+  {
+    name: "with-path-copy",
+    what:
+      "Structural sharing: nodes allocated by ONE `.with` at n=100/1000/2000/40000 " +
+      "(shift/5+1 — path copying, not a full copy), then the O(1) leading-spread append. " +
+      "Exact integers straight out of __pvAllocs(), so zero noise.",
+    source: `${BIG_HELPER}
+function upd(n: number): number {
+  const a: number[] = big(n);
+  const v1: number[] = a.with(0, 5);   // freezes: one-time O(n) build
+  const before: number = __pvAllocs();
+  const v2: number[] = v1.with(1, 6);  // path copy only
+  const cost: number = __pvAllocs() - before;
+  return cost + 0 * (v2[1] + a[0]);
+}
+const c1: number = upd(100);
+const c2: number = upd(1000);
+const c3: number = upd(2000);
+const c4: number = upd(40000);
+const a2: number[] = big(2000);
+const f: number[] = [...a2, 1];
+const b2: number = __pvAllocs();
+const g: number[] = [...f, 2];
+const appendCost: number = __pvAllocs() - b2;
+console.log("__nt_anchor", c1, c2, c3, c4, appendCost, g.length);`,
+    measuresRss: false,
+  },
+];
+
+/**
+ * Peak RSS of a child process.
+ *
+ * Measured, not assumed: 8 runs of the 200k anchor at load average 260-390 spread
+ * **1.24%** (5.03-5.09 MB), against 230-790% for wall clock on the same box. That is why
+ * RSS is gated and wall clock is not. It is still allocator- and page-size-dependent, so
+ * it is keyed by platform like binary size, and its fence is wide (25%): the regression it
+ * exists to catch is 5.3 MB -> 87.9 MB, a 16x jump, not a few percent.
+ *
+ * There is no portable libc-free way to read a child's peak RSS from JS, so this shells
+ * out to `/usr/bin/time`: `-l` on macOS reports BYTES, GNU `-f %M` on Linux reports KB.
+ * Returns null when neither is available, and the caller then reports that it is not
+ * measuring rather than passing quietly.
+ */
+export function peakRssBytes(bin: string): { rss: number | null; stdout: string; exitCode: number } {
+  if (process.platform === "darwin") {
+    const p = spawnSync("/usr/bin/time", ["-l", bin], { encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL" });
+    const m = (p.stderr ?? "").match(/(\d+)\s+maximum resident set size/);
+    return { rss: m ? Number(m[1]) : null, stdout: p.stdout ?? "", exitCode: p.status ?? -1 };
+  }
+  // GNU time: %M is peak RSS in kilobytes.
+  const p = spawnSync("/usr/bin/time", ["-f", "%M", bin], { encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL" });
+  const m = (p.stderr ?? "").trim().split("\n").pop()?.match(/^(\d+)$/);
+  return { rss: m ? Number(m[1]) * 1024 : null, stdout: p.stdout ?? "", exitCode: p.status ?? -1 };
+}
+
+/** Peak RSS is near-deterministic but not exact; this catches step changes, not percent. */
+const RSS_THRESHOLD_PCT = 25;
+
+/* ============================================================
  * Metrics.
  * ============================================================ */
 
@@ -252,6 +362,10 @@ interface Baseline {
   alloc?: Record<string, AllocStats>;
   /** Platform-DEPENDENT: keyed by `${process.platform}-${process.arch}`. */
   binarySize?: Record<string, Record<string, number>>;
+  /** Anchor probe lines — platform-independent exact strings. */
+  anchors?: Record<string, string>;
+  /** Anchor peak RSS, platform-keyed (allocator + page size differ). */
+  anchorRss?: Record<string, Record<string, number>>;
 }
 
 function loadBaseline(): Baseline | null {
@@ -359,12 +473,39 @@ async function measureLink(): Promise<Record<string, LinkStats>> {
   }
 }
 
+export interface AnchorStats {
+  /** The anchor program's own counter/probe line — exact, zero noise. */
+  line: string;
+  /** Peak RSS in bytes, or null when this anchor does not measure it / it is unavailable. */
+  rssBytes: number | null;
+}
+
+async function measureAnchors(): Promise<Record<string, AnchorStats>> {
+  const dir = mkdtempSync(join(tmpdir(), "nativets-anchor-"));
+  try {
+    const out: Record<string, AnchorStats> = {};
+    for (const a of ANCHORS) {
+      const bin = join(dir, a.name);
+      await buildBinary(a.source, bin, { target: "host" });
+      const r = peakRssBytes(bin);
+      if (r.exitCode !== 0) throw new Error(`anchor ${a.name}: exited ${r.exitCode}`);
+      const line = r.stdout.split("\n").filter((l) => l.startsWith("__nt_")).pop();
+      if (!line) throw new Error(`anchor ${a.name}: produced no probe line`);
+      out[a.name] = { line, rssBytes: a.measuresRss ? r.rss : null };
+    }
+    return out;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /* ============================================================
  * The gate.
  * ============================================================ */
 
 const measured = measureIR();
 const measuredLink = await measureLink();
+const measuredAnchors = await measureAnchors();
 const baseline = loadBaseline();
 
 describe("perf: baseline regeneration", () => {
@@ -384,6 +525,15 @@ describe("perf: baseline regeneration", () => {
       // MERGE, never clobber: regenerating on macOS must not delete the Linux runner's
       // recorded sizes (and vice versa) — that would silently disarm the gate there.
       binarySize: { ...(baseline?.binarySize ?? {}), [PLATFORM]: sizes },
+      anchors: Object.fromEntries(Object.entries(measuredAnchors).map(([k, v]) => [k, v.line])),
+      anchorRss: {
+        ...(baseline?.anchorRss ?? {}),
+        [PLATFORM]: Object.fromEntries(
+          Object.entries(measuredAnchors)
+            .filter(([, v]) => v.rssBytes !== null)
+            .map(([k, v]) => [k, v.rssBytes!]),
+        ),
+      },
     });
     if (baseline) {
       const ch = compareMetric("irInstrs", mapOf(baseline.ir, "instrs"), mapOf(measured, "instrs"), THRESHOLD_PCT.irInstrs);
@@ -514,6 +664,52 @@ describe.skipIf(UPDATE)("perf: runtime allocation counters (deterministic)", () 
   });
 });
 
+describe.skipIf(UPDATE)("perf: anchors (measured wins from real fixes)", () => {
+  for (const a of ANCHORS) {
+    describe(a.name, () => {
+      test("the probe line is unchanged", () => {
+        const before = baseline?.anchors?.[a.name];
+        expect(before, `Anchor "${a.name}" missing from the baseline. ${REGEN}`).toBeDefined();
+        if (before === undefined) return;
+        expect(
+          measuredAnchors[a.name]!.line,
+          `Anchor "${a.name}" changed.\n\n  ${a.what}\n\n` +
+            `  before: ${before}\n  after:  ${measuredAnchors[a.name]!.line}\n\n  If intended: ${REGEN}`,
+        ).toBe(before);
+      });
+
+      test.skipIf(!a.measuresRss)("peak RSS is within the significance threshold", () => {
+        const before = baseline?.anchorRss?.[PLATFORM]?.[a.name];
+        const after = measuredAnchors[a.name]!.rssBytes;
+        if (after === null) {
+          console.log(`\n  perf: peak RSS unavailable here (/usr/bin/time not usable) — anchor "${a.name}" RSS NOT gated.\n`);
+          return;
+        }
+        if (before === undefined) {
+          console.log(
+            `\n  perf: no peak-RSS baseline for platform "${PLATFORM}" — anchor "${a.name}" RSS NOT gated.\n` +
+              `  RSS is allocator/page-size dependent, so this is expected on a new runner. To gate it: ${REGEN}\n`,
+          );
+          return;
+        }
+        const deltaPct = (100 * (after - before)) / before;
+        const mb = (b: number) => (b / 1048576).toFixed(2);
+        console.log(
+          `\n  anchor ${a.name}: peak RSS ${mb(before)}MB -> ${mb(after)}MB ` +
+            `(${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(2)}%, threshold ${RSS_THRESHOLD_PCT}%)\n`,
+        );
+        expect(
+          Math.abs(deltaPct) <= RSS_THRESHOLD_PCT,
+          `Peak RSS moved ${deltaPct.toFixed(2)}% (${mb(before)}MB -> ${mb(after)}MB), past ${RSS_THRESHOLD_PCT}%.\n\n` +
+            `  ${a.what}\n\n` +
+            `  RSS is near-deterministic here (measured 1.24% spread over 8 runs at load\n` +
+            `  average ~300), so this is a real change, not load noise.\n\n  If intended: ${REGEN}`,
+        ).toBe(true);
+      });
+    });
+  }
+});
+
 /* ============================================================
  * Wall clock — REPORTED, never asserted.
  *
@@ -566,9 +762,13 @@ describe.skipIf(UPDATE)("perf: compile wall clock (REPORT ONLY — never fails)"
       `\ncompile wall clock (informational — NOT a gate; see the block comment for why):\n` +
         `${rows.join("\n")}\n  ${"corpus total (min)".padEnd(18)} ${totalMin.toFixed(1)}ms over ${IR_CORPUS.length} programs\n`,
     );
-    // The ONLY time-based assertion, and it is estone's: the work must complete at all.
-    // Deliberately ~100x the observed total, so it means "hung", never "the box was busy".
-    expect(totalMin).toBeLessThan(60_000);
+    // NOT ASSERTED ON TIME — not even a generous "must finish" bound. A perf test that
+    // *can* go red under load gets ignored and then deleted, at which point it is worse
+    // than nothing, so nothing here is allowed to fail on a clock. estone's timetrap
+    // already exists for free: bun's own per-test timeout (`--timeout 60000` in CI) kills
+    // a genuine hang without this file owning a threshold that load can trip.
+    // The assertion is the deterministic one: every program was actually measured.
+    expect(rows.length).toBe(IR_CORPUS.length);
   });
 });
 

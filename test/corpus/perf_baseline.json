@@ -191,5 +191,14 @@
       "stackvm.ts": 113664,
       "json-pretty.ts": 113696
     }
+  },
+  "anchors": {
+    "append-200k": "__nt_perf 0 0 0 0 0",
+    "with-path-copy": "__nt_anchor 2 2 3 4 1 2002"
+  },
+  "anchorRss": {
+    "darwin-arm64": {
+      "append-200k": 5308416
+    }
   }
 }
