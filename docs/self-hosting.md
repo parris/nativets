@@ -269,6 +269,29 @@ phase is recorded and may improve but never regress, so new compiler code cannot
 silently grow the gap (the lint this document asks for under "Keeping the gap from
 growing"). The `#!` shebang blocker listed under SH1's tail is **closed**.
 
+### Re-measured after SH2 — the union blocker did NOT move, and that is the finding
+
+Running the unpreprocessed pipeline again after discriminated unions landed, `checker.ts`
+still stops at `NT1009`, on the *same* construct: `Record<string, number | "var">`, i.e.
+`number | string` — a **scalar** union, which SH2 deliberately does not represent. Nothing
+else in the table changed (`ast` `NT0001` at a template-literal TYPE on line 14, `parser`
+`satisfies`, `codegen` `static`, three modules `node:fs`, two genuine regexes).
+
+The reading is not "SH2 achieved nothing" — it is that the frontier is a *conjunction*, and
+the union arm of it has two remaining pieces rather than one:
+
+1. **Scalar unions** (`number | string`) — the literal `checker.ts` blocker. Unlike an object
+   union there is no in-value tag to dispatch on, so this genuinely needs the boxed
+   representation (a `[tag, value]` block, the nullable encoding generalized).
+2. **Recursive types** — `src/ast.ts`'s `Expr` is not merely a union, it is a union whose
+   members refer back to it. That is a `Ty`-encoding problem, not a union problem
+   (`interface N { next: N }` has always erased to `number`), and it is what would still
+   stop the AST from being expressible even with unions in hand.
+
+`coverage src/checker.ts` reports the same one `NT1009` before and after; what it does show is
+**347 → 355 statements analyzed**, and `coverage src/ast.ts` **182 → 257** — the union
+declarations and everything downstream of them now get as far as being analyzed at all.
+
 ---
 
 ## Milestones
@@ -305,9 +328,38 @@ growing"). The `#!` shebang blocker listed under SH1's tail is **closed**.
 
   Still open from the original SH1 scope: the `#!` shebang and the remaining template-literal
   escapes.
-- **SH2 — Discriminated unions + `type`/`interface` (the crux).** Tagged-union types with exhaustive
-  `switch (node.kind)`, literal-union types, and erased `type`/`interface` aliases. This unlocks
-  representing the AST natively and is the single biggest type-system lift.
+- **SH2 ✅ (discriminated unions) — the crux, landed.** `type Shape = Square | Rectangle | Circle`
+  where every member is an object type carrying a common literal-typed tag field. Declared,
+  constructed, passed, stored in arrays; narrowed by `if (x.kind === "…")` (both arms — the else
+  gets the remaining members as a sub-union), by `switch (x.kind)` (including `default:` and
+  fallthrough), and by ELIMINATION after a guard clause (`if (…) return;` narrows the rest of the
+  block). Exhaustiveness is diagnosed for the one shape that goes wrong. Tests: `test/unions.test.ts`
+  + `test/unions/`, cases borrowed from `microsoft/TypeScript`
+  `tests/cases/conformance/types/union/discriminatedUnionTypes{1,2}.ts`.
+
+  - **Representation: there is NO box.** A union value simply IS the member's object block. The
+    tag already lives in the value as the discriminant field, so the union is accepted only when
+    that field sits at the SAME slot index in every member — and then `u.kind` is an ordinary slot
+    load, narrowing is a pure retype costing nothing at runtime, and object literals, slots,
+    equality, linearity and drop are all the existing object machinery unchanged. The Ty encoding
+    is `U<{k:"a",…}|{k:"b",…}>`, distinct from every other encoding (it ends in `>`, not `}`/`[]`).
+  - **String-literal types** (`"square"`) exist only to carry those tags. The parser keeps them
+    (`parseTypeInner`) and `parseType` widens them back to `string` for every type that is not a
+    union, so `type Dir = "n" | "s"` still collapses and nothing past the checker sees one.
+  - **Linear, like the record it is** — move-checked (`NT1601`) and dropped once (`nt_obj_free`,
+    `__objLive()` → 0). Consequently `const n = nodes[i]` on a union array is `NT1605`, exactly as
+    for an object element (Stage 28); pass it by value instead.
+  - **Refused, never guessed at (`NT1009`):** a union of object types with no usable discriminant
+    (no shared field / not literal-typed / duplicated tag value / tag at a different position in
+    different members — each with its own message), and any union that is not all object types,
+    which notably still includes **scalar unions** (`number | string`) and intersections.
+  - **Still open, and it is what blocks the AST itself: RECURSIVE types.** `interface Negate {
+    operand: Expr }` cannot be written in nativets at all — `Ty` is a flat string, so a
+    self-reference has no finite encoding and resolves to `number`. This is pre-existing and
+    union-independent (`interface N { next: N }` has always erased), but it means `src/ast.ts`'s
+    own `Expr` needs either arena indices or a named-reference in the type encoding.
+  - **NT1009 in `checker.ts` did NOT move**: its blocker is `Record<string, number | "var">`, a
+    SCALAR union — the next piece of this milestone.
 - **SH3 — De-class (or minimal classes).** Refactor `Checker`/`ModuleGen`/`FnGen`/`Scope` from
   classes into closures + records (nativets closures already carry mutable state), or add minimal
   no-inheritance class support if the refactor proves too invasive. Decide with a spike on `Scope`

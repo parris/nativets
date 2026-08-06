@@ -23,7 +23,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { compileAndRun, runWithNode } from "./harness.ts";
+import { compileAndRun, runWithNode, compileAndRunFile, runWithNodeFile } from "./harness.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { NTError } from "../src/diagnostics.ts";
 
@@ -50,6 +50,27 @@ describe("discriminated unions (differential vs node)", () => {
       });
     });
   }
+});
+
+/*
+ * A union declared in one module and used in another. It needs a DIRECTORY (a
+ * multi-module program is not one source string), so it sits beside the flat fixtures
+ * rather than in the loop above. What it pins is the alias table crossing the module
+ * boundary with its tags intact: the parser stores alias RHSs un-widened so a
+ * `{ kind: "square" }` can still become a union member, and `export type`/`import type`
+ * carry that same encoding through `src/modules.ts`.
+ */
+describe("a union crosses a module boundary (SH1 + SH2)", () => {
+  const entry = join(DIR, "modular", "main.ts");
+  test("matches node (differential)", async () => {
+    const oracle = runWithNodeFile(entry);
+    const ours = await compileAndRunFile(entry);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+  test("matches curated expected output", async () => {
+    expect((await compileAndRunFile(entry)).stdout).toBe(readFileSync(`${entry}.expected`, "utf8"));
+  });
 });
 
 /** Compile-only; returns the NT diagnostic code (or null when it compiles). */
