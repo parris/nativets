@@ -53,11 +53,12 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, statSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { sourceToIR } from "../src/driver.ts";
+import { sourceToIR, buildBinary } from "../src/driver.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EXAMPLES = join(HERE, "..", "examples");
@@ -79,6 +80,23 @@ const IR_CORPUS = [
   "jobs.ts", "json-pretty.ts", "life.ts", "markdown.ts", "matrix.ts", "maze.ts",
   "primes.ts", "roman.ts", "router.ts", "rpn.ts", "rule110.ts", "stackvm.ts",
   "sudoku.ts", "tictactoe.ts", "todo.ts", "units.ts", "vigenere.ts", "wordfreq.ts",
+];
+
+/**
+ * Link-and-run corpus: a narrower slice, because each entry invokes `clang` and then
+ * executes the binary. Chosen to span the runtime surfaces that a regression would most
+ * plausibly bloat — persistent-vector arrays, dense array churn, objects, strings, and
+ * the Map/Set (HAMT) path — rather than to be exhaustive.
+ */
+const LINK_CORPUS = [
+  "primes.ts",     // numeric + persistent-vector node allocation
+  "matrix.ts",     // nested number[] work
+  "sudoku.ts",     // heavy array allocation churn (backtracking)
+  "life.ts",       // long-lived grid + string building
+  "maze.ts",       // objects + strings + BFS
+  "wordfreq.ts",   // Map/Set (HAMT) + objects
+  "stackvm.ts",    // string-heavy interpreter loop
+  "json-pretty.ts", // objects + JSON
 ];
 
 /* ============================================================
@@ -205,6 +223,7 @@ export function renderChanges(changes: Change[], thresholdPct: number): string {
 interface Baseline {
   note: string;
   ir: Record<string, IrStats>;
+  link?: Record<string, LinkStats>;
 }
 
 function loadBaseline(): Baseline | null {
@@ -230,31 +249,61 @@ function measureIR(): Record<string, IrStats> {
   return out;
 }
 
+/**
+ * Compiled binary size.
+ *
+ * Deterministic for a fixed toolchain (verified: two builds of the same source produce
+ * byte-identical sizes for all 8 corpus programs), but NOT across clang versions, and CI
+ * may not run the clang this baseline was taken with. So its fence is deliberately loose:
+ * it exists to catch step changes — "we started linking nt_actor.c / raylib into every
+ * program", which is a >15% jump — not to police kilobytes.
+ */
+export interface LinkStats { bytes: number }
+
+const LINK_THRESHOLD_PCT = 15;
+
+async function measureLink(): Promise<Record<string, LinkStats>> {
+  const dir = mkdtempSync(join(tmpdir(), "nativets-perf-"));
+  try {
+    const out: Record<string, LinkStats> = {};
+    for (const name of LINK_CORPUS) {
+      const src = readFileSync(join(EXAMPLES, name), "utf8");
+      const bin = join(dir, `${name}.bin`);
+      await buildBinary(src, bin, { target: "host" });
+      out[name] = { bytes: statSync(bin).size };
+    }
+    return out;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /* ============================================================
  * The gate.
  * ============================================================ */
 
-describe("perf: emitted IR size (deterministic)", () => {
-  const measured = measureIR();
+const measured = measureIR();
+const measuredLink = await measureLink();
+const baseline = loadBaseline();
 
-  if (UPDATE) {
-    test("regenerates the baseline", () => {
-      const prev = loadBaseline();
-      saveBaseline({
-        note: "nativets performance baseline. Deterministic metrics only; see test/perf.test.ts for methodology. Regenerate with NATIVETS_PERF_UPDATE=1 bun test test/perf.test.ts",
-        ir: measured,
-      });
-      if (prev) {
-        const ch = compareMetric("irInstrs", mapOf(prev.ir, "instrs"), mapOf(measured, "instrs"), THRESHOLD_PCT.irInstrs);
-        console.log(`\nperf baseline updated. IR instruction changes:\n${renderChanges(ch, THRESHOLD_PCT.irInstrs)}\n`);
-      }
-      expect(existsSync(BASELINE)).toBe(true);
+describe("perf: baseline regeneration", () => {
+  test.skipIf(!UPDATE)("writes the measured metrics to the baseline", () => {
+    saveBaseline({
+      note:
+        "nativets performance baseline — DETERMINISTIC metrics only (see test/perf.test.ts for the methodology and the reference projects it came from). " +
+        "Regenerate with NATIVETS_PERF_UPDATE=1 bun test test/perf.test.ts, and review the diff: an unexplained jump is the regression this file exists to catch.",
+      ir: measured,
+      link: measuredLink,
     });
-    return;
-  }
+    if (baseline) {
+      const ch = compareMetric("irInstrs", mapOf(baseline.ir, "instrs"), mapOf(measured, "instrs"), THRESHOLD_PCT.irInstrs);
+      console.log(`\nperf baseline updated. IR instruction changes:\n${renderChanges(ch, THRESHOLD_PCT.irInstrs)}\n`);
+    }
+    expect(existsSync(BASELINE)).toBe(true);
+  });
+});
 
-  const baseline = loadBaseline();
-
+describe.skipIf(UPDATE)("perf: emitted IR size (deterministic)", () => {
   test("a baseline exists", () => {
     expect(baseline, `No perf baseline at ${BASELINE}. ${REGEN}`).not.toBeNull();
   });
@@ -297,6 +346,30 @@ describe("perf: emitted IR size (deterministic)", () => {
       `Corpus-wide IR total moved past ${AGGREGATE_THRESHOLD_PCT}% — a broad codegen change,\n` +
         `even if no single program crossed its own threshold:\n${lines.join("\n")}\n\n  If intended: ${REGEN}`,
     ).toEqual([]);
+  });
+});
+
+describe.skipIf(UPDATE)("perf: compiled binary size (deterministic per toolchain)", () => {
+  test("every link-corpus program still builds", () => {
+    for (const name of LINK_CORPUS) expect(measuredLink[name]!.bytes).toBeGreaterThan(0);
+  });
+
+  // A metric whose baseline is missing must FAIL, not silently pass: a gate that can
+  // quietly stop measuring is worse than no gate, because it still looks green.
+  test("the baseline covers every link-corpus program", () => {
+    expect(
+      LINK_CORPUS.filter((n) => baseline?.link?.[n] === undefined),
+      `Link-corpus programs missing from the baseline. ${REGEN}`,
+    ).toEqual([]);
+  });
+
+  test("binary size is within the significance threshold", () => {
+    if (!baseline?.link) return;
+    const before: Record<string, number> = {};
+    for (const [k, v] of Object.entries(baseline.link)) before[k] = v.bytes;
+    const after: Record<string, number> = {};
+    for (const [k, v] of Object.entries(measuredLink)) after[k] = v.bytes;
+    reportAndAssert(compareMetric("binBytes", before, after, LINK_THRESHOLD_PCT), LINK_THRESHOLD_PCT);
   });
 });
 

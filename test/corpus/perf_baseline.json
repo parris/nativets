@@ -1,5 +1,5 @@
 {
-  "note": "nativets performance baseline. Deterministic metrics only; see test/perf.test.ts for methodology. Regenerate with NATIVETS_PERF_UPDATE=1 bun test test/perf.test.ts",
+  "note": "nativets performance baseline — DETERMINISTIC metrics only (see test/perf.test.ts for the methodology and the reference projects it came from). Regenerate with NATIVETS_PERF_UPDATE=1 bun test test/perf.test.ts, and review the diff: an unexplained jump is the regression this file exists to catch.",
   "ir": {
     "base64.ts": {
       "instrs": 69,
@@ -120,6 +120,32 @@
       "instrs": 355,
       "funcs": 4,
       "bytes": 22156
+    }
+  },
+  "link": {
+    "primes.ts": {
+      "bytes": 113616
+    },
+    "matrix.ts": {
+      "bytes": 114016
+    },
+    "sudoku.ts": {
+      "bytes": 113984
+    },
+    "life.ts": {
+      "bytes": 113976
+    },
+    "maze.ts": {
+      "bytes": 133224
+    },
+    "wordfreq.ts": {
+      "bytes": 133328
+    },
+    "stackvm.ts": {
+      "bytes": 113664
+    },
+    "json-pretty.ts": {
+      "bytes": 113696
     }
   }
 }
