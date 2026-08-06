@@ -1717,6 +1717,9 @@ class Parser {
     if (t.type === "num") { this.next(); return { kind: "NumberLiteral", value: Number(t.value) }; }
     if (t.type === "str") { this.next(); return { kind: "StringLiteral", value: t.value }; }
     if (t.type === "template") { this.next(); return this.buildTemplate(t.value); }
+    // A regex literal LEXES (so the file survives) but has no representation: nativets
+    // has no RegExp by design (Tier C). Refused here, located, instead of miscompiled.
+    if (t.type === "regex") throw nyi(NYI.REGEX, `regular expression literal ${t.value} at ${t.line}:${t.col}`);
     if (t.type === "ident") {
       if (t.value === "true" || t.value === "false") { this.next(); return { kind: "BooleanLiteral", value: t.value === "true" }; }
       if (t.value === "undefined") { this.next(); return { kind: "UndefinedLiteral" }; }

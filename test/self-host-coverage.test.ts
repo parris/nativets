@@ -100,14 +100,16 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     //
     // Each surviving NT0001 is a blocker an EARLIER burn-down unmasked, which is what
     // burning one down is supposed to do — not a parser regression:
-    //   - `checker.ts`: Stage 45 made `this.f = v` legal in a class METHOD, so `class
-    //     Checker` parses past its field assignment and reaches
-    //     `t.replace(/[^A-Za-z0-9_]/g, "_")` — a REGEX LITERAL (no RegExp, Tier C);
     //   - `parser.ts`: the mutable-records lane put `//@@mutable` on `class Parser`, so it
     //     parses past `this.pos++` and reaches `… satisfies ExportTable` — the `satisfies`
     //     operator, which nativets does not have.
     // Everything else still parses.
-    const UNMASKED: Record<string, number> = { "checker.ts": 1, "parser.ts": 1 };
+    //
+    // `checker.ts` USED to be here too, for `t.replace(/[^A-Za-z0-9_]/g, "_")`. Regex
+    // literals now LEX and are refused as **NT1027**, so that blocker is named (with its
+    // pattern and position) instead of being an anonymous "unparsed statement" — it moved
+    // buckets, it did not go away. See the NT1027 row in the histogram test below.
+    const UNMASKED: Record<string, number> = { "parser.ts": 1 };
     for (const f of SRC_MODULES) {
       const r = coverage(src(f));
       const nt0001 = r.blockers.filter((b) => b.code === "NT0001").length;
@@ -145,7 +147,9 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     for (const f of SRC_MODULES) {
       for (const b of coverage(src(f)).blockers) hist.set(b.code, (hist.get(b.code) ?? 0) + b.count);
     }
-    expect([...hist.keys()].sort()).toEqual(["NT0001", "NT1003", "NT1009", "NT1014", "NT1015", "NT1606"]);
+    // NT1027 (a regex literal) is new only as a NAME: it was inside the NT0001 bucket
+    // until regex literals started lexing. Naming it is what makes it burnable-down.
+    expect([...hist.keys()].sort()).toEqual(["NT0001", "NT1003", "NT1009", "NT1014", "NT1015", "NT1027", "NT1606"]);
     // NT1606 is no longer the largest bucket — that is the lane's whole result.
     for (const [code, n] of hist) if (code !== "NT1606") expect(n).toBeGreaterThanOrEqual(hist.get("NT1606")!);
   });
