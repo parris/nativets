@@ -47,7 +47,7 @@ describe("B3 v0 actors — behavioral (native, deterministic)", () => {
       try {
         const bin = join(dir, "p");
         await buildBinary(src(c.file), bin, { target: "host" });
-        const r = spawnSync(bin, [], { encoding: "utf8" });
+        const r = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" });
         expect(r.stdout).toBe(c.expected);
         expect(r.status).toBe(0);
       } finally {

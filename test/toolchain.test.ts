@@ -40,7 +40,7 @@ describe("toolchain", () => {
       const bin = join(dir, "smoke");
       const build = spawnSync("clang", [SMOKE_LL, "-o", bin], { encoding: "utf8" });
       expect(build.status).toBe(0);
-      const run = spawnSync(bin, [], { encoding: "utf8" });
+      const run = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" });
       expect(run.status).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });

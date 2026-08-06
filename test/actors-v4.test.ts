@@ -32,7 +32,7 @@ async function buildAndRun(file: string): Promise<{ stdout: string; stderr: stri
   try {
     const bin = join(dir, "p");
     await buildBinary(src(file), bin, { target: "host" });
-    const r = spawnSync(bin, [], { encoding: "utf8" });
+    const r = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" });
     return { stdout: r.stdout, stderr: r.stderr, status: r.status };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -83,7 +83,7 @@ describe("B3 v4 actors — selective receive / timeouts / string messages", () =
     try {
       const bin = join(dir, "p");
       await buildBinary(readFileSync(file, "utf8"), bin, { target: "host" });
-      const r = spawnSync(bin, [], { encoding: "utf8" });
+      const r = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" });
       expect(r.stdout).toBe(readFileSync(`${file}.expected`, "utf8"));
       expect(r.status).toBe(0);
       expect(r.stderr).toContain('"c4 /boom"');       // the crash record names the request

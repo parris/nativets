@@ -49,7 +49,7 @@ describe("conformance corpus", () => {
           continue;
         }
         supported++;
-        const out = spawnSync(bin, [], { encoding: "utf8" }).stdout ?? "";
+        const out = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" }).stdout ?? "";
         if (out !== c.expectedStdout) {
           mismatches.push(`${c.name}: got ${JSON.stringify(out)} want ${JSON.stringify(c.expectedStdout)}`);
         }

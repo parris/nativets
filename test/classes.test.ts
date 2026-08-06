@@ -22,7 +22,7 @@ async function run(source: string): Promise<{ stdout: string; status: number | n
   try {
     const bin = join(dir, "p");
     await buildBinary(source, bin, { target: "host" });
-    const r = spawnSync(bin, [], { encoding: "utf8" });
+    const r = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" });
     return { stdout: r.stdout, status: r.status };
   } finally {
     rmSync(dir, { recursive: true, force: true });

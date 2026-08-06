@@ -145,10 +145,20 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   let firstError: { code: string; message: string } | undefined;
   let parseFailures = 0;
   if (linked) body.push(...linked.body);
+  // Statement-at-a-time parsing loses everything a DECLARATION publishes, so the two
+  // things later statements need are threaded across the loop by hand: the type-alias
+  // table (`collectTypes` in, `typeEnv` out) and the `@@mutable` tag sets. Without them a
+  // `@@mutable type Cell = …` in one statement would be invisible to the `c.n = 1` in the
+  // next, and `coverage` would report an NT1606 the real compiler does not.
+  const typeEnv = new Map<string, import("./ast.ts").Ty>();
+  const mutableClasses = new Set<string>();
+  const mutableRecords = new Set<string>();
   for (const st of linked ? [] : pre.statements) {
     let prog: Program;
     try {
-      prog = parse(st.text);
+      prog = parse(st.text, { typeEnv, collectTypes: typeEnv });
+      for (const c of prog.mutableClasses ?? []) mutableClasses.add(c);
+      for (const r of prog.mutableRecords ?? []) mutableRecords.add(r);
     } catch (e) {
       parseFailures++;
       const diag = e instanceof NTError ? e.diag : { code: "NT0001", message: String(e) };
@@ -165,11 +175,28 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   // The real semantic verdict comes from the checker over the reassembled survivors.
   let checkPassed = true;
   try {
-    check({ kind: "Program", body });
+    check(linked ?? {
+      kind: "Program", body,
+      ...(mutableClasses.size ? { mutableClasses: [...mutableClasses] } : {}),
+      ...(mutableRecords.size ? { mutableRecords: [...mutableRecords] } : {}),
+    });
   } catch (e) {
     checkPassed = false;
     const err = e instanceof NTError ? { code: e.diag.code, message: e.diag.message } : { code: "NT9001", message: String(e) };
     if (!firstError) firstError = err;
+    // A FEATURE blocker the CHECKER found belongs in the histogram too. It used to reach
+    // only `firstError`, which made the histogram silently PARSE-centric: moving a
+    // rejection from the parser to the checker — as immutable field assignment did when
+    // `@@mutable` records arrived — would have looked like the blocker disappearing.
+    // Only the NT1xxx band is counted: that is what "blocking features" means. An NT2xxx
+    // TYPE error is a real user error, not a missing feature, and under this file's
+    // statement-at-a-time recovery it is usually an artifact of the recovery itself
+    // (a name whose declaring statement failed to parse) — it stays in `firstError`,
+    // which still makes `compiles` false. The checker stops at its first error, so this
+    // contributes at most one blocker per file: an under-count, never a fabricated win.
+    if (e instanceof NTError && e.diag.code.startsWith("NT1")) {
+      flag({ code: e.diag.code, milestone: e.diag.milestone ?? "later", hint: e.diag.hint ?? "" }, e.diag.message);
+    }
   }
 
   const parsed = body.length > 0 || stripped.length > 0;

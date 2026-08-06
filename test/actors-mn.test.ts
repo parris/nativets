@@ -43,7 +43,7 @@ async function runWith(
     const env = { ...process.env, ...extraEnv } as Record<string, string>;
     if (threads === undefined) delete env.NATIVETS_SCHED_THREADS;
     else env.NATIVETS_SCHED_THREADS = threads;
-    const r = spawnSync(bin, [], { encoding: "utf8", env });
+    const r = spawnSync(bin, [], { encoding: "utf8", env, timeout: 60_000, killSignal: "SIGKILL" });
     return { stdout: r.stdout, stderr: r.stderr, status: r.status };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -154,7 +154,7 @@ describe("B3 v6 — async-IO poller (kqueue/epoll)", () => {
         const env = { ...process.env } as Record<string, string>;
         if (threads === undefined) delete env.NATIVETS_SCHED_THREADS;
         else env.NATIVETS_SCHED_THREADS = threads;
-        const r = spawnSync(bin, [], { encoding: "utf8", env });
+        const r = spawnSync(bin, [], { encoding: "utf8", env, timeout: 60_000, killSignal: "SIGKILL" });
         expect(r.stdout).toContain("PASS");
         expect(r.status).toBe(0);
       } finally {

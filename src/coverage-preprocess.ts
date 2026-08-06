@@ -88,7 +88,17 @@ function tokenize(source: string): Tok[] {
     if (c === "/" && source[i + 1] === "/") {
       let j = i + 2;
       while (j < n && source[j] !== "\n") j++;
-      toks.push({ kind: "comment", value: source.slice(i, j), line });
+      // `//@@name` is a PRAGMA, not a comment — the comment spelling of a compile-time
+      // attribute, which is how the compiler's own source can carry `@@mutable` and still
+      // be run by bun (see src/lexer.ts). Comments are dropped below, so it must be
+      // re-emitted as the two tokens the real lexer produces for the bare sigil.
+      const m = /^\s*@@([A-Za-z_$][\w$]*)\s*$/.exec(source.slice(i + 2, j));
+      if (m) {
+        push({ kind: "punct", value: "@@", line });
+        push({ kind: "ident", value: m[1]!, line });
+      } else {
+        toks.push({ kind: "comment", value: source.slice(i, j), line });
+      }
       i = j; continue;
     }
     if (c === "/" && source[i + 1] === "*") {
@@ -169,7 +179,7 @@ function tokenize(source: string): Tok[] {
     const three = source.slice(i, i + 3);
     const two = source.slice(i, i + 2);
     if (["===", "!==", ">>>", "...", "**=", "<<=", ">>="].includes(three)) { push({ kind: "punct", value: three, line }); i += 3; continue; }
-    if (["=>", "==", "!=", "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "&=", "|=", "^=", "**", "|>"].includes(two)) { push({ kind: "punct", value: two, line }); i += 2; continue; }
+    if (["=>", "==", "!=", "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "&=", "|=", "^=", "**", "|>", "@@"].includes(two)) { push({ kind: "punct", value: two, line }); i += 2; continue; }
     // stray characters the real lexer would reject (`#`, `\`, `@`) — keep as punct so
     // the strip/split can still reason about structure; they land in a statement chunk
     // that simply fails to parse (and is reported), never a tokenizer crash.
@@ -268,6 +278,12 @@ export function preprocessForCoverage(source: string): Preprocessed {
     const t = toks[i]!;
 
     if (isKw(t, "import")) { i = skipToSemicolon(i); continue; }
+    // A PLAIN `type`/`interface` is still erased (type-level, legitimately erasable — it
+    // is not counted as a blocker). A DECORATED one is not: `@@mutable type Cell = { … }`
+    // changes how later statements COMPILE, so erasing it would make `coverage` report an
+    // NT1606 the real compiler does not. Those reach the real parser (the decorator sigil
+    // is what `t` is here, so neither branch below matches) and their alias travels to the
+    // next statement via `ParseOpts.collectTypes`.
     if (isKw(t, "type") && toks[i + 1]?.kind === "ident") { i = skipToSemicolon(i); continue; }
     if (isKw(t, "interface")) { i = skipBraceBlock(i); continue; }
     // `class` is no longer erased: minimal classes (fields + constructor + methods) now
@@ -291,6 +307,12 @@ export function preprocessForCoverage(source: string): Preprocessed {
         const closed = isP(prev, "}") || isP(prev, ";");
         const doWhile = tk.value === "while" && isKw(group[0], "do");
         if (closed && !doWhile) break; // start a fresh statement here
+      }
+      // A decorator sigil after a completed statement starts a fresh one too, so a
+      // decorated declaration is analyzed on its own rather than glued to its predecessor.
+      if (group.length && balanced && (isP(tk, "@@") || isP(tk, "@"))) {
+        const prev = group[group.length - 1]!;
+        if (isP(prev, "}") || isP(prev, ";")) break;
       }
       group.push(tk); i++;
       if (isP(tk, "{")) cur++;

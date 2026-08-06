@@ -27,6 +27,21 @@ function scratch(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `nativets-${prefix}-`));
 }
 
+/**
+ * Every compiled program we RUN is bounded. A test program that spins — a scheduler
+ * bug, a probe loop over a corrupted table, a deadlock — otherwise hangs the whole
+ * suite, and worse: when the parent is killed the child survives, so an orphan sits
+ * at 100% CPU indefinitely. That happened (an actors-v4 binary found at 99% CPU after
+ * 87 minutes, long after its run had been abandoned), and it degrades every other
+ * test sharing the machine. SIGKILL because a spinning program may not honor SIGTERM.
+ *
+ * Generous on purpose: this bounds the RUN only (the build is separate), so no honest
+ * fixture comes close. A timeout here should be read as "the program hung", not "the
+ * machine was busy".
+ */
+export const RUN_TIMEOUT_MS = 60_000;
+const BOUNDED = { timeout: RUN_TIMEOUT_MS, killSignal: "SIGKILL" } as const;
+
 /** Lower source to LLVM IR text. Pure; no toolchain invoked. */
 export function emitIR(source: string): string {
   return sourceToIR(source);
@@ -38,7 +53,7 @@ export async function compileAndRun(source: string): Promise<RunResult> {
   try {
     const bin = join(dir, "prog");
     await buildBinary(source, bin, { target: "host" });
-    const proc = spawnSync(bin, [], { encoding: "utf8" });
+    const proc = spawnSync(bin, [], { encoding: "utf8", ...BOUNDED });
     return {
       stdout: proc.stdout ?? "",
       stderr: proc.stderr ?? "",
@@ -79,7 +94,7 @@ export async function compileAndRunFile(entryPath: string, args: string[] = []):
   try {
     const bin = join(dir, "prog");
     await buildBinary(readFileSync(entryPath, "utf8"), bin, { target: "host", entryPath });
-    const proc = spawnSync(bin, args, { encoding: "utf8" });
+    const proc = spawnSync(bin, args, { encoding: "utf8", ...BOUNDED });
     return { stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", exitCode: proc.status ?? -1 };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -220,6 +235,7 @@ export async function compileAndRunIO(source: string, io: IOInput = {}): Promise
       encoding: "utf8",
       input: io.stdin ?? "",
       env: { ...process.env, ...(io.env ?? {}) },
+      ...BOUNDED,
     });
     return { stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", exitCode: proc.status ?? -1 };
   } finally {

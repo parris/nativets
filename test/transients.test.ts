@@ -403,7 +403,7 @@ console.log(built.slice(0, 4).map((x: number): number => x * 2).join(","));`;
         "-lm", "-o", bin,
       ], { encoding: "utf8" });
       expect(built.status).toBe(0);
-      const run = spawnSync(bin, [], { encoding: "utf8" });
+      const run = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" });
       expect(run.stderr).not.toContain("AddressSanitizer");
       expect(run.stderr).not.toContain("runtime error");
       expect(run.status).toBe(0);

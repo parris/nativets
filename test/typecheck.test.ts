@@ -42,7 +42,7 @@ describe("runtime typecheck (dyn as T) — must throw on bad shape", () => {
       try {
         const bin = join(dir, "p");
         await buildBinary(c.code, bin, { target: "host" }); // must COMPILE (validation is runtime)
-        const r = spawnSync(bin, [], { encoding: "utf8" });
+        const r = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" });
         expect(r.stdout).toBe("");          // threw before printing
         expect(r.status).not.toBe(0);       // uncaught runtime TypeError → non-zero exit
       } finally {

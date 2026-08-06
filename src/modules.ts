@@ -318,6 +318,11 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
    *  the link would silently downgrade a mutable class to copy-on-write, so they travel
    *  with the merged program (see docs/decorators.md). */
   const mutableClasses = new Set<string>();
+  /** `@@mutable` RECORD tags, likewise under their final (post-rename) names. A record
+   *  type binds no VALUE, so it is not in `topLevelNames` — but its tag is embedded in
+   *  every Ty that mentions it, so it is renamed per module through `tags` for exactly
+   *  the reason class tags are: two modules may each declare a `Cell`. */
+  const mutableRecords = new Set<string>();
 
   order.forEach((path, i) => {
     const source = sources.get(path)!;
@@ -364,7 +369,9 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
         if (classes.has(n)) tags.set(n, `${prefix}${n}`);
       }
     }
+    if (!isEntry) for (const r of program.mutableRecords ?? []) tags.set(r, `${prefixBase}${i}_${r}`);
     for (const c of program.mutableClasses ?? []) mutableClasses.add(names.get(c) ?? c);
+    for (const r of program.mutableRecords ?? []) mutableRecords.add(tags.get(r) ?? r);
     new Renamer(names, tags).program(program);
 
     // 4. Publish this module's export table under the final names.
@@ -388,6 +395,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
 
   const merged: Program = { kind: "Program", body };
   if (mutableClasses.size) merged.mutableClasses = [...mutableClasses];
+  if (mutableRecords.size) merged.mutableRecords = [...mutableRecords];
   return merged;
 }
 

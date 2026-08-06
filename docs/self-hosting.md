@@ -123,6 +123,52 @@ the *source* (refactor those classes into fold/return-new shapes) or about the *
 class instance fields mutable), not a missing feature. The remaining `NT1015`/`NT1009` are a
 `static` member, one un-annotated class field, and one general union.
 
+### Re-measured again — `NT1606` is down to ONE, and it is deliberate
+
+The `NT1606` bucket above resolved into two different things, and both are now closed by the
+`@@mutable` attribute rather than by rewriting the compiler:
+
+- **three CLASS-field mutations** (`Parser`, `FnGen`, `Analyzer`) — Stage 45's `@@mutable class`
+  already covered these;
+- **five plain-RECORD mutations** (`s.returnTy = ret`, `sig.ret = inferred`, `b.count++`) — the
+  compiler mutates AST nodes in place, and those are structural records, not class instances.
+  `@@mutable` was **extended to a `type`/`interface` declaration** for them (docs/decorators.md).
+
+**Both had to be spelled as a comment.** `@@mutable` is not valid TypeScript, and `src/*.ts` has to
+satisfy **two toolchains at once** — bun runs it today, nativets must compile it tomorrow. So the
+attribute has a **pragma spelling**: a line comment whose entire content is `@@name` lexes to
+exactly the same two tokens as the bare sigil (`src/lexer.ts`). It is a comment to TypeScript and
+load-bearing to nativets, and the two spellings emit byte-identical IR (pinned in
+`test/mutable-records.test.ts`). This is the general answer for every future attribute, not a
+one-off for `@@mutable`.
+
+| Code | × | What it actually is |
+|------|---|---------------------|
+| `NT1014` | 4 | `new Map(iterable)` / `new Set(iterable)` — **newly visible**: `coverage` now counts a FEATURE blocker the CHECKER reports, not only parse-stage ones |
+| `NT1009` | 3 | general unions / an intersection type |
+| `NT1015` | 3 | a `static` member (`ModuleGen`), a `get` accessor (`FnGen`, unmasked), a class field needing a type annotation (`modules.ts`) |
+| `NT0001` | 2 | a **regex literal** (`checker.ts`) and **`satisfies`** (`parser.ts`) — both *unmasked*, i.e. reached only because an earlier blocker on the same class was cleared |
+| `NT1606` | **1** | `delete o.k` in `specializeDecl` — **deliberate**: a record's SHAPE is its type (fields are static slots), so removing a key is a different feature from assigning one |
+| `NT1003` | 1 | `driver.ts` calls an *imported* function, which single-file coverage sees as an unknown callee — an artifact of the measurement, not a gap |
+
+Two measurement changes came with this, both in the direction of honesty:
+
+1. **`coverage` now counts checker-stage NT1xxx blockers**, not only parse-stage ones. Without that,
+   moving the `o.f = v` rejection from the parser to the checker (which is what deferring the
+   mutability decision to a type required) would have looked like eight blockers *vanishing*. Only
+   the NT1xxx band is counted — an NT2xxx type error is a real user error, and under this tool's
+   statement-at-a-time recovery it is usually an artifact of the recovery itself.
+2. **A DECORATED `type`/`interface` is no longer pre-stripped** by the coverage preprocess, and
+   `ParseOpts.collectTypes` threads the alias table across the statement loop — otherwise a
+   `@@mutable type Cell = …` in one statement would be invisible to the `c.n = 1` in the next and
+   `coverage` would report an NT1606 the real compiler does not. Undecorated type declarations are
+   still stripped, so every other number in the table is comparable with the previous measurement.
+
+**What still stands between here and SH6** (module-by-module self-compile) is no longer mutation:
+it is **discriminated unions** (`NT1009` — the AST *is* a union type, and that is Tier 1's crux),
+the last three **class features** (`static`, `get`), and two small syntax gaps (**regex literals**,
+**`satisfies`**).
+
 ---
 
 ## The strategic fork
