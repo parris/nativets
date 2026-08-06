@@ -65,7 +65,14 @@ function literalIndex(e: Expr): number | undefined {
 /** `len` is set only for a `const` bound to a literal of statically-known length (an
  *  array literal without spreads, or a string literal) — it feeds the NT2002
  *  compile-time out-of-bounds rejection. */
-interface Binding { ty: Ty; constant: boolean; len?: number }
+interface Binding {
+  ty: Ty; constant: boolean; len?: number;
+  /** SH2: this binding is a NARROWING shadow of a discriminated union, and this is the
+   *  union it was narrowed from. Assigning through it is refused (see the checker) —
+   *  the narrowing was proved for the OLD value and a new one can carry a different
+   *  tag, so honouring it would read the next field access at the wrong slot. */
+  narrowedFrom?: Ty;
+}
 
 class Scope {
   private vars = new Map<string, Binding>();
@@ -76,7 +83,7 @@ class Scope {
   readonly hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
-  declare(name: string, ty: Ty, constant: boolean, len?: number): void { this.vars.set(name, { ty, constant, len }); }
+  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty): void { this.vars.set(name, { ty, constant, len, narrowedFrom }); }
   own(name: string): Binding | undefined { return this.vars.get(name); }
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
@@ -730,7 +737,12 @@ class Checker {
   /** Declare the narrowed shadow binding in `inner`, when there is one. */
   private narrowInto(inner: Scope, name: string, u: Ty, tags: string[]): void {
     const t = this.restrictUnion(u, tags);
-    if (t !== undefined) inner.declare(name, t, true);
+    // Declared CONSTANT on purpose: a narrowing is proved for the value that is there
+    // now, and assigning a different member through the same name would leave every
+    // later field access reading the wrong slot. Refusing is the conservative half of
+    // reject-don't-miscompile; tracking the invalidation properly (rustc-style flow
+    // analysis through loops and nested blocks) is the general fix.
+    if (t !== undefined) inner.declare(name, t, true, undefined, u);
   }
 
   /**
@@ -1249,6 +1261,14 @@ class Checker {
       case "AssignExpr": {
         const b = scope.lookup(e.target);
         if (!b) throw typeError(`'${e.target}' is not defined`);
+        if (b.narrowedFrom !== undefined) {
+          throw typeError(
+            `cannot assign to '${e.target}' here: it is NARROWED to ${b.ty === baseTy(b.ty) && isUnionTy(b.ty) ? showUnion(b.ty) : b.ty} ` +
+              `inside this arm, and the narrowing was proved for the value already in it — a different member of ` +
+              `${showUnion(b.narrowedFrom)} would make every later field access read the wrong slot. ` +
+              `Assign to a new binding, or move the assignment outside the narrowed arm`,
+          );
+        }
         if (b.constant) throw typeError(`Cannot assign to const '${e.target}'`);
         const vt = this.type(e.value, scope, e.op === "=" ? b.ty : undefined); // assignment target is the context (e.g. `a = []`)
         if (e.op === "=") {

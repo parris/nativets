@@ -273,6 +273,32 @@ const xs: AB[] = [{ kind: "a", n: 1 }];
   });
 });
 
+describe("a narrowing cannot be invalidated under our feet", () => {
+  test("assigning THROUGH a narrowed binding is refused, and says why", () => {
+    // node prints `undefined` for `s.size` on a Ci; we would read slot 1 as a number.
+    // Tracking the invalidation properly (through loops and nested blocks) is real flow
+    // analysis, so the conservative half of reject-don't-miscompile applies.
+    const src = `interface Sq { kind: "sq"; size: number; }
+interface Ci { kind: "ci"; radius: number; }
+type Shape = Sq | Ci;
+function f(): number {
+  let s: Shape = { kind: "sq", size: 1 };
+  if (s.kind === "sq") {
+    s = { kind: "ci", radius: 9 };
+    return s.size;
+  }
+  return 0;
+}
+console.log(f());
+`;
+    expect(codeOf(src)).toBe("NT2001");
+    expect(messageOf(src)).toContain("NARROWED");
+    // Reassigning OUTSIDE the arm is fine.
+    expect(codeOf(src.replace(`  if (s.kind === "sq") {\n    s = { kind: "ci", radius: 9 };\n    return s.size;\n  }`,
+      `  s = { kind: "ci", radius: 9 };\n  if (s.kind === "ci") { return s.radius; }`))).toBe(null);
+  });
+});
+
 describe("RENDERING an un-narrowed union is refused, never rendered as nothing", () => {
   // Both renderers are generated from the static type. Before this lane a union
   // reached their silent fallbacks: `console.log` printed a bare newline (the
