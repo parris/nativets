@@ -35,6 +35,62 @@ const PUNCT_1 = [
 
 export class LexError extends Error {}
 
+/*
+ * Character classes, spelled out.
+ *
+ * nativets deliberately has no `RegExp` (a Tier-C refusal — docs/divergences.md), so the
+ * compiler's own source may not use one either: a `/.../` in here is refused with NT1027
+ * and this file never reaches the parser. These predicates are the character classes the
+ * scanner used to express as one-character regexes, and each is exactly its class.
+ */
+
+/** `[A-Za-z_$]` — an identifier's first character. */
+function isIdentStart(c: string): boolean {
+  return (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || c === "_" || c === "$";
+}
+/** `[A-Za-z0-9_$]` (= `[\w$]`) — an identifier's subsequent characters. */
+function isIdentPart(c: string): boolean {
+  return isIdentStart(c) || (c >= "0" && c <= "9");
+}
+/** `[0-9a-fA-F]`. */
+function isHexDigit(c: string): boolean {
+  return (c >= "0" && c <= "9") || (c >= "a" && c <= "f") || (c >= "A" && c <= "F");
+}
+/**
+ * ECMAScript `\s` — WhiteSpace + LineTerminator, by code unit. The scanner only ever
+ * applies this to a single source line, but that line can still hold a `\r` (CRLF) or a
+ * ` `, both of which `\s` matched.
+ */
+function isSpace(c: string): boolean {
+  const n = c.charCodeAt(0);
+  if (n === 9 || n === 10 || n === 11 || n === 12 || n === 13 || n === 32) return true;
+  return (
+    n === 0xa0 || n === 0x1680 || (n >= 0x2000 && n <= 0x200a) ||
+    n === 0x2028 || n === 0x2029 || n === 0x202f || n === 0x205f ||
+    n === 0x3000 || n === 0xfeff
+  );
+}
+
+/**
+ * `^\s*@@([A-Za-z_$][\w$]*)\s*$` over a line comment's body — the pragma spelling of an
+ * attribute (docs/decorators.md). Returns the attribute name, or `""` when the comment is
+ * anything else (including one that merely mentions `@@mutable` in prose).
+ */
+function pragmaName(body: string): string {
+  let a = 0;
+  while (a < body.length && isSpace(body[a]!)) a++;
+  if (body[a] !== "@" || body[a + 1] !== "@") return "";
+  a += 2;
+  if (a >= body.length || !isIdentStart(body[a]!)) return "";
+  const start = a;
+  a++;
+  while (a < body.length && isIdentPart(body[a]!)) a++;
+  const name = body.slice(start, a);
+  // `\s*$` — everything after the name must be whitespace, all the way to the end.
+  while (a < body.length && isSpace(body[a]!)) a++;
+  return a === body.length ? name : "";
+}
+
 /**
  * Keywords after which a `/` begins a REGEX rather than a division. Everything that can
  * END an expression (identifier, literal, `)`, `]`, postfix `++`/`--`) means division;
@@ -145,10 +201,10 @@ export function lex(source: string): Token[] {
       let j = i + 2;
       while (j < source.length && source[j] !== "\n") j++;
       const body = source.slice(i + 2, j);
-      const m = /^\s*@@([A-Za-z_$][\w$]*)\s*$/.exec(body);
-      if (m) {
+      const attr = pragmaName(body);
+      if (attr !== "") {
         tokens.push({ type: "punct", value: "@@", line: startLine, col: startCol });
-        tokens.push({ type: "ident", value: m[1]!, line: startLine, col: startCol + 2 });
+        tokens.push({ type: "ident", value: attr, line: startLine, col: startCol + 2 });
       }
       while (i < source.length && source[i] !== "\n") advance();
       continue;
@@ -169,10 +225,10 @@ export function lex(source: string): Token[] {
       // Without this the lexer read `0` and then `x1f` as an identifier, which is what
       // made `src/codegen.ts`'s byte constants (`0x22`, `0x5c`) unparseable.
       const radix = source[i + 1];
-      if (c === "0" && radix !== undefined && /[xXbBoO]/.test(radix)) {
+      if (c === "0" && radix !== undefined && "xXbBoO".includes(radix)) {
         let s = "0" + radix;
         advance(2);
-        while (i < source.length && /[0-9a-fA-F_]/.test(source[i]!)) { if (source[i] !== "_") s += source[i]; advance(); }
+        while (i < source.length && (isHexDigit(source[i]!) || source[i] === "_")) { if (source[i] !== "_") s += source[i]; advance(); }
         tokens.push({ type: "num", value: s, line: sl, col: sc });
         continue;
       }
@@ -190,9 +246,9 @@ export function lex(source: string): Token[] {
     }
 
     // identifier / keyword
-    if (/[A-Za-z_$]/.test(c)) {
+    if (isIdentStart(c)) {
       let s = "";
-      while (i < source.length && /[A-Za-z0-9_$]/.test(source[i]!)) { s += source[i]; advance(); }
+      while (i < source.length && isIdentPart(source[i]!)) { s += source[i]; advance(); }
       tokens.push({ type: "ident", value: s, line: sl, col: sc });
       continue;
     }
@@ -210,7 +266,10 @@ export function lex(source: string): Token[] {
             // `\xHH` — two-hex-digit byte escape (e.g. `\x1b` = ESC), as node does.
             advance();
             const h = (source[i] ?? "") + (source[i + 1] ?? "");
-            if (!/^[0-9a-fA-F]{2}$/.test(h)) throw new LexError(`Invalid \\x escape at ${line}:${col}`);
+            // `^[0-9a-fA-F]{2}$` — exactly two hex digits (`h` is at most two chars).
+            if (h.length !== 2 || !isHexDigit(h[0]!) || !isHexDigit(h[1]!)) {
+              throw new LexError(`Invalid \\x escape at ${line}:${col}`);
+            }
             s += String.fromCharCode(parseInt(h, 16));
             advance(); advance();
             continue;
@@ -268,7 +327,7 @@ export function lex(source: string): Token[] {
       }
       if (closed) {
         let end = j + 1;
-        while (end < source.length && /[a-z]/.test(source[end]!)) end++; // flags
+        while (end < source.length && source[end]! >= "a" && source[end]! <= "z") end++; // flags
         const raw = source.slice(i, end);
         advance(end - i);
         tokens.push({ type: "regex", value: raw, line: sl, col: sc });
