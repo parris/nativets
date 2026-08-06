@@ -213,6 +213,47 @@ the last three **class features** (`static`, `get`), and two small syntax gaps (
 
 ---
 
+## MEASURED: the real stage-1 frontier (`test/bootstrap.test.ts`)
+
+The coverage histogram above is **not** the bootstrap frontier, and reads far more
+optimistic than the truth. `coverage` runs a coverage-ONLY preprocess
+(`src/coverage-preprocess.ts`) that strips the module preamble **and regex literals**
+so it can reach a feature histogram at all. Running the compiler's own *unpreprocessed*
+pipeline over `src/*.ts` gives a different answer:
+
+| Phase reached | Modules |
+|---|---|
+| **`lex`** — does not even tokenize | `ast`, `lexer`, `diagnostics`, `ownership`, `driver`, `cli`, `modules`, `coverage-preprocess` (**8 of 12**) |
+| **`parse`** | `parser` (`NT0001` at a `!` non-null assertion), `checker` (`NT1009` general union), `codegen` (`NT1015` `static` member) |
+| **IR** | `coverage` only |
+
+**Blocker #1 is REGEX LITERALS, by a wide margin.** All 8 lex failures are the same
+construct: the lexer does not tokenize `/.../` at all, so the first `\` inside one is
+an `Unexpected character`. `cli.ts` is the sharpest illustration — coverage reports it
+`parsed: true` with **zero** blockers, while it does not survive the lexer.
+
+Two ways forward, and it is a real decision:
+
+- **Refactor the ~28 regex sites in `src/` to string operations (Path B).** Consistent
+  with the language as designed: nativets deliberately has **no `RegExp`** (Tier C,
+  `docs/divergences.md` — `.replace`/`.replaceAll` take string patterns only). The
+  compiler must be written in the subset it accepts. Bounded, but it touches every
+  hot file.
+- **Lex regex literals, then reject `RegExp` with a clean code (Path A-lite).** Does not
+  add an engine; it converts a *lex wall* into a *gradient*, which is the SH0
+  philosophy — the remaining type/codegen blockers behind those 8 modules are currently
+  invisible. The classic difficulty is the regex-vs-division ambiguity.
+
+Doing A-lite first and then B is probably right: measure what is behind the wall before
+committing to 28 rewrites.
+
+`test/bootstrap.test.ts` pins all of this as a **ratchet** — each module's furthest
+phase is recorded and may improve but never regress, so new compiler code cannot
+silently grow the gap (the lint this document asks for under "Keeping the gap from
+growing"). The `#!` shebang blocker listed under SH1's tail is **closed**.
+
+---
+
 ## Milestones
 
 - **SH0 — Gradient first (highest-value, do first).** Teach `coverage` (and a throwaway

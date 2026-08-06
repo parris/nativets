@@ -52,6 +52,15 @@ export function lex(source: string): Token[] {
     }
   };
 
+  // A `#!` shebang on line 1 is not JavaScript — it is a hashbang comment (TC39
+  // "HashbangComment", which node and every JS engine strip before parsing). It is
+  // skipped to end-of-line rather than tokenized, so an executable script such as
+  // our OWN `src/cli.ts` (`#!/usr/bin/env bun`) lexes. Only at offset 0: a `#`
+  // anywhere else is still an "Unexpected character". (SH1 tail, self-hosting.)
+  if (source.startsWith("#!")) {
+    while (i < source.length && source[i] !== "\n") advance();
+  }
+
   /** Raw inner text of a template, up to (not including) its closing backtick. */
   const scanTemplateBody = (sl: number, sc: number): string => {
     let raw = "";
