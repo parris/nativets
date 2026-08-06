@@ -226,22 +226,48 @@ afterAll(() => rmSync(corpusDir, { recursive: true, force: true }));
  * blocker UNMASKS the next, so codes churn while rungs do not.
  */
 const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
-  // Blocked on its own source, all of them at rung 0 — no module reaches IR today.
   "ast.ts": { rung: 0, code: "NT0001", blame: "self" },
-  "lexer.ts": { rung: 0, code: "NT1027", blame: "self" },
-  "diagnostics.ts": { rung: 0, code: "NT1027", blame: "self" },
+  "lexer.ts": { rung: 0, code: "NT1014", blame: "self" },
+  "diagnostics.ts": { rung: 0, code: "NT2001", blame: "self" },
   "parser.ts": { rung: 0, code: "NT0001", blame: "self" },
   "checker.ts": { rung: 0, code: "NT1009", blame: "self" },
   "codegen.ts": { rung: 0, code: "NT1015", blame: "self" },
-  // The one module whose OWN source parses clean. Its blocker is INHERITED through the
-  // SH1 whole-program link, from `ast.ts`.
   "coverage.ts": { rung: 0, code: "NT0001", blame: "ast.ts" },
-  "ownership.ts": { rung: 0, code: "NT1027", blame: "self" },
+  "ownership.ts": { rung: 0, code: "NT1009", blame: "checker.ts" },
   "driver.ts": { rung: 0, code: "NT1017", blame: "self" },
-  "cli.ts": { rung: 0, code: "NT1017", blame: "self" },
-  "modules.ts": { rung: 0, code: "NT1017", blame: "self" },
-  "coverage-preprocess.ts": { rung: 0, code: "NT1027", blame: "self" },
+  "cli.ts": { rung: 0, code: "NT1017", blame: "driver.ts" },
+  "modules.ts": { rung: 0, code: "NT1015", blame: "self" },
+  "coverage-preprocess.ts": { rung: 0, code: "NT0001", blame: "ast.ts" },
 };
+
+/*
+ * BASELINE HISTORY — recorded because the deltas are the measurement's whole output.
+ *
+ * First recorded (before SH4 and the regex removal landed):
+ *   NT1027 x4 (lexer, diagnostics, ownership, coverage-preprocess) — regex literals
+ *   NT1017 x3 (driver, cli, modules)             — `node:fs` and friends
+ *   NT0001 x3, NT1009 x1, NT1015 x1
+ *
+ * After merging main (SH4 host FFI + the compiler's own source made regex-free), every
+ * rung FLOOR held — no regressions — and five of the twelve moved to a different, deeper
+ * blocker. What the movement shows:
+ *
+ *   - `NT1027` is an EMPTY bucket, as main claims. What sat behind it: `lexer.ts` now
+ *     dies on `new Set([...])` (NT1014) at src/lexer.ts:101 — the regex-lexing support
+ *     table survived the removal of the regex literals themselves.
+ *   - `NT1017` did NOT clear for `driver.ts`. SH4 cleared `node:fs`; what is left is
+ *     `import runtimeSource from "../runtime/runtime.c" with { type: "text" }`
+ *     (src/driver.ts:27) — the bun-specific text import that embeds the C runtime into
+ *     the single executable. `cli.ts` inherits it. This is structural: a self-hosted
+ *     nativets needs its own answer for embedding the runtime, and no host-FFI work
+ *     removes it.
+ *   - `diagnostics.ts` now dies with **NT2001**, the TYPE-ERROR band. That matters for
+ *     the gradient: `coverage` deliberately counts only the NT1xxx band (an NT2xxx is
+ *     "a real user error"), so this blocker is invisible to the coverage histogram by
+ *     design, and only a pipeline measurement like this one sees it at all. It is also
+ *     reported with NO span, and the identifier it names ('value') does not occur in
+ *     `src/diagnostics.ts` — so it is currently unlocatable from the diagnostic alone.
+ */
 
 /** As a library (no argv) — every module compiled as its own entry. */
 const MODULES: Entry[] = Object.keys(BASELINE).map((file) => ({
@@ -343,19 +369,38 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * wrong file — the same class of mistake `coverage`'s preprocess made.
    */
   test("blocker attribution: self vs inherited through the import graph", async () => {
+    const got: Record<string, string> = {};
+    for (const e of MODULES) got[e.file] = await blameOf(e.file);
+    const want: Record<string, string> = {};
+    for (const [file, b] of Object.entries(BASELINE)) want[file] = b.blame;
+    expect(got).toEqual(want);
+  }, 300_000);
+
+  /**
+   * The parse-based attribution this test used to do is now WRONG, and recording why
+   * matters more than the fix: it is the same mistake twice.
+   *
+   * `coverage`'s preprocess made a module look blocker-free by stripping what blocked it.
+   * "Reaches parse" then became the proxy every self-hosting lane was judged by. Both
+   * measure a stage rather than the outcome. Today SIX modules parse their own source
+   * cleanly — and four of them are still blocked, two by a dependency and two at the
+   * CHECKER, after parse is over. A parse-clean module is not an unblocked module, so
+   * attribution has to compare what the whole pipeline actually reports.
+   */
+  test("parsing clean is not being unblocked — six parse, none compiles", async () => {
     const { parse } = await import("../src/parser.ts");
-    const ownSourceClean: string[] = [];
+    const parseClean: string[] = [];
     for (const e of MODULES) {
-      try {
-        parse(read(e.file));
-        ownSourceClean.push(e.file);
-      } catch { /* blocked on its own source */ }
+      try { parse(read(e.file)); parseClean.push(e.file); } catch { /* blocked at parse */ }
     }
-    expect(ownSourceClean).toEqual(["coverage.ts"]);
-    // ...and its recorded blame names the dependency that actually stops it.
-    expect(BASELINE["coverage.ts"]!.blame).toBe("ast.ts");
-    expect((await measure(MODULES.find((e) => e.file === "coverage.ts")!)).error)
-      .toBe(msg(tryCompile("ast.ts")));
+    expect(parseClean.sort()).toEqual([
+      "cli.ts", "coverage-preprocess.ts", "coverage.ts", "diagnostics.ts", "lexer.ts", "ownership.ts",
+    ]);
+    // ...and not one of them reaches IR.
+    for (const file of parseClean) {
+      const m = await measure(MODULES.find((e) => e.file === file)!);
+      expect(`${file} rung ${m.rung}`).toBe(`${file} rung 0`);
+    }
   }, 300_000);
 
   /**
@@ -369,13 +414,41 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
   }, 600_000);
 });
 
-function tryCompile(file: string): unknown {
-  try {
-    sourceToIR(read(file), pathOf(file));
-    return new Error("");
-  } catch (e) {
-    return e;
+/**
+ * ATTRIBUTION — which FILE a module's blocker actually lives in, which the diagnostic
+ * itself does not say. `sourceToIR` compiles a whole PROGRAM (SH1 merges the import
+ * graph), so a module is routinely stopped by a file it merely imports: `cli.ts` reports
+ * `driver.ts`'s text import, `ownership.ts` reports `checker.ts`'s union. Aiming a
+ * burn-down at the reporting module would be aiming it at the wrong file.
+ *
+ * A module is blamed on a dependency when that dependency, compiled as its OWN entry,
+ * produces the byte-identical error. Dependencies are walked post-order (deepest first),
+ * matching the linker's own DFS, so the blame lands on the file that originates the
+ * error rather than an intermediate that merely propagates it.
+ */
+async function blameOf(file: string): Promise<string> {
+  const error = (await measure(MODULES.find((e) => e.file === file)!)).error;
+  if (!error) return "self";
+  for (const dep of depsOf(file)) {
+    const d = MODULES.find((e) => e.file === dep);
+    if (d && (await measure(d)).error === error) return dep;
   }
+  return "self";
+}
+
+/** Transitive `./x.ts` imports, post-order (deepest first) — the linker's own order. */
+function depsOf(file: string, seen = new Set<string>()): string[] {
+  if (seen.has(file)) return [];
+  seen.add(file);
+  const out: string[] = [];
+  for (const m of read(file).matchAll(/(?:from|import)\s+"\.\/([\w.-]+\.ts)"/g)) {
+    const dep = m[1]!;
+    // Only real compiler modules: `src/*.ts` carries commented-out import EXAMPLES
+    // (`from "./m.ts"` in a doc comment), and a text scan cannot tell those from code.
+    if (!(dep in BASELINE)) continue;
+    out.push(...depsOf(dep, seen), dep);
+  }
+  return out;
 }
 
 /* ============================================================
@@ -401,8 +474,7 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // improves, and the comparison below becomes the real gate.
       expect(`no compiled compiler yet (stage-1 at rung ${m.rung}, ${m.code}): ${m.error}`)
         .toBe(`no compiled compiler yet (stage-1 at rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}): `
-          + `[NT1017] the module specifier 'node:fs' (only relative paths like './util.ts' are resolved`
-          + ` — there is no node_modules resolution) is not supported yet`);
+          + `[NT1017] default import 'import runtimeSource from …' at 27:1 is not supported yet`);
       return;
     }
 
