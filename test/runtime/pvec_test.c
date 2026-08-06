@@ -17,6 +17,13 @@
 #include <string.h>
 #include <stdint.h>
 
+/* nt_pvec.c calls through `nt_rt_lock`, the recursive hook nt_actor.c installs when the
+ * M:N scheduler starts more than one thread. Nothing installs it in a single-file C test,
+ * so define it NULL here (every NT_PV_LOCK becomes a no-op, which is exactly the
+ * single-threaded behaviour this test exercises). Without it the build fails on an
+ * undefined symbol — which is how this test silently rotted: no bun test built it. */
+void (*nt_rt_lock)(int acquire) = 0;
+
 #include "../../runtime/nt_pvec.h"
 
 /* ============================================================
