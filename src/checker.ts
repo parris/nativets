@@ -144,6 +144,11 @@ const HOST_FUNCS: Record<string, MethodSig> = {
   writeFileSync: { min: 2, max: 2, argTys: ["string", "string"], ret: "void" },
   // `existsSync(path)` REPORTS rather than throws — it is the guard in front of a read.
   existsSync: { min: 1, max: 1, argTys: ["string"], ret: "boolean" },
+  mkdtempSync: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  readdirSync: { min: 1, max: 1, argTys: ["string"], ret: "string[]" }, // names only (no withFileTypes)
+  // `rmSync(path)` / `rmSync(path, { recursive: true, force: true })`. The options are
+  // validated by VALUE (checkHostCall) — they decide what the call removes.
+  rmSync: { min: 1, max: 2, argTys: ["string", null], ret: "void" },
   // node:child_process — `spawnSync(cmd, args, { encoding: "utf8" })`. The options
   // object is validated by VALUE (checkHostCall): every other node option changes what
   // the call does, so an ignored one would be a silent divergence. Field order here IS
@@ -2135,6 +2140,17 @@ class Checker {
       const enc = args[1];
       if (!enc || enc.kind !== "StringLiteral" || enc.value !== "utf8")
         throw nyi(NYI.HOSTMOD, `readFileSync without the literal encoding "utf8" (node returns a Buffer, which has no representation here — write \`readFileSync(path, "utf8")\`)`);
+    }
+    if (name === "rmSync" && args.length === 2) {
+      // Only `recursive`/`force`, and only literal `true`: a `false` means the OTHER
+      // behaviour, and every other node option (maxRetries, retryDelay) changes what
+      // the call does, so neither is accepted and ignored.
+      const opts = args[1]!;
+      const props = opts.kind === "ObjectLiteral" ? opts.properties : null;
+      const ok = props !== null && props.length > 0 && props.every((p) =>
+        (p.key === "recursive" || p.key === "force") && p.value.kind === "BooleanLiteral" && p.value.value === true);
+      if (!ok)
+        throw nyi(NYI.HOSTMOD, `rmSync with options other than literal \`{ recursive: true }\` / \`{ force: true }\` (a \`false\` selects the other behaviour, and the retry options change what the call does)`);
     }
     if (name === "spawnSync") {
       // Exactly `{ encoding: "utf8" }`. Every other node option (cwd, env, input,

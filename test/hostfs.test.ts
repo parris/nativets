@@ -230,6 +230,106 @@ console.log(run.stdout.trim());
 });
 
 /*
+ * node:fs, the rest of the surface src/driver.ts and src/cli.ts use: a scratch
+ * directory, a listing, and a recursive remove. `mkdtempSync` returns a RANDOM
+ * suffix, so the fixture prints derived facts (prefix kept, six characters added,
+ * the directory exists) — identical on both sides, so node is still the oracle.
+ */
+describe("node:fs — mkdtempSync / readdirSync / rmSync", () => {
+  test("mkdtempSync creates a real directory named after its prefix", async () => {
+    const dir = scratch();
+    await differential(
+      `import { mkdtempSync, existsSync } from "node:fs";
+const prefix = process.argv[2];
+const d = mkdtempSync(prefix);
+console.log(d.startsWith(prefix));
+console.log(d.length - prefix.length);
+console.log(existsSync(d));
+`,
+      { args: [join(dir, "scratch-")] },
+    );
+  });
+
+  test("readdirSync lists the entries of a directory", async () => {
+    const dir = scratch();
+    writeFileSync(join(dir, "b.ts"), "");
+    writeFileSync(join(dir, "a.ts"), "");
+    writeFileSync(join(dir, "c.txt"), "");
+    await differential(
+      `import { readdirSync } from "node:fs";
+const names = readdirSync(process.argv[2]);
+console.log(names.length);
+console.log(names.toSorted().join(","));
+`,
+      { args: [dir] },
+    );
+  });
+
+  test("readdirSync of a missing directory throws, with node's message", async () => {
+    const dir = scratch();
+    await differential(
+      `import { readdirSync } from "node:fs";
+try {
+  console.log(readdirSync(process.argv[2]).length);
+} catch (e) {
+  console.log("caught: " + e.message);
+}
+`,
+      { args: [join(dir, "nope")] },
+    );
+  });
+
+  // The fixture CREATES what it removes: `differential` runs node first, so a file
+  // written by the test would already be gone by the time our binary runs.
+  test("rmSync removes a file", async () => {
+    const dir = scratch();
+    await differential(
+      `import { rmSync, writeFileSync, existsSync } from "node:fs";
+const p = process.argv[2];
+writeFileSync(p, "x");
+console.log(existsSync(p));
+rmSync(p);
+console.log(existsSync(p));
+`,
+      { args: [join(dir, "doomed.txt")] },
+    );
+  });
+
+  test("rmSync removes a tree recursively, and force ignores a missing path", async () => {
+    const dir = scratch();
+    await differential(
+      `import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
+const d = mkdtempSync(process.argv[2]);
+writeFileSync(d + "/one.txt", "a");
+writeFileSync(d + "/two.txt", "b");
+console.log(existsSync(d + "/one.txt"));
+rmSync(d, { recursive: true, force: true });
+console.log(existsSync(d));
+rmSync(d, { recursive: true, force: true }); // already gone: force says nothing
+console.log("done");
+`,
+      { args: [join(dir, "tree-")] },
+    );
+  });
+
+  test("the driver's own shape: scratch dir → write → read back → remove", async () => {
+    const dir = scratch();
+    await differential(
+      `import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { join } from "node:path";
+const d = mkdtempSync(process.argv[2]);
+const ll = join(d, "out.ll");
+writeFileSync(ll, "; ModuleID = 'nativets'\\n");
+console.log(readFileSync(ll, "utf8").trim());
+rmSync(d, { recursive: true, force: true });
+console.log(existsSync(ll));
+`,
+      { args: [join(dir, "build-")] },
+    );
+  });
+});
+
+/*
  * node:path — pure string algorithms, ported from node's own lib/path.js (posix),
  * so node is the oracle directly. The cases below are node's danger zones: `..`
  * above the root, empty and trailing segments, and a relative path whose common

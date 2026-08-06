@@ -336,6 +336,9 @@ const DECLARES = [
   "declare ptr @nt_read_file(ptr)",
   "declare void @nt_write_file(ptr, ptr)",
   "declare i32 @nt_path_exists(ptr)",
+  "declare ptr @nt_mkdtemp(ptr)",
+  "declare ptr @nt_readdir(ptr)",
+  "declare void @nt_rm(ptr, i32, i32)",
   "declare ptr @nt_spawn(ptr, ptr, ptr, ptr)",
   "declare ptr @nt_path_join(ptr, ptr)",
   "declare ptr @nt_path_resolve(ptr, ptr)",
@@ -4231,6 +4234,29 @@ class FnGen {
         const t = this.fresh();
         this.emit(`${t} = icmp ne i32 ${r}, 0`);
         return { v: t, ty: "boolean" };
+      }
+      case "mkdtempSync": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_mkdtemp(ptr ${this.genExpr(args[0]!).v})`);
+        this.emitExcCheck();
+        return { v: t, ty: "string" };
+      }
+      case "readdirSync": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_readdir(ptr ${this.genExpr(args[0]!).v})`);
+        this.emitExcCheck();
+        return { v: t, ty: "string[]" };
+      }
+      case "rmSync": {
+        // The options are compile-time literals (checkHostCall), so the flags are
+        // constants here — no options object is ever built.
+        const path = this.genExpr(args[0]!).v;
+        const opts = args[1];
+        const flag = (k: string) =>
+          opts?.kind === "ObjectLiteral" && opts.properties.some((p) => p.key === k) ? 1 : 0;
+        this.emit(`call void @nt_rm(ptr ${path}, i32 ${flag("recursive")}, i32 ${flag("force")})`);
+        this.emitExcCheck();
+        return { v: "", ty: "void" };
       }
       case "spawnSync": {
         // Same shape as genFetch: allocate the result block, hand C the slot pointers

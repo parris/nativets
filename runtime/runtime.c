@@ -25,6 +25,7 @@
 #include <time.h>     /* clock_gettime / time — Date.now */
 #include <errno.h>    /* host FFI (SH4): node-identical fs error codes/messages */
 #include <sys/stat.h> /* host FFI (SH4): existsSync — POSIX stat, cross-links */
+#include <dirent.h>  /* host FFI (SH4): readdirSync / recursive rmSync */
 #if !defined(_WIN32) && !defined(__wasi__)
 #include <sys/wait.h> /* host FFI (SH4): spawnSync — fork/execvp/waitpid + poll */
 #include <poll.h>
@@ -1597,6 +1598,82 @@ void nt_write_file(const char *path, const char *data) {
 int32_t nt_path_exists(const char *path) {
   struct stat st;
   return stat(path, &st) == 0 ? 1 : 0;
+}
+
+/* mkdtempSync(prefix) -> a fresh directory named `<prefix>XXXXXX` (six random
+ * characters, node's shape), created with mode 0700. Throws like node on failure. */
+const char *nt_mkdtemp(const char *prefix) {
+  size_t n = strlen(prefix);
+  char *tmpl = (char *)nativets_alloc(n + 7);
+  memcpy(tmpl, prefix, n);
+  memcpy(tmpl + n, "XXXXXX", 7);
+  if (!mkdtemp(tmpl)) { nt_exc_raise_msg(host_fs_error(errno, "mkdtemp", prefix)); return ""; }
+  size_t ln = strlen(tmpl);
+  char *o = alloc_str(ln);
+  memcpy(o, tmpl, ln); o[ln] = '\0';
+  return o;
+}
+
+/* readdirSync(path) -> the entry names, WITHOUT "." and "..", in directory order
+ * (node does not sort either). Throws like node when the path is not a directory. */
+NtArray *nt_readdir(const char *path) {
+  DIR *d = opendir(path);
+  if (!d) { nt_exc_raise_msg(host_fs_error(errno, "scandir", path)); return nt_arr_new(0); }
+  NtArray *a = nt_arr_new(8);
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    size_t ln = strlen(e->d_name);
+    char *o = alloc_str(ln);
+    memcpy(o, e->d_name, ln); o[ln] = '\0';
+    nt_arr_push(a, (int64_t)(intptr_t)o);
+  }
+  closedir(d);
+  return a;
+}
+
+/* Depth-first removal of `path` (a file, or a whole tree). Returns 0 or errno. */
+static int rm_tree(const char *path) {
+  struct stat st;
+  if (lstat(path, &st) != 0) return errno;
+  if (!S_ISDIR(st.st_mode)) return unlink(path) == 0 ? 0 : errno;
+  DIR *d = opendir(path);
+  if (!d) return errno;
+  struct dirent *e;
+  int err = 0;
+  size_t pl = strlen(path);
+  while ((e = readdir(d)) != NULL) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    size_t nl = strlen(e->d_name);
+    char *child = (char *)nativets_alloc(pl + nl + 2);
+    memcpy(child, path, pl); child[pl] = '/';
+    memcpy(child + pl + 1, e->d_name, nl); child[pl + 1 + nl] = '\0';
+    int r = rm_tree(child);
+    if (r && !err) err = r;
+  }
+  closedir(d);
+  if (err) return err;
+  return rmdir(path) == 0 ? 0 : errno;
+}
+
+/* rmSync(path[, { recursive: true, force: true }]). `recursive` removes a tree,
+ * `force` swallows a missing path (both exactly node's meaning). Anything else
+ * throws with node's message. */
+void nt_rm(const char *path, int32_t recursive, int32_t force) {
+  struct stat st;
+  if (lstat(path, &st) != 0) {
+    if (force && errno == ENOENT) return;   /* node: force ignores a missing path */
+    nt_exc_raise_msg(host_fs_error(errno, "lstat", path));
+    return;
+  }
+  int err;
+  if (S_ISDIR(st.st_mode)) {
+    if (!recursive) { nt_exc_raise_msg(host_fs_error(EISDIR, "rm", path)); return; }
+    err = rm_tree(path);
+  } else {
+    err = unlink(path) == 0 ? 0 : errno;
+  }
+  if (err && !(force && err == ENOENT)) nt_exc_raise_msg(host_fs_error(err, "unlink", path));
 }
 
 /* ============================================================
