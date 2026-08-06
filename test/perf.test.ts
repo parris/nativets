@@ -221,10 +221,27 @@ export function renderChanges(changes: Change[], thresholdPct: number): string {
  * Baseline I/O — a checked-in JSON corpus, like test/corpus/cases.json.
  * ============================================================ */
 
+/**
+ * Which metrics are platform-independent, and which are not — the difference decides
+ * whether one checked-in number can gate every CI runner.
+ *
+ * CI here is a macOS + Linux matrix (`.github/workflows/ci.yml`). IR text and allocation
+ * counts are pure functions of the program: same source, same compiler, same numbers on
+ * every host. **Binary size is not** — Mach-O and ELF are not comparable at all, and even
+ * two clang versions on one OS differ — so a single checked-in size would fail on Linux
+ * every single time, which is precisely how a gate earns its way into being deleted.
+ * Sizes are therefore keyed by platform, and a platform with no recorded baseline reports
+ * loudly that it is not measuring rather than passing quietly.
+ */
+const PLATFORM = `${process.platform}-${process.arch}`;
+
 interface Baseline {
   note: string;
   ir: Record<string, IrStats>;
-  link?: Record<string, LinkStats>;
+  /** Platform-independent: allocation counts are facts about the program, not the host. */
+  alloc?: Record<string, AllocStats>;
+  /** Platform-DEPENDENT: keyed by `${process.platform}-${process.arch}`. */
+  binarySize?: Record<string, Record<string, number>>;
 }
 
 function loadBaseline(): Baseline | null {
@@ -259,9 +276,8 @@ function measureIR(): Record<string, IrStats> {
  * it exists to catch step changes — "we started linking nt_actor.c / raylib into every
  * program", which is a >15% jump — not to police kilobytes.
  */
-export interface LinkStats {
-  bytes: number;
-  /** Live heap values at exit: arrays, objects, RC'd strings, persistent-vector nodes. */
+/** Live heap values at exit, plus cumulative trie-node allocations. */
+export interface AllocStats {
   arrLive: number;
   objLive: number;
   strLive: number;
@@ -269,6 +285,8 @@ export interface LinkStats {
   /** CUMULATIVE persistent-vector node allocations — total work, not residue. */
   pvAllocs: number;
 }
+
+export interface LinkStats extends AllocStats { bytes: number }
 
 const LINK_THRESHOLD_PCT = 15;
 
@@ -330,12 +348,21 @@ const baseline = loadBaseline();
 
 describe("perf: baseline regeneration", () => {
   test.skipIf(!UPDATE)("writes the measured metrics to the baseline", () => {
+    const alloc: Record<string, AllocStats> = {};
+    const sizes: Record<string, number> = {};
+    for (const [name, s] of Object.entries(measuredLink)) {
+      alloc[name] = { arrLive: s.arrLive, objLive: s.objLive, strLive: s.strLive, pvNodes: s.pvNodes, pvAllocs: s.pvAllocs };
+      sizes[name] = s.bytes;
+    }
     saveBaseline({
       note:
         "nativets performance baseline — DETERMINISTIC metrics only (see test/perf.test.ts for the methodology and the reference projects it came from). " +
         "Regenerate with NATIVETS_PERF_UPDATE=1 bun test test/perf.test.ts, and review the diff: an unexplained jump is the regression this file exists to catch.",
       ir: measured,
-      link: measuredLink,
+      alloc,
+      // MERGE, never clobber: regenerating on macOS must not delete the Linux runner's
+      // recorded sizes (and vice versa) — that would silently disarm the gate there.
+      binarySize: { ...(baseline?.binarySize ?? {}), [PLATFORM]: sizes },
     });
     if (baseline) {
       const ch = compareMetric("irInstrs", mapOf(baseline.ir, "instrs"), mapOf(measured, "instrs"), THRESHOLD_PCT.irInstrs);
@@ -396,22 +423,28 @@ describe.skipIf(UPDATE)("perf: compiled binary size (deterministic per toolchain
     for (const name of LINK_CORPUS) expect(measuredLink[name]!.bytes).toBeGreaterThan(0);
   });
 
-  // A metric whose baseline is missing must FAIL, not silently pass: a gate that can
-  // quietly stop measuring is worse than no gate, because it still looks green.
-  test("the baseline covers every link-corpus program", () => {
-    expect(
-      LINK_CORPUS.filter((n) => baseline?.link?.[n] === undefined),
-      `Link-corpus programs missing from the baseline. ${REGEN}`,
-    ).toEqual([]);
-  });
+  const sizeBaseline = baseline?.binarySize?.[PLATFORM];
 
   test("binary size is within the significance threshold", () => {
-    if (!baseline?.link) return;
-    const before: Record<string, number> = {};
-    for (const [k, v] of Object.entries(baseline.link)) before[k] = v.bytes;
+    if (!sizeBaseline) {
+      // Not a silent pass: say out loud that this platform is unmeasured, and how to fix it.
+      console.log(
+        `\n  perf: no binary-size baseline for platform "${PLATFORM}" — size is NOT being gated here.\n` +
+          `  Sizes are platform-specific (Mach-O vs ELF), so this is expected on a runner that\n` +
+          `  has never recorded one. To start gating it here: ${REGEN}\n`,
+      );
+      return;
+    }
+    // Once a platform HAS a baseline, a program missing from it is a lost metric, not an
+    // expected gap — fail rather than skip.
+    expect(
+      LINK_CORPUS.filter((n) => sizeBaseline[n] === undefined),
+      `Programs missing from the "${PLATFORM}" size baseline. ${REGEN}`,
+    ).toEqual([]);
+
     const after: Record<string, number> = {};
     for (const [k, v] of Object.entries(measuredLink)) after[k] = v.bytes;
-    reportAndAssert(compareMetric("binBytes", before, after, LINK_THRESHOLD_PCT), LINK_THRESHOLD_PCT);
+    reportAndAssert(compareMetric("binBytes", sizeBaseline, after, LINK_THRESHOLD_PCT), LINK_THRESHOLD_PCT);
   });
 });
 
@@ -426,10 +459,10 @@ describe.skipIf(UPDATE)("perf: runtime allocation counters (deterministic)", () 
    * put them back.
    */
   test("allocation counters match the baseline exactly", () => {
-    if (!baseline?.link) return;
+    if (!baseline?.alloc) return;
     const diffs: string[] = [];
     for (const name of LINK_CORPUS) {
-      const b = baseline.link[name];
+      const b = baseline.alloc[name];
       const a = measuredLink[name]!;
       if (!b) continue;
       for (const key of COUNTER_KEYS) {
@@ -444,13 +477,17 @@ describe.skipIf(UPDATE)("perf: runtime allocation counters (deterministic)", () 
       diffs,
       `Runtime allocation counts changed. These are exact integer facts about a\n` +
         `fixed-work program, so any change is real — a leak, a lost drop, or a lost\n` +
-        `structural-sharing fast path:\n${diffs.join("\n")}\n\n  If intended: ${REGEN}`,
+        `structural-sharing fast path.\n\n` +
+        `NOTE: these are platform-INDEPENDENT by construction (they count our own\n` +
+        `allocations, driven by deterministic programs). If this fires only on one OS,\n` +
+        `that is a portability defect to investigate, NOT noise to widen the fence:\n` +
+        `${diffs.join("\n")}\n\n  If intended: ${REGEN}`,
     ).toEqual([]);
   });
 
   test("the baseline records counters for every link-corpus program", () => {
     expect(
-      LINK_CORPUS.filter((n) => baseline?.link?.[n]?.strLive === undefined),
+      LINK_CORPUS.filter((n) => baseline?.alloc?.[n]?.strLive === undefined),
       `Link-corpus programs missing counter data in the baseline. ${REGEN}`,
     ).toEqual([]);
   });

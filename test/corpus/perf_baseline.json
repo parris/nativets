@@ -122,9 +122,8 @@
       "bytes": 22156
     }
   },
-  "link": {
+  "alloc": {
     "primes.ts": {
-      "bytes": 113616,
       "arrLive": 1,
       "objLive": 0,
       "strLive": 74,
@@ -132,7 +131,6 @@
       "pvAllocs": 212
     },
     "matrix.ts": {
-      "bytes": 114016,
       "arrLive": 21,
       "objLive": 0,
       "strLive": 112,
@@ -140,7 +138,6 @@
       "pvAllocs": 0
     },
     "sudoku.ts": {
-      "bytes": 113984,
       "arrLive": 8385,
       "objLive": 0,
       "strLive": 498,
@@ -148,7 +145,6 @@
       "pvAllocs": 0
     },
     "life.ts": {
-      "bytes": 113976,
       "arrLive": 111,
       "objLive": 0,
       "strLive": 1200,
@@ -156,7 +152,6 @@
       "pvAllocs": 0
     },
     "maze.ts": {
-      "bytes": 133224,
       "arrLive": 4,
       "objLive": 33,
       "strLive": 835,
@@ -164,7 +159,6 @@
       "pvAllocs": 0
     },
     "wordfreq.ts": {
-      "bytes": 133328,
       "arrLive": 3,
       "objLive": 86,
       "strLive": 231,
@@ -172,7 +166,6 @@
       "pvAllocs": 0
     },
     "stackvm.ts": {
-      "bytes": 113664,
       "arrLive": 0,
       "objLive": 0,
       "strLive": 53,
@@ -180,12 +173,23 @@
       "pvAllocs": 0
     },
     "json-pretty.ts": {
-      "bytes": 113696,
       "arrLive": 5,
       "objLive": 2,
       "strLive": 74,
       "pvNodes": 0,
       "pvAllocs": 0
+    }
+  },
+  "binarySize": {
+    "darwin-arm64": {
+      "primes.ts": 113616,
+      "matrix.ts": 114016,
+      "sudoku.ts": 113984,
+      "life.ts": 113976,
+      "maze.ts": 133224,
+      "wordfreq.ts": 133328,
+      "stackvm.ts": 113664,
+      "json-pretty.ts": 113696
     }
   }
 }
