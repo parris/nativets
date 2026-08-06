@@ -273,6 +273,31 @@ const xs: AB[] = [{ kind: "a", n: 1 }];
   });
 });
 
+describe("RENDERING an un-narrowed union is refused, never rendered as nothing", () => {
+  // Both renderers are generated from the static type. Before this lane a union
+  // reached their silent fallbacks: `console.log` printed a bare newline (the
+  // Stage-48 defect, off a raw pointer) and `JSON.stringify` printed the literal
+  // `null` — measured, not assumed. Narrowed, both are byte-exact (test/unions/render.ts).
+  const decl = `interface A { kind: "a"; n: number; }
+interface B { kind: "b"; s: string; }
+type AB = A | B;
+`;
+  test("at the ROOT", () => {
+    expect(codeOf(`${decl}const x: AB = { kind: "a", n: 1 };\nconsole.log(x);\n`)).toBe("NT1025");
+    expect(codeOf(`${decl}const x: AB = { kind: "a", n: 1 };\nconsole.log(JSON.stringify(x));\n`)).toBe("NT1025");
+    expect(messageOf(`${decl}const x: AB = { kind: "a", n: 1 };\nconsole.log(x);\n`)).toContain("Narrow it first");
+  });
+
+  test("NESTED inside a rendered container — the renderers recurse, so the check does too", () => {
+    expect(codeOf(`${decl}const xs: AB[] = [{ kind: "a", n: 1 }];\nconsole.log(xs);\n`)).toBe("NT1025");
+    expect(codeOf(`${decl}const o: { v: AB } = { v: { kind: "a", n: 1 } };\nconsole.log(JSON.stringify(o));\n`)).toBe("NT1025");
+  });
+
+  test("...and a NARROWED one renders", () => {
+    expect(codeOf(`${decl}function f(x: AB): void { if (x.kind === "a") { console.log(x); console.log(JSON.stringify(x)); } }\nf({ kind: "a", n: 1 });\n`)).toBe(null);
+  });
+});
+
 describe("what a union may BE — refused, never guessed at", () => {
   test("a union of object types with no usable discriminant is NT1009, and says why", () => {
     // no shared field at all

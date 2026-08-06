@@ -1617,7 +1617,10 @@ class Checker {
       }
       if (e.callee.property !== "stringify") throw nyi(NYI.JSON, `JSON.${e.callee.property}`);
       if (e.args.length < 1 || e.args.length > 3) throw typeError("JSON.stringify expects 1 to 3 arguments");
-      this.type(e.args[0]!, scope);
+      // SH2: the serializer is generated from the STATIC type, and an un-narrowed union
+      // does not have one shape — it used to fall through to the literal `null`, which is
+      // a silent wrong answer. Refuse; narrowing gives it a member to serialize.
+      checkUnionRenderable(this.type(e.args[0]!, scope), "JSON.stringify");
       // arg2 (replacer) — only `null`/`undefined` supported (no array/function replacer).
       if (e.args.length >= 2) {
         const r = e.args[1]!;
@@ -2508,7 +2511,40 @@ export function checkConsoleArg(at: Ty, depth = 0): void {
     throw nyi(NYI.WEBAPI, `console.log of a ${at} (node prints an inspected \`${at} { … }\`; print a component, e.g. \`u.href\`-less \`u.origin + u.pathname\`, or \`${at === "URL" ? "u.searchParams" : "p"}.toString()\`)`);
   // The net: no argument type may reach codegen without a renderer. Printing a
   // heap handle used to emit the raw pointer — i.e. nothing at all.
+  checkUnionRenderable(at, "console.log");
   if (!isPrintableTy(at)) throw nyi(NYI.INSPECT, `console.log of a ${at}`);
+}
+
+/**
+ * SH2: rendering — `console.log`, `JSON.stringify` — is generated from the STATIC type,
+ * walking a known field layout. An un-narrowed union has no single one, and the fallback
+ * in each renderer is silent (a bare newline / the literal `null`), so it is refused with
+ * the fix named. The union's own tag is what supplies the missing shape, at runtime and
+ * with one branch per member; that is a follow-on, not a guess to make now.
+ */
+export function checkUnionRenderable(ty: Ty, what: string): void {
+  const u = findUnionIn(ty);
+  if (u === undefined) return;
+  const d = unionDiscriminant(u)!;
+  const where = u === ty ? "" : ` inside \`${ty}\``;
+  throw nyi(
+    NYI.INSPECT,
+    `${what} of the un-narrowed union ${unionWidenedMembers(u).join(" | ")}${where} — its shape is only known from its tag at RUNTIME. ` +
+      `Narrow it first (\`if (x.${d.key} === "…")\` / \`switch (x.${d.key})\`) and render the member`,
+  );
+}
+
+/** The first union reachable in `ty`, at the root or nested in a rendered container.
+ *  Both renderers recurse into elements/fields, so a union ANYWHERE inside is the same
+ *  silent fallback as one at the root. */
+function findUnionIn(ty: Ty): Ty | undefined {
+  if (isUnionTy(ty)) return ty;
+  if (isNullableTy(ty)) return findUnionIn(baseTy(ty));
+  if (isArrayTy(ty)) return findUnionIn(elemTy(ty));
+  if (isSetTy(ty)) return findUnionIn(setElemTy(ty));
+  if (isMapTy(ty)) return findUnionIn(mapKeyTy(ty)) ?? findUnionIn(mapValTy(ty));
+  if (isObjectTy(ty)) for (const f of objectFields(ty)) { const u = findUnionIn(f.ty); if (u) return u; }
+  return undefined;
 }
 
 /**
