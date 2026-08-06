@@ -179,6 +179,8 @@ const ACTOR_BUILTINS = new Set([
   "register", "whereis", "link", "monitor", "trapExit", "exit", "__crash", "__kill", "supervise",
   // v4 selective receive (receiveMatch(pred, timeoutMs?)); receive gained an optional timeout
   "receiveMatch",
+  // v6 M:N scheduler introspection (debug builtins, like __arrLive)
+  "__schedulers", "__schedUsed", "__schedSteals",
 ]);
 
 /** B3 v5: is `t` a STRUCTURED message type — a record or an array, sent by a
@@ -1219,6 +1221,12 @@ class Checker {
       if (name === "__drain") {
         if (e.args.length !== 0) throw typeError("__drain() takes no arguments");
         return "void";
+      }
+      // v6 debug introspection: resolved scheduler-thread count, how many of them
+      // actually ran an actor, and how many actors were work-STOLEN across queues.
+      if (name === "__schedulers" || name === "__schedUsed" || name === "__schedSteals") {
+        if (e.args.length !== 0) throw typeError(`${name}() takes no arguments`);
+        return "number";
       }
       // v2/v3 surface — registry / links / monitors / trap / fault injection / supervision
       if (name === "register") {

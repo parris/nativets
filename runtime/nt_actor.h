@@ -200,4 +200,29 @@ int64_t nt_mbox_peek_kind(int64_t i);     /* i-th message kind (-1 if out of ran
 void    nt_mbox_take(int64_t i);          /* remove the i-th message (the match) */
 int32_t nt_mbox_wait_from(int64_t n, double ms, int32_t has_timeout); /* block for msg > n */
 
+/* ============================================================================
+ * v6 — M:N scheduler threads, lock-free MPSC mailboxes, work stealing.
+ *
+ * NATIVETS_SCHED_THREADS selects the mode AT RUN TIME:
+ *   unset / "1"  -> ONE cooperative scheduler (the default). Byte-identical to v0..v5:
+ *                   a single FIFO run queue, direct mailbox appends, the virtual clock —
+ *                   so every behavioral test that asserts an exact interleaving still holds.
+ *   "N" / "auto" -> N OS threads, each with its own scheduler + run queue, work stealing
+ *                   between them, and per-actor LOCK-FREE MPSC mailbox intake. Actors
+ *                   migrate freely; PIDS ARE STABLE (they index one global actor table).
+ *
+ * Only what the actor model actually guarantees survives the switch: per-sender FIFO,
+ * message counts, supervision outcomes, eventual completion. A specific interleaving
+ * does not, which is exactly why the multi-threaded mode is opt-in.
+ *
+ * SOUNDNESS OF THE REST OF THE RUNTIME. runtime.c's string refcount side-table and
+ * nt_pvec.c's node refcounts are single-threaded structures (Stages 30/38/44). Under M:N
+ * they are reached from several scheduler threads, so both call through the `nt_rt_lock`
+ * hook, which nt_sched_init installs ONLY when more than one scheduler thread is running.
+ * NULL (the default) means a plain, predictable branch and zero behavioural change.
+ * ========================================================================== */
+double nt_schedulers(void);    /* resolved scheduler-thread count (1 = deterministic mode) */
+double nt_sched_used(void);    /* how many schedulers actually ran an actor (test hook) */
+double nt_sched_steals(void);  /* work-stealing hits (test hook) */
+
 #endif /* NT_ACTOR_H */

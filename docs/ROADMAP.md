@@ -111,8 +111,25 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
   Crash records render the structured triggering message (a codegen-emitted per-shape JSON
   renderer, called only while printing a record). Un-copyable message types (a closure, a
   Map/Set/bytes/Response handle) are **`NT1021`** at compile time.
-- **v6 (deferred):** M:N scheduler threads + work-stealing, dirty pool, lock-free MPSC mailboxes,
-  and the epoll/kqueue **async IO poller** (park actors as WAITING, wake on readiness).
+- **v6 ✅ (Stage 45) — M:N scheduler threads, lock-free MPSC mailboxes, work stealing, and the
+  async-IO poller.** `NATIVETS_SCHED_THREADS` picks the scheduler at RUN TIME: unset/`1` keeps the
+  deterministic single cooperative scheduler (the default — every `test/actors/` case still asserts
+  exact stdout, byte for byte), `N`/`auto` starts N OS threads, each with its own run queue plus
+  FIFO **work stealing**, and a per-actor **lock-free MPSC** mailbox intake (Treiber stack +
+  consumer-side batch reverse) drained into the private list the selective-receive save queue
+  already scans — BEAM's outer/inner mailbox split, so v4/v5 machinery is untouched. Actors migrate;
+  **pids are stable**. The M:N-only hazard — a sender enqueueing an actor whose ucontext is still
+  being saved — is closed by a `SWITCHING` state only the regaining scheduler may leave. **Refcount
+  soundness:** the string RC side-table and the pvec node refcounts + Stage-44 transient run under a
+  recursive lock installed *only* in M:N mode (`nt_rt_lock`, `NULL` otherwise → one branch); values
+  need no protection because every message is deep-copied and arrays/objects are immutable. Gated by
+  **ThreadSanitizer with a negative control**. The **poller** (kqueue/epoll) parks an actor on a fd
+  and wakes it on readiness, costing no scheduler slice — mechanism done and gated, but **not yet
+  wired to a TS-visible IO builtin** (`readLine` slurps stdin up front; `fetch` is blocking libcurl),
+  which is the remaining piece and what would finally make Stage 34's `await` more than an identity.
+- **v6 follow-ons (deferred):** a DIRTY scheduler pool (long native calls off the main pool);
+  retrofitting `fetch` (curl multi) and an incremental `readLine` onto the poller; per-actor
+  heap arenas so the RC lock can go away entirely; timeouts on `nt_io_wait`.
 - **Good tracebacks (the JS-async fix):** on crash emit ONE record — pid+name, reason +
   synchronous stacktrace, **the triggering message**, state snapshot, supervisor + restart
   decision. Tag every message with origin pid for a causal chain.
