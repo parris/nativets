@@ -117,6 +117,43 @@ which are **refusals or already-documented consequences**, never approximations:
 - **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
   monotonic, whole milliseconds, plausible epoch range.
 
+### Number → String is NOT a divergence (it used to be, silently)
+
+`Number::toString` (ECMAScript §6.1.6.1.20) sits under every printed number, and until now the
+runtime approximated it with C's `%g` / `%.0f`. That is a different function, and it disagreed
+with node three ways — none of them documented, all of them prime-directive violations:
+
+| | nativets (before) | node |
+|---|---|---|
+| `1e-7` | `1e-07` | `1e-7` |
+| `1e-5`, `0.00001` | `1e-05` | `0.00001` |
+| `123456789012345680000` | `123456789012345683968` | `123456789012345680000` |
+
+i.e. a **zero-padded exponent**, the **wrong notation threshold** (`%g` switches to exponential
+below `1e-4`; the spec switches below `1e-6` and at/above `1e21`), and the double's **exact
+decimal expansion** where the spec asks for the **shortest round-tripping digits** zero-filled.
+
+It is now the spec algorithm: the shortest digit string that `strtod`s back to the same bits
+(precisions 1..17, first round-tripping one wins — with the adjacent decimal probed too, because
+near a power of two the rounding interval is asymmetric and the *nearest* p-digit decimal can fall
+outside it while its neighbour, the one V8 prints, does not), then the spec's k/n placement rules.
+Verified by a seeded fuzz of ~250k doubles against `String(x)` under node (`test/numtostr.test.ts`
+plus a larger out-of-band run): **zero mismatches**. There is no remaining divergence to document
+here — this entry exists so the old behaviour is not mistaken for a deliberate choice.
+
+Two things that look like divergences and are not:
+
+- **`console.log(-0)` prints `-0`, `String(-0)` / `` `${-0}` `` / `"" + -0` produce `"0"`.** That
+  is node: `console.log` renders a number through `util.inspect`, which shows the sign of negative
+  zero, while `Number::toString` does not. Both sides are matched deliberately.
+- **`.toSorted()` with no comparator orders by these strings** (`[10, 9].toSorted()` is `[10, 9]`),
+  so fixing the notation thresholds also fixed the default sort order for values below `1e-6` or
+  at/above `1e21`.
+
+`toFixed(digits)` and `toString(radix)` are separate, separately-verified code paths (ECMAScript
+ToFixed; V8's `DoubleToRadixCString`) and are unchanged — see the Batch 1 entry above for their
+one restriction (literal, in-range arguments).
+
 ### stdlib Batch 3 — `Date` (and the TIMEZONE decision), `URL`, URI encoding
 
 **The timezone decision: local time is REALLY local, and the tests pin `TZ`.**
