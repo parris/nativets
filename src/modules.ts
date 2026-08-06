@@ -323,6 +323,12 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
    *  every Ty that mentions it, so it is renamed per module through `tags` for exactly
    *  the reason class tags are: two modules may each declare a `Cell`. */
   const mutableRecords = new Set<string>();
+  /** Host builtins (SH4) imported ANYWHERE in the graph. These are canonical builtin
+   *  names, not module bindings, so they are never renamed — a `node:` import binds a
+   *  compiler builtin, and the merged program simply needs the union. The compiler's
+   *  own source is exactly this shape (src/modules.ts imports node:fs; src/cli.ts is
+   *  the entry), so without the union a non-entry module's host call would vanish. */
+  const hostImports = new Set<string>();
 
   order.forEach((path, i) => {
     const source = sources.get(path)!;
@@ -372,6 +378,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     if (!isEntry) for (const r of program.mutableRecords ?? []) tags.set(r, `${prefixBase}${i}_${r}`);
     for (const c of program.mutableClasses ?? []) mutableClasses.add(names.get(c) ?? c);
     for (const r of program.mutableRecords ?? []) mutableRecords.add(tags.get(r) ?? r);
+    for (const h of program.hostImports ?? []) hostImports.add(h);
     new Renamer(names, tags).program(program);
 
     // 4. Publish this module's export table under the final names.
@@ -396,6 +403,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
   const merged: Program = { kind: "Program", body };
   if (mutableClasses.size) merged.mutableClasses = [...mutableClasses];
   if (mutableRecords.size) merged.mutableRecords = [...mutableRecords];
+  if (hostImports.size) merged.hostImports = [...hostImports];
   return merged;
 }
 

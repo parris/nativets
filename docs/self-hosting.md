@@ -259,6 +259,20 @@ visible for the first time:**
 | `NT1009` | `checker` | a general union — still the crux (the AST *is* a discriminated union) |
 | `NT1015` | `codegen` | a `static` member |
 
+### Re-measured after SH4 — the host FFI is no longer a blocker
+
+`NT1017`'s three modules are past it. Clearing a blocker UNMASKS what sat behind it, so the
+regex bucket grew from 4 modules to 6 — the gradient working, not a regression:
+
+| Blocker | Modules | What it is |
+|---|---|---|
+| `NT1027` | `lexer`, `diagnostics`, `ownership`, `coverage-preprocess`, **`cli`**, **`modules`** | regex literals — now the **dominant** blocker, at half the tree |
+| `NT0001` | `ast`, `coverage`, `parser` | a template-literal TYPE (`` `${string}[]` ``) and `satisfies` |
+| `NT1009` | `checker` | a general union — **still the crux** |
+| `NT1015` | `codegen` | a `static` member |
+| `NT1017` | `driver` | **not** a `node:` module: the bun text-asset import `import runtimeSource from "../runtime/runtime.c" with { type: "text" }` |
+| `NT1028` | — | the host FFI surface is complete for what `src/*.ts` imports |
+
 That reorders the plan. **`!` is now the cheapest win** and unblocks five modules;
 **`node:fs` (SH4)** is the real structural work, not regex. Only two modules genuinely
 need regex removed, so the "~28 sites, Path B" rewrite is far smaller than the wall
@@ -364,10 +378,37 @@ declarations and everything downstream of them now get as far as being analyzed 
   classes into closures + records (nativets closures already carry mutable state), or add minimal
   no-inheritance class support if the refactor proves too invasive. Decide with a spike on `Scope`
   (the smallest class).
-- **SH4 — Host FFI.** A tiny `Host` interface in the runtime backed by libc/posix:
-  `nt_read_file`, `nt_write_file`, `nt_spawn` (run `clang`, capture status/stderr), `nt_argv`,
-  `nt_exit`. Wire the driver/cli through it. This is what lets a self-hosted `nativets` actually
-  read a `.ts`, emit `.ll`, and invoke `clang`.
+- **SH4 ✅ — Host FFI.** `node:` specifiers now resolve to **compiler builtins** rather than files:
+  the parser binds the named members of a `node:` module (`HOST_MODULES` in `ast.ts`), erases the
+  import, and publishes the canonical names on `Program.hostImports`; the checker types them from
+  `HOST_FUNCS` and codegen lowers each to a runtime call. A host builtin is deliberately **not
+  ambient** — it is in scope only where it was imported, exactly like node — so a program that
+  defines its own `join`/`readFileSync` is unaffected.
+
+  - **Implemented, and exactly what `src/*.ts` imports** (the grep drove the list):
+    `node:fs` — `readFileSync` / `writeFileSync` / `existsSync` / `mkdtempSync` / `readdirSync` /
+    `rmSync`; `node:path` — `join` / `dirname` / `basename` / `resolve` / `relative` (a faithful C
+    port of node's own `lib/path.js` posix functions); `node:os` — `tmpdir` / `homedir`;
+    `node:url` — `fileURLToPath`; `node:child_process` — `spawnSync`.
+  - **All libc/POSIX** (stdio, `stat`, `dirent`, `mkdtemp`, `fork`+`execvp`+`poll`), so
+    `runtime/runtime.c` cross-links unchanged: iOS-sim, iOS-device and Android arm64 all link a
+    program using the FFI, and it **RUNS on the iOS simulator** (fs + a real `spawnSync`).
+  - **Errors are node's, byte-for-byte** (`ENOENT: no such file or directory, open '/x'`) through
+    the pending-exception protocol, and a try block containing a host call binds `catch (e)` to
+    `{message:string}`, so `e.message` matches node.
+  - **Refused, never half-implemented — `NT1028`:** an unimplemented `node:` module or member, and
+    the argument *values* that decide what node returns (`readFileSync` with no/computed encoding,
+    `spawnSync` without `{ encoding: "utf8" }` or with any other option, `rmSync` with a `false`
+    flag). One documented divergence: `spawnSync().status` is `-1` where node reports `null` — see
+    `docs/divergences.md`.
+  - Tests: `test/hostfs.test.ts` (39, node-differential except the refusal table and the
+    documented `status` divergence).
+
+  **Measured effect:** the three modules NT1017 used to stop — `driver.ts`, `cli.ts`, `modules.ts`
+  — are all past the host FFI. `cli.ts` and `modules.ts` now stop on a **regex literal** (NT1027,
+  the deliberate Tier-C refusal) and `driver.ts` on a *different* NT1017: the bun text-asset import
+  `import runtimeSource from "../runtime/runtime.c" with { type: "text" }`, a bundler feature rather
+  than a `node:` module. `NT1028` does not appear in the frontier at all.
 - **SH5 — Close the tail.** Run the SH0 gradient again; burn down remaining Tier-1 features the
   source actually uses (generics beyond `Map`/`Set`, specific string/array methods, spread/
   destructuring — mostly already supported). Keep going until `coverage src/<bundle>.ts` is clean.

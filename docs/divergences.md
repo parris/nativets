@@ -693,6 +693,37 @@ supported case is node-differential — there is **no runtime divergence**. The 
 | NT1020 | promises / concurrency: `Promise.*`, `new Promise`, `.then`/`.catch`/`.finally`, un-awaited `async` results | later | an event loop — or, the chosen answer, the **actor** model (`spawn`/`send`/`receive`). `async`/`await`/`fetch` themselves are ✅ supported (blocking; see §A) |
 | NT1025 | `console.log` of a value with no node-identical rendering: a **function value** anywhere, or a `Uint8Array`/`TextEncoder`/`TextDecoder`/`Response`/`Headers`/`URL`/`URLSearchParams` handle **nested inside** a printed value | later | objects, class instances, arrays, Map/Set and `Dyn` are ✅ node-exact (util.inspect, see above); this code covers only the leaf types that have no node-identical form here |
 
+### Host FFI (SH4) — `node:fs` / `node:child_process`
+
+A `node:` import binds a **compiler builtin**, not a file: there is no `node_modules`, no JS to
+run, and nothing to link. `readFileSync`/`writeFileSync`/`existsSync`/`spawnSync` are backed by
+libc (stdio, `stat`, `fork`+`execvp`), so `runtime/runtime.c` still cross-links unchanged. The
+same `.ts` runs under node, so every supported case is node-differential
+(`test/hostfs.test.ts`). Three deliberate departures:
+
+- **A host builtin is not ambient.** It is in scope only where it was imported, unlike
+  `readLine`/`fetch`/`parseInt`. That is *stricter* than treating it as a global (node also
+  requires the import) and it leaves a user function named `readFileSync` compiling normally.
+- **`spawnSync().status` is a `number`, and a spawn FAILURE is `-1`.** node reports a failure to
+  spawn — and death by a signal — as `status: null` plus an `.error`/`.signal` property. Typing
+  it `number | null` would make the idiomatic `r.status !== 0` (which the compiler's own
+  `src/driver.ts` is written with) need narrowing at every call site, so the value is `-1` and
+  the shape stays flat. Like node, it **does not throw**: an unrunnable command is a reported
+  result, not an exception. Exit codes of a program that *did* run are exact.
+- **Errors are node's, byte-for-byte.** A failed `readFileSync`/`writeFileSync` raises
+  `ENOENT: no such file or directory, open '/x'` — node's exact `err.message` — through the
+  pending-exception protocol, so `try`/`catch` works; a try block containing a host call binds
+  its catch parameter to `{message:string}` (nativets' `Error` shape), so `e.message` prints the
+  same text on both sides. `existsSync` never throws, matching node.
+
+Everything outside the implemented surface is **`NT1028`**, never half-implemented — including
+the argument *values* that decide what node returns: `readFileSync(p)` with no encoding (node
+yields a Buffer), a computed encoding, `spawnSync` without `{ encoding: "utf8" }`, and any other
+`spawnSync` option (`cwd`/`env`/`input`/`shell`/`timeout`), since accepting and ignoring one
+would silently change what the program does.
+
+| NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`) |
+
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
 

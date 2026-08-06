@@ -161,15 +161,23 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
       const code = /\[(NT\d+)\]/.exec(error)?.[1] ?? "other";
       (byCode[code] ??= []).push(m);
     }
-    // NT1017 (`node:fs`) is the SH4 host-FFI story; NT1027 is the regex refusal; the
-    // NT0001 survivors are a template-literal TYPE (`\`${string}[]\`` in ast.ts, which
-    // coverage.ts sees through the link) and `satisfies` in parser.ts.
+    // NT1027 is the regex refusal; the NT0001 survivors are a template-literal TYPE
+    // (`\`${string}[]\`` in ast.ts, which coverage.ts sees through the link) and
+    // `satisfies` in parser.ts.
+    //
+    // THE HOST FFI IS NO LONGER A BLOCKER (SH4). `node:` specifiers resolve to compiler
+    // builtins, and every member driver/cli/modules import is implemented, so all three
+    // moved past it: two now stop on a REGEX and driver.ts on a different NT1017 — the
+    // bun text-asset import `import runtimeSource from "…/runtime.c" with {type:"text"}`,
+    // which is a bundler feature, not a `node:` module. NT1028 does not appear at all.
     expect(Object.keys(byCode).sort()).toEqual(["NT0001", "NT1009", "NT1015", "NT1017", "NT1027"]);
-    expect(byCode["NT1017"]!.sort()).toEqual(["cli.ts", "driver.ts", "modules.ts"]);
-    // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
-    // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
-    // working, not a regression — the phase table above is what must never go backwards.
-    expect(byCode["NT1027"]!.sort()).toEqual(["coverage-preprocess.ts", "diagnostics.ts", "lexer.ts", "ownership.ts"]);
+    expect(byCode["NT1028"]).toBeUndefined();
+    expect(byCode["NT1017"]!.sort()).toEqual(["driver.ts"]);
+    // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts,
+    // and to 6 when SH4 cleared the host FFI in cli.ts and modules.ts: clearing a blocker
+    // UNMASKS what sat behind it. The count going up is the ratchet working, not a
+    // regression — the phase table above is what must never go backwards.
+    expect(byCode["NT1027"]!.sort()).toEqual(["cli.ts", "coverage-preprocess.ts", "diagnostics.ts", "lexer.ts", "modules.ts", "ownership.ts"]);
     expect(byCode["NT0001"]!.sort()).toEqual(["ast.ts", "coverage.ts", "parser.ts"]);
   });
 
