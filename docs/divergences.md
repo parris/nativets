@@ -88,6 +88,54 @@ anything but the instance (`NT1023` — the copy would be lost), and the `@@muta
 shapes whose ownership cannot be established (`NT1607` / `NT1604` / `NT1602` — see
 `docs/ownership.md` and `docs/decorators.md`).
 
+### `console.log` of a COMPOUND value — node's `util.inspect`, and what is refused
+
+`console.log(obj)` used to print a **bare newline**: `emitPrint` fell through to
+`js_print_str` on the heap POINTER. A silent wrong answer, and the reason this section
+exists. Compound values now render through a port of node's
+`lib/internal/util/inspect.js` at console.log's defaults — **breakLength 80, compact 3,
+depth 2, maxArrayLength 100** — and are **byte-identical to node**:
+
+- **objects** `{ a: 1, b: 'x' }` (keys bare only for node's `/^[a-zA-Z_][a-zA-Z_0-9]*$/`
+  — `$x` IS quoted), **class instances** `Point { x: 1 }`, **arrays** `[ 1, 2, 3 ]` /
+  `[]`, **Map/Set** `Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`, and every nesting of them;
+- **node's line-breaking**, including the column-grouped layout for arrays past six
+  entries and the `... n more items` cut at 100;
+- **node's depth cut** (`[Object]`/`[Array]` below depth 2), where an EMPTY compound
+  still prints (`{}`) because node checks emptiness first;
+- **node's string quoting** — `'`, falling back to `"` then `` ` `` to avoid escaping —
+  with a **nested** string quoted and a **top-level** one bare;
+- `-0` prints as `-0` (util.inspect's `formatNumber`), while `String(-0)` stays `"0"`;
+- a **`Dyn`** (a `JSON.parse` result) uses the same algorithm at runtime — closing the
+  Stage-20 deferral, where a compound printed the literal `[object]`.
+
+Refused (**`NT1025`**), never printed as a pointer:
+
+- a **function value**, anywhere in a printed value — node names a function after the
+  binding it came from (`[Function: f]`), and our lambda-lifted arrows carry no name;
+- a **`Uint8Array` / `TextEncoder` / `TextDecoder` / `Response` / `Headers` / `URL` /
+  `URLSearchParams`** handle **nested inside** a printed value. At the ROOT each keeps
+  its own long-standing code (`NT1016`, `NT1002`, `NT1024`) — a bare `Uint8Array` is
+  still refused for node's column-grouped typed-array layout.
+
+A value below node's depth cut is never rendered, so a refused type there does **not**
+block the program. Two residual divergences:
+
+- **An ABSENT optional field still prints** — `{ a?: number }` is encoded exactly as
+  `{ a: number | undefined }` (the parser's own equivalence), so a slot always exists
+  and `console.log({ b: 'x' })` typed that way prints `{ a: undefined, b: 'x' }` where
+  node prints `{ b: 'x' }`. This is the **pre-existing** optional-field-slot divergence
+  already visible through `Object.keys` (`a,b`) and `JSON.stringify` (`{"a":null,…}`),
+  not something inspect introduces — inspect is consistent with the rest of the compiler.
+- **Widths are counted in UTF-8 BYTES**, node counts UTF-16 units (§A.2), so a non-ASCII
+  entry can tip the 80-column break differently. Identical for ASCII.
+
+Not a divergence but worth recording: `console.log("%s", x)` **format specifiers are not
+interpreted** (pre-existing), and `js_number_to_string` has its own pre-existing gaps
+(`1e-7` → `1e-07`, `1e-5` → `1e-05` instead of `0.00001`, and very large integers print
+their exact rather than shortest-round-trip digits). Both are independent of inspect —
+they show identically through `String(x)` — and are not fixed here.
+
 ### stdlib Batch 1 — what cannot match node, and what we do instead
 
 The Batch-1 stdlib (`docs/stdlib.md`) is node-differential everywhere except these, all of
@@ -518,11 +566,11 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 
 | Code | Feature | Milestone | Needs |
 |------|---------|-----------|-------|
-| NT1001 | arrays: empty `[]`, nested/object element types, `console.log(arr)` | M1 | (basic `number[]`/`string[]` are ✅ supported) |
+| NT1001 | arrays: empty `[]`, nested/object element types | M1 | (basic `number[]`/`string[]` are ✅ supported; `console.log(arr)` is ✅ node-exact — see the util.inspect section above) |
 | NT1002 | objects: nested object fields, object methods | M1 | (flat objects, `.f`/`o["f"]`, `Object.keys`, `for-in` are ✅ supported) |
 | NT1003 | arrow functions / function values / closures | M2 | captured environments |
 | NT1004 | `try`/`catch`/`throw` | M2 | unwinding |
-| NT1005 | `JSON` | M3 | `JSON.stringify` ✅ and `JSON.parse` + `dyn as T` runtime typecheck ✅ (scalars/objects/arrays, nested); code reused to reject un-validatable narrow targets (functions, unions) + compound `Dyn` direct-print |
+| NT1005 | `JSON` | M3 | `JSON.stringify` ✅ and `JSON.parse` + `dyn as T` runtime typecheck ✅ (scalars/objects/arrays, nested); code reused to reject un-validatable narrow targets (functions, unions). A compound `Dyn` now PRINTS node-exactly (util.inspect, see above) |
 | NT1006 | spread | M2 | arrays/objects |
 | NT1007 | destructuring | M2 | arrays/objects |
 | NT1008 | rest parameters | M2 | arrays |
@@ -556,6 +604,7 @@ supported case is node-differential — there is **no runtime divergence**. The 
   is also **not enforced** (a bound violation surfaces as an ordinary error inside the
   specialization, not as a constraint violation at the call site).
 | NT1020 | promises / concurrency: `Promise.*`, `new Promise`, `.then`/`.catch`/`.finally`, un-awaited `async` results | later | an event loop — or, the chosen answer, the **actor** model (`spawn`/`send`/`receive`). `async`/`await`/`fetch` themselves are ✅ supported (blocking; see §A) |
+| NT1025 | `console.log` of a value with no node-identical rendering: a **function value** anywhere, or a `Uint8Array`/`TextEncoder`/`TextDecoder`/`Response`/`Headers`/`URL`/`URLSearchParams` handle **nested inside** a printed value | later | objects, class instances, arrays, Map/Set and `Dyn` are ✅ node-exact (util.inspect, see above); this code covers only the leaf types that have no node-identical form here |
 
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.

@@ -132,6 +132,11 @@ export const NYI = {
   // (`localeCompare`), locale/format tables (`toLocaleString`, `Date#toString`), or Date
   // MUTATION (`setHours` — a Date here is an immutable time value, like everything else).
   WEBAPI: { code: "NT1024", milestone: "later", hint: "Date supports getTime/getFullYear/getMonth/getDate/getDay/getHours/getMinutes/getSeconds/getMilliseconds/toISOString; URL supports protocol/host/hostname/port/pathname/search/hash/origin/searchParams. Locale- and Unicode-table-driven members are refused rather than approximated" },
+  // console.log of a COMPOUND value renders through node's util.inspect (Stage 47):
+  // objects, class instances, arrays, Map/Set, nested combinations and Dyn are all
+  // byte-identical to node. This code refuses the few leaf types INSIDE a printed
+  // value whose node rendering we cannot reproduce — never a raw pointer.
+  INSPECT: { code: "NT1025", milestone: "later", hint: "console.log renders objects, class instances, arrays, Map/Set and JSON.parse results exactly like node. A function value prints as `[Function: <name>]` in node — a name our lifted closures do not carry — and a Uint8Array/Response/URL handle has no node-identical form here; print a field or a derived string instead" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

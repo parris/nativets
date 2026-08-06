@@ -30,6 +30,13 @@ export function llvmDouble(n: number): string {
   return "0x" + hex.toUpperCase();
 }
 
+/** node's `util.inspect` defaults as console.log uses them (lib/internal/util/inspect.js):
+ *  a compound deeper than `depth` renders as `[Object]`/`[Array]`, and an array shows at
+ *  most `maxArrayLength` entries followed by `... n more items`. `breakLength` (80) and
+ *  `compact` (3) live in the runtime builder, which is where widths are known. */
+const INSPECT_DEPTH = 2;
+const INSPECT_MAXARR = 100;
+
 const ACTOR_BUILTINS = new Set([
   "spawn", "send", "receive", "self", "__drain",
   // v2 links/monitors/trap + fault injection; v3 supervision + registry
@@ -372,6 +379,19 @@ const DECLARES = [
   "declare i64 @nt_sup_new(i64, i64, i64)",
   "declare void @nt_sup_add_child(i64, ptr, ptr, ptr)",
   "declare i64 @nt_sup_start(i64)",
+  // --- console.log of a COMPOUND value: node's util.inspect (Stage 47) ---
+  // Codegen walks the static type and renders one entry string per element/field;
+  // the builder owns only the width / line-breaking decision (runtime widths).
+  "declare ptr @nt_insp_new(ptr, ptr, double, double, double)",
+  "declare void @nt_insp_add(ptr, ptr)",
+  "declare ptr @nt_insp_done(ptr)",
+  "declare ptr @nt_insp_num(double)",
+  "declare ptr @nt_insp_str(ptr)",
+  "declare ptr @nt_insp_entry(ptr, ptr)",
+  "declare ptr @nt_insp_pair(ptr, ptr)",
+  "declare ptr @nt_insp_coll_open(ptr, double)",
+  "declare ptr @nt_insp_more(double)",
+  "declare ptr @nt_dyn_inspect(ptr, double)",
 ];
 
 /** B3 v4 runtime entry points — typed messages, receive timeouts, selective receive.
@@ -2579,7 +2599,208 @@ class FnGen {
       return;
     }
     if (isNullableTy(val.ty)) { this.emitPrintNullable(val.v, baseTy(val.ty)); return; }
-    this.emit(`call void @js_print_str(ptr ${val.v})`);
+    // A COMPOUND value (object / class instance / array / Map / Set) is rendered by
+    // node's util.inspect. Before Stage 47 this fell through to `js_print_str` on the
+    // heap POINTER — a silent wrong answer (usually a bare newline).
+    if (isObjectTy(val.ty) || isArrayTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty)) {
+      this.emit(`call void @js_print_str(ptr ${this.genInspect(val, 0, 0).v})`);
+      return;
+    }
+    this.emit(`call void @js_print_str(ptr ${val.v})`); // a top-level string prints BARE
+  }
+
+  /**
+   * node's `util.inspect` of a value, generated from its STATIC type — the
+   * `JSON.stringify` walk's shape, with node's rendering rules. Returns a string Val.
+   *
+   * `depth` is node's `recurseTimes` (a compound below `depth 2` renders as
+   * `[Object]`/`[Array]`); `indent` is node's `ctx.indentationLvl` (+2 per level),
+   * which the runtime builder needs for the width test and the wrapped layout.
+   * Nested strings are QUOTED, a top-level one is not — hence the split between
+   * this walk and `emitPrint`.
+   */
+  private genInspect(val: Val, depth: number, indent: number): Val {
+    const ty = val.ty;
+    const lit = (s: string): Val => ({ v: this.mod.intern(s), ty: "string" });
+    if (ty === "number") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_insp_num(double ${val.v})`); return { v: t, ty: "string" }; }
+    if (ty === "boolean") {
+      const z = this.fresh(); this.emit(`${z} = zext i1 ${val.v} to i32`);
+      const t = this.fresh(); this.emit(`${t} = call ptr @js_bool_to_str(i32 ${z})`);
+      return { v: t, ty: "string" };
+    }
+    if (ty === "string") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_insp_str(ptr ${val.v})`); return { v: t, ty: "string" }; }
+    if (ty === "undefined" || ty === "void") return lit("undefined");
+    if (ty === "null") return lit("null");
+    if (isDateTy(ty)) { const t = this.fresh(); this.emit(`${t} = call ptr @nt_date_inspect(double ${val.v})`); return { v: t, ty: "string" }; }
+    if (ty === "Dyn") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_dyn_inspect(ptr ${val.v}, double ${llvmDouble(indent)})`); return { v: t, ty: "string" }; }
+    if (isNullableTy(ty)) return this.genInspectNullable(val.v, baseTy(ty), depth, indent);
+    if (isObjectTy(ty)) return this.genInspectObject(val, depth, indent);
+    if (isArrayTy(ty)) return this.genInspectArray(val, depth, indent);
+    if (isMapTy(ty) || isSetTy(ty)) return this.genInspectColl(val, depth, indent);
+    return lit("undefined"); // unreachable: the checker rejects every other arg type
+  }
+
+  /** A nullable box is INVISIBLE to inspect: render the tag's value at the same depth. */
+  private genInspectNullable(ptr: string, base: Ty, depth: number, indent: number): Val {
+    const out = this.slot("string");
+    const tag = this.nullTag(ptr);
+    const isU = this.fresh(); this.emit(`${isU} = icmp eq i64 ${tag}, 0`);
+    const uLbl = this.label("iu"), nChk = this.label("inc"), nLbl = this.label("in"), pLbl = this.label("ip"), end = this.label("ie");
+    this.terminate(`br i1 ${isU}, label %${uLbl}, label %${nChk}`);
+    this.to(this.block(uLbl)); this.emit(`store ptr ${this.mod.intern("undefined")}, ptr ${out}`); this.terminate(`br label %${end}`);
+    this.to(this.block(nChk));
+    const isN = this.fresh(); this.emit(`${isN} = icmp eq i64 ${tag}, 1`);
+    this.terminate(`br i1 ${isN}, label %${nLbl}, label %${pLbl}`);
+    this.to(this.block(nLbl)); this.emit(`store ptr ${this.mod.intern("null")}, ptr ${out}`); this.terminate(`br label %${end}`);
+    this.to(this.block(pLbl));
+    const inner = this.genInspect({ v: this.fromSlot(this.nullVal(ptr), base), ty: base }, depth, indent);
+    this.emit(`store ptr ${inner.v}, ptr ${out}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(end));
+    const t = this.fresh(); this.emit(`${t} = load ptr, ptr ${out}`);
+    return { v: t, ty: "string" };
+  }
+
+  /**
+   * `{ a: 1, b: 'x' }` / `Point { x: 1 }`. node folds a class name into the OPENING
+   * BRACE (`braces[0]`), and measures it there, so `open` carries it. Both the empty
+   * form and the depth cut-off are compile-time decisions here (fields are static),
+   * and node checks EMPTY FIRST — `{}` prints at any depth, `[Object]` only when it
+   * has fields.
+   */
+  private genInspectObject(val: Val, depth: number, indent: number): Val {
+    const fields = objectFields(val.ty);
+    const tag = classTag(val.ty);
+    const open = `${tag ? `${tag} ` : ""}{`;
+    if (fields.length === 0) return { v: this.mod.intern(`${open}}`), ty: "string" };
+    if (depth > INSPECT_DEPTH) return { v: this.mod.intern(`[${tag ?? "Object"}]`), ty: "string" };
+    const b = this.fresh();
+    this.emit(`${b} = call ptr @nt_insp_new(ptr ${this.mod.intern(open)}, ptr ${this.mod.intern("}")}, double ${llvmDouble(indent)}, double 0x0000000000000000, double 0x0000000000000000)`);
+    fields.forEach((f) => {
+      const gep = this.fresh();
+      this.emit(`${gep} = getelementptr i64, ptr ${val.v}, i64 ${fieldIndex(val.ty, f.key)}`);
+      const slot = this.fresh();
+      this.emit(`${slot} = load i64, ptr ${gep}`);
+      const s = this.genInspect({ v: this.fromSlot(slot, f.ty), ty: f.ty }, depth + 1, indent + 2);
+      const e = this.fresh();
+      this.emit(`${e} = call ptr @nt_insp_entry(ptr ${this.mod.intern(f.key)}, ptr ${s.v})`);
+      this.emit(`call void @nt_insp_add(ptr ${b}, ptr ${e})`);
+    });
+    const t = this.fresh(); this.emit(`${t} = call ptr @nt_insp_done(ptr ${b})`);
+    return { v: t, ty: "string" };
+  }
+
+  /**
+   * `[ 1, 2, 3 ]`, or node's column-grouped layout past six entries. The length is a
+   * runtime value, so the empty (`[]`) and depth-cut (`[Array]`) cases are a runtime
+   * select; entries past `maxArrayLength` (100) become `... n more items`.
+   */
+  private genInspectArray(val: Val, depth: number, indent: number): Val {
+    const el = elemTy(val.ty);
+    const len = this.fresh();
+    this.emit(`${len} = call double @nt_arr_len(ptr ${val.v})`);
+    const isEmpty = this.fresh(); this.emit(`${isEmpty} = fcmp oeq double ${len}, 0.0`);
+    if (depth > INSPECT_DEPTH) {
+      const t = this.fresh();
+      this.emit(`${t} = select i1 ${isEmpty}, ptr ${this.mod.intern("[]")}, ptr ${this.mod.intern("[Array]")}`);
+      return { v: t, ty: "string" };
+    }
+    // node's `order`: padStart only when EVERY element is a number.
+    const numericPad = el === "number" ? 1 : 0;
+    const b = this.fresh();
+    this.emit(`${b} = call ptr @nt_insp_new(ptr ${this.mod.intern("[")}, ptr ${this.mod.intern("]")}, double ${llvmDouble(indent)}, double ${llvmDouble(1)}, double ${llvmDouble(numericPad)})`);
+    const over = this.fresh(); this.emit(`${over} = fcmp ogt double ${len}, ${llvmDouble(INSPECT_MAXARR)}`);
+    const capped = this.fresh();
+    this.emit(`${capped} = select i1 ${over}, double ${llvmDouble(INSPECT_MAXARR)}, double ${len}`);
+    const idx = this.slot("number");
+    this.emit(`store double 0x0000000000000000, ptr ${idx}`);
+    const cond = this.label("ia"), body = this.label("iab"), upd = this.label("iau"), end = this.label("iae");
+    this.terminate(`br label %${cond}`);
+    this.to(this.block(cond));
+    const iC = this.fresh(); this.emit(`${iC} = load double, ptr ${idx}`);
+    const cmp = this.fresh(); this.emit(`${cmp} = fcmp olt double ${iC}, ${capped}`);
+    this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
+    this.to(this.block(body));
+    const iB = this.fresh(); this.emit(`${iB} = load double, ptr ${idx}`);
+    const slot = this.fresh(); this.emit(`${slot} = call i64 @nt_arr_get(ptr ${val.v}, double ${iB})`);
+    const es = this.genInspect({ v: this.fromSlot(slot, el), ty: el }, depth + 1, indent + 2);
+    this.emit(`call void @nt_insp_add(ptr ${b}, ptr ${es.v})`);
+    this.terminate(`br label %${upd}`);
+    this.to(this.block(upd));
+    const iU = this.fresh(); this.emit(`${iU} = load double, ptr ${idx}`);
+    const iN = this.fresh(); this.emit(`${iN} = fadd double ${iU}, 1.0`);
+    this.emit(`store double ${iN}, ptr ${idx}`);
+    this.terminate(`br label %${cond}`);
+    this.to(this.block(end));
+    const rem = this.fresh(); this.emit(`${rem} = fsub double ${len}, ${capped}`);
+    const more = this.fresh(); this.emit(`${more} = fcmp ogt double ${rem}, 0.0`);
+    const mLbl = this.label("iam"), mEnd = this.label("iaz");
+    this.terminate(`br i1 ${more}, label %${mLbl}, label %${mEnd}`);
+    this.to(this.block(mLbl));
+    const ms = this.fresh(); this.emit(`${ms} = call ptr @nt_insp_more(double ${rem})`);
+    this.emit(`call void @nt_insp_add(ptr ${b}, ptr ${ms})`);
+    this.terminate(`br label %${mEnd}`);
+    this.to(this.block(mEnd));
+    const t = this.fresh(); this.emit(`${t} = call ptr @nt_insp_done(ptr ${b})`);
+    return { v: t, ty: "string" };
+  }
+
+  /**
+   * `Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`. The size is in node's opening brace and
+   * is a runtime value, so the brace is built at runtime too. Iteration reuses the
+   * Stage-37 insertion-order key log (`nt_coll_keys`), so the order matches node.
+   */
+  private genInspectColl(val: Val, depth: number, indent: number): Val {
+    const isMap = isMapTy(val.ty);
+    const kt = isMap ? mapKeyTy(val.ty) : setElemTy(val.ty);
+    const vt = isMap ? mapValTy(val.ty) : ("number" as Ty);
+    const size = this.fresh(); this.emit(`${size} = call i64 @nt_coll_size(ptr ${val.v})`);
+    const sizeD = this.fresh(); this.emit(`${sizeD} = sitofp i64 ${size} to double`);
+    const open = this.fresh();
+    this.emit(`${open} = call ptr @nt_insp_coll_open(ptr ${this.mod.intern(isMap ? "Map" : "Set")}, double ${sizeD})`);
+    if (depth > INSPECT_DEPTH) {
+      // node checks empty BEFORE the depth cut, so an empty collection still prints.
+      const isEmpty = this.fresh(); this.emit(`${isEmpty} = icmp eq i64 ${size}, 0`);
+      const empty = this.concat(open, this.mod.intern("}"));
+      const t = this.fresh();
+      this.emit(`${t} = select i1 ${isEmpty}, ptr ${empty}, ptr ${this.mod.intern(isMap ? "[Map]" : "[Set]")}`);
+      return { v: t, ty: "string" };
+    }
+    const b = this.fresh();
+    this.emit(`${b} = call ptr @nt_insp_new(ptr ${open}, ptr ${this.mod.intern("}")}, double ${llvmDouble(indent)}, double 0x0000000000000000, double 0x0000000000000000)`);
+    const keys = this.fresh(); this.emit(`${keys} = call ptr @nt_coll_keys(ptr ${val.v})`);
+    const klen = this.fresh(); this.emit(`${klen} = call double @nt_arr_len(ptr ${keys})`);
+    const idx = this.slot("number");
+    this.emit(`store double 0x0000000000000000, ptr ${idx}`);
+    const cond = this.label("ic"), body = this.label("icb"), upd = this.label("icu"), end = this.label("ice");
+    this.terminate(`br label %${cond}`);
+    this.to(this.block(cond));
+    const iC = this.fresh(); this.emit(`${iC} = load double, ptr ${idx}`);
+    const cmp = this.fresh(); this.emit(`${cmp} = fcmp olt double ${iC}, ${klen}`);
+    this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
+    this.to(this.block(body));
+    const iB = this.fresh(); this.emit(`${iB} = load double, ptr ${idx}`);
+    const kslot = this.fresh(); this.emit(`${kslot} = call i64 @nt_arr_get(ptr ${keys}, double ${iB})`);
+    const ks = this.genInspect({ v: this.fromSlot(kslot, kt), ty: kt }, depth + 1, indent + 2);
+    let entry = ks.v;
+    if (isMap) {
+      const vs = this.fresh();
+      this.emit(`${vs} = call i64 @nt_map_get_slot(ptr ${val.v}, i32 ${this.keyTag(kt)}, i64 ${kslot})`);
+      const vstr = this.genInspect({ v: this.fromSlot(vs, vt), ty: vt }, depth + 1, indent + 2);
+      const p = this.fresh();
+      this.emit(`${p} = call ptr @nt_insp_pair(ptr ${ks.v}, ptr ${vstr.v})`);
+      entry = p;
+    }
+    this.emit(`call void @nt_insp_add(ptr ${b}, ptr ${entry})`);
+    this.terminate(`br label %${upd}`);
+    this.to(this.block(upd));
+    const iU = this.fresh(); this.emit(`${iU} = load double, ptr ${idx}`);
+    const iN = this.fresh(); this.emit(`${iN} = fadd double ${iU}, 1.0`);
+    this.emit(`store double ${iN}, ptr ${idx}`);
+    this.terminate(`br label %${cond}`);
+    this.to(this.block(end));
+    const t = this.fresh(); this.emit(`${t} = call ptr @nt_insp_done(ptr ${b})`);
+    return { v: t, ty: "string" };
   }
 
   /** Print a nullable box: tag 0 → `undefined`, 1 → `null`, else unbox and print the base value. */
