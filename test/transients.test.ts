@@ -403,7 +403,21 @@ console.log(built.slice(0, 4).map((x: number): number => x * 2).join(","));`;
         "-lm", "-o", bin,
       ], { encoding: "utf8" });
       expect(built.status).toBe(0);
-      const run = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" });
+      // LeakSanitizer is OFF, deliberately, and this is the reason CI was red on Linux
+      // while every macOS run was green: ASan enables LSan by default on Linux and
+      // macOS HAS NO LSan, so the gate silently meant two different things per platform.
+      //
+      // What it is meant to mean is the sentence above — no double free, no
+      // use-after-free — which is what -fno-sanitize-recover + ASan's access checks
+      // give us. It is NOT a leak gate, and must not be: nativets *deliberately* leaks
+      // at the boundaries Stage 44 documents (a container frees its handle, not what
+      // its slots point at; module-level bindings; temporaries in non-chain positions).
+      // This PROGRAM hits them on purpose — `objs = [{a:1},{a:2}]` is exactly the
+      // documented container-element case, and top-level bindings die with main's frame,
+      // so LSan calls them unreachable. Leaks are gated separately and precisely by the
+      // live counters (__arrLive/__objLive/__pvNodes/nt_str_live) asserted above.
+      const asanEnv = { ...process.env, ASAN_OPTIONS: "detect_leaks=0" };
+      const run = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL", env: asanEnv });
       expect(run.stderr).not.toContain("AddressSanitizer");
       expect(run.stderr).not.toContain("runtime error");
       expect(run.status).toBe(0);
