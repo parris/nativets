@@ -50,6 +50,16 @@
  *
  * and READ the diff — an intentional +3% from a new feature is fine, an unexplained +40%
  * is the bug this file exists to catch.
+ *
+ * OPERATIONAL NOTES.
+ *  - The baseline measures the CORPUS as well as the compiler, so editing an
+ *    `examples/*.ts` program legitimately moves its numbers. Regenerate, and check the
+ *    diff only touches the program you edited.
+ *  - After merging parallel lanes, regenerate ONCE at the end of the round, not per
+ *    merge — the same rule CLAUDE.md already gives for the IR snapshots.
+ *  - This is a REGRESSION gate, not a benchmark: it answers "did this change make things
+ *    worse", not "how fast are we". Nothing here measures a compiled program's runtime
+ *    speed (see the limits noted on each metric).
  */
 
 import { test, expect, describe } from "bun:test";
@@ -262,7 +272,18 @@ const REGEN = `Run  NATIVETS_PERF_UPDATE=1 bun test test/perf.test.ts  to accept
 function measureIR(): Record<string, IrStats> {
   const out: Record<string, IrStats> = {};
   for (const name of IR_CORPUS) {
-    out[name] = irStats(sourceToIR(readFileSync(join(EXAMPLES, name), "utf8")));
+    try {
+      out[name] = irStats(sourceToIR(readFileSync(join(EXAMPLES, name), "utf8")));
+    } catch (e) {
+      // Legibility: this runs at module load, so a bare throw here would surface as an
+      // unattributed file-level error. Say which program and that it is a CORRECTNESS
+      // failure (examples.test.ts owns that), not a performance one.
+      throw new Error(
+        `perf corpus: examples/${name} no longer compiles, so it cannot be measured.\n` +
+          `This is a correctness regression (see test/examples.test.ts), not a perf one.\n` +
+          `Underlying error: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`,
+      );
+    }
   }
   return out;
 }
