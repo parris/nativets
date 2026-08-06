@@ -169,26 +169,149 @@ void nt_str_release(void *p) {
 /* Live heap-string count (registered - freed), for leak tests (cf. nt_arr_live). */
 double nt_str_live(void) { return (double)(g_str_allocs - g_str_frees); }
 
-/* ---- number -> string, matching JS Number#toString / node console.log ---- */
+/* ============================================================
+ * number -> string: ECMAScript §6.1.6.1.20, `Number::toString(x, 10)`.
+ *
+ * The spec defines the output in terms of three integers k, n, s with
+ *
+ *     k >= 1,  10^(k-1) <= s < 10^k,  s * 10^(n-k) = |x|,  k AS SMALL AS POSSIBLE
+ *
+ * i.e. s is the SHORTEST decimal digit string that round-trips to the same
+ * double (Steele-White / Grisu / Ryu), n is the position of the decimal point,
+ * and the k/n rules alone decide fixed vs exponential notation. `%g` is NOT that
+ * function and disagrees three ways: it pads the exponent (`1e-07`), switches to
+ * exponential at 1e-5 instead of 1e-6, and `%.0f` on an integer prints the
+ * double's EXACT expansion (`123456789012345683968`) where the spec asks for the
+ * shortest digits zero-filled (`123456789012345680000`).
+ *
+ * Shortest digits are obtained by trying precisions 1..17 with `%.*e` and taking
+ * the first that `strtod`s back to the same bits — libc's decimal conversion is
+ * correctly rounded, so the first round-tripping precision IS the minimal k and
+ * its digits are the ones closest to the value (what V8's Ryu picks). 17 always
+ * round-trips, so the loop always terminates. Seventeen snprintf calls is not
+ * the fastest known algorithm; it is small enough to be read and verified, and
+ * fast enough that no benchmark has asked for more.
+ * ============================================================ */
+
+/* The double nearest to 0.<digits> * 10^n — the round-trip side of the test. */
+static double js_dec_value(const char *digits, int n) {
+  char b[64];
+  snprintf(b, sizeof(b), "0.%se%d", digits, n);
+  return strtod(b, NULL);
+}
+
+/* Step `digits` (k of them, value 0.<digits> * 10^n) one unit in its LAST place,
+ * renormalizing a carry (0.999 -> 0.100e+1) or a borrow (0.100 -> 0.990e-1). */
+static void js_dec_bump(char *digits, int k, int *n, int up) {
+  int i = k - 1;
+  if (up) {
+    for (; i >= 0; i--) { if (digits[i] != '9') { digits[i]++; break; } digits[i] = '0'; }
+    if (i < 0) { digits[0] = '1'; for (int j = 1; j < k; j++) digits[j] = '0'; (*n)++; }
+  } else {
+    for (; i >= 0; i--) { if (digits[i] != '0') { digits[i]--; break; } digits[i] = '9'; }
+    if (digits[0] == '0') { /* leading zero: shift left and drop the exponent */
+      memmove(digits, digits + 1, (size_t)(k - 1));
+      digits[k - 1] = '0';
+      (*n)--;
+    }
+  }
+}
+
+/* Shortest round-tripping digits of a FINITE, NONZERO, POSITIVE double.
+ * Writes k significant digits (no point, no sign) into `digits` and the decimal
+ * point position n into *np; returns k. `digits` needs 18 bytes. */
+static int js_shortest_digits(double v, char *digits, int *np) {
+  char d[24];
+  for (int p = 1; p <= 17; p++) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.*e", p - 1, v);
+    /* buf is  d[.ddd]e(+|-)XX  — collect the mantissa digits, then the exponent. */
+    int k = 0;
+    const char *q = buf;
+    for (; *q && *q != 'e' && *q != 'E'; q++) {
+      if (*q >= '0' && *q <= '9' && k < 17) d[k++] = *q;
+    }
+    d[k] = '\0';
+    int n = (int)strtol(*q ? q + 1 : "0", NULL, 10) + 1; /* d.ddd*10^e == 0.ddd*10^(e+1) */
+
+    if (p < 17 && js_dec_value(d, n) != v) {
+      /* printf gives the p-digit decimal NEAREST to v; near a power of two the
+       * rounding interval is asymmetric (the neighbouring double below is half
+       * as far away), so the nearest decimal can fall outside it while the
+       * ADJACENT one lands inside — and that adjacent one is what V8 prints
+       * (e.g. 2^-24: printf says ...062, only ...063 round-trips). At most one
+       * side can qualify once the nearest has failed, so order is irrelevant. */
+      char alt[24];
+      int an, ok = 0;
+      for (int up = 1; up >= 0 && !ok; up--) {
+        memcpy(alt, d, (size_t)k + 1);
+        an = n;
+        js_dec_bump(alt, k, &an, up);
+        if (js_dec_value(alt, an) == v) { memcpy(d, alt, (size_t)k + 1); n = an; ok = 1; }
+      }
+      if (!ok) continue; /* p digits cannot name v at all — try one more */
+    }
+    /* Trailing zeros are not significant: dropping them shrinks k with s, leaving
+     * s * 10^(n-k) unchanged — and k must be as small as possible. */
+    while (k > 1 && d[k - 1] == '0') k--;
+    memcpy(digits, d, (size_t)k);
+    digits[k] = '\0';
+    *np = n;
+    return k;
+  }
+  /* Unreachable: 17 significant digits always round-trip. */
+  digits[0] = '0'; digits[1] = '\0'; *np = 1;
+  return 1;
+}
 
 static void js_number_to_string(double v, char *out, size_t out_len) {
   if (isnan(v)) { snprintf(out, out_len, "NaN"); return; }
   if (isinf(v)) { snprintf(out, out_len, v < 0 ? "-Infinity" : "Infinity"); return; }
   if (v == 0.0) { snprintf(out, out_len, "0"); return; } /* also collapses -0 -> "0" */
 
-  if (v == floor(v) && fabs(v) < 1e21) {
-    snprintf(out, out_len, "%.0f", v);
-    return;
-  }
-  for (int prec = 1; prec <= 17; prec++) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%.*g", prec, v);
-    if (strtod(buf, NULL) == v) {
-      snprintf(out, out_len, "%s", buf);
-      return;
+  const char *sign = "";
+  if (v < 0) { sign = "-"; v = -v; }
+
+  char d[20];
+  int n = 0;
+  int k = js_shortest_digits(v, d, &n);
+
+  /* Longest body: -6 < n <= 0 gives "0." + 6 zeros + 17 digits = 25 chars. */
+  char body[48];
+  int b = 0;
+  if (k <= n && n <= 21) {
+    /* integer, shortest digits then n-k trailing zeros (NOT the exact expansion) */
+    for (int i = 0; i < k; i++) body[b++] = d[i];
+    for (int i = 0; i < n - k; i++) body[b++] = '0';
+  } else if (0 < n && n <= 21) {
+    /* point inside the digits: 12.34 */
+    for (int i = 0; i < n; i++) body[b++] = d[i];
+    body[b++] = '.';
+    for (int i = n; i < k; i++) body[b++] = d[i];
+  } else if (-6 < n && n <= 0) {
+    /* leading zeros: 0.000001234 — fixed notation holds down to just above 1e-7 */
+    body[b++] = '0'; body[b++] = '.';
+    for (int i = 0; i < -n; i++) body[b++] = '0';
+    for (int i = 0; i < k; i++) body[b++] = d[i];
+  } else {
+    /* exponential: one digit, optional fraction, then e(+|-)<exponent, and the
+     * exponent is written with NO leading zeros (`1e-7`, `1e+21`). */
+    body[b++] = d[0];
+    if (k > 1) {
+      body[b++] = '.';
+      for (int i = 1; i < k; i++) body[b++] = d[i];
     }
+    body[b++] = 'e';
+    int e = n - 1;
+    body[b++] = e < 0 ? '-' : '+';
+    unsigned ae = (unsigned)(e < 0 ? -e : e);
+    char ds[8];
+    int di = 0;
+    do { ds[di++] = (char)('0' + ae % 10); ae /= 10; } while (ae);
+    while (di > 0) body[b++] = ds[--di];
   }
-  snprintf(out, out_len, "%.17g", v);
+  body[b] = '\0';
+  snprintf(out, out_len, "%s%s", sign, body);
 }
 
 /* ============================================================
@@ -221,9 +344,16 @@ void nt_panic_bounds(const char *what, double len, double idx, const char *loc) 
 
 /* ---- console.log building blocks ---- */
 
+/* The same conversion, exported for the other runtime translation units (the
+ * actor crash record renders a number message with it). */
+void nt_num_to_buf(double v, char *out, size_t out_len) {
+  js_number_to_string(v, out, out_len);
+}
+
 /* console.log's number renderer is util.inspect's `formatNumber`, NOT String():
- * it prints negative zero as "-0" (`String(-0)` is "0"). Only console.log reaches
- * here — template literals / string coercion keep js_num_to_str. */
+ * it differs in exactly one place, showing the SIGN of negative zero
+ * (`console.log(-0)` -> `-0`, but `String(-0)` / `"" + -0` -> `"0"`). Template
+ * literals / string coercion keep js_num_to_str. */
 void js_print_num(double v) {
   if (v == 0.0 && signbit(v)) { fputs("-0", stdout); return; }
   char buf[64];
@@ -1139,6 +1269,8 @@ const char *nt_dyn_inspect(NtDyn *d, double indent); /* defined with the inspect
 void nt_dyn_print(NtDyn *d) {
   if (!d) { fputs("undefined", stdout); return; }
   switch (d->tag) {
+    /* nt_insp_num is util.inspect's formatNumber; it delegates to js_num_to_str ->
+     * js_number_to_string, so it picks up the spec-correct digits automatically. */
     case DYN_NUM:  fputs(nt_insp_num(d->num), stdout); break; /* -0 prints as -0 */
     case DYN_BOOL: fputs(d->boolean ? "true" : "false", stdout); break;
     case DYN_STR:  fputs(d->str, stdout); break;

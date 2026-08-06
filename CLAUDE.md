@@ -57,7 +57,12 @@ Key deliberate choices:
   need `llc`/`opt`/`llvm-config` — clang consumes `.ll` directly.
 - **All JS numbers are IEEE-754 `double`.** IR uses `double` throughout. Float literals
   are emitted as exact **hex** (`0x…`, 16 digits) so LLVM never rejects an
-  unrepresentable decimal. Number→string uses shortest-round-trip to match node.
+  unrepresentable decimal. Number→string is **ECMAScript §6.1.6.1.20** —
+  shortest-round-trip digits (`strtod` round-trip search, adjacent-decimal probe for the
+  asymmetric power-of-two interval) plus the spec's k/n placement rules, so the notation
+  thresholds (`1e-6` / `1e21`) and the unpadded exponent match node; fuzzed over ~250k
+  doubles against node's `String(x)` (`test/numtostr.test.ts`). It used to be `%g`, which
+  is a *different* function — see the ledger entry and `docs/divergences.md`.
 - **Opaque pointers only** (`ptr`, never `double*`) — required by LLVM 21.
 - **Static typing.** The checker infers a type for every expression (`number` → `double`,
   `boolean` → `i1`, `string` → `ptr` to NUL-terminated UTF-8, `void`). Codegen is
@@ -887,6 +892,35 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   own shape (record declared in `ast.ts`, mutated in `checker.ts`). **This is an extension of the
   owner's design, not something he specified** (he asked for `@@mutable` on classes) — see the
   flagged section in `docs/decorators.md`.
+- **Defect fix ✅ (`Number::toString` — the prime-directive violation under every printed number)**
+  The architecture section above claimed "Number→string uses shortest-round-trip to match node".
+  It did not: `js_number_to_string` was `%.0f` for integers below `1e21` and otherwise the first
+  round-tripping `%g`, and `%g` is a **different function**. It disagreed with node three ways —
+  a **zero-padded exponent** (`1e-07` vs `1e-7`), the **wrong notation threshold** (`%g` goes
+  exponential below `1e-4`; ECMAScript goes exponential only below `1e-6` and at/above `1e21`, so
+  `1e-5` must print `0.00001`), and the double's **exact decimal expansion** instead of the
+  shortest digits zero-filled (`123456789012345683968` vs node's `123456789012345680000`). It sat
+  under `console.log`, templates, `String()`, `.toString()`, `JSON.stringify`, `.join`, `Map`/`Set`
+  values, `Dyn` printing, the default `.toSorted()` comparator (which compares string forms, so the
+  sort ORDER was wrong too) and actor crash records. Now it is **ECMAScript §6.1.6.1.20** as
+  written: find the shortest digit string `s` (with `k`, `n`) that round-trips — precisions 1..17
+  via `%.*e` + `strtod`, taking the first that returns the same bits — then apply the spec's k/n
+  rules to place the point. One subtlety the fuzz found: near a **power of two** the rounding
+  interval is asymmetric (the neighbour below is half as far), so the *nearest* p-digit decimal can
+  fall outside it while the ADJACENT one lands inside — and that adjacent one is what V8 prints
+  (`2^-24` → `5.960464477539063e-8`, not `…062`); when the nearest fails to round-trip we probe the
+  neighbour, which is the only extra rule needed. Seventeen `snprintf`s is not the fastest known
+  algorithm (Ryū is), but it is short enough to verify by reading and no benchmark has asked for
+  more. **Verified by fuzz, not anecdote:** ~250k doubles per seed — random 64-bit patterns,
+  subnormals, random integers/decimals, powers of ten, ULP neighbourhoods of the `1e-6`/`1e21`
+  thresholds, and `m·2^k` few-significant-bit values (where the decimal ties live) — compared to
+  node's `String(x)`, **0 mismatches** across seeds; the committed gate is `test/numtostr.test.ts`
+  (spec table, every call site, two 10k fuzz families, a tie-prone family, and a `toFixed` /
+  `toString(radix)` no-regression pair). Also fixed alongside: `console.log(-0)` prints `-0` (node
+  renders a bare number through `util.inspect`, which shows the sign — while `String(-0)` stays
+  `"0"`), including for a `JSON.parse`d `Dyn`, and the actor crash record renders a number message
+  with the real ToString instead of `%g` (`nt_num_to_buf`, exported from `runtime.c`). No compiler
+  change — `runtime/runtime.c` + one line of `runtime/nt_actor.c`.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 

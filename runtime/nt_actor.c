@@ -59,6 +59,12 @@
 
 #include "nt_actor.h"
 
+/* runtime.c: JS `Number::toString` (ECMAScript 6.1.6.1.20). A crash record shows
+ * a number message exactly as the program would have printed it, so it must not
+ * use printf's %g (which pads exponents and switches notation at the wrong
+ * magnitudes). */
+extern void nt_num_to_buf(double v, char *out, size_t out_len);
+
 /* macOS marks the ucontext family deprecated; it still works and is the cleanest
  * portable coroutine substrate for v0. Silence just those warnings. */
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -978,7 +984,9 @@ static void print_triggering_message(NtActor *a) {
     fprintf(stderr, "    \"%s\"\n", s ? s : "");
   } else {
     double mv; memcpy(&mv, &a->last_val, sizeof(mv)); /* number msg = double bits */
-    fprintf(stderr, "    %g\n", mv);
+    char nb[64];
+    nt_num_to_buf(mv, nb, sizeof(nb)); /* JS Number::toString, not printf's %g */
+    fprintf(stderr, "    %s\n", nb);
   }
 }
 

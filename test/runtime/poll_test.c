@@ -16,10 +16,21 @@
  * Build & run (from repo root):
  *   clang -O0 -g test/runtime/poll_test.c -o /tmp/poll_test && /tmp/poll_test
  */
-/* Stand-ins for the two runtime.c symbols nt_actor.c references, so the single-file build
- * command above links without dragging in the whole runtime (no strings are sent here). */
+/* Stand-ins for the runtime.c symbols nt_actor.c references, so the single-file build
+ * command above links without dragging in the whole runtime (no strings are sent here).
+ *
+ * THIS LIST MUST TRACK nt_actor.c. It is the price of the single-file build, and it goes
+ * stale silently: `nt_num_to_buf` was added to runtime.c by the Number::toString fix and
+ * used by nt_actor.c's crash record, which broke this link with an undefined symbol —
+ * a failure neither lane could see alone, only their merge. */
+#include <stdio.h>
 void (*nt_rt_lock)(int acquire) = 0;
 void nt_str_register(void *p) { (void)p; }
+/* Faithful enough for a test that never renders a crash record; the real one is
+ * ECMAScript Number::toString (runtime.c). */
+void nt_num_to_buf(double v, char *out, unsigned long out_len) {
+  snprintf(out, out_len, "%g", v);
+}
 
 #include "../../runtime/nt_actor.c"
 
