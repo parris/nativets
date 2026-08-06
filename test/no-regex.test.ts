@@ -32,7 +32,6 @@ const SRC = new URL("../src/", import.meta.url);
  * compiler code cannot reintroduce a regex into a module that was cleared.
  */
 const REMAINING: Record<string, number> = {
-  "ast.ts": 6,
   "cli.ts": 1,
   "driver.ts": 7,
   "modules.ts": 1,
