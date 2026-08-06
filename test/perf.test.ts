@@ -32,11 +32,23 @@
  *    runs are comparable), a composite tracked number, and a timeout as the only hard
  *    time-based assertion.
  *
- * WHY THIS SHAPE HERE. CI runners for this repo are shared and heavily loaded. Measured
- * on this machine at load average ~600, the SAME `sourceToIR` call over 20 warm iterations
- * spread 230%-790% between its median and its max (primes.ts 0.67ms median / 5.40ms max).
- * A wall-clock assertion at any tolerance that would catch a real 2x regression would fire
- * constantly here, and a flaky gate gets deleted. So:
+ * WHY THIS SHAPE HERE. CI runners for this repo are shared and loaded. The SAME
+ * `sourceToIR` call, 20 warm iterations, measured TWICE — once while the machine was
+ * contaminated by orphaned spinner processes (load average ~600) and again after they
+ * were reaped (load ~4.8):
+ *
+ *                   max/median @ load 596     max/median @ load 4.8
+ *     primes.ts            +705%                     +114%
+ *     matrix.ts            +520%                     +124%
+ *     maze.ts              +230%                      +37%
+ *     tictactoe.ts         +423%                     +258%
+ *     infixcalc.ts         +792%                      +75%
+ *
+ * Both columns are reported deliberately. The first set is what a contaminated box does;
+ * the second is this project's REALISTIC floor. A tolerance loose enough to survive even
+ * the quiet column (+258%) is far too loose to catch a real 2x (+100%) regression, so
+ * wall clock fails as a gate on a good day, never mind a bad one — and a gate that can go
+ * red because someone left a spinner running is a gate that gets deleted. So:
  *
  *   GATED  (deterministic): emitted-IR instruction/function count per program.
  *   GATED  (deterministic): compiled binary size.
@@ -64,7 +76,7 @@
 
 import { test, expect, describe } from "bun:test";
 import { readFileSync, writeFileSync, existsSync, statSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, loadavg, cpus } from "node:os";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -194,9 +206,12 @@ console.log("__nt_anchor", c1, c2, c3, c4, appendCost, g.length);`,
 /**
  * Peak RSS of a child process.
  *
- * Measured, not assumed: 8 runs of the 200k anchor at load average 260-390 spread
- * **1.24%** (5.03-5.09 MB), against 230-790% for wall clock on the same box. That is why
- * RSS is gated and wall clock is not. It is still allocator- and page-size-dependent, so
+ * Measured, not assumed, and measured on BOTH a contaminated and a quiet machine: 8 runs
+ * of the 200k anchor spread **1.24%** at load average ~300 (5.03-5.09 MB) and **0.62%**
+ * at load ~4.8 (5.03-5.06 MB) — against 230-790% / 37-258% for wall clock on the same
+ * box. Load barely moves it, which is the entire argument for gating RSS and not time.
+ * (The 1.24% figure is the one the fence is sized against: CI is the loaded case.)
+ * It is still allocator- and page-size-dependent, so
  * it is keyed by platform like binary size, and its fence is wide (25%): the regression it
  * exists to catch is 5.3 MB -> 87.9 MB, a 16x jump, not a few percent.
  *
@@ -736,6 +751,35 @@ describe.skipIf(UPDATE)("perf: anchors (measured wins from real fixes)", () => {
 
 const TIMING_ITERATIONS = 7;
 
+/**
+ * Environment sanity — REPORTED, never enforced.
+ *
+ * This exists because of a real incident: 22 orphaned `while :; do :; done` shells were
+ * reparented to init when the `kill %1 %2 …` meant to reap them silently missed, and they
+ * burned ~50% CPU each for 14-18 hours, peaking the load average at 758. Nobody noticed
+ * for the better part of a day. Every timing taken in that window was worthless and every
+ * deterministic metric in this file was completely unaffected.
+ *
+ * So each timing report carries the load average it was taken under. A future reader
+ * comparing two runs can then tell a real regression from a busy box instead of guessing,
+ * and an absurd load is called out at the moment it would otherwise silently poison a
+ * number. It is NOT a gate: the machine being busy is not the compiler's fault, and
+ * failing here would reintroduce exactly the load-sensitive red this file avoids.
+ */
+export function environmentNote(): { line: string; suspect: boolean } {
+  const [one, five, fifteen] = loadavg();
+  const cores = cpus().length || 1;
+  const perCore = one! / cores;
+  const suspect = perCore > 2;
+  return {
+    line:
+      `load average ${one!.toFixed(2)} / ${five!.toFixed(2)} / ${fifteen!.toFixed(2)} ` +
+      `over ${cores} cores (${perCore.toFixed(2)} per core)` +
+      (suspect ? "  <-- BUSY: treat every timing below as noise, not signal" : ""),
+    suspect,
+  };
+}
+
 export function minAndMedian(samples: number[]): { min: number; median: number } {
   const s = [...samples].sort((a, b) => a - b);
   return { min: s[0]!, median: s[Math.floor(s.length / 2)]! };
@@ -743,6 +787,7 @@ export function minAndMedian(samples: number[]): { min: number; median: number }
 
 describe.skipIf(UPDATE)("perf: compile wall clock (REPORT ONLY — never fails)", () => {
   test("reports compile time per program", () => {
+    const envBefore = environmentNote();
     const rows: string[] = [];
     let totalMin = 0;
     for (const name of IR_CORPUS) {
@@ -758,9 +803,15 @@ describe.skipIf(UPDATE)("perf: compile wall clock (REPORT ONLY — never fails)"
       totalMin += min;
       rows.push(`  ${name.padEnd(18)} min ${min.toFixed(2).padStart(7)}ms   median ${median.toFixed(2).padStart(7)}ms   ${(measured[name]!.instrs / min).toFixed(0).padStart(6)} IR-instr/ms`);
     }
+    const envAfter = environmentNote();
     console.log(
       `\ncompile wall clock (informational — NOT a gate; see the block comment for why):\n` +
-        `${rows.join("\n")}\n  ${"corpus total (min)".padEnd(18)} ${totalMin.toFixed(1)}ms over ${IR_CORPUS.length} programs\n`,
+        `  before: ${envBefore.line}\n  after:  ${envAfter.line}\n\n` +
+        `${rows.join("\n")}\n  ${"corpus total (min)".padEnd(18)} ${totalMin.toFixed(1)}ms over ${IR_CORPUS.length} programs\n` +
+        (envBefore.suspect || envAfter.suspect
+          ? `\n  The machine was BUSY during this run. The deterministic gates above are\n` +
+            `  unaffected (they survived a 130x load change unchanged); these timings are not.\n`
+          : ""),
     );
     // NOT ASSERTED ON TIME — not even a generous "must finish" bound. A perf test that
     // *can* go red under load gets ignored and then deleted, at which point it is worse
