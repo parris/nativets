@@ -679,11 +679,6 @@ class Checker {
     );
   }
 
-  /**
-   * Which member of the union `u` does this object literal construct? Answered from the
-   * TAG the literal actually writes, not from its structure: two members can be
-   * structurally ambiguous (`{k:"a",n:number} | {k:"b",n:number}`), a tag never is.
-   */
   /* ---- SH2 narrowing ------------------------------------------------------
    * `if (s.kind === "square")` / `switch (s.kind)` retype `s` INSIDE the arm. It is
    * a pure type-space operation — a union value already is its member's object block,
@@ -726,7 +721,8 @@ class Checker {
    * narrowing, only `.kind` is readable).
    */
   private restrictUnion(u: Ty, tags: string[]): Ty | undefined {
-    const keep = unionMembers(u).filter((_, i) => tags.includes(unionTagValues(u)[i]!));
+    const values = unionTagValues(u);
+    const keep = unionMembers(u).filter((_, i) => tags.includes(values[i]!));
     if (keep.length === 0) return undefined;
     return keep.length === 1 ? widenLiteralTys(keep[0]!) : makeUnionTy(keep);
   }
@@ -737,6 +733,11 @@ class Checker {
     if (t !== undefined) inner.declare(name, t, true);
   }
 
+  /**
+   * Which member of the union `u` does this object literal construct? Answered from the
+   * TAG the literal actually writes, not from its structure: two members can be
+   * structurally ambiguous (`{k:"a",n:number} | {k:"b",n:number}`), a tag never is.
+   */
   private unionMemberForLiteral(e: Extract<Expr, { kind: "ObjectLiteral" }>, u: Ty): Ty | undefined {
     const d = unionDiscriminant(u);
     if (!d) return undefined;
