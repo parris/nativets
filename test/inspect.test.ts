@@ -307,6 +307,24 @@ describe("refusals (reject, never print nothing)", () => {
 });
 
 /* ------------------------------------------------------------------ *
+ * 13b. In CONTEXT. The walk creates basic blocks mid-expression (the array/Map loops,
+ * the nullable branch), so it has to survive being emitted inside another block —
+ * a loop body, a branch arm, a try, a lifted arrow's result.
+ * ------------------------------------------------------------------ */
+
+differential("inside other control flow", [
+  { name: "inside a function", code: `function show(o: { a: number; b: string }): void { console.log(o); }\nshow({ a: 1, b: "x" });` },
+  { name: "inside a loop", code: `for (let i = 0; i < 3; i++) { console.log({ i: i, xs: [i, i + 1] }); }` },
+  { name: "a loop body that column-groups", code: `let k = 0;\nwhile (k < 2) { console.log([k, k * 2, k * 3, k * 4, k * 5, k * 6, k * 7]); k++; }` },
+  { name: "a ternary arm", code: `const flag = true;\nconsole.log(flag ? { a: 1 } : { a: 2 });` },
+  { name: "inside try/catch", code: `try { console.log({ inTry: [1, 2] }); throw "boom"; } catch (e) { console.log({ caught: e }); }` },
+  { name: "an HOF result", code: `const ps = [{ n: "a", v: 1 }, { n: "b", v: 2 }];\nconsole.log(ps.map((p) => p.v));\nconsole.log(ps.filter((p) => p.v > 1));` },
+  { name: "a returned array of objects", code: `function make(): { a: number }[] { return [{ a: 1 }, { a: 2 }]; }\nconsole.log(make());` },
+  { name: "an array field on a class", code: `class Box { items: number[]; constructor() { this.items = [1, 2, 3]; } }\nconsole.log(new Box());` },
+  { name: "a generic function prints its argument", code: `function show<T>(x: T): void { console.log(x); }\nshow<number>(1);\nshow<string>("a");\nshow<boolean>(true);` },
+]);
+
+/* ------------------------------------------------------------------ *
  * 14. Non-console.log paths are untouched — inspect quoting must not leak into
  * string coercion, template literals or JSON.stringify.
  * ------------------------------------------------------------------ */
