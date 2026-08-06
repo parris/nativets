@@ -85,7 +85,11 @@ const msg = (e: unknown) => String((e as Error)?.message ?? e).split("\n")[0]!.t
 const BASELINE: Record<string, Phase> = {
   "ast.ts": "parse",
   "lexer.ts": "parse",
-  "diagnostics.ts": "parse",
+  // RATCHET MOVE (regex removal): `formatDiagnostic`'s `^\s*` was the module's first
+  // blocker. Rewritten as a character scan, it now reaches `ir` and stops on the next
+  // thing behind it — NT2001, `diag.spans.length` in `!diag.spans || diag.spans.length
+  // === 0`, i.e. nullable narrowing does not flow across `||`.
+  "diagnostics.ts": "ir",
   "parser.ts": "parse",
   "checker.ts": "parse",
   "codegen.ts": "parse",
@@ -164,12 +168,16 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT1017 (`node:fs`) is the SH4 host-FFI story; NT1027 is the regex refusal; the
     // NT0001 survivors are a template-literal TYPE (`\`${string}[]\`` in ast.ts, which
     // coverage.ts sees through the link) and `satisfies` in parser.ts.
-    expect(Object.keys(byCode).sort()).toEqual(["NT0001", "NT1009", "NT1015", "NT1017", "NT1027"]);
+    expect(Object.keys(byCode).sort()).toEqual(["NT0001", "NT1009", "NT1015", "NT1017", "NT1027", "NT2001"]);
     expect(byCode["NT1017"]!.sort()).toEqual(["cli.ts", "driver.ts", "modules.ts"]);
     // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
     // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
     // working, not a regression — the phase table above is what must never go backwards.
-    expect(byCode["NT1027"]!.sort()).toEqual(["coverage-preprocess.ts", "diagnostics.ts", "lexer.ts", "ownership.ts"]);
+    // It is now shrinking as the compiler's own regex uses are rewritten as character
+    // scanning (nativets has no RegExp, so its source may not use one).
+    expect(byCode["NT1027"]!.sort()).toEqual(["coverage-preprocess.ts", "lexer.ts", "ownership.ts"]);
+    // Unmasked by that rewrite: diagnostics.ts now gets all the way to the checker.
+    expect(byCode["NT2001"]!.sort()).toEqual(["diagnostics.ts"]);
     expect(byCode["NT0001"]!.sort()).toEqual(["ast.ts", "coverage.ts", "parser.ts"]);
   });
 

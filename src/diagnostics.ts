@@ -41,6 +41,29 @@ export class NTError extends Error {
 }
 
 /**
+ * How many leading whitespace characters `s` has — the `^\s*` of ECMAScript's `\s`
+ * (WhiteSpace + LineTerminator), scanned by code unit. nativets deliberately has no
+ * `RegExp` (docs/divergences.md), so the compiler's own source may not use one either.
+ */
+function leadingWhitespace(s: string): number {
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    // ASCII: TAB, LF, VT, FF, CR, SPACE.
+    const ascii = c === 9 || c === 10 || c === 11 || c === 12 || c === 13 || c === 32;
+    // The rest of `\s`: NBSP, OGHAM SPACE, EN QUAD..HAIR SPACE, LS, PS, NNBSP,
+    // MMSP, IDEOGRAPHIC SPACE, BOM.
+    const wide =
+      c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+      c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f ||
+      c === 0x3000 || c === 0xfeff;
+    if (!ascii && !wide) break;
+    i++;
+  }
+  return i;
+}
+
+/**
  * Render a diagnostic. With the original `source`, a multi-span diagnostic prints
  * rustc-style — the message, then each labeled span with its source line and a caret
  * underline — turning "moved at line 4, used at line 7" into a scannable, pointed error.
@@ -62,7 +85,7 @@ export function formatDiagnostic(diag: Diagnostic, source?: string): string {
     const text = srcLines[s.line - 1] ?? "";
     const num = String(s.line).padStart(gutter);
     const pad = " ".repeat(gutter);
-    const trimmed = text.replace(/^\s*/, "");
+    const trimmed = text.slice(leadingWhitespace(text));
     const indent = text.length - trimmed.length;
     const caret = (s.primary ? "^" : "-").repeat(Math.max(1, trimmed.length || 1));
     lines.push(`  ${pad} |`);
