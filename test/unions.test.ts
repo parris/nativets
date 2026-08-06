@@ -205,6 +205,53 @@ show({ kind: "circle", radius: 1 });
   });
 });
 
+describe("a union is a LINEAR value — it is the member's object block, and is treated as one", () => {
+  test("it is dropped exactly once (no leak, no double free)", async () => {
+    // `__objLive()` is objects allocated − freed; the equivalent plain-record program
+    // balances to 0, and so must this one. (Not node-differential: __objLive is ours.)
+    const src = `interface A { kind: "a"; n: number; }
+interface B { kind: "b"; s: string; }
+type AB = A | B;
+function tag(x: AB): string { return x.kind; }
+function run(): void {
+  const a: AB = { kind: "a", n: 1 };
+  const b: AB = { kind: "b", s: "x" };
+  console.log(tag(a) + tag(b));
+}
+run();
+console.log(__objLive());
+`;
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe("ab\n0\n");
+    expect(ours.exitCode).toBe(0);
+  });
+
+  test("use after move is NT1601, exactly as for the record it is", () => {
+    const src = `interface A { kind: "a"; n: number; }
+interface B { kind: "b"; s: string; }
+type AB = A | B;
+function tag(x: AB): string { return x.kind; }
+const a: AB = { kind: "a", n: 1 };
+const b: AB = move(a);
+console.log(tag(a));
+`;
+    expect(codeOf(src)).toBe("NT1601");
+  });
+
+  test("binding a union OUT of an array element is NT1605 — the Stage-28 rule, unchanged", () => {
+    // A union element is linear, so `const n = nodes[i]` would move it out of the
+    // array. Passing it by value (`f(nodes[i])`) borrows and is fine — see
+    // test/unions/ast-shape.ts, which is written that way for exactly this reason.
+    const shared = `interface A { kind: "a"; n: number; }
+interface B { kind: "b"; s: string; }
+type AB = A | B;
+const xs: AB[] = [{ kind: "a", n: 1 }];
+`;
+    expect(codeOf(`${shared}const first: AB = xs[0];\nconsole.log(first.kind);\n`)).toBe("NT1605");
+    expect(codeOf(`${shared}function tag(x: AB): string { return x.kind; }\nconsole.log(tag(xs[0]));\n`)).toBe(null);
+  });
+});
+
 describe("what a union may BE — refused, never guessed at", () => {
   test("a union of object types with no usable discriminant is NT1009, and says why", () => {
     // no shared field at all

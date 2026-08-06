@@ -799,7 +799,8 @@ class FnGen {
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       // Move-aware RAII: objects free via nt_obj_free, arrays via nt_arr_free.
-      const free = isObjectTy(this.varTypes.get(n) ?? "number") ? "nt_obj_free" : "nt_arr_free";
+      const dropTy = this.varTypes.get(n) ?? "number";
+      const free = isObjectTy(dropTy) || isUnionTy(dropTy) ? "nt_obj_free" : "nt_arr_free"; // a union IS an object block (SH2)
       this.emit(`call void @${free}(ptr ${p})`);
     }
   }
@@ -818,7 +819,7 @@ class FnGen {
     if (this.globalVars.has(e.target)) return;
     const p = this.fresh();
     this.emit(`${p} = load ptr, ptr ${this.addr(e.target)}`);
-    this.emit(`call void @${isObjectTy(ty) ? "nt_obj_free" : "nt_arr_free"}(ptr ${p})`);
+    this.emit(`call void @${isObjectTy(ty) || isUnionTy(ty) ? "nt_obj_free" : "nt_arr_free"}(ptr ${p})`);
   }
 
   /** Free the RECEIVER of an array method when the receiver was an unbound TEMPORARY

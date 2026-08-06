@@ -16,7 +16,10 @@
  *     interface N { v: number; next: N }   // `next` erases to `number`, pre-existing
  *
  * so children are held as INDICES into a node array — the arena form a self-hosted
- * compiler would need today. See the note in test/unions.test.ts.
+ * compiler would need today. A node is passed BY VALUE (`evaluate(nodes[i])`, an
+ * argument position, which borrows) rather than bound out of the array first: a
+ * union is a linear value, so `const n = nodes[i]` is NT1605, exactly as it already
+ * is for an object element (Stage 28). See the note in test/unions.test.ts.
  *
  * Not borrowed from the TypeScript conformance suite: this is the compiler's own
  * source shape, which is what SH2 is measured against.
@@ -53,16 +56,15 @@ const nodes: Node[] = [
   { kind: "BinaryExpr", op: "*", left: 2, right: 6 }, // 7
 ];
 
-function evaluate(i: number): number {
-  const n: Node = nodes[i];
+function evaluate(n: Node): number {
   switch (n.kind) {
     case "NumberLiteral":
       return n.value;
     case "Negate":
-      return -evaluate(n.operand);
+      return -evaluate(nodes[n.operand]);
     case "BinaryExpr": {
-      const l = evaluate(n.left);
-      const r = evaluate(n.right);
+      const l = evaluate(nodes[n.left]);
+      const r = evaluate(nodes[n.right]);
       if (n.op === "+") return l + r;
       if (n.op === "-") return l - r;
       if (n.op === "*") return l * r;
@@ -72,19 +74,18 @@ function evaluate(i: number): number {
 }
 
 // the OTHER dispatch shape the compiler uses: an if-chain over the same tag
-function show(i: number): string {
-  const n: Node = nodes[i];
+function show(n: Node): string {
   if (n.kind === "NumberLiteral") {
     return "" + n.value;
   }
   if (n.kind === "Negate") {
-    return "-(" + show(n.operand) + ")";
+    return "-(" + show(nodes[n.operand]) + ")";
   }
-  return "(" + show(n.left) + " " + n.op + " " + show(n.right) + ")";
+  return "(" + show(nodes[n.left]) + " " + n.op + " " + show(nodes[n.right]) + ")";
 }
 
-console.log(show(7));
-console.log(evaluate(7));
+console.log(show(nodes[7]));
+console.log(evaluate(nodes[7]));
 
 // walking the whole arena — a union flows through an array and a for-of alike
 for (const n of nodes) {
