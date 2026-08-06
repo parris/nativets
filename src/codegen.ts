@@ -1685,7 +1685,10 @@ class FnGen {
         if (e.name === "NaN") return { v: llvmDouble(NaN), ty: "number" };
         if (e.name === "Infinity") return { v: llvmDouble(Infinity), ty: "number" };
         if (this.captures.has(e.name)) return this.readCapture(e.name);
-        const ty = this.varTypes.get(e.name) ?? (e.ty ?? "number");
+        // SH2: a NARROWED read (`s` inside `if (s.kind === "square")`) keeps the binding's
+        // storage but takes the checker's member type — same pointer, different layout.
+        const declared = this.varTypes.get(e.name) ?? (e.ty ?? "number");
+        const ty = isUnionTy(declared) && e.ty !== undefined && e.ty !== declared ? e.ty : declared;
         const t = this.fresh();
         this.emit(`${t} = load ${llvmTy(ty)}, ptr ${this.addr(e.name)}`);
         // Drop flag: this read moves the value out, and the binding is still dropped on
@@ -1720,7 +1723,13 @@ class FnGen {
         // An optional chain whose result is nullable is lowered as a unit: guard at
         // each `?.`, short-circuiting the WHOLE rest of the chain to `undefined`.
         if (isNullableTy(e.ty ?? "") && isOptChainExpr(e)) return this.genOptChain(e);
-        const obj = this.genExpr(e.object);
+        let obj = this.genExpr(e.object);
+        // SH2 narrowing: the checker may have retyped this receiver from the union to one
+        // of its members. The POINTER is identical — only the slot layout the fields are
+        // read with changes — so take the checker's answer wherever it narrowed. Done on
+        // the MemberExpr (not on the Identifier) so it covers every producer of a union
+        // value alike: a local, a closure capture, a `for-of` element, a call result.
+        if (isUnionTy(obj.ty) && e.object.ty !== undefined && isObjectTy(e.object.ty)) obj = { v: obj.v, ty: e.object.ty };
         if (obj.ty === "Dyn") { // dynamic field access: nt_dyn_get_field returns a Dyn
           const t = this.fresh();
           this.emit(`${t} = call ptr @nt_dyn_get_field(ptr ${obj.v}, ptr ${this.mod.intern(e.property)})`);

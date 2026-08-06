@@ -16,7 +16,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
-import { isUnionTy, unionDiscriminant, unionMemberFor, unionTagValues, unionWidenedMembers, widenLiteralTys } from "./ast.ts";
+import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError } from "./diagnostics.ts";
 
@@ -619,6 +619,59 @@ class Checker {
    * TAG the literal actually writes, not from its structure: two members can be
    * structurally ambiguous (`{k:"a",n:number} | {k:"b",n:number}`), a tag never is.
    */
+  /* ---- SH2 narrowing ------------------------------------------------------
+   * `if (s.kind === "square")` / `switch (s.kind)` retype `s` INSIDE the arm. It is
+   * a pure type-space operation — a union value already is its member's object block,
+   * so narrowing emits no code at all; it only changes the slot layout the member
+   * fields are read with. Implemented by SHADOW-DECLARING the name in the arm's child
+   * scope, which is the one mechanism every later pass already reads.
+   *
+   * Deliberately narrow in scope: the narrowed thing must be a plain IDENTIFIER
+   * (`s`, not `o.inner`) tested against the union's own discriminant. Anything else
+   * keeps the un-narrowed union and the "narrow it first" diagnostic — an unsound
+   * narrowing would hand codegen the wrong layout, which is the exact silent wrong
+   * answer this project exists to avoid.
+   */
+
+  /** `x.kind` where `x` is a union-typed local and `kind` is its discriminant. */
+  private discriminantRead(e: Expr, scope: Scope): { name: string; union: Ty } | undefined {
+    if (e.kind !== "MemberExpr" || e.optional || e.object.kind !== "Identifier") return undefined;
+    const u = scope.lookup(e.object.name)?.ty;
+    if (u === undefined || !isUnionTy(u)) return undefined;
+    return unionDiscriminant(u)!.key === e.property ? { name: e.object.name, union: u } : undefined;
+  }
+
+  /** The narrowing a `===`/`!==` tag comparison implies for its two arms. */
+  private tagTest(test: Expr, scope: Scope): { name: string; union: Ty; tag: string; negated: boolean } | undefined {
+    if (test.kind !== "BinaryExpr") return undefined;
+    if (test.op !== "===" && test.op !== "!==" && test.op !== "==" && test.op !== "!=") return undefined;
+    const negated = test.op === "!==" || test.op === "!=";
+    for (const [a, b] of [[test.left, test.right], [test.right, test.left]] as [Expr, Expr][]) {
+      const d = this.discriminantRead(a, scope);
+      if (d && b.kind === "StringLiteral") return { ...d, tag: b.value, negated };
+    }
+    return undefined;
+  }
+
+  /**
+   * The type a name gets when its union is restricted to `tags`. One tag ⇒ that
+   * member; several ⇒ the sub-union (still discriminated, by construction); none ⇒
+   * `undefined`, meaning "leave the binding alone" — TS would say `never`, and the
+   * un-narrowed union is the honest conservative stand-in (its fields still need a
+   * narrowing, only `.kind` is readable).
+   */
+  private restrictUnion(u: Ty, tags: string[]): Ty | undefined {
+    const keep = unionMembers(u).filter((_, i) => tags.includes(unionTagValues(u)[i]!));
+    if (keep.length === 0) return undefined;
+    return keep.length === 1 ? widenLiteralTys(keep[0]!) : makeUnionTy(keep);
+  }
+
+  /** Declare the narrowed shadow binding in `inner`, when there is one. */
+  private narrowInto(inner: Scope, name: string, u: Ty, tags: string[]): void {
+    const t = this.restrictUnion(u, tags);
+    if (t !== undefined) inner.declare(name, t, true);
+  }
+
   private unionMemberForLiteral(e: Extract<Expr, { kind: "ObjectLiteral" }>, u: Ty): Ty | undefined {
     const d = unionDiscriminant(u);
     if (!d) return undefined;
@@ -681,11 +734,23 @@ class Checker {
           if (ret !== "void" && !this.fitsParam(ret, t)) throw typeError(`return type ${t} does not match declared ${ret}`);
         }
         return;
-      case "IfStmt":
+      case "IfStmt": {
         this.type(s.test, scope);
-        this.checkBlock(s.consequent, scope.child(), ret);
-        if (s.alternate) this.checkBlock(s.alternate, scope.child(), ret);
+        // SH2: a tag test narrows BOTH arms — the tested member in one, the remaining
+        // members (still a discriminated union, or a single member) in the other. That
+        // is what makes an `else if` chain over a 3-member union work.
+        const t = this.tagTest(s.test, scope);
+        const con = scope.child();
+        const alt = scope.child();
+        if (t) {
+          const others = unionTagValues(t.union).filter((v) => v !== t.tag);
+          this.narrowInto(con, t.name, t.union, t.negated ? others : [t.tag]);
+          this.narrowInto(alt, t.name, t.union, t.negated ? [t.tag] : others);
+        }
+        this.checkBlock(s.consequent, con, ret);
+        if (s.alternate) this.checkBlock(s.alternate, alt, ret);
         return;
+      }
       case "WhileStmt":
         this.type(s.test, scope);
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
@@ -734,13 +799,30 @@ class Checker {
       case "SwitchStmt": {
         const dt = this.type(s.discriminant, scope);
         this.switchDepth++;
-        for (const cse of s.cases) {
+        // SH2: `switch (s.kind)` narrows each arm to the member(s) that can reach it.
+        // FALLTHROUGH is the subtle part and is handled explicitly: a case body that
+        // does not end in a terminator also runs for the NEXT case's tag, so the tags
+        // that can reach a body are carried forward. Narrowing to the case's own tag
+        // alone would be unsound exactly there.
+        const d = this.discriminantRead(s.discriminant, scope);
+        const listed = s.cases.map((c) => (c.test && c.test.kind === "StringLiteral" ? c.test.value : undefined));
+        let carry: string[] = [];
+        s.cases.forEach((cse, i) => {
           if (cse.test) {
             const ct = this.type(cse.test, scope);
             if (ct !== dt) throw typeError(`switch case type ${ct} does not match discriminant ${dt}`);
           }
-          this.checkBlock(cse.body, scope.child(), ret);
-        }
+          const inner = scope.child();
+          if (d) {
+            const own = cse.test
+              ? (listed[i] !== undefined ? [listed[i]!] : []) // a non-literal case test tells us nothing
+              : unionTagValues(d.union).filter((v) => !listed.includes(v)); // `default:` — whatever is left
+            const tags = [...new Set([...carry, ...own])];
+            this.narrowInto(inner, d.name, d.union, tags);
+            carry = endsControlFlow(cse.body) ? [] : tags;
+          }
+          this.checkBlock(cse.body, inner, ret);
+        });
         this.switchDepth--;
         return;
       }
@@ -797,7 +879,7 @@ class Checker {
           // context we still reject (don't guess) — see `emptyArrayError`.
           if (hint && isArrayTy(hint)) {
             const el = elemTy(hint);
-            if (el !== "number" && el !== "string" && el !== "boolean" && !isObjectTy(el) && !isArrayTy(el)) throw nyi(NYI.ARRAY, `arrays of ${el}`);
+            if (el !== "number" && el !== "string" && el !== "boolean" && !isObjectTy(el) && !isArrayTy(el) && !isUnionTy(el)) throw nyi(NYI.ARRAY, `arrays of ${el}`);
             return hint;
           }
           throw emptyArrayError();
@@ -816,11 +898,16 @@ class Checker {
           // takes its element type) from the annotation, exactly as one in a field does.
           return this.type(el, scope, hint && isArrayTy(hint) ? elemTy(hint) : undefined);
         });
+        // SH2: the elements of a `Shape[]` have DIFFERENT types by design — they share
+        // the union, not one object shape. Accept exactly when every element is one of
+        // its members (the same identity rule `assignable` uses for a union target).
+        const want = hint !== undefined && isArrayTy(hint) && isUnionTy(elemTy(hint)) ? elemTy(hint) : undefined;
+        if (want !== undefined && tys.every((t) => this.assignable(want, t))) return hint as Ty;
         const first = tys[0]!;
         if (!tys.every((t) => t === first)) throw typeError(`array elements must share a type (got ${[...new Set(tys)].join(", ")})`);
         // A `Date` is represented AS a double (stdlib batch 3), so `Date[]` is a
         // `number[]` in every way that matters to the slot vector — allow it.
-        if (first !== "number" && first !== "string" && first !== "boolean" && !isObjectTy(first) && !isArrayTy(first) && !isDateTy(first)) throw nyi(NYI.ARRAY, `arrays of ${first}`);
+        if (first !== "number" && first !== "string" && first !== "boolean" && !isObjectTy(first) && !isArrayTy(first) && !isDateTy(first) && !isUnionTy(first)) throw nyi(NYI.ARRAY, `arrays of ${first}`);
         return `${first}[]`;
       }
       case "ObjectLiteral": {
@@ -2147,6 +2234,17 @@ class Checker {
       if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`);
     });
   }
+}
+
+/**
+ * Does this statement list definitely leave its enclosing switch case? Used only to
+ * decide whether the NEXT case can also be reached by fallthrough, so being
+ * conservative (a `return` inside both arms of an `if` is not recognized) widens the
+ * set of tags a body is narrowed to — the safe direction.
+ */
+function endsControlFlow(body: Stmt[]): boolean {
+  const last = body[body.length - 1];
+  return last !== undefined && (last.kind === "BreakStmt" || last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "ContinueStmt");
 }
 
 /** A union rendered the way it was written (`A | B`), for diagnostics. */
