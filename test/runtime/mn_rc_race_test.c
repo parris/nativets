@@ -34,10 +34,12 @@
  */
 
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../../runtime/nt_pvec.h"
 
@@ -123,8 +125,16 @@ static void run(void *(*fn)(void *)) {
 int main(void) {
   /* NT_RACE_TEST_NOHOOK=1 runs the SAME workload with the hook left uninstalled — i.e.
    * the pre-v6 single-threaded RC. It must report races; that is what proves this gate is
-   * sensitive rather than vacuously green. Not the default (it is an expected failure). */
+   * sensitive rather than vacuously green. Not the default: it is an EXPECTED FAILURE, and
+   * it may not terminate — a corrupted side-table can send str_tab_slot's linear probe
+   * (which relies on an empty slot always existing) into an infinite loop.
+   *
+   * So it bounds ITSELF with alarm(): a harness timeout is a safety net, not a guarantee
+   * (an early-returning spawn wrapper once left one of these spinning for 47 minutes on a
+   * shared machine). SIGALRM's default action terminates the process, and by then TSan has
+   * already streamed its reports, which is all the negative control needs to prove. */
   if (!getenv("NT_RACE_TEST_NOHOOK")) install_hook();
+  else alarm(20);
 
   double str_before = nt_str_live();
   run(str_worker);
