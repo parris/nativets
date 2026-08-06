@@ -1158,30 +1158,22 @@ class Checker {
     }
     for (const a of e.args) if (a.kind === "SpreadExpr") throw nyi(NYI.SPREAD, "spread in calls");
 
-    // console.log(...)
-    if (isConsoleLog(e)) {
-      for (const a of e.args) {
+    // console.log / error / warn / info / debug (...)
+    const cm = consoleMethod(e);
+    if (cm !== null) {
+      if (!CONSOLE_STREAMS.has(cm))
+        throw nyi(NYI.CONSOLE, `console.${cm}`);
+      // Stage 49: node reads format specifiers from a LEADING STRING argument, so an
+      // argument's ROLE decides what it must be renderable as — `%d` of an object is
+      // node's `NaN` and needs no inspect, `%c` discards its argument entirely.
+      const plan = planConsoleFormat(e.args);
+      const bySpec = plan ? fmtSpecByArg(plan) : null;
+      for (const [i, a] of e.args.entries()) {
         const at = this.type(a, scope);
-        // Stage 47: compound values (objects, class instances, arrays, Map/Set, Dyn)
-        // render through node's util.inspect, generated from the static type in
-        // codegen. What is left below is what has NO node-identical rendering here —
-        // each refused, never printed as a raw pointer.
-        checkInspectable(at, at);
-        // node prints a Uint8Array with a size-dependent, column-grouped multi-line
-        // layout for 7+ elements (not statically known here) — not cheap to match
-        // byte-for-byte, so reject rather than guess (reject-don't-miscompile).
-        if (isBytesTy(at)) throw nyi(NYI.BYTES, "console.log of a Uint8Array (node's column-grouped typed-array formatting)");
-        // A Response/Headers handle has no printable form here (node prints an inspected
-        // `Response { … }`); reject rather than print the raw pointer.
-        if (isResponseTy(at) || isHeadersTy(at)) throw nyi(NYI.OBJECT, `console.log of a ${at} (print .status / .ok / await res.text() instead)`);
-        // stdlib Batch 3: node's util.inspect of a Date IS its ISO string (and the
-        // literal "Invalid Date" for a NaN time value), so `console.log(d)` is exact.
-        // A URL/URLSearchParams inspects as `URL { href: …, … }` — refused, not guessed.
-        if (isUrlTy(at) || isSearchParamsTy(at))
-          throw nyi(NYI.WEBAPI, `console.log of a ${at} (node prints an inspected \`${at} { … }\`; print a component, e.g. \`u.href\`-less \`u.origin + u.pathname\`, or \`${at === "URL" ? "u.searchParams" : "p"}.toString()\`)`);
-        // The net: no argument type may reach codegen without a renderer. Printing a
-        // heap handle used to emit the raw pointer — i.e. nothing at all.
-        if (!isPrintableTy(at)) throw nyi(NYI.INSPECT, `console.log of a ${at}`);
+        if (plan && i === 0) continue; // the format string itself, consumed
+        const spec = bySpec?.get(i);
+        if (spec !== undefined) { checkFormatArg(spec, at); continue; }
+        checkConsoleArg(at);
       }
       return "void";
     }
@@ -2074,14 +2066,171 @@ export function isOptChainExpr(e: Expr): boolean {
   return e.kind === "MemberExpr" && (!!e.optional || isOptChainExpr(e.object));
 }
 
-export function isConsoleLog(e: Expr): boolean {
-  return (
-    e.kind === "CallExpr" &&
-    e.callee.kind === "MemberExpr" &&
-    e.callee.object.kind === "Identifier" &&
-    e.callee.object.name === "console" &&
-    e.callee.property === "log"
-  );
+/**
+ * `console.<m>(…)` — the method name, or null if this is not a console call.
+ * Recognized like `Math.*` (not shadowable by a user binding), as `console.log`
+ * always has been.
+ */
+export function consoleMethod(e: Expr): string | null {
+  if (e.kind !== "CallExpr") return null;
+  const c = e.callee;
+  if (c.kind !== "MemberExpr" || c.object.kind !== "Identifier" || c.object.name !== "console") return null;
+  return c.property;
+}
+
+/** The stream each supported `console` method writes to — node's mapping. */
+export const CONSOLE_STREAMS: ReadonlyMap<string, "out" | "err"> = new Map([
+  ["log", "out"], ["info", "out"], ["debug", "out"],
+  ["error", "err"], ["warn", "err"],
+] as const);
+
+/* ============================================================
+ * Format specifiers (Stage 49) — a faithful port of node's
+ * `formatWithOptionsInternal` (lib/internal/util/inspect.js).
+ *
+ * The rules that matter, all of them observable:
+ *   - specifiers are only read from a LEADING STRING argument, and only while
+ *     an unconsumed argument remains (`a + 1 !== args.length`), so
+ *     `console.log("100%% done")` — one argument — is not formatted at all;
+ *   - the scan stops at `length - 1`, so a trailing `%` is never a specifier;
+ *   - an unknown specifier (`%z`) is left LITERAL, `%%` collapses to `%`;
+ *   - if anything was consumed, the format string itself is consumed too and
+ *     the remaining arguments are appended space-separated (as always).
+ *
+ * The plan is computed from the SOURCE, so both the checker (which validates
+ * each argument for the role it plays) and codegen (which renders it) derive
+ * the same thing from the same function.
+ * ============================================================ */
+
+export type FmtSpec = "s" | "d" | "i" | "f" | "j" | "o" | "O" | "c";
+export type FmtPiece = { text: string; spec?: undefined } | { text?: undefined; spec: FmtSpec; arg: number };
+export interface FmtPlan {
+  /** The formatted prefix, in order: literal chunks and argument substitutions. */
+  pieces: FmtPiece[];
+  /** Index of the first argument appended space-separated after the prefix. */
+  restStart: number;
+}
+
+const FMT_SPECS: ReadonlyMap<string, FmtSpec> = new Map([
+  ["s", "s"], ["d", "d"], ["i", "i"], ["f", "f"], ["j", "j"], ["o", "o"], ["O", "O"], ["c", "c"],
+] as const);
+
+/**
+ * The compile-time format plan for a `console.*` call, or null when there is
+ * none — a single argument (node returns it verbatim), a non-literal format
+ * string, or a literal that consumes nothing. A null plan means "print every
+ * argument space-separated", which is what the pre-Stage-49 path already did.
+ */
+export function planConsoleFormat(args: Expr[]): FmtPlan | null {
+  if (args.length < 2) return null;
+  const first = args[0]!;
+  const fmt = first.kind === "StringLiteral" ? first.value
+    : first.kind === "TemplateLiteral" && first.exprs.length === 0 ? first.quasis[0] ?? "" : null;
+  if (fmt === null) return null;
+  return planFormatString(fmt, args.length);
+}
+
+/** node's `formatWithOptionsInternal` scan, transcribed. `argc` counts the format string. */
+export function planFormatString(first: string, argc: number): FmtPlan | null {
+  const pieces: FmtPiece[] = [];
+  const push = (text: string) => { if (text !== "") pieces.push({ text }); };
+  let a = 0;
+  let lastPos = 0;
+  for (let i = 0; i < first.length - 1; i++) {
+    if (first.charCodeAt(i) !== 37 /* % */) continue;
+    const next = first[++i]!;
+    if (a + 1 !== argc) {
+      if (next === "%") { push(first.slice(lastPos, i)); lastPos = i + 1; continue; }
+      const spec = FMT_SPECS.get(next);
+      if (spec === undefined) continue; // not a placeholder — left literal
+      const arg = ++a;
+      if (lastPos !== i - 1) push(first.slice(lastPos, i - 1));
+      pieces.push({ spec, arg });
+      lastPos = i + 1;
+    } else if (next === "%") {
+      push(first.slice(lastPos, i));
+      lastPos = i + 1;
+    }
+  }
+  if (lastPos === 0) return null; // nothing consumed: the plain space-separated path
+  if (lastPos < first.length) push(first.slice(lastPos));
+  return { pieces, restStart: a + 1 };
+}
+
+/** Which specifier consumes each argument index (indices below `restStart`). */
+export function fmtSpecByArg(plan: FmtPlan): Map<number, FmtSpec> {
+  const m = new Map<number, FmtSpec>();
+  for (const p of plan.pieces) if (p.spec !== undefined) m.set(p.arg, p.spec);
+  return m;
+}
+
+/**
+ * The full printability net for one `console.*` argument printed on its own
+ * (Stage 47) — `checkInspectable` plus the handle types that keep their own
+ * long-standing code at the root. `depth` is where node's renderer starts:
+ * 0 for a plain argument, and higher for a `%s`, which inspects at `depth: 0`
+ * so a nested compound is cut to `[Object]` immediately.
+ */
+export function checkConsoleArg(at: Ty, depth = 0): void {
+  // Stage 47: compound values (objects, class instances, arrays, Map/Set, Dyn)
+  // render through node's util.inspect, generated from the static type in
+  // codegen. What is left below is what has NO node-identical rendering here —
+  // each refused, never printed as a raw pointer.
+  checkInspectable(at, at, depth);
+  // (Stage 49 closed the old NT1016 here: node's typed-array layout IS the array
+  // layout with the length folded into the opening brace, which the Stage-47
+  // builder already owns — `Uint8Array(3) [ 1, 2, 3 ]`, grouped past six.)
+  // A Response/Headers handle has no printable form here (node prints an inspected
+  // `Response { … }`); reject rather than print the raw pointer.
+  if (isResponseTy(at) || isHeadersTy(at)) throw nyi(NYI.OBJECT, `console.log of a ${at} (print .status / .ok / await res.text() instead)`);
+  // stdlib Batch 3: node's util.inspect of a Date IS its ISO string (and the
+  // literal "Invalid Date" for a NaN time value), so `console.log(d)` is exact.
+  // A URL/URLSearchParams inspects as `URL { href: …, … }` — refused, not guessed.
+  if (isUrlTy(at) || isSearchParamsTy(at))
+    throw nyi(NYI.WEBAPI, `console.log of a ${at} (node prints an inspected \`${at} { … }\`; print a component, e.g. \`u.href\`-less \`u.origin + u.pathname\`, or \`${at === "URL" ? "u.searchParams" : "p"}.toString()\`)`);
+  // The net: no argument type may reach codegen without a renderer. Printing a
+  // heap handle used to emit the raw pointer — i.e. nothing at all.
+  if (!isPrintableTy(at)) throw nyi(NYI.INSPECT, `console.log of a ${at}`);
+}
+
+/**
+ * What a format specifier needs of the argument it consumes (Stage 49). Each
+ * rule is node's, and each refusal is a conversion whose node result depends on
+ * machinery we do not have — never an approximation:
+ *
+ *   `%c` discards its argument, so any type goes;
+ *   `%s`/`%O` inspect (at depth 0 / the default depth), so the Stage-47 net applies;
+ *   `%o` adds `showHidden` (`[ 1, 2, 3, [length]: 3 ]`), which we only match for
+ *        a scalar, where it is identical to `%O`;
+ *   `%j` is `JSON.stringify`, which has no meaning for a Map/Set/Dyn handle here;
+ *   `%d`/`%i`/`%f` are ToNumber / parseInt / parseFloat, which for an ARRAY go
+ *        through `ToPrimitive` (`String([1,2,3])` is `"1,2,3"`, so `%f` of it is 1) —
+ *        a coercion nativets does not implement for arrays.
+ */
+export function checkFormatArg(spec: FmtSpec, at: Ty): void {
+  if (spec === "c") return; // consumed and ignored
+  if (spec === "s") {
+    // node's `%s` inspects an object only when it has no custom `toString`; a typed
+    // array has one, so `%s` of a Uint8Array is `String(u8)` — the comma-joined
+    // elements ("1,2,3"), NOT the `Uint8Array(3) [ … ]` form the others get.
+    if (isBytesTy(at)) throw nyi(NYI.CONSOLE, "`%s` of a Uint8Array (node prints `String(u8)`, the comma-joined bytes) — use `%O`, or print it on its own");
+    return checkConsoleArg(at, INSPECT_DEPTH_LIMIT - 1);
+  }
+  if (spec === "O") return checkConsoleArg(at);
+  const scalar = at === "number" || at === "boolean" || at === "string" || at === "undefined" ||
+    at === "void" || at === "null" || isDateTy(at);
+  if (isNullableTy(at)) return checkFormatArg(spec, baseTy(at));
+  if (spec === "o") {
+    if (!scalar) throw nyi(NYI.CONSOLE, `\`%o\` of a ${at} (node's \`showHidden\` inspect, e.g. \`[ 1, 2, 3, [length]: 3 ]\`) — use \`%O\``);
+    return;
+  }
+  if (spec === "j") {
+    if (!scalar && !isObjectTy(at) && !isArrayTy(at)) throw nyi(NYI.CONSOLE, `\`%j\` of a ${at} (JSON.stringify has no faithful form for it here) — use \`%O\``);
+    return;
+  }
+  // %d / %i / %f
+  if (!scalar && !isObjectTy(at) && !isMapTy(at) && !isSetTy(at))
+    throw nyi(NYI.CONSOLE, `\`%${spec}\` of a ${at} (node coerces it through ToPrimitive) — use \`%s\``);
 }
 
 /**
@@ -2094,13 +2243,15 @@ export function isConsoleLog(e: Expr): boolean {
  * never do is print nothing (or a raw pointer), which is what this replaced.
  */
 export function checkInspectable(ty: Ty, root: Ty, depth = 0): void {
-  // A HANDLE type at the ROOT keeps its own long-standing diagnostic (NT1016 bytes,
-  // NT1002 Response/Headers, NT1024 URL), applied by the caller right after this walk;
+  // A HANDLE type at the ROOT keeps its own long-standing diagnostic
+  // (NT1002 Response/Headers, NT1024 URL), applied by the caller right after this walk;
   // here we catch the same types NESTED inside a printed value, plus function values
   // anywhere (node names a function from its binding — a name our lifted arrows lack).
   if (ty !== root) {
     const what = () => nyi(NYI.INSPECT, `console.log of a ${isFuncTy(ty) ? "function value" : ty} inside \`${root}\``);
-    if (isFuncTy(ty) || isBytesRefTy(ty) || isFetchRefTy(ty) || isUrlRefTy(ty)) throw what();
+    // A Uint8Array is renderable ANYWHERE since Stage 49; its two companion handles
+    // (TextEncoder/TextDecoder) are not, and neither is a fetch/URL handle.
+    if (isFuncTy(ty) || isTextEncoderTy(ty) || isTextDecoderTy(ty) || isFetchRefTy(ty) || isUrlRefTy(ty)) throw what();
   } else if (isFuncTy(ty)) {
     throw nyi(NYI.INSPECT, "console.log of a function value");
   }
@@ -2127,6 +2278,6 @@ export function isPrintableTy(t: Ty): boolean {
   return (
     t === "number" || t === "boolean" || t === "string" || t === "undefined" || t === "void" ||
     t === "null" || t === "Dyn" || isDateTy(t) || isNullableTy(t) ||
-    isObjectTy(t) || isArrayTy(t) || isMapTy(t) || isSetTy(t)
+    isObjectTy(t) || isArrayTy(t) || isMapTy(t) || isSetTy(t) || isBytesTy(t)
   );
 }

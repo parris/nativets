@@ -11,7 +11,7 @@
  */
 
 import type { CheckedProgram, Sig } from "./checker.ts";
-import { isConsoleLog } from "./checker.ts";
+import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, type FmtSpec } from "./checker.ts";
 import { blockDrops } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
@@ -152,6 +152,17 @@ const DECLARES = [
   "declare void @js_print_str(ptr)",
   "declare void @js_print_sep()",
   "declare void @js_print_newline()",
+  // Stage 49: `console.error`/`console.warn` write to STDERR. Separate entry points
+  // rather than a mode flag on the printer — a preempted actor must never be able to
+  // redirect another actor's half-written line — and `begin` flushes stdout first so
+  // the two streams stay in order when they are merged.
+  "declare void @js_eprint_begin()",
+  "declare void @js_eprint_num(double)",
+  "declare void @js_eprint_bool(i32)",
+  "declare void @js_eprint_str(ptr)",
+  "declare void @js_eprint_sep()",
+  "declare void @js_eprint_newline()",
+  "declare void @nt_fmt_guard(ptr, double)",
   "declare double @pow(double, double)",
   "declare ptr @js_str_concat(ptr, ptr)",
   "declare double @js_str_len(ptr)",
@@ -390,8 +401,11 @@ const DECLARES = [
   "declare ptr @nt_insp_entry(ptr, ptr)",
   "declare ptr @nt_insp_pair(ptr, ptr)",
   "declare ptr @nt_insp_coll_open(ptr, double)",
+  "declare ptr @nt_insp_len_open(ptr, double)",
   "declare ptr @nt_insp_more(double)",
   "declare ptr @nt_dyn_inspect(ptr, double)",
+  "declare ptr @nt_dyn_display(ptr, double)",
+  "declare ptr @nt_dyn_str_or_null(ptr)",
 ];
 
 /** B3 v4 runtime entry points — typed messages, receive timeouts, selective receive.
@@ -2161,7 +2175,8 @@ class FnGen {
   }
 
   private genCall(e: Extract<Expr, { kind: "CallExpr" }>): Val {
-    if (isConsoleLog(e)) return this.genConsoleLog(e.args);
+    const cm = consoleMethod(e);
+    if (cm !== null) return this.genConsoleLog(e.args, CONSOLE_STREAMS.get(cm) ?? "out");
 
     // process.exit(code?) — flush + exit; the block cannot fall through afterwards.
     if (
@@ -2568,45 +2583,204 @@ class FnGen {
     return { v: t, ty: ret };
   }
 
-  private genConsoleLog(args: Expr[]): Val {
-    args.forEach((a, i) => {
-      const val = this.genExpr(a);
-      if (i > 0) this.emit(`call void @js_print_sep()`);
-      this.emitPrint(val);
-    });
-    this.emit(`call void @js_print_newline()`);
+  /**
+   * `console.log` / `error` / `warn` / `info` / `debug`.
+   *
+   * Stage 49: node reads FORMAT SPECIFIERS from a leading string argument when
+   * further arguments follow (`formatWithOptionsInternal`). Our arguments are
+   * statically typed and the format string is almost always a literal, so the
+   * whole scan happens at COMPILE time (`planConsoleFormat`) and each specifier
+   * lowers to the conversion its argument's type calls for — no runtime format
+   * interpreter, no per-call cost. A NON-literal format string keeps the plain
+   * space-separated path plus a runtime guard that refuses (loudly) if the string
+   * turns out to contain a specifier; a literal that consumes nothing (node's
+   * `console.log("100%% done")`, one argument) is the plain path too.
+   *
+   * Every argument is evaluated FIRST, left to right — node evaluates the whole
+   * argument list before formatting, and `%c` discards its argument but must not
+   * skip its side effects.
+   */
+  private genConsoleLog(args: Expr[], stream: "out" | "err" = "out"): Val {
+    const err = stream === "err";
+    const P = err ? "js_eprint" : "js_print";
+    if (err) this.emit(`call void @js_eprint_begin()`);
+    const plan = planConsoleFormat(args);
+    const vals = args.map((a) => this.genExpr(a));
+    if (plan === null) {
+      // A runtime string in the format position is the one case the compile-time scan
+      // cannot decide; the guard turns "maybe wrong output" into a refusal.
+      const fmt = args.length > 1 ? this.genFormatStringOrNull(vals[0]!) : null;
+      if (fmt !== null) this.emit(`call void @nt_fmt_guard(ptr ${fmt}, double ${llvmDouble(args.length - 1)})`);
+      vals.forEach((val, i) => {
+        if (i > 0) this.emit(`call void @${P}_sep()`);
+        this.emitPrint(val, stream);
+      });
+    } else {
+      for (const piece of plan.pieces) {
+        if (piece.spec === undefined) { this.emit(`call void @${P}_str(ptr ${this.mod.intern(piece.text)})`); continue; }
+        const s = this.genFormatArg(vals[piece.arg]!, piece.spec);
+        if (s !== null) this.emit(`call void @${P}_str(ptr ${s.v})`);
+      }
+      // Anything the format string did not consume is appended space-separated —
+      // with a LEADING space, because node sets its join separator once it formats.
+      for (let i = plan.restStart; i < vals.length; i++) {
+        this.emit(`call void @${P}_sep()`);
+        this.emitPrint(vals[i]!, stream);
+      }
+    }
+    this.emit(`call void @${P}_newline()`);
     return { v: "0", ty: "void" };
   }
 
+  /**
+   * The leading argument AS A FORMAT STRING, or null if it can never be one.
+   * node only scans specifiers when `typeof args[0] === 'string'` — which for a
+   * nullable or a `Dyn` is a RUNTIME fact, so those two produce a pointer that is
+   * null exactly when node would not have scanned (`nt_fmt_guard` ignores null).
+   */
+  private genFormatStringOrNull(val: Val): string | null {
+    if (val.ty === "string") return val.v;
+    if (isNullableTy(val.ty) && baseTy(val.ty) === "string") {
+      const tag = this.nullTag(val.v);
+      const present = this.fresh(); this.emit(`${present} = icmp eq i64 ${tag}, 2`);
+      const inner = this.fromSlot(this.nullVal(val.v), "string");
+      const t = this.fresh(); this.emit(`${t} = select i1 ${present}, ptr ${inner}, ptr null`);
+      return t;
+    }
+    if (val.ty === "Dyn") {
+      const t = this.fresh(); this.emit(`${t} = call ptr @nt_dyn_str_or_null(ptr ${val.v})`);
+      return t;
+    }
+    return null;
+  }
+
   /** Print one value per its static type (used by console.log, incl. nullable unbox). */
-  private emitPrint(val: Val): void {
-    if (val.ty === "number") { this.emit(`call void @js_print_num(double ${val.v})`); return; }
+  private emitPrint(val: Val, stream: "out" | "err" = "out"): void {
+    const P = stream === "err" ? "js_eprint" : "js_print";
+    if (val.ty === "number") { this.emit(`call void @${P}_num(double ${val.v})`); return; }
     if (val.ty === "boolean") {
       const z = this.fresh();
       this.emit(`${z} = zext i1 ${val.v} to i32`);
-      this.emit(`call void @js_print_bool(i32 ${z})`);
+      this.emit(`call void @${P}_bool(i32 ${z})`);
       return;
     }
-    if (val.ty === "undefined" || val.ty === "void") { this.emit(`call void @js_print_str(ptr ${this.mod.intern("undefined")})`); return; }
-    if (val.ty === "null") { this.emit(`call void @js_print_str(ptr ${this.mod.intern("null")})`); return; }
-    if (val.ty === "Dyn") { this.emit(`call void @nt_dyn_print(ptr ${val.v})`); return; }
+    if (val.ty === "undefined" || val.ty === "void") { this.emit(`call void @${P}_str(ptr ${this.mod.intern("undefined")})`); return; }
+    if (val.ty === "null") { this.emit(`call void @${P}_str(ptr ${this.mod.intern("null")})`); return; }
+    if (val.ty === "Dyn") {
+      if (stream === "out") { this.emit(`call void @nt_dyn_print(ptr ${val.v})`); return; }
+      const s = this.fresh();
+      this.emit(`${s} = call ptr @nt_dyn_display(ptr ${val.v}, double 0x0000000000000000)`);
+      this.emit(`call void @${P}_str(ptr ${s})`);
+      return;
+    }
     // stdlib Batch 3: node's util.inspect of a Date is its ISO string ("Invalid Date"
     // when the time value is NaN) — the one non-throwing renderer, so no exc check.
     if (isDateTy(val.ty)) {
       const s = this.fresh();
       this.emit(`${s} = call ptr @nt_date_inspect(double ${val.v})`);
-      this.emit(`call void @js_print_str(ptr ${s})`);
+      this.emit(`call void @${P}_str(ptr ${s})`);
       return;
     }
-    if (isNullableTy(val.ty)) { this.emitPrintNullable(val.v, baseTy(val.ty)); return; }
+    if (isNullableTy(val.ty)) { this.emitPrintNullable(val.v, baseTy(val.ty), stream); return; }
     // A COMPOUND value (object / class instance / array / Map / Set) is rendered by
     // node's util.inspect. Before Stage 47 this fell through to `js_print_str` on the
     // heap POINTER — a silent wrong answer (usually a bare newline).
-    if (isObjectTy(val.ty) || isArrayTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty)) {
-      this.emit(`call void @js_print_str(ptr ${this.genInspect(val, 0, 0).v})`);
+    if (isObjectTy(val.ty) || isArrayTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || isBytesTy(val.ty)) {
+      this.emit(`call void @${P}_str(ptr ${this.genInspect(val, 0, 0).v})`);
       return;
     }
-    this.emit(`call void @js_print_str(ptr ${val.v})`); // a top-level string prints BARE
+    this.emit(`call void @${P}_str(ptr ${val.v})`); // a top-level string prints BARE
+  }
+
+  /**
+   * One format specifier applied to one argument, as a string Val (null = print
+   * nothing, which is `%c`). Every conversion is node's, per `%`:
+   *
+   *   `%s` String(), except a compound inspects at `depth: 0` (nested → `[Object]`)
+   *        and a number keeps util.inspect's `-0`;
+   *   `%O` inspect at the default depth — i.e. exactly what printing it alone gives,
+   *        except that a top-level string is QUOTED;  `%o` is the same for a scalar
+   *        (its `showHidden` only shows on a compound, which the checker refuses);
+   *   `%j` JSON.stringify — with node's literal `undefined` for a value it drops;
+   *   `%d` formatNumber(ToNumber(x));  `%i` parseInt(String(x));  `%f` parseFloat(String(x)).
+   */
+  private genFormatArg(val: Val, spec: FmtSpec): Val | null {
+    const ty = val.ty;
+    const lit = (s: string): Val => ({ v: this.mod.intern(s), ty: "string" });
+    if (spec === "c") return null; // consumed and ignored (node's CSS specifier)
+    if (isNullableTy(ty)) return this.genFormatNullable(val.v, baseTy(ty), spec);
+    if (spec === "O" || spec === "o") {
+      if (ty === "Dyn") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_dyn_inspect(ptr ${val.v}, double 0x0000000000000000)`); return { v: t, ty: "string" }; }
+      return this.genInspect(val, 0, 0);
+    }
+    if (spec === "j") {
+      // JSON.stringify(undefined) is the VALUE undefined, which node concatenates as
+      // the literal "undefined" — not the string "null" the walk would give.
+      if (ty === "undefined" || ty === "void") return lit("undefined");
+      return this.genJsonStringify(val);
+    }
+    if (spec === "s") {
+      if (ty === "string") return val; // bare, like String()
+      if (ty === "Dyn") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_dyn_display(ptr ${val.v}, double ${llvmDouble(INSPECT_DEPTH)})`); return { v: t, ty: "string" }; }
+      // A compound goes through inspect with `depth: 0`, so starting the walk AT the
+      // cut-off depth is what makes its fields' compounds render as `[Object]`.
+      if (isObjectTy(ty) || isArrayTy(ty) || isMapTy(ty) || isSetTy(ty)) return this.genInspect(val, INSPECT_DEPTH, 0);
+      return this.genInspect(val, 0, 0); // number (-0), boolean, undefined, null, Date
+    }
+    // %d / %i / %f — all three render a double through util.inspect's formatNumber.
+    const num = this.genFormatNumber(val, spec);
+    const t = this.fresh();
+    this.emit(`${t} = call ptr @nt_insp_num(double ${num})`);
+    return { v: t, ty: "string" };
+  }
+
+  /** The `double` a `%d`/`%i`/`%f` conversion produces for this value. */
+  private genFormatNumber(val: Val, spec: "d" | "i" | "f"): string {
+    const ty = val.ty;
+    // `%d` is ToNumber: a boolean is 1/0, `null` is 0, `undefined` is NaN, and a Date
+    // is its time value (nativets represents a Date AS that double).
+    if (spec === "d") {
+      if (ty === "number" || isDateTy(ty)) return val.v;
+      if (ty === "null") return "0.0";
+      if (ty === "boolean") { const t = this.fresh(); this.emit(`${t} = uitofp i1 ${val.v} to double`); return t; }
+      if (ty === "string") { const t = this.fresh(); this.emit(`${t} = call double @js_str_to_num(ptr ${val.v})`); return t; }
+      return llvmDouble(NaN); // undefined, and an object/Map/Set ("[object Object]")
+    }
+    // `%i`/`%f` are parseInt/parseFloat of String(x) — so a boolean ("true") is NaN
+    // where `%d` gives 1, and a Date is NaN because its String() starts with a weekday.
+    if (ty === "number" || ty === "string" || ty === "boolean" || ty === "undefined" || ty === "void" || ty === "null") {
+      const s = this.coerceToString(ty === "void" ? { v: val.v, ty: "undefined" } : val);
+      const t = this.fresh();
+      this.emit(spec === "i" ? `${t} = call double @js_parse_int(ptr ${s}, double 0x0000000000000000)` : `${t} = call double @js_parse_float(ptr ${s})`);
+      return t;
+    }
+    return llvmDouble(NaN);
+  }
+
+  /** A nullable box under a specifier: the tag decides, then the base type converts. */
+  private genFormatNullable(ptr: string, base: Ty, spec: FmtSpec): Val | null {
+    if (spec === "c") return null;
+    const out = this.slot("string");
+    const tag = this.nullTag(ptr);
+    const isU = this.fresh(); this.emit(`${isU} = icmp eq i64 ${tag}, 0`);
+    const uLbl = this.label("fu"), nChk = this.label("fnc"), nLbl = this.label("fn"), pLbl = this.label("fp"), end = this.label("fe");
+    this.terminate(`br i1 ${isU}, label %${uLbl}, label %${nChk}`);
+    this.to(this.block(uLbl));
+    this.emit(`store ptr ${this.genFormatArg({ v: "0", ty: "undefined" }, spec)!.v}, ptr ${out}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(nChk));
+    const isN = this.fresh(); this.emit(`${isN} = icmp eq i64 ${tag}, 1`);
+    this.terminate(`br i1 ${isN}, label %${nLbl}, label %${pLbl}`);
+    this.to(this.block(nLbl));
+    this.emit(`store ptr ${this.genFormatArg({ v: "0", ty: "null" }, spec)!.v}, ptr ${out}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(pLbl));
+    const inner = this.genFormatArg({ v: this.fromSlot(this.nullVal(ptr), base), ty: base }, spec)!;
+    this.emit(`store ptr ${inner.v}, ptr ${out}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(end));
+    const t = this.fresh(); this.emit(`${t} = load ptr, ptr ${out}`);
+    return { v: t, ty: "string" };
   }
 
   /**
@@ -2635,6 +2809,7 @@ class FnGen {
     if (ty === "Dyn") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_dyn_inspect(ptr ${val.v}, double ${llvmDouble(indent)})`); return { v: t, ty: "string" }; }
     if (isNullableTy(ty)) return this.genInspectNullable(val.v, baseTy(ty), depth, indent);
     if (isObjectTy(ty)) return this.genInspectObject(val, depth, indent);
+    if (isBytesTy(ty)) return this.genInspectBytes(val, depth, indent);
     if (isArrayTy(ty)) return this.genInspectArray(val, depth, indent);
     if (isMapTy(ty) || isSetTy(ty)) return this.genInspectColl(val, depth, indent);
     return lit("undefined"); // unreachable: the checker rejects every other arg type
@@ -2746,6 +2921,64 @@ class FnGen {
   }
 
   /**
+   * `Uint8Array(3) [ 1, 2, 3 ]` (Stage 49, closing NT1016). node's `formatTypedArray`
+   * is `formatArrayBuffer`'s layout with the LENGTH folded into the opening brace —
+   * the same shape as a Map/Set, measured as part of `braces[0]` — so this is
+   * `genInspectArray` with a runtime-built brace: column grouping past six entries,
+   * right-aligned (every element is a number), `... n more items` past 100, and the
+   * depth cut to `[Uint8Array]`.
+   */
+  private genInspectBytes(val: Val, depth: number, indent: number): Val {
+    const len = this.fresh(); this.emit(`${len} = call double @nt_bytes_len(ptr ${val.v})`);
+    const open = this.fresh();
+    this.emit(`${open} = call ptr @nt_insp_len_open(ptr ${this.mod.intern("Uint8Array")}, double ${len})`);
+    const isEmpty = this.fresh(); this.emit(`${isEmpty} = fcmp oeq double ${len}, 0.0`);
+    if (depth > INSPECT_DEPTH) {
+      // As everywhere in node's renderer, EMPTY is checked before the depth cut.
+      const empty = this.concat(open, this.mod.intern("]"));
+      const t = this.fresh();
+      this.emit(`${t} = select i1 ${isEmpty}, ptr ${empty}, ptr ${this.mod.intern("[Uint8Array]")}`);
+      return { v: t, ty: "string" };
+    }
+    const b = this.fresh();
+    this.emit(`${b} = call ptr @nt_insp_new(ptr ${open}, ptr ${this.mod.intern("]")}, double ${llvmDouble(indent)}, double ${llvmDouble(1)}, double ${llvmDouble(1)})`);
+    const over = this.fresh(); this.emit(`${over} = fcmp ogt double ${len}, ${llvmDouble(INSPECT_MAXARR)}`);
+    const capped = this.fresh();
+    this.emit(`${capped} = select i1 ${over}, double ${llvmDouble(INSPECT_MAXARR)}, double ${len}`);
+    const idx = this.slot("number");
+    this.emit(`store double 0x0000000000000000, ptr ${idx}`);
+    const cond = this.label("ib"), body = this.label("ibb"), upd = this.label("ibu"), end = this.label("ibe");
+    this.terminate(`br label %${cond}`);
+    this.to(this.block(cond));
+    const iC = this.fresh(); this.emit(`${iC} = load double, ptr ${idx}`);
+    const cmp = this.fresh(); this.emit(`${cmp} = fcmp olt double ${iC}, ${capped}`);
+    this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
+    this.to(this.block(body));
+    const iB = this.fresh(); this.emit(`${iB} = load double, ptr ${idx}`);
+    const by = this.fresh(); this.emit(`${by} = call double @nt_bytes_get(ptr ${val.v}, double ${iB})`);
+    const es = this.fresh(); this.emit(`${es} = call ptr @nt_insp_num(double ${by})`);
+    this.emit(`call void @nt_insp_add(ptr ${b}, ptr ${es})`);
+    this.terminate(`br label %${upd}`);
+    this.to(this.block(upd));
+    const iU = this.fresh(); this.emit(`${iU} = load double, ptr ${idx}`);
+    const iN = this.fresh(); this.emit(`${iN} = fadd double ${iU}, 1.0`);
+    this.emit(`store double ${iN}, ptr ${idx}`);
+    this.terminate(`br label %${cond}`);
+    this.to(this.block(end));
+    const rem = this.fresh(); this.emit(`${rem} = fsub double ${len}, ${capped}`);
+    const more = this.fresh(); this.emit(`${more} = fcmp ogt double ${rem}, 0.0`);
+    const mLbl = this.label("ibm"), mEnd = this.label("ibz");
+    this.terminate(`br i1 ${more}, label %${mLbl}, label %${mEnd}`);
+    this.to(this.block(mLbl));
+    const ms = this.fresh(); this.emit(`${ms} = call ptr @nt_insp_more(double ${rem})`);
+    this.emit(`call void @nt_insp_add(ptr ${b}, ptr ${ms})`);
+    this.terminate(`br label %${mEnd}`);
+    this.to(this.block(mEnd));
+    const t = this.fresh(); this.emit(`${t} = call ptr @nt_insp_done(ptr ${b})`);
+    return { v: t, ty: "string" };
+  }
+
+  /**
    * `Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`. The size is in node's opening brace and
    * is a runtime value, so the brace is built at runtime too. Iteration reuses the
    * Stage-37 insertion-order key log (`nt_coll_keys`), so the order matches node.
@@ -2804,17 +3037,18 @@ class FnGen {
   }
 
   /** Print a nullable box: tag 0 → `undefined`, 1 → `null`, else unbox and print the base value. */
-  private emitPrintNullable(ptr: string, base: Ty): void {
+  private emitPrintNullable(ptr: string, base: Ty, stream: "out" | "err" = "out"): void {
+    const P = stream === "err" ? "js_eprint" : "js_print";
     const tag = this.nullTag(ptr);
     const isU = this.fresh(); this.emit(`${isU} = icmp eq i64 ${tag}, 0`);
     const uLbl = this.label("pu"), nChk = this.label("pnc"), nLbl = this.label("pn"), pLbl = this.label("pp"), end = this.label("pe");
     this.terminate(`br i1 ${isU}, label %${uLbl}, label %${nChk}`);
-    this.to(this.block(uLbl)); this.emit(`call void @js_print_str(ptr ${this.mod.intern("undefined")})`); this.terminate(`br label %${end}`);
+    this.to(this.block(uLbl)); this.emit(`call void @${P}_str(ptr ${this.mod.intern("undefined")})`); this.terminate(`br label %${end}`);
     this.to(this.block(nChk));
     const isN = this.fresh(); this.emit(`${isN} = icmp eq i64 ${tag}, 1`);
     this.terminate(`br i1 ${isN}, label %${nLbl}, label %${pLbl}`);
-    this.to(this.block(nLbl)); this.emit(`call void @js_print_str(ptr ${this.mod.intern("null")})`); this.terminate(`br label %${end}`);
-    this.to(this.block(pLbl)); this.emitPrint({ v: this.fromSlot(this.nullVal(ptr), base), ty: base }); this.terminate(`br label %${end}`);
+    this.to(this.block(nLbl)); this.emit(`call void @${P}_str(ptr ${this.mod.intern("null")})`); this.terminate(`br label %${end}`);
+    this.to(this.block(pLbl)); this.emitPrint({ v: this.fromSlot(this.nullVal(ptr), base), ty: base }, stream); this.terminate(`br label %${end}`);
     this.to(this.block(end));
   }
 

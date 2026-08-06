@@ -851,6 +851,53 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   **Found, not fixed (own lane):** `js_number_to_string` diverges from node for `1e-7` (`1e-07`),
   `1e-5` (`1e-05` vs `0.00001`) and very large integers (exact rather than shortest-round-trip
   digits) — identical through `String(x)`, so unrelated to inspect.
+- **Stage 49 ✅ (the rest of the `console` surface — format specifiers + the stderr methods)**
+  Two live defects, both the "prints the wrong thing" class Stage 48 exists to remove.
+  **(1) Format specifiers were IGNORED:** `console.log("a %s b", "x")` printed `a %s b x` where
+  node prints `a x b`, because we appended every argument instead of letting the leading string
+  consume them. node's `formatWithOptionsInternal` (read out of the running binary via
+  `process.binding("natives")`, like Stage 48) is now transcribed as `planConsoleFormat` in
+  `src/checker.ts` — the same function the checker and codegen both derive from, so an argument
+  is validated for **the role it plays**. The scan runs at **COMPILE time**, which is the whole
+  design: arguments are statically typed and the format string is virtually always a literal, so
+  a call becomes a fixed sequence of literal chunks and per-argument conversions lowered from
+  static types — no runtime format interpreter, no per-call cost. Supported and node-differential:
+  **`%s`** (String, except a compound inspects at `depth: 0` so nested becomes `[Object]`, and a
+  number keeps util.inspect's `-0`), **`%d`** (ToNumber — `true` is 1, `null` is 0, `""` is 0, a
+  Date is its time value), **`%i`** (parseInt of `String(x)` — so `true` is NaN where `%d` is 1,
+  and `"0x1f"` is 31), **`%f`** (parseFloat), **`%j`** (JSON.stringify, with node's literal
+  `undefined` for a value it drops), **`%O`** (inspect at the default depth), **`%o`** (identical
+  for a scalar), **`%c`** (consumed, discarded — but still evaluated), **`%%`**, plus every rule
+  of the scan itself: a trailing `%` is never a specifier, an unknown one stays literal, a
+  specifier with no remaining argument stays literal, `%%` only collapses once arguments follow
+  (`console.log("100%% done")` alone is verbatim), and unconsumed arguments are appended
+  space-separated after a leading space. **A NON-literal format string** keeps the plain path plus
+  a runtime guard (`nt_fmt_guard`) applying node's exact rule to the actual string: it panics
+  (stderr, stdout flushed, exit 134 — the Stage-41 path) **only if a specifier would really be
+  consumed**, so the common `console.log(label, x)` is untouched and the wrong line is never
+  printed. `typeof args[0] === 'string'` is a runtime fact for a nullable and a `Dyn`, so both
+  feed the guard a pointer that is null exactly when node would not have scanned. Refused
+  (**`NT1026`**, never approximated): `%o` of a compound (node's `showHidden`), `%j` of a
+  Map/Set/Dyn, `%d`/`%i`/`%f` of an array (node's `ToPrimitive`/join), and `%s` of a `Uint8Array`
+  (node prints `String(u8)`, `1,2,3`, because a typed array has its own `toString` — the one place
+  node does NOT inspect).
+  **(2) `console.error` did not exist** (it failed `NT2001: 'console' is not defined`).
+  `log`/`info`/`debug` → **stdout**, `error`/`warn` → **stderr**, all sharing the entire path
+  (inspect, specifiers, nullable unboxing, Dyn). Separate `js_eprint_*` entry points rather than a
+  mode flag on the printer — a preempted actor must never be able to redirect another actor's
+  half-written line — and `js_eprint_begin` flushes stdout first so a merged `2>&1` stays ordered.
+  Every other `console.*` method is `NT1026` rather than the misleading undefined-identifier error.
+  **Closed as a cheap win: NT1016 is retired.** node's typed-array layout IS the array layout with
+  the length folded into the opening brace (`Uint8Array(3) [ 1, 2, 3 ]`), which the Stage-47
+  `nt_insp_*` builder already owned, so `console.log(u8)` now matches node exactly — including the
+  column-grouped right-aligned layout past six entries, `... n more items` past 100, the empty
+  `Uint8Array(0) []`, and the `[Uint8Array]` depth cut. `NT1024`/`Response` were measured and
+  **left**: node's `URL` inspect is a 13-field multi-line record including `href`, `username`,
+  `password` and a nested `URLSearchParams { 'd' => '1' }` — `href` alone is separately refused —
+  and `Headers`/`Response` need header iteration; neither falls out of the same machinery.
+  Stage 48's guarantee holds unchanged: the `isPrintableTy` net still means **no input prints
+  nothing**. Tests: `test/console.test.ts` (118, node-differential on BOTH streams except the
+  refusal table and the deliberate non-literal panic).
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
