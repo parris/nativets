@@ -130,3 +130,91 @@ if (x !== undefined) {
 `, "NT2001");
   });
 });
+
+describe("narrowing 2 — a guard whose branch EXITS narrows the rest of the block", () => {
+  // TypeScript: conformance/controlFlow/controlFlowIfStatement.ts (function `a`) — the
+  // branch that `return`s leaves only the narrowed path for the statements below.
+  test("`if (x === undefined) return;` narrows for the rest of the function", async () => {
+    await expectNode(`
+function f(x: number | undefined): string {
+  if (x === undefined) return "none";
+  return "n=" + (x + 1);
+}
+let a: number | undefined = 41;
+console.log(f(a));
+a = undefined;
+console.log(f(a));
+`);
+  });
+
+  // A `throw` is lexical here (Stage 18), so the handler lives in the same function.
+  test("`throw` exits too", async () => {
+    await expectNode(`
+function len(s: string | null): number {
+  try {
+    if (s === null) throw "null";
+    return s.length;
+  } catch (e) {
+    return -1;
+  }
+}
+let v: string | null = "abcd";
+console.log(len(v));
+v = null;
+console.log(len(v));
+`);
+  });
+
+  test("the negated guard exits (`if (x !== undefined) return;` leaves the NULLISH path)", () => {
+    // Below such a guard `x` is definitely nullish, NOT narrowed — arithmetic on it
+    // must still be refused.
+    expectRejected(`
+function f(x: number | undefined): number {
+  if (x !== undefined) return x;
+  return x + 1;
+}
+console.log(f(1));
+`, "NT2001");
+  });
+
+  test("an `else` that exits narrows after the if", async () => {
+    await expectNode(`
+function f(x: string | undefined): string {
+  if (x !== undefined) {
+    console.log("have one");
+  } else {
+    return "none";
+  }
+  return x.toUpperCase();
+}
+let s: string | undefined = "hi";
+console.log(f(s));
+s = undefined;
+console.log(f(s));
+`);
+  });
+
+  test("`continue` exits the iteration, so the rest of the loop body is narrowed", async () => {
+    await expectNode(`
+const xs = [10, 20, 30];
+let total = 0;
+for (let i = 0; i < 5; i++) {
+  const x = xs.at(i); // number | undefined — undefined past the end
+  if (x === undefined) continue;
+  total += x;
+}
+console.log(total);
+`);
+  });
+
+  test("an assignment below the guard invalidates the narrowing", () => {
+    expectRejected(`
+function f(x: number | undefined): number {
+  if (x === undefined) return 0;
+  x = undefined;
+  return x + 1;
+}
+console.log(f(1));
+`, "NT2001");
+  });
+});
