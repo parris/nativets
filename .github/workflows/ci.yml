@@ -10,6 +10,13 @@ name: CI
 #     BUNDLES on Windows and (when the `--target windows` lane is merged) that it can
 #     compile + run a native Windows binary. Full Windows parity is a runtime-port
 #     follow-on, tracked separately.
+#
+# REPRODUCING THE LINUX JOB LOCALLY: `scripts/docker-test.sh [test/foo.test.ts]` runs
+# this same suite in a container mirroring the ubuntu step below (clang + libcurl +
+# node + bun), against your working tree — see docs/docker-linux.md. Worth reaching for
+# whenever a job is red here and green on your Mac: the platforms genuinely differ
+# (ASan enables LeakSanitizer on Linux and macOS has none, which kept this job red for
+# five merges).
 
 on:
   push:
