@@ -104,7 +104,11 @@ const BASELINE: Record<string, Phase> = {
   "driver.ts": "parse",
   "cli.ts": "parse",
   "modules.ts": "parse",
-  "coverage-preprocess.ts": "parse",
+  // RATCHET MOVE (regex removal): the coverage preprocess is itself now regex-free, so
+  // the module whose job is to make `src/` measurable is measurable too. It reaches `ir`
+  // and stops on the SAME NT0001 as ast.ts — the template-literal TYPE — which it sees
+  // through the whole-program link.
+  "coverage-preprocess.ts": "ir",
 };
 
 describe("SH0: bootstrap frontier (ratchet — a module may improve, never regress)", () => {
@@ -175,7 +179,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT0001 survivors are a template-literal TYPE (`\`${string}[]\`` in ast.ts, which
     // coverage.ts sees through the link) and `satisfies` in parser.ts.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT0001", "NT1009", "NT1014", "NT1015", "NT1017", "NT1027", "NT2001"],
+      ["NT0001", "NT1009", "NT1014", "NT1015", "NT1017", "NT2001"],
     );
     expect(byCode["NT1017"]!.sort()).toEqual(["cli.ts", "driver.ts", "modules.ts"]);
     // Unmasked by the lexer rewrite: `new Set([...])` for REGEX_AFTER_KEYWORD.
@@ -183,13 +187,16 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
     // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
     // working, not a regression — the phase table above is what must never go backwards.
-    // It is now shrinking as the compiler's own regex uses are rewritten as character
-    // scanning (nativets has no RegExp, so its source may not use one).
-    expect(byCode["NT1027"]!.sort()).toEqual(["coverage-preprocess.ts"]);
+    // NT1027 is now GONE: every regex the compiler's own source used has been rewritten
+    // as character scanning (nativets has no RegExp, so its source may not use one).
+    // `test/no-regex.test.ts` is the shrink-only lint that keeps it that way.
+    expect(byCode["NT1027"]).toBeUndefined();
     expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
     // Unmasked by that rewrite: diagnostics.ts now gets all the way to the checker.
     expect(byCode["NT2001"]!.sort()).toEqual(["diagnostics.ts"]);
-    expect(byCode["NT0001"]!.sort()).toEqual(["ast.ts", "coverage.ts", "parser.ts"]);
+    expect(byCode["NT0001"]!.sort()).toEqual(
+      ["ast.ts", "coverage-preprocess.ts", "coverage.ts", "parser.ts"],
+    );
   });
 
   test("coverage's preprocess still hides the regex blocker (histogram reads optimistic)", async () => {

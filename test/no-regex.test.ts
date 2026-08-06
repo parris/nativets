@@ -34,7 +34,6 @@ const SRC = new URL("../src/", import.meta.url);
 const REMAINING: Record<string, number> = {
   "ast.ts": 6,
   "cli.ts": 1,
-  "coverage-preprocess.ts": 5,
   "driver.ts": 7,
   "modules.ts": 1,
 };
