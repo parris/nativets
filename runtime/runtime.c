@@ -20,6 +20,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <stdatomic.h> /* relaxed stat counters (thread-safe under B3 v6 M:N schedulers) */
 #include <stdint.h>
 #include <time.h>     /* clock_gettime / time — Date.now */
 #ifndef _WIN32
@@ -53,9 +54,22 @@ void *nativets_alloc(size_t n) {
  *
  * This is the shared-immutable (rc) model for value-semantics strings, distinct
  * from the linear/move model used for arrays and objects. Open-addressed linear
- * probe with backward-shift deletion (no tombstones). NOT thread-safe — fine for
- * the v0 cooperative scheduler; an M:N runtime would need a lock here.
+ * probe with backward-shift deletion (no tombstones).
+ *
+ * THREAD SAFETY (B3 v6). This table IS shared state: one global open-addressed array
+ * that REHASHES, so two scheduler threads registering strings concurrently would corrupt
+ * it. Under M:N (nt_actor.c, NATIVETS_SCHED_THREADS > 1) every entry point below runs
+ * under `nt_rt_lock`, a hook the actor runtime installs at nt_sched_init when — and only
+ * when — it starts more than one scheduler thread. It is NULL for every other program:
+ * a predictable NULL test, no pthread dependency in this file (which must keep compiling
+ * for wasm/Android), and behaviour identical to Stage 30's single-threaded RC.
  * ============================================================ */
+
+/* Installed by nt_actor.c ONLY in M:N mode; NULL everywhere else (see above).
+ * nt_pvec.c uses the same hook for its node refcounts + Stage-44 transients. */
+void (*nt_rt_lock)(int acquire) = 0;
+#define NT_RC_LOCK()   do { if (nt_rt_lock) nt_rt_lock(1); } while (0)
+#define NT_RC_UNLOCK() do { if (nt_rt_lock) nt_rt_lock(0); } while (0)
 
 typedef struct { void *key; long rc; } NtStrEnt;
 static NtStrEnt *g_str_tab = NULL;
@@ -113,32 +127,43 @@ static void str_tab_remove_at(size_t i) {
 /* Register a freshly-allocated heap string (rc=1). Called by every producer. */
 void nt_str_register(void *p) {
   if (!p) return;
+  NT_RC_LOCK();
   if (g_str_cap == 0 || (g_str_count + 1) * 10 >= g_str_cap * 7) str_tab_grow();
   size_t i = str_tab_slot(p);
   if (g_str_tab[i].key == NULL) { g_str_tab[i].key = p; g_str_count++; }
   g_str_tab[i].rc = 1; /* a reused (previously-freed) address starts fresh */
   g_str_allocs++;
+  NT_RC_UNLOCK();
 }
 
 /* Add an owner. No-op (returns p) for untracked pointers, e.g. literals. */
 void *nt_str_retain(void *p) {
-  if (!p || g_str_cap == 0) return p;
-  size_t i = str_tab_slot(p);
-  if (g_str_tab[i].key == p) g_str_tab[i].rc++;
+  if (!p) return p;
+  NT_RC_LOCK();
+  if (g_str_cap != 0) {
+    size_t i = str_tab_slot(p);
+    if (g_str_tab[i].key == p) g_str_tab[i].rc++;
+  }
+  NT_RC_UNLOCK();
   return p;
 }
 
 /* Drop an owner; free + remove at rc 0. No-op for untracked pointers (literals)
  * and NULL. Freeing is the ONLY place a heap string is reclaimed. */
 void nt_str_release(void *p) {
-  if (!p || g_str_cap == 0) return;
-  size_t i = str_tab_slot(p);
-  if (g_str_tab[i].key != p) return; /* literal / already freed / untracked */
-  if (--g_str_tab[i].rc <= 0) {
-    free(p);
-    str_tab_remove_at(i);
-    g_str_frees++;
+  if (!p) return;
+  NT_RC_LOCK();
+  if (g_str_cap != 0) {
+    size_t i = str_tab_slot(p);
+    if (g_str_tab[i].key == p) {       /* else: literal / already freed / untracked */
+      if (--g_str_tab[i].rc <= 0) {
+        free(p);
+        str_tab_remove_at(i);
+        g_str_frees++;
+      }
+    }
   }
+  NT_RC_UNLOCK();
 }
 
 /* Live heap-string count (registered - freed), for leak tests (cf. nt_arr_live). */
@@ -428,14 +453,21 @@ typedef struct { int64_t len; int64_t cap; int64_t *data; nt_pv *pv; } NtArray;
 static double slot_to_num(int64_t s) { double d; memcpy(&d, &s, 8); return d; }
 
 /* Live-array accounting so compiler-inserted drops are observable in tests. */
-static long g_arr_allocs = 0;
-static long g_arr_frees = 0;
+/* Live-value counters (the __arrLive/__objLive test hooks). RELAXED atomics: they are
+ * pure statistics — no other state is ordered by them — but under M:N (B3 v6) two
+ * scheduler threads allocate concurrently, so a plain `++` would be a genuine data race
+ * (and would lose counts, breaking the leak assertions). Relaxed is one `ldadd` on arm64
+ * and imposes no ordering, so the single-threaded cost is negligible. */
+static _Atomic long g_arr_allocs = 0;
+static _Atomic long g_arr_frees = 0;
+#define NT_STAT_INC(c) atomic_fetch_add_explicit(&(c), 1, memory_order_relaxed)
+#define NT_STAT_GET(c) atomic_load_explicit(&(c), memory_order_relaxed)
 
 /* A counted, empty header (no backing store yet). */
 static NtArray *arr_header(void) {
   NtArray *a = (NtArray *)nativets_alloc(sizeof(NtArray));
   a->len = 0; a->cap = 0; a->data = NULL; a->pv = NULL;
-  g_arr_allocs++;
+  NT_STAT_INC(g_arr_allocs);
   return a;
 }
 
@@ -527,9 +559,9 @@ void nt_arr_free(NtArray *a) {
   if (a->pv) nt_pv_release(a->pv);
   free(a->data);
   free(a);
-  g_arr_frees++;
+  NT_STAT_INC(g_arr_frees);
 }
-double nt_arr_live(void) { return (double)(g_arr_allocs - g_arr_frees); }
+double nt_arr_live(void) { return (double)(NT_STAT_GET(g_arr_allocs) - NT_STAT_GET(g_arr_frees)); }
 /* Structural-sharing witnesses (the array analogue of __arrLive): live trie nodes
  * and cumulative node allocations. See test/sharing.test.ts. */
 double nt_arr_nodes(void) { return NT_PV_ON ? nt_pv_node_live() : 0.0; }
@@ -642,22 +674,22 @@ double nt_arr_indexof_str(NtArray *a, const char *x) {
  * are observable in tests. Every heap object block (object literals — and closure
  * env blocks, which reuse nt_obj_new) is counted; owned objects are freed at scope
  * exit via nt_obj_free (RAII), exactly once, never a moved-out value. */
-static long g_obj_allocs = 0;
-static long g_obj_frees = 0;
+static _Atomic long g_obj_allocs = 0;   /* see NT_STAT_INC above (relaxed statistics) */
+static _Atomic long g_obj_frees = 0;
 
 void *nt_obj_new(double nfields) {
   size_t n = (size_t)nfields;
   int64_t *slots = (int64_t *)nativets_alloc((n ? n : 1) * sizeof(int64_t));
   for (size_t i = 0; i < n; i++) slots[i] = 0;
-  g_obj_allocs++;
+  NT_STAT_INC(g_obj_allocs);
   return slots;
 }
 void nt_obj_free(void *o) {
   if (!o) return;
   free(o);
-  g_obj_frees++;
+  NT_STAT_INC(g_obj_frees);
 }
-double nt_obj_live(void) { return (double)(g_obj_allocs - g_obj_frees); }
+double nt_obj_live(void) { return (double)(NT_STAT_GET(g_obj_allocs) - NT_STAT_GET(g_obj_frees)); }
 
 /* ---- string split -> array, array reverse ---- */
 

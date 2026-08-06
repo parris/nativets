@@ -43,6 +43,8 @@ const ACTOR_BUILTINS = new Set([
   "register", "whereis", "link", "monitor", "trapExit", "exit", "__crash", "__kill", "supervise",
   // v4 selective receive
   "receiveMatch",
+  // v6 M:N scheduler introspection (debug)
+  "__schedulers", "__schedUsed", "__schedSteals",
 ]);
 
 /** B3 v4/v5 message kind tag (must match NT_MSG_NUM/STR/STRUCT in runtime/nt_actor.h).
@@ -412,6 +414,11 @@ const ACTOR_V4_DECLARES = [
   "declare i64 @nt_recv_struct(ptr, double, i32)",
   "declare i32 @nt_mbox_shape_ok(i64, ptr)",
   "declare ptr @nt_msg_str_copy(ptr)",
+  // v6 M:N introspection (debug builtins). In the GATED list, not the unconditional one,
+  // so a non-actor program's IR is still byte-identical.
+  "declare double @nt_schedulers()",
+  "declare double @nt_sched_used()",
+  "declare double @nt_sched_steals()",
 ];
 
 interface Val { v: string; ty: Ty; }
@@ -4069,6 +4076,9 @@ class FnGen {
         return { v: d, ty: "number" };
       }
       case "__drain": { this.emit(`call void @nt_drain()`); return { v: "", ty: "void" }; }
+      case "__schedulers":   { const t = this.fresh(); this.emit(`${t} = call double @nt_schedulers()`); return { v: t, ty: "number" }; }
+      case "__schedUsed":    { const t = this.fresh(); this.emit(`${t} = call double @nt_sched_used()`); return { v: t, ty: "number" }; }
+      case "__schedSteals":  { const t = this.fresh(); this.emit(`${t} = call double @nt_sched_steals()`); return { v: t, ty: "number" }; }
 
       // --- B3 v2 registry / links / monitors / trap / fault injection ---
       case "register": {

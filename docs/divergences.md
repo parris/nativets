@@ -397,6 +397,55 @@ send-order is guaranteed. Actor programs are **host-verified only**: `nt_actor.c
 absent from the Android NDK (API 24) — so the runtime is linked **only when a program uses
 actors**, keeping the Android/iOS cross-build green for every non-actor program.
 
+### M:N scheduler threads are OPT-IN, because parallelism is not free of meaning (B3 v6)
+
+`NATIVETS_SCHED_THREADS` selects the scheduler at run time:
+
+| value | scheduler |
+|---|---|
+| unset, or `1` | **the default.** One cooperative scheduler, one FIFO run queue, ucontext switches, reduction-counted preemption — v0..v5 exactly, byte for byte |
+| `N` (> 1), or `auto` | `N` OS threads (`auto` = core count), each with its own scheduler + run queue, **work stealing** between them, and per-actor **lock-free MPSC** mailbox intake |
+
+The default is single-threaded **on purpose**, and it is a divergence worth stating plainly:
+a BEAM-style runtime would just use all your cores. Here, an actor program's stdout is only a
+*specification* while the interleaving is a pure function of the program — which is exactly what
+the whole `test/actors/` corpus asserts, and what makes a crash record reproducible. True
+parallelism destroys that. So parallelism is a thing you ask for, and when you do, only what the
+actor model actually guarantees survives:
+
+- **guaranteed under M:N:** per-sender (pairwise) FIFO ordering, exactly-once delivery, mailbox
+  contents, supervision outcomes (a crash still restarts the child under its registered name),
+  eventual completion, and stable **pids** (one global actor table; actors migrate, pids do not);
+- **NOT guaranteed:** any particular interleaving of two actors' output, which scheduler runs an
+  actor, or the *order* in which independent actors reach a print. Programs that were relying on
+  the single-scheduler order are relying on an artifact.
+
+Two further behavioural differences in M:N mode, both consequences of real threads:
+
+- **A brutal `__kill` of an actor that is RUNNING on another scheduler thread is asynchronous.**
+  Its registers are live on another CPU, so the runtime records the kill and the victim reaps
+  itself at its next compiler-emitted safepoint (`nt_reduction_tick`, at every call site and loop
+  back-edge) — BEAM's discipline. Single-threaded, the kill is immediate as before.
+- **Receive timeouts still use the virtual clock** (above): it advances only at *system-wide*
+  quiescence — every scheduler idle and nothing queued or running — so the "fires exactly when
+  nothing runnable could still send" rule is preserved rather than degraded to wall clock.
+
+**Thread safety of the rest of the runtime.** The string refcount side-table and the persistent
+vector's node refcounts (including Stage 44's `rc == 1 ⇒ mutate in place` transient, a
+check-then-act) are single-threaded structures. Under M:N they run under one recursive lock,
+installed by `nt_sched_init` *only* when it starts more than one scheduler thread; otherwise the
+hook is `NULL` and the cost is one predictable branch. Values themselves need no protection: every
+message is **deep-copied on send** (Stage 42) and arrays/objects are **immutable** (Stage 29), so
+what crosses threads is shared *read-only* storage plus its refcount. Gated by ThreadSanitizer,
+with a negative control that must report races when the lock hook is removed
+(`test/runtime/mn_rc_race_test.c`).
+
+**Async IO.** The poller (kqueue/epoll) exists and is gated (`test/runtime/poll_test.c`): an actor
+can park on a file descriptor and be resumed by kernel readiness, costing no scheduler slice. It is
+**not yet wired to any TS-visible IO**: `readLine` slurps all of stdin up front and `fetch` is
+blocking libcurl (see "`async`/`await` … NO concurrency"), so today those still block their
+scheduler thread.
+
 ### 2. `String#length` / string ops are UTF-8 byte-oriented
 We store strings as NUL-terminated UTF-8 and measure/slice by byte. Identical to JS for
 ASCII (all fixtures); differs for non-ASCII (an emoji is 4 bytes here, 2 UTF-16 units in JS).
