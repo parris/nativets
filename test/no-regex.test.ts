@@ -31,10 +31,7 @@ const SRC = new URL("../src/", import.meta.url);
  * and a module that reaches zero is DELETED from the table rather than set to 0 — so new
  * compiler code cannot reintroduce a regex into a module that was cleared.
  */
-const REMAINING: Record<string, number> = {
-  "cli.ts": 1,
-  "modules.ts": 1,
-};
+const REMAINING: Record<string, number> = {}; // EMPTY — all 29 removed. Keep it that way.
 
 describe("no RegExp in the compiler's own source", () => {
   test("no `src/` module contains a regex literal", () => {
