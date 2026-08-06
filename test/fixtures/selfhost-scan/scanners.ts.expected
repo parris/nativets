@@ -1,0 +1,28 @@
+true false true false
+true true false false
+true false true false
+true false true false
+3 0 0
+mutable  
+_a1 
+(number)=>{a:string}
+#T[]
+#number[]
+no markers here
+_m1_Point{x:number,y:_m1_Point{z:number}}
+{a:{b:number}}
+1_m1_Point{a:number}
+true false
+false true
+true
+false
+false
+true
+-L/opt/lib|-lraylib
+one a|b|c
+true
+false
+false
+roman roman
+set set
+true false false
