@@ -434,16 +434,32 @@ class Checker {
     return undefined;
   }
 
-  /** Type an arrow body with `let` narrowings suspended (they do not cross the boundary). */
-  private inArrow<T>(f: () => T): T {
+  /**
+   * Type an arrow body with `let` narrowings suspended (they do not cross the boundary).
+   *
+   * Concrete, not generic, like the two below: a generic METHOD is still an NT1015 in the
+   * subset the compiler can compile ITSELF in, and `test/self-host-coverage.test.ts`
+   * measures exactly that — a generic here would push the file's real frontier out of view.
+   */
+  private inArrow(f: () => Ty): Ty {
     this.arrowDepth++;
     try { return f(); } finally { this.arrowDepth--; }
   }
 
-  /** Type `f()` with `facts` in scope. */
-  private withFacts<T>(facts: NarrowFact[], f: () => T): T {
+  /** Type an expression with `facts` in scope. */
+  private withFacts(facts: NarrowFact[], f: () => Ty): Ty {
     this.narrowStack.push(facts);
     try { return f(); } finally { this.narrowStack.pop(); }
+  }
+
+  /**
+   * Check statements with `facts` in scope. `finally` matters: `coverage` keeps going
+   * after a rejected statement, so a diagnostic thrown mid-branch must not leave a stale
+   * frame behind for the next one.
+   */
+  private withFactsIn(facts: NarrowFact[], f: () => void): void {
+    this.narrowStack.push(facts);
+    try { f(); } finally { this.narrowStack.pop(); }
   }
 
   /**
@@ -452,14 +468,13 @@ class Checker {
    * evaluated unconditionally in the test (which holds on BOTH branches). Facts about a
    * name the region assigns are dropped.
    */
-  private factsFor(test: Expr, scope: Scope, positive: boolean, region: Stmt[] | Expr, guards = true): NarrowFact[] {
+  private factsFor(test: Expr, scope: Scope, positive: boolean, region: Stmt[], guards = true): NarrowFact[] {
     const out: NarrowFact[] = [];
     if (guards) this.guardFacts(test, scope, positive, out);
     this.assertFacts(test, scope, out);
     if (!out.length) return out;
     const assigned = new Set<string>();
-    if (Array.isArray(region)) collectAssignedStmts(region, assigned, assigned, false);
-    else collectAssigned(region, assigned, assigned, false);
+    collectAssignedStmts(region, assigned, assigned, false);
     return out.filter((f) => !assigned.has(f.name) && !this.closureAssigned.has(f.name));
   }
 
@@ -822,10 +837,10 @@ class Checker {
       case "IfStmt": {
         this.type(s.test, scope);
         // Control-flow narrowing: the guard's facts hold in the branch it selects.
-        this.withFacts(this.factsFor(s.test, scope, true, s.consequent),
+        this.withFactsIn(this.factsFor(s.test, scope, true, s.consequent),
           () => this.checkBlock(s.consequent, scope.child(), ret));
         if (s.alternate) {
-          this.withFacts(this.factsFor(s.test, scope, false, s.alternate),
+          this.withFactsIn(this.factsFor(s.test, scope, false, s.alternate),
             () => this.checkBlock(s.alternate!, scope.child(), ret));
         }
         return;
@@ -1198,7 +1213,7 @@ class Checker {
         // `??` gets no guard fact (its right operand runs when the left IS nullish), but
         // an `x!` assertion in the left holds for it too — the left ran to completion.
         const r = this.withFacts(
-          this.factsFor(e.left, scope, e.op === "&&", e.right, e.op !== "??"),
+          this.factsFor(e.left, scope, e.op === "&&", exprRegion(e.right), e.op !== "??"),
           () => this.type(e.right, scope, rhint),
         );
         if (e.op === "??") {
@@ -1227,8 +1242,8 @@ class Checker {
         // non-empty arm first and feed its type back.
         // Each arm is also NARROWED by the test, exactly as an `if` branch is
         // (`x !== undefined ? x.toUpperCase() : "-"`).
-        const yes = <T>(f: () => T) => this.withFacts(this.factsFor(e.test, scope, true, e.consequent), f);
-        const no = <T>(f: () => T) => this.withFacts(this.factsFor(e.test, scope, false, e.alternate), f);
+        const yes = (f: () => Ty) => this.withFacts(this.factsFor(e.test, scope, true, exprRegion(e.consequent)), f);
+        const no = (f: () => Ty) => this.withFacts(this.factsFor(e.test, scope, false, exprRegion(e.alternate)), f);
         let a: Ty, b: Ty;
         if (isEmptyArrayLit(e.consequent) && !isEmptyArrayLit(e.alternate)) {
           b = no(() => this.type(e.alternate, scope, hint));
@@ -2408,6 +2423,9 @@ function collectAssignedStmts(body: Stmt[], direct: Set<string>, closure: Set<st
     }
   }
 }
+
+/** An expression as a one-statement region, so `factsFor` takes one shape of region. */
+function exprRegion(e: Expr): Stmt[] { return [{ kind: "ExprStmt", expr: e }]; }
 
 /** True if control cannot fall out of the bottom of `body`. */
 function alwaysExits(body: Stmt[]): boolean {
