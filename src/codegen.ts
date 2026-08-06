@@ -1436,6 +1436,21 @@ class FnGen {
     return t;
   }
 
+  /**
+   * Control-flow narrowing: the checker proved that on this path the binding is not
+   * nullish (`if (x !== undefined) { x + 1 }`), so this read hands back the BARE value
+   * rather than the A2 tagged pair. Unwrapped by the same `nt_nonnull` the `!` assertion
+   * uses — so if the analysis is ever wrong it PANICS at the read with a location,
+   * exactly like a false assertion, and never yields a phantom value.
+   */
+  private narrowRead(e: Extract<Expr, { kind: "Identifier" }>, r: Val): Val {
+    if (!e.narrowed || !isNullableTy(r.ty)) return r;
+    const base = baseTy(r.ty);
+    const slot = this.fresh();
+    this.emit(`${slot} = call i64 @nt_nonnull(ptr ${r.v}, ptr ${this.locArg(e.loc) ?? "null"})`);
+    return { v: this.fromSlot(slot, base), ty: base };
+  }
+
   // ---- nullable tagged pair [tag, value] (A2) ----
   // tag 0 = undefined, 1 = null, 2 = present. is_nullish = tag < 2. The nullish
   // predicate is TAG-based, never truthiness, so 0 / "" / false pass through.
@@ -1679,14 +1694,14 @@ class FnGen {
       case "Identifier": {
         if (e.name === "NaN") return { v: llvmDouble(NaN), ty: "number" };
         if (e.name === "Infinity") return { v: llvmDouble(Infinity), ty: "number" };
-        if (this.captures.has(e.name)) return this.readCapture(e.name);
+        if (this.captures.has(e.name)) return this.narrowRead(e, this.readCapture(e.name));
         const ty = this.varTypes.get(e.name) ?? (e.ty ?? "number");
         const t = this.fresh();
         this.emit(`${t} = load ${llvmTy(ty)}, ptr ${this.addr(e.name)}`);
         // Drop flag: this read moves the value out, and the binding is still dropped on
         // some other path — null the slot so that drop frees nothing (see nullOnMove).
         if (e.nullOnMove && !this.liftedArrow) this.emit(`store ptr null, ptr ${this.addr(e.name)}`);
-        return { v: t, ty };
+        return this.narrowRead(e, { v: t, ty });
       }
 
       case "MemberExpr": {

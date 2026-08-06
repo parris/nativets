@@ -65,6 +65,9 @@ function literalIndex(e: Expr): number | undefined {
  *  compile-time out-of-bounds rejection. */
 interface Binding { ty: Ty; constant: boolean; len?: number }
 
+/** One control-flow narrowing fact — see the narrowing section on `Checker`. */
+interface NarrowFact { name: string; binding: Binding; ty: Ty; constant: boolean; arrowDepth: number }
+
 class Scope {
   private vars = new Map<string, Binding>();
   /** Names of THIS scope's own bindings that some lookup resolved to. Used on the
@@ -240,6 +243,10 @@ export function check(program: Program): CheckedProgram {
    * imported module's `export const` read from an imported function).
    */
   const moduleScope = builtins();
+  // Narrowing: a name some arrow (or nested function) assigns to can change at any time
+  // after a guard proved it non-nullish, so it is never narrowed. TypeScript's rule, for
+  // the same reason (`narrowingPastLastAssignment.ts`, function `f3`).
+  c.noteClosureAssignments(program.body);
   // M3: a generic declaration is a TEMPLATE, not a function. Register it with the
   // monomorphizer instead of the signature table; it is never checked or emitted as
   // written — only its specializations are (and a generic nobody calls emits nothing).
@@ -375,6 +382,174 @@ class Checker {
     if (!this.mutable.size || !isObjectTy(ot)) return false;
     const tag = classTag(ot);
     return tag !== undefined && this.mutable.has(tag);
+  }
+
+  /* ============================================================
+   * Control-flow narrowing of nullable BINDINGS (A2 follow-on).
+   *
+   * `x!` narrowed the EXPRESSION only. Having PROVED on this path that `x` is not
+   * nullish, every later read of `x` on that path should see the base type instead of
+   * the `?U`/`?N` tagged pair — `if (x !== undefined) { x + 1 }` is the idiomatic TS
+   * spelling and used to be a type error.
+   *
+   * A narrowing is a stack of FRAMES, each a set of facts scoped to a region (an `if`
+   * branch, the rest of a block after an early exit, the right operand of `&&`). A fact
+   * names the BINDING OBJECT, not the name, so an inner declaration that shadows the
+   * name is unaffected. Reads consult the innermost frame.
+   *
+   * Two rules keep it sound (the model is TypeScript's own, `narrowingPastLastAssignment.ts`):
+   *   - a fact is dropped if the region ASSIGNS to that name anywhere (including inside
+   *     an arrow in it), so a loop back-edge can never observe a stale narrowing;
+   *   - a `let` fact does not survive into an inner function body — a closure may run
+   *     after a later assignment. `const` facts do (they cannot be invalidated).
+   * A name assigned inside ANY arrow in the program is never narrowed at all, which is
+   * TypeScript's rule for the same reason.
+   *
+   * When the analysis is nonetheless wrong the read unwraps a nullish box, which PANICS
+   * exactly like a false `!` assertion (see codegen's `NonNullExpr`) — never a phantom
+   * value.
+   * ============================================================ */
+
+  /** One proved fact: this binding is not nullish here, so it reads as `ty`. */
+  private narrowStack: { binding: Binding; ty: Ty; constant: boolean; arrowDepth: number }[][] = [];
+  /** Nesting depth of arrow bodies being typed (a `let` narrowing stops at depth+1). */
+  private arrowDepth = 0;
+  /** Names assigned inside SOME arrow body anywhere in the program — never narrowable. */
+  private closureAssigned = new Set<string>();
+
+  /** Record the program's closure-assigned names (see the note above). */
+  noteClosureAssignments(body: Stmt[]): void {
+    const direct = new Set<string>();
+    collectAssignedStmts(body, direct, this.closureAssigned, false);
+  }
+
+  /** The narrowed type of `b` here, or undefined if no fact covers it. */
+  private narrowedTy(b: Binding): Ty | undefined {
+    for (let i = this.narrowStack.length - 1; i >= 0; i--) {
+      for (const f of this.narrowStack[i]!) {
+        if (f.binding !== b) continue;
+        return !f.constant && this.arrowDepth > f.arrowDepth ? undefined : f.ty;
+      }
+    }
+    return undefined;
+  }
+
+  /** Type an arrow body with `let` narrowings suspended (they do not cross the boundary). */
+  private inArrow<T>(f: () => T): T {
+    this.arrowDepth++;
+    try { return f(); } finally { this.arrowDepth--; }
+  }
+
+  /** Type `f()` with `facts` in scope. */
+  private withFacts<T>(facts: NarrowFact[], f: () => T): T {
+    this.narrowStack.push(facts);
+    try { return f(); } finally { this.narrowStack.pop(); }
+  }
+
+  /**
+   * The facts `test` establishes for `region`, where `region` is the code they cover:
+   * the guard's own facts on the branch selected by `positive`, plus any `x!` assertion
+   * evaluated unconditionally in the test (which holds on BOTH branches). Facts about a
+   * name the region assigns are dropped.
+   */
+  private factsFor(test: Expr, scope: Scope, positive: boolean, region: Stmt[] | Expr): NarrowFact[] {
+    const out: NarrowFact[] = [];
+    this.guardFacts(test, scope, positive, out);
+    this.assertFacts(test, scope, out);
+    if (!out.length) return out;
+    const assigned = new Set<string>();
+    if (Array.isArray(region)) collectAssignedStmts(region, assigned, assigned, false);
+    else collectAssigned(region, assigned, assigned, false);
+    return out.filter((f) => !assigned.has(f.name) && !this.closureAssigned.has(f.name));
+  }
+
+  /** Facts from the guard itself: an equality against the matching nullish literal. */
+  private guardFacts(e: Expr, scope: Scope, positive: boolean, out: NarrowFact[]): void {
+    switch (e.kind) {
+      case "BinaryExpr": {
+        const ne = e.op === "!==" || e.op === "!=";
+        const eq = e.op === "===" || e.op === "==";
+        // The value is non-nullish on the TRUE branch of `!==` and the FALSE branch of `===`.
+        if ((!ne && !eq) || positive !== ne) return;
+        for (const [v, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
+          // Both operand orders narrow — TypeScript's
+          // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
+          const lt = (lit as { ty?: Ty }).ty;
+          if (v.kind === "Identifier" && (lt === "undefined" || lt === "null")) this.addFact(v, scope, lt, out);
+        }
+        return;
+      }
+      case "LogicalExpr":
+        // `a && b` proves both when true; `a || b` proves both when false (De Morgan).
+        if ((e.op === "&&") === positive && e.op !== "??") {
+          this.guardFacts(e.left, scope, positive, out);
+          this.guardFacts(e.right, scope, positive, out);
+        }
+        return;
+      case "UnaryExpr":
+        if (e.op === "!") this.guardFacts(e.operand, scope, !positive, out);
+        return;
+      default:
+        return;
+    }
+  }
+
+  /**
+   * `x!` assertions evaluated UNCONDITIONALLY by `e` — the fact survives the expression
+   * (`m! && m[0]`, TypeScript's `narrowingWithNonNullExpression.ts`), because a false
+   * assertion never returns. Conditional positions (a `&&`/`||`/`??` right operand, a
+   * `?:` arm, an arrow body) are skipped: they may not run.
+   */
+  private assertFacts(e: Expr, scope: Scope, out: NarrowFact[]): void {
+    const go = (x: Expr) => this.assertFacts(x, scope, out);
+    switch (e.kind) {
+      case "NonNullExpr":
+        if (e.expr.kind === "Identifier") this.addFact(e.expr, scope, null, out);
+        go(e.expr);
+        return;
+      case "MemberExpr": go(e.object); return;
+      case "IndexExpr": go(e.object); go(e.index); return;
+      case "UnaryExpr": go(e.operand); return;
+      case "TypeofExpr": go(e.operand); return;
+      case "AsExpr": go(e.expr); return;
+      case "InstanceOfExpr": go(e.object); return;
+      case "BinaryExpr": go(e.left); go(e.right); return;
+      case "LogicalExpr": go(e.left); return; // the right operand is conditional
+      case "ConditionalExpr": go(e.test); return; // ditto the arms
+      case "SequenceExpr": e.exprs.forEach(go); return;
+      case "TemplateLiteral": e.exprs.forEach(go); return;
+      case "CallExpr": go(e.callee); e.args.forEach(go); return;
+      case "ArrayLiteral": e.elements.forEach(go); return;
+      case "SpreadExpr": go(e.argument); return;
+      default: return;
+    }
+  }
+
+  /**
+   * Add "this binding is not nullish" — but only when the test can actually prove it.
+   * A nullable carries ONE nullish arm, so comparing a `T | null` against `undefined`
+   * proves nothing (the tags never match); `kind` is the literal that was compared
+   * against, or null for a `!` assertion, which proves it outright.
+   */
+  private addFact(id: Extract<Expr, { kind: "Identifier" }>, scope: Scope, kind: Ty | null, out: NarrowFact[]): void {
+    const b = scope.lookup(id.name);
+    if (!b || !isNullableTy(b.ty)) return;
+    if (kind !== null && nullishKind(b.ty) !== kind) return;
+    if (out.some((f) => f.binding === b)) return;
+    out.push({ name: id.name, binding: b, ty: baseTy(b.ty), constant: b.constant, arrowDepth: this.arrowDepth });
+  }
+
+  /**
+   * A guard whose taken branch always EXITS narrows the binding for the REST of the
+   * block — `if (x === undefined) return;`. Modeled on TypeScript's
+   * `controlFlowIfStatement.ts` (function `a`, where the `else` returns).
+   */
+  private exitGuardFacts(s: Stmt, scope: Scope, rest: Stmt[]): NarrowFact[] {
+    if (s.kind !== "IfStmt" || !rest.length) return [];
+    const consExits = alwaysExits(s.consequent);
+    const altExits = !!s.alternate && alwaysExits(s.alternate);
+    if (consExits === altExits) return []; // neither, or both (the rest is unreachable)
+    return this.factsFor(s.test, scope, altExits, rest);
   }
 
   /* ============================================================
@@ -529,7 +704,15 @@ class Checker {
   }
 
   checkBlock(body: Stmt[], scope: Scope, ret: Ty = "void"): void {
-    for (const s of body) this.checkStmt(s, scope, ret);
+    let pushed = 0;
+    for (let i = 0; i < body.length; i++) {
+      this.checkStmt(body[i]!, scope, ret);
+      // A guard whose taken branch always exits narrows the REST of the block
+      // (`if (x === undefined) return;`). The frame stays for the remaining statements.
+      const facts = this.exitGuardFacts(body[i]!, scope, body.slice(i + 1));
+      if (facts.length) { this.narrowStack.push(facts); pushed++; }
+    }
+    for (let i = 0; i < pushed; i++) this.narrowStack.pop();
   }
 
   /**
@@ -636,11 +819,17 @@ class Checker {
           if (ret !== "void" && t !== ret) throw typeError(`return type ${t} does not match declared ${ret}`);
         }
         return;
-      case "IfStmt":
+      case "IfStmt": {
         this.type(s.test, scope);
-        this.checkBlock(s.consequent, scope.child(), ret);
-        if (s.alternate) this.checkBlock(s.alternate, scope.child(), ret);
+        // Control-flow narrowing: the guard's facts hold in the branch it selects.
+        this.withFacts(this.factsFor(s.test, scope, true, s.consequent),
+          () => this.checkBlock(s.consequent, scope.child(), ret));
+        if (s.alternate) {
+          this.withFacts(this.factsFor(s.test, scope, false, s.alternate),
+            () => this.checkBlock(s.alternate!, scope.child(), ret));
+        }
         return;
+      }
       case "WhileStmt":
         this.type(s.test, scope);
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
@@ -818,7 +1007,12 @@ class Checker {
           throw nyi(NYI.GENERIC, `generic function '${e.name}' used as a value; a generic is specialized at its CALL site — call it directly (\`${e.name}(…)\`) or wrap it in a concrete arrow`);
         }
         if (!b) throw typeError(`'${e.name}' is not defined`);
-        return b.ty;
+        // Control-flow narrowing: on this path the binding was PROVED non-nullish, so it
+        // reads as its base type and codegen unwraps the tagged pair here. Always
+        // written, so a `true` stamped by an earlier typing pass cannot go stale.
+        const narrowed = this.narrowedTy(b);
+        e.narrowed = narrowed !== undefined;
+        return narrowed ?? b.ty;
       }
       case "MemberExpr": {
         // Host I/O: process.argv -> string[], process.env.NAME -> string. Recognized
@@ -2128,6 +2322,83 @@ function collectIdentsStmt(s: Stmt, out: Set<string>): void {
     default: return;
   }
 }
+/* ------------------------------------------------------------
+ * Narrowing support: which NAMES a region assigns to.
+ *
+ * An assignment invalidates a narrowing, so a fact is only established over a region
+ * that provably contains none. Two sinks: `direct` for assignments in ordinary code and
+ * `closure` for ones inside an arrow body — the caller passes the same set for a region
+ * scan (either kind kills the fact) and separate ones for the whole-program scan, where
+ * only the closure assignments matter (they can run at any time later).
+ * ------------------------------------------------------------ */
+function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inArrow: boolean): void {
+  const go = (x: Expr) => collectAssigned(x, direct, closure, inArrow);
+  switch (e.kind) {
+    case "AssignExpr": (inArrow ? closure : direct).add(e.target); go(e.value); return;
+    case "UpdateExpr":
+      if (e.targetExpr) go(e.targetExpr); else (inArrow ? closure : direct).add(e.target);
+      return;
+    case "ArrowFunction":
+      if (e.exprBody) collectAssigned(e.body as Expr, direct, closure, true);
+      else collectAssignedStmts(e.body as Stmt[], direct, closure, true);
+      return;
+    case "MemberExpr": go(e.object); return;
+    case "IndexExpr": go(e.object); go(e.index); return;
+    case "UnaryExpr": go(e.operand); return;
+    case "TypeofExpr": go(e.operand); return;
+    case "AsExpr": case "NonNullExpr": go(e.expr); return;
+    case "InstanceOfExpr": go(e.object); return;
+    case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
+    case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;
+    case "SequenceExpr": case "TemplateLiteral": (e.exprs as Expr[]).forEach(go); return;
+    case "CallExpr": go(e.callee); e.args.forEach(go); return;
+    case "NewExpr": e.args.forEach(go); return;
+    case "IndexAssign": go(e.object); go(e.index); go(e.value); return;
+    case "FieldAssign": go(e.object); go(e.value); return;
+    case "ArrayLiteral": e.elements.forEach(go); return;
+    case "ObjectLiteral": e.properties.forEach((p) => go(p.value)); return;
+    case "SpreadExpr": go(e.argument); return;
+    default: return;
+  }
+}
+
+function collectAssignedStmts(body: Stmt[], direct: Set<string>, closure: Set<string>, inArrow: boolean): void {
+  const goE = (x: Expr) => collectAssigned(x, direct, closure, inArrow);
+  const goS = (b: Stmt[]) => collectAssignedStmts(b, direct, closure, inArrow);
+  for (const s of body) {
+    switch (s.kind) {
+      case "VarDecl": for (const d of s.decls) goE(d.init); break;
+      case "ReturnStmt": if (s.argument) goE(s.argument); break;
+      case "ThrowStmt": goE(s.argument); break;
+      case "ExprStmt": goE(s.expr); break;
+      case "IfStmt": goE(s.test); goS(s.consequent); if (s.alternate) goS(s.alternate); break;
+      case "WhileStmt": case "DoWhileStmt": goE(s.test); goS(s.body); break;
+      case "ForStmt":
+        if (s.init) { if ((s.init as Stmt).kind === "VarDecl") goS([s.init as Stmt]); else goE(s.init as Expr); }
+        if (s.test) goE(s.test);
+        if (s.update) goE(s.update);
+        goS(s.body);
+        break;
+      case "ForOfStmt": goE(s.iterable); goS(s.body); break;
+      case "ForInStmt": goE(s.object); goS(s.body); break;
+      case "SwitchStmt": goE(s.discriminant); for (const c of s.cases) { if (c.test) goE(c.test); goS(c.body); } break;
+      case "TryStmt": goS(s.block); if (s.handler) goS(s.handler); if (s.finalizer) goS(s.finalizer); break;
+      case "BlockStmt": goS(s.body); break;
+      case "MultiStmt": goS(s.stmts); break;
+      // A function/class body is its own flow; its assignments run when it is CALLED,
+      // which — like an arrow's — may be any time after the narrowing was established.
+      case "FuncDecl": collectAssignedStmts(s.body, direct, closure, true); break;
+      default: break;
+    }
+  }
+}
+
+/** True if control cannot fall out of the bottom of `body`. */
+function alwaysExits(body: Stmt[]): boolean {
+  return body.some((s) =>
+    s.kind === "ReturnStmt" || s.kind === "ThrowStmt" || s.kind === "BreakStmt" || s.kind === "ContinueStmt");
+}
+
 function collectBlockLocals(s: Stmt, out: Set<string>): void {
   if (s.kind === "VarDecl") for (const d of s.decls) out.add(d.name);
   else if (s.kind === "ForOfStmt" || s.kind === "ForInStmt") out.add(s.name);
