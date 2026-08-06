@@ -35,6 +35,7 @@ void nt_num_to_buf(double v, char *out, unsigned long out_len) {
 #include "../../runtime/nt_actor.c"
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
 
 static int g_checks = 0, g_fails = 0;
@@ -48,9 +49,21 @@ static void check_s(const char *what, const char *got, const char *want) {
 }
 
 /* A trace of the order things happened in, so "the scheduler kept working while the
- * reader was parked" is an assertion rather than a hope. */
+ * reader was parked" is an assertion rather than a hope.
+ *
+ * The append must be ATOMIC: under M:N these actors really do run on different OS threads
+ * at the same moment, and the obvious `strlen` + write is a read-modify-write that loses a
+ * character when two of them land together (observed: ~1/120 runs at 8 threads, which read
+ * as a runtime failure when it was only the instrumentation). Each writer claims its own
+ * index and writes exactly one byte; the buffer is zeroed per test, so it stays a valid
+ * C string without anyone writing a terminator over a neighbour's slot. */
 static char g_trace[64];
-static void trace(char c) { size_t n = strlen(g_trace); if (n < sizeof(g_trace) - 1) { g_trace[n] = c; g_trace[n + 1] = 0; } }
+static _Atomic size_t g_trace_n;
+static void trace(char c) {
+  size_t i = atomic_fetch_add(&g_trace_n, 1);
+  if (i < sizeof(g_trace) - 1) g_trace[i] = c;
+}
+static void trace_reset(void) { memset(g_trace, 0, sizeof(g_trace)); atomic_store(&g_trace_n, 0); }
 
 static int g_pipe[2];
 static int g_read_rc = -99;
@@ -80,7 +93,7 @@ static void worker_body(void *env, int64_t arg) {
 
 static void test_park_and_wake(void) {
   nt_sched_init();
-  g_trace[0] = 0;
+  trace_reset();
   if (pipe(g_pipe) != 0) { fprintf(stderr, "  FAIL pipe()\n"); g_fails++; return; }
 
   nt_spawn_closure(reader_body, NULL, 0);       /* spawned FIRST: it parks first */

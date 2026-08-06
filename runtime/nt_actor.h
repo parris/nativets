@@ -58,7 +58,15 @@ NtMsg       nt_msg_list_get(NtMsg m, int64_t i);
 typedef void (*NtActorFn)(NtMsg arg);
 
 /* ---- core v0 API ---- */
-void   nt_sched_init(void);                 /* (re)initialize the scheduler + actor 0 (main) */
+/* (re)initialize the scheduler + actor 0 (main).
+ *
+ * A compiled program calls this ONCE, from @main's prologue. Calling it again is supported
+ * (the C test harnesses do it per case, for independence) but only from the SAME thread and
+ * only at QUIESCENCE — after nt_drain has returned. Scheduler THREADS are created on the
+ * first call and never again: a repeat call must not touch the NtSched structs the existing
+ * workers are running on. Rebuilding them wholesale, as v0..v5 did when there were no
+ * threads, is a use-after-free that shows up as a SIGBUS/SIGSEGV or a hang under M:N. */
+void   nt_sched_init(void);
 NtPid  nt_spawn(NtActorFn body, NtMsg arg); /* start body(arg); returns the new pid */
 void   nt_send(NtPid to, NtMsg msg);        /* async, deep-copy, enqueue; wakes a blocked actor */
 NtMsg  nt_receive(void);                    /* block current actor until a message; FIFO dequeue */
