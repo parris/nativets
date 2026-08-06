@@ -344,6 +344,12 @@ export interface Identifier {
    *  is dropped on some other path, so the slot is nulled here. `free(NULL)` is a
    *  no-op, which makes the pointer itself rustc's runtime drop flag. */
   nullOnMove?: boolean;
+  /** Control-flow narrowing: the checker proved that on THIS path the binding — whose
+   *  declared type is a nullable `?U`/`?N` pair — is not nullish, so `ty` above is the
+   *  BASE type and codegen must unwrap the tagged pair at this read (same unwrap as
+   *  `x!`). Set on every read, so a stale `true` from an earlier typing pass cannot
+   *  survive. */
+  narrowed?: boolean;
 }
 
 export interface MemberExpr {
