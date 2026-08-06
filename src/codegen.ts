@@ -335,6 +335,7 @@ const DECLARES = [
   // so `try`/`catch` sees it exactly like node's throw.
   "declare ptr @nt_read_file(ptr)",
   "declare void @nt_write_file(ptr, ptr)",
+  "declare i32 @nt_path_exists(ptr)",
   // --- GUI FFI (raylib-backed, north-star C-d): flat scalar ABI, conditionally linked ---
   // Booleans come back as i32 (0/1) and are lowered to i1 via `icmp ne`. nt_gui.c + -lraylib
   // are pulled in ONLY when one of these is CALLED (see driver.ts) — non-GUI programs and
@@ -4214,6 +4215,16 @@ class FnGen {
         this.emit(`call void @nt_write_file(ptr ${path}, ptr ${data})`);
         this.emitExcCheck();
         return { v: "", ty: "void" };
+      }
+      case "existsSync": {
+        // Infallible by contract (node swallows every stat error into `false`), so no
+        // exception check. i32 → i1 like the other predicate FFI returns.
+        const path = this.genExpr(args[0]!).v;
+        const r = this.fresh();
+        this.emit(`${r} = call i32 @nt_path_exists(ptr ${path})`);
+        const t = this.fresh();
+        this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        return { v: t, ty: "boolean" };
       }
     }
     // Unreachable: the checker only admits a name that HOST_FUNCS has a signature for.

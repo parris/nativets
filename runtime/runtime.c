@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <time.h>     /* clock_gettime / time — Date.now */
 #include <errno.h>    /* host FFI (SH4): node-identical fs error codes/messages */
+#include <sys/stat.h> /* host FFI (SH4): existsSync — POSIX stat, cross-links */
 #ifndef _WIN32
 #include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
 #if !defined(__wasi__)
@@ -1584,6 +1585,14 @@ void nt_write_file(const char *path, const char *data) {
   int bad = (w != n || ferror(f)) ? (errno ? errno : EIO) : 0;
   if (fclose(f) != 0 && !bad) bad = errno ? errno : EIO;
   if (bad) nt_exc_raise_msg(host_fs_error(bad, "write", path));
+}
+
+/* existsSync(path) -> 1 when the path exists (a file, a directory, anything
+ * stat can see), else 0. node NEVER throws here — every stat failure is `false` —
+ * so this raises nothing and codegen emits no exception check. */
+int32_t nt_path_exists(const char *path) {
+  struct stat st;
+  return stat(path, &st) == 0 ? 1 : 0;
 }
 
 /* ============================================================

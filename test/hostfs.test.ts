@@ -139,6 +139,33 @@ try {
   });
 });
 
+describe("node:fs — existsSync", () => {
+  test("true for a file, false for a missing path, true for a directory", async () => {
+    const dir = scratch();
+    const file = join(dir, "here.txt");
+    writeFileSync(file, "x");
+    await differential(
+      `import { existsSync } from "node:fs";
+console.log(existsSync(process.argv[2]));
+console.log(existsSync(process.argv[3]));
+console.log(existsSync(process.argv[4]));
+`,
+      { args: [file, join(dir, "absent.txt"), dir] },
+    );
+  });
+
+  test("it does not throw — it reports, so it guards a read", async () => {
+    const dir = scratch();
+    await differential(
+      `import { existsSync, readFileSync } from "node:fs";
+const p = process.argv[2];
+console.log(existsSync(p) ? readFileSync(p, "utf8") : "no such file");
+`,
+      { args: [join(dir, "guarded.txt")] },
+    );
+  });
+});
+
 describe("the host FFI surface is closed — outside it is NT1028, never half-implemented", () => {
   test("a `node:` module with no native implementation", () => {
     expect(rejects(`import { createHash } from "node:crypto";\nconsole.log(typeof createHash);\n`)).toBe("NT1028");

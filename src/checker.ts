@@ -142,6 +142,8 @@ const HOST_FUNCS: Record<string, MethodSig> = {
   // `writeFileSync(path, contents)` — node also takes an options/encoding third
   // argument; the default (utf8, truncate) is the only mode implemented.
   writeFileSync: { min: 2, max: 2, argTys: ["string", "string"], ret: "void" },
+  // `existsSync(path)` REPORTS rather than throws — it is the guard in front of a read.
+  existsSync: { min: 1, max: 1, argTys: ["string"], ret: "boolean" },
 };
 
 const GLOBAL_FUNCS: Record<string, MethodSig> = {
