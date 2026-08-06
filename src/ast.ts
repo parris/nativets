@@ -608,10 +608,29 @@ export interface ExportTable {
   types: Map<string, Ty>;
 }
 
+/**
+ * SH4 — the host FFI surface: the `node:` builtin modules a self-hosted nativets
+ * needs to read a `.ts`, write a `.ll`, stat a path and invoke `clang`. A named
+ * import binds the SAME-NAMED compiler builtin (so `readFileSync(p, "utf8")` is
+ * ordinary TypeScript that node runs too), and the import is then erased.
+ *
+ * The list is deliberately exactly what `src/*.ts` imports — nothing speculative.
+ * A module or member outside it is refused with NT1028, never half-implemented.
+ * The signatures live in the checker (`HOST_FUNCS`) and the lowering in codegen.
+ */
+export const HOST_MODULES: Record<string, readonly string[]> = {
+  "node:fs": ["readFileSync"],
+};
+
 export interface Program {
   kind: "Program";
   body: Stmt[];
   endDrops?: string[];
+  /** Host builtins (SH4) this program imported from a `node:` module, by their
+   *  CANONICAL name (an `as` alias is rewritten at parse time). A host builtin is
+   *  only in scope when imported — unlike an ambient global — so user code that
+   *  defines its own `join` is unaffected. */
+  hostImports?: string[];
   /** Present only when the source declared imports (the linker's input). */
   imports?: ImportDecl[];
   exports?: ExportTable;

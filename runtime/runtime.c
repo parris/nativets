@@ -23,6 +23,7 @@
 #include <stdatomic.h> /* relaxed stat counters (thread-safe under B3 v6 M:N schedulers) */
 #include <stdint.h>
 #include <time.h>     /* clock_gettime / time — Date.now */
+#include <errno.h>    /* host FFI (SH4): node-identical fs error codes/messages */
 #ifndef _WIN32
 #include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
 #if !defined(__wasi__)
@@ -1493,6 +1494,82 @@ const char *nt_read_key(void) {
   if (g_stdin_pos >= g_stdin_len) { char *o = alloc_str(0); o[0] = '\0'; return o; }
   char *o = alloc_str(1); o[0] = g_stdin[g_stdin_pos]; o[1] = '\0';
   g_stdin_pos++;
+  return o;
+}
+
+/* ============================================================
+ * Host FFI (SH4) — the filesystem, backed by stdio only (fopen/fread/fwrite/
+ * fclose), so this block cross-links unchanged for macOS/iOS/Android exactly
+ * like the argv/env/stdin block above.
+ *
+ * Errors are node's, byte-for-byte: node's `err.message` for a failed fs call is
+ * `<CODE>: <description>, <syscall> '<path>'` (the "Error: " prefix belongs to
+ * toString, not to the message). We raise that string through the pending-
+ * exception protocol, so `try { readFileSync(p, "utf8") } catch (e) { e.message }`
+ * prints the same text under node and under the compiled binary.
+ * ============================================================ */
+
+/* The node/libuv description for the errno values an fs call actually produces.
+ * An errno we do not name falls back to strerror(3) — never a wrong code. */
+static const char *host_errno_code(int e) {
+  switch (e) {
+    case ENOENT:  return "ENOENT";
+    case EACCES:  return "EACCES";
+    case EISDIR:  return "EISDIR";
+    case ENOTDIR: return "ENOTDIR";
+    case EEXIST:  return "EEXIST";
+    case EPERM:   return "EPERM";
+    case ENOTEMPTY: return "ENOTEMPTY";
+    default:      return "";
+  }
+}
+static const char *host_errno_desc(int e) {
+  switch (e) {
+    case ENOENT:  return "no such file or directory";
+    case EACCES:  return "permission denied";
+    case EISDIR:  return "illegal operation on a directory";
+    case ENOTDIR: return "not a directory";
+    case EEXIST:  return "file already exists";
+    case EPERM:   return "operation not permitted";
+    case ENOTEMPTY: return "directory not empty";
+    default:      return strerror(e);
+  }
+}
+
+/* Build node's fs error message: "ENOENT: no such file or directory, open '/x'".
+ * The buffer is untracked (like a string literal), so the message a catch block
+ * holds is never freed and never double-freed. */
+static const char *host_fs_error(int e, const char *syscall, const char *path) {
+  const char *code = host_errno_code(e);
+  const char *desc = host_errno_desc(e);
+  size_t n = strlen(code) + strlen(desc) + strlen(syscall) + strlen(path) + 16;
+  char *m = (char *)nativets_alloc(n);
+  if (code[0]) snprintf(m, n, "%s: %s, %s '%s'", code, desc, syscall, path);
+  else         snprintf(m, n, "%s, %s '%s'", desc, syscall, path);
+  return m;
+}
+
+/* readFileSync(path, "utf8") -> the whole file as a string. Throws (catchably) on
+ * a missing/unreadable path, like node. Read with fread in a growing buffer rather
+ * than fseek+ftell so it also works for a non-seekable path. */
+const char *nt_read_file(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) { nt_exc_raise_msg(host_fs_error(errno, "open", path)); return ""; }
+  size_t cap = 4096, len = 0;
+  char *buf = (char *)nativets_alloc(cap);
+  for (;;) {
+    if (len == cap) { size_t nc = cap * 2; char *nb = (char *)nativets_alloc(nc); memcpy(nb, buf, len); buf = nb; cap = nc; }
+    size_t n = fread(buf + len, 1, cap - len, f);
+    len += n;
+    if (n == 0) break;
+  }
+  int bad = ferror(f) ? errno : 0;
+  fclose(f);
+  /* node reports reading a DIRECTORY as EISDIR with the `read` syscall — fopen on a
+   * directory succeeds on macOS/Linux, so the failure surfaces here, not at open. */
+  if (bad) { nt_exc_raise_msg(host_fs_error(bad, "read", path)); return ""; }
+  char *o = alloc_str(len);
+  memcpy(o, buf, len); o[len] = '\0';
   return o;
 }
 

@@ -129,6 +129,18 @@ const STRING_METHODS: Record<string, MethodSig> = {
   endsWith: { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" },
   lastIndexOf: { min: 1, max: 1, argTys: ["string"], ret: "number" }, // number | undefined (node: undefined out of range)
 };
+/**
+ * Host FFI (SH4) — the signatures of the `node:` builtins, keyed by their canonical
+ * name. Unlike GLOBAL_FUNCS these are NOT ambient: a name is only in scope when the
+ * program imported it (`Program.hostImports`), so node and nativets agree on what is
+ * defined. Backed by libc in runtime/runtime.c, so they cross-link unchanged.
+ */
+const HOST_FUNCS: Record<string, MethodSig> = {
+  // node:fs — `readFileSync(path, "utf8")`. The encoding is REQUIRED and must be the
+  // literal "utf8": node returns a Buffer without one, and we have no Buffer.
+  readFileSync: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
+};
+
 const GLOBAL_FUNCS: Record<string, MethodSig> = {
   parseInt: { min: 1, max: 2, argTys: ["string", "number"], ret: "number" },
   parseFloat: { min: 1, max: 1, argTys: ["string"], ret: "number" },
@@ -228,7 +240,7 @@ export function actorSendTy(t: Ty): Ty {
 
 export function check(program: Program): CheckedProgram {
   const functions = new Map<string, Sig>();
-  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []));
+  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []));
   const builtins = () => {
     const s = new Scope();
     for (const n of BUILTIN_NUMBERS) s.declare(n, "number", true);
@@ -355,6 +367,10 @@ class Checker {
      *  from object LITERALS — so a literal must be able to take the tag from its context.
      *  Class tags are deliberately excluded: an instance comes from `new C(…)`. */
     private recordTags: Set<string> = new Set(),
+    /** Host builtins (SH4) brought into scope by a `node:` import. Empty unless the
+     *  program imported one, so `readFileSync` is an ordinary undefined name — and a
+     *  user function of that name — in every program that did not. */
+    private hostImports: Set<string> = new Set(),
   ) {}
 
   /** The tagged record type a literal should take from its context, if any. */
@@ -1193,13 +1209,25 @@ class Checker {
 
   /** Type of the first `throw` reachable in a body (for the catch binding). */
   private inferThrowType(stmts: Stmt[], scope: Scope): Ty | undefined {
+    // SH4: a host FFI call throws an ERROR, exactly like node's `fs` — so a block
+    // containing one binds `catch (e)` to `{message:string}` and `e.message` is the
+    // node-identical text. Checked before the `throw` scan (an explicit throw in the
+    // same block still wins, since it decides the type it actually throws).
+    if (this.hostImports.size && stmts.some((s) => hasHostCall(s, this.hostImports))) {
+      const explicit = this.firstThrowType(stmts, scope);
+      return explicit ?? "{message:string}";
+    }
+    return this.firstThrowType(stmts, scope);
+  }
+
+  private firstThrowType(stmts: Stmt[], scope: Scope): Ty | undefined {
     for (const s of stmts) {
       let t: Ty | undefined;
       if (s.kind === "ThrowStmt") t = this.type(s.argument, scope);
-      else if (s.kind === "IfStmt") t = this.inferThrowType(s.consequent, scope) ?? (s.alternate ? this.inferThrowType(s.alternate, scope) : undefined);
-      else if (s.kind === "WhileStmt" || s.kind === "DoWhileStmt" || s.kind === "ForOfStmt" || s.kind === "ForInStmt" || s.kind === "ForStmt") t = this.inferThrowType(s.body, scope);
-      else if (s.kind === "BlockStmt") t = this.inferThrowType(s.body, scope);
-      else if (s.kind === "MultiStmt") t = this.inferThrowType(s.stmts, scope);
+      else if (s.kind === "IfStmt") t = this.firstThrowType(s.consequent, scope) ?? (s.alternate ? this.firstThrowType(s.alternate, scope) : undefined);
+      else if (s.kind === "WhileStmt" || s.kind === "DoWhileStmt" || s.kind === "ForOfStmt" || s.kind === "ForInStmt" || s.kind === "ForStmt") t = this.firstThrowType(s.body, scope);
+      else if (s.kind === "BlockStmt") t = this.firstThrowType(s.body, scope);
+      else if (s.kind === "MultiStmt") t = this.firstThrowType(s.stmts, scope);
       if (t) return t;
     }
     return undefined;
@@ -1675,6 +1703,14 @@ class Checker {
       return t;
     }
 
+    // Host FFI (SH4) — in scope only because a `node:` import brought it in.
+    if (e.callee.kind === "Identifier" && this.hostImports.has(e.callee.name)) {
+      const h = HOST_FUNCS[e.callee.name]!;
+      this.checkHostCall(e.callee.name, e.args);
+      this.checkArgs(e.args, h, scope, e.callee.name);
+      return h.ret;
+    }
+
     // global builtin, function value, or user function
     if (e.callee.kind === "Identifier") {
       const g = GLOBAL_FUNCS[e.callee.name];
@@ -2069,6 +2105,20 @@ class Checker {
     return a.kind === "ArrowFunction" ? this.typeArrow(a, expected, scope) : this.type(a, scope, baseTy(expected));
   }
 
+  /**
+   * The extra, non-type constraints a host builtin carries (SH4) — the arguments whose
+   * VALUE, not just type, decides what node returns. `readFileSync(p)` with no encoding
+   * yields a Buffer, and `readFileSync(p, enc)` with a computed `enc` could be any of
+   * them, so both are refused rather than compiled as if they said "utf8".
+   */
+  private checkHostCall(name: string, args: Expr[]): void {
+    if (name === "readFileSync") {
+      const enc = args[1];
+      if (!enc || enc.kind !== "StringLiteral" || enc.value !== "utf8")
+        throw nyi(NYI.HOSTMOD, `readFileSync without the literal encoding "utf8" (node returns a Buffer, which has no representation here — write \`readFileSync(path, "utf8")\`)`);
+    }
+  }
+
   private checkArgs(args: Expr[], sig: MethodSig, scope: Scope, label: string): void {
     if (args.length < sig.min || args.length > sig.max) throw typeError(`${label} expects ${sig.min}..${sig.max} args, got ${args.length}`);
     args.forEach((a, i) => {
@@ -2077,6 +2127,21 @@ class Checker {
       if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`);
     });
   }
+}
+
+/**
+ * SH4: does this statement (anywhere inside it, at any depth) CALL a host builtin?
+ * A host call is fallible — a missing file, a failed spawn — and node reports the
+ * failure as an `Error`, so a try block containing one binds its catch parameter to
+ * `{message:string}`. Structural, like codegen's `mentions`: the AST is plain data,
+ * and a shape-blind walk cannot miss a node kind added later.
+ */
+function hasHostCall(node: unknown, hosts: Set<string>): boolean {
+  if (Array.isArray(node)) return node.some((x) => hasHostCall(x, hosts));
+  if (!node || typeof node !== "object") return false;
+  const n = node as { kind?: string; callee?: { kind?: string; name?: string } };
+  if (n.kind === "CallExpr" && n.callee?.kind === "Identifier" && n.callee.name && hosts.has(n.callee.name)) return true;
+  return Object.values(node).some((v) => hasHostCall(v, hosts));
 }
 
 /** A bare `[]` — the one expression whose type must come from context, not from itself. */

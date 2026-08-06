@@ -330,6 +330,10 @@ const DECLARES = [
   "declare ptr @nt_read_key()",
   "declare void @nt_raw_mode(i32)",
   "declare void @nt_exit(double)",
+  // --- Host FFI (SH4): filesystem + subprocess. libc/POSIX only (fopen/stat/fork),
+  // so these cross-link unchanged; a failure raises the pending-exception protocol
+  // so `try`/`catch` sees it exactly like node's throw.
+  "declare ptr @nt_read_file(ptr)",
   // --- GUI FFI (raylib-backed, north-star C-d): flat scalar ABI, conditionally linked ---
   // Booleans come back as i32 (0/1) and are lowered to i1 via `icmp ne`. nt_gui.c + -lraylib
   // are pulled in ONLY when one of these is CALLED (see driver.ts) — non-GUI programs and
@@ -557,8 +561,13 @@ class ModuleGen {
     return sym;
   }
 
+  /** Host builtins (SH4) the program imported from a `node:` module. Only these names
+   *  lower to a host call; every other program's IR is unchanged. */
+  hostImports = new Set<string>();
+
   build(program: CheckedProgram["program"]): string {
     this.usesActors = scanUsesActors(program);
+    this.hostImports = new Set(program.hostImports ?? []);
     const fns: string[] = [];
     for (const s of program.body) {
       if (s.kind === "FuncDecl") fns.push(new FnGen(this).genFunction(s));
@@ -2446,6 +2455,7 @@ class FnGen {
       return this.genStringMethod(e.callee.property, recv, e.args);
     }
     if (e.callee.kind === "Identifier") {
+      if (this.mod.hostImports.has(e.callee.name)) return this.genHost(e.callee.name, e.args);
       const g = this.genGlobal(e.callee.name, e.args, e.ty);
       if (g) return g;
       const cap = this.captures.get(e.callee.name);
@@ -2566,6 +2576,17 @@ class FnGen {
         const m = this.fresh();
         this.emit(`${m} = call ptr @nt_exc_message()`);
         this.emit(`store ptr ${m}, ptr ${this.addr(h.excVar)}`);
+      } else if (h.excVar && h.eType === "{message:string}") {
+        // SH4: the block calls a host builtin, so its failure is an Error — box the
+        // runtime message into `new Error(msg)`'s shape so `e.message` reads it.
+        const m = this.fresh();
+        this.emit(`${m} = call ptr @nt_exc_message()`);
+        const obj = this.fresh();
+        this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(1)})`);
+        const g = this.fresh();
+        this.emit(`${g} = getelementptr i64, ptr ${obj}, i64 0`);
+        this.emit(`store i64 ${this.toSlot({ v: m, ty: "string" })}, ptr ${g}`);
+        this.emit(`store ptr ${obj}, ptr ${this.addr(h.excVar)}`);
       }
       this.emit(`call void @nt_exc_clear()`);
       this.terminate(`br label %${h.catchLbl}`);
@@ -4168,6 +4189,27 @@ class FnGen {
     const slot = this.fresh();
     this.emit(`${slot} = load i64, ptr ${gep}`);
     return { v: this.fromSlot(slot, ty), ty };
+  }
+
+  /**
+   * Host FFI (SH4) — lower a `node:` builtin the program imported. The checker has
+   * already validated the signature (HOST_FUNCS), so this only marshals. Fallible
+   * calls raise the pending exception (nt_exc_*) and are followed by an exception
+   * check, so a missing file surfaces as a catchable throw, like node's ENOENT.
+   */
+  private genHost(name: string, args: Expr[]): Val {
+    switch (name) {
+      case "readFileSync": {
+        // The encoding argument is checked to be the literal "utf8"; nothing to emit.
+        const path = this.genExpr(args[0]!).v;
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_read_file(ptr ${path})`);
+        this.emitExcCheck();
+        return { v: t, ty: "string" };
+      }
+    }
+    // Unreachable: the checker only admits a name that HOST_FUNCS has a signature for.
+    throw new Error(`host builtin '${name}' has no lowering`);
   }
 
   private genGlobal(name: string, args: Expr[], retTy?: Ty): Val | null {

@@ -9,7 +9,7 @@
 
 import { lex, type Token } from "./lexer.ts";
 import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnostics.ts";
-import { makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep, isObjectTy, classTag } from "./ast.ts";
+import { makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep, isObjectTy, classTag, HOST_MODULES } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
   ImportDecl, ExportTable,
@@ -125,6 +125,11 @@ class Parser {
    *  ordinary single-file program, in which case `parseProgram` leaves them off the
    *  Program entirely — so every existing single-module path is untouched. */
   private imports: ImportDecl[] = [];
+  /** Host FFI (SH4): the canonical names imported from a `node:` builtin module, plus
+   *  the `as`-alias→canonical map applied when an identifier is parsed. A `node:` import
+   *  binds a compiler BUILTIN, so there is no module to link — it is erased like a type. */
+  private readonly hostImports = new Set<string>();
+  private readonly hostAliases = new Map<string, string>();
   private exportValues = new Map<string, string>();
   private exportReexports = new Map<string, { source: string; imported: string; line: number }>();
   private exportTypes = new Set<string>();
@@ -204,6 +209,8 @@ class Parser {
     // attribute, so an ordinary program's Program is byte-identical to what it was.
     if (this.mutableClasses.size) program.mutableClasses = [...this.mutableClasses];
     if (this.mutableRecords.size) program.mutableRecords = [...this.mutableRecords];
+    // Host FFI (SH4) — attached only when the source imported a `node:` builtin.
+    if (this.hostImports.size) program.hostImports = [...this.hostImports];
     if (this.collectTypes) for (const [k, v] of this.typeAliases) this.collectTypes.set(k, v);
     // Only attach the module surface when the source actually used it, so a
     // single-file program's Program is byte-identical to what it always was.
@@ -545,6 +552,16 @@ class Parser {
     const clause = this.parseNamedClause();
     if (this.at(",")) throw nyi(NYI.MODULE, `a combined default + named import at ${kw.line}:${kw.col}`);
     this.eat("from");
+    // Host FFI (SH4): `node:fs` & friends name COMPILER BUILTINS, not files. The import
+    // binds them (a builtin is out of scope until imported, so user code that defines its
+    // own `join` is unaffected) and is then erased — there is nothing to link.
+    const spec = this.peek();
+    if (spec.type === "str" && spec.value.startsWith("node:")) {
+      this.next();
+      if (this.at(";")) this.eat(";");
+      this.bindHostImport(spec.value, clause, typeOnly, kw);
+      return { kind: "MultiStmt", stmts: [] };
+    }
     const source = this.parseSpecifier("from");
     if (this.at(";")) this.eat(";");
     this.imports.push({
@@ -553,6 +570,26 @@ class Parser {
       line: kw.line,
     });
     return { kind: "MultiStmt", stmts: [] };
+  }
+
+  /** Bind the named members of a `node:` builtin module (SH4). Each one must have a
+   *  native implementation — the surface is `HOST_MODULES` — otherwise NT1028. */
+  private bindHostImport(
+    mod: string,
+    clause: { name: string; alias: string; typeOnly: boolean }[],
+    typeOnly: boolean,
+    kw: Token,
+  ): void {
+    const members = HOST_MODULES[mod];
+    if (!members)
+      throw nyi(NYI.HOSTMOD, `the built-in module '${mod}' at ${kw.line}:${kw.col} (implemented: ${Object.keys(HOST_MODULES).map((m) => `'${m}'`).join(", ")})`);
+    for (const c of clause) {
+      if (typeOnly || c.typeOnly) continue; // a type-only import binds no value
+      if (!members.includes(c.name))
+        throw nyi(NYI.HOSTMOD, `'${c.name}' from '${mod}' at ${kw.line}:${kw.col} (implemented: ${members.join(", ")})`);
+      this.hostImports.add(c.name);
+      if (c.alias !== c.name) this.hostAliases.set(c.alias, c.name);
+    }
   }
 
   private parseExport(): Stmt {
@@ -1748,7 +1785,10 @@ class Parser {
         return { kind: "FieldAssign", object: this.ident("this"), field: "message", value: args[0]!, viaThis: true };
       }
       this.next();
-      return { kind: "Identifier", name: t.value, loc: { line: t.line, col: t.col } };
+      // SH4: `import { readFileSync as rfs }` renames a HOST BUILTIN, which has no
+      // declaration to alpha-rename — so the alias is resolved here, at the use site.
+      const name = this.hostAliases.get(t.value) ?? t.value;
+      return { kind: "Identifier", name, loc: { line: t.line, col: t.col } };
     }
     if (this.at("[")) return this.parseArrayLiteral();
     if (this.at("{")) return this.parseObjectLiteral();

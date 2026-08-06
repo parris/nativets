@@ -148,6 +148,13 @@ export const NYI = {
   // LEXES (so it is a located, named refusal instead of a character-level lexer crash
   // that killed the whole file) and is refused here. This is the #1 self-hosting
   // blocker — see docs/self-hosting.md.
+  // The host FFI (SH4). A `node:` builtin module is resolved by the compiler itself —
+  // there is no node_modules and no JS to run — so only the members with a native
+  // implementation exist. This code refuses a `node:` module we do not implement, and a
+  // member outside the implemented surface, naming what IS available. Half-implementing
+  // (e.g. `readFileSync` with no encoding, which returns a Buffer in node) would be a
+  // silent divergence, so those are refused here too.
+  HOSTMOD: { code: "NT1028", milestone: "later", hint: "the host FFI implements exactly what a self-hosted compiler needs; see docs/self-hosting.md (SH4). Anything else from a `node:` module has no native implementation" },
   REGEX: { code: "NT1027", milestone: "later", hint: "there is no RegExp — string patterns only (`s.replace(\"a\", \"b\")`, `s.split(\",\")`, `s.startsWith`/`endsWith`/`includes`/`indexOf`). Hand-roll character scanning for anything richer" },
 } as const;
 

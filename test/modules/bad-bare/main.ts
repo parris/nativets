@@ -1,4 +1,5 @@
 // There is no node_modules resolution: a bare specifier is NT1017.
-import { readFileSync } from "node:fs";
+// (A `node:` specifier is DIFFERENT — those name compiler builtins, see SH4/NT1028.)
+import { chunk } from "lodash";
 
-console.log(typeof readFileSync);
+console.log(typeof chunk);
