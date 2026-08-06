@@ -570,7 +570,33 @@ class Checker {
   }
 
   checkBlock(body: Stmt[], scope: Scope, ret: Ty = "void"): void {
-    for (const s of body) this.checkStmt(s, scope, ret);
+    for (const s of body) {
+      this.checkStmt(s, scope, ret);
+      this.eliminateAfterEarlyExit(s, scope);
+    }
+  }
+
+  /**
+   * SH2 narrowing by ELIMINATION — the guard-clause shape, and the second one the
+   * compiler's own passes are written in:
+   *
+   *     if (n.kind === "NumberLiteral") return n.value;
+   *     if (n.kind === "Negate") return -evaluate(n.operand);
+   *     return n.left …            // narrowed to BinaryExpr by what CANNOT be here
+   *
+   * An `if` with no `else` whose body always leaves the block means every statement
+   * after it runs only when the tag did NOT match, so the rest of the block sees the
+   * remaining members. The shadow is declared in the block's OWN scope (not a child),
+   * because "from here on" IS the rest of this scope — and the statements before it
+   * are already checked, so nothing is retroactively affected.
+   */
+  private eliminateAfterEarlyExit(s: Stmt, scope: Scope): void {
+    if (s.kind !== "IfStmt" || s.alternate) return;
+    if (!leavesBlock(s.consequent)) return;
+    const t = this.tagTest(s.test, scope);
+    if (!t) return;
+    const others = unionTagValues(t.union).filter((v) => v !== t.tag);
+    this.narrowInto(scope, t.name, t.union, t.negated ? [t.tag] : others);
   }
 
   /**
@@ -858,7 +884,7 @@ class Checker {
               : unionTagValues(d.union).filter((v) => !listed.includes(v)); // `default:` — whatever is left
             const tags = [...new Set([...carry, ...own])];
             this.narrowInto(inner, d.name, d.union, tags);
-            carry = endsControlFlow(cse.body) ? [] : tags;
+            carry = leavesBlock(cse.body) ? [] : tags;
           }
           this.checkBlock(cse.body, inner, ret);
         });
@@ -2275,23 +2301,25 @@ class Checker {
   }
 }
 
-/**
- * Does this statement list definitely leave its enclosing switch case? Used only to
- * decide whether the NEXT case can also be reached by fallthrough, so being
- * conservative (a `return` inside both arms of an `if` is not recognized) widens the
- * set of tags a body is narrowed to — the safe direction.
- */
-function endsControlFlow(body: Stmt[]): boolean {
-  const last = body[body.length - 1];
-  return last !== undefined && (last.kind === "BreakStmt" || last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "ContinueStmt");
-}
-
 /** Does this case body definitely LEAVE the enclosing function (as opposed to merely
  *  leaving the switch, which `break` does)? Conservative in the safe direction: an
  *  unrecognized shape means "not total", so the exhaustiveness check stands down. */
 function leavesFunction(body: Stmt[]): boolean {
   const last = body[body.length - 1];
   return last !== undefined && (last.kind === "ReturnStmt" || last.kind === "ThrowStmt");
+}
+
+/**
+ * Does this statement list always leave its enclosing block? Two SH2 narrowings read
+ * it: elimination after a guard clause, and whether a switch case can fall through
+ * into the next one. Conservative — a `return` in both arms of an `if` is not
+ * recognized — and conservative is the safe direction for both: less elimination,
+ * and a WIDER set of tags carried into the next case.
+ */
+function leavesBlock(body: Stmt[]): boolean {
+  const last = body[body.length - 1];
+  return last !== undefined &&
+    (last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "BreakStmt" || last.kind === "ContinueStmt");
 }
 
 /** A union rendered the way it was written (`A | B`), for diagnostics. */
