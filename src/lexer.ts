@@ -258,7 +258,10 @@ export function lex(source: string): Token[] {
       let closed = false;
       for (; j < source.length && source[j] !== "\n"; j++) {
         const ch = source[j]!;
-        if (ch === "\\") { j++; continue; } // skip the escaped char
+        // A RegularExpressionBackslashSequence may NOT contain a LineTerminator
+        // (test262 language/literals/regexp/7.8.5-1). Skipping the escaped character
+        // blindly would scan straight past the newline and swallow the next line.
+        if (ch === "\\") { if (source[j + 1] === "\n") { closed = false; break; } j++; continue; }
         if (ch === "[") inClass = true;
         else if (ch === "]") inClass = false;
         else if (ch === "/" && !inClass) { closed = true; break; }

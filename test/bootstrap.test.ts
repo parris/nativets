@@ -222,6 +222,27 @@ describe("regex literals lex (so they are a named refusal, not a lexer crash)", 
     }
   });
 
+  // BORROWED: tc39/test262 test/language/literals/regexp/7.8.5-1.js — "A
+  // RegularExpressionBackslashSequence may not contain a LineTerminator." Skipping the
+  // escaped character blindly scanned straight past the newline and swallowed the next
+  // line; test262 found that, a hand-written case would not have.
+  test("test262 7.8.5-1: a backslash sequence may not contain a line terminator", () => {
+    expect(() => lex("const a = /\\\n n/;")).toThrow();
+  });
+
+  // BORROWED: tc39/test262 test/language/literals/regexp/S7.8.5_A2.1_T1.js — patterns
+  // that are legal and must lex as ONE token (spaces, punctuation, unicode escapes).
+  test("test262 S7.8.5_A2.1_T1: ordinary patterns lex as one token", () => {
+    for (const [src, want] of [
+      ["const a = /aa/;", "/aa/"],
+      ["const a = /,;/;", "/,;/"],
+      ["const a = /  /;", "/  /"],
+      ["const a = /a\\u0041/;", "/a\\u0041/"],
+    ] as const) {
+      expect(lex(src).find((t) => t.type === "regex")!.value).toBe(want);
+    }
+  });
+
   test("an unterminated `/` on a line stays division (no runaway consumption)", () => {
     // `a / b` split across lines must not swallow the newline looking for a closer.
     expect(lex("const x = a /\n  b;").some((t) => t.type === "regex")).toBe(false);
