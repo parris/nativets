@@ -55,6 +55,7 @@
 import { test, expect, describe } from "bun:test";
 import { readFileSync, writeFileSync, existsSync, statSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -258,9 +259,36 @@ function measureIR(): Record<string, IrStats> {
  * it exists to catch step changes — "we started linking nt_actor.c / raylib into every
  * program", which is a >15% jump — not to police kilobytes.
  */
-export interface LinkStats { bytes: number }
+export interface LinkStats {
+  bytes: number;
+  /** Live heap values at exit: arrays, objects, RC'd strings, persistent-vector nodes. */
+  arrLive: number;
+  objLive: number;
+  strLive: number;
+  pvNodes: number;
+  /** CUMULATIVE persistent-vector node allocations — total work, not residue. */
+  pvAllocs: number;
+}
 
 const LINK_THRESHOLD_PCT = 15;
+
+/**
+ * The runtime-counter probe.
+ *
+ * Appended to each corpus program, so the counters are read after the program's own
+ * top-level work (including its scope-exit drops) has finished. These builtins are
+ * nativets-only debug hooks, which is fine: this file is not differential-tested, and
+ * they are the same hooks `test/drops*.test.ts` and `test/str-rc.test.ts` already assert
+ * on. `__pvAllocs` is CUMULATIVE (total trie nodes ever allocated), so it is a genuine
+ * measure of work done — the closest thing here to TypeScript's Instantiations count.
+ * The `*Live` counters are residue, and so are a sharp leak-regression detector: Stage 44
+ * drove several of these to 0, and this pins them there.
+ */
+const COUNTER_PROBE =
+  '\nconsole.log("__nt_perf", __arrLive(), __objLive(), __strLive(), __pvNodes(), __pvAllocs());\n';
+
+/** Allocation counters are integer facts about the program, so they must match EXACTLY. */
+const COUNTER_KEYS = ["arrLive", "objLive", "strLive", "pvNodes", "pvAllocs"] as const;
 
 async function measureLink(): Promise<Record<string, LinkStats>> {
   const dir = mkdtempSync(join(tmpdir(), "nativets-perf-"));
@@ -268,9 +296,23 @@ async function measureLink(): Promise<Record<string, LinkStats>> {
     const out: Record<string, LinkStats> = {};
     for (const name of LINK_CORPUS) {
       const src = readFileSync(join(EXAMPLES, name), "utf8");
+
+      // Size is measured on the UNMODIFIED program: that is the artifact a user ships.
       const bin = join(dir, `${name}.bin`);
       await buildBinary(src, bin, { target: "host" });
-      out[name] = { bytes: statSync(bin).size };
+
+      // Counters need the probe, so they get their own build.
+      const probed = join(dir, `${name}.probe`);
+      await buildBinary(src + COUNTER_PROBE, probed, { target: "host" });
+      const proc = spawnSync(probed, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL" });
+      const line = (proc.stdout ?? "").split("\n").filter((l) => l.startsWith("__nt_perf")).pop();
+      if (!line) throw new Error(`${name}: probe produced no counter line (exit ${proc.status})`);
+      const [, arrLive, objLive, strLive, pvNodes, pvAllocs] = line.split(" ").map(Number) as number[];
+
+      out[name] = {
+        bytes: statSync(bin).size,
+        arrLive: arrLive!, objLive: objLive!, strLive: strLive!, pvNodes: pvNodes!, pvAllocs: pvAllocs!,
+      };
     }
     return out;
   } finally {
@@ -370,6 +412,47 @@ describe.skipIf(UPDATE)("perf: compiled binary size (deterministic per toolchain
     const after: Record<string, number> = {};
     for (const [k, v] of Object.entries(measuredLink)) after[k] = v.bytes;
     reportAndAssert(compareMetric("binBytes", before, after, LINK_THRESHOLD_PCT), LINK_THRESHOLD_PCT);
+  });
+});
+
+describe.skipIf(UPDATE)("perf: runtime allocation counters (deterministic)", () => {
+  /*
+   * These are EXACT, unlike every metric above. An allocation count is an integer fact
+   * about a fixed-work program, not a measurement — it has no units to be a few percent
+   * off in. `arrLive`/`objLive`/`strLive` at exit are what the drop and RC passes are
+   * supposed to drive to zero (Stages 9/23/30/44), so a change of +1 is exactly the leak
+   * a percentage fence would hide. `pvAllocs` is cumulative work: Stage 44's transients
+   * took 200k loop-appends from 217660 node allocations to 0, and nothing should quietly
+   * put them back.
+   */
+  test("allocation counters match the baseline exactly", () => {
+    if (!baseline?.link) return;
+    const diffs: string[] = [];
+    for (const name of LINK_CORPUS) {
+      const b = baseline.link[name];
+      const a = measuredLink[name]!;
+      if (!b) continue;
+      for (const key of COUNTER_KEYS) {
+        if (b[key] === undefined) continue;
+        if (a[key] !== b[key]) {
+          const dir = a[key] > b[key] ? "regression" : "improvement";
+          diffs.push(`  ${name.padEnd(16)} ${key.padEnd(9)} ${String(b[key]).padStart(7)} -> ${String(a[key]).padStart(7)}  (${dir})`);
+        }
+      }
+    }
+    expect(
+      diffs,
+      `Runtime allocation counts changed. These are exact integer facts about a\n` +
+        `fixed-work program, so any change is real — a leak, a lost drop, or a lost\n` +
+        `structural-sharing fast path:\n${diffs.join("\n")}\n\n  If intended: ${REGEN}`,
+    ).toEqual([]);
+  });
+
+  test("the baseline records counters for every link-corpus program", () => {
+    expect(
+      LINK_CORPUS.filter((n) => baseline?.link?.[n]?.strLive === undefined),
+      `Link-corpus programs missing counter data in the baseline. ${REGEN}`,
+    ).toEqual([]);
   });
 });
 
