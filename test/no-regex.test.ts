@@ -33,7 +33,6 @@ const SRC = new URL("../src/", import.meta.url);
  */
 const REMAINING: Record<string, number> = {
   "cli.ts": 1,
-  "driver.ts": 7,
   "modules.ts": 1,
 };
 
@@ -152,6 +151,86 @@ describe("the `@@name` pragma matches `^\\s*@@([A-Za-z_$][\\w$]*)\\s*$`", () => 
     // `\r` is in `\s`, so `//@@mutable\r\n` matched before and must still match. The
     // comment scan stops at `\n`, leaving the `\r` in the body.
     expect(lex("//@@mutable\r\nclass C {}\n").filter((t) => t.value === "@@").length).toBe(1);
+  });
+});
+
+/*
+ * driver.ts's conditional link. Each runtime object (`nt_hamt.c`, `nt_pvec.c`,
+ * `nt_bytes.c`, `nt_gui.c`) is added to the link line only when the emitted IR CALLS a
+ * symbol from it — matched at the call site, NEVER at the always-present `declare` line.
+ * That test used to be `/\bcall\b[^\n]*@nt_arr_/`. Its failure mode is quiet and bad: a
+ * missed match drops an object and the build fails at link, a spurious one links raylib
+ * into a program that never draws. So the boundaries are pinned directly.
+ */
+describe("driver: the conditional-link IR scan", () => {
+  const isWordChar = (c: string) =>
+    (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "_";
+  function wordIndex(hay: string, word: string): number {
+    for (let i = 0; i + word.length <= hay.length; i++) {
+      if (!hay.startsWith(word, i)) continue;
+      const beforeOk = i === 0 || !isWordChar(hay[i - 1]!);
+      const end = i + word.length;
+      const afterOk = end === hay.length || !isWordChar(hay[end]!);
+      if (beforeOk && afterOk) return i;
+    }
+    return -1;
+  }
+  const irCallsAny = (ir: string, prefixes: string[]) =>
+    ir.split("\n").some((line) => {
+      const at = wordIndex(line, "call");
+      return at >= 0 && prefixes.some((p) => line.slice(at + 4).includes(p));
+    });
+
+  test("a `declare` line does NOT count; a `call` line does", () => {
+    expect(irCallsAny("declare ptr @nt_arr_new()", ["@nt_arr_"])).toBe(false);
+    expect(irCallsAny("  %1 = call ptr @nt_arr_new()", ["@nt_arr_"])).toBe(true);
+    expect(irCallsAny("  %1 = tail call ptr @nt_arr_new()", ["@nt_arr_"])).toBe(true);
+  });
+
+  test("`\\bcall\\b` — `recall`/`callx`/`_call`/`9call` are not `call`", () => {
+    for (const line of ["  recall @nt_arr_x", "  callx @nt_arr_x", "  _call @nt_arr_x", "  9call @nt_arr_x", "  call9 @nt_arr_x"]) {
+      expect([line, irCallsAny(line, ["@nt_arr_"])]).toEqual([line, false]);
+    }
+  });
+
+  test("`[^\\n]*` cannot cross a line — the symbol must be on the SAME line as its call", () => {
+    expect(irCallsAny("  %1 = call void @f()\n  @nt_arr_new", ["@nt_arr_"])).toBe(false);
+    expect(irCallsAny("  @nt_arr_new is before the call here", ["@nt_arr_"])).toBe(false);
+  });
+
+  test("the `(coll|map|set)` alternation covers all three", () => {
+    const p = ["@nt_coll_", "@nt_map_", "@nt_set_"];
+    expect(irCallsAny("  %1 = call double @nt_coll_size(ptr %0)", p)).toBe(true);
+    expect(irCallsAny("  %1 = call ptr @nt_map_new()", p)).toBe(true);
+    expect(irCallsAny("  %1 = call ptr @nt_set_add(ptr %0, ptr %1)", p)).toBe(true);
+    expect(irCallsAny("  %1 = call ptr @nt_str_new()", p)).toBe(false);
+  });
+});
+
+describe("driver: the toolchain probes", () => {
+  const isAndroidClangName = (f: string) => {
+    const prefix = "aarch64-linux-android", suffix = "-clang";
+    if (!f.startsWith(prefix) || !f.endsWith(suffix)) return false;
+    const api = f.slice(prefix.length, f.length - suffix.length);
+    if (api.length === 0) return false;
+    for (let i = 0; i < api.length; i++) if (api[i]! < "0" || api[i]! > "9") return false;
+    return true;
+  };
+
+  test("`^aarch64-linux-android\\d+-clang$` — anchored, and `\\d+` needs a digit", () => {
+    for (const [f, want] of [
+      ["aarch64-linux-android24-clang", true],
+      ["aarch64-linux-android21-clang", true],
+      ["aarch64-linux-android-clang", false],       // `\d+` needs at least one
+      ["aarch64-linux-android24-clang++", false],   // `$` anchor
+      ["xaarch64-linux-android24-clang", false],    // `^` anchor
+      ["armv7a-linux-androideabi24-clang", false],
+      ["aarch64-linux-androidX-clang", false],
+      // `\d` is ASCII-only: Arabic-Indic digits are NOT `\d`.
+      ["aarch64-linux-android١٢-clang", false],
+    ] as const) {
+      expect([f, isAndroidClangName(f)]).toEqual([f, want]);
+    }
   });
 });
 
