@@ -96,6 +96,49 @@ console.log(slurp(process.argv[2], "utf8").trim());
   });
 });
 
+describe("node:fs — writeFileSync", () => {
+  test("writes a file, which readFileSync reads back", async () => {
+    const dir = scratch();
+    await differential(
+      `import { readFileSync, writeFileSync } from "node:fs";
+const out = process.argv[2];
+writeFileSync(out, "line one\\nline two\\n");
+console.log(readFileSync(out, "utf8"));
+`,
+      { args: [join(dir, "written.txt")] },
+    );
+  });
+
+  test("overwrites (it truncates, it does not append)", async () => {
+    const dir = scratch();
+    const file = join(dir, "twice.txt");
+    writeFileSync(file, "a much longer original body\n");
+    await differential(
+      `import { readFileSync, writeFileSync } from "node:fs";
+const out = process.argv[2];
+writeFileSync(out, "short\\n");
+console.log(JSON.stringify(readFileSync(out, "utf8")));
+`,
+      { args: [file] },
+    );
+  });
+
+  test("an unwritable path throws catchably, with node's message", async () => {
+    const dir = scratch();
+    await differential(
+      `import { writeFileSync } from "node:fs";
+try {
+  writeFileSync(process.argv[2], "nope");
+  console.log("wrote");
+} catch (e) {
+  console.log("caught: " + e.message);
+}
+`,
+      { args: [join(dir, "no-such-dir", "f.txt")] },
+    );
+  });
+});
+
 describe("the host FFI surface is closed — outside it is NT1028, never half-implemented", () => {
   test("a `node:` module with no native implementation", () => {
     expect(rejects(`import { createHash } from "node:crypto";\nconsole.log(typeof createHash);\n`)).toBe("NT1028");

@@ -139,6 +139,9 @@ const HOST_FUNCS: Record<string, MethodSig> = {
   // node:fs — `readFileSync(path, "utf8")`. The encoding is REQUIRED and must be the
   // literal "utf8": node returns a Buffer without one, and we have no Buffer.
   readFileSync: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
+  // `writeFileSync(path, contents)` — node also takes an options/encoding third
+  // argument; the default (utf8, truncate) is the only mode implemented.
+  writeFileSync: { min: 2, max: 2, argTys: ["string", "string"], ret: "void" },
 };
 
 const GLOBAL_FUNCS: Record<string, MethodSig> = {

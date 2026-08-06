@@ -334,6 +334,7 @@ const DECLARES = [
   // so these cross-link unchanged; a failure raises the pending-exception protocol
   // so `try`/`catch` sees it exactly like node's throw.
   "declare ptr @nt_read_file(ptr)",
+  "declare void @nt_write_file(ptr, ptr)",
   // --- GUI FFI (raylib-backed, north-star C-d): flat scalar ABI, conditionally linked ---
   // Booleans come back as i32 (0/1) and are lowered to i1 via `icmp ne`. nt_gui.c + -lraylib
   // are pulled in ONLY when one of these is CALLED (see driver.ts) — non-GUI programs and
@@ -4206,6 +4207,13 @@ class FnGen {
         this.emit(`${t} = call ptr @nt_read_file(ptr ${path})`);
         this.emitExcCheck();
         return { v: t, ty: "string" };
+      }
+      case "writeFileSync": {
+        const path = this.genExpr(args[0]!).v;
+        const data = this.genExpr(args[1]!).v;
+        this.emit(`call void @nt_write_file(ptr ${path}, ptr ${data})`);
+        this.emitExcCheck();
+        return { v: "", ty: "void" };
       }
     }
     // Unreachable: the checker only admits a name that HOST_FUNCS has a signature for.

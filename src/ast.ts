@@ -619,7 +619,7 @@ export interface ExportTable {
  * The signatures live in the checker (`HOST_FUNCS`) and the lowering in codegen.
  */
 export const HOST_MODULES: Record<string, readonly string[]> = {
-  "node:fs": ["readFileSync"],
+  "node:fs": ["readFileSync", "writeFileSync"],
 };
 
 export interface Program {

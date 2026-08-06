@@ -1573,6 +1573,19 @@ const char *nt_read_file(const char *path) {
   return o;
 }
 
+/* writeFileSync(path, contents) -> the bytes are written, truncating an existing
+ * file (node's default flag "w"). Throws (catchably) with node's message when the
+ * path cannot be opened or the write fails. */
+void nt_write_file(const char *path, const char *data) {
+  FILE *f = fopen(path, "wb");
+  if (!f) { nt_exc_raise_msg(host_fs_error(errno, "open", path)); return; }
+  size_t n = strlen(data);
+  size_t w = n ? fwrite(data, 1, n, f) : 0;
+  int bad = (w != n || ferror(f)) ? (errno ? errno : EIO) : 0;
+  if (fclose(f) != 0 && !bad) bad = errno ? errno : EIO;
+  if (bad) nt_exc_raise_msg(host_fs_error(bad, "write", path));
+}
+
 /* ============================================================
  * stdlib (web standards) — Batch 1
  *
