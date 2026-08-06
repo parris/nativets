@@ -810,6 +810,47 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   (mode gate, determinism regression, M:N properties — per-pair FIFO, exactly-once, migration,
   supervision outcome, a repeated stress run — plus the TSan and poller gates),
   `test/actors/mn_{fanin,parallel,stress}.ts`, `test/runtime/{mn_rc_race_test,poll_test}.c`.
+- **Stage 48 ✅ (`console.log` of a COMPOUND value — node's `util.inspect`; a silent-miscompile fix)**
+  `console.log({ a: 1, b: "x" })` printed a **bare newline** and exited 0: `emitPrint` fell through
+  to `js_print_str` on the object's heap POINTER, whose first byte is usually 0. A silent wrong
+  answer — the same class of defect as the out-of-bounds `0` fixed in Stage 41, and *worse* than
+  the honest refusals beside it (`console.log(arr)` was `NT1001`, a `Uint8Array` `NT1016`). It is
+  now a faithful port of node's `lib/internal/util/inspect.js` at console.log's defaults —
+  **breakLength 80, compact 3, depth 2, maxArrayLength 100**. **Split of work:** codegen walks the
+  STATIC type and renders one entry string per field/element (the `JSON.stringify` walk's shape —
+  `genInspect`/`genInspectObject`/`genInspectArray`/`genInspectColl`), while the runtime's
+  `nt_insp_*` builder owns the one decision that needs runtime information — the **width /
+  line-breaking** rule (`reduceToSingleString` + `isBelowBreakLength` + `groupArrayElements`),
+  because it depends on the *rendered* widths. Node-identical for: objects, **class instances**
+  (`Point { x: 1 }` — node folds the name into `braces[0]` and MEASURES it there, which is why a
+  longer class name wraps the same fields sooner), arrays (`[ 1, 2, 3 ]`, `[]`, node's
+  column-grouped layout past six entries with right-alignment only when every element is a number,
+  `... n more items` past 100), **Map/Set** (`Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`, size in the
+  brace, Stage-37 insertion order), arbitrary nesting incl. node's `[Object]`/`[Array]` **depth
+  cut** (where an EMPTY compound still prints, because node checks emptiness *first*), node's
+  **string quoting** (`'` → `"` → `` ` `` to minimise escaping; a nested string quoted, a
+  top-level one bare), and `-0`, which util.inspect prints as `-0` where `String(-0)` is `"0"`.
+  Also closes the Stage-20 deferral: a compound **`Dyn`** (`console.log(JSON.parse(s))`) used to
+  print the literal `[object]` and now runs the same algorithm in C, where the shape is only known
+  at runtime. **Method:** node's own `lib/internal/util/inspect.js` was extracted from the running
+  binary (`process.binding("natives")`), re-implemented in JS and **fuzzed to zero mismatches over
+  60 000 random values** against `util.inspect`, then ported to C and **re-fuzzed to zero over
+  20 000 random entry lists** against that verified reference — before any of it reached codegen.
+  End to end, ~140 generated programs (≈3 400 compound values) are byte-identical to node.
+  **Refused, never a raw pointer (`NT1025`):** a **function value** anywhere in a printed value
+  (node names a function after its binding, `[Function: f]`, which our lambda-lifted arrows do not
+  carry) and a `Uint8Array`/`TextEncoder`/`TextDecoder`/`Response`/`Headers`/`URL`/
+  `URLSearchParams` handle **nested inside** one; at the ROOT each keeps its existing code
+  (`NT1016`/`NT1002`/`NT1024`). A `checkInspectable` walk stops where node's renderer stops, so a
+  refused type *below* the depth cut does not block, and an `isPrintableTy` net guarantees the
+  invariant the stage exists for: **no input prints nothing.** Tests: `test/inspect.test.ts`
+  (88 cases, all node-differential except the refusal table). Residual, documented: an **absent
+  optional field still prints** (`{ a?: T }` IS `{ a: T | undefined }` here, so the slot exists —
+  the pre-existing divergence already visible through `Object.keys`/`JSON.stringify`, and inspect
+  stays consistent with them), and widths count UTF-8 **bytes** not UTF-16 units (§A.2).
+  **Found, not fixed (own lane):** `js_number_to_string` diverges from node for `1e-7` (`1e-07`),
+  `1e-5` (`1e-05` vs `0.00001`) and very large integers (exact rather than shortest-round-trip
+  digits) — identical through `String(x)`, so unrelated to inspect.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
