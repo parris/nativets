@@ -1,0 +1,10 @@
+((1 + 2) * -((3 - 7)))
+12
+lit 1
+lit 2
+op +
+lit 3
+lit 7
+op -
+neg of 5
+op *

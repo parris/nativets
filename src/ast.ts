@@ -186,6 +186,125 @@ export function objectType(fields: { key: string; ty: Ty }[]): Ty {
 }
 
 /* ============================================================
+ * Discriminated (tagged) unions — SH2, "the crux" of self-hosting.
+ *
+ * A union of object types with a common LITERAL-typed discriminant field is
+ * encoded `U<{k:"a",…}|{k:"b",…}>`. The `U<` prefix / `>` suffix keep it distinct
+ * from every other encoding: it does not end in `}` (so `isObjectTy`/`classTag`
+ * miss it), not in `[]`, does not start with `(`/`?U`/`?N`/`Map<`/`Set<`.
+ *
+ * REPRESENTATION: a union value IS the member object pointer — there is no box.
+ * The tag already lives in the value as the discriminant field, so a union is only
+ * accepted when that field sits at the SAME slot index in every member (checked by
+ * `unionDiscriminant`). Consequences: `u.kind` on an un-narrowed union is an
+ * ordinary slot load, narrowing is a pure retype costing nothing at runtime, and
+ * literals / slots / drop are the existing object machinery unchanged.
+ *
+ * STRING-LITERAL TYPES (`"square"`) exist ONLY to carry those tags. They are
+ * `widenLiteralTys`'d to `string` the moment a member type escapes the union — at
+ * narrowing, at a field read, and at every non-union annotation — so no pass past
+ * the checker ever sees one, and `type Dir = "n" | "s"` still collapses to `string`
+ * exactly as before.
+ * ============================================================ */
+
+/** A string-literal type, e.g. `"square"` (quotes included). */
+export function isStringLitTy(t: Ty): boolean {
+  return typeof t === "string" && t.length >= 2 && t.startsWith(`"`) && t.endsWith(`"`) && !t.slice(1, -1).includes(`"`);
+}
+/** The VALUE of a string-literal type (`"square"` → `square`). */
+export function stringLitValue(t: Ty): string { return t.slice(1, -1); }
+/** Make the literal type for a string value. */
+export function stringLitTy(v: string): Ty { return `"${v}"` as Ty; }
+/**
+ * Characters a tag value may not contain: the type encoding is a flat string split
+ * structurally (`splitTopLevel` knows nothing about quotes), so a tag carrying one
+ * of these would corrupt every downstream parse. Rejected with a diagnostic rather
+ * than mis-split — see the parser.
+ */
+export function tagValueIsEncodable(v: string): boolean { return !/[,{}<>|[\]()"\\]/.test(v); }
+
+export function isUnionTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("U<") && t.endsWith(">"); }
+export function unionMembers(t: Ty): Ty[] { return splitTopLevel(t.slice(2, -1), "|") as Ty[]; }
+export function makeUnionTy(members: Ty[]): Ty { return `U<${members.join("|")}>` as Ty; }
+
+/**
+ * The discriminant of a union: a field that is present at the SAME index in every
+ * member, string-literal-typed in every member, with a DISTINCT value per member.
+ * `undefined` when no such field exists — which is exactly when the union cannot be
+ * represented (and so is refused, never guessed at).
+ */
+export function unionDiscriminant(t: Ty): { key: string; index: number } | undefined {
+  const members = unionMembers(t);
+  if (members.length < 2) return undefined;
+  const first = objectFields(members[0]!);
+  for (let i = 0; i < first.length; i++) {
+    const key = first[i]!.key;
+    const values = new Set<Ty>();
+    let ok = true;
+    for (const m of members) {
+      const f = objectFields(m)[i];
+      if (!f || f.key !== key || !isStringLitTy(f.ty)) { ok = false; break; }
+      values.add(f.ty);
+    }
+    if (ok && values.size === members.length) return { key, index: i };
+  }
+  return undefined;
+}
+
+/** Every tag value of a union, in declaration order (drives exhaustiveness). */
+export function unionTagValues(t: Ty): string[] {
+  const d = unionDiscriminant(t);
+  if (!d) return [];
+  return unionMembers(t).map((m) => stringLitValue(objectFields(m)[d.index]!.ty));
+}
+
+/** The (widened) member selected by a tag value — the result of narrowing. */
+export function unionMemberFor(t: Ty, tag: string): Ty | undefined {
+  const d = unionDiscriminant(t);
+  if (!d) return undefined;
+  const m = unionMembers(t).find((m) => objectFields(m)[d.index]!.ty === stringLitTy(tag));
+  return m === undefined ? undefined : widenLiteralTys(m);
+}
+
+/** Every member of a union as it is seen OUTSIDE it (literal tags widened). */
+export function unionWidenedMembers(t: Ty): Ty[] { return unionMembers(t).map(widenLiteralTys); }
+
+/**
+ * Replace every string-literal type with `string`, EXCEPT inside a nested `U<…>`
+ * (whose members must keep their tags to stay narrowable). Applied wherever a type
+ * leaves union space, so a literal type never reaches ownership or codegen.
+ */
+export function widenLiteralTys(t: Ty): Ty {
+  if (typeof t !== "string" || !t.includes(`"`)) return t;
+  let out = "";
+  for (let i = 0; i < t.length; ) {
+    if (t.startsWith("U<", i)) {
+      const end = matchAngle(t, i + 1);
+      out += t.slice(i, end + 1);
+      i = end + 1;
+    } else if (t[i] === `"`) {
+      const close = t.indexOf(`"`, i + 1);
+      if (close < 0) { out += t.slice(i); break; }
+      out += "string";
+      i = close + 1;
+    } else {
+      out += t[i];
+      i++;
+    }
+  }
+  return out as Ty;
+}
+/** Index of the `>` closing the `<` at `open`. */
+function matchAngle(s: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < s.length; i++) {
+    if (s[i] === "<") depth++;
+    else if (s[i] === ">" && --depth === 0) return i;
+  }
+  return s.length - 1;
+}
+
+/* ============================================================
  * Generic type parameters (M3 — monomorphization).
  *
  * While parsing a generic function `function f<T>(x: T): T`, a use of an in-scope type

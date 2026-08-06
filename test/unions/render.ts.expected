@@ -1,0 +1,6 @@
+{ kind: 'ok', value: 42 }
+{"kind":"ok","value":42}
+{ kind: 'err', message: 'boom', code: 3 }
+{"kind":"err","message":"boom","code":3}
+= 7
+E1 nope

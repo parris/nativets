@@ -24,10 +24,12 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
-import { isArrayTy, isObjectTy, setBlockDrops, classTag, mutableTags } from "./ast.ts";
+import { isArrayTy, isObjectTy, isUnionTy, setBlockDrops, classTag, mutableTags } from "./ast.ts";
 
-/** The linear (single-owner, move-checked + dropped) types: heap aggregates. */
-function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t); }
+/** The linear (single-owner, move-checked + dropped) types: heap aggregates. A
+ *  DISCRIMINATED UNION (SH2) is one of them: its value IS a member's object block, so
+ *  it is owned, moved and freed exactly like the record it is. */
+function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t) || isUnionTy(t); }
 
 export const OWN_CODES = {
   USE_AFTER_MOVE: "NT1601",      // ≈ E0382

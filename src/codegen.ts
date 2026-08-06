@@ -18,6 +18,9 @@ import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
+// SH2 (discriminated unions): a union value IS its member's object block, so every
+// lowering below treats it exactly like an object pointer.
+import { isUnionTy, unionDiscriminant } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
@@ -100,6 +103,7 @@ function freshArray(e: Expr): boolean {
 }
 
 function llvmTy(ty: Ty): string {
+  if (isUnionTy(ty)) return "ptr"; // SH2: the member object block itself — there is no box
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*; URL/URLSearchParams = the URL/query TEXT
   switch (ty) {
     case "Date": return "double"; // stdlib batch 3: a Date IS its time value (epoch ms)
@@ -121,6 +125,7 @@ function llvmTy(ty: Ty): string {
 function userSym(name: string): string { return name === "main" ? "nt_user_main" : name; }
 
 function defaultZero(ty: Ty): string {
+  if (isUnionTy(ty)) return "null";
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "null";
   switch (ty) {
     case "number": return "0x0000000000000000";
@@ -794,7 +799,8 @@ class FnGen {
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       // Move-aware RAII: objects free via nt_obj_free, arrays via nt_arr_free.
-      const free = isObjectTy(this.varTypes.get(n) ?? "number") ? "nt_obj_free" : "nt_arr_free";
+      const dropTy = this.varTypes.get(n) ?? "number";
+      const free = isObjectTy(dropTy) || isUnionTy(dropTy) ? "nt_obj_free" : "nt_arr_free"; // a union IS an object block (SH2)
       this.emit(`call void @${free}(ptr ${p})`);
     }
   }
@@ -813,7 +819,7 @@ class FnGen {
     if (this.globalVars.has(e.target)) return;
     const p = this.fresh();
     this.emit(`${p} = load ptr, ptr ${this.addr(e.target)}`);
-    this.emit(`call void @${isObjectTy(ty) ? "nt_obj_free" : "nt_arr_free"}(ptr ${p})`);
+    this.emit(`call void @${isObjectTy(ty) || isUnionTy(ty) ? "nt_obj_free" : "nt_arr_free"}(ptr ${p})`);
   }
 
   /** Free the RECEIVER of an array method when the receiver was an unbound TEMPORARY
@@ -1421,7 +1427,7 @@ class FnGen {
     if (val.ty === "string") this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
     const t = this.fresh();
     if (val.ty === "number" || isDateTy(val.ty)) this.emit(`${t} = bitcast double ${val.v} to i64`); // a Date IS a double (batch 3)
-    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    else if (isUnionTy(val.ty) || val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -1430,7 +1436,7 @@ class FnGen {
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
     if (ty === "number" || isDateTy(ty)) this.emit(`${t} = bitcast i64 ${slot} to double`); // a Date IS a double (batch 3)
-    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    else if (isUnionTy(ty) || ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
@@ -1694,8 +1700,12 @@ class FnGen {
       case "Identifier": {
         if (e.name === "NaN") return { v: llvmDouble(NaN), ty: "number" };
         if (e.name === "Infinity") return { v: llvmDouble(Infinity), ty: "number" };
+        // Both narrowings reach a read: `narrowRead` unwraps a nullable that the checker
+        // proved present, and the union case below keeps the binding's storage while
+        // taking the checker's MEMBER type (same pointer, different layout).
         if (this.captures.has(e.name)) return this.narrowRead(e, this.readCapture(e.name));
-        const ty = this.varTypes.get(e.name) ?? (e.ty ?? "number");
+        const declared = this.varTypes.get(e.name) ?? (e.ty ?? "number");
+        const ty = isUnionTy(declared) && e.ty !== undefined && e.ty !== declared ? e.ty : declared;
         const t = this.fresh();
         this.emit(`${t} = load ${llvmTy(ty)}, ptr ${this.addr(e.name)}`);
         // Drop flag: this read moves the value out, and the binding is still dropped on
@@ -1730,7 +1740,13 @@ class FnGen {
         // An optional chain whose result is nullable is lowered as a unit: guard at
         // each `?.`, short-circuiting the WHOLE rest of the chain to `undefined`.
         if (isNullableTy(e.ty ?? "") && isOptChainExpr(e)) return this.genOptChain(e);
-        const obj = this.genExpr(e.object);
+        let obj = this.genExpr(e.object);
+        // SH2 narrowing: the checker may have retyped this receiver from the union to one
+        // of its members. The POINTER is identical — only the slot layout the fields are
+        // read with changes — so take the checker's answer wherever it narrowed. Done on
+        // the MemberExpr (not on the Identifier) so it covers every producer of a union
+        // value alike: a local, a closure capture, a `for-of` element, a call result.
+        if (isUnionTy(obj.ty) && e.object.ty !== undefined && isObjectTy(e.object.ty)) obj = { v: obj.v, ty: e.object.ty };
         if (obj.ty === "Dyn") { // dynamic field access: nt_dyn_get_field returns a Dyn
           const t = this.fresh();
           this.emit(`${t} = call ptr @nt_dyn_get_field(ptr ${obj.v}, ptr ${this.mod.intern(e.property)})`);
@@ -1778,6 +1794,16 @@ class FnGen {
           const d = this.fresh();
           this.emit(`${d} = sitofp i64 ${sz} to double`);
           return { v: d, ty: "number" };
+        }
+        // SH2: on an un-narrowed union only the DISCRIMINANT is readable, and it sits at
+        // the same slot in every member (that requirement is what lets the union go
+        // unboxed) — so this is an ordinary slot load, of a string.
+        if (isUnionTy(obj.ty)) {
+          const gep = this.fresh();
+          this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${unionDiscriminant(obj.ty)!.index}`);
+          const slot = this.fresh();
+          this.emit(`${slot} = load i64, ptr ${gep}`);
+          return { v: this.fromSlot(slot, "string"), ty: "string" };
         }
         if (isObjectTy(obj.ty)) {
           const idx = fieldIndex(obj.ty, e.property);
