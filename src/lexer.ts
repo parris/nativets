@@ -102,6 +102,24 @@ export function lex(source: string): Token[] {
 
     if (c === " " || c === "\t" || c === "\r" || c === "\n") { advance(); continue; }
     if (c === "/" && source[i + 1] === "/") {
+      // PRAGMA COMMENT `//@@name` — the comment spelling of a compile-time attribute.
+      //
+      // `@@mutable` is not valid TypeScript, so a file carrying the bare sigil cannot
+      // ALSO be run by tsc/bun. That is fatal for exactly one program: the compiler's
+      // own source, which bun runs today and nativets must compile tomorrow. A line
+      // comment whose ENTIRE content is `@@name` lexes to the same two tokens as the
+      // sigil, so the attribute is invisible to TypeScript and load-bearing here.
+      // Anything else after `//` — including a comment that merely mentions `@@mutable`
+      // in prose — stays an ordinary comment. See docs/decorators.md.
+      const startLine = line, startCol = col;
+      let j = i + 2;
+      while (j < source.length && source[j] !== "\n") j++;
+      const body = source.slice(i + 2, j);
+      const m = /^\s*@@([A-Za-z_$][\w$]*)\s*$/.exec(body);
+      if (m) {
+        tokens.push({ type: "punct", value: "@@", line: startLine, col: startCol });
+        tokens.push({ type: "ident", value: m[1]!, line: startLine, col: startCol + 2 });
+      }
       while (i < source.length && source[i] !== "\n") advance();
       continue;
     }

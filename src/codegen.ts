@@ -553,6 +553,10 @@ const MATH_FN1: Record<string, string> = {
   floor: "floor", ceil: "ceil", sqrt: "sqrt", trunc: "trunc", abs: "fabs", round: "js_math_round",
 };
 
+// An emitter is an accumulator: `this.blocks` grows, `this.tmp`/`this.lbl` count up. That
+// is in-place mutation of one owned object — `@@mutable`, in the pragma spelling that
+// keeps this file runnable by bun (see src/parser.ts's note and src/lexer.ts).
+//@@mutable
 class FnGen {
   private entryAllocas: string[] = [];
   private blocks: { label: string; lines: string[]; terminated: boolean }[] = [];

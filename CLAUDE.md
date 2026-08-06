@@ -668,7 +668,6 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   any arrow body (a closure env holds a second pointer), module-level bindings promoted to globals
   (a function may have returned the pointer), temporaries in non-chain positions, and array/object
   **elements** (a container frees its handle, not what its slots point at).
-<<<<<<< HEAD
 - **Stage 45 ✅ (decorators: `@@` compile-time attributes + `@` runtime wrappers, and mutable
   classes)** Two sigils, two mechanisms (`docs/decorators.md`). **`@@name`** is a **compile-time
   ATTRIBUTE** the compiler reads — Rust's `#[derive]`, zero runtime footprint; an **unknown one is
@@ -706,8 +705,7 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   instance. Tests: `test/decorators.test.ts` (25) — node-differential wherever a mechanical
   desugaring exists (attribute-stripped source; hand-written explicit wrapper application),
   behavioral with exact stdout where it does not.
-=======
-- **Stage 45 ✅ (stdlib Batch 3 — the object-shaped web APIs, now that classes exist)**
+- **Stage 46 ✅ (stdlib Batch 3 — the object-shaped web APIs, now that classes exist)**
   `docs/stdlib.md` deferred these while nativets had no classes; SH3–SH3.6 removed that blocker,
   so the functional workarounds became the real API and **node is the oracle DIRECTLY, with no
   polyfill** (`test/stdlib-batch3.test.ts`, 56 cases). **`Date`:** `new Date()` / `new Date(ms)`
@@ -746,7 +744,42 @@ If a divergence from node is intentional, document it in `docs/divergences.md`.
   with a `T | null` emitted **invalid IR** (now `NT1009`), `DATE_GETTERS` as a plain Record let
   `d.toString()` resolve to `Object.prototype.toString` (now a `Map`), and `JSON.stringify` of a
   Date field silently produced `null`.
->>>>>>> worktree-agent-a7f6c8a3bfe44f4c0
+- **Stage 47 ✅ (mutable RECORDS + the `//@@` pragma — an EXTENSION of Stage 45, flagged for veto)**
+  The self-hosting frontier's #1 blocker was `NT1606` ×8: the compiler mutates its own state in
+  place. Three sites were class fields (Stage 45's `@@mutable class` already covers them) and five
+  were plain **records** — the compiler mutates AST nodes (`s.returnTy = ret`), which are structural
+  records, not class instances. Two things closed all eight. **(1) `//@@name`, the PRAGMA spelling.**
+  `@@mutable` is not valid TypeScript, and `src/*.ts` must satisfy **two toolchains at once** (bun
+  runs it today, nativets must compile it tomorrow), so a file carrying the bare sigil cannot be run
+  at all. A line comment whose ENTIRE content is `@@name` now lexes to exactly the two tokens the
+  sigil produces — a comment to TypeScript, load-bearing to nativets, **byte-identical IR** either
+  way, and node is the oracle DIRECTLY (a pragma source is already valid TS, so it needs no
+  stripping). An unknown pragma is still `NT1023`; a comment that merely mentions `@@mutable` in
+  prose stays a comment. This is the general answer for every future attribute. **(2) `@@mutable` on
+  a `type`/`interface`.** The record compiles to the **TAGGED** object type `Cell{n:number}` — the
+  same encoding a class instance already uses — so mutability is **NOMINAL**: `@@mutable type Cell =
+  {n:number}` and `type Frozen = {n:number}` stay different types, and an undecorated record can
+  never be silently mutated because something else shares its shape. Reusing the tag means every
+  downstream rule is the class rule unchanged: the checker's field-assignment check and the
+  ownership pass's **`NT1607`** (mutate through an alias / parameter / `for-of` element / container
+  element / capture), **`NT1604`** (an alias escaping), **`NT1602`** (reassigning an aliased owner);
+  `const b = c` is a borrow, so the record is still dropped exactly once (`__objLive()` → 0). A
+  record has no constructor, so a literal takes the tag from its **context** (annotation, return
+  type, parameter type, array element) through the existing hint channel. `o.f op= v` and `o.f++`
+  desugar to a read plus a write, so a computed receiver is refused rather than double-evaluated.
+  **`delete o.k` stays `NT1606` by decision** — a record's shape IS its type (static slots), so
+  removing a key is a different, much larger feature; the hint now names the two real fixes. The
+  parser stopped deciding `o.f = v` (it cannot know types) and defers to the checker, which meant
+  **`coverage` had to start counting checker-stage NT1xxx blockers** — otherwise moving a rejection
+  from parser to checker would have looked like eight blockers vanishing. Also: `ParseOpts.collectTypes`
+  threads the alias table across `coverage`'s statement-at-a-time loop, and a *decorated* type
+  declaration is no longer pre-stripped, so a `@@mutable type` is measurable at all; the module
+  linker renames record tags per module (two modules may each declare a `Cell`). Tests:
+  `test/mutable-records.test.ts` (28) — node-differential wherever the attribute-stripped source is
+  the desugaring, behavioral for the drop count, plus the cross-module case that is the compiler's
+  own shape (record declared in `ast.ts`, mutated in `checker.ts`). **This is an extension of the
+  owner's design, not something he specified** (he asked for `@@mutable` on classes) — see the
+  flagged section in `docs/decorators.md`.
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
@@ -763,18 +796,25 @@ types** (`compose` — a function returning a function) remain of the closure ca
 clusters: spread, destructuring, `try/catch`, `?.`/`??`, JSON, nested objects, and making
 objects/strings linear. The gap corpus has node-verified cases waiting in `KNOWN_UNSUPPORTED`.
 
-### Self-hosting frontier (re-measured after the `NT0001` burn-down)
+### Self-hosting frontier (re-measured after `@@mutable` reached records)
 
-`nativets coverage` over `src/*.ts` — **`NT0001` is now 0**, as is `NT1013` (Stage 36
-monomorphization). **Every statement in the compiler's own source parses.** The frontier is no
-longer syntax at all:
+`nativets coverage` over `src/*.ts`. `NT1013` is 0 (Stage 36 monomorphization) and `NT1606` — which
+was the #1 blocker at ×8 — is **down to 1, deliberately**. The remaining eight were two different
+things, both closed by the `@@mutable` attribute rather than by rewriting the compiler: three
+**class**-field mutations (`Parser`/`FnGen`/`Analyzer`, Stage 45's attribute) and five plain-**record**
+mutations (`s.returnTy = ret` — the compiler mutates AST nodes in place), for which `@@mutable` was
+**extended to a `type`/`interface`**. Both had to be spelled `//@@mutable`, the **pragma** form (a
+comment to TypeScript, the same two tokens to nativets), because `src/*.ts` must satisfy bun and
+nativets at once — see `docs/decorators.md`.
 
 | Blocker | × | What it actually is |
 |---|---|---|
-| `NT1606` | 8 | field mutation `o.f = v` / `o.f++` on a plain record in `Parser`/`Checker`/`FnGen`/`Analyzer`/`coverage` — a *source* refactor, not a missing feature. (Stage 45 made `this.f = v` legal inside a class METHOD, so what remains is genuinely non-`this` mutation.) |
-| `NT1009` | 3 | general unions (`Record<string, number \| "var">`, an intersection type) |
-| `NT1015` | 2 | a `static` member in `ModuleGen`; a class field needing a type annotation in `modules.ts` |
-| `NT0001` | 1 | **unmasked by Stage 45**: `class Checker` now parses past its field assignment and reaches `t.replace(/[^A-Za-z0-9_]/g, "_")` — a **regex literal**, which nativets does not have (no RegExp, Tier C). Not a parser regression; a previously-hidden blocker becoming visible. |
+| `NT1014` | 4 | `new Map(iterable)` / `new Set(iterable)` — **newly visible**: `coverage` now counts a FEATURE blocker the CHECKER reports, not only parse-stage ones (otherwise moving the `o.f = v` rejection from parser to checker would have looked like blockers vanishing) |
+| `NT1009` | 3 | general unions / an intersection type — **the real remaining crux** (the AST *is* a discriminated union) |
+| `NT1015` | 3 | a `static` member (`ModuleGen`), a `get` accessor (`FnGen`, unmasked), a class field needing a type annotation (`modules.ts`) |
+| `NT0001` | 2 | both **unmasked**, not regressions: a **regex literal** in `checker.ts` (Stage 45 unmasked it) and **`satisfies`** in `parser.ts` (this lane unmasked it, by letting `class Parser` parse past `this.pos++`) |
+| `NT1606` | **1** | `delete o.k` in `specializeDecl` — **deliberate**: a record's SHAPE is its type (fields are static slots), so removing a key is a different feature from assigning one. Refused with that in the hint |
+| `NT1003` | 1 | `driver.ts` calls an *imported* function, which single-file coverage sees as an unknown callee — an artifact of the measurement, not a gap |
 
 The `NT0001` bucket was ×11 and was never one feature — six concrete gaps, each extracted from a
 real statement and closed one at a time (fixtures in `test/selfhost-parse/`, gate in

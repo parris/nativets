@@ -434,13 +434,21 @@ export interface IndexAssign {
 }
 
 /**
- * Field initialization `this.field = expr` — permitted ONLY inside a class constructor
- * (the parser emits this in place of an `AssignExpr` for a `this.f = v` target while
- * parsing a ctor body). It is the single place field assignment is allowed: everywhere
- * else `o.f = v` stays rejected (NT1606) since values are immutable, and a method
- * mutating `this` is likewise rejected. Lowers to a static slot store on the instance.
+ * Field assignment `o.field = expr` — a static slot store on the receiver.
+ *
+ * The parser emits it for EVERY `member = value` target and defers the legality question
+ * to the checker, which knows types. Two things may legitimately be assigned:
+ *   - `this.f` inside a class member body — a constructor building the instance, or a
+ *     setter method (`viaThis`, vetted syntactically by the parser);
+ *   - a field of a `@@mutable` record or class instance (nominal, by tag).
+ * Everything else is NT1606 (values are immutable — Stage 29). WHO may mutate is a
+ * separate, ownership question, answered by src/ownership.ts (NT1607).
  */
-export interface FieldAssign { kind: "FieldAssign"; object: Expr; field: string; value: Expr; ty?: Ty; }
+export interface FieldAssign {
+  kind: "FieldAssign"; object: Expr; field: string; value: Expr; ty?: Ty;
+  /** The parser proved this is `this.f = v` inside a member body where that is legal. */
+  viaThis?: boolean;
+}
 
 export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
 
@@ -603,4 +611,17 @@ export interface Program {
    *  mutate IN PLACE, so the ownership pass treats their bindings differently
    *  (alias-not-move + owner-only mutation) — see docs/decorators.md. */
   mutableClasses?: string[];
+  /** RECORD type names carrying `@@mutable` (`@@mutable type Cell = { n: number }`) — the
+   *  extension of the class attribute to a `type`/`interface` declaration. Such a record is
+   *  TAGGED with its name (`Cell{n:number}`), exactly like a class instance type, so the
+   *  tag is what makes mutability nominal rather than structural. Everything downstream
+   *  treats these tags exactly like `mutableClasses` — see `mutableTags`. */
+  mutableRecords?: string[];
+}
+
+/** Every tag whose values mutate in place: `@@mutable` classes AND `@@mutable` records.
+ *  One concept downstream — the checker's field-assignment rule and the ownership pass's
+ *  NT1607/NT1604/NT1602 read this and nothing else. */
+export function mutableTags(p: Program): Set<string> {
+  return new Set([...(p.mutableClasses ?? []), ...(p.mutableRecords ?? [])]);
 }

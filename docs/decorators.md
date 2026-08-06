@@ -5,7 +5,8 @@ different mechanisms with different costs, and the sigil tells you which one you
 
 | Sigil | What it is | Runtime footprint | Applies to |
 |---|---|---|---|
-| `@@name` | a **compile-time attribute** the compiler reads — Rust's `#[derive]` | **none** | a `class` |
+| `@@name` | a **compile-time attribute** the compiler reads — Rust's `#[derive]` | **none** | a `class`, or a record `type`/`interface` |
+| `//@@name` | the **same attribute**, spelled as a comment (see "Two toolchains" below) | **none** | ditto |
 | `@name` | a real **runtime wrapper** — Python's `f = w(f)` | a real call | a `class` or a **method** |
 
 ```ts
@@ -157,6 +158,118 @@ Reading through any handle is always fine. `a.bump(); b.get()` is the canonical 
 
 ---
 
+# EXTENSION — `//@@name` and `@@mutable` on records
+
+> **Both sections below are an EXTENSION of the design above, not part of what was
+> specified.** The owner asked for `@@mutable` on **classes**; the pragma spelling and
+> record support were added by the mutable-records lane because the compiler's own source
+> needs them (see `docs/self-hosting.md`). They are additive — every program written
+> against the spec above behaves identically — and can be vetoed without touching it.
+
+## Two toolchains, one source: `//@@mutable`
+
+`@@mutable` is **not valid TypeScript**. For an ordinary program that is fine: nativets is the
+only thing that ever reads it. But there is one program that must satisfy **two toolchains at
+once** — nativets' own source, which `bun` runs *today* and nativets must compile *tomorrow*. A
+file carrying the bare sigil cannot be run by bun at all, so `src/parser.ts` could not say that
+`class Parser` is mutable.
+
+So the attribute has a second spelling: **a line comment whose entire content is `@@name`**.
+
+```ts
+//@@mutable
+class Parser { private pos = 0; /* … */ }
+```
+
+The lexer turns `//@@mutable` into exactly the two tokens the bare sigil produces (`@@`, `mutable`),
+so everything downstream — the parser, the checker, the ownership pass — is untouched, and the two
+spellings emit **byte-identical IR** (pinned in `test/mutable-records.test.ts`). To TypeScript it is
+a comment; to nativets it is the attribute.
+
+Three deliberate details:
+
+- **Only an exact match counts.** The comment body must be `@@name` and nothing else, so a comment
+  that merely *mentions* `@@mutable` in prose stays a comment.
+- **An unknown pragma is still `NT1023`.** The comment spelling changes the syntax, not the rule:
+  `//@@mutabel` is an error, not an ignored comment, for the same reason `@@mutabel` is.
+- **node stays the oracle, with no stripping at all.** A pragma source is *already* valid TS, so its
+  oracle is `runWithNode` directly — better than the sigil form, which needs `stripAttributes`.
+
+This is the general answer for every future `@@attribute`, not a one-off for `@@mutable`.
+
+## `@@mutable` on a record `type` / `interface`
+
+```ts
+@@mutable
+type Cell = { n: number };
+const c: Cell = { n: 1 };
+c.n = 41;
+c.n++;          // and compound assignment, and `+=`
+```
+
+An undecorated record is unchanged: `o.f = v` is still `NT1606` pointing at `{ ...o, f: v }`.
+
+### Mutability is NOMINAL, carried by a TAG
+
+A `@@mutable` record type is compiled to the **tagged** object type `Cell{n:number}` — exactly the
+encoding a class instance already uses (`Point{x:number,y:number}`), rather than the untagged
+`{n:number}` of a plain record literal. That is the whole design decision, and it is what makes
+
+```ts
+@@mutable type Cell   = { n: number };
+          type Frozen = { n: number };
+```
+
+two *different* types: `Frozen` is still immutable even though it is structurally identical. Had
+mutability been attached to the SHAPE, the compiler could not have told them apart and any
+`{n:number}` anywhere would have become assignable in place — a silent hole. Reusing the class tag
+also means every downstream rule is the class rule, unchanged: `classTag`, the checker's field-
+assignment check, and the ownership pass's `NT1607`/`NT1604`/`NT1602`.
+
+Because a record has no constructor, its values come from object **literals**, so a literal takes
+the tag from its **context** — a binding annotation, a declared return type, a parameter type, an
+array element type. `const c: Cell = { n: 1 }`, `return { n: 1 }` and `f({ n: 1 })` all produce a
+`Cell` through the one hint channel the checker already had.
+
+### The ownership rule is the SAME one
+
+Only the **owner** may mutate, and a borrow may never outlive its owner — stated over a field write
+instead of a setter call:
+
+| | |
+|---|---|
+| `const b = c` | an **alias** (a borrow), not a move — every handle observes the mutation, and the value is still dropped exactly once, by the owner (`__objLive()` → 0) |
+| `b.n = 1` through an alias, a **parameter**, a `for-of` element, a **container element** (`cells[0].n = 1`), a capture | **`NT1607`** (≈ rustc E0596) — the receiver is not a binding whose ownership this scope can establish |
+| letting an alias **escape** (`return b`) | **`NT1604`** (≈ E0507) |
+| reassigning an owner that is still aliased | **`NT1602`** (≈ E0506) |
+| **reading** through any handle | always fine |
+
+Parameters being borrows means a mutating helper (`function tick(c: Cell) { c.n++; }`) is refused:
+mutate where the record is owned, or return a new one. That is the same restriction a `@@mutable`
+class setter has, and the same one that keeps the model single-owner.
+
+### `delete o.k` is still refused, and that is a decision
+
+`@@mutable` legalizes assigning a **slot**, not changing a **shape**. A record's fields are static
+slots resolved at compile time — the shape *is* the type — so removing a key would change a value's
+type mid-program, which is a different and much larger feature (it needs runtime-keyed objects).
+It stays `NT1606`, now with a hint that names the two real fixes: declare the field optional
+(`k?: T`) and set it to `undefined` — which a `@@mutable` record can now actually do — or rebuild
+without the key.
+
+### Known imprecision
+
+- **A record tag is a NAME.** The module linker renames a non-entry module's record tags per module
+  (like class tags), so two modules may each declare a `Cell` — verified in
+  `test/mutable-records.test.ts`. Within one module the name must be unique, as any type name must.
+- **Compound assignment re-reads the receiver.** `o.f += v` desugars to `o.f = o.f + v`, which is
+  sound only for a side-effect-free receiver path, so a computed one (`f().x += 1`) is refused
+  rather than double-evaluated.
+- Everything under "What this proves, and what it does not" above applies verbatim: this is not
+  full `&mut` exclusivity, and aliases borrow for the whole scope (no NLL).
+
+---
+
 ## `@wrapper` — the runtime decorator
 
 A `@wrapper` is an **ordinary user function** that takes the thing being decorated and returns
@@ -207,7 +320,8 @@ Refused (`NT1023`), because the wrapper's type is the method's own signature:
 
 ## Tests
 
-`test/decorators.test.ts`.
+`test/decorators.test.ts` (the specified design) and `test/mutable-records.test.ts` (the extension:
+the `//@@` pragma, records, their ownership rules, and the module-linker path).
 
 - **node-differential** (the oracle is node on a mechanically desugared source):
   - `@@mutable` classes — the oracle is the same source with the attribute line stripped

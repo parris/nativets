@@ -90,7 +90,7 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     expect(r.blockers).toEqual([]);
   });
 
-  test("NT0001 is CLEARED everywhere except ONE unmasked regex literal", () => {
+  test("NT0001 is CLEARED except TWO unmasked constructs (a regex literal, `satisfies`)", () => {
     // The NT0001 "unparsed statement" bucket was the #1 self-host blocker at x11 once
     // Stage 36 cleared NT1013. It was never one feature; the six causes were extracted
     // from real statements and closed one at a time (see test/selfhost-parse.test.ts):
@@ -98,33 +98,56 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // literals, `++`/`--` on a member or index target, `instanceof`, binding patterns in
     // parameters — plus parenthesized types and `delete`. Whole tree: ZERO.
     //
-    // Re-measured after the DECORATORS lane (Stage 45) made `this.f = v` legal inside a
-    // class METHOD: `class Checker` now parses PAST the field assignment that used to
-    // stop it, and reaches `t.replace(/[^A-Za-z0-9_]/g, "_")` — a REGEX LITERAL, which
-    // nativets genuinely does not have (no RegExp, Tier C). So this is not a regression
-    // in the parser; it is a previously-masked blocker becoming visible, which is what
-    // burning down an earlier one is supposed to do. Everything else still parses.
+    // Each surviving NT0001 is a blocker an EARLIER burn-down unmasked, which is what
+    // burning one down is supposed to do — not a parser regression:
+    //   - `checker.ts`: Stage 45 made `this.f = v` legal in a class METHOD, so `class
+    //     Checker` parses past its field assignment and reaches
+    //     `t.replace(/[^A-Za-z0-9_]/g, "_")` — a REGEX LITERAL (no RegExp, Tier C);
+    //   - `parser.ts`: the mutable-records lane put `//@@mutable` on `class Parser`, so it
+    //     parses past `this.pos++` and reaches `… satisfies ExportTable` — the `satisfies`
+    //     operator, which nativets does not have.
+    // Everything else still parses.
+    const UNMASKED: Record<string, number> = { "checker.ts": 1, "parser.ts": 1 };
     for (const f of SRC_MODULES) {
       const r = coverage(src(f));
       const nt0001 = r.blockers.filter((b) => b.code === "NT0001").length;
-      expect({ file: f, nt0001 }).toEqual({ file: f, nt0001: f === "checker.ts" ? 1 : 0 });
+      expect({ file: f, nt0001 }).toEqual({ file: f, nt0001: UNMASKED[f] ?? 0 });
     }
   });
 
-  test("the frontier is now NT1606 field mutation — a SOURCE refactor, not a missing feature", () => {
-    // Re-measured after the NT0001 burn-down. What blocks src/ is no longer syntax: it
-    // is field mutation `o.f = v` / `o.f++` on a value the compiler treats as a plain
-    // record (objects are immutable since Stage 29), which is a property of how the
-    // compiler is WRITTEN. (Stage 45 made `this.f = v` legal in a class method, so what
-    // is left is genuinely non-`this` mutation.) The residue is 2x NT1015 (a `static`
-    // member, a class field needing an annotation), NT1009 (general unions), and the one
-    // unmasked regex literal above.
+  test("NT1606 field mutation is DOWN to one: `delete o.k`, the one `@@mutable` refuses", () => {
+    // Before the mutable-records lane this was the #1 blocker at x8: `o.f = v` / `o.f++`
+    // on a value the compiler treats as a plain record (objects are immutable since Stage
+    // 29). Three of those were class-field mutations, cleared by putting `@@mutable` on
+    // `Parser`/`FnGen`/`Analyzer` — in the `//@@mutable` PRAGMA spelling, because this
+    // source must satisfy bun AND nativets at once. Five were plain-RECORD mutations
+    // (`s.returnTy = ret`), cleared by extending `@@mutable` to `type`/`interface`.
+    //
+    // The one that remains is `delete o.k` in `specializeDecl`, and it is deliberate: a
+    // record's SHAPE is its type here (fields are static slots), so removing a key is a
+    // different feature from assigning one. It is refused with that in the hint.
+    const nt1606: { file: string; feature: string }[] = [];
+    for (const f of SRC_MODULES) {
+      for (const b of coverage(src(f)).blockers) if (b.code === "NT1606") nt1606.push({ file: f, feature: b.feature });
+    }
+    expect(nt1606.length).toBe(1);
+    expect(nt1606[0]!.file).toBe("checker.ts");
+    expect(nt1606[0]!.feature).toContain("delete o.k");
+  });
+
+  test("the re-measured frontier: no single code dominates any more", () => {
+    // The histogram now also counts a FEATURE blocker the CHECKER reports (NT1xxx only —
+    // see src/coverage.ts). Without that, moving a rejection from the parser to the
+    // checker (which is exactly what `o.f = v` did when `@@mutable` records arrived) would
+    // have looked like the blocker vanishing. So this list is bigger than the pre-lane one
+    // and, unlike it, is not parse-stage-only.
     const hist = new Map<string, number>();
     for (const f of SRC_MODULES) {
       for (const b of coverage(src(f)).blockers) hist.set(b.code, (hist.get(b.code) ?? 0) + b.count);
     }
-    expect([...hist.keys()].sort()).toEqual(["NT0001", "NT1009", "NT1015", "NT1606"]);
-    expect(hist.get("NT1606")).toBeGreaterThan(hist.get("NT1015")!);
+    expect([...hist.keys()].sort()).toEqual(["NT0001", "NT1003", "NT1009", "NT1014", "NT1015", "NT1606"]);
+    // NT1606 is no longer the largest bucket — that is the lane's whole result.
+    for (const [code, n] of hist) if (code !== "NT1606") expect(n).toBeGreaterThanOrEqual(hist.get("NT1606")!);
   });
 
   test("every src module reaches analysis (no file dies on the module preamble)", () => {

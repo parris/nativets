@@ -24,7 +24,7 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
-import { isArrayTy, isObjectTy, setBlockDrops, classTag } from "./ast.ts";
+import { isArrayTy, isObjectTy, setBlockDrops, classTag, mutableTags } from "./ast.ts";
 
 /** The linear (single-owner, move-checked + dropped) types: heap aggregates. */
 function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t); }
@@ -130,6 +130,9 @@ function isIdentityCall(e: Expr): boolean {
     && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object" && e.args.length === 1;
 }
 
+// The dataflow analyzer mutates its own borrow/alias/arrow-depth state as it walks — one
+// owned object, mutated in place. `@@mutable`, in the pragma spelling (src/lexer.ts).
+//@@mutable
 class Analyzer {
   readonly diags: OwnDiag[] = [];
   private collecting = true;
@@ -338,6 +341,45 @@ class Analyzer {
     this.collecting = prev;
   }
 
+  /**
+   * EXCLUSIVE ACCESS for an in-place field write on a `@@mutable` record — the same rule
+   * a `@@mutable` class setter obeys, stated over a `FieldAssign`/`UpdateExpr` target
+   * instead of a method call.
+   *
+   * The receiver must be a BINDING this scope owns. Refused (NT1607, ≈ rustc E0596):
+   *   - an alias (`const b = c; b.n = 1`) and a by-borrow PARAMETER — the owner is elsewhere;
+   *   - a `for-of` element — the array owns it;
+   *   - anything that is not a name at all (`cells[0].n = 1`, a call result, a capture) —
+   *     ownership we cannot establish, so it is refused rather than mutated blind.
+   * Reading through any handle stays fine; only the WRITE needs the owner.
+   */
+  private checkOwnedReceiver(object: Expr, field: string): void {
+    if (!this.mutable.classes.size) return;
+    // Resolve the receiver: `a.b.c = v` mutates the record `a.b`, whose root binding is `a`.
+    let root: Expr = object;
+    while (root.kind === "MemberExpr") root = root.object;
+    if (root.kind === "Identifier" && root.name === "this") return; // a method's own receiver
+    const owned = root.kind === "Identifier" && this.varTy.has(root.name) && !this.borrowBindings.has(root.name);
+    if (owned) return;
+    const name = root.kind === "Identifier" ? root.name : null;
+    if (name !== null && this.varTy.get(name) !== undefined && !this.isMutableInstance(this.varTy.get(name)!)) {
+      // A borrowed binding of a NON-mutable type cannot be the receiver of a legal field
+      // write at all (the checker already rejected it) — nothing to add here.
+      return;
+    }
+    const ownerOfAlias = name !== null ? this.aliasOf.get(name) : undefined;
+    this.report({
+      code: OWN_CODES.MUTATE_THROUGH_BORROW,
+      message: name === null
+        ? `cannot assign \`.${field}\` here: the receiver is not a binding whose ownership this scope can establish`
+        : `cannot mutate \`${name}\` through a borrow: assigning \`.${field}\` needs exclusive (owning) access`,
+      line: lineOf(object),
+      hint: ownerOfAlias !== undefined && ownerOfAlias !== ""
+        ? `\`${name}\` is an alias of \`${ownerOfAlias}\`, which still owns the value — assign through \`${ownerOfAlias}\`, or make \`${name}\` the owner with \`const ${name} = move(${ownerOfAlias})\``
+        : "a `@@mutable` record is mutated in place, so the write needs an OWNED receiver — a local bound in this scope. Parameters, `for-of` elements, container elements and captures are borrows (their owner is elsewhere), so they are refused rather than mutated blind; build and return a new record instead",
+    });
+  }
+
   /** `consume` = this position takes ownership (move); otherwise it's a borrow. */
   private expr(e: Expr, state: State, consume: boolean): void {
     switch (e.kind) {
@@ -446,7 +488,15 @@ class Analyzer {
           state.set(e.target, { moved: false, must: false }); // reassignment revives
         }
         return;
-      case "FieldAssign": // `this.field = v`: read the instance (borrow), move the value in
+      case "FieldAssign":
+        // `o.field = v`: read the receiver (borrow), move the value in.
+        //
+        // A `@@mutable` RECORD has no methods, so its mutation is this node rather than a
+        // setter call — but the rule is the SAME one Stage 45 established for classes:
+        // only the OWNER may mutate (Rust's `&mut self`). `this.f = v` inside a member
+        // body is exempt (the receiver is the caller's, and the call-site rules are what
+        // keep it single-owner).
+        if (!e.viaThis) this.checkOwnedReceiver(e.object, e.field);
         this.expr(e.object, state, false);
         this.expr(e.value, state, true);
         return;
@@ -493,7 +543,15 @@ class Analyzer {
         this.arrowDepth--;
         return;
       case "SequenceExpr": for (const x of e.exprs) this.expr(x, state, false); return;
-      default: return; // literals, update (numeric), unreachable kinds
+      case "UpdateExpr":
+        // `c.n++` on a `@@mutable` record is a field WRITE, so it needs an owned receiver
+        // exactly like `c.n = c.n + 1`. A plain `i++` has no receiver and falls through.
+        if (e.targetExpr) {
+          if (e.targetExpr.kind === "MemberExpr") this.checkOwnedReceiver(e.targetExpr.object, e.targetExpr.property);
+          this.expr(e.targetExpr, state, false);
+        }
+        return;
+      default: return; // literals, numeric update, unreachable kinds
     }
   }
 }
@@ -584,7 +642,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   // `@@mutable` classes (decorators lane) and their setters. Empty for every program that
   // does not use the attribute, in which case every rule below is inert.
   const mutable: MutableInfo = {
-    classes: new Set(checked.program.mutableClasses ?? []),
+    classes: mutableTags(checked.program), // `@@mutable` classes AND `@@mutable` records
     setters: new Set(),
     setterProps: new Set(),
   };

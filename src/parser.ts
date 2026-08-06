@@ -9,7 +9,7 @@
 
 import { lex, type Token } from "./lexer.ts";
 import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnostics.ts";
-import { makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep } from "./ast.ts";
+import { makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep, isObjectTy, classTag } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
   ImportDecl, ExportTable,
@@ -23,6 +23,11 @@ export interface ParseOpts {
   typeEnv?: Map<string, Ty>;
   /** This module's path, as it should appear in a runtime panic's `at <file>:<line>:<col>`. */
   file?: string;
+  /** OUT-param: receives every type alias this parse declared. `coverage` parses a file
+   *  one statement at a time, so without this a `type`/`interface` declared in one
+   *  statement would be invisible to the next — most visibly a `@@mutable type`, whose
+   *  tag is what makes a later `r.f = v` legal. Unused by the normal pipeline. */
+  collectTypes?: Map<string, Ty>;
 }
 
 export class ParseError extends Error {}
@@ -53,6 +58,23 @@ const SCALARS = new Set(["number", "boolean", "string", "void", "undefined", "nu
  */
 const KNOWN_ATTRS = new Set(["mutable"]);
 
+/**
+ * A receiver that can be evaluated TWICE with no observable difference — a plain name,
+ * `this`, or a chain of field reads over one. Compound field assignment (`o.f += v`) and
+ * `o.f++` desugar to a read plus a write, so they need this; a computed receiver
+ * (`f().x += 1`) is refused rather than silently double-evaluated.
+ */
+function isSimplePath(e: Expr): boolean {
+  if (e.kind === "Identifier") return true;
+  return e.kind === "MemberExpr" && isSimplePath(e.object);
+}
+
+// A parser is a CURSOR: `this.pos` advances, `this.typeAliases` accumulates. That is real
+// in-place mutation of one owned object, so it is `@@mutable` (docs/decorators.md) — spelled
+// as a PRAGMA comment because this file must satisfy two toolchains at once: bun runs it
+// today (where `@@mutable` is a syntax error) and nativets must compile it tomorrow (where
+// the attribute is load-bearing). See src/lexer.ts.
+//@@mutable
 class Parser {
   private pos = 0;
   private tmpCounter = 0;
@@ -94,6 +116,11 @@ class Parser {
   /** Classes carrying `@@mutable` — TRUE in-place mutation (see docs/decorators.md).
    *  Published on the Program so the ownership pass and the checker can see it. */
   private readonly mutableClasses = new Set<string>();
+  /** RECORD type names carrying `@@mutable` (`@@mutable type Cell = { n: number }`) —
+   *  an extension of the class attribute to a `type`/`interface` declaration. The record
+   *  is tagged with this name (`Cell{n:number}`), so mutability is NOMINAL rather than
+   *  structural; published on the Program for the checker + ownership pass. */
+  private readonly mutableRecords = new Set<string>();
   /** Module surface (SH1): `import` declarations and the export table. Empty for an
    *  ordinary single-file program, in which case `parseProgram` leaves them off the
    *  Program entirely — so every existing single-module path is untouched. */
@@ -102,9 +129,11 @@ class Parser {
   private exportReexports = new Map<string, { source: string; imported: string; line: number }>();
   private exportTypes = new Set<string>();
   private file?: string;
+  private collectTypes?: Map<string, Ty>;
   constructor(private toks: Token[], opts: ParseOpts = {}) {
     if (opts.typeEnv) for (const [k, v] of opts.typeEnv) this.typeAliases.set(k, v);
     this.file = opts.file;
+    this.collectTypes = opts.collectTypes;
   }
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
@@ -174,6 +203,8 @@ class Parser {
     // `@@mutable` classes (decorators lane). Attached only when the source used the
     // attribute, so an ordinary program's Program is byte-identical to what it was.
     if (this.mutableClasses.size) program.mutableClasses = [...this.mutableClasses];
+    if (this.mutableRecords.size) program.mutableRecords = [...this.mutableRecords];
+    if (this.collectTypes) for (const [k, v] of this.typeAliases) this.collectTypes.set(k, v);
     // Only attach the module surface when the source actually used it, so a
     // single-file program's Program is byte-identical to what it always was.
     if (this.imports.length) program.imports = this.imports;
@@ -395,26 +426,67 @@ class Parser {
   // `type X = <type>;` — record the alias, erase the declaration. RHS uses the normal
   // type grammar (so `type Dir = "n" | "s"` collapses to string; a general union throws NYI).
   private parseTypeAlias(): Stmt {
+    const dec = this.pendingDecorators;
+    this.pendingDecorators = null;
     this.eat("type");
     const name = this.expectIdent();
     if (this.at("<")) this.skipGenerics(); // erased type params
     this.eat("=");
     const rhs = this.parseType();
     if (this.at(";")) this.eat(";");
-    this.typeAliases.set(name, rhs);
+    this.typeAliases.set(name, this.applyRecordAttrs(dec, name, rhs, "type"));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
+  }
+
+  /**
+   * `@@mutable` on a `type`/`interface` declaration (extension of Stage 45's class
+   * attribute — see docs/decorators.md).
+   *
+   * The record is TAGGED with its declaration name, exactly the way a class instance
+   * type is (`Cell{n:number}` vs the untagged literal `{n:number}`), and the tag is
+   * published on the Program. That makes mutability NOMINAL: two structurally identical
+   * records, one decorated and one not, stay distinguishable, so an undecorated record
+   * can never be silently mutated because some other declaration happens to share its
+   * shape. Every downstream rule then reuses the class machinery unchanged — `classTag`,
+   * the checker's field-assignment check, and the ownership pass's NT1607/NT1604/NT1602.
+   */
+  private applyRecordAttrs(dec: { attrs: string[]; wrappers: string[] } | null, name: string, shape: Ty, what: string): Ty {
+    if (!dec || (!dec.attrs.length && !dec.wrappers.length)) return shape;
+    if (dec.wrappers.length) {
+      throw decoratorError(
+        `runtime decorator '@${dec.wrappers[0]}' on a '${what}' declaration`,
+        "a `@wrapper` is a real function applied to a runtime value; a type declaration has none (it is erased). Only the compile-time `@@` form applies to a type",
+      );
+    }
+    const unknown = dec.attrs.filter((a) => a !== "mutable");
+    if (unknown.length) {
+      throw decoratorError(
+        `compile-time attribute '@@${unknown[0]}' on a '${what}' declaration`,
+        "the only attribute a type declaration accepts is `@@mutable`",
+      );
+    }
+    if (!isObjectTy(shape) || classTag(shape) !== undefined) {
+      throw decoratorError(
+        `'@@mutable ${what} ${name}' does not declare a RECORD (it resolves to '${shape}')`,
+        "`@@mutable` marks a record whose fields may be assigned in place, so the declaration must be an object type — `@@mutable type Cell = { n: number }`. Arrays, scalars and aliases of another named record cannot carry it",
+      );
+    }
+    this.mutableRecords.add(name);
+    return `${name}${shape}` as Ty;
   }
 
   // `interface X [extends …] { fields }` — record the structural record, erase the
   // declaration. Field-only bodies (`k: T` / `k?: T`, `,`/`;`-separated); reuses the
   // object-type grammar. Uses of `X` in annotations resolve to this shape.
   private parseInterface(): Stmt {
+    const dec = this.pendingDecorators;
+    this.pendingDecorators = null;
     this.eat("interface");
     const name = this.expectIdent();
     if (this.at("<")) this.skipGenerics();
     if (this.at("extends")) { this.eat("extends"); this.parseType(); while (this.at(",")) { this.eat(","); this.parseType(); } }
     const shape = this.parseObjectType();
-    this.typeAliases.set(name, shape);
+    this.typeAliases.set(name, this.applyRecordAttrs(dec, name, shape, "interface"));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
   }
 
@@ -550,10 +622,14 @@ class Parser {
     this.pendingDecorators = { attrs, wrappers };
     if (this.at("export")) return this.parseExport();
     if (this.at("class") && this.peek(1).type === "ident") return this.parseClass();
+    // `@@mutable type X = { … }` / `@@mutable interface X { … }` — a RECORD declaration
+    // (the extension of the class attribute; see applyRecordAttrs / docs/decorators.md).
+    if (this.at("type") && this.peek(1).type === "ident" && (this.peek(2).value === "=" || this.peek(2).value === "<")) return this.parseTypeAlias();
+    if (this.at("interface") && this.peek(1).type === "ident") return this.parseInterface();
     const t = this.peek();
     throw decoratorError(
       `decorator on a '${t.value || t.type}' declaration at ${t.line}:${t.col}`,
-      "decorators attach to a `class` (either sigil) or to a class METHOD (`@wrapper m() { … }`) — not to a function, variable or statement",
+      "decorators attach to a `class` or a record `type`/`interface` (the `@@` form), or to a class METHOD (`@wrapper m() { … }`) — not to a function, variable or statement",
     );
   }
 
@@ -933,12 +1009,12 @@ class Parser {
     for (const p of ctorParams ?? []) {
       if (!p.paramProp) continue;
       fields.push({ key: p.name, ty: p.annot ?? "number" });
-      paramPropInits.push({ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: p.name, value: this.ident(p.name) } });
+      paramPropInits.push({ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: p.name, value: this.ident(p.name), viaThis: true } });
     }
     // Field initializers (`name = init`): `this.name = init`, in declaration order, prepended
     // after the parameter-property inits and before the explicit ctor body (TS field-init order).
     const fieldInitStmts: Stmt[] = fieldInits.map(fi => ({
-      kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: fi.field, value: fi.value },
+      kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: fi.field, value: fi.value, viaThis: true },
     }) as Stmt);
     const prelude = [...paramPropInits, ...fieldInitStmts];
     // A class with initializers but no explicit constructor gets a synthesized zero-arg ctor
@@ -953,7 +1029,7 @@ class Parser {
     // works and `x.message === "m"` — matching node's implicit `super(...arguments)`.
     if (extendsError && ctorParams === null && fields.length === 1) {
       ctorParams = [{ name: "message", annot: "string" }];
-      ctorBody = [{ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: "message", value: this.ident("message") } }];
+      ctorBody = [{ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: "message", value: this.ident("message"), viaThis: true } }];
     }
 
     // Reject-don't-miscompile: fields are only initialized by the constructor. Without an
@@ -1382,15 +1458,30 @@ class Parser {
         return { kind: "IndexAssign", op, object: left.object, index: left.index, value: this.parseAssign(), loc: left.loc };
       }
       if (left.kind === "MemberExpr") {
-        // The ONE allowed field assignment: `this.field = v` while building an instance
-        // inside a constructor. Everywhere else `o.f = v` stays rejected (immutability),
-        // and a method of a class is writable too (the setter lowering, docs/decorators.md).
-        if (this.thisWritable && t.value === "=" && left.object.kind === "Identifier" && left.object.name === "this") {
-          this.next();
-          this.thisAssigned = true;
-          return { kind: "FieldAssign", object: left.object, field: left.property, value: this.parseAssign() };
+        // Field assignment `o.f = v`. The parser can prove only the SYNTACTIC case —
+        // `this.f` inside a member body, where the constructor is building the instance
+        // or the method is a setter (docs/decorators.md). Whether any OTHER receiver may
+        // be assigned depends on its TYPE (a `@@mutable` record/class), which the parser
+        // does not know, so the node is emitted and the checker decides — rejecting with
+        // the same NT1606 it used to throw here when it is not mutable.
+        const viaThis = this.thisWritable && left.object.kind === "Identifier" && left.object.name === "this";
+        if (viaThis) this.thisAssigned = true;
+        const op = this.next().value;
+        const value = this.parseAssign();
+        if (op === "=") return { kind: "FieldAssign", object: left.object, field: left.property, value, viaThis };
+        // Compound `o.f op= v` desugars to `o.f = o.f op v`, which re-evaluates the
+        // RECEIVER — sound only for a side-effect-free path (`a`, `this`, `a.b.c`).
+        if (!isSimplePath(left.object)) {
+          throw mutationError(
+            `compound assignment '${op}' to a field of a computed receiver`,
+            "the receiver would be evaluated twice; bind it first — `const o = …; o.f = o.f + v`",
+          );
         }
-        throw mutationError("objects are immutable: `o.f = v` would mutate the object in place", "use `{ ...o, f: v }` — returns a NEW object; the original is unchanged");
+        const bin = op.slice(0, -1) as BinaryOp;
+        return {
+          kind: "FieldAssign", object: left.object, field: left.property, viaThis,
+          value: { kind: "BinaryExpr", op: bin, left: { ...left }, right: value },
+        };
       }
       if (left.kind !== "Identifier") throw parseError("Invalid assignment target");
       const op = this.next().value as any;
@@ -1488,7 +1579,15 @@ class Parser {
     if (this.at("delete") && this.startsExpression(this.peek(1))) {
       this.eat("delete");
       this.parseUnary();
-      throw mutationError("objects are immutable: `delete o.k` would remove a key in place", "rebuild without the key — e.g. `Object.keys(o).filter((x) => x !== k)` — or keep a nullable field and set it to undefined");
+      // NOTE (mutable records): `@@mutable` does NOT make `delete` legal. A record's
+      // SHAPE is its type — fields are static slots resolved at compile time — so removing
+      // a key would change the value's type mid-program, which is a different (and much
+      // larger) feature than assigning a slot in place. Refused precisely instead.
+      throw mutationError(
+        "objects are immutable: `delete o.k` would remove a key in place",
+        "a record's shape is its TYPE (fields are static slots), so a key cannot be removed at runtime even from a `@@mutable` record. " +
+        "Declare the field optional (`k?: T`) and set it to `undefined`, or rebuild without the key",
+      );
     }
     if (this.at("new")) {
       this.eat("new");
@@ -1521,9 +1620,15 @@ class Parser {
    */
   private updateTarget(target: Expr): Expr {
     if (target.kind === "MemberExpr") {
-      if (!(this.thisWritable && target.object.kind === "Identifier" && target.object.name === "this"))
-        throw mutationError("objects are immutable: `o.f++` would mutate the object in place", "use `{ ...o, f: o.f + 1 }` — returns a NEW object; the original is unchanged");
-      this.thisAssigned = true;
+      // Same split as plain assignment: `this.f` is decided here (syntax), every other
+      // receiver is deferred to the checker, which knows whether it is `@@mutable`.
+      if (this.thisWritable && target.object.kind === "Identifier" && target.object.name === "this") this.thisAssigned = true;
+      else if (!isSimplePath(target.object)) {
+        throw mutationError(
+          "`o.f++` on a computed receiver",
+          "the receiver would be evaluated twice; bind it first — `const o = …; o.f++`",
+        );
+      }
     }
     return target;
   }
@@ -1624,7 +1729,7 @@ class Parser {
         if (!this.at(")")) { do { if (this.at(")")) break; args.push(this.parseAssign()); } while (this.at(",") && (this.eat(","), true)); }
         this.eat(")");
         if (args.length !== 1) throw nyi(NYI.CLASS_FEATURE, `super(...) with ${args.length} arguments (an Error subclass takes a single message)`);
-        return { kind: "FieldAssign", object: this.ident("this"), field: "message", value: args[0]! };
+        return { kind: "FieldAssign", object: this.ident("this"), field: "message", value: args[0]!, viaThis: true };
       }
       this.next();
       return { kind: "Identifier", name: t.value, loc: { line: t.line, col: t.col } };

@@ -9,7 +9,7 @@
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
-import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep } from "./ast.ts";
+import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
@@ -223,7 +223,7 @@ export function actorSendTy(t: Ty): Ty {
 
 export function check(program: Program): CheckedProgram {
   const functions = new Map<string, Sig>();
-  const c = new Checker(functions);
+  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []));
   const builtins = () => {
     const s = new Scope();
     for (const n of BUILTIN_NUMBERS) s.declare(n, "number", true);
@@ -340,7 +340,37 @@ class Checker {
    * NT1014 rejection. This set records the positions as they are checked.
    */
   private iterOk = new Set<Expr>();
-  constructor(private functions: Map<string, Sig>) {}
+  constructor(
+    private functions: Map<string, Sig>,
+    /** Tags whose values mutate IN PLACE — `@@mutable` classes and `@@mutable` records.
+     *  Empty for every program that does not use the attribute, which is what keeps
+     *  `o.f = v` rejected exactly as it was before (Stage 29). */
+    private mutable: Set<string> = new Set(),
+    /** Just the `@@mutable` RECORD tags. A record has no constructor — its values come
+     *  from object LITERALS — so a literal must be able to take the tag from its context.
+     *  Class tags are deliberately excluded: an instance comes from `new C(…)`. */
+    private recordTags: Set<string> = new Set(),
+  ) {}
+
+  /** The tagged record type a literal should take from its context, if any. */
+  private contextualRecordTy(hint: Ty | undefined): Ty | undefined {
+    if (hint === undefined || !this.recordTags.size) return undefined;
+    const base = baseTy(hint);
+    const tag = classTag(base);
+    return tag !== undefined && this.recordTags.has(tag) ? base : undefined;
+  }
+
+  /**
+   * May a field of `ot` be assigned in place? Only for a value whose type carries a
+   * `@@mutable` tag — a class instance (Stage 45) or a `@@mutable` record (this lane).
+   * Mutability is NOMINAL: a structurally identical undecorated record has no tag, so it
+   * stays immutable and keeps the NT1606 rejection with the spread hint.
+   */
+  private isMutableTy(ot: Ty): boolean {
+    if (!this.mutable.size || !isObjectTy(ot)) return false;
+    const tag = classTag(ot);
+    return tag !== undefined && this.mutable.has(tag);
+  }
 
   /* ============================================================
    * M3 — monomorphization of generic functions.
@@ -731,7 +761,10 @@ class Checker {
             if (!isArrayTy(st)) throw typeError("can only spread an array into an array literal");
             return elemTy(st);
           }
-          return this.type(el, scope);
+          // The context's ELEMENT type is each element's context, so a `@@mutable` record
+          // literal in `const cells: Cell[] = [{ n: 1 }]` takes its tag (and a nested `[]`
+          // takes its element type) from the annotation, exactly as one in a field does.
+          return this.type(el, scope, hint && isArrayTy(hint) ? elemTy(hint) : undefined);
         });
         const first = tys[0]!;
         if (!tys.every((t) => t === first)) throw typeError(`array elements must share a type (got ${[...new Set(tys)].join(", ")})`);
@@ -755,7 +788,14 @@ class Checker {
             put(p.key, this.type(p.value, scope, want ? baseTy(want) : undefined));
           }
         }
-        return objectType(fields);
+        const lit = objectType(fields);
+        // Contextual TAGGING (`@@mutable` records). A record's values come from object
+        // literals, and the tag is what makes its mutability nominal — so where the
+        // context asks for a tagged record and the literal fits it, the literal IS one.
+        // That covers `const c: Cell = {…}`, `return {…}`, `f({…})` and `Cell[]` elements
+        // through the one hint channel that already exists.
+        const tagged = this.contextualRecordTy(hint);
+        return tagged !== undefined && this.assignable(tagged, lit) ? tagged : lit;
       }
       case "SpreadExpr": throw nyi(NYI.SPREAD, "spread");
       case "ArrowFunction": return this.typeArrow(e, undefined, scope);
@@ -879,6 +919,20 @@ class Checker {
             if (isObjectTy(ot))
               throw mutationError("objects are immutable: `o[k]++` would mutate the object in place", "use `{ ...o, k: o[k] + 1 }` — returns a NEW object; the original is unchanged");
             throw mutationError("arrays are immutable: `arr[i]++` would mutate the array in place", "use `arr.with(i, arr[i] + 1)` — returns a NEW array; the original is unchanged");
+          }
+          // A FIELD target (`this.n++`, `cell.n++`). The parser vetted only the `this`
+          // case (syntax); mutability of any other receiver is a TYPE question, decided
+          // here exactly like `FieldAssign`.
+          if (tgt.kind === "MemberExpr") {
+            const ot = this.type(tgt.object, scope);
+            const isThis = tgt.object.kind === "Identifier" && tgt.object.name === "this";
+            if (!isThis && !this.isMutableTy(ot)) {
+              throw mutationError(
+                "objects are immutable: `o.f++` would mutate the object in place",
+                "use `{ ...o, f: o.f + 1 }` — returns a NEW object; the original is unchanged" +
+                  (isObjectTy(ot) ? ". To assign in place instead, declare the record `@@mutable` (docs/decorators.md)" : ""),
+              );
+            }
           }
           const ft = this.type(tgt, scope);
           if (ft !== "number") throw typeError(`'${e.op}' needs number`);
@@ -1007,8 +1061,22 @@ class Checker {
         throw mutationError("arrays are immutable: `arr[i] = v` would mutate the array in place", "use `arr.with(i, v)` — returns a NEW array; the original is unchanged");
       }
       case "FieldAssign": {
-        // `this.field = expr` inside a constructor — initialize one instance slot.
+        // `o.field = expr` — store one slot. Three ways to get here:
+        //   - `this.f = v` inside a class member body (the parser vetted the syntactic
+        //     context: a constructor building the instance, or a setter method);
+        //   - `r.f = v` on a `@@mutable` RECORD (this lane) — allowed below;
+        //   - anything else, which is the Stage-29 immutability rejection (NT1606).
+        // The parser cannot decide the last two (it does not know types), so it emits the
+        // node and defers here. The ownership pass then decides WHO may mutate (NT1607).
         const ot = this.type(e.object, scope);
+        if (!e.viaThis && !this.isMutableTy(ot)) {
+          throw mutationError(
+            "objects are immutable: `o.f = v` would mutate the object in place",
+            isObjectTy(ot)
+              ? "use `{ ...o, f: v }` — returns a NEW object; the original is unchanged. To assign in place instead, declare the record `@@mutable` (docs/decorators.md)"
+              : "use `{ ...o, f: v }` — returns a NEW object; the original is unchanged",
+          );
+        }
         if (!isObjectTy(ot)) throw typeError(`cannot assign field on non-object type ${ot}`);
         const ft = fieldType(ot, e.field);
         if (!ft) throw typeError(`Property '${e.field}' does not exist on ${ot}`);
