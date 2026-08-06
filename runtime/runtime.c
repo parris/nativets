@@ -23,6 +23,13 @@
 #include <stdatomic.h> /* relaxed stat counters (thread-safe under B3 v6 M:N schedulers) */
 #include <stdint.h>
 #include <time.h>     /* clock_gettime / time — Date.now */
+#include <errno.h>    /* host FFI (SH4): node-identical fs error codes/messages */
+#include <sys/stat.h> /* host FFI (SH4): existsSync — POSIX stat, cross-links */
+#include <dirent.h>  /* host FFI (SH4): readdirSync / recursive rmSync */
+#if !defined(_WIN32) && !defined(__wasi__)
+#include <sys/wait.h> /* host FFI (SH4): spawnSync — fork/execvp/waitpid + poll */
+#include <poll.h>
+#endif
 #ifndef _WIN32
 #include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
 #if !defined(__wasi__)
@@ -1495,6 +1502,606 @@ const char *nt_read_key(void) {
   g_stdin_pos++;
   return o;
 }
+
+/* ============================================================
+ * Host FFI (SH4) — the filesystem, backed by stdio only (fopen/fread/fwrite/
+ * fclose), so this block cross-links unchanged for macOS/iOS/Android exactly
+ * like the argv/env/stdin block above.
+ *
+ * Errors are node's, byte-for-byte: node's `err.message` for a failed fs call is
+ * `<CODE>: <description>, <syscall> '<path>'` (the "Error: " prefix belongs to
+ * toString, not to the message). We raise that string through the pending-
+ * exception protocol, so `try { readFileSync(p, "utf8") } catch (e) { e.message }`
+ * prints the same text under node and under the compiled binary.
+ * ============================================================ */
+
+/* The node/libuv description for the errno values an fs call actually produces.
+ * An errno we do not name falls back to strerror(3) — never a wrong code. */
+static const char *host_errno_code(int e) {
+  switch (e) {
+    case ENOENT:  return "ENOENT";
+    case EACCES:  return "EACCES";
+    case EISDIR:  return "EISDIR";
+    case ENOTDIR: return "ENOTDIR";
+    case EEXIST:  return "EEXIST";
+    case EPERM:   return "EPERM";
+    case ENOTEMPTY: return "ENOTEMPTY";
+    default:      return "";
+  }
+}
+static const char *host_errno_desc(int e) {
+  switch (e) {
+    case ENOENT:  return "no such file or directory";
+    case EACCES:  return "permission denied";
+    case EISDIR:  return "illegal operation on a directory";
+    case ENOTDIR: return "not a directory";
+    case EEXIST:  return "file already exists";
+    case EPERM:   return "operation not permitted";
+    case ENOTEMPTY: return "directory not empty";
+    default:      return strerror(e);
+  }
+}
+
+/* Build node's fs error message: "ENOENT: no such file or directory, open '/x'".
+ * The buffer is untracked (like a string literal), so the message a catch block
+ * holds is never freed and never double-freed. */
+static const char *host_fs_error(int e, const char *syscall, const char *path) {
+  const char *code = host_errno_code(e);
+  const char *desc = host_errno_desc(e);
+  size_t n = strlen(code) + strlen(desc) + strlen(syscall) + strlen(path) + 16;
+  char *m = (char *)nativets_alloc(n);
+  if (code[0]) snprintf(m, n, "%s: %s, %s '%s'", code, desc, syscall, path);
+  else         snprintf(m, n, "%s, %s '%s'", desc, syscall, path);
+  return m;
+}
+
+/* readFileSync(path, "utf8") -> the whole file as a string. Throws (catchably) on
+ * a missing/unreadable path, like node. Read with fread in a growing buffer rather
+ * than fseek+ftell so it also works for a non-seekable path. */
+const char *nt_read_file(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) { nt_exc_raise_msg(host_fs_error(errno, "open", path)); return ""; }
+  size_t cap = 4096, len = 0;
+  char *buf = (char *)nativets_alloc(cap);
+  for (;;) {
+    if (len == cap) { size_t nc = cap * 2; char *nb = (char *)nativets_alloc(nc); memcpy(nb, buf, len); buf = nb; cap = nc; }
+    size_t n = fread(buf + len, 1, cap - len, f);
+    len += n;
+    if (n == 0) break;
+  }
+  int bad = ferror(f) ? errno : 0;
+  fclose(f);
+  /* node reports reading a DIRECTORY as EISDIR with the `read` syscall — fopen on a
+   * directory succeeds on macOS/Linux, so the failure surfaces here, not at open. */
+  if (bad) { nt_exc_raise_msg(host_fs_error(bad, "read", path)); return ""; }
+  char *o = alloc_str(len);
+  memcpy(o, buf, len); o[len] = '\0';
+  return o;
+}
+
+/* writeFileSync(path, contents) -> the bytes are written, truncating an existing
+ * file (node's default flag "w"). Throws (catchably) with node's message when the
+ * path cannot be opened or the write fails. */
+void nt_write_file(const char *path, const char *data) {
+  FILE *f = fopen(path, "wb");
+  if (!f) { nt_exc_raise_msg(host_fs_error(errno, "open", path)); return; }
+  size_t n = strlen(data);
+  size_t w = n ? fwrite(data, 1, n, f) : 0;
+  int bad = (w != n || ferror(f)) ? (errno ? errno : EIO) : 0;
+  if (fclose(f) != 0 && !bad) bad = errno ? errno : EIO;
+  if (bad) nt_exc_raise_msg(host_fs_error(bad, "write", path));
+}
+
+/* existsSync(path) -> 1 when the path exists (a file, a directory, anything
+ * stat can see), else 0. node NEVER throws here — every stat failure is `false` —
+ * so this raises nothing and codegen emits no exception check. */
+int32_t nt_path_exists(const char *path) {
+  struct stat st;
+  return stat(path, &st) == 0 ? 1 : 0;
+}
+
+/* mkdtempSync(prefix) -> a fresh directory named `<prefix>XXXXXX` (six random
+ * characters, node's shape), created with mode 0700. Throws like node on failure. */
+const char *nt_mkdtemp(const char *prefix) {
+  size_t n = strlen(prefix);
+  char *tmpl = (char *)nativets_alloc(n + 7);
+  memcpy(tmpl, prefix, n);
+  memcpy(tmpl + n, "XXXXXX", 7);
+  if (!mkdtemp(tmpl)) { nt_exc_raise_msg(host_fs_error(errno, "mkdtemp", prefix)); return ""; }
+  size_t ln = strlen(tmpl);
+  char *o = alloc_str(ln);
+  memcpy(o, tmpl, ln); o[ln] = '\0';
+  return o;
+}
+
+/* readdirSync(path) -> the entry names, WITHOUT "." and "..", in directory order
+ * (node does not sort either). Throws like node when the path is not a directory. */
+NtArray *nt_readdir(const char *path) {
+  DIR *d = opendir(path);
+  if (!d) { nt_exc_raise_msg(host_fs_error(errno, "scandir", path)); return nt_arr_new(0); }
+  NtArray *a = nt_arr_new(8);
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    size_t ln = strlen(e->d_name);
+    char *o = alloc_str(ln);
+    memcpy(o, e->d_name, ln); o[ln] = '\0';
+    nt_arr_push(a, (int64_t)(intptr_t)o);
+  }
+  closedir(d);
+  return a;
+}
+
+/* Depth-first removal of `path` (a file, or a whole tree). Returns 0 or errno. */
+static int rm_tree(const char *path) {
+  struct stat st;
+  if (lstat(path, &st) != 0) return errno;
+  if (!S_ISDIR(st.st_mode)) return unlink(path) == 0 ? 0 : errno;
+  DIR *d = opendir(path);
+  if (!d) return errno;
+  struct dirent *e;
+  int err = 0;
+  size_t pl = strlen(path);
+  while ((e = readdir(d)) != NULL) {
+    if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+    size_t nl = strlen(e->d_name);
+    char *child = (char *)nativets_alloc(pl + nl + 2);
+    memcpy(child, path, pl); child[pl] = '/';
+    memcpy(child + pl + 1, e->d_name, nl); child[pl + 1 + nl] = '\0';
+    int r = rm_tree(child);
+    if (r && !err) err = r;
+  }
+  closedir(d);
+  if (err) return err;
+  return rmdir(path) == 0 ? 0 : errno;
+}
+
+/* rmSync(path[, { recursive: true, force: true }]). `recursive` removes a tree,
+ * `force` swallows a missing path (both exactly node's meaning). Anything else
+ * throws with node's message. */
+void nt_rm(const char *path, int32_t recursive, int32_t force) {
+  struct stat st;
+  if (lstat(path, &st) != 0) {
+    if (force && errno == ENOENT) return;   /* node: force ignores a missing path */
+    nt_exc_raise_msg(host_fs_error(errno, "lstat", path));
+    return;
+  }
+  int err;
+  if (S_ISDIR(st.st_mode)) {
+    if (!recursive) { nt_exc_raise_msg(host_fs_error(EISDIR, "rm", path)); return; }
+    err = rm_tree(path);
+  } else {
+    err = unlink(path) == 0 ? 0 : errno;
+  }
+  if (err && !(force && err == ENOENT)) nt_exc_raise_msg(host_fs_error(err, "unlink", path));
+}
+
+/* ============================================================
+ * Host FFI (SH4) — node:path (POSIX).
+ *
+ * A faithful port of node's own `lib/path.js` posix implementation, function for
+ * function (`normalizeString`, `join`, `dirname`, `basename`, `resolve`,
+ * `relative`), because the edge cases are the whole point: `..` above the root,
+ * empty and trailing segments, and a common prefix that is not a whole segment.
+ * Pure string work plus getcwd(3) for `resolve` — no allocation beyond the result,
+ * and nothing platform-specific, so it cross-links with the rest.
+ *
+ * Windows paths are deliberately NOT modelled: `path` here is `path.posix`.
+ * ============================================================ */
+
+/* node's normalizeString(path, allowAboveRoot, '/', isPosixPathSeparator).
+ * Writes into `res` (caller-allocated, >= strlen(path)+1) and returns its length. */
+static size_t path_normalize_string(const char *path, int allowAboveRoot, char *res) {
+  size_t n = strlen(path), rl = 0;
+  size_t lastSegmentLength = 0;
+  long lastSlash = -1;
+  int dots = 0;
+  char code = 0;
+  res[0] = '\0';
+  for (size_t i = 0; i <= n; ++i) {
+    if (i < n) code = path[i];
+    else if (code == '/') break;
+    else code = '/';
+
+    if (code == '/') {
+      if (lastSlash == (long)i - 1 || dots == 1) {
+        /* NOOP: an empty segment or "." */
+      } else if (dots == 2) {
+        int trailing_dotdot = rl >= 2 && lastSegmentLength == 2 && res[rl - 1] == '.' && res[rl - 2] == '.';
+        if (!trailing_dotdot) {
+          if (rl > 2) {
+            /* drop the last segment */
+            long lastSlashIndex = -1;
+            for (long k = (long)rl - 1; k >= 0; k--) if (res[k] == '/') { lastSlashIndex = k; break; }
+            if (lastSlashIndex == -1) { rl = 0; res[0] = '\0'; lastSegmentLength = 0; }
+            else {
+              rl = (size_t)lastSlashIndex; res[rl] = '\0';
+              long prev = -1;
+              for (long k = (long)rl - 1; k >= 0; k--) if (res[k] == '/') { prev = k; break; }
+              lastSegmentLength = (size_t)((long)rl - 1 - prev);
+            }
+            lastSlash = (long)i; dots = 0; continue;
+          } else if (rl != 0) {
+            rl = 0; res[0] = '\0'; lastSegmentLength = 0;
+            lastSlash = (long)i; dots = 0; continue;
+          }
+        }
+        if (allowAboveRoot) {
+          if (rl > 0) { res[rl++] = '/'; }
+          res[rl++] = '.'; res[rl++] = '.'; res[rl] = '\0';
+          lastSegmentLength = 2;
+        }
+      } else {
+        size_t seglen = i - (size_t)(lastSlash + 1);
+        if (rl > 0) res[rl++] = '/';
+        memcpy(res + rl, path + lastSlash + 1, seglen);
+        rl += seglen; res[rl] = '\0';
+        lastSegmentLength = seglen;
+      }
+      lastSlash = (long)i;
+      dots = 0;
+    } else if (code == '.' && dots != -1) {
+      ++dots;
+    } else {
+      dots = -1;
+    }
+  }
+  return rl;
+}
+
+/* node's path.posix.normalize, into a fresh rc-tracked string. */
+static const char *path_normalize(const char *path) {
+  size_t n = strlen(path);
+  if (n == 0) { char *o = alloc_str(1); o[0] = '.'; o[1] = '\0'; return o; }
+  int isAbsolute = path[0] == '/';
+  int trailing = path[n - 1] == '/';
+  char *buf = (char *)nativets_alloc(n + 4);
+  size_t rl = path_normalize_string(path, !isAbsolute, buf);
+  if (rl == 0) {
+    if (isAbsolute) { char *o = alloc_str(1); o[0] = '/'; o[1] = '\0'; return o; }
+    if (trailing) { char *o = alloc_str(2); o[0] = '.'; o[1] = '/'; o[2] = '\0'; return o; }
+    char *o = alloc_str(1); o[0] = '.'; o[1] = '\0'; return o;
+  }
+  size_t extra = (isAbsolute ? 1 : 0) + (trailing ? 1 : 0);
+  char *o = alloc_str(rl + extra);
+  size_t w = 0;
+  if (isAbsolute) o[w++] = '/';
+  memcpy(o + w, buf, rl); w += rl;
+  if (trailing) o[w++] = '/';
+  o[w] = '\0';
+  return o;
+}
+
+/* path.join(a, b). Variadic join is a LEFT FOLD of this in codegen: normalize is
+ * idempotent and `..` resolves left to right, so folding gives node's answer for
+ * the whole list (pinned by the differential corpus in test/hostfs.test.ts). */
+const char *nt_path_join(const char *a, const char *b) {
+  size_t la = strlen(a), lb = strlen(b);
+  if (la == 0 && lb == 0) { char *o = alloc_str(1); o[0] = '.'; o[1] = '\0'; return o; }
+  if (la == 0) return path_normalize(b);
+  if (lb == 0) return path_normalize(a);
+  char *j = (char *)nativets_alloc(la + lb + 2);
+  memcpy(j, a, la); j[la] = '/'; memcpy(j + la + 1, b, lb); j[la + 1 + lb] = '\0';
+  return path_normalize(j);
+}
+
+const char *nt_path_dirname(const char *path) {
+  size_t n = strlen(path);
+  if (n == 0) { char *o = alloc_str(1); o[0] = '.'; o[1] = '\0'; return o; }
+  int hasRoot = path[0] == '/';
+  long end = -1;
+  int matchedSlash = 1;
+  for (long i = (long)n - 1; i >= 1; --i) {
+    if (path[i] == '/') { if (!matchedSlash) { end = i; break; } }
+    else matchedSlash = 0;
+  }
+  if (end == -1) {
+    char *o = alloc_str(1);
+    o[0] = hasRoot ? '/' : '.'; o[1] = '\0'; return o;
+  }
+  if (hasRoot && end == 1) { char *o = alloc_str(2); o[0] = '/'; o[1] = '/'; o[2] = '\0'; return o; }
+  char *o = alloc_str((size_t)end);
+  memcpy(o, path, (size_t)end); o[end] = '\0';
+  return o;
+}
+
+/* path.basename(path) — the one-argument form (the `ext` argument is refused by
+ * the checker rather than silently ignored). */
+const char *nt_path_basename(const char *path) {
+  size_t n = strlen(path);
+  long start = 0, end = -1;
+  int matchedSlash = 1;
+  for (long i = (long)n - 1; i >= 0; --i) {
+    if (path[i] == '/') { if (!matchedSlash) { start = i + 1; break; } }
+    else if (end == -1) { matchedSlash = 0; end = i + 1; }
+  }
+  if (end == -1) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  size_t len = (size_t)(end - start);
+  char *o = alloc_str(len);
+  memcpy(o, path + start, len); o[len] = '\0';
+  return o;
+}
+
+/* path.resolve(a) / path.resolve(a, b) — b may be NULL. Absolute by construction:
+ * scans right to left and prepends the working directory when nothing is absolute. */
+const char *nt_path_resolve(const char *a, const char *b) {
+  char cwd[4096];
+  if (!getcwd(cwd, sizeof cwd)) { cwd[0] = '/'; cwd[1] = '\0'; }
+  const char *parts[3];
+  int np = 0;
+  parts[np++] = a;
+  if (b) parts[np++] = b;
+
+  size_t cap = strlen(cwd) + 2;
+  for (int i = 0; i < np; i++) cap += strlen(parts[i]) + 1;
+  char *acc = (char *)nativets_alloc(cap + 1);
+  acc[0] = '\0';
+  size_t al = 0;
+  int absolute = 0;
+  for (int i = np - 1; i >= -1 && !absolute; i--) {
+    const char *p = i >= 0 ? parts[i] : cwd;
+    size_t lp = strlen(p);
+    if (lp == 0) continue;
+    /* acc = p + "/" + acc */
+    memmove(acc + lp + 1, acc, al + 1);
+    memcpy(acc, p, lp);
+    acc[lp] = '/';
+    al += lp + 1;
+    absolute = p[0] == '/';
+  }
+  char *buf = (char *)nativets_alloc(al + 4);
+  size_t rl = path_normalize_string(acc, !absolute, buf);
+  if (absolute) {
+    char *o = alloc_str(rl + 1);
+    o[0] = '/'; memcpy(o + 1, buf, rl); o[rl + 1] = '\0';
+    return o;
+  }
+  if (rl == 0) { char *o = alloc_str(1); o[0] = '.'; o[1] = '\0'; return o; }
+  char *o = alloc_str(rl);
+  memcpy(o, buf, rl); o[rl] = '\0';
+  return o;
+}
+
+/* path.relative(from, to) — both resolved to absolute first, then the longest
+ * common SEGMENT prefix decides how many `..` steps precede the remainder. */
+const char *nt_path_relative(const char *from_in, const char *to_in) {
+  if (strcmp(from_in, to_in) == 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  const char *from = nt_path_resolve(from_in, NULL);
+  const char *to = nt_path_resolve(to_in, NULL);
+  if (strcmp(from, to) == 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+
+  size_t fromStart = 1, fromEnd = strlen(from);
+  size_t fromLen = fromEnd - fromStart;
+  size_t toStart = 1, toLen = strlen(to) - toStart;
+  size_t length = fromLen < toLen ? fromLen : toLen;
+  long lastCommonSep = -1;
+  size_t i = 0;
+  for (; i < length; i++) {
+    char fc = from[fromStart + i];
+    if (fc != to[toStart + i]) break;
+    else if (fc == '/') lastCommonSep = (long)i;
+  }
+  if (i == length) {
+    if (toLen > length) {
+      if (to[toStart + i] == '/') {
+        const char *tail = to + toStart + i + 1;
+        size_t tl = strlen(tail);
+        char *o = alloc_str(tl); memcpy(o, tail, tl); o[tl] = '\0'; return o;
+      }
+      if (i == 0) {
+        const char *tail = to + toStart + i;
+        size_t tl = strlen(tail);
+        char *o = alloc_str(tl); memcpy(o, tail, tl); o[tl] = '\0'; return o;
+      }
+    } else if (fromLen > length) {
+      if (from[fromStart + i] == '/') lastCommonSep = (long)i;
+      else if (i == 0) lastCommonSep = 0;
+    }
+  }
+  /* One ".." per remaining segment of `from`, then the rest of `to`. */
+  size_t ups = 0;
+  for (size_t k = fromStart + (size_t)(lastCommonSep + 1); k <= fromEnd; ++k)
+    if (k == fromEnd || from[k] == '/') ups++;
+  const char *tail = to + toStart + (size_t)lastCommonSep;
+  size_t tl = strlen(tail);
+  size_t need = ups * 3 + tl + 1;
+  char *o = alloc_str(need);
+  size_t w = 0;
+  for (size_t u = 0; u < ups; u++) {
+    if (w > 0) o[w++] = '/';
+    o[w++] = '.'; o[w++] = '.';
+  }
+  memcpy(o + w, tail, tl); w += tl;
+  o[w] = '\0';
+  return o;
+}
+
+/* ============================================================
+ * Host FFI (SH4) — node:os and node:url.
+ * ============================================================ */
+
+/* os.tmpdir() — node's rule: $TMPDIR / $TMP / $TEMP, else "/tmp", with a trailing
+ * slash stripped (unless the path IS "/"). */
+const char *nt_os_tmpdir(void) {
+  const char *t = getenv("TMPDIR");
+  if (!t || !*t) t = getenv("TMP");
+  if (!t || !*t) t = getenv("TEMP");
+  if (!t || !*t) t = "/tmp";
+  size_t n = strlen(t);
+  if (n > 1 && t[n - 1] == '/') n--;
+  char *o = alloc_str(n);
+  memcpy(o, t, n); o[n] = '\0';
+  return o;
+}
+
+/* os.homedir() — $HOME, falling back to the passwd entry (node does the same). */
+const char *nt_os_homedir(void) {
+  const char *h = getenv("HOME");
+  if (!h) h = "";
+  size_t n = strlen(h);
+  char *o = alloc_str(n);
+  memcpy(o, h, n); o[n] = '\0';
+  return o;
+}
+
+/* url.fileURLToPath(u) — the POSIX case of node's implementation: require the
+ * `file:` protocol (node throws ERR_INVALID_URL_SCHEME otherwise), then
+ * percent-DECODE the path. A `%2F` is rejected by node as ERR_INVALID_FILE_URL_PATH;
+ * that check is here too, so a decoded separator can never appear silently. */
+static int host_hexval(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+const char *nt_file_url_to_path(const char *u) {
+  if (strncmp(u, "file://", 7) != 0) {
+    nt_exc_raise_msg("TypeError [ERR_INVALID_URL_SCHEME]: The URL must be of scheme file");
+    return "";
+  }
+  const char *p = u + 7;
+  /* Skip a host: node only accepts an empty host or "localhost" on POSIX. */
+  if (strncmp(p, "localhost/", 10) == 0) p += 9;
+  else if (*p != '/') {
+    nt_exc_raise_msg("TypeError [ERR_INVALID_FILE_URL_HOST]: File URL host must be \"localhost\" or empty");
+    return "";
+  }
+  size_t n = strlen(p);
+  char *o = alloc_str(n);
+  size_t w = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (p[i] == '%' && i + 2 < n) {
+      int hi = host_hexval(p[i + 1]), lo = host_hexval(p[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        int c = hi * 16 + lo;
+        if (c == '/') {
+          nt_exc_raise_msg("TypeError [ERR_INVALID_FILE_URL_PATH]: File URL path must not include encoded / characters");
+          return "";
+        }
+        o[w++] = (char)c;
+        i += 2;
+        continue;
+      }
+    }
+    o[w++] = p[i];
+  }
+  o[w] = '\0';
+  return o;
+}
+
+/* ============================================================
+ * Host FFI (SH4) — subprocess. This is what lets a self-hosted nativets invoke
+ * `clang`: run a program to completion and capture its status + stdout + stderr.
+ *
+ * fork + execvp + two pipes + waitpid, all POSIX — no posix_spawn (absent below
+ * Android API 28) and no libc extensions, so the block cross-links like the rest.
+ * Both pipes are drained with poll(2) rather than one-then-the-other: a child that
+ * fills the pipe it is NOT being read from would otherwise block forever.
+ *
+ * No shell is involved: the argument vector is passed through verbatim, so a
+ * filename with a space, a `*` or a `$` is a single literal argument (node's
+ * `spawnSync(cmd, args)` without `shell: true` behaves the same way).
+ *
+ * `nt_host_spawn`, NOT `nt_spawn`: `nt_actor.c` already exports `nt_spawn` for the
+ * ACTOR spawn, and an actor program links both translation units — the collision is
+ * a duplicate-symbol link failure in every actor program, not a compile error here.
+ * ============================================================ */
+
+/* Append `n` bytes to a growing buffer (the stdout/stderr collectors). */
+typedef struct { char *p; size_t len, cap; } SpawnBuf;
+static void spawn_buf_add(SpawnBuf *b, const char *src, size_t n) {
+  if (b->len + n + 1 > b->cap) {
+    size_t nc = b->cap ? b->cap : 4096;
+    while (b->len + n + 1 > nc) nc *= 2;
+    char *np = (char *)nativets_alloc(nc);
+    if (b->p) memcpy(np, b->p, b->len);
+    b->p = np; b->cap = nc;
+  }
+  memcpy(b->p + b->len, src, n);
+  b->len += n;
+  b->p[b->len] = '\0';
+}
+/* Hand a collector's bytes to TS as an rc-tracked heap string ("" when empty). */
+static const char *spawn_buf_str(SpawnBuf *b) {
+  char *o = alloc_str(b->len);
+  if (b->len) memcpy(o, b->p, b->len);
+  o[b->len] = '\0';
+  return o;
+}
+
+#if !defined(_WIN32) && !defined(__wasi__)
+const char *nt_host_spawn(const char *cmd, NtArray *args, double *status_out, const char **stderr_out) {
+  SpawnBuf out = { NULL, 0, 0 }, err = { NULL, 0, 0 };
+  *status_out = -1.0;                 /* the spawn-failed value; see docs/divergences.md */
+  *stderr_out = "";
+
+  int64_t n = (int64_t)nt_arr_len(args);
+  char **argv = (char **)nativets_alloc(sizeof(char *) * (size_t)(n + 2));
+  argv[0] = (char *)cmd;
+  for (int64_t i = 0; i < n; i++) argv[i + 1] = (char *)(intptr_t)nt_arr_get(args, (double)i);
+  argv[n + 1] = NULL;
+
+  int po[2], pe[2];
+  if (pipe(po) != 0) return spawn_buf_str(&out);
+  if (pipe(pe) != 0) { close(po[0]); close(po[1]); return spawn_buf_str(&out); }
+
+  fflush(stdout); fflush(stderr);     /* the child inherits our buffers otherwise */
+  pid_t pid = fork();
+  if (pid < 0) { close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); return spawn_buf_str(&out); }
+  if (pid == 0) {
+    /* Child: wire the write ends onto fd 1/2 and exec. A failed execvp exits 127,
+     * which is what a shell reports for "command not found"; the parent turns that
+     * into the spawn-failure status below (node reports `null` + `.error`). */
+    dup2(po[1], STDOUT_FILENO);
+    dup2(pe[1], STDERR_FILENO);
+    close(po[0]); close(po[1]); close(pe[0]); close(pe[1]);
+    execvp(cmd, argv);
+    _exit(127);
+  }
+
+  close(po[1]); close(pe[1]);
+  struct pollfd fds[2];
+  fds[0].fd = po[0]; fds[1].fd = pe[0];
+  int open_fds = 2;
+  while (open_fds > 0) {
+    fds[0].events = fds[0].fd >= 0 ? POLLIN : 0;
+    fds[1].events = fds[1].fd >= 0 ? POLLIN : 0;
+    if (poll(fds, 2, -1) < 0) { if (errno == EINTR) continue; break; }
+    for (int i = 0; i < 2; i++) {
+      if (fds[i].fd < 0 || !fds[i].revents) continue;
+      char buf[4096];
+      ssize_t r = read(fds[i].fd, buf, sizeof buf);
+      if (r > 0) { spawn_buf_add(i == 0 ? &out : &err, buf, (size_t)r); continue; }
+      if (r < 0 && errno == EINTR) continue;
+      close(fds[i].fd); fds[i].fd = -1; open_fds--;
+    }
+  }
+  if (fds[0].fd >= 0) close(fds[0].fd);
+  if (fds[1].fd >= 0) close(fds[1].fd);
+
+  int st = 0;
+  while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { /* retry */ }
+  if (WIFEXITED(st)) {
+    int code = WEXITSTATUS(st);
+    /* execvp never ran the program: report the spawn failure, not a real exit 127. */
+    *status_out = (code == 127 && out.len == 0 && err.len == 0) ? -1.0 : (double)code;
+  } else {
+    /* Killed by a signal. node reports `status: null` + `.signal`; a number type
+     * cannot hold null, so this is -1 too (documented divergence). */
+    *status_out = -1.0;
+  }
+  *stderr_out = spawn_buf_str(&err);
+  return spawn_buf_str(&out);
+}
+#else
+/* Windows / WASI: no fork/exec. Report the spawn failure rather than pretend. */
+const char *nt_host_spawn(const char *cmd, NtArray *args, double *status_out, const char **stderr_out) {
+  (void)cmd; (void)args;
+  *status_out = -1.0;
+  *stderr_out = "spawnSync is not available on this platform";
+  char *o = alloc_str(0); o[0] = '\0'; return o;
+}
+#endif
 
 /* ============================================================
  * stdlib (web standards) — Batch 1

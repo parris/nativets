@@ -46,8 +46,59 @@ export interface Preprocessed {
 type TokKind = "ident" | "num" | "str" | "template" | "regex" | "punct" | "comment" | "shebang";
 interface Tok { kind: TokKind; value: string; line: number }
 
-const ID_START = /[A-Za-z_$]/;
-const ID_PART = /[A-Za-z0-9_$]/;
+/*
+ * Character classes, spelled out — the same discipline as `src/lexer.ts`. nativets has no
+ * `RegExp` (docs/divergences.md), so the compiler's own source may not use one; this
+ * module in particular, whose whole job is to make `src/` measurable, must be measurable
+ * itself. `test/no-regex.test.ts` pins each class against the regex it replaced over
+ * every BMP code point.
+ */
+/** `[A-Za-z_$]`. */
+function isIdentStart(c: string): boolean {
+  return (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || c === "_" || c === "$";
+}
+/** `[A-Za-z0-9_$]` (= `[\w$]`). */
+function isIdentPart(c: string): boolean {
+  return isIdentStart(c) || (c >= "0" && c <= "9");
+}
+/** `[0-9a-fA-F]`. */
+function isHexDigit(c: string): boolean {
+  return (c >= "0" && c <= "9") || (c >= "a" && c <= "f") || (c >= "A" && c <= "F");
+}
+/** ECMAScript `\s` — WhiteSpace + LineTerminator, by code unit. */
+function isSpace(c: string): boolean {
+  const n = c.charCodeAt(0);
+  if (n === 9 || n === 10 || n === 11 || n === 12 || n === 13 || n === 32) return true;
+  return (
+    n === 0xa0 || n === 0x1680 || (n >= 0x2000 && n <= 0x200a) ||
+    n === 0x2028 || n === 0x2029 || n === 0x202f || n === 0x205f ||
+    n === 0x3000 || n === 0xfeff
+  );
+}
+/**
+ * `[0-9a-fA-FxXeE._+-]` — every character this forgiving tokenizer will absorb into a
+ * numeric literal, radix prefixes and exponents included. (`e`/`E` are already hex
+ * digits; `x`/`X` are the extra.)
+ */
+function isNumChar(c: string): boolean {
+  return isHexDigit(c) || c === "x" || c === "X" ||
+    c === "." || c === "_" || c === "+" || c === "-";
+}
+
+/** `^\s*@@([A-Za-z_$][\w$]*)\s*$` — the pragma; `""` when the comment is anything else. */
+function pragmaName(body: string): string {
+  let a = 0;
+  while (a < body.length && isSpace(body[a]!)) a++;
+  if (body[a] !== "@" || body[a + 1] !== "@") return "";
+  a += 2;
+  if (a >= body.length || !isIdentStart(body[a]!)) return "";
+  const start = a;
+  a++;
+  while (a < body.length && isIdentPart(body[a]!)) a++;
+  const name = body.slice(start, a);
+  while (a < body.length && isSpace(body[a]!)) a++;
+  return a === body.length ? name : "";
+}
 
 /** Keywords after which a `/` begins a regex literal (not division). */
 const REGEX_PREFIX_KW = new Set([
@@ -92,10 +143,10 @@ function tokenize(source: string): Tok[] {
       // attribute, which is how the compiler's own source can carry `@@mutable` and still
       // be run by bun (see src/lexer.ts). Comments are dropped below, so it must be
       // re-emitted as the two tokens the real lexer produces for the bare sigil.
-      const m = /^\s*@@([A-Za-z_$][\w$]*)\s*$/.exec(source.slice(i + 2, j));
-      if (m) {
+      const attr = pragmaName(source.slice(i + 2, j));
+      if (attr !== "") {
         push({ kind: "punct", value: "@@", line });
-        push({ kind: "ident", value: m[1]!, line });
+        push({ kind: "ident", value: attr, line });
       } else {
         toks.push({ kind: "comment", value: source.slice(i, j), line });
       }
@@ -124,7 +175,7 @@ function tokenize(source: string): Tok[] {
         else if (ch === "\n") break; // not a regex after all — bail out safely
         i++;
       }
-      while (i < n && ID_PART.test(source[i]!)) i++; // flags
+      while (i < n && isIdentPart(source[i]!)) i++; // flags
       push({ kind: "regex", value: source.slice(start, i), line });
       continue;
     }
@@ -158,9 +209,10 @@ function tokenize(source: string): Tok[] {
     // number
     if (c >= "0" && c <= "9") {
       const start = i;
-      while (i < n && /[0-9a-fA-FxXeE._+-]/.test(source[i]!)) {
+      while (i < n && isNumChar(source[i]!)) {
         // stop a trailing +/- that isn't part of an exponent
-        if ((source[i] === "+" || source[i] === "-") && !/[eE]/.test(source[i - 1] ?? "")) break;
+        const p = source[i - 1] ?? "";
+        if ((source[i] === "+" || source[i] === "-") && p !== "e" && p !== "E") break;
         i++;
       }
       push({ kind: "num", value: source.slice(start, i), line });
@@ -168,9 +220,9 @@ function tokenize(source: string): Tok[] {
     }
 
     // identifier / keyword
-    if (ID_START.test(c)) {
+    if (isIdentStart(c)) {
       const start = i;
-      while (i < n && ID_PART.test(source[i]!)) i++;
+      while (i < n && isIdentPart(source[i]!)) i++;
       push({ kind: "ident", value: source.slice(start, i), line });
       continue;
     }

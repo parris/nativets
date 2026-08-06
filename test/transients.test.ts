@@ -416,7 +416,22 @@ console.log(built.slice(0, 4).map((x: number): number => x * 2).join(","));`;
       // documented container-element case, and top-level bindings die with main's frame,
       // so LSan calls them unreachable. Leaks are gated separately and precisely by the
       // live counters (__arrLive/__objLive/__pvNodes/nt_str_live) asserted above.
-      const asanEnv = { ...process.env, ASAN_OPTIONS: "detect_leaks=0" };
+      //
+      // The knob below makes that platform difference REPRODUCIBLE ON DEMAND instead of
+      // only in CI: `NATIVETS_ASAN_LEAKS=1` turns LSan back on. On Linux (i.e. inside
+      // `scripts/docker-test.sh`) the run then reports `LeakSanitizer: detected memory
+      // leaks` and exits 23, so this test goes red exactly the way ubuntu's job did; on
+      // macOS the same command is a no-op, because there is no LSan to enable. That is
+      // the difference itself, on demand, in one command — see docs/docker-linux.md.
+      // On macOS the flag is not merely inert — ASan REFUSES it ("detect_leaks is not
+      // supported on this platform") and exits — so the knob is a no-op there, with a
+      // note, and this gate stays green on the host exactly as before.
+      const wantLeaks = process.env.NATIVETS_ASAN_LEAKS === "1";
+      if (wantLeaks && process.platform === "darwin") {
+        console.warn("NATIVETS_ASAN_LEAKS=1 ignored: macOS has no LeakSanitizer. Run `scripts/docker-test.sh test/transients.test.ts` to see the Linux behavior.");
+      }
+      const detectLeaks = wantLeaks && process.platform !== "darwin" ? "1" : "0";
+      const asanEnv = { ...process.env, ASAN_OPTIONS: `detect_leaks=${detectLeaks}` };
       const run = spawnSync(bin, [], { encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL", env: asanEnv });
       expect(run.stderr).not.toContain("AddressSanitizer");
       expect(run.stderr).not.toContain("runtime error");

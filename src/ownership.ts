@@ -24,10 +24,12 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
-import { isArrayTy, isObjectTy, setBlockDrops, classTag, mutableTags } from "./ast.ts";
+import { isArrayTy, isObjectTy, isUnionTy, setBlockDrops, classTag, mutableTags } from "./ast.ts";
 
-/** The linear (single-owner, move-checked + dropped) types: heap aggregates. */
-function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t); }
+/** The linear (single-owner, move-checked + dropped) types: heap aggregates. A
+ *  DISCRIMINATED UNION (SH2) is one of them: its value IS a member's object block, so
+ *  it is owned, moved and freed exactly like the record it is. */
+function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t) || isUnionTy(t); }
 
 export const OWN_CODES = {
   USE_AFTER_MOVE: "NT1601",      // ≈ E0382
@@ -653,7 +655,8 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     const [tag, m] = [s.name.split(".")[0]!, s.name.split(".").slice(1).join(".")];
     if (!mutable.classes.has(tag)) continue; // an ordinary class's setter copies — nothing to guard
     mutable.setters.add(s.name);
-    mutable.setterProps.add(m.replace(/\$inner$/, ""));
+    // `s.replace(/\$inner$/, "")` — the suffix, without a RegExp (nativets has none).
+    mutable.setterProps.add(m.endsWith("$inner") ? m.slice(0, m.length - "$inner".length) : m);
   }
   const isMutableTy = (t: import("./ast.ts").Ty): boolean => {
     if (!mutable.classes.size || !isObjectTy(t)) return false;

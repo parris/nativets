@@ -41,6 +41,29 @@ export class NTError extends Error {
 }
 
 /**
+ * How many leading whitespace characters `s` has — the `^\s*` of ECMAScript's `\s`
+ * (WhiteSpace + LineTerminator), scanned by code unit. nativets deliberately has no
+ * `RegExp` (docs/divergences.md), so the compiler's own source may not use one either.
+ */
+function leadingWhitespace(s: string): number {
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    // ASCII: TAB, LF, VT, FF, CR, SPACE.
+    const ascii = c === 9 || c === 10 || c === 11 || c === 12 || c === 13 || c === 32;
+    // The rest of `\s`: NBSP, OGHAM SPACE, EN QUAD..HAIR SPACE, LS, PS, NNBSP,
+    // MMSP, IDEOGRAPHIC SPACE, BOM.
+    const wide =
+      c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+      c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f ||
+      c === 0x3000 || c === 0xfeff;
+    if (!ascii && !wide) break;
+    i++;
+  }
+  return i;
+}
+
+/**
  * Render a diagnostic. With the original `source`, a multi-span diagnostic prints
  * rustc-style — the message, then each labeled span with its source line and a caret
  * underline — turning "moved at line 4, used at line 7" into a scannable, pointed error.
@@ -62,7 +85,7 @@ export function formatDiagnostic(diag: Diagnostic, source?: string): string {
     const text = srcLines[s.line - 1] ?? "";
     const num = String(s.line).padStart(gutter);
     const pad = " ".repeat(gutter);
-    const trimmed = text.replace(/^\s*/, "");
+    const trimmed = text.slice(leadingWhitespace(text));
     const indent = text.length - trimmed.length;
     const caret = (s.primary ? "^" : "-").repeat(Math.max(1, trimmed.length || 1));
     lines.push(`  ${pad} |`);
@@ -149,6 +172,14 @@ export const NYI = {
   // that killed the whole file) and is refused here. This is the #1 self-hosting
   // blocker — see docs/self-hosting.md.
   REGEX: { code: "NT1027", milestone: "later", hint: "there is no RegExp — string patterns only (`s.replace(\"a\", \"b\")`, `s.split(\",\")`, `s.startsWith`/`endsWith`/`includes`/`indexOf`). Hand-roll character scanning for anything richer" },
+  // The host FFI (SH4). A `node:` builtin module is resolved by the compiler ITSELF —
+  // there is no node_modules and no JS to run — so only the members with a native
+  // implementation exist. This code refuses a `node:` module we do not implement, and a
+  // member outside the implemented surface, naming what IS available. It also refuses
+  // the argument VALUES that decide what node returns (`readFileSync` with no encoding
+  // yields a Buffer; a `spawnSync` option changes what the call does), because
+  // half-implementing those would be a silent divergence rather than a refusal.
+  HOSTMOD: { code: "NT1028", milestone: "later", hint: "the host FFI implements exactly what a self-hosted compiler needs — `node:fs` (readFileSync/writeFileSync/existsSync/mkdtempSync/readdirSync/rmSync), `node:path`, `node:os` (tmpdir/homedir), `node:url` (fileURLToPath), `node:child_process` (spawnSync). See docs/self-hosting.md (SH4)" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

@@ -18,6 +18,9 @@ import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
+// SH2 (discriminated unions): a union value IS its member's object block, so every
+// lowering below treats it exactly like an object pointer.
+import { isUnionTy, unionDiscriminant } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
@@ -100,6 +103,7 @@ function freshArray(e: Expr): boolean {
 }
 
 function llvmTy(ty: Ty): string {
+  if (isUnionTy(ty)) return "ptr"; // SH2: the member object block itself — there is no box
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*; URL/URLSearchParams = the URL/query TEXT
   switch (ty) {
     case "Date": return "double"; // stdlib batch 3: a Date IS its time value (epoch ms)
@@ -121,6 +125,7 @@ function llvmTy(ty: Ty): string {
 function userSym(name: string): string { return name === "main" ? "nt_user_main" : name; }
 
 function defaultZero(ty: Ty): string {
+  if (isUnionTy(ty)) return "null";
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "null";
   switch (ty) {
     case "number": return "0x0000000000000000";
@@ -330,6 +335,24 @@ const DECLARES = [
   "declare ptr @nt_read_key()",
   "declare void @nt_raw_mode(i32)",
   "declare void @nt_exit(double)",
+  // --- Host FFI (SH4): filesystem + subprocess. libc/POSIX only (fopen/stat/fork),
+  // so these cross-link unchanged; a failure raises the pending-exception protocol
+  // so `try`/`catch` sees it exactly like node's throw.
+  "declare ptr @nt_read_file(ptr)",
+  "declare void @nt_write_file(ptr, ptr)",
+  "declare i32 @nt_path_exists(ptr)",
+  "declare ptr @nt_mkdtemp(ptr)",
+  "declare ptr @nt_readdir(ptr)",
+  "declare void @nt_rm(ptr, i32, i32)",
+  "declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)",
+  "declare ptr @nt_path_join(ptr, ptr)",
+  "declare ptr @nt_path_resolve(ptr, ptr)",
+  "declare ptr @nt_path_dirname(ptr)",
+  "declare ptr @nt_path_basename(ptr)",
+  "declare ptr @nt_path_relative(ptr, ptr)",
+  "declare ptr @nt_os_tmpdir()",
+  "declare ptr @nt_os_homedir()",
+  "declare ptr @nt_file_url_to_path(ptr)",
   // --- GUI FFI (raylib-backed, north-star C-d): flat scalar ABI, conditionally linked ---
   // Booleans come back as i32 (0/1) and are lowered to i1 via `icmp ne`. nt_gui.c + -lraylib
   // are pulled in ONLY when one of these is CALLED (see driver.ts) — non-GUI programs and
@@ -557,8 +580,13 @@ class ModuleGen {
     return sym;
   }
 
+  /** Host builtins (SH4) the program imported from a `node:` module. Only these names
+   *  lower to a host call; every other program's IR is unchanged. */
+  hostImports = new Set<string>();
+
   build(program: CheckedProgram["program"]): string {
     this.usesActors = scanUsesActors(program);
+    this.hostImports = new Set(program.hostImports ?? []);
     const fns: string[] = [];
     for (const s of program.body) {
       if (s.kind === "FuncDecl") fns.push(new FnGen(this).genFunction(s));
@@ -794,7 +822,8 @@ class FnGen {
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       // Move-aware RAII: objects free via nt_obj_free, arrays via nt_arr_free.
-      const free = isObjectTy(this.varTypes.get(n) ?? "number") ? "nt_obj_free" : "nt_arr_free";
+      const dropTy = this.varTypes.get(n) ?? "number";
+      const free = isObjectTy(dropTy) || isUnionTy(dropTy) ? "nt_obj_free" : "nt_arr_free"; // a union IS an object block (SH2)
       this.emit(`call void @${free}(ptr ${p})`);
     }
   }
@@ -813,7 +842,7 @@ class FnGen {
     if (this.globalVars.has(e.target)) return;
     const p = this.fresh();
     this.emit(`${p} = load ptr, ptr ${this.addr(e.target)}`);
-    this.emit(`call void @${isObjectTy(ty) ? "nt_obj_free" : "nt_arr_free"}(ptr ${p})`);
+    this.emit(`call void @${isObjectTy(ty) || isUnionTy(ty) ? "nt_obj_free" : "nt_arr_free"}(ptr ${p})`);
   }
 
   /** Free the RECEIVER of an array method when the receiver was an unbound TEMPORARY
@@ -1421,7 +1450,7 @@ class FnGen {
     if (val.ty === "string") this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
     const t = this.fresh();
     if (val.ty === "number" || isDateTy(val.ty)) this.emit(`${t} = bitcast double ${val.v} to i64`); // a Date IS a double (batch 3)
-    else if (val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    else if (isUnionTy(val.ty) || val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -1430,10 +1459,25 @@ class FnGen {
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
     if (ty === "number" || isDateTy(ty)) this.emit(`${t} = bitcast i64 ${slot} to double`); // a Date IS a double (batch 3)
-    else if (ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    else if (isUnionTy(ty) || ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
+  }
+
+  /**
+   * Control-flow narrowing: the checker proved that on this path the binding is not
+   * nullish (`if (x !== undefined) { x + 1 }`), so this read hands back the BARE value
+   * rather than the A2 tagged pair. Unwrapped by the same `nt_nonnull` the `!` assertion
+   * uses — so if the analysis is ever wrong it PANICS at the read with a location,
+   * exactly like a false assertion, and never yields a phantom value.
+   */
+  private narrowRead(e: Extract<Expr, { kind: "Identifier" }>, r: Val): Val {
+    if (!e.narrowed || !isNullableTy(r.ty)) return r;
+    const base = baseTy(r.ty);
+    const slot = this.fresh();
+    this.emit(`${slot} = call i64 @nt_nonnull(ptr ${r.v}, ptr ${this.locArg(e.loc) ?? "null"})`);
+    return { v: this.fromSlot(slot, base), ty: base };
   }
 
   // ---- nullable tagged pair [tag, value] (A2) ----
@@ -1679,14 +1723,18 @@ class FnGen {
       case "Identifier": {
         if (e.name === "NaN") return { v: llvmDouble(NaN), ty: "number" };
         if (e.name === "Infinity") return { v: llvmDouble(Infinity), ty: "number" };
-        if (this.captures.has(e.name)) return this.readCapture(e.name);
-        const ty = this.varTypes.get(e.name) ?? (e.ty ?? "number");
+        // Both narrowings reach a read: `narrowRead` unwraps a nullable that the checker
+        // proved present, and the union case below keeps the binding's storage while
+        // taking the checker's MEMBER type (same pointer, different layout).
+        if (this.captures.has(e.name)) return this.narrowRead(e, this.readCapture(e.name));
+        const declared = this.varTypes.get(e.name) ?? (e.ty ?? "number");
+        const ty = isUnionTy(declared) && e.ty !== undefined && e.ty !== declared ? e.ty : declared;
         const t = this.fresh();
         this.emit(`${t} = load ${llvmTy(ty)}, ptr ${this.addr(e.name)}`);
         // Drop flag: this read moves the value out, and the binding is still dropped on
         // some other path — null the slot so that drop frees nothing (see nullOnMove).
         if (e.nullOnMove && !this.liftedArrow) this.emit(`store ptr null, ptr ${this.addr(e.name)}`);
-        return { v: t, ty };
+        return this.narrowRead(e, { v: t, ty });
       }
 
       case "MemberExpr": {
@@ -1715,7 +1763,13 @@ class FnGen {
         // An optional chain whose result is nullable is lowered as a unit: guard at
         // each `?.`, short-circuiting the WHOLE rest of the chain to `undefined`.
         if (isNullableTy(e.ty ?? "") && isOptChainExpr(e)) return this.genOptChain(e);
-        const obj = this.genExpr(e.object);
+        let obj = this.genExpr(e.object);
+        // SH2 narrowing: the checker may have retyped this receiver from the union to one
+        // of its members. The POINTER is identical — only the slot layout the fields are
+        // read with changes — so take the checker's answer wherever it narrowed. Done on
+        // the MemberExpr (not on the Identifier) so it covers every producer of a union
+        // value alike: a local, a closure capture, a `for-of` element, a call result.
+        if (isUnionTy(obj.ty) && e.object.ty !== undefined && isObjectTy(e.object.ty)) obj = { v: obj.v, ty: e.object.ty };
         if (obj.ty === "Dyn") { // dynamic field access: nt_dyn_get_field returns a Dyn
           const t = this.fresh();
           this.emit(`${t} = call ptr @nt_dyn_get_field(ptr ${obj.v}, ptr ${this.mod.intern(e.property)})`);
@@ -1763,6 +1817,16 @@ class FnGen {
           const d = this.fresh();
           this.emit(`${d} = sitofp i64 ${sz} to double`);
           return { v: d, ty: "number" };
+        }
+        // SH2: on an un-narrowed union only the DISCRIMINANT is readable, and it sits at
+        // the same slot in every member (that requirement is what lets the union go
+        // unboxed) — so this is an ordinary slot load, of a string.
+        if (isUnionTy(obj.ty)) {
+          const gep = this.fresh();
+          this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${unionDiscriminant(obj.ty)!.index}`);
+          const slot = this.fresh();
+          this.emit(`${slot} = load i64, ptr ${gep}`);
+          return { v: this.fromSlot(slot, "string"), ty: "string" };
         }
         if (isObjectTy(obj.ty)) {
           const idx = fieldIndex(obj.ty, e.property);
@@ -2446,6 +2510,7 @@ class FnGen {
       return this.genStringMethod(e.callee.property, recv, e.args);
     }
     if (e.callee.kind === "Identifier") {
+      if (this.mod.hostImports.has(e.callee.name)) return this.genHost(e.callee.name, e.args);
       const g = this.genGlobal(e.callee.name, e.args, e.ty);
       if (g) return g;
       const cap = this.captures.get(e.callee.name);
@@ -2566,6 +2631,17 @@ class FnGen {
         const m = this.fresh();
         this.emit(`${m} = call ptr @nt_exc_message()`);
         this.emit(`store ptr ${m}, ptr ${this.addr(h.excVar)}`);
+      } else if (h.excVar && h.eType === "{message:string}") {
+        // SH4: the block calls a host builtin, so its failure is an Error — box the
+        // runtime message into `new Error(msg)`'s shape so `e.message` reads it.
+        const m = this.fresh();
+        this.emit(`${m} = call ptr @nt_exc_message()`);
+        const obj = this.fresh();
+        this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(1)})`);
+        const g = this.fresh();
+        this.emit(`${g} = getelementptr i64, ptr ${obj}, i64 0`);
+        this.emit(`store i64 ${this.toSlot({ v: m, ty: "string" })}, ptr ${g}`);
+        this.emit(`store ptr ${obj}, ptr ${this.addr(h.excVar)}`);
       }
       this.emit(`call void @nt_exc_clear()`);
       this.terminate(`br label %${h.catchLbl}`);
@@ -4168,6 +4244,130 @@ class FnGen {
     const slot = this.fresh();
     this.emit(`${slot} = load i64, ptr ${gep}`);
     return { v: this.fromSlot(slot, ty), ty };
+  }
+
+  /**
+   * Host FFI (SH4) — lower a `node:` builtin the program imported. The checker has
+   * already validated the signature (HOST_FUNCS), so this only marshals. Fallible
+   * calls raise the pending exception (nt_exc_*) and are followed by an exception
+   * check, so a missing file surfaces as a catchable throw, like node's ENOENT.
+   */
+  private genHost(name: string, args: Expr[]): Val {
+    switch (name) {
+      case "readFileSync": {
+        // The encoding argument is checked to be the literal "utf8"; nothing to emit.
+        const path = this.genExpr(args[0]!).v;
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_read_file(ptr ${path})`);
+        this.emitExcCheck();
+        return { v: t, ty: "string" };
+      }
+      case "writeFileSync": {
+        const path = this.genExpr(args[0]!).v;
+        const data = this.genExpr(args[1]!).v;
+        this.emit(`call void @nt_write_file(ptr ${path}, ptr ${data})`);
+        this.emitExcCheck();
+        return { v: "", ty: "void" };
+      }
+      case "existsSync": {
+        // Infallible by contract (node swallows every stat error into `false`), so no
+        // exception check. i32 → i1 like the other predicate FFI returns.
+        const path = this.genExpr(args[0]!).v;
+        const r = this.fresh();
+        this.emit(`${r} = call i32 @nt_path_exists(ptr ${path})`);
+        const t = this.fresh();
+        this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        return { v: t, ty: "boolean" };
+      }
+      case "mkdtempSync": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_mkdtemp(ptr ${this.genExpr(args[0]!).v})`);
+        this.emitExcCheck();
+        return { v: t, ty: "string" };
+      }
+      case "readdirSync": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_readdir(ptr ${this.genExpr(args[0]!).v})`);
+        this.emitExcCheck();
+        return { v: t, ty: "string[]" };
+      }
+      case "rmSync": {
+        // The options are compile-time literals (checkHostCall), so the flags are
+        // constants here — no options object is ever built.
+        const path = this.genExpr(args[0]!).v;
+        const opts = args[1];
+        const flag = (k: string) =>
+          opts?.kind === "ObjectLiteral" && opts.properties.some((p) => p.key === k) ? 1 : 0;
+        this.emit(`call void @nt_rm(ptr ${path}, i32 ${flag("recursive")}, i32 ${flag("force")})`);
+        this.emitExcCheck();
+        return { v: "", ty: "void" };
+      }
+      case "spawnSync": {
+        // Same shape as genFetch: allocate the result block, hand C the slot pointers
+        // it fills (status as a raw double, stderr as a ptr) and store the returned
+        // stdout. Slot order matches HOST_FUNCS' field order: 0 status, 1 stdout,
+        // 2 stderr. The options object is compile-time only ({ encoding: "utf8" }).
+        const cmd = this.genExpr(args[0]!).v;
+        const argv = this.genExpr(args[1]!).v;
+        const res = this.fresh();
+        this.emit(`${res} = call ptr @nt_obj_new(double ${llvmDouble(3)})`);
+        const gStatus = this.fresh();
+        this.emit(`${gStatus} = getelementptr i64, ptr ${res}, i64 0`);
+        const gErr = this.fresh();
+        this.emit(`${gErr} = getelementptr i64, ptr ${res}, i64 2`);
+        const out = this.fresh();
+        this.emit(`${out} = call ptr @nt_host_spawn(ptr ${cmd}, ptr ${argv}, ptr ${gStatus}, ptr ${gErr})`);
+        const gOut = this.fresh();
+        this.emit(`${gOut} = getelementptr i64, ptr ${res}, i64 1`);
+        this.emit(`store i64 ${this.toSlot({ v: out, ty: "string" })}, ptr ${gOut}`);
+        return { v: res, ty: "{status:number,stdout:string,stderr:string}" };
+      }
+      // node:path — pure string work; nothing here can fail, so no exception check.
+      case "join": case "resolve": {
+        // node's variadic form, LEFT-FOLDED over the binary primitive.
+        const fn = name === "join" ? "nt_path_join" : "nt_path_resolve";
+        let acc = this.genExpr(args[0]!).v;
+        if (args.length === 1) {
+          // Still a real call: node's 1-argument `join`/`resolve` NORMALIZES ("a/./b"
+          // → "a/b"). `resolve` takes a null second part; `join` an empty one.
+          const t = this.fresh();
+          const snd = name === "resolve" ? "null" : this.mod.intern("");
+          this.emit(`${t} = call ptr @${fn}(ptr ${acc}, ptr ${snd})`);
+          return { v: t, ty: "string" };
+        }
+        for (let i = 1; i < args.length; i++) {
+          const next = this.genExpr(args[i]!).v;
+          const t = this.fresh();
+          this.emit(`${t} = call ptr @${fn}(ptr ${acc}, ptr ${next})`);
+          acc = t;
+        }
+        return { v: acc, ty: "string" };
+      }
+      case "dirname": case "basename": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_path_${name}(ptr ${this.genExpr(args[0]!).v})`);
+        return { v: t, ty: "string" };
+      }
+      case "tmpdir": case "homedir": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_os_${name}()`);
+        return { v: t, ty: "string" };
+      }
+      case "fileURLToPath": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_file_url_to_path(ptr ${this.genExpr(args[0]!).v})`);
+        this.emitExcCheck(); // node throws for a non-file scheme / an encoded separator
+        return { v: t, ty: "string" };
+      }
+      case "relative": {
+        const a = this.genExpr(args[0]!).v, b = this.genExpr(args[1]!).v;
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_path_relative(ptr ${a}, ptr ${b})`);
+        return { v: t, ty: "string" };
+      }
+    }
+    // Unreachable: the checker only admits a name that HOST_FUNCS has a signature for.
+    throw new Error(`host builtin '${name}' has no lowering`);
   }
 
   private genGlobal(name: string, args: Expr[], retTy?: Ty): Val | null {

@@ -150,6 +150,27 @@ export function mapKeyTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[
 export function mapValTy(t: Ty): Ty { return splitTopLevel(t.slice(4, -1), ",")[1] as Ty; }
 export function setElemTy(t: Ty): Ty { return t.slice(4, -1) as Ty; }
 
+/*
+ * Character classes, spelled out — the same discipline as `src/lexer.ts`. nativets has no
+ * `RegExp` (docs/divergences.md), so the compiler's own source may not use one. Kept local
+ * to the module rather than shared, so the import graph the bootstrap measurement walks is
+ * unchanged. `test/no-regex.test.ts` pins each against the regex it replaced.
+ */
+/** `[A-Za-z_$]`. */
+function isIdentStart(c: string): boolean {
+  return (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || c === "_" || c === "$";
+}
+/** `[A-Za-z0-9_$]` (= `[\w$]`). */
+function isIdentPart(c: string): boolean {
+  return isIdentStart(c) || (c >= "0" && c <= "9");
+}
+/** `^[A-Za-z_$][\w$]*$` — is the WHOLE of `s` a plain identifier? */
+function isIdentifier(s: string): boolean {
+  if (s.length === 0 || !isIdentStart(s[0]!)) return false;
+  for (let i = 1; i < s.length; i++) if (!isIdentPart(s[i]!)) return false;
+  return true;
+}
+
 /**
  * Class instance types (minimal classes) are structural object types with a leading
  * class-name TAG: `Name{field:ty,...}` (e.g. `Point{x:number,y:number}`). The `{...}`
@@ -162,13 +183,13 @@ export function classTag(t: Ty): string | undefined {
   const i = t.indexOf("{");
   if (i <= 0 || !t.endsWith("}")) return undefined;
   const tag = t.slice(0, i);
-  return /^[A-Za-z_$][\w$]*$/.test(tag) ? tag : undefined;
+  return isIdentifier(tag) ? tag : undefined;
 }
 export function isObjectTy(t: Ty): boolean {
   if (typeof t !== "string" || isNullableTy(t) || t.endsWith("[]")) return false;
   const i = t.indexOf("{");
   if (i < 0 || !t.endsWith("}")) return false;
-  return i === 0 || /^[A-Za-z_$][\w$]*$/.test(t.slice(0, i)); // untagged literal or class-tagged
+  return i === 0 || isIdentifier(t.slice(0, i)); // untagged literal or class-tagged
 }
 /** Parse an object type into ordered [key, type] fields (nesting-aware; tag-tolerant). */
 export function objectFields(t: Ty): { key: string; ty: Ty }[] {
@@ -183,6 +204,129 @@ export function fieldIndex(t: Ty, key: string): number { return objectFields(t).
 export function fieldType(t: Ty, key: string): Ty | undefined { return objectFields(t).find((f) => f.key === key)?.ty; }
 export function objectType(fields: { key: string; ty: Ty }[]): Ty {
   return `{${fields.map((f) => `${f.key}:${f.ty}`).join(",")}}`;
+}
+
+/* ============================================================
+ * Discriminated (tagged) unions — SH2, "the crux" of self-hosting.
+ *
+ * A union of object types with a common LITERAL-typed discriminant field is
+ * encoded `U<{k:"a",…}|{k:"b",…}>`. The `U<` prefix / `>` suffix keep it distinct
+ * from every other encoding: it does not end in `}` (so `isObjectTy`/`classTag`
+ * miss it), not in `[]`, does not start with `(`/`?U`/`?N`/`Map<`/`Set<`.
+ *
+ * REPRESENTATION: a union value IS the member object pointer — there is no box.
+ * The tag already lives in the value as the discriminant field, so a union is only
+ * accepted when that field sits at the SAME slot index in every member (checked by
+ * `unionDiscriminant`). Consequences: `u.kind` on an un-narrowed union is an
+ * ordinary slot load, narrowing is a pure retype costing nothing at runtime, and
+ * literals / slots / drop are the existing object machinery unchanged.
+ *
+ * STRING-LITERAL TYPES (`"square"`) exist ONLY to carry those tags. They are
+ * `widenLiteralTys`'d to `string` the moment a member type escapes the union — at
+ * narrowing, at a field read, and at every non-union annotation — so no pass past
+ * the checker ever sees one, and `type Dir = "n" | "s"` still collapses to `string`
+ * exactly as before.
+ * ============================================================ */
+
+/** A string-literal type, e.g. `"square"` (quotes included). */
+export function isStringLitTy(t: Ty): boolean {
+  return typeof t === "string" && t.length >= 2 && t.startsWith(`"`) && t.endsWith(`"`) && !t.slice(1, -1).includes(`"`);
+}
+/** The VALUE of a string-literal type (`"square"` → `square`). */
+export function stringLitValue(t: Ty): string { return t.slice(1, -1); }
+/** Make the literal type for a string value. */
+export function stringLitTy(v: string): Ty { return `"${v}"` as Ty; }
+/**
+ * Characters a tag value may not contain: the type encoding is a flat string split
+ * structurally (`splitTopLevel` knows nothing about quotes), so a tag carrying one
+ * of these would corrupt every downstream parse. Rejected with a diagnostic rather
+ * than mis-split — see the parser.
+ */
+const TAG_FORBIDDEN = ",{}<>|[]()\"\\"; // the class `[,{}<>|[\]()"\\]`, as a character set
+export function tagValueIsEncodable(v: string): boolean {
+  for (let i = 0; i < v.length; i++) if (TAG_FORBIDDEN.includes(v[i]!)) return false;
+  return true;
+}
+
+export function isUnionTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("U<") && t.endsWith(">"); }
+export function unionMembers(t: Ty): Ty[] { return splitTopLevel(t.slice(2, -1), "|") as Ty[]; }
+export function makeUnionTy(members: Ty[]): Ty { return `U<${members.join("|")}>` as Ty; }
+
+/**
+ * The discriminant of a union: a field that is present at the SAME index in every
+ * member, string-literal-typed in every member, with a DISTINCT value per member.
+ * `undefined` when no such field exists — which is exactly when the union cannot be
+ * represented (and so is refused, never guessed at).
+ */
+export function unionDiscriminant(t: Ty): { key: string; index: number } | undefined {
+  const members = unionMembers(t);
+  if (members.length < 2) return undefined;
+  const first = objectFields(members[0]!);
+  for (let i = 0; i < first.length; i++) {
+    const key = first[i]!.key;
+    const values = new Set<Ty>();
+    let ok = true;
+    for (const m of members) {
+      const f = objectFields(m)[i];
+      if (!f || f.key !== key || !isStringLitTy(f.ty)) { ok = false; break; }
+      values.add(f.ty);
+    }
+    if (ok && values.size === members.length) return { key, index: i };
+  }
+  return undefined;
+}
+
+/** Every tag value of a union, in declaration order (drives exhaustiveness). */
+export function unionTagValues(t: Ty): string[] {
+  const d = unionDiscriminant(t);
+  if (!d) return [];
+  return unionMembers(t).map((m) => stringLitValue(objectFields(m)[d.index]!.ty));
+}
+
+/** The (widened) member selected by a tag value — the result of narrowing. */
+export function unionMemberFor(t: Ty, tag: string): Ty | undefined {
+  const d = unionDiscriminant(t);
+  if (!d) return undefined;
+  const m = unionMembers(t).find((m) => objectFields(m)[d.index]!.ty === stringLitTy(tag));
+  return m === undefined ? undefined : widenLiteralTys(m);
+}
+
+/** Every member of a union as it is seen OUTSIDE it (literal tags widened). */
+export function unionWidenedMembers(t: Ty): Ty[] { return unionMembers(t).map(widenLiteralTys); }
+
+/**
+ * Replace every string-literal type with `string`, EXCEPT inside a nested `U<…>`
+ * (whose members must keep their tags to stay narrowable). Applied wherever a type
+ * leaves union space, so a literal type never reaches ownership or codegen.
+ */
+export function widenLiteralTys(t: Ty): Ty {
+  if (typeof t !== "string" || !t.includes(`"`)) return t;
+  let out = "";
+  for (let i = 0; i < t.length; ) {
+    if (t.startsWith("U<", i)) {
+      const end = matchAngle(t, i + 1);
+      out += t.slice(i, end + 1);
+      i = end + 1;
+    } else if (t[i] === `"`) {
+      const close = t.indexOf(`"`, i + 1);
+      if (close < 0) { out += t.slice(i); break; }
+      out += "string";
+      i = close + 1;
+    } else {
+      out += t[i];
+      i++;
+    }
+  }
+  return out as Ty;
+}
+/** Index of the `>` closing the `<` at `open`. */
+function matchAngle(s: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < s.length; i++) {
+    if (s[i] === "<") depth++;
+    else if (s[i] === ">" && --depth === 0) return i;
+  }
+  return s.length - 1;
 }
 
 /* ============================================================
@@ -201,22 +345,55 @@ export function objectType(fields: { key: string; ty: Ty }[]): Ty {
  * with a user-written type name.
  * ============================================================ */
 
-const TYPE_PARAM_RE = /^#[A-Za-z_$][\w$]*$/;
 /** The marker type for type parameter `name` (`T` → `#T`). */
 export function typeParamTy(name: string): Ty { return `#${name}` as Ty; }
-/** Is `t` EXACTLY a bare type parameter (`#T`, not `#T[]`)? */
-export function isTypeParamTy(t: Ty): boolean { return typeof t === "string" && TYPE_PARAM_RE.test(t); }
+/** Is `t` EXACTLY a bare type parameter (`^#[A-Za-z_$][\w$]*$` — `#T`, not `#T[]`)? */
+export function isTypeParamTy(t: Ty): boolean {
+  return typeof t === "string" && t.startsWith("#") && isIdentifier(t.slice(1));
+}
+
+/**
+ * Rewrite every `#Name` marker in `t`, left to right, exactly as `/#([A-Za-z_$][\w$]*)/g`
+ * did: non-overlapping, replacements are never rescanned, and a `#` not followed by an
+ * identifier start is left alone (the scan resumes at the very next character, so `##T`
+ * still rewrites the SECOND `#T`). A bound marker becomes its binding; an UNBOUND one
+ * becomes `number` when `eraseUnbound`, and is otherwise left as the marker.
+ *
+ * Deliberately a `Map` + a flag rather than a rename CALLBACK: a callback returning
+ * `string | undefined` would need a nullable-returning function type, which nativets does
+ * not accept at a call site (it rejects a plain `(s) => string` argument against it). That
+ * would have planted a self-hosting blocker BEHIND ast.ts's current one, where the
+ * bootstrap ratchet could not see it. Concrete types only.
+ */
+const EMPTY_BINDINGS = new Map<string, Ty>();
+function mapTypeParams(t: string, bindings: Map<string, Ty>, eraseUnbound: boolean): string {
+  let out = "";
+  let i = 0;
+  while (i < t.length) {
+    if (t[i] !== "#" || i + 1 >= t.length || !isIdentStart(t[i + 1]!)) {
+      out += t[i];
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < t.length && isIdentPart(t[j]!)) j++;
+    const bound = bindings.get(t.slice(i + 1, j));
+    out += bound ?? (eraseUnbound ? "number" : t.slice(i, j));
+    i = j;
+  }
+  return out;
+}
 /** Does `t` mention any type parameter anywhere (`#T[]`, `(#T)=>#U`, `{a:#T}`)? */
 export function hasTypeParam(t: Ty): boolean { return typeof t === "string" && t.includes("#"); }
 /** Substitute bound type parameters through `t`; unbound ones are left as markers. */
 export function substTypeParams(t: Ty, bindings: Map<string, Ty>): Ty {
   if (!hasTypeParam(t)) return t;
-  return t.replace(/#([A-Za-z_$][\w$]*)/g, (m, n: string) => bindings.get(n) ?? m) as Ty;
+  return mapTypeParams(t, bindings, false) as Ty;
 }
 /** Erase any REMAINING type parameters to `number` (the pre-M3 fallback, kept for
  *  generic ARROWS, which are values and so have no instantiation site to specialize). */
 export function eraseTypeParams(t: Ty): Ty {
-  return hasTypeParam(t) ? (t.replace(/#[A-Za-z_$][\w$]*/g, "number") as Ty) : t;
+  return hasTypeParam(t) ? (mapTypeParams(t, EMPTY_BINDINGS, true) as Ty) : t;
 }
 /**
  * Structural unification of a parameter PATTERN (which may mention `#T`) against a
@@ -344,6 +521,12 @@ export interface Identifier {
    *  is dropped on some other path, so the slot is nulled here. `free(NULL)` is a
    *  no-op, which makes the pointer itself rustc's runtime drop flag. */
   nullOnMove?: boolean;
+  /** Control-flow narrowing: the checker proved that on THIS path the binding — whose
+   *  declared type is a nullable `?U`/`?N` pair — is not nullish, so `ty` above is the
+   *  BASE type and codegen must unwrap the tagged pair at this read (same unwrap as
+   *  `x!`). Set on every read, so a stale `true` from an earlier typing pass cannot
+   *  survive. */
+  narrowed?: boolean;
 }
 
 export interface MemberExpr {
@@ -608,10 +791,36 @@ export interface ExportTable {
   types: Map<string, Ty>;
 }
 
+/**
+ * SH4 — the host FFI surface: the `node:` builtin modules a self-hosted nativets
+ * needs to read a `.ts`, write a `.ll`, stat a path and invoke `clang`. A named
+ * import binds the SAME-NAMED compiler builtin (so `readFileSync(p, "utf8")` is
+ * ordinary TypeScript that node runs too), and the import is then erased.
+ *
+ * The list is deliberately exactly what `src/*.ts` imports — nothing speculative.
+ * A module or member outside it is refused with NT1028, never half-implemented.
+ * The signatures live in the checker (`HOST_FUNCS`) and the lowering in codegen.
+ */
+/* `string[]`, NOT `readonly string[]`: `src/*.ts` must stay inside the subset nativets
+ * can compile ITSELF in, and a `readonly` type modifier does not parse — adding one here
+ * made this file's first blocker an NT0001 in the self-host histogram. */
+export const HOST_MODULES: Record<string, string[]> = {
+  "node:fs": ["readFileSync", "writeFileSync", "existsSync", "mkdtempSync", "readdirSync", "rmSync"],
+  "node:path": ["join", "dirname", "basename", "resolve", "relative"],
+  "node:os": ["tmpdir", "homedir"],
+  "node:url": ["fileURLToPath"],
+  "node:child_process": ["spawnSync"],
+};
+
 export interface Program {
   kind: "Program";
   body: Stmt[];
   endDrops?: string[];
+  /** Host builtins (SH4) this program imported from a `node:` module, by their
+   *  CANONICAL name (an `as` alias is rewritten at parse time). A host builtin is
+   *  only in scope when imported — unlike an ambient global — so user code that
+   *  defines its own `join` is unaffected. */
+  hostImports?: string[];
   /** Present only when the source declared imports (the linker's input). */
   imports?: ImportDecl[];
   exports?: ExportTable;

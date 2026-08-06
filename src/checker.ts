@@ -15,6 +15,8 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // Stage 47 (console.log of compound values): the handle-type predicates the
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
+// SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
+import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError } from "./diagnostics.ts";
 
@@ -63,7 +65,17 @@ function literalIndex(e: Expr): number | undefined {
 /** `len` is set only for a `const` bound to a literal of statically-known length (an
  *  array literal without spreads, or a string literal) — it feeds the NT2002
  *  compile-time out-of-bounds rejection. */
-interface Binding { ty: Ty; constant: boolean; len?: number }
+interface Binding {
+  ty: Ty; constant: boolean; len?: number;
+  /** SH2: this binding is a NARROWING shadow of a discriminated union, and this is the
+   *  union it was narrowed from. Assigning through it is refused (see the checker) —
+   *  the narrowing was proved for the OLD value and a new one can carry a different
+   *  tag, so honouring it would read the next field access at the wrong slot. */
+  narrowedFrom?: Ty;
+}
+
+/** One control-flow narrowing fact — see the narrowing section on `Checker`. */
+interface NarrowFact { name: string; binding: Binding; ty: Ty; constant: boolean; arrowDepth: number }
 
 class Scope {
   private vars = new Map<string, Binding>();
@@ -74,7 +86,7 @@ class Scope {
   readonly hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
-  declare(name: string, ty: Ty, constant: boolean, len?: number): void { this.vars.set(name, { ty, constant, len }); }
+  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty): void { this.vars.set(name, { ty, constant, len, narrowedFrom }); }
   own(name: string): Binding | undefined { return this.vars.get(name); }
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
@@ -129,6 +141,46 @@ const STRING_METHODS: Record<string, MethodSig> = {
   endsWith: { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" },
   lastIndexOf: { min: 1, max: 1, argTys: ["string"], ret: "number" }, // number | undefined (node: undefined out of range)
 };
+/**
+ * Host FFI (SH4) — the signatures of the `node:` builtins, keyed by their canonical
+ * name. Unlike GLOBAL_FUNCS these are NOT ambient: a name is only in scope when the
+ * program imported it (`Program.hostImports`), so node and nativets agree on what is
+ * defined. Backed by libc in runtime/runtime.c, so they cross-link unchanged.
+ */
+const HOST_FUNCS: Record<string, MethodSig> = {
+  // node:fs — `readFileSync(path, "utf8")`. The encoding is REQUIRED and must be the
+  // literal "utf8": node returns a Buffer without one, and we have no Buffer.
+  readFileSync: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
+  // `writeFileSync(path, contents)` — node also takes an options/encoding third
+  // argument; the default (utf8, truncate) is the only mode implemented.
+  writeFileSync: { min: 2, max: 2, argTys: ["string", "string"], ret: "void" },
+  // `existsSync(path)` REPORTS rather than throws — it is the guard in front of a read.
+  existsSync: { min: 1, max: 1, argTys: ["string"], ret: "boolean" },
+  mkdtempSync: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  readdirSync: { min: 1, max: 1, argTys: ["string"], ret: "string[]" }, // names only (no withFileTypes)
+  // `rmSync(path)` / `rmSync(path, { recursive: true, force: true })`. The options are
+  // validated by VALUE (checkHostCall) — they decide what the call removes.
+  rmSync: { min: 1, max: 2, argTys: ["string", null], ret: "void" },
+  // node:child_process — `spawnSync(cmd, args, { encoding: "utf8" })`. The options
+  // object is validated by VALUE (checkHostCall): every other node option changes what
+  // the call does, so an ignored one would be a silent divergence. Field order here IS
+  // the slot order codegen writes.
+  spawnSync: { min: 3, max: 3, argTys: ["string", "string[]", null], ret: "{status:number,stdout:string,stderr:string}" },
+  // node:path (POSIX). `join`/`resolve` are variadic in node and are LEFT-FOLDED over
+  // the binary runtime primitive here (normalize is idempotent and `..` resolves left
+  // to right, so the fold is node's answer — pinned by the differential corpus).
+  join: { min: 1, max: 8, argTys: ["string", "string", "string", "string", "string", "string", "string", "string"], ret: "string" },
+  resolve: { min: 1, max: 8, argTys: ["string", "string", "string", "string", "string", "string", "string", "string"], ret: "string" },
+  dirname: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  // node's 2-arg `basename(p, ext)` strips a suffix; only the 1-arg form is implemented.
+  basename: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  relative: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
+  // node:os / node:url — the last two the compiler's own source imports.
+  tmpdir: { min: 0, max: 0, argTys: [], ret: "string" },
+  homedir: { min: 0, max: 0, argTys: [], ret: "string" },
+  fileURLToPath: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+};
+
 const GLOBAL_FUNCS: Record<string, MethodSig> = {
   parseInt: { min: 1, max: 2, argTys: ["string", "number"], ret: "number" },
   parseFloat: { min: 1, max: 1, argTys: ["string"], ret: "number" },
@@ -228,7 +280,7 @@ export function actorSendTy(t: Ty): Ty {
 
 export function check(program: Program): CheckedProgram {
   const functions = new Map<string, Sig>();
-  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []));
+  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []));
   const builtins = () => {
     const s = new Scope();
     for (const n of BUILTIN_NUMBERS) s.declare(n, "number", true);
@@ -240,6 +292,10 @@ export function check(program: Program): CheckedProgram {
    * imported module's `export const` read from an imported function).
    */
   const moduleScope = builtins();
+  // Narrowing: a name some arrow (or nested function) assigns to can change at any time
+  // after a guard proved it non-nullish, so it is never narrowed. TypeScript's rule, for
+  // the same reason (`narrowingPastLastAssignment.ts`, function `f3`).
+  c.noteClosureAssignments(program.body);
   // M3: a generic declaration is a TEMPLATE, not a function. Register it with the
   // monomorphizer instead of the signature table; it is never checked or emitted as
   // written — only its specializations are (and a generic nobody calls emits nothing).
@@ -355,6 +411,10 @@ class Checker {
      *  from object LITERALS — so a literal must be able to take the tag from its context.
      *  Class tags are deliberately excluded: an instance comes from `new C(…)`. */
     private recordTags: Set<string> = new Set(),
+    /** Host builtins (SH4) brought into scope by a `node:` import. Empty unless the
+     *  program imported one, so `readFileSync` is an ordinary undefined name — and a
+     *  user function of that name — in every program that did not. */
+    private hostImports: Set<string> = new Set(),
   ) {}
 
   /** The tagged record type a literal should take from its context, if any. */
@@ -375,6 +435,189 @@ class Checker {
     if (!this.mutable.size || !isObjectTy(ot)) return false;
     const tag = classTag(ot);
     return tag !== undefined && this.mutable.has(tag);
+  }
+
+  /* ============================================================
+   * Control-flow narrowing of nullable BINDINGS (A2 follow-on).
+   *
+   * `x!` narrowed the EXPRESSION only. Having PROVED on this path that `x` is not
+   * nullish, every later read of `x` on that path should see the base type instead of
+   * the `?U`/`?N` tagged pair — `if (x !== undefined) { x + 1 }` is the idiomatic TS
+   * spelling and used to be a type error.
+   *
+   * A narrowing is a stack of FRAMES, each a set of facts scoped to a region (an `if`
+   * branch, the rest of a block after an early exit, the right operand of `&&`). A fact
+   * names the BINDING OBJECT, not the name, so an inner declaration that shadows the
+   * name is unaffected. Reads consult the innermost frame.
+   *
+   * Two rules keep it sound (the model is TypeScript's own, `narrowingPastLastAssignment.ts`):
+   *   - a fact is dropped if the region ASSIGNS to that name anywhere (including inside
+   *     an arrow in it), so a loop back-edge can never observe a stale narrowing;
+   *   - a `let` fact does not survive into an inner function body — a closure may run
+   *     after a later assignment. `const` facts do (they cannot be invalidated).
+   * A name assigned inside ANY arrow in the program is never narrowed at all, which is
+   * TypeScript's rule for the same reason.
+   *
+   * When the analysis is nonetheless wrong the read unwraps a nullish box, which PANICS
+   * exactly like a false `!` assertion (see codegen's `NonNullExpr`) — never a phantom
+   * value.
+   * ============================================================ */
+
+  /** One proved fact: this binding is not nullish here, so it reads as `ty`. */
+  private narrowStack: { binding: Binding; ty: Ty; constant: boolean; arrowDepth: number }[][] = [];
+  /** Nesting depth of arrow bodies being typed (a `let` narrowing stops at depth+1). */
+  private arrowDepth = 0;
+  /** Names assigned inside SOME arrow body anywhere in the program — never narrowable. */
+  private closureAssigned = new Set<string>();
+
+  /** Record the program's closure-assigned names (see the note above). */
+  noteClosureAssignments(body: Stmt[]): void {
+    const direct = new Set<string>();
+    collectAssignedStmts(body, direct, this.closureAssigned, false);
+  }
+
+  /** The narrowed type of `b` here, or undefined if no fact covers it. */
+  private narrowedTy(b: Binding): Ty | undefined {
+    for (let i = this.narrowStack.length - 1; i >= 0; i--) {
+      for (const f of this.narrowStack[i]!) {
+        if (f.binding !== b) continue;
+        return !f.constant && this.arrowDepth > f.arrowDepth ? undefined : f.ty;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Type an arrow body with `let` narrowings suspended (they do not cross the boundary).
+   *
+   * Concrete, not generic, like the two below: a generic METHOD is still an NT1015 in the
+   * subset the compiler can compile ITSELF in, and `test/self-host-coverage.test.ts`
+   * measures exactly that — a generic here would push the file's real frontier out of view.
+   */
+  private inArrow(f: () => Ty): Ty {
+    this.arrowDepth++;
+    try { return f(); } finally { this.arrowDepth--; }
+  }
+
+  /** Type an expression with `facts` in scope. */
+  private withFacts(facts: NarrowFact[], f: () => Ty): Ty {
+    this.narrowStack.push(facts);
+    try { return f(); } finally { this.narrowStack.pop(); }
+  }
+
+  /**
+   * Check statements with `facts` in scope. `finally` matters: `coverage` keeps going
+   * after a rejected statement, so a diagnostic thrown mid-branch must not leave a stale
+   * frame behind for the next one.
+   */
+  private withFactsIn(facts: NarrowFact[], f: () => void): void {
+    this.narrowStack.push(facts);
+    try { f(); } finally { this.narrowStack.pop(); }
+  }
+
+  /**
+   * The facts `test` establishes for `region`, where `region` is the code they cover:
+   * the guard's own facts on the branch selected by `positive`, plus any `x!` assertion
+   * evaluated unconditionally in the test (which holds on BOTH branches). Facts about a
+   * name the region assigns are dropped.
+   */
+  private factsFor(test: Expr, scope: Scope, positive: boolean, region: Stmt[], guards = true): NarrowFact[] {
+    const out: NarrowFact[] = [];
+    if (guards) this.guardFacts(test, scope, positive, out);
+    this.assertFacts(test, scope, out);
+    if (!out.length) return out;
+    const assigned = new Set<string>();
+    collectAssignedStmts(region, assigned, assigned, false);
+    return out.filter((f) => !assigned.has(f.name) && !this.closureAssigned.has(f.name));
+  }
+
+  /** Facts from the guard itself: an equality against the matching nullish literal. */
+  private guardFacts(e: Expr, scope: Scope, positive: boolean, out: NarrowFact[]): void {
+    switch (e.kind) {
+      case "BinaryExpr": {
+        const ne = e.op === "!==" || e.op === "!=";
+        const eq = e.op === "===" || e.op === "==";
+        // The value is non-nullish on the TRUE branch of `!==` and the FALSE branch of `===`.
+        if ((!ne && !eq) || positive !== ne) return;
+        for (const [v, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
+          // Both operand orders narrow — TypeScript's
+          // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
+          const lt = (lit as { ty?: Ty }).ty;
+          if (v.kind === "Identifier" && (lt === "undefined" || lt === "null")) this.addFact(v, scope, lt, out);
+        }
+        return;
+      }
+      case "LogicalExpr":
+        // `a && b` proves both when true; `a || b` proves both when false (De Morgan).
+        if ((e.op === "&&") === positive && e.op !== "??") {
+          this.guardFacts(e.left, scope, positive, out);
+          this.guardFacts(e.right, scope, positive, out);
+        }
+        return;
+      case "UnaryExpr":
+        if (e.op === "!") this.guardFacts(e.operand, scope, !positive, out);
+        return;
+      default:
+        return;
+    }
+  }
+
+  /**
+   * `x!` assertions evaluated UNCONDITIONALLY by `e` — the fact survives the expression
+   * (`m! && m[0]`, TypeScript's `narrowingWithNonNullExpression.ts`), because a false
+   * assertion never returns. Conditional positions (a `&&`/`||`/`??` right operand, a
+   * `?:` arm, an arrow body) are skipped: they may not run.
+   */
+  private assertFacts(e: Expr, scope: Scope, out: NarrowFact[]): void {
+    const go = (x: Expr) => this.assertFacts(x, scope, out);
+    switch (e.kind) {
+      case "NonNullExpr":
+        if (e.expr.kind === "Identifier") this.addFact(e.expr, scope, null, out);
+        go(e.expr);
+        return;
+      case "MemberExpr": go(e.object); return;
+      case "IndexExpr": go(e.object); go(e.index); return;
+      case "UnaryExpr": go(e.operand); return;
+      case "TypeofExpr": go(e.operand); return;
+      case "AsExpr": go(e.expr); return;
+      case "InstanceOfExpr": go(e.object); return;
+      case "BinaryExpr": go(e.left); go(e.right); return;
+      case "LogicalExpr": go(e.left); return; // the right operand is conditional
+      case "ConditionalExpr": go(e.test); return; // ditto the arms
+      case "SequenceExpr": e.exprs.forEach(go); return;
+      case "TemplateLiteral": e.exprs.forEach(go); return;
+      case "CallExpr": go(e.callee); e.args.forEach(go); return;
+      case "ArrayLiteral": e.elements.forEach(go); return;
+      case "SpreadExpr": go(e.argument); return;
+      default: return;
+    }
+  }
+
+  /**
+   * Add "this binding is not nullish" — but only when the test can actually prove it.
+   * A nullable carries ONE nullish arm, so comparing a `T | null` against `undefined`
+   * proves nothing (the tags never match); `kind` is the literal that was compared
+   * against, or null for a `!` assertion, which proves it outright.
+   */
+  private addFact(id: Extract<Expr, { kind: "Identifier" }>, scope: Scope, kind: Ty | null, out: NarrowFact[]): void {
+    const b = scope.lookup(id.name);
+    if (!b || !isNullableTy(b.ty)) return;
+    if (kind !== null && nullishKind(b.ty) !== kind) return;
+    if (out.some((f) => f.binding === b)) return;
+    out.push({ name: id.name, binding: b, ty: baseTy(b.ty), constant: b.constant, arrowDepth: this.arrowDepth });
+  }
+
+  /**
+   * A guard whose taken branch always EXITS narrows the binding for the REST of the
+   * block — `if (x === undefined) return;`. Modeled on TypeScript's
+   * `controlFlowIfStatement.ts` (function `a`, where the `else` returns).
+   */
+  private exitGuardFacts(s: Stmt, scope: Scope, rest: Stmt[]): NarrowFact[] {
+    if (s.kind !== "IfStmt" || !rest.length) return [];
+    const consExits = alwaysExits(s.consequent);
+    const altExits = !!s.alternate && alwaysExits(s.alternate);
+    if (consExits === altExits) return []; // neither, or both (the rest is unreachable)
+    return this.factsFor(s.test, scope, altExits, rest);
   }
 
   /* ============================================================
@@ -526,10 +769,83 @@ class Checker {
   checkFunction(fn: FuncDecl, base: Scope): void {
     for (const p of fn.params) base.declare(p.name, p.annot ?? (p.default ? "number" : "number"), false);
     this.checkBlock(fn.body, base, fn.returnTy ?? "number");
+    this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
+  }
+
+  /**
+   * SH2 exhaustiveness. Deliberately exactly as wide as the DEFECT it removes, and no
+   * wider: falling out of a `switch` is ordinary JavaScript, and a switch with a
+   * statement after it, or with arms that `break`, is code node runs correctly and we
+   * must not reject. The one shape that goes WRONG is the switch that is a function's
+   * TAIL with every arm returning or throwing: an uncovered member falls off the end of
+   * the function, where node yields `undefined` and nativets yields a value (`0` for a
+   * `number` return — a pre-existing general divergence). That is a silent wrong answer,
+   * and here — uniquely — the compiler knows the complete set of possibilities, so it
+   * can name the missing ones instead of guessing.
+   *
+   * Everything is read off the AST types the checker just filled in, so no scope is
+   * needed: `switch (s.kind)`'s receiver carries the un-narrowed union on `.object.ty`.
+   */
+  private checkExhaustiveTailSwitch(fn: FuncDecl, ret: Ty): void {
+    if (ret === "void") return;
+    const last = fn.body[fn.body.length - 1];
+    if (!last || last.kind !== "SwitchStmt") return;
+    const d = last.discriminant;
+    if (d.kind !== "MemberExpr" || d.object.ty === undefined || !isUnionTy(d.object.ty)) return;
+    const u = d.object.ty;
+    if (unionDiscriminant(u)!.key !== d.property) return;
+    if (last.cases.some((c) => c.test === null)) return; // a `default` covers everything left
+    // Only a switch every arm of which LEAVES the function is one the author wrote to be
+    // total; an arm that merely breaks is choosing to fall out, and is left alone. An
+    // empty body is fine — it falls into the next case, which is still inside the switch.
+    const total = last.cases.every((c, i) => (c.body.length === 0 && i < last.cases.length - 1) || leavesFunction(c.body));
+    if (!total) return;
+    const covered = new Set(last.cases.map((c) => (c.test && c.test.kind === "StringLiteral" ? c.test.value : "")));
+    const missing = unionTagValues(u).filter((v) => !covered.has(v));
+    if (missing.length === 0) return;
+    throw typeError(
+      `'${fn.name}' can fall off its end: this switch over ${showUnion(u)} returns from every case but does not cover ` +
+        `${missing.map((v) => `'${d.property}: "${v}"'`).join(", ")} — add ${missing.length === 1 ? "that case" : "those cases"}, ` +
+        `a \`default:\`, or a \`return\` after the switch (node would yield \`undefined\` here, which this return type cannot represent)`,
+    );
   }
 
   checkBlock(body: Stmt[], scope: Scope, ret: Ty = "void"): void {
-    for (const s of body) this.checkStmt(s, scope, ret);
+    let pushed = 0;
+    for (let i = 0; i < body.length; i++) {
+      this.checkStmt(body[i]!, scope, ret);
+      // Two INDEPENDENT early-exit narrowings, and a block can want both:
+      // nullable facts (`if (x === undefined) return;` — x is present below), and
+      // discriminated-union tag elimination (`if (n.kind === "Num") return …;` — the
+      // rest of the block sees the remaining members). Different domains, same shape.
+      const facts = this.exitGuardFacts(body[i]!, scope, body.slice(i + 1));
+      if (facts.length) { this.narrowStack.push(facts); pushed++; }
+      this.eliminateAfterEarlyExit(body[i]!, scope);
+    }
+    for (let i = 0; i < pushed; i++) this.narrowStack.pop();
+  }
+
+  /**
+   * SH2 narrowing by ELIMINATION — the guard-clause shape, and the second one the
+   * compiler's own passes are written in:
+   *
+   *     if (n.kind === "NumberLiteral") return n.value;
+   *     if (n.kind === "Negate") return -evaluate(n.operand);
+   *     return n.left …            // narrowed to BinaryExpr by what CANNOT be here
+   *
+   * An `if` with no `else` whose body always leaves the block means every statement
+   * after it runs only when the tag did NOT match, so the rest of the block sees the
+   * remaining members. The shadow is declared in the block's OWN scope (not a child),
+   * because "from here on" IS the rest of this scope — and the statements before it
+   * are already checked, so nothing is retroactively affected.
+   */
+  private eliminateAfterEarlyExit(s: Stmt, scope: Scope): void {
+    if (s.kind !== "IfStmt" || s.alternate) return;
+    if (!leavesBlock(s.consequent)) return;
+    const t = this.tagTest(s.test, scope);
+    if (!t) return;
+    const others = unionTagValues(t.union).filter((v) => v !== t.tag);
+    this.narrowInto(scope, t.name, t.union, t.negated ? [t.tag] : others);
   }
 
   /**
@@ -542,6 +858,17 @@ class Checker {
    */
   private assignable(target: Ty, source: Ty): boolean {
     if (target === source) return true;
+    // SH2: a union value IS one of its members' object blocks — there is no box — so
+    // what flows in must have EXACTLY a member's layout. Deliberately identity, not the
+    // structural rule below: a record that is merely structurally compatible with a
+    // member could have a different slot layout, and accepting it would miscompile
+    // every subsequent field read. (An object LITERAL reaches here already retyped to
+    // the member the context selected — see `unionMemberForLiteral`.)
+    if (isUnionTy(target)) {
+      const members = unionWidenedMembers(target);
+      if (isUnionTy(source)) return unionWidenedMembers(source).every((m) => members.includes(m));
+      return members.includes(source);
+    }
     if (isNullableTy(target)) {
       const which = nullishKind(target);
       if (source === which) return true;                 // undefined→?U / null→?N
@@ -601,8 +928,99 @@ class Checker {
     );
   }
 
+  /* ---- SH2 narrowing ------------------------------------------------------
+   * `if (s.kind === "square")` / `switch (s.kind)` retype `s` INSIDE the arm. It is
+   * a pure type-space operation — a union value already is its member's object block,
+   * so narrowing emits no code at all; it only changes the slot layout the member
+   * fields are read with. Implemented by SHADOW-DECLARING the name in the arm's child
+   * scope, which is the one mechanism every later pass already reads.
+   *
+   * Deliberately narrow in scope: the narrowed thing must be a plain IDENTIFIER
+   * (`s`, not `o.inner`) tested against the union's own discriminant. Anything else
+   * keeps the un-narrowed union and the "narrow it first" diagnostic — an unsound
+   * narrowing would hand codegen the wrong layout, which is the exact silent wrong
+   * answer this project exists to avoid.
+   */
+
+  /** `x.kind` where `x` is a union-typed local and `kind` is its discriminant. */
+  private discriminantRead(e: Expr, scope: Scope): { name: string; union: Ty } | undefined {
+    if (e.kind !== "MemberExpr" || e.optional || e.object.kind !== "Identifier") return undefined;
+    const u = scope.lookup(e.object.name)?.ty;
+    if (u === undefined || !isUnionTy(u)) return undefined;
+    return unionDiscriminant(u)!.key === e.property ? { name: e.object.name, union: u } : undefined;
+  }
+
+  /** The narrowing a `===`/`!==` tag comparison implies for its two arms. */
+  private tagTest(test: Expr, scope: Scope): { name: string; union: Ty; tag: string; negated: boolean } | undefined {
+    if (test.kind !== "BinaryExpr") return undefined;
+    if (test.op !== "===" && test.op !== "!==" && test.op !== "==" && test.op !== "!=") return undefined;
+    const negated = test.op === "!==" || test.op === "!=";
+    for (const [a, b] of [[test.left, test.right], [test.right, test.left]] as [Expr, Expr][]) {
+      const d = this.discriminantRead(a, scope);
+      if (d && b.kind === "StringLiteral") return { ...d, tag: b.value, negated };
+    }
+    return undefined;
+  }
+
+  /**
+   * The type a name gets when its union is restricted to `tags`. One tag ⇒ that
+   * member; several ⇒ the sub-union (still discriminated, by construction); none ⇒
+   * `undefined`, meaning "leave the binding alone" — TS would say `never`, and the
+   * un-narrowed union is the honest conservative stand-in (its fields still need a
+   * narrowing, only `.kind` is readable).
+   */
+  private restrictUnion(u: Ty, tags: string[]): Ty | undefined {
+    const values = unionTagValues(u);
+    const keep = unionMembers(u).filter((_, i) => tags.includes(values[i]!));
+    if (keep.length === 0) return undefined;
+    return keep.length === 1 ? widenLiteralTys(keep[0]!) : makeUnionTy(keep);
+  }
+
+  /** Declare the narrowed shadow binding in `inner`, when there is one. */
+  private narrowInto(inner: Scope, name: string, u: Ty, tags: string[]): void {
+    const t = this.restrictUnion(u, tags);
+    // Declared CONSTANT on purpose: a narrowing is proved for the value that is there
+    // now, and assigning a different member through the same name would leave every
+    // later field access reading the wrong slot. Refusing is the conservative half of
+    // reject-don't-miscompile; tracking the invalidation properly (rustc-style flow
+    // analysis through loops and nested blocks) is the general fix.
+    if (t !== undefined) inner.declare(name, t, true, undefined, u);
+  }
+
+  /**
+   * Which member of the union `u` does this object literal construct? Answered from the
+   * TAG the literal actually writes, not from its structure: two members can be
+   * structurally ambiguous (`{k:"a",n:number} | {k:"b",n:number}`), a tag never is.
+   */
+  private unionMemberForLiteral(e: Extract<Expr, { kind: "ObjectLiteral" }>, u: Ty): Ty | undefined {
+    const d = unionDiscriminant(u);
+    if (!d) return undefined;
+    const tags = unionTagValues(u).map((v) => `"${v}"`).join(" | ");
+    const p = e.properties.find((p) => !p.spread && p.key === d.key);
+    if (!p || p.value.kind !== "StringLiteral") {
+      throw typeError(
+        `an object literal for ${showUnion(u)} must set '${d.key}' to one of the literals ${tags}` +
+          ` — that tag is what selects the member (and, at runtime, IS the value's type)`,
+      );
+    }
+    const m = unionMemberFor(u, p.value.value);
+    if (!m) throw typeError(`'${d.key}: "${p.value.value}"' matches no member of ${showUnion(u)} (expected ${tags})`);
+    return m;
+  }
+
   /** Resolve `.prop` on a NON-nullable base (object field, or string/array `.length`). */
   private fieldOnBase(base: Ty, prop: string): Ty {
+    // SH2: only the DISCRIMINANT is readable on an un-narrowed union — it is the one
+    // field guaranteed to exist, at the same slot, in every member. Everything else
+    // needs a narrowing first; say so instead of guessing a member.
+    if (isUnionTy(base)) {
+      const d = unionDiscriminant(base)!;
+      if (prop === d.key) return "string";
+      throw typeError(
+        `Property '${prop}' does not exist on ${showUnion(base)} — narrow it first ` +
+          `(\`if (x.${d.key} === "…")\` or \`switch (x.${d.key})\`), then the member's fields are available`,
+      );
+    }
     if ((base === "string" || isArrayTy(base)) && prop === "length") return "number";
     if (isObjectTy(base)) {
       const ft = fieldType(base, prop);
@@ -633,14 +1051,32 @@ class Checker {
       case "ReturnStmt":
         if (s.argument) {
           const t = this.type(s.argument, scope, ret === "void" ? undefined : ret); // return type is the context (e.g. `return []`)
-          if (ret !== "void" && t !== ret) throw typeError(`return type ${t} does not match declared ${ret}`);
+          if (ret !== "void" && !this.fitsParam(ret, t)) throw typeError(`return type ${t} does not match declared ${ret}`);
         }
         return;
-      case "IfStmt":
+      case "IfStmt": {
         this.type(s.test, scope);
-        this.checkBlock(s.consequent, scope.child(), ret);
-        if (s.alternate) this.checkBlock(s.alternate, scope.child(), ret);
+        // Two INDEPENDENT narrowings apply to the same arms, and a guard can want both
+        // (see checkBlock): nullable FACTS from the guard hold in the branch it selects,
+        // and a TAG test narrows each arm's union — the tested member in one, the
+        // remaining members in the other, which is what makes an `else if` chain over a
+        // 3-member union work. Compose them rather than choosing one.
+        const t = this.tagTest(s.test, scope);
+        const con = scope.child();
+        const alt = scope.child();
+        if (t) {
+          const others = unionTagValues(t.union).filter((v) => v !== t.tag);
+          this.narrowInto(con, t.name, t.union, t.negated ? others : [t.tag]);
+          this.narrowInto(alt, t.name, t.union, t.negated ? [t.tag] : others);
+        }
+        this.withFactsIn(this.factsFor(s.test, scope, true, s.consequent),
+          () => this.checkBlock(s.consequent, con, ret));
+        if (s.alternate) {
+          this.withFactsIn(this.factsFor(s.test, scope, false, s.alternate),
+            () => this.checkBlock(s.alternate!, alt, ret));
+        }
         return;
+      }
       case "WhileStmt":
         this.type(s.test, scope);
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
@@ -689,13 +1125,30 @@ class Checker {
       case "SwitchStmt": {
         const dt = this.type(s.discriminant, scope);
         this.switchDepth++;
-        for (const cse of s.cases) {
+        // SH2: `switch (s.kind)` narrows each arm to the member(s) that can reach it.
+        // FALLTHROUGH is the subtle part and is handled explicitly: a case body that
+        // does not end in a terminator also runs for the NEXT case's tag, so the tags
+        // that can reach a body are carried forward. Narrowing to the case's own tag
+        // alone would be unsound exactly there.
+        const d = this.discriminantRead(s.discriminant, scope);
+        const listed = s.cases.map((c) => (c.test && c.test.kind === "StringLiteral" ? c.test.value : undefined));
+        let carry: string[] = [];
+        s.cases.forEach((cse, i) => {
           if (cse.test) {
             const ct = this.type(cse.test, scope);
             if (ct !== dt) throw typeError(`switch case type ${ct} does not match discriminant ${dt}`);
           }
-          this.checkBlock(cse.body, scope.child(), ret);
-        }
+          const inner = scope.child();
+          if (d) {
+            const own = cse.test
+              ? (listed[i] !== undefined ? [listed[i]!] : []) // a non-literal case test tells us nothing
+              : unionTagValues(d.union).filter((v) => !listed.includes(v)); // `default:` — whatever is left
+            const tags = [...new Set([...carry, ...own])];
+            this.narrowInto(inner, d.name, d.union, tags);
+            carry = leavesBlock(cse.body) ? [] : tags;
+          }
+          this.checkBlock(cse.body, inner, ret);
+        });
         this.switchDepth--;
         return;
       }
@@ -752,7 +1205,7 @@ class Checker {
           // context we still reject (don't guess) — see `emptyArrayError`.
           if (hint && isArrayTy(hint)) {
             const el = elemTy(hint);
-            if (el !== "number" && el !== "string" && el !== "boolean" && !isObjectTy(el) && !isArrayTy(el)) throw nyi(NYI.ARRAY, `arrays of ${el}`);
+            if (el !== "number" && el !== "string" && el !== "boolean" && !isObjectTy(el) && !isArrayTy(el) && !isUnionTy(el)) throw nyi(NYI.ARRAY, `arrays of ${el}`);
             return hint;
           }
           throw emptyArrayError();
@@ -771,14 +1224,25 @@ class Checker {
           // takes its element type) from the annotation, exactly as one in a field does.
           return this.type(el, scope, hint && isArrayTy(hint) ? elemTy(hint) : undefined);
         });
+        // SH2: the elements of a `Shape[]` have DIFFERENT types by design — they share
+        // the union, not one object shape. Accept exactly when every element is one of
+        // its members (the same identity rule `assignable` uses for a union target).
+        const want = hint !== undefined && isArrayTy(hint) && isUnionTy(elemTy(hint)) ? elemTy(hint) : undefined;
+        if (want !== undefined && tys.every((t) => this.assignable(want, t))) return hint as Ty;
         const first = tys[0]!;
         if (!tys.every((t) => t === first)) throw typeError(`array elements must share a type (got ${[...new Set(tys)].join(", ")})`);
         // A `Date` is represented AS a double (stdlib batch 3), so `Date[]` is a
         // `number[]` in every way that matters to the slot vector — allow it.
-        if (first !== "number" && first !== "string" && first !== "boolean" && !isObjectTy(first) && !isArrayTy(first) && !isDateTy(first)) throw nyi(NYI.ARRAY, `arrays of ${first}`);
+        if (first !== "number" && first !== "string" && first !== "boolean" && !isObjectTy(first) && !isArrayTy(first) && !isDateTy(first) && !isUnionTy(first)) throw nyi(NYI.ARRAY, `arrays of ${first}`);
         return `${first}[]`;
       }
       case "ObjectLiteral": {
+        // SH2: when the context wants a UNION, the literal's own tag says which member
+        // it is, and that member becomes the context from here down. This is the one
+        // place a union value is created, and the selection is syntactic (the tag the
+        // programmer wrote) rather than structural — two members can be structurally
+        // ambiguous, a tag never is.
+        const ctx = hint !== undefined && isUnionTy(hint) ? this.unionMemberForLiteral(e, hint) : hint;
         const fields: { key: string; ty: Ty }[] = [];
         const put = (key: string, ty: Ty) => { const f = fields.find((f) => f.key === key); if (f) f.ty = ty; else fields.push({ key, ty }); };
         for (const p of e.properties) {
@@ -789,11 +1253,14 @@ class Checker {
           } else {
             // An annotated target type is the context for each property value, so
             // `const o: {xs: number[]} = { xs: [] }` types the empty literal.
-            const want = hint && isObjectTy(hint) ? fieldType(hint, p.key) : undefined;
+            const want = ctx && isObjectTy(ctx) ? fieldType(ctx, p.key) : undefined;
             put(p.key, this.type(p.value, scope, want ? baseTy(want) : undefined));
           }
         }
         const lit = objectType(fields);
+        // The selected member wins as the literal's type, so codegen builds the member's
+        // declared slot layout (and any optional field it omitted is still allocated).
+        if (hint !== undefined && isUnionTy(hint) && ctx !== undefined && isObjectTy(ctx) && this.assignable(ctx, lit)) return ctx;
         // Contextual TAGGING (`@@mutable` records). A record's values come from object
         // literals, and the tag is what makes its mutability nominal — so where the
         // context asks for a tagged record and the literal fits it, the literal IS one.
@@ -818,7 +1285,12 @@ class Checker {
           throw nyi(NYI.GENERIC, `generic function '${e.name}' used as a value; a generic is specialized at its CALL site — call it directly (\`${e.name}(…)\`) or wrap it in a concrete arrow`);
         }
         if (!b) throw typeError(`'${e.name}' is not defined`);
-        return b.ty;
+        // Control-flow narrowing: on this path the binding was PROVED non-nullish, so it
+        // reads as its base type and codegen unwraps the tagged pair here. Always
+        // written, so a `true` stamped by an earlier typing pass cannot go stale.
+        const narrowed = this.narrowedTy(b);
+        e.narrowed = narrowed !== undefined;
+        return narrowed ?? b.ty;
       }
       case "MemberExpr": {
         // Host I/O: process.argv -> string[], process.env.NAME -> string. Recognized
@@ -872,6 +1344,7 @@ class Checker {
         if ((ot === "string" || isArrayTy(ot) || isBytesTy(ot)) && e.property === "length") return "number";
         if ((isMapTy(ot) || isSetTy(ot)) && e.property === "size") return "number";
         if (ot === "Dyn") return "Dyn"; // dynamic field access — runtime tag check
+        if (isUnionTy(ot)) return this.fieldOnBase(ot, e.property); // SH2: the discriminant, or "narrow it first"
         if (isObjectTy(ot)) {
           const ft = fieldType(ot, e.property);
           if (!ft) throw typeError(`Property '${e.property}' does not exist on ${ot}`);
@@ -882,6 +1355,10 @@ class Checker {
       case "IndexExpr": {
         const ot = this.type(e.object, scope);
         if (ot === "Dyn") { this.type(e.index, scope); return "Dyn"; } // dynamic element/field — runtime tag check
+        if (isUnionTy(ot)) { // SH2: `u["kind"]` is the same read as `u.kind`
+          if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
+          return this.fieldOnBase(ot, e.index.value);
+        }
         if (isObjectTy(ot)) {
           if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
           const ft = fieldType(ot, e.index.value);
@@ -998,7 +1475,15 @@ class Checker {
           : isNullableTy(l) ? baseTy(l)
           : l === "null" || l === "undefined" ? hint
           : l;
-        const r = this.type(e.right, scope, rhint);
+        // Control-flow narrowing across the short circuit: the right operand only runs
+        // when the left decided the branch, so it sees that branch's facts — `&&` the
+        // TRUE ones (`m! && m[0]`, `x !== undefined && x > 3`), `||` the FALSE ones.
+        // `??` gets no guard fact (its right operand runs when the left IS nullish), but
+        // an `x!` assertion in the left holds for it too — the left ran to completion.
+        const r = this.withFacts(
+          this.factsFor(e.left, scope, e.op === "&&", exprRegion(e.right), e.op !== "??"),
+          () => this.type(e.right, scope, rhint),
+        );
         if (e.op === "??") {
           // `??` collapses to the non-nullish arm. Left may be definitely-nullish
           // (static → right), a runtime-nullable `T | ...` (runtime tag branch →
@@ -1023,13 +1508,17 @@ class Checker {
         // Each arm sees the surrounding context; additionally an empty `[]` arm takes
         // its element type from the OTHER arm (`flag ? [1, 2] : []`), so type the
         // non-empty arm first and feed its type back.
+        // Each arm is also NARROWED by the test, exactly as an `if` branch is
+        // (`x !== undefined ? x.toUpperCase() : "-"`).
+        const yes = (f: () => Ty) => this.withFacts(this.factsFor(e.test, scope, true, exprRegion(e.consequent)), f);
+        const no = (f: () => Ty) => this.withFacts(this.factsFor(e.test, scope, false, exprRegion(e.alternate)), f);
         let a: Ty, b: Ty;
         if (isEmptyArrayLit(e.consequent) && !isEmptyArrayLit(e.alternate)) {
-          b = this.type(e.alternate, scope, hint);
-          a = this.type(e.consequent, scope, hint ?? b);
+          b = no(() => this.type(e.alternate, scope, hint));
+          a = yes(() => this.type(e.consequent, scope, hint ?? b));
         } else {
-          a = this.type(e.consequent, scope, hint);
-          b = this.type(e.alternate, scope, hint ?? a);
+          a = yes(() => this.type(e.consequent, scope, hint));
+          b = no(() => this.type(e.alternate, scope, hint ?? a));
         }
         if (a !== b) throw typeError(`Ternary branches differ: ${a} vs ${b}`);
         return a;
@@ -1037,6 +1526,14 @@ class Checker {
       case "AssignExpr": {
         const b = scope.lookup(e.target);
         if (!b) throw typeError(`'${e.target}' is not defined`);
+        if (b.narrowedFrom !== undefined) {
+          throw typeError(
+            `cannot assign to '${e.target}' here: it is NARROWED to ${b.ty === baseTy(b.ty) && isUnionTy(b.ty) ? showUnion(b.ty) : b.ty} ` +
+              `inside this arm, and the narrowing was proved for the value already in it — a different member of ` +
+              `${showUnion(b.narrowedFrom)} would make every later field access read the wrong slot. ` +
+              `Assign to a new binding, or move the assignment outside the narrowed arm`,
+          );
+        }
         if (b.constant) throw typeError(`Cannot assign to const '${e.target}'`);
         const vt = this.type(e.value, scope, e.op === "=" ? b.ty : undefined); // assignment target is the context (e.g. `a = []`)
         if (e.op === "=") {
@@ -1193,13 +1690,25 @@ class Checker {
 
   /** Type of the first `throw` reachable in a body (for the catch binding). */
   private inferThrowType(stmts: Stmt[], scope: Scope): Ty | undefined {
+    // SH4: a host FFI call throws an ERROR, exactly like node's `fs` — so a block
+    // containing one binds `catch (e)` to `{message:string}` and `e.message` is the
+    // node-identical text. Checked before the `throw` scan (an explicit throw in the
+    // same block still wins, since it decides the type it actually throws).
+    if (this.hostImports.size && stmts.some((s) => hasHostCall(s, this.hostImports))) {
+      const explicit = this.firstThrowType(stmts, scope);
+      return explicit ?? "{message:string}";
+    }
+    return this.firstThrowType(stmts, scope);
+  }
+
+  private firstThrowType(stmts: Stmt[], scope: Scope): Ty | undefined {
     for (const s of stmts) {
       let t: Ty | undefined;
       if (s.kind === "ThrowStmt") t = this.type(s.argument, scope);
-      else if (s.kind === "IfStmt") t = this.inferThrowType(s.consequent, scope) ?? (s.alternate ? this.inferThrowType(s.alternate, scope) : undefined);
-      else if (s.kind === "WhileStmt" || s.kind === "DoWhileStmt" || s.kind === "ForOfStmt" || s.kind === "ForInStmt" || s.kind === "ForStmt") t = this.inferThrowType(s.body, scope);
-      else if (s.kind === "BlockStmt") t = this.inferThrowType(s.body, scope);
-      else if (s.kind === "MultiStmt") t = this.inferThrowType(s.stmts, scope);
+      else if (s.kind === "IfStmt") t = this.firstThrowType(s.consequent, scope) ?? (s.alternate ? this.firstThrowType(s.alternate, scope) : undefined);
+      else if (s.kind === "WhileStmt" || s.kind === "DoWhileStmt" || s.kind === "ForOfStmt" || s.kind === "ForInStmt" || s.kind === "ForStmt") t = this.firstThrowType(s.body, scope);
+      else if (s.kind === "BlockStmt") t = this.firstThrowType(s.body, scope);
+      else if (s.kind === "MultiStmt") t = this.firstThrowType(s.stmts, scope);
       if (t) return t;
     }
     return undefined;
@@ -1406,7 +1915,10 @@ class Checker {
       }
       if (e.callee.property !== "stringify") throw nyi(NYI.JSON, `JSON.${e.callee.property}`);
       if (e.args.length < 1 || e.args.length > 3) throw typeError("JSON.stringify expects 1 to 3 arguments");
-      this.type(e.args[0]!, scope);
+      // SH2: the serializer is generated from the STATIC type, and an un-narrowed union
+      // does not have one shape — it used to fall through to the literal `null`, which is
+      // a silent wrong answer. Refuse; narrowing gives it a member to serialize.
+      checkUnionRenderable(this.type(e.args[0]!, scope), "JSON.stringify");
       // arg2 (replacer) — only `null`/`undefined` supported (no array/function replacer).
       if (e.args.length >= 2) {
         const r = e.args[1]!;
@@ -1675,6 +2187,14 @@ class Checker {
       return t;
     }
 
+    // Host FFI (SH4) — in scope only because a `node:` import brought it in.
+    if (e.callee.kind === "Identifier" && this.hostImports.has(e.callee.name)) {
+      const h = HOST_FUNCS[e.callee.name]!;
+      this.checkHostCall(e.callee.name, e.args);
+      this.checkArgs(e.args, h, scope, e.callee.name);
+      return h.ret;
+    }
+
     // global builtin, function value, or user function
     if (e.callee.kind === "Identifier") {
       const g = GLOBAL_FUNCS[e.callee.name];
@@ -1706,7 +2226,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = i < fixed ? sig.params[i]! : restElem;
           const at = this.typeArg(a, exp, scope);
-          if (at !== exp) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`);
+          if (!this.fitsParam(exp, at)) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`);
         });
         return sig.ret;
       }
@@ -1715,7 +2235,7 @@ class Checker {
       }
       e.args.forEach((a, i) => {
         const at = this.typeArg(a, sig.params[i]!, scope); // contextual: function-typed params type their arrow args
-        if (at !== sig.params[i]) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`);
+        if (!this.fitsParam(sig.params[i]!, at)) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`);
       });
       return sig.ret;
     }
@@ -1724,7 +2244,7 @@ class Checker {
     if (isFuncTy(ct)) {
       const ps = funcParams(ct);
       if (e.args.length !== ps.length) throw typeError(`call expects ${ps.length} arguments, got ${e.args.length}`);
-      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (at !== ps[i]) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`); });
+      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsParam(ps[i]!, at)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`); });
       return funcRet(ct);
     }
     throw nyi(NYI.CLOSURE, "unsupported call target");
@@ -2018,13 +2538,17 @@ class Checker {
     arrow.paramTys = paramTys;
     const inner = scope.child();
     arrow.params.forEach((p, i) => inner.declare(p.name, paramTys[i]!, false));
-    let retTy: Ty;
-    if (arrow.exprBody) {
-      retTy = this.type(arrow.body as Expr, inner);
-    } else {
-      retTy = this.inferBlockReturn(arrow.body as Stmt[], inner);
-      this.checkBlock(arrow.body as Stmt[], inner.child(), retTy);
-    }
+    // An arrow used as a VALUE may escape and run long after the guard that narrowed an
+    // enclosing binding, so a `let` narrowing stops at this boundary (a `const` one
+    // cannot be invalidated, so it crosses). TypeScript draws the line in the same
+    // place. The INLINED HOF callbacks (`typeArrowBody`) run inside the expression that
+    // creates them, so they are not a boundary.
+    const retTy: Ty = this.inArrow(() => {
+      if (arrow.exprBody) return this.type(arrow.body as Expr, inner);
+      const t = this.inferBlockReturn(arrow.body as Stmt[], inner);
+      this.checkBlock(arrow.body as Stmt[], inner.child(), t);
+      return t;
+    });
     arrow.retTy = retTy;
     arrow.captures = this.computeCaptures(arrow, scope);
     const ty = makeFuncTy(paramTys, retTy);
@@ -2063,20 +2587,112 @@ class Checker {
     return caps;
   }
 
+  /**
+   * Does an argument / return value of type `actual` fit a declared `expected`?
+   * Type IDENTITY, as it always was — widened by exactly one rule, for SH2: a member
+   * of a discriminated union fits the union, because a union value simply IS its
+   * member's object block. Deliberately not the general `assignable` relation, whose
+   * structural-object and nullable arms would accept values codegen does not box here.
+   */
+  private fitsParam(expected: Ty, actual: Ty): boolean {
+    return actual === expected || (isUnionTy(expected) && this.assignable(expected, actual));
+  }
+
   private typeArg(a: Expr, expected: Ty, scope: Scope): Ty {
     // The parameter type is the CONTEXT for the argument: it types an arrow's params
     // (closures) and supplies the element type of an empty `[]` (e.g. `g([])`).
     return a.kind === "ArrowFunction" ? this.typeArrow(a, expected, scope) : this.type(a, scope, baseTy(expected));
   }
 
+  /**
+   * The extra, non-type constraints a host builtin carries (SH4) — the arguments whose
+   * VALUE, not just type, decides what node returns. `readFileSync(p)` with no encoding
+   * yields a Buffer, and `readFileSync(p, enc)` with a computed `enc` could be any of
+   * them, so both are refused rather than compiled as if they said "utf8".
+   */
+  private checkHostCall(name: string, args: Expr[]): void {
+    if (name === "readFileSync") {
+      const enc = args[1];
+      if (!enc || enc.kind !== "StringLiteral" || enc.value !== "utf8")
+        throw nyi(NYI.HOSTMOD, `readFileSync without the literal encoding "utf8" (node returns a Buffer, which has no representation here — write \`readFileSync(path, "utf8")\`)`);
+    }
+    if (name === "rmSync" && args.length === 2) {
+      // Only `recursive`/`force`, and only literal `true`: a `false` means the OTHER
+      // behaviour, and every other node option (maxRetries, retryDelay) changes what
+      // the call does, so neither is accepted and ignored.
+      const opts = args[1]!;
+      const props = opts.kind === "ObjectLiteral" ? opts.properties : null;
+      const ok = props !== null && props.length > 0 && props.every((p) =>
+        (p.key === "recursive" || p.key === "force") && p.value.kind === "BooleanLiteral" && p.value.value === true);
+      if (!ok)
+        throw nyi(NYI.HOSTMOD, `rmSync with options other than literal \`{ recursive: true }\` / \`{ force: true }\` (a \`false\` selects the other behaviour, and the retry options change what the call does)`);
+    }
+    if (name === "spawnSync") {
+      // Exactly `{ encoding: "utf8" }`. Every other node option (cwd, env, input,
+      // shell, timeout, maxBuffer) CHANGES what the call does, so accepting and
+      // ignoring one would be a silent divergence — refuse instead.
+      const opts = args[2];
+      const props = opts?.kind === "ObjectLiteral" ? opts.properties : null;
+      const bad = !props
+        || props.length !== 1
+        || props[0]!.key !== "encoding"
+        || props[0]!.value.kind !== "StringLiteral"
+        || props[0]!.value.value !== "utf8";
+      if (bad)
+        throw nyi(NYI.HOSTMOD, `spawnSync with options other than the literal \`{ encoding: "utf8" }\` (without it node yields Buffers, and every other option — cwd/env/input/shell/timeout — changes what the call does)`);
+    }
+  }
+
   private checkArgs(args: Expr[], sig: MethodSig, scope: Scope, label: string): void {
     if (args.length < sig.min || args.length > sig.max) throw typeError(`${label} expects ${sig.min}..${sig.max} args, got ${args.length}`);
     args.forEach((a, i) => {
-      const at = this.type(a, scope);
+      // The declared argument type is the CONTEXT for the argument, so a bare `[]`
+      // takes its element type from it (Stage 33) — `spawnSync(cmd, [], …)` is the
+      // forcing case. `null` in argTys means "any type", hence no hint.
       const want = sig.argTys[i];
+      const at = want ? this.type(a, scope, want) : this.type(a, scope);
       if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`);
     });
   }
+}
+
+/** Does this case body definitely LEAVE the enclosing function (as opposed to merely
+ *  leaving the switch, which `break` does)? Conservative in the safe direction: an
+ *  unrecognized shape means "not total", so the exhaustiveness check stands down. */
+function leavesFunction(body: Stmt[]): boolean {
+  const last = body[body.length - 1];
+  return last !== undefined && (last.kind === "ReturnStmt" || last.kind === "ThrowStmt");
+}
+
+/**
+ * Does this statement list always leave its enclosing block? Two SH2 narrowings read
+ * it: elimination after a guard clause, and whether a switch case can fall through
+ * into the next one. Conservative — a `return` in both arms of an `if` is not
+ * recognized — and conservative is the safe direction for both: less elimination,
+ * and a WIDER set of tags carried into the next case.
+ */
+function leavesBlock(body: Stmt[]): boolean {
+  const last = body[body.length - 1];
+  return last !== undefined &&
+    (last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "BreakStmt" || last.kind === "ContinueStmt");
+}
+
+/** A union rendered the way it was written (`A | B`), for diagnostics. */
+function showUnion(t: Ty): string { return unionWidenedMembers(t).join(" | "); }
+
+/**
+ * SH4: does this statement (anywhere inside it, at any depth) CALL a host builtin?
+ * A host call is fallible — a missing file, a failed spawn — and node reports the
+ * failure as an `Error`, so a try block containing one binds its catch parameter to
+ * `{message:string}`. Structural, like codegen's `mentions`: the AST is plain data,
+ * and a shape-blind walk cannot miss a node kind added later.
+ */
+function hasHostCall(node: unknown, hosts: Set<string>): boolean {
+  if (Array.isArray(node)) return node.some((x) => hasHostCall(x, hosts));
+  if (!node || typeof node !== "object") return false;
+  const n = node as { kind?: string; callee?: { kind?: string; name?: string } };
+  if (n.kind === "CallExpr" && n.callee?.kind === "Identifier" && n.callee.name && hosts.has(n.callee.name)) return true;
+  return Object.values(node).some((v) => hasHostCall(v, hosts));
 }
 
 /** A bare `[]` — the one expression whose type must come from context, not from itself. */
@@ -2128,6 +2744,86 @@ function collectIdentsStmt(s: Stmt, out: Set<string>): void {
     default: return;
   }
 }
+/* ------------------------------------------------------------
+ * Narrowing support: which NAMES a region assigns to.
+ *
+ * An assignment invalidates a narrowing, so a fact is only established over a region
+ * that provably contains none. Two sinks: `direct` for assignments in ordinary code and
+ * `closure` for ones inside an arrow body — the caller passes the same set for a region
+ * scan (either kind kills the fact) and separate ones for the whole-program scan, where
+ * only the closure assignments matter (they can run at any time later).
+ * ------------------------------------------------------------ */
+function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inArrow: boolean): void {
+  const go = (x: Expr) => collectAssigned(x, direct, closure, inArrow);
+  switch (e.kind) {
+    case "AssignExpr": (inArrow ? closure : direct).add(e.target); go(e.value); return;
+    case "UpdateExpr":
+      if (e.targetExpr) go(e.targetExpr); else (inArrow ? closure : direct).add(e.target);
+      return;
+    case "ArrowFunction":
+      if (e.exprBody) collectAssigned(e.body as Expr, direct, closure, true);
+      else collectAssignedStmts(e.body as Stmt[], direct, closure, true);
+      return;
+    case "MemberExpr": go(e.object); return;
+    case "IndexExpr": go(e.object); go(e.index); return;
+    case "UnaryExpr": go(e.operand); return;
+    case "TypeofExpr": go(e.operand); return;
+    case "AsExpr": case "NonNullExpr": go(e.expr); return;
+    case "InstanceOfExpr": go(e.object); return;
+    case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
+    case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;
+    case "SequenceExpr": case "TemplateLiteral": (e.exprs as Expr[]).forEach(go); return;
+    case "CallExpr": go(e.callee); e.args.forEach(go); return;
+    case "NewExpr": e.args.forEach(go); return;
+    case "IndexAssign": go(e.object); go(e.index); go(e.value); return;
+    case "FieldAssign": go(e.object); go(e.value); return;
+    case "ArrayLiteral": e.elements.forEach(go); return;
+    case "ObjectLiteral": e.properties.forEach((p) => go(p.value)); return;
+    case "SpreadExpr": go(e.argument); return;
+    default: return;
+  }
+}
+
+function collectAssignedStmts(body: Stmt[], direct: Set<string>, closure: Set<string>, inArrow: boolean): void {
+  const goE = (x: Expr) => collectAssigned(x, direct, closure, inArrow);
+  const goS = (b: Stmt[]) => collectAssignedStmts(b, direct, closure, inArrow);
+  for (const s of body) {
+    switch (s.kind) {
+      case "VarDecl": for (const d of s.decls) goE(d.init); break;
+      case "ReturnStmt": if (s.argument) goE(s.argument); break;
+      case "ThrowStmt": goE(s.argument); break;
+      case "ExprStmt": goE(s.expr); break;
+      case "IfStmt": goE(s.test); goS(s.consequent); if (s.alternate) goS(s.alternate); break;
+      case "WhileStmt": case "DoWhileStmt": goE(s.test); goS(s.body); break;
+      case "ForStmt":
+        if (s.init) { if ((s.init as Stmt).kind === "VarDecl") goS([s.init as Stmt]); else goE(s.init as Expr); }
+        if (s.test) goE(s.test);
+        if (s.update) goE(s.update);
+        goS(s.body);
+        break;
+      case "ForOfStmt": goE(s.iterable); goS(s.body); break;
+      case "ForInStmt": goE(s.object); goS(s.body); break;
+      case "SwitchStmt": goE(s.discriminant); for (const c of s.cases) { if (c.test) goE(c.test); goS(c.body); } break;
+      case "TryStmt": goS(s.block); if (s.handler) goS(s.handler); if (s.finalizer) goS(s.finalizer); break;
+      case "BlockStmt": goS(s.body); break;
+      case "MultiStmt": goS(s.stmts); break;
+      // A function/class body is its own flow; its assignments run when it is CALLED,
+      // which — like an arrow's — may be any time after the narrowing was established.
+      case "FuncDecl": collectAssignedStmts(s.body, direct, closure, true); break;
+      default: break;
+    }
+  }
+}
+
+/** An expression as a one-statement region, so `factsFor` takes one shape of region. */
+function exprRegion(e: Expr): Stmt[] { return [{ kind: "ExprStmt", expr: e }]; }
+
+/** True if control cannot fall out of the bottom of `body`. */
+function alwaysExits(body: Stmt[]): boolean {
+  return body.some((s) =>
+    s.kind === "ReturnStmt" || s.kind === "ThrowStmt" || s.kind === "BreakStmt" || s.kind === "ContinueStmt");
+}
+
 function collectBlockLocals(s: Stmt, out: Set<string>): void {
   if (s.kind === "VarDecl") for (const d of s.decls) out.add(d.name);
   else if (s.kind === "ForOfStmt" || s.kind === "ForInStmt") out.add(s.name);
@@ -2262,7 +2958,40 @@ export function checkConsoleArg(at: Ty, depth = 0): void {
     throw nyi(NYI.WEBAPI, `console.log of a ${at} (node prints an inspected \`${at} { … }\`; print a component, e.g. \`u.href\`-less \`u.origin + u.pathname\`, or \`${at === "URL" ? "u.searchParams" : "p"}.toString()\`)`);
   // The net: no argument type may reach codegen without a renderer. Printing a
   // heap handle used to emit the raw pointer — i.e. nothing at all.
+  checkUnionRenderable(at, "console.log");
   if (!isPrintableTy(at)) throw nyi(NYI.INSPECT, `console.log of a ${at}`);
+}
+
+/**
+ * SH2: rendering — `console.log`, `JSON.stringify` — is generated from the STATIC type,
+ * walking a known field layout. An un-narrowed union has no single one, and the fallback
+ * in each renderer is silent (a bare newline / the literal `null`), so it is refused with
+ * the fix named. The union's own tag is what supplies the missing shape, at runtime and
+ * with one branch per member; that is a follow-on, not a guess to make now.
+ */
+export function checkUnionRenderable(ty: Ty, what: string): void {
+  const u = findUnionIn(ty);
+  if (u === undefined) return;
+  const d = unionDiscriminant(u)!;
+  const where = u === ty ? "" : ` inside \`${ty}\``;
+  throw nyi(
+    NYI.INSPECT,
+    `${what} of the un-narrowed union ${unionWidenedMembers(u).join(" | ")}${where} — its shape is only known from its tag at RUNTIME. ` +
+      `Narrow it first (\`if (x.${d.key} === "…")\` / \`switch (x.${d.key})\`) and render the member`,
+  );
+}
+
+/** The first union reachable in `ty`, at the root or nested in a rendered container.
+ *  Both renderers recurse into elements/fields, so a union ANYWHERE inside is the same
+ *  silent fallback as one at the root. */
+function findUnionIn(ty: Ty): Ty | undefined {
+  if (isUnionTy(ty)) return ty;
+  if (isNullableTy(ty)) return findUnionIn(baseTy(ty));
+  if (isArrayTy(ty)) return findUnionIn(elemTy(ty));
+  if (isSetTy(ty)) return findUnionIn(setElemTy(ty));
+  if (isMapTy(ty)) return findUnionIn(mapKeyTy(ty)) ?? findUnionIn(mapValTy(ty));
+  if (isObjectTy(ty)) for (const f of objectFields(ty)) { const u = findUnionIn(f.ty); if (u) return u; }
+  return undefined;
 }
 
 /**

@@ -9,7 +9,11 @@
 
 import { lex, type Token } from "./lexer.ts";
 import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnostics.ts";
-import { makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep, isObjectTy, classTag } from "./ast.ts";
+import {
+  makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
+  isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
+  tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES,
+} from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
   ImportDecl, ExportTable,
@@ -125,6 +129,11 @@ class Parser {
    *  ordinary single-file program, in which case `parseProgram` leaves them off the
    *  Program entirely — so every existing single-module path is untouched. */
   private imports: ImportDecl[] = [];
+  /** Host FFI (SH4): the canonical names imported from a `node:` builtin module, plus
+   *  the `as`-alias→canonical map applied when an identifier is parsed. A `node:` import
+   *  binds a compiler BUILTIN, so there is no module to link — it is erased like a type. */
+  private readonly hostImports = new Set<string>();
+  private readonly hostAliases = new Map<string, string>();
   private exportValues = new Map<string, string>();
   private exportReexports = new Map<string, { source: string; imported: string; line: number }>();
   private exportTypes = new Set<string>();
@@ -204,6 +213,8 @@ class Parser {
     // attribute, so an ordinary program's Program is byte-identical to what it was.
     if (this.mutableClasses.size) program.mutableClasses = [...this.mutableClasses];
     if (this.mutableRecords.size) program.mutableRecords = [...this.mutableRecords];
+    // Host FFI (SH4) — attached only when the source imported a `node:` builtin.
+    if (this.hostImports.size) program.hostImports = [...this.hostImports];
     if (this.collectTypes) for (const [k, v] of this.typeAliases) this.collectTypes.set(k, v);
     // Only attach the module surface when the source actually used it, so a
     // single-file program's Program is byte-identical to what it always was.
@@ -239,32 +250,82 @@ class Parser {
   }
 
   // ---- types (permissive; we only need scalars precisely) ----
-  // A type is a union of atoms. The supported unions are the two restricted
-  // NULLABLE shapes `T | undefined` / `T | null` (either arm order) and a union of
-  // literal atoms that COLLAPSE to one base (`"a" | "b" | "c"` → string) — the arms
-  // dedupe to a single type. A general/heterogeneous >2-arm union is rejected with
-  // an NYI code (never miscompiled) — see the checker's §5 note and the Excluded table.
+  /**
+   * A type ANNOTATION. `parseTypeInner` does the real work and keeps string-literal
+   * types (`"square"`) intact, because they are what makes a union discriminated;
+   * this wrapper WIDENS them away again for every type that is not itself a union.
+   * That is what keeps `let d: "n" | "s"` collapsing to `string` (and a literal field
+   * of an ordinary record typed `string`) while `type Shape = Square | Circle` keeps
+   * the tags it needs. `widenLiteralTys` deliberately does not descend into a nested
+   * `U<…>`, so `{ s: Shape }` keeps the union's tags too.
+   */
   private parseType(): Ty {
+    const t = this.parseTypeInner();
+    return isUnionTy(t) ? t : widenLiteralTys(t);
+  }
+  // A type is a union of atoms. Supported: the two NULLABLE shapes `T | undefined` /
+  // `T | null` (either arm order); a union of literal atoms that COLLAPSE to one base
+  // (`"a" | "b" | "c"` → string); and a DISCRIMINATED union of object types (SH2).
+  // Anything else is rejected with an NYI code (never miscompiled).
+  private parseTypeInner(): Ty {
     if (this.at("|")) this.next(); // leading union bar: `type X = | A | B`
     const arms: Ty[] = [this.parseTypeAtom()];
     let sawIntersect = false;
     while (this.at("|") || this.at("&")) { if (this.at("&")) sawIntersect = true; this.next(); arms.push(this.parseTypeAtom()); }
     if (arms.length === 1) return arms[0]!;
-    const uniq = [...new Set(arms)];
-    if (uniq.length === 1) return uniq[0]!; // collapsed literal union (all arms identical)
+    // Literal arms of the same base collapse (`"a" | "b"` → string), exactly as before.
+    const uniq = [...new Set(arms.map(widenLiteralTys))];
+    if (uniq.length === 1) return uniq[0]!;
     if (!sawIntersect && uniq.length === 2) {
       const [a, b] = uniq as [Ty, Ty];
       if (a === "undefined" || a === "null") return makeNullable(a, b);
       if (b === "undefined" || b === "null") return makeNullable(b, a);
     }
-    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null' are supported)`);
+    if (!sawIntersect) {
+      const u = this.discriminatedUnion(arms);
+      if (u) return u;
+    }
+    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.map(widenLiteralTys).join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null' and a DISCRIMINATED union of object types — a common literal-typed tag field at the same position in every member — are supported)`);
+  }
+
+  /**
+   * Build a discriminated union from `arms`, or return null if they are not all object
+   * types (letting the caller report the general-union refusal). Arms that ARE all
+   * objects but carry no usable discriminant get a precise refusal here instead —
+   * "you wrote a union of records but I cannot tell them apart" is a different and
+   * far more actionable message than "general union".
+   */
+  private discriminatedUnion(arms: Ty[]): Ty | null {
+    if (!arms.every((a) => isObjectTy(a) && classTag(a) === undefined)) return null;
+    const members = [...new Set(arms)];
+    const shown = members.map(widenLiteralTys).join(" | ");
+    if (members.length < 2) return null;
+    const ty = makeUnionTy(members);
+    const d = unionDiscriminant(ty);
+    if (d) return ty;
+    // Say WHICH way it failed — a missing tag field, a non-literal tag, a duplicated
+    // tag value, or a tag at a different position in different members.
+    const keys = members.map((m) => objectFields(m).map((f) => f.key));
+    const common = keys[0]!.filter((k) => keys.every((ks) => ks.includes(k)));
+    const why =
+      common.length === 0
+        ? "the members share no field at all, so nothing can tell them apart"
+        : common.some((k) => members.every((m) => isStringLitTy(objectFields(m).find((f) => f.key === k)!.ty)))
+          ? `the shared tag field must sit at the SAME position in every member and carry a DISTINCT string-literal type in each (shared fields: ${common.join(", ")})`
+          : `the shared field(s) ${common.join(", ")} are not string-literal typed — a discriminant needs \`kind: "a"\`, not \`kind: string\``;
+    throw nyi(NYI.OPTIONAL_CHAIN, `union of object types '${shown}' without a usable discriminant — ${why}`);
   }
   // A single type atom: literal / function / object / tuple / import-type /
   // scalar-or-named, plus `[]` suffixes.
   private parseTypeAtom(): Ty {
     let base: Ty;
     const t = this.peek();
-    if (t.type === "str") { this.next(); base = "string"; }        // string-literal type: "a"
+    // A string-literal type is KEPT as `"a"` here; `parseType` widens it back to
+    // `string` unless it ends up as a union member's discriminant (see above).
+    if (t.type === "str") {
+      this.next();
+      base = tagValueIsEncodable(t.value) ? stringLitTy(t.value) : "string";
+    }
     else if (t.type === "num") { this.next(); base = "number"; }   // numeric-literal type: 0
     else if (this.at("(")) base = this.parseParenOrFuncType();
     else if (this.at("{")) base = this.parseObjectType();
@@ -390,7 +451,10 @@ class Parser {
         const optional = this.at("?"); // `{ a?: T }` ≡ `{ a: T | undefined }`
         if (optional) this.eat("?");
         this.eat(":");
-        let ft = this.parseType();
+        // `parseTypeInner`, not `parseType`: a field's literal type must survive long
+        // enough for this record to become a union member's discriminant. Every path
+        // that does NOT end up in a union widens it back (see `parseType`).
+        let ft = this.parseTypeInner();
         if (optional) ft = makeNullable("undefined", ft);
         fields.push(`${key}:${ft}`);
       } while ((this.at(",") || this.at(";")) && (this.next(), true));
@@ -432,7 +496,9 @@ class Parser {
     const name = this.expectIdent();
     if (this.at("<")) this.skipGenerics(); // erased type params
     this.eat("=");
-    const rhs = this.parseType();
+    // Stored RAW (literal types intact) so `type Square = { kind: "square" }` can later
+    // be a union member; every USE goes through `parseType`, which widens.
+    const rhs = this.parseTypeInner();
     if (this.at(";")) this.eat(";");
     this.typeAliases.set(name, this.applyRecordAttrs(dec, name, rhs, "type"));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
@@ -545,6 +611,16 @@ class Parser {
     const clause = this.parseNamedClause();
     if (this.at(",")) throw nyi(NYI.MODULE, `a combined default + named import at ${kw.line}:${kw.col}`);
     this.eat("from");
+    // Host FFI (SH4): `node:fs` & friends name COMPILER BUILTINS, not files. The import
+    // binds them (a builtin is out of scope until imported, so user code that defines its
+    // own `join` is unaffected) and is then erased — there is nothing to link.
+    const spec = this.peek();
+    if (spec.type === "str" && spec.value.startsWith("node:")) {
+      this.next();
+      if (this.at(";")) this.eat(";");
+      this.bindHostImport(spec.value, clause, typeOnly, kw);
+      return { kind: "MultiStmt", stmts: [] };
+    }
     const source = this.parseSpecifier("from");
     if (this.at(";")) this.eat(";");
     this.imports.push({
@@ -553,6 +629,26 @@ class Parser {
       line: kw.line,
     });
     return { kind: "MultiStmt", stmts: [] };
+  }
+
+  /** Bind the named members of a `node:` builtin module (SH4). Each one must have a
+   *  native implementation — the surface is `HOST_MODULES` — otherwise NT1028. */
+  private bindHostImport(
+    mod: string,
+    clause: { name: string; alias: string; typeOnly: boolean }[],
+    typeOnly: boolean,
+    kw: Token,
+  ): void {
+    const members = HOST_MODULES[mod];
+    if (!members)
+      throw nyi(NYI.HOSTMOD, `the built-in module '${mod}' at ${kw.line}:${kw.col} (implemented: ${Object.keys(HOST_MODULES).map((m) => `'${m}'`).join(", ")})`);
+    for (const c of clause) {
+      if (typeOnly || c.typeOnly) continue; // a type-only import binds no value
+      if (!members.includes(c.name))
+        throw nyi(NYI.HOSTMOD, `'${c.name}' from '${mod}' at ${kw.line}:${kw.col} (implemented: ${members.join(", ")})`);
+      this.hostImports.add(c.name);
+      if (c.alias !== c.name) this.hostAliases.set(c.alias, c.name);
+    }
   }
 
   private parseExport(): Stmt {
@@ -1748,7 +1844,10 @@ class Parser {
         return { kind: "FieldAssign", object: this.ident("this"), field: "message", value: args[0]!, viaThis: true };
       }
       this.next();
-      return { kind: "Identifier", name: t.value, loc: { line: t.line, col: t.col } };
+      // SH4: `import { readFileSync as rfs }` renames a HOST BUILTIN, which has no
+      // declaration to alpha-rename — so the alias is resolved here, at the use site.
+      const name = this.hostAliases.get(t.value) ?? t.value;
+      return { kind: "Identifier", name, loc: { line: t.line, col: t.col } };
     }
     if (this.at("[")) return this.parseArrayLiteral();
     if (this.at("{")) return this.parseObjectLiteral();

@@ -208,8 +208,10 @@ the last three **class features** (`static`, `get`), and two small syntax gaps (
 - **Tier 3 — runtime / host.** A small **host FFI**: read/write files (`readFileSync`/
   `writeFileSync`), **spawn a subprocess** (`spawnSync` to invoke `clang`), argv, `process.exit`,
   path join/basename, `TextEncoder`. `Map`/`Set`, `JSON`, strings, arrays, closures, `try/catch`
-  are already supported. **Audit for regex** in the lexer — if present, either add regex or rewrite
-  the scanner char-by-char (likely already char-by-char).
+  are already supported. ~~**Audit for regex** in the lexer — if present, either add regex or rewrite
+  the scanner char-by-char (likely already char-by-char).~~ **DONE:** the audit found 29 regex
+  literals across 8 of the 12 modules (the lexer's scanner was *not* already char-by-char), and all
+  29 are now explicit character scanning. `test/no-regex.test.ts` keeps them out.
 
 ---
 
@@ -255,9 +257,23 @@ visible for the first time:**
 |---|---|---|
 | `NT0001` | `ast`, `lexer`, `parser`, `ownership`, `coverage` | the postfix **`!` non-null assertion** (TS-only, erased at runtime — should be cheap) and one `satisfies` |
 | `NT1017` | `driver`, `cli`, `modules` | **`node:fs` and friends** — the host FFI, i.e. milestone **SH4** |
-| `NT1027` | `diagnostics`, `coverage-preprocess` | genuine regex uses (2 modules, not 8) |
+| `NT1027` | `diagnostics`, `coverage-preprocess` | genuine regex uses (2 modules, not 8) — **since removed; see the regex-removal re-measurement below** |
 | `NT1009` | `checker` | a general union — still the crux (the AST *is* a discriminated union) |
 | `NT1015` | `codegen` | a `static` member |
+
+### Re-measured after SH4 — the host FFI is no longer a blocker
+
+`NT1017`'s three modules are past it. Clearing a blocker UNMASKS what sat behind it, so the
+regex bucket grew from 4 modules to 6 — the gradient working, not a regression:
+
+| Blocker | Modules | What it is |
+|---|---|---|
+| `NT1027` | `lexer`, `diagnostics`, `ownership`, `coverage-preprocess`, **`cli`**, **`modules`** | regex literals — now the **dominant** blocker, at half the tree |
+| `NT0001` | `ast`, `coverage`, `parser` | a template-literal TYPE (`` `${string}[]` ``) and `satisfies` |
+| `NT1009` | `checker` | a general union — **still the crux** |
+| `NT1015` | `codegen` | a `static` member |
+| `NT1017` | `driver` | **not** a `node:` module: the bun text-asset import `import runtimeSource from "../runtime/runtime.c" with { type: "text" }` |
+| `NT1028` | — | the host FFI surface is complete for what `src/*.ts` imports |
 
 That reorders the plan. **`!` is now the cheapest win** and unblocks five modules;
 **`node:fs` (SH4)** is the real structural work, not regex. Only two modules genuinely
@@ -268,6 +284,61 @@ suggested — measuring first was the right call.
 phase is recorded and may improve but never regress, so new compiler code cannot
 silently grow the gap (the lint this document asks for under "Keeping the gap from
 growing"). The `#!` shebang blocker listed under SH1's tail is **closed**.
+
+### Re-measured after SH2 — the union blocker did NOT move, and that is the finding
+
+Running the unpreprocessed pipeline again after discriminated unions landed, `checker.ts`
+still stops at `NT1009`, on the *same* construct: `Record<string, number | "var">`, i.e.
+`number | string` — a **scalar** union, which SH2 deliberately does not represent. Nothing
+else in the table changed (`ast` `NT0001` at a template-literal TYPE on line 14, `parser`
+`satisfies`, `codegen` `static`, three modules `node:fs`, two genuine regexes).
+
+The reading is not "SH2 achieved nothing" — it is that the frontier is a *conjunction*, and
+the union arm of it has two remaining pieces rather than one:
+
+1. **Scalar unions** (`number | string`) — the literal `checker.ts` blocker. Unlike an object
+   union there is no in-value tag to dispatch on, so this genuinely needs the boxed
+   representation (a `[tag, value]` block, the nullable encoding generalized).
+2. **Recursive types** — `src/ast.ts`'s `Expr` is not merely a union, it is a union whose
+   members refer back to it. That is a `Ty`-encoding problem, not a union problem
+   (`interface N { next: N }` has always erased to `number`), and it is what would still
+   stop the AST from being expressible even with unions in hand.
+
+`coverage src/checker.ts` reports the same one `NT1009` before and after; what it does show is
+**347 → 355 statements analyzed**, and `coverage src/ast.ts` **182 → 257** — the union
+declarations and everything downstream of them now get as far as being analyzed at all.
+
+### Re-measured after the REGEX REMOVAL — `NT1027` is gone from the frontier entirely
+
+nativets has no `RegExp` and never will (a permanent Tier-C refusal, `docs/divergences.md`),
+so a compiler written with regexes cannot compile itself. All **29** regex literals in
+`src/` — spread over **8** of the 12 modules — are now explicit character scanning.
+`test/no-regex.test.ts` is the lint that keeps them out, with an empty table.
+
+| Module | Before | After |
+|---|---|---|
+| `diagnostics.ts` | `parse` — `NT1027` `/^\s*/` | **`ir`** — `NT2001`, `diag.spans.length` after `!diag.spans \|\|` (nullable narrowing does not flow across `\|\|`) |
+| `ownership.ts` | `parse` — `NT1027` `/\$inner$/` | **`ir`** — `NT1009`, the scalar union in `checker.ts` via the link |
+| `lexer.ts` | `parse` — `NT1027` the `@@name` pragma | **`ir`** — `NT1014`, `new Set([…])` for `REGEX_AFTER_KEYWORD` |
+| `coverage-preprocess.ts` | `parse` — `NT1027` `/[A-Za-z_$]/` | **`ir`** — `NT0001`, the same template-literal TYPE as `ast.ts` |
+| `ast.ts` (6), `driver.ts` (7), `modules.ts`, `cli.ts` | regex-free now, but their FIRST blocker was already something else | unchanged (`NT0001` line 14, `NT1017` `node:fs` ×3) |
+
+Four modules moved `parse` → `ir`; four had a nearer blocker and did not move. Nothing
+regressed. The blocker count *rose*, which is the ratchet working: clearing a blocker
+unmasks what was behind it.
+
+**What this measurement does NOT establish.** A byte-identical-IR diff over every fixture
+is the natural way to prove a compiler source rewrite is observationally null, and it is
+**far too weak on its own**. Mutating each rewritten predicate in turn — drop `$` from the
+identifier class, drop `\r` from `\s`, drop `_` from the hex class, accept a one-digit `\x`
+escape, accept `A-Z` in regex flags, drop the pragma's trailing `\s*$` — changes the IR of
+**zero** of the 121 fixtures and the tokens of **zero** compiler modules. Five of the six
+are invisible to the entire existing corpus; the sixth is caught only by **tc39/test262**
+(`early-err-bad-flag.js`, whose flag is uppercase). So the evidence that actually carries
+weight is (a) old-vs-new token streams over 1,105 files including 702 borrowed test262
+cases, (b) exhaustive BMP sweeps of every rewritten class, and (c) compiling each new
+helper **with nativets itself** — which is what caught the two blockers this lane nearly
+planted (a nullable-returning callback type, and an `arr.push`).
 
 ---
 
@@ -305,17 +376,73 @@ growing"). The `#!` shebang blocker listed under SH1's tail is **closed**.
 
   Still open from the original SH1 scope: the `#!` shebang and the remaining template-literal
   escapes.
-- **SH2 — Discriminated unions + `type`/`interface` (the crux).** Tagged-union types with exhaustive
-  `switch (node.kind)`, literal-union types, and erased `type`/`interface` aliases. This unlocks
-  representing the AST natively and is the single biggest type-system lift.
+- **SH2 ✅ (discriminated unions) — the crux, landed.** `type Shape = Square | Rectangle | Circle`
+  where every member is an object type carrying a common literal-typed tag field. Declared,
+  constructed, passed, stored in arrays; narrowed by `if (x.kind === "…")` (both arms — the else
+  gets the remaining members as a sub-union), by `switch (x.kind)` (including `default:` and
+  fallthrough), and by ELIMINATION after a guard clause (`if (…) return;` narrows the rest of the
+  block). Exhaustiveness is diagnosed for the one shape that goes wrong. Tests: `test/unions.test.ts`
+  + `test/unions/`, cases borrowed from `microsoft/TypeScript`
+  `tests/cases/conformance/types/union/discriminatedUnionTypes{1,2}.ts`.
+
+  - **Representation: there is NO box.** A union value simply IS the member's object block. The
+    tag already lives in the value as the discriminant field, so the union is accepted only when
+    that field sits at the SAME slot index in every member — and then `u.kind` is an ordinary slot
+    load, narrowing is a pure retype costing nothing at runtime, and object literals, slots,
+    equality, linearity and drop are all the existing object machinery unchanged. The Ty encoding
+    is `U<{k:"a",…}|{k:"b",…}>`, distinct from every other encoding (it ends in `>`, not `}`/`[]`).
+  - **String-literal types** (`"square"`) exist only to carry those tags. The parser keeps them
+    (`parseTypeInner`) and `parseType` widens them back to `string` for every type that is not a
+    union, so `type Dir = "n" | "s"` still collapses and nothing past the checker sees one.
+  - **Linear, like the record it is** — move-checked (`NT1601`) and dropped once (`nt_obj_free`,
+    `__objLive()` → 0). Consequently `const n = nodes[i]` on a union array is `NT1605`, exactly as
+    for an object element (Stage 28); pass it by value instead.
+  - **Refused, never guessed at (`NT1009`):** a union of object types with no usable discriminant
+    (no shared field / not literal-typed / duplicated tag value / tag at a different position in
+    different members — each with its own message), and any union that is not all object types,
+    which notably still includes **scalar unions** (`number | string`) and intersections.
+  - **Still open, and it is what blocks the AST itself: RECURSIVE types.** `interface Negate {
+    operand: Expr }` cannot be written in nativets at all — `Ty` is a flat string, so a
+    self-reference has no finite encoding and resolves to `number`. This is pre-existing and
+    union-independent (`interface N { next: N }` has always erased), but it means `src/ast.ts`'s
+    own `Expr` needs either arena indices or a named-reference in the type encoding.
+  - **NT1009 in `checker.ts` did NOT move**: its blocker is `Record<string, number | "var">`, a
+    SCALAR union — the next piece of this milestone.
 - **SH3 — De-class (or minimal classes).** Refactor `Checker`/`ModuleGen`/`FnGen`/`Scope` from
   classes into closures + records (nativets closures already carry mutable state), or add minimal
   no-inheritance class support if the refactor proves too invasive. Decide with a spike on `Scope`
   (the smallest class).
-- **SH4 — Host FFI.** A tiny `Host` interface in the runtime backed by libc/posix:
-  `nt_read_file`, `nt_write_file`, `nt_spawn` (run `clang`, capture status/stderr), `nt_argv`,
-  `nt_exit`. Wire the driver/cli through it. This is what lets a self-hosted `nativets` actually
-  read a `.ts`, emit `.ll`, and invoke `clang`.
+- **SH4 ✅ — Host FFI.** `node:` specifiers now resolve to **compiler builtins** rather than files:
+  the parser binds the named members of a `node:` module (`HOST_MODULES` in `ast.ts`), erases the
+  import, and publishes the canonical names on `Program.hostImports`; the checker types them from
+  `HOST_FUNCS` and codegen lowers each to a runtime call. A host builtin is deliberately **not
+  ambient** — it is in scope only where it was imported, exactly like node — so a program that
+  defines its own `join`/`readFileSync` is unaffected.
+
+  - **Implemented, and exactly what `src/*.ts` imports** (the grep drove the list):
+    `node:fs` — `readFileSync` / `writeFileSync` / `existsSync` / `mkdtempSync` / `readdirSync` /
+    `rmSync`; `node:path` — `join` / `dirname` / `basename` / `resolve` / `relative` (a faithful C
+    port of node's own `lib/path.js` posix functions); `node:os` — `tmpdir` / `homedir`;
+    `node:url` — `fileURLToPath`; `node:child_process` — `spawnSync`.
+  - **All libc/POSIX** (stdio, `stat`, `dirent`, `mkdtemp`, `fork`+`execvp`+`poll`), so
+    `runtime/runtime.c` cross-links unchanged: iOS-sim, iOS-device and Android arm64 all link a
+    program using the FFI, and it **RUNS on the iOS simulator** (fs + a real `spawnSync`).
+  - **Errors are node's, byte-for-byte** (`ENOENT: no such file or directory, open '/x'`) through
+    the pending-exception protocol, and a try block containing a host call binds `catch (e)` to
+    `{message:string}`, so `e.message` matches node.
+  - **Refused, never half-implemented — `NT1028`:** an unimplemented `node:` module or member, and
+    the argument *values* that decide what node returns (`readFileSync` with no/computed encoding,
+    `spawnSync` without `{ encoding: "utf8" }` or with any other option, `rmSync` with a `false`
+    flag). One documented divergence: `spawnSync().status` is `-1` where node reports `null` — see
+    `docs/divergences.md`.
+  - Tests: `test/hostfs.test.ts` (39, node-differential except the refusal table and the
+    documented `status` divergence).
+
+  **Measured effect:** the three modules NT1017 used to stop — `driver.ts`, `cli.ts`, `modules.ts`
+  — are all past the host FFI. `cli.ts` and `modules.ts` now stop on a **regex literal** (NT1027,
+  the deliberate Tier-C refusal) and `driver.ts` on a *different* NT1017: the bun text-asset import
+  `import runtimeSource from "../runtime/runtime.c" with { type: "text" }`, a bundler feature rather
+  than a `node:` module. `NT1028` does not appear in the frontier at all.
 - **SH5 — Close the tail.** Run the SH0 gradient again; burn down remaining Tier-1 features the
   source actually uses (generics beyond `Map`/`Set`, specific string/array methods, spread/
   destructuring — mostly already supported). Keep going until `coverage src/<bundle>.ts` is clean.

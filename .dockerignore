@@ -1,0 +1,4 @@
+# Nothing is COPYed into the image (the tree is bind-mounted at run time), so this
+# only keeps the build CONTEXT small — a big context is pure upload latency.
+*
+!docker/
