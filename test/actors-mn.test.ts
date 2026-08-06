@@ -206,8 +206,16 @@ describe("B3 v6 — ThreadSanitizer over the shared runtime structures", () => {
   test("negative control: the same workload DOES race without the hook", () => {
     const dir = mkdtempSync(join(tmpdir(), "mn-tsan-"));
     try {
+      // BOUNDED ON PURPOSE. Without the lock the RC side-table is corrupted by concurrent
+      // rehashing, and `str_tab_slot`'s linear probe — which terminates only because an
+      // empty slot is guaranteed to exist — can then spin forever. That non-termination is
+      // itself part of the finding, but an unbounded child would outlive the test and burn
+      // a core, so cap it and SIGKILL. TSan streams each race as it finds it, so the
+      // assertion holds on whatever was captured before the cap.
       const r = spawnSync(buildTsan(dir), [], {
         encoding: "utf8",
+        timeout: 30_000,
+        killSignal: "SIGKILL",
         env: { ...process.env, NT_RACE_TEST_NOHOOK: "1" } as Record<string, string>,
       });
       expect(r.stderr).toContain("ThreadSanitizer: data race");
