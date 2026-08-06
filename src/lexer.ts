@@ -11,7 +11,7 @@
  *   eof
  */
 
-export type TokenType = "num" | "ident" | "str" | "template" | "punct" | "eof";
+export type TokenType = "num" | "ident" | "str" | "template" | "regex" | "punct" | "eof";
 
 export interface Token {
   type: TokenType;
@@ -34,6 +34,27 @@ const PUNCT_1 = [
 ];
 
 export class LexError extends Error {}
+
+/**
+ * Keywords after which a `/` begins a REGEX rather than a division. Everything that can
+ * END an expression (identifier, literal, `)`, `]`, postfix `++`/`--`) means division;
+ * these keywords cannot end one, so `return /x/.test(s)` lexes as a regex while
+ * `(a + b) / c` and `a / b / c` stay division. This is the standard prev-token
+ * disambiguation — the ambiguity is genuinely unresolvable without parser context.
+ */
+const REGEX_AFTER_KEYWORD = new Set([
+  "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+  "case", "do", "else", "yield", "await", "throw",
+]);
+
+/** May a regex literal begin here, given the previous significant token? */
+function regexCanStart(prev: Token | undefined): boolean {
+  if (!prev) return true; // start of input
+  if (prev.type === "num" || prev.type === "str" || prev.type === "template" || prev.type === "regex") return false;
+  if (prev.type === "ident") return REGEX_AFTER_KEYWORD.has(prev.value);
+  if (prev.type === "punct") return !(prev.value === ")" || prev.value === "]" || prev.value === "++" || prev.value === "--");
+  return true;
+}
 
 const ESCAPES: Record<string, string> = {
   n: "\n", t: "\t", r: "\r", "\\": "\\", "'": "'", '"': '"', "`": "`", "0": "\0",
@@ -219,6 +240,38 @@ export function lex(source: string): Token[] {
       advance(); // closing backtick
       tokens.push({ type: "template", value: raw, line: sl, col: sc });
       continue;
+    }
+
+    // Regex literal `/pattern/flags`. nativets has NO RegExp (Tier C) — this exists so a
+    // regex is a LOCATED, named refusal (NT1027 at parse) instead of a character-level
+    // lexer crash on the first `\` inside it, which killed the whole file and made 8 of
+    // the 12 compiler modules unmeasurable (docs/self-hosting.md).
+    //
+    // Two guards keep a DIVISION from ever being mistaken for a regex — a misread would
+    // swallow real code up to the next `/`:
+    //   1. the previous-token rule (`regexCanStart`), and
+    //   2. a closing unescaped `/` must exist on the SAME line (a regex literal cannot
+    //      span lines), else we fall through and treat `/` as the operator it is.
+    if (c === "/" && regexCanStart(tokens[tokens.length - 1])) {
+      let j = i + 1;
+      let inClass = false; // inside `[...]`, where `/` is literal and needs no escape
+      let closed = false;
+      for (; j < source.length && source[j] !== "\n"; j++) {
+        const ch = source[j]!;
+        if (ch === "\\") { j++; continue; } // skip the escaped char
+        if (ch === "[") inClass = true;
+        else if (ch === "]") inClass = false;
+        else if (ch === "/" && !inClass) { closed = true; break; }
+      }
+      if (closed) {
+        let end = j + 1;
+        while (end < source.length && /[a-z]/.test(source[end]!)) end++; // flags
+        const raw = source.slice(i, end);
+        advance(end - i);
+        tokens.push({ type: "regex", value: raw, line: sl, col: sc });
+        continue;
+      }
+      // no closer on this line -> it was division after all; fall through to PUNCT.
     }
 
     const four = source.slice(i, i + 4);

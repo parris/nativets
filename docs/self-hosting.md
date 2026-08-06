@@ -232,20 +232,37 @@ construct: the lexer does not tokenize `/.../` at all, so the first `\` inside o
 an `Unexpected character`. `cli.ts` is the sharpest illustration — coverage reports it
 `parsed: true` with **zero** blockers, while it does not survive the lexer.
 
-Two ways forward, and it is a real decision:
+### The wall is DOWN — regex literals now lex (`NT1027`)
 
-- **Refactor the ~28 regex sites in `src/` to string operations (Path B).** Consistent
-  with the language as designed: nativets deliberately has **no `RegExp`** (Tier C,
-  `docs/divergences.md` — `.replace`/`.replaceAll` take string patterns only). The
-  compiler must be written in the subset it accepts. Bounded, but it touches every
-  hot file.
-- **Lex regex literals, then reject `RegExp` with a clean code (Path A-lite).** Does not
-  add an engine; it converts a *lex wall* into a *gradient*, which is the SH0
-  philosophy — the remaining type/codegen blockers behind those 8 modules are currently
-  invisible. The classic difficulty is the regex-vs-division ambiguity.
+Rather than guess what was behind it, the lexer now **tokenizes** `/pattern/flags` and the
+parser refuses it with **`NT1027`**. No engine is added: nativets still deliberately has
+**no `RegExp`** (Tier C). What changes is that a regex is a *located, named* refusal
+instead of a character-level crash that killed the whole file — the SH0 move, a wall
+becoming a gradient.
 
-Doing A-lite first and then B is probably right: measure what is behind the wall before
-committing to 28 rewrites.
+The risk was misreading a **division** as a regex, which would silently swallow code to
+the next `/`. Two guards prevent it: the standard previous-token rule (a `/` after
+anything that can END an expression — identifier, literal, `)`, `]`, postfix `++`/`--` —
+is division; only after an operator or one of `return`/`typeof`/`case`/… can a regex
+start), and a required closing `/` on the **same line**, since a regex literal cannot
+span lines. Pinned by a division corpus in `test/bootstrap.test.ts`, plus the whole
+fixture suite.
+
+**Result — every module now reaches at least `parse`, and the tier behind the wall is
+visible for the first time:**
+
+| Blocker | Modules | What it is |
+|---|---|---|
+| `NT0001` | `ast`, `lexer`, `parser`, `ownership`, `coverage` | the postfix **`!` non-null assertion** (TS-only, erased at runtime — should be cheap) and one `satisfies` |
+| `NT1017` | `driver`, `cli`, `modules` | **`node:fs` and friends** — the host FFI, i.e. milestone **SH4** |
+| `NT1027` | `diagnostics`, `coverage-preprocess` | genuine regex uses (2 modules, not 8) |
+| `NT1009` | `checker` | a general union — still the crux (the AST *is* a discriminated union) |
+| `NT1015` | `codegen` | a `static` member |
+
+That reorders the plan. **`!` is now the cheapest win** and unblocks five modules;
+**`node:fs` (SH4)** is the real structural work, not regex. Only two modules genuinely
+need regex removed, so the "~28 sites, Path B" rewrite is far smaller than the wall
+suggested — measuring first was the right call.
 
 `test/bootstrap.test.ts` pins all of this as a **ratchet** — each module's furthest
 phase is recorded and may improve but never regress, so new compiler code cannot

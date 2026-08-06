@@ -70,25 +70,31 @@ const msg = (e: unknown) => String((e as Error)?.message ?? e).split("\n")[0]!.t
  * BASELINE — the furthest phase each module reaches today. `lex` means it does not
  * even tokenize; `ir` with no error would mean it produced LLVM IR.
  *
- * The dominant blocker is REGEX LITERALS: nativets has no `RegExp` (a deliberate
- * Tier-C refusal, docs/divergences.md), and the lexer does not tokenize `/.../` at
- * all, so the first `\` inside one is an "Unexpected character". That is what stops
- * 8 of these 12 modules — a fact the coverage histogram cannot show, because its
- * preprocess removes regexes before measuring.
+ * HISTORY. This table used to read `lex` for 8 of the 12: nativets has no `RegExp`
+ * (a deliberate Tier-C refusal, docs/divergences.md) and the lexer did not tokenize
+ * `/.../` at all, so the first `\` inside one was an "Unexpected character" that
+ * killed the whole file. The coverage histogram could not show this, because its
+ * preprocess strips regexes before measuring — it reported `cli.ts` as fully parsed
+ * with ZERO blockers while the lexer died on line 71.
+ *
+ * Lexing regex literals (and refusing them at parse with NT1027) removed that wall,
+ * which is the SH0 move: a wall becomes a gradient. Every module now reaches at
+ * least `parse`, and the tier BEHIND the wall is visible for the first time — see
+ * the blocker-tier test below.
  */
 const BASELINE: Record<string, Phase> = {
-  "ast.ts": "lex",
-  "lexer.ts": "lex",
-  "diagnostics.ts": "lex",
+  "ast.ts": "parse",
+  "lexer.ts": "parse",
+  "diagnostics.ts": "parse",
   "parser.ts": "parse",
   "checker.ts": "parse",
   "codegen.ts": "parse",
   "coverage.ts": "ir",
-  "ownership.ts": "lex",
-  "driver.ts": "lex",
-  "cli.ts": "lex",
-  "modules.ts": "lex",
-  "coverage-preprocess.ts": "lex",
+  "ownership.ts": "parse",
+  "driver.ts": "parse",
+  "cli.ts": "parse",
+  "modules.ts": "parse",
+  "coverage-preprocess.ts": "parse",
 };
 
 describe("SH0: bootstrap frontier (ratchet — a module may improve, never regress)", () => {
@@ -138,17 +144,81 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     for (const m of stuckAtLex) {
       expect(phaseOf(m).error).toContain("Unexpected character");
     }
-    // Recorded, so that shrinking this set is a visible, deliberate step.
-    expect(stuckAtLex.length).toBe(8);
+    // The wall is GONE: lexing regex literals moved all 8 past the lexer.
+    expect(stuckAtLex.length).toBe(0);
   });
 
-  test("coverage's preprocess HIDES that wall (why the histogram reads optimistic)", async () => {
+  /**
+   * The tier BEHIND the old lex wall, visible for the first time. These are the real
+   * stage-1 blockers, grouped by the code each module dies on. Recorded so that
+   * shrinking any bucket is a deliberate, reviewable step — the SH0 gradient.
+   */
+  test("the blocker tiers behind the wall", () => {
+    const byCode: Record<string, string[]> = {};
+    for (const m of Object.keys(BASELINE)) {
+      const { error } = phaseOf(m);
+      if (!error) continue;
+      const code = /\[(NT\d+)\]/.exec(error)?.[1] ?? "other";
+      (byCode[code] ??= []).push(m);
+    }
+    // `!` non-null assertions and other unparsed statements; node: builtins (`node:fs`)
+    // are the SH4 host-FFI story; NT1027 is the regex refusal this lane introduced.
+    expect(Object.keys(byCode).sort()).toEqual(["NT0001", "NT1009", "NT1015", "NT1017", "NT1027"]);
+    expect(byCode["NT1017"]!.sort()).toEqual(["cli.ts", "driver.ts", "modules.ts"]);
+    expect(byCode["NT1027"]!.sort()).toEqual(["coverage-preprocess.ts", "diagnostics.ts"]);
+  });
+
+  test("coverage's preprocess still hides the regex blocker (histogram reads optimistic)", async () => {
     const { coverage } = await import("../src/coverage.ts");
-    // cli.ts does not survive the lexer, yet coverage reports it as fully parsed with
-    // zero blockers — because the preprocess strips the regex literal first.
-    expect(phaseOf("cli.ts").phase).toBe("lex");
+    // cli.ts stops at `node:fs`, but coverage reports zero blockers — its preprocess
+    // strips module syntax AND regexes, so the histogram cannot see either.
+    expect(phaseOf("cli.ts").phase).toBe("parse");
     const r = coverage(read("cli.ts"));
     expect(r.parsed).toBe(true);
     expect(r.blockers.length).toBe(0);
+  });
+});
+
+describe("regex literals lex (so they are a named refusal, not a lexer crash)", () => {
+  test("a regex literal is one token", () => {
+    const toks = lex("const re = /ab+c/gi;\n");
+    expect(toks.filter((t) => t.type === "regex").map((t) => t.value)).toEqual(["/ab+c/gi"]);
+  });
+
+  test("escapes and character classes containing `/` do not end it early", () => {
+    expect(lex("f(/\\.ts$/);").find((t) => t.type === "regex")!.value).toBe("/\\.ts$/");
+    expect(lex("f(/[/]x/);").find((t) => t.type === "regex")!.value).toBe("/[/]x/");
+  });
+
+  test("it is REFUSED at parse with NT1027, located", () => {
+    try {
+      parse('const re = /x/;\n');
+      throw new Error("expected NT1027");
+    } catch (e) {
+      expect((e as { diag?: { code: string } }).diag?.code).toBe("NT1027");
+    }
+  });
+
+  // The disambiguation that matters: a misread division would silently swallow code up
+  // to the next `/`. Division wins after anything that can END an expression.
+  test("division is never mistaken for a regex", () => {
+    for (const src of [
+      "const x = a / b;", "const x = a / b / c;", "const x = (a + b) / c;",
+      "const x = xs[0] / 2;", "const x = f() / 2;", "let d = 10; d /= 2;",
+      "const x = a.length / 2;", "let e = 8; const x = e++ / 2;",
+    ]) {
+      expect(lex(src).some((t) => t.type === "regex")).toBe(false);
+    }
+  });
+
+  test("a regex IS recognized where an expression may start", () => {
+    for (const src of ["return /x/.test(s);", "f(/x/);", "const r = /x/;", "x = y || /x/.test(s);"]) {
+      expect(lex(src).some((t) => t.type === "regex")).toBe(true);
+    }
+  });
+
+  test("an unterminated `/` on a line stays division (no runaway consumption)", () => {
+    // `a / b` split across lines must not swallow the newline looking for a closer.
+    expect(lex("const x = a /\n  b;").some((t) => t.type === "regex")).toBe(false);
   });
 });

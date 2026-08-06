@@ -143,6 +143,12 @@ export const NYI = {
   // method (`table`/`group`/`dir`/`time`/`count`/`assert`/`trace`), and a specifier
   // applied to an argument type whose node rendering has no faithful form here.
   CONSOLE: { code: "NT1026", milestone: "later", hint: "console supports log/error/warn/info/debug and node's `%s %d %i %f %j %O %c %%` format specifiers in a literal format string; build the line yourself for anything else" },
+  // Regular expressions are a deliberate non-feature (Tier C, docs/divergences.md):
+  // `.replace`/`.replaceAll`/`.split` take STRING patterns. A `/.../` literal now
+  // LEXES (so it is a located, named refusal instead of a character-level lexer crash
+  // that killed the whole file) and is refused here. This is the #1 self-hosting
+  // blocker — see docs/self-hosting.md.
+  REGEX: { code: "NT1027", milestone: "later", hint: "there is no RegExp — string patterns only (`s.replace(\"a\", \"b\")`, `s.split(\",\")`, `s.startsWith`/`endsWith`/`includes`/`indexOf`). Hand-roll character scanning for anything richer" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
