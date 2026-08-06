@@ -38,7 +38,13 @@ jobs:
       - run: bun install --frozen-lockfile
       # node is preinstalled on GitHub runners (the differential oracle);
       # the cross-target tests (iOS / Android / wasm) skip gracefully headless.
-      - run: bun test
+      # --timeout: EVERY differential test compiles a binary with clang and runs it, and
+      # bun's default per-test budget is 5s. That is fine on a warm dev machine and NOT
+      # fine on a cold CI runner — `stdlib-url basic.ts` began timing out at exactly
+      # 5000ms on ubuntu while the very next test on the same file passed in 1.7s. A
+      # global budget is the right knob (52 test files compile); note bunfig.toml's
+      # [test] timeout is NOT honored by bun, only this flag.
+      - run: bun test --timeout 60000
 
   # ---- Reduced Windows job: bundle (hard gate) + native smoke (best-effort) -
   #
