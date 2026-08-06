@@ -116,9 +116,11 @@ number array with JS ToUint8 wrap; index read/**write** — a genuinely mutable 
 our immutable `T[]`; `.length`; `for-of`) + `TextEncoder().encode(str)` / `TextDecoder().decode(u8)`
 (UTF-8 round-trip — trivial since nativets strings are already UTF-8). Backed by `runtime/nt_bytes.c`
 (compact 1-byte-per-element buffer, linked conditionally-on-usage like `nt_mapset`/`nt_http`). node is
-the oracle for every op (`test/bytes.test.ts`). **Divergence:** `console.log(u8)` is rejected
-(`NT1016`), not printed — node's size-dependent, column-grouped typed-array layout (7+ elements →
-multi-line) isn't cheap to match byte-for-byte, so reject-don't-miscompile. **Deferred:** `ArrayBuffer`
+the oracle for every op (`test/bytes.test.ts`). `console.log(u8)` was the one refusal here
+(`NT1016`, for node's size-dependent column-grouped typed-array layout); **Stage 49 closed it** —
+that layout is the array layout with the length in the opening brace, so a `Uint8Array` now prints
+exactly like node (`Uint8Array(3) [ 1, 2, 3 ]`, grouped past six). Only `"%s"` of one is refused
+(node prints `String(u8)`, the comma-joined bytes). **Deferred:** `ArrayBuffer`
 / `DataView`, other typed-array flavors, `.slice`/`.set`/`.subarray`, `crypto`, `Blob`. Bytes buffers
 are on the allocate-and-never-free placeholder (not linear/RC yet — safe, may leak).
 

@@ -6,11 +6,12 @@
  * for every operation below — construct, index read/write (JS ToUint8 wrap), .length,
  * for-of, and the encode/decode UTF-8 round trip (ASCII + multi-byte).
  *
- * DIVERGENCE (documented): `console.log(u8)` is REJECTED (NT1016), not printed — node's
- * size-dependent, column-grouped typed-array layout (7+ elements => multi-line) is not
- * cheap to match byte-for-byte and the length isn't statically known, so we reject rather
- * than miscompile the format. All other operations match node exactly. Fixtures therefore
- * never `console.log` a Uint8Array directly — they print its elements / length / decode.
+ * `console.log(u8)` was the one refusal here (NT1016 — node's size-dependent,
+ * column-grouped typed-array layout). Stage 49 CLOSED it: that layout is the array
+ * layout with the length folded into the opening brace, which the Stage-47 inspect
+ * builder already owns, so a Uint8Array now prints exactly like node
+ * (`Uint8Array(3) [ 1, 2, 3 ]`) — pinned in `test/console.test.ts`. The fixtures below
+ * still print elements / length / decode, which is what they were written to cover.
  */
 
 import { test, expect, describe } from "bun:test";
@@ -77,9 +78,9 @@ describe("bytes: Uint8Array + TextEncoder/TextDecoder match node", () => {
   }
 });
 
-describe("bytes: console.log(Uint8Array) is rejected (NT1016), not miscompiled", () => {
-  test("printing a Uint8Array is refused with a diagnostic", () => {
-    expect(rejectCode(`const u = new Uint8Array([1, 2, 3]); console.log(u);`)).toBe("NT1016");
+describe("bytes: console.log(Uint8Array) prints node's typed-array layout (Stage 49)", () => {
+  test("printing a Uint8Array compiles — the old NT1016 refusal is closed", () => {
+    expect(rejectCode(`const u = new Uint8Array([1, 2, 3]); console.log(u);`)).toBeNull();
   });
   test("index read/for-of/length/decode still compile (the supported surface)", () => {
     expect(rejectCode(`const u = new Uint8Array([1, 2, 3]); console.log(u[0]); console.log(u.length); for (const x of u) console.log(x); console.log(new TextDecoder().decode(u));`)).toBeNull();

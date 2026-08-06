@@ -93,11 +93,11 @@ export const NYI = {
   // Everything beyond that plain shape — inheritance, static, getters/setters, access
   // modifiers, parameter properties, field initializers — is deferred with this code.
   CLASS_FEATURE: { code: "NT1015", milestone: "M3", hint: "minimal classes support only fields + a constructor + methods; this class feature is deferred" },
-  // Bytes (stdlib batch 2): Uint8Array + TextEncoder/TextDecoder ARE supported (construct,
-  // index read/write, .length, for-of, encode/decode). What is refused with this code is
-  // `console.log(u8)` — node's size-dependent column-grouped typed-array layout is not
-  // cheap to match byte-for-byte, so we reject rather than miscompile the format.
-  BYTES: { code: "NT1016", milestone: "M3", hint: "Uint8Array works (index/length/for-of/encode/decode); only console.log of one is deferred — inspect elements individually or decode to a string" },
+  // (NT1016 is retired. It refused `console.log(u8)` — node's size-dependent,
+  // column-grouped typed-array layout. Stage 49 found that layout to BE the array
+  // layout with the length folded into the opening brace, which the Stage-47 inspect
+  // builder already owned, so a Uint8Array now prints exactly like node and nothing
+  // is left for the code to refuse. The number is not reused.)
   // Networking tier: `fetch`/`await` ARE supported — but nativets has no event loop, so
   // `await` never yields and every request BLOCKS. Anything whose meaning depends on real
   // promises (concurrent/overlapping requests, `Promise.all`, `.then`, an un-awaited async
@@ -137,6 +137,12 @@ export const NYI = {
   // byte-identical to node. This code refuses the few leaf types INSIDE a printed
   // value whose node rendering we cannot reproduce — never a raw pointer.
   INSPECT: { code: "NT1025", milestone: "later", hint: "console.log renders objects, class instances, arrays, Map/Set and JSON.parse results exactly like node. A function value prints as `[Function: <name>]` in node — a name our lifted closures do not carry — and a Uint8Array/Response/URL handle has no node-identical form here; print a field or a derived string instead" },
+  // The `console` surface (Stage 49). `console.log`/`error`/`warn`/`info`/`debug` ARE
+  // supported, including node's format specifiers (`%s %d %i %f %j %o %O %c %%`) when
+  // the format string is a LITERAL. This code refuses the rest: another `console.*`
+  // method (`table`/`group`/`dir`/`time`/`count`/`assert`/`trace`), and a specifier
+  // applied to an argument type whose node rendering has no faithful form here.
+  CONSOLE: { code: "NT1026", milestone: "later", hint: "console supports log/error/warn/info/debug and node's `%s %d %i %f %j %O %c %%` format specifiers in a literal format string; build the line yourself for anything else" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

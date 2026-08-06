@@ -372,6 +372,54 @@ void js_print_str(const char *s) {
 void js_print_sep(void) { fputc(' ', stdout); }
 void js_print_newline(void) { fputc('\n', stdout); }
 
+/* console.error / console.warn — the same renderers, on STDERR (Stage 49).
+ * `begin` flushes stdout first: stdout is fully buffered when piped and stderr is
+ * not, so without it a merged `2>&1` capture would show the two streams reordered. */
+void js_eprint_begin(void) { fflush(stdout); }
+
+void js_eprint_num(double v) {
+  if (v == 0.0 && signbit(v)) { fputs("-0", stderr); return; }
+  char buf[64];
+  js_number_to_string(v, buf, sizeof(buf));
+  fputs(buf, stderr);
+}
+
+void js_eprint_bool(int32_t b) { fputs(b ? "true" : "false", stderr); }
+void js_eprint_str(const char *s) { fputs(s, stderr); }
+void js_eprint_sep(void) { fputc(' ', stderr); }
+void js_eprint_newline(void) { fputc('\n', stderr); }
+
+/* The guard behind a NON-LITERAL format string (Stage 49). nativets expands format
+ * specifiers at COMPILE time from the literal, which is what makes them free and
+ * type-directed; when the format string is a runtime value we cannot know whether it
+ * contains one. Printing the arguments space-separated would be node-correct only if
+ * it does NOT — so we check node's exact rule here and, if a specifier WOULD be
+ * consumed, refuse loudly rather than print a line node would have formatted.
+ * `argc` counts the arguments AFTER the format string. */
+void nt_fmt_guard(const char *fmt, double argcd) {
+  if (!fmt) return;
+  int64_t argc = (int64_t)argcd; /* excluding the format string itself */
+  int64_t a = 0;
+  size_t len = strlen(fmt);
+  for (size_t i = 0; i + 1 < len; i++) {
+    if (fmt[i] != '%') continue;
+    char next = fmt[++i];
+    if (a != argc) {
+      if (next == '%' || strchr("sdifjoOc", next)) goto refuse;
+      continue; /* not a placeholder — left literal, consumes nothing */
+    }
+    if (next == '%') goto refuse;
+  }
+  return;
+refuse:
+  fflush(stdout);
+  fprintf(stderr, "panic: console format specifier in a non-literal format string: \"%s\"\n", fmt);
+  fputs("  help: nativets expands `%s`/`%d`/… at compile time, so the format string must be a\n"
+        "        literal — build the line with a template literal (`${x}`) or pass a literal format\n", stderr);
+  fflush(stderr);
+  abort();
+}
+
 /* ---- string operations ---- */
 
 const char *js_str_concat(const char *a, const char *b) {
@@ -2758,6 +2806,19 @@ const char *nt_insp_coll_open(const char *name, double size) {
   return sb_finish_rc(&b);
 }
 
+/* The same, with node's ARRAY brace — `Uint8Array(3) [`. A typed array is laid out
+ * exactly like an array (node's `formatTypedArray` folds the length into braces[0],
+ * as it does for a Map/Set), so only the opening brace differs. */
+const char *nt_insp_len_open(const char *name, double size) {
+  SB b; sb_init(&b);
+  sb_append(&b, name, strlen(name));
+  sb_append(&b, "(", 1);
+  char num[64]; js_number_to_string(size, num, sizeof(num));
+  sb_append(&b, num, strlen(num));
+  sb_append(&b, ") [", 3);
+  return sb_finish_rc(&b);
+}
+
 /* `... 3 more items` when an array exceeds maxArrayLength (100). */
 const char *nt_insp_more(double remaining) {
   SB b; sb_init(&b);
@@ -2829,5 +2890,25 @@ static const char *nt_dyn_inspect_at(NtDyn *d, int64_t depth, int64_t indent) {
 /* The rendered form of a Dyn at a given indentation level (0 at the top level). */
 const char *nt_dyn_inspect(NtDyn *d, double indent) {
   return nt_dyn_inspect_at(d, (int64_t)indent / 2, (int64_t)indent);
+}
+
+/* A Dyn's string, or NULL if it holds anything else — node scans format specifiers
+ * only when `typeof args[0] === 'string'`, which for a Dyn is a runtime fact. */
+const char *nt_dyn_str_or_null(NtDyn *d) {
+  return d && d->tag == DYN_STR ? d->str : NULL;
+}
+
+/* What `nt_dyn_print` writes, as a STRING (Stage 49) — a scalar bare, a compound
+ * inspected. `depth` is where the walk starts, so `%s` (node inspects it at
+ * `depth: 0`) passes 2 and a nested compound is cut to `[Object]` right away. */
+const char *nt_dyn_display(NtDyn *d, double depth) {
+  if (!d) return "undefined";
+  switch (d->tag) {
+    case DYN_NUM:  return nt_insp_num(d->num);
+    case DYN_BOOL: return d->boolean ? "true" : "false";
+    case DYN_STR:  return d->str;
+    case DYN_NULL: return "null";
+    default:       return nt_dyn_inspect_at(d, (int64_t)depth, 0);
+  }
 }
 

@@ -283,13 +283,15 @@ describe("refusals (reject, never print nothing)", () => {
   test("a function value NESTED in an object is NT1025", () => {
     expect(rejectCode(`const f = (x: number): number => x + 1;\nconsole.log({ f: f });`)).toBe("NT1025");
   });
-  // A bare Uint8Array keeps its own long-standing code (node's column-grouped
-  // typed-array layout); nested, it is NT1025 like the other opaque handles.
-  test("a bare Uint8Array is still NT1016", () => {
-    expect(rejectCode(`const u = new Uint8Array(3);\nconsole.log(u);`)).toBe("NT1016");
+  // A Uint8Array is no longer refused ANYWHERE: Stage 49 found node's typed-array
+  // layout to be this file's array layout with the length folded into the opening
+  // brace, so it renders through the same builder (`test/console.test.ts` pins the
+  // output against node). What is left refused is its two companion handles.
+  test("a bare Uint8Array now renders (the old NT1016 is closed)", () => {
+    expect(rejectCode(`const u = new Uint8Array(3);\nconsole.log(u);`)).toBe(null);
   });
-  test("a nested Uint8Array is NT1025", () => {
-    expect(rejectCode(`const u = new Uint8Array(3);\nconsole.log({ u: u });`)).toBe("NT1025");
+  test("a nested Uint8Array renders too", () => {
+    expect(rejectCode(`const u = new Uint8Array(3);\nconsole.log({ u: u });`)).toBe(null);
   });
   test("a TextEncoder handle is NT1025", () => {
     expect(rejectCode(`console.log(new TextEncoder());`)).toBe("NT1025");

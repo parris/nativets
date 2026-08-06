@@ -113,10 +113,13 @@ Refused (**`NT1025`**), never printed as a pointer:
 
 - a **function value**, anywhere in a printed value — node names a function after the
   binding it came from (`[Function: f]`), and our lambda-lifted arrows carry no name;
-- a **`Uint8Array` / `TextEncoder` / `TextDecoder` / `Response` / `Headers` / `URL` /
-  `URLSearchParams`** handle **nested inside** a printed value. At the ROOT each keeps
-  its own long-standing code (`NT1016`, `NT1002`, `NT1024`) — a bare `Uint8Array` is
-  still refused for node's column-grouped typed-array layout.
+- a **`TextEncoder` / `TextDecoder` / `Response` / `Headers` / `URL` /
+  `URLSearchParams`** handle, anywhere in a printed value. At the ROOT `Response`/
+  `Headers` keep `NT1002` and `URL`/`URLSearchParams` keep `NT1024`.
+  (A **`Uint8Array` is no longer refused**: Stage 49 found node's typed-array layout to
+  be the array layout with the length folded into the opening brace, so it renders
+  through the same builder — `Uint8Array(3) [ 1, 2, 3 ]`, column-grouped past six.
+  `NT1016` is retired.)
 
 A value below node's depth cut is never rendered, so a refused type there does **not**
 block the program. Two residual divergences:
@@ -130,11 +133,58 @@ block the program. Two residual divergences:
 - **Widths are counted in UTF-8 BYTES**, node counts UTF-16 units (§A.2), so a non-ASCII
   entry can tip the 80-column break differently. Identical for ASCII.
 
-Not a divergence but worth recording: `console.log("%s", x)` **format specifiers are not
-interpreted** (pre-existing), and `js_number_to_string` has its own pre-existing gaps
-(`1e-7` → `1e-07`, `1e-5` → `1e-05` instead of `0.00001`, and very large integers print
-their exact rather than shortest-round-trip digits). Both are independent of inspect —
-they show identically through `String(x)` — and are not fixed here.
+Worth recording alongside: `js_number_to_string` has its own pre-existing gaps (`1e-7` →
+`1e-07`, `1e-5` → `1e-05` instead of `0.00001`, and very large integers print their exact
+rather than shortest-round-trip digits). Independent of inspect — they show identically
+through `String(x)` — and not fixed here. (Format specifiers WERE also unimplemented; see
+the next section, which closes them.)
+
+### `console` format specifiers — compile-time, and what a NON-LITERAL format string does
+
+`console.log("a %s b", "x")` printed `a %s b x` where node prints `a x b`: node's
+`formatWithOptionsInternal` consumes `%s %d %i %f %j %o %O %c %%` from a **leading string
+argument when further arguments follow**, and we appended every argument instead. Another
+silent wrong answer, now closed — with two deliberate limits.
+
+**The scan runs at COMPILE time.** Arguments here are statically typed and the format
+string is virtually always a literal, so `planConsoleFormat` (in `src/checker.ts`, node's
+loop transcribed) turns the call into a fixed sequence of literal chunks and per-argument
+conversions, each lowered from the argument's static type. There is no runtime format
+interpreter and no per-call cost, and the checker validates each argument for **the role
+it plays** — `%d` of an object is node's `NaN` and needs no renderer, `%c` discards its
+argument entirely (though it is still evaluated, like node).
+
+**A non-literal format string panics if — and only if — it turns out to hold a
+specifier.** `console.log(label, x)` is common and correct while `label` holds no
+specifier, so it keeps the plain space-separated path plus a runtime guard
+(`nt_fmt_guard`) that applies node's exact rule to the actual string:
+
+```
+panic: console format specifier in a non-literal format string: "a %s b"
+  help: nativets expands `%s`/`%d`/… at compile time, so the format string must be a
+        literal — build the line with a template literal (`${x}`) or pass a literal format
+```
+
+on stderr, stdout flushed first, via `abort()` (exit 134) — the Stage-41 panic path. The
+alternative was printing a line node would have formatted, which is the defect this
+section exists to remove. `typeof args[0] === 'string'` is a runtime fact for a nullable
+and for a `Dyn`, so both feed the guard a pointer that is null exactly when node would not
+have scanned.
+
+**Refused at compile time (`NT1026`)** — conversions with no faithful form here, never an
+approximation:
+
+- **`%o`** of a compound (node adds `showHidden`: `[ 1, 2, 3, [length]: 3 ]`) — use `%O`;
+- **`%j`** of a `Map`/`Set`/`Dyn`/handle (`JSON.stringify` has no meaning for them here);
+- **`%d`/`%i`/`%f`** of an array or `Dyn`, which node coerces through `ToPrimitive`
+  (`String([1,2,3])` is `"1,2,3"`, so `%f` of it is `1`);
+- **`%s`** of a `Uint8Array`: node inspects an object only when it has no custom
+  `toString`, and a typed array has one, so node prints `String(u8)` — `1,2,3` — not the
+  `Uint8Array(3) [ … ]` form every other compound gets. `%O` and printing it alone are exact.
+- any other `console.*` method (`table`, `group`, `dir`, `time`, `count`, `assert`,
+  `trace`): **`console.log`/`error`/`warn`/`info`/`debug` are the supported surface**, with
+  node's streams (error/warn → **stderr**, log/info/debug → **stdout**). `console.error`
+  previously did not exist at all — it failed with `NT2001: 'console' is not defined`.
 
 ### stdlib Batch 1 — what cannot match node, and what we do instead
 
