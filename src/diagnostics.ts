@@ -148,14 +148,15 @@ export const NYI = {
   // LEXES (so it is a located, named refusal instead of a character-level lexer crash
   // that killed the whole file) and is refused here. This is the #1 self-hosting
   // blocker — see docs/self-hosting.md.
-  // The host FFI (SH4). A `node:` builtin module is resolved by the compiler itself —
+  REGEX: { code: "NT1027", milestone: "later", hint: "there is no RegExp — string patterns only (`s.replace(\"a\", \"b\")`, `s.split(\",\")`, `s.startsWith`/`endsWith`/`includes`/`indexOf`). Hand-roll character scanning for anything richer" },
+  // The host FFI (SH4). A `node:` builtin module is resolved by the compiler ITSELF —
   // there is no node_modules and no JS to run — so only the members with a native
   // implementation exist. This code refuses a `node:` module we do not implement, and a
-  // member outside the implemented surface, naming what IS available. Half-implementing
-  // (e.g. `readFileSync` with no encoding, which returns a Buffer in node) would be a
-  // silent divergence, so those are refused here too.
-  HOSTMOD: { code: "NT1028", milestone: "later", hint: "the host FFI implements exactly what a self-hosted compiler needs; see docs/self-hosting.md (SH4). Anything else from a `node:` module has no native implementation" },
-  REGEX: { code: "NT1027", milestone: "later", hint: "there is no RegExp — string patterns only (`s.replace(\"a\", \"b\")`, `s.split(\",\")`, `s.startsWith`/`endsWith`/`includes`/`indexOf`). Hand-roll character scanning for anything richer" },
+  // member outside the implemented surface, naming what IS available. It also refuses
+  // the argument VALUES that decide what node returns (`readFileSync` with no encoding
+  // yields a Buffer; a `spawnSync` option changes what the call does), because
+  // half-implementing those would be a silent divergence rather than a refusal.
+  HOSTMOD: { code: "NT1028", milestone: "later", hint: "the host FFI implements exactly what a self-hosted compiler needs — `node:fs` (readFileSync/writeFileSync/existsSync/mkdtempSync/readdirSync/rmSync), `node:path`, `node:os` (tmpdir/homedir), `node:url` (fileURLToPath), `node:child_process` (spawnSync). See docs/self-hosting.md (SH4)" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

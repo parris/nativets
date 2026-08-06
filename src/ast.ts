@@ -618,7 +618,10 @@ export interface ExportTable {
  * A module or member outside it is refused with NT1028, never half-implemented.
  * The signatures live in the checker (`HOST_FUNCS`) and the lowering in codegen.
  */
-export const HOST_MODULES: Record<string, readonly string[]> = {
+/* `string[]`, NOT `readonly string[]`: `src/*.ts` must stay inside the subset nativets
+ * can compile ITSELF in, and a `readonly` type modifier does not parse — adding one here
+ * made this file's first blocker an NT0001 in the self-host histogram. */
+export const HOST_MODULES: Record<string, string[]> = {
   "node:fs": ["readFileSync", "writeFileSync", "existsSync", "mkdtempSync", "readdirSync", "rmSync"],
   "node:path": ["join", "dirname", "basename", "resolve", "relative"],
   "node:os": ["tmpdir", "homedir"],
