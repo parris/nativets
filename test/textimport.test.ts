@@ -19,13 +19,16 @@
  * FORM is nativets-only. Each test below says which half it is asserting.
  */
 
-import { test, expect, describe } from "bun:test";
-import { readFileSync } from "node:fs";
+import { test, expect, describe, afterAll } from "bun:test";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 import { compileAndRunFile } from "./harness.ts";
+import { sourceToIR } from "../src/driver.ts";
+import { NTError } from "../src/diagnostics.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DIR = join(HERE, "textimport");
@@ -113,4 +116,77 @@ describe("text imports (node-verified through the readFileSync twin)", () => {
     expect(total).toBeGreaterThan(300_000);
     expect(ours.stdout).toContain(`\n${total}\n`);
   }, 300_000);
+
+  /*
+   * A text import in a NON-entry module — the shape `src/driver.ts` actually has (the
+   * entry is `src/cli.ts`). Two hazards: the specifier must resolve against the
+   * IMPORTING file, not the entry, and the materialized const must be renamed with the
+   * rest of that module's top level — here both modules bind `banner`.
+   */
+  test("nested: resolved relative to the importing module, and mangled like any binding", async () => {
+    const ours = await compileAndRunFile(join(DIR, "nested", "main.ts"));
+    const theirs = oracle("nested");
+    expect(ours.stdout).toBe(theirs.stdout);
+    expect(ours.exitCode).toBe(theirs.exitCode);
+    expect(ours.stdout).toBe("root data\nlib data\nfalse\n");
+  });
+});
+
+/* ============================================================
+ * Reject, never miscompile — the refusals, each pinned to its NT code.
+ * ============================================================ */
+
+const scratch = mkdtempSync(join(tmpdir(), "nativets-textimport-"));
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
+/** Compile-only; returns the NT code, or null when it compiled. `anchor` is the entry
+ *  path the specifiers resolve against (the file itself need not exist). */
+function codeOf(source: string, anchor = join(DIR, "basic", "main.ts")): string | null {
+  try { sourceToIR(source, anchor); return null; }
+  catch (e) { return e instanceof NTError ? e.diag.code : `threw ${String((e as Error).message).slice(0, 60)}`; }
+}
+
+describe("what is refused", () => {
+  test('only `type: "text"` is implemented — `type: "json"` is NT1017, not silently text', () => {
+    // node DOES implement `with { type: "json" }` (it binds the PARSED object, not the
+    // source text). Treating it as text would be a silent wrong answer, so it is refused.
+    expect(codeOf('import j from "./payload.txt" with { type: "json" };\nconsole.log(1);\n')).toBe("NT1017");
+    expect(codeOf('import j from "./payload.txt" with { charset: "utf8" };\nconsole.log(1);\n')).toBe("NT1017");
+    expect(codeOf('import j from "./payload.txt" with { type: "text", charset: "utf8" };\nconsole.log(1);\n')).toBe("NT1017");
+  });
+
+  test("a general default import is still NT1017 — the attribute is what makes this one work", () => {
+    expect(codeOf('import x from "./other.ts";\nconsole.log(1);\n')).toBe("NT1017");
+    expect(codeOf('import x, { y } from "./other.ts";\nconsole.log(1);\n')).toBe("NT1017");
+    expect(codeOf('import * as ns from "./other.ts";\nconsole.log(1);\n')).toBe("NT1017");
+  });
+
+  test("an import attribute on a NAMED import is refused rather than ignored", () => {
+    expect(codeOf('import { a } from "./other.ts" with { type: "json" };\nconsole.log(1);\n')).toBe("NT1017");
+  });
+
+  test("the specifier is a relative path, like every other one (no bare specifiers)", () => {
+    expect(codeOf('import s from "runtime/runtime.c" with { type: "text" };\nconsole.log(s);\n')).toBe("NT1017");
+  });
+
+  test("an unreadable text file is NT1701, the same code as an unresolvable module", () => {
+    expect(codeOf('import s from "./no-such-file.c" with { type: "text" };\nconsole.log(s);\n')).toBe("NT1701");
+  });
+
+  /*
+   * The silent-truncation guard. nativets strings are NUL-terminated (`js_str_len` is
+   * `strlen`), so a NUL byte inside an inlined file would cut the constant short at run
+   * time while the `.ll` still carried every byte — a wrong answer with nothing to see.
+   * Refused at compile time instead.
+   */
+  test("a NUL byte in the file is NT1704, not a silently truncated constant", () => {
+    const bin = join(scratch, "with-nul.bin");
+    const entry = join(scratch, "main.ts");
+    const src = 'import s from "./with-nul.bin" with { type: "text" };\nconsole.log(s);\n';
+    writeFileSync(bin, Buffer.from("before\u0000after\n", "utf8"));
+    expect(codeOf(src, entry)).toBe("NT1704");
+    // …and the same file WITHOUT the NUL compiles, so it is the byte that is refused.
+    writeFileSync(bin, Buffer.from("beforeafter\n", "utf8"));
+    expect(codeOf(src, entry)).toBe(null);
+  });
 });
