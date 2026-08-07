@@ -157,7 +157,7 @@ one-off for `@@mutable`.
 | `NT1015` | 3 | a `static` member (`ModuleGen`), a `get` accessor (`FnGen`, unmasked), a class field needing a type annotation (`modules.ts`) |
 | `NT0001` | 2 | a **regex literal** (`checker.ts`) and **`satisfies`** (`parser.ts`) — both *unmasked*, i.e. reached only because an earlier blocker on the same class was cleared |
 | `NT1606` | **1** | `delete o.k` in `specializeDecl` — **deliberate**: a record's SHAPE is its type (fields are static slots), so removing a key is a different feature from assigning one |
-| `NT1003` | 1 | `driver.ts` calls an *imported* function, which single-file coverage sees as an unknown callee — an artifact of the measurement, not a gap |
+| `NT1003` | 1 | `driver.ts` calls an *imported* function, which single-file coverage sees as an unknown callee — an artifact of the measurement, not a gap. Same for `coverage.ts`'s call to `parse`. The diagnostic now SAYS this (`src/diagnostics.ts` `unlinkedImportError`) instead of blaming closures; linked, both calls check and run |
 
 Two measurement changes came with this, both in the direction of honesty:
 
@@ -396,8 +396,8 @@ standalone column is the one that tells you what to fix:
 | `coverage-preprocess.ts` | `NT1606` | array **`.push`** (arrays are immutable) |
 | `diagnostics.ts` | `NT2001` | narrowing does not flow across `\|\|` |
 | `cli.ts` | `NT2001` | `'source' declared string but initialized with undefined` |
-| `ownership.ts` | `NT2001` | `'NO_MUTABLE' is not defined` |
-| `coverage.ts` | `NT1003` | call to `parse` (function value / unknown callee) |
+| `ownership.ts` | `NT1014` | `new Set(iterable)` — was `NT2001 'NO_MUTABLE' is not defined`, a checker BUG (parameter defaults were typed in a builtins-only scope), now fixed |
+| `coverage.ts` | — | **not a blocker**: its `NT1003` on `parse` is the unlinked-import artifact above, not a gap. Its first real blocker is whatever a LINKED check reports |
 
 These are **first** blockers. Each one cleared unmasks the next, so this is a ratchet
 grind, not an eleven-item list — the same shape every earlier re-measurement had.

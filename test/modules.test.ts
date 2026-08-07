@@ -24,6 +24,8 @@ import { fileURLToPath } from "node:url";
 import { compileAndRunFile, runWithNodeFile } from "./harness.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { linkProgram, moduleGraph } from "../src/modules.ts";
+import { parse } from "../src/parser.ts";
+import { check } from "../src/checker.ts";
 import { coverage } from "../src/coverage.ts";
 import { NTError } from "../src/diagnostics.ts";
 
@@ -172,4 +174,51 @@ describe("modules (rejected with a diagnostic)", () => {
       expect(diag.message).toContain(needle);
     });
   }
+});
+
+/*
+ * Checking a module WITHOUT linking it first.
+ *
+ * `check()` on a bare `parse()` result sees `import { parse } from "./parser.ts"` as
+ * nothing at all — the binding is introduced by the LINKER (src/modules.ts), so an
+ * imported callee is simply an unknown name. It used to be reported as
+ *   [NT1003] call to 'parse' (function values / unknown callee) is not supported yet
+ *   hint: function values / closures need captured environments
+ * which is a diagnostic about a feature the program does not use, on a call the
+ * compiler handles perfectly once linked. It sent two self-hosting lanes at a phantom
+ * closure blocker: `src/coverage.ts` and `src/driver.ts` both "needed" NT1003, and
+ * neither does — linked, both calls check and run.
+ *
+ * The name is right there in `program.imports`, so the diagnostic says so.
+ */
+describe("an unlinked import is reported as an unlinked import", () => {
+  const SRC = 'import { helper } from "./dep.ts";\nconsole.log(helper(1));\n';
+
+  test("a call to an imported function names the module, not closures", () => {
+    let err: unknown;
+    try { check(parse(SRC)); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(NTError);
+    const diag = (err as NTError).diag;
+    expect(diag.message).toContain("helper");
+    expect(diag.message).toContain("./dep.ts");
+    expect(diag.message).not.toContain("function values");
+  });
+
+  // The `coverage` tool reaches the same call by a different road: it ERASES the import
+  // preamble (src/coverage-preprocess.ts) so a module whose preamble does not parse can
+  // still be measured, which drops the binding names too. docs/self-hosting.md attributes
+  // driver.ts's NT1003 to exactly this path, so it needs the honest message just as much.
+  test("the coverage tool names the unlinked import too", () => {
+    const r = coverage(SRC);
+    expect(r.firstError!.code).toBe("NT1003");
+    expect(r.firstError!.message).toContain("./dep.ts");
+    expect(r.firstError!.message).not.toContain("function values");
+  });
+
+  test("a genuinely unknown callee still reports the closure gap", () => {
+    let err: unknown;
+    try { check(parse("console.log(nosuch(1));\n")); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(NTError);
+    expect((err as NTError).diag.message).toContain("function values");
+  });
 });
