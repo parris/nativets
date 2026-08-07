@@ -811,6 +811,11 @@ export interface ExportTable {
   values: Map<string, string>;
   reexports: Map<string, { source: string; imported: string; line: number }>;
   types: Map<string, Ty>;
+  /** Exported names declared `export async function` — `async` is ERASED, so an
+   *  importing module cannot tell from the value alone. It has to, because calling
+   *  one without `await` yields a Promise under node and a plain value here; the
+   *  floating-async guard (NT1020) is seeded from this. */
+  asyncValues: Set<string>;
 }
 
 /**
