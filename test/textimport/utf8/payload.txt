@@ -1,0 +1,6 @@
+em dash — and ellipsis …
+accents: éàüñ Ω π
+cjk: 日本語テキスト 中文 한국어
+astral: 😀🚀 (a surrogate pair in UTF-16, four bytes in UTF-8)
+combining: é vs é
+zero width: a​b

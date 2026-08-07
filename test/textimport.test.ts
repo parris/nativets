@@ -47,4 +47,70 @@ describe("text imports (node-verified through the readFileSync twin)", () => {
     // Pinned, so a change on BOTH sides can never pass silently.
     expect(ours.stdout).toBe("19\nhello, text import\n\n");
   });
+
+  /*
+   * The syntax was never the risk — the PAYLOAD is. A text import's bytes travel
+   * through the AST as one string literal and land in the `.ll` as a `c"…"` constant,
+   * where a mis-escaped byte or a wrong length is a silent wrong answer. This payload
+   * is built to break that: quotes, backslashes (single, doubled, and C-escape text
+   * that must NOT be interpreted), every control character except NUL, DEL, `%s`,
+   * backticks, `${`, `c"hello\00"` (LLVM's own escape syntax), and a 4000-char line.
+   *
+   * Pure ASCII on purpose, so `.length`, `charCodeAt`, `indexOf` and comparison are
+   * all node-verified here — the whole assertion is a node differential.
+   */
+  test("nasty: quotes, backslashes, control characters and a 4KB line survive byte-for-byte", async () => {
+    const ours = await compileAndRunFile(join(DIR, "nasty", "main.ts"));
+    const theirs = oracle("nasty");
+    expect(ours.stdout).toBe(theirs.stdout);
+    expect(ours.exitCode).toBe(theirs.exitCode);
+    // The payload really did arrive whole (4432 bytes on disk), not truncated at the
+    // first quote/backslash/control byte.
+    const size = readFileSync(join(DIR, "nasty", "payload.txt")).length;
+    expect(ours.stdout.startsWith(`${size}\n`)).toBe(true);
+    expect(ours.stdout.endsWith(readFileSync(join(DIR, "nasty", "payload.txt"), "utf8") + "\n")).toBe(true);
+  });
+
+  /*
+   * Non-ASCII bytes. A text import must be a UTF-8 pass-through: the emitted `.ll`
+   * escapes every byte >= 0x7f numerically, and the length in the constant is a BYTE
+   * count, so a multi-byte character is where an off-by-one shows up.
+   *
+   * node-verified, with one deliberate exception named in the fixture: nativets'
+   * `String#length` is UTF-8 byte-oriented (docs/divergences.md §A.2), so the oracle
+   * prints `Buffer.byteLength` for that line. The bytes themselves are compared
+   * verbatim, which is what actually pins the encoding.
+   */
+  test("utf8: multi-byte characters pass through unchanged", async () => {
+    const ours = await compileAndRunFile(join(DIR, "utf8", "main.ts"));
+    const theirs = oracle("utf8");
+    expect(ours.stdout).toBe(theirs.stdout);
+    expect(ours.exitCode).toBe(theirs.exitCode);
+    const raw = readFileSync(join(DIR, "utf8", "payload.txt"));
+    expect(ours.stdout.startsWith(`${raw.length}\n${raw.length}\n`)).toBe(true);
+    expect(ours.stdout.endsWith(raw.toString("utf8") + "\n")).toBe(true);
+  });
+
+  /*
+   * The case the feature exists for: the twelve C files `src/driver.ts` embeds, ~305KB
+   * in total with runtime/runtime.c alone at ~147KB. A silent truncation or a single
+   * mis-escaped byte here would hand clang broken C, which is why this is asserted on
+   * the real files and not on a stand-in.
+   */
+  test("runtime: all twelve embedded C files (~305KB) arrive byte-for-byte", async () => {
+    const ours = await compileAndRunFile(join(DIR, "runtime", "main.ts"));
+    const theirs = oracle("runtime");
+    expect(ours.stdout).toBe(theirs.stdout);
+    expect(ours.exitCode).toBe(theirs.exitCode);
+    // Independently of the oracle: the concatenation really is every byte on disk.
+    const files = [
+      "runtime.c", "nt_actor.c", "nt_actor.h", "nt_hamt.c", "nt_hamt.h", "nt_mapset.c",
+      "nt_bytes.c", "nt_bytes.h", "nt_pvec.c", "nt_pvec.h", "nt_http.c", "nt_gui.c",
+    ];
+    const raw = files.map((f) => readFileSync(join(HERE, "..", "runtime", f), "utf8"));
+    expect(ours.stdout.endsWith(raw.map((s) => `${s}\n`).join(""))).toBe(true);
+    const total = raw.reduce((n, s) => n + Buffer.byteLength(s, "utf8"), 0);
+    expect(total).toBeGreaterThan(300_000);
+    expect(ours.stdout).toContain(`\n${total}\n`);
+  }, 300_000);
 });
