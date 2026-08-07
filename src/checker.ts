@@ -648,7 +648,7 @@ class Checker {
       case "IndexExpr": go(e.object); go(e.index); return;
       case "UnaryExpr": go(e.operand); return;
       case "TypeofExpr": go(e.operand); return;
-      case "AsExpr": go(e.expr); return;
+      case "AsExpr": case "SatisfiesExpr": go(e.expr); return;
       case "InstanceOfExpr": go(e.object); return;
       case "BinaryExpr": go(e.left); go(e.right); return;
       case "LogicalExpr": go(e.left); return; // the right operand is conditional
@@ -1681,8 +1681,20 @@ class Checker {
         // Immutable collections (B2). `new Map<K,V>()` / `new Set<T>()`; bare
         // `new Map()`/`new Set()` default to Map<string,number> / Set<string>.
         if (e.callee === "Map") {
-          if (e.args.length !== 0) throw nyi(NYI.COLLECTION, "new Map(iterable) (use .set)");
-          const k = e.typeArgs?.[0] ?? "string", v = e.typeArgs?.[1] ?? "number";
+          if (e.args.length > 1) throw typeError("new Map expects at most one argument (an iterable)");
+          let k = e.typeArgs?.[0] ?? "string", v = e.typeArgs?.[1] ?? "number";
+          if (e.args.length === 1) {
+            // Only the Map-COPY form. The entries form needs a [K, V] tuple type we
+            // do not have yet (`["a", 1]` is NT2001 on its own), so it stays refused.
+            // Refuse the entries form BEFORE typing it — `[["a", 1]]` would otherwise
+            // die as NT2001 ("elements must share a type"), which names the symptom
+            // rather than the missing tuple type.
+            const a0 = e.args[0]!;
+            if (a0.kind === "ArrayLiteral") throw nyi(NYI.COLLECTION, "new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set)");
+            const at = this.type(a0, scope);
+            if (!isMapTy(at)) throw nyi(NYI.COLLECTION, `new Map(${at}) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set)`);
+            k = mapKeyTy(at); v = mapValTy(at);
+          }
           // Keys ride an i64 slot tagged NT_K_STR (string) or NT_K_NUM (number) —
           // those are the two the runtime canonicalizes (SameValueZero), so keys are
           // restricted to string|number. Values ride a raw i64 slot, so any storable
@@ -1692,8 +1704,24 @@ class Checker {
           return makeMapTy(k, v);
         }
         if (e.callee === "Set") {
-          if (e.args.length !== 0) throw nyi(NYI.COLLECTION, "new Set(iterable) (use .add)");
-          const el = e.typeArgs?.[0] ?? "string";
+          if (e.args.length > 1) throw typeError("new Set expects at most one argument (an iterable)");
+          const declared = e.typeArgs?.[0];
+          let el = declared ?? "string";
+          if (e.args.length === 1) {
+            // `new Set(iterable)` — bulk construction. The element type comes from the
+            // argument (an array's element type), so `new Set([1,2,3])` is Set<number>
+            // without a type argument, exactly as node/tsc infer it.
+            const at = this.type(e.args[0]!, scope, declared ? (`${declared}[]` as Ty) : undefined);
+            if (isArrayTy(at)) el = elemTy(at);
+            else if (isSetTy(at)) el = setElemTy(at);
+            // A string is deliberately REFUSED: node iterates it by code point
+            // (`new Set("a😀b")` has size 3) while our string for-of walks bytes, so
+            // building it here would silently produce the wrong set. We cannot prove
+            // a string is ASCII at compile time, so the refusal is unconditional.
+            else if (at === "string") throw nyi(NYI.COLLECTION, "new Set(string) (node iterates a string by code point; split it yourself, e.g. new Set(s.split(\"\")) for ASCII)");
+            else throw nyi(NYI.COLLECTION, `new Set(${at}) (only an array or another Set is supported — build others with .add)`);
+            if (declared && el !== declared) throw typeError(`new Set<${declared}> from ${at} (element type must match)`);
+          }
           if (el !== "string" && el !== "number") throw nyi(NYI.COLLECTION, `Set of ${el}`);
           return makeSetTy(el);
         }
@@ -1757,6 +1785,21 @@ class Checker {
         return "{message:string}";
       }
       case "AsExpr": { this.type(e.expr, scope); return e.ty; } // identity retype
+      /**
+       * `satisfies` CHECKS against the annotation but keeps the expression's own type.
+       * The annotation is passed down as the contextual hint (so an object literal is
+       * shaped by it, exactly as under a `const x: T =` annotation), and then the
+       * result is the INFERRED type, not `e.ty` — that is the whole difference from
+       * `as` on the line above.
+       */
+      case "SatisfiesExpr": {
+        const t = this.type(e.expr, scope, e.ty);
+        if (t !== e.ty && !this.assignable(e.ty, t)) {
+          throw typeError(`${t} does not satisfy ${e.ty}`, undefined,
+            `\`satisfies\` checks assignability without changing the type; use \`as ${e.ty}\` only if you mean to retype.`);
+        }
+        return t;
+      }
       // `expr!` NARROWS away the nullable arm — that is the point of the operator, and
       // why it cannot simply be erased. On a non-nullable operand it is the identity.
       case "NonNullExpr": return baseTy(this.type(e.expr, scope, hint));
@@ -2831,7 +2874,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "ObjectLiteral": e.properties.forEach((p) => collectIdents(p.value, out)); return;
     case "SpreadExpr": collectIdents(e.argument, out); return;
     case "SequenceExpr": e.exprs.forEach((x) => collectIdents(x, out)); return;
-    case "AsExpr": collectIdents(e.expr, out); return;
+    case "AsExpr": case "SatisfiesExpr": collectIdents(e.expr, out); return;
     case "NonNullExpr": collectIdents(e.expr, out); return;
     case "InstanceOfExpr": collectIdents(e.object, out); return; // the class name is not a value
     case "ArrowFunction": if (e.exprBody) collectIdents(e.body as Expr, out); return;
@@ -2878,7 +2921,7 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
     case "IndexExpr": go(e.object); go(e.index); return;
     case "UnaryExpr": go(e.operand); return;
     case "TypeofExpr": go(e.operand); return;
-    case "AsExpr": case "NonNullExpr": go(e.expr); return;
+    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": go(e.expr); return;
     case "InstanceOfExpr": go(e.object); return;
     case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
     case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;

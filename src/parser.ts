@@ -25,6 +25,11 @@ export interface ParseOpts {
    *  and the instance shape of an imported `class`). Seeds the alias table so an
    *  annotation naming an imported type resolves to its real shape. */
   typeEnv?: Map<string, Ty>;
+  /** LOCAL names bound to an imported `export async function`. The floating-async guard
+   *  is per-parse, so without this an imported async call written without `await` would
+   *  be erased into a silent wrong answer (node yields a Promise). Parallel to typeEnv:
+   *  the linker maps each dependency's async exports onto this module's local names. */
+  asyncEnv?: Set<string>;
   /** This module's path, as it should appear in a runtime panic's `at <file>:<line>:<col>`. */
   file?: string;
   /** OUT-param: receives every type alias this parse declared. `coverage` parses a file
@@ -116,7 +121,13 @@ class Parser {
    * are how the parser spots the first case. See docs/divergences.md.
    */
   private asyncFns = new Set<string>();          // names of `async function f`
+  /** Exported names that are `export async function` — published on the ExportTable so
+   *  an importing module can seed its OWN `asyncFns` (see ParseOpts.asyncEnv). */
+  private exportAsync = new Set<string>();
   private awaitedCalls = new Set<Expr>();        // call nodes that are the operand of an `await`
+  /** Arrow nodes that were written `async` — the bridge from an erased async ARROW back
+   *  to the NAME it gets bound to, which is what `asyncFns` (and the guard) work in. */
+  private asyncFnExprs = new Set<Expr>();
   private identCalls: { node: Expr; name: string; line: number; col: number }[] = [];
   /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
    *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
@@ -154,6 +165,7 @@ class Parser {
   private collectTypes?: Map<string, Ty>;
   constructor(private toks: Token[], opts: ParseOpts = {}) {
     if (opts.typeEnv) for (const [k, v] of opts.typeEnv) this.typeAliases.set(k, v);
+    if (opts.asyncEnv) for (const n of opts.asyncEnv) this.asyncFns.add(n);
     this.file = opts.file;
     this.collectTypes = opts.collectTypes;
   }
@@ -254,7 +266,7 @@ class Parser {
     if (this.exportValues.size || this.exportReexports.size || this.exportTypes.size) {
       const types = new Map<string, Ty>();
       for (const n of this.exportTypes) { const t = this.typeAliases.get(n); if (t) types.set(n, t); }
-      program.exports = { values: this.exportValues, reexports: this.exportReexports, types } satisfies ExportTable;
+      program.exports = { values: this.exportValues, reexports: this.exportReexports, types, asyncValues: this.exportAsync } satisfies ExportTable;
     }
     return program;
   }
@@ -359,6 +371,12 @@ class Parser {
       base = tagValueIsEncodable(t.value) ? stringLitTy(t.value) : "string";
     }
     else if (t.type === "num") { this.next(); base = "number"; }   // numeric-literal type: 0
+    // A TEMPLATE-LITERAL type (`` `${string}[]` ``) erases to plain `string`: the raw
+    // inner text is dropped and the pattern is NOT enforced. A pattern that only ever
+    // constrains type-level strings cannot reach emitted code, and node — which strips
+    // types without checking them — has no opinion to disagree with. Recorded as a
+    // deliberate divergence in docs/divergences.md.
+    else if (t.type === "template") { this.next(); base = "string"; }
     else if (this.at("(")) base = this.parseParenOrFuncType();
     else if (this.at("{")) base = this.parseObjectType();
     else if (this.at("[")) base = this.parseTupleType();
@@ -764,11 +782,29 @@ class Parser {
     // `export class C { … }` — the class name is BOTH a value (its ctor/methods lower
     // to `C.constructor` / `C.m`) and a type (the tagged instance shape).
     if (this.at("class")) { const name = this.peek(1).value; const s = this.parseClass(); this.exportValues.set(name, name); this.exportTypes.add(name); return s; }
-    if (this.at("function")) { const s = this.parseFuncDecl() as FuncDecl; this.exportValues.set(s.name, s.name); return s; }
+    // `export function f() {…}` — and `export async function f() {…}`, which is the
+    // same thing: `async` is ERASED here exactly as at statement level (see the
+    // async/await note above), so the export publishes an ordinary function.
+    if (this.at("function") || (this.at("async") && this.peek(1).value === "function")) {
+      const isAsync = this.at("async");
+      if (isAsync) { this.next(); this.asyncFns.add(this.peek(1).value); }
+      const s = this.parseFuncDecl() as FuncDecl;
+      this.exportValues.set(s.name, s.name);
+      // Publish the async-ness: erasure makes it invisible in the exported value, and
+      // an importing module needs it to refuse a call without `await` (NT1020).
+      if (isAsync) this.exportAsync.add(s.name);
+      return s;
+    }
     if (this.at("let") || this.at("const")) {
       const d = this.parseVarDecl();
       this.eat(";");
-      for (const decl of d.decls) this.exportValues.set(decl.name, decl.name);
+      for (const decl of d.decls) {
+        this.exportValues.set(decl.name, decl.name);
+        // `export const f = async () => …` is just as promise-returning as `export async
+        // function f`, so it publishes async-ness the same way. parseDeclarator has
+        // already put an async arrow (or an alias of one) into `asyncFns`.
+        if (this.asyncFns.has(decl.name)) this.exportAsync.add(decl.name);
+      }
       return d;
     }
     throw nyi(NYI.MODULE, `'export' of a '${this.peek().value || this.peek().type}' declaration at ${kw.line}:${kw.col}`);
@@ -862,6 +898,16 @@ class Parser {
     let init: Expr;
     if (this.at("=")) { this.eat("="); init = this.parseAssign(); }
     else init = { kind: "UndefinedLiteral" };
+    // `const f = async () => …` makes `f` an async function under every name the guard
+    // cares about, exactly as `async function f` would — and a DIRECT alias (`const g = f`)
+    // carries that along, so a chain `const c = b; const b = a` stays guarded.
+    //
+    // BOUNDARY: this is name tracking, not dataflow. An async function that escapes into
+    // a PARAMETER (`run(one)` then `f()` inside `run`) is not reached, because the callee
+    // is only known interprocedurally. That residual hole is reported, not papered over.
+    if (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name))) {
+      this.asyncFns.add(name);
+    }
     return { name, annot, init };
   }
   private parseVarDecl(): VarDecl {
@@ -1650,7 +1696,15 @@ class Parser {
     // in this subset (no JSX / old-style casts), so it is unambiguous: erase the type-param
     // list and parse the arrow that follows.
     // `async (x) => …` / `async x => …` — `async` is erased (see the async/await note).
-    if (this.at("async") && (this.peek(1).value === "(" || this.peek(2).value === "=>")) { this.next(); return this.parseArrow(); }
+    if (this.at("async") && (this.peek(1).value === "(" || this.peek(2).value === "=>")) {
+      this.next();
+      const arrow = this.parseArrow();
+      // Remember WHICH node this is: erasure loses the `async`, but a `const` binding
+      // this arrow is every bit as promise-returning as an `async function`, and the
+      // floating-async guard is by NAME. parseDeclarator turns this back into a name.
+      this.asyncFnExprs.add(arrow);
+      return arrow;
+    }
     if (this.at("<")) {
       // An arrow is a VALUE, so it has no single instantiation site to specialize (M3
       // monomorphizes DECLARATIONS). Its type params are still brought into scope so the
@@ -1744,7 +1798,10 @@ class Parser {
 
   private parseConditional(): Expr {
     let test = this.parseBinary(0);
-    while (this.at("as")) { this.eat("as"); test = { kind: "AsExpr", expr: test, ty: this.parseType() }; }
+    while (this.at("as") || this.at("satisfies")) {
+      if (this.at("as")) { this.eat("as"); test = { kind: "AsExpr", expr: test, ty: this.parseType() }; }
+      else { this.eat("satisfies"); test = { kind: "SatisfiesExpr", expr: test, ty: this.parseType() }; }
+    }
     if (this.at("?")) {
       this.eat("?");
       const consequent = this.parseAssign();
@@ -1933,6 +1990,12 @@ class Parser {
         if (expr.callee.kind === "Identifier") {
           const loc = expr.callee.loc ?? { line: 0, col: 0 };
           this.identCalls.push({ node: expr, name: expr.callee.name, line: loc.line, col: loc.col });
+        } else if (this.asyncFnExprs.has(expr.callee)) {
+          // An immediately-invoked async arrow, `(async () => …)()`. It never binds a
+          // name, so the name-based path above cannot see it; the callee NODE is the
+          // identity. Recorded under a descriptive name so the guard reads the same.
+          this.identCalls.push({ node: expr, name: "(async arrow)", line: callLoc.line, col: callLoc.col });
+          this.asyncFns.add("(async arrow)"); // not a legal identifier, so it collides with nothing
         }
       } else if (this.at("<") && (pendingTypeArgs = this.tryCallTypeArgs())) {
         // Call-site type arguments `f<T>(x)` / `foo<string>()` — RECORDED on the call so

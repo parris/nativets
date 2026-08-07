@@ -529,6 +529,7 @@ export type Expr =
   | ArrowFunction
   | NewExpr
   | AsExpr
+  | SatisfiesExpr
   | NonNullExpr
   | InstanceOfExpr
   | CallExpr;
@@ -707,6 +708,13 @@ export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeAr
 export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
 /**
+ * `expr satisfies Type` — CHECKED but never ADOPTED. `as` replaces the expression's
+ * type with `ty`; `satisfies` only proves assignability to `ty` and leaves the
+ * expression's own inferred type in place, which is the entire reason the operator
+ * exists. Erases at codegen, exactly like `as`.
+ */
+export interface SatisfiesExpr { kind: "SatisfiesExpr"; expr: Expr; ty: Ty; }
+/**
  * `expr!` — TypeScript's NON-NULL ASSERTION. Unlike `as`, it is not an identity: it
  * NARROWS `T | undefined` / `T | null` to `T`, which is the whole reason it exists and
  * why erasing it is not enough (`const v: number = m.get(k)!` must typecheck). On a
@@ -873,6 +881,11 @@ export interface ExportTable {
   values: Map<string, string>;
   reexports: Map<string, { source: string; imported: string; line: number }>;
   types: Map<string, Ty>;
+  /** Exported names declared `export async function` — `async` is ERASED, so an
+   *  importing module cannot tell from the value alone. It has to, because calling
+   *  one without `await` yields a Promise under node and a plain value here; the
+   *  floating-async guard (NT1020) is seeded from this. */
+  asyncValues: Set<string>;
 }
 
 /**
@@ -957,7 +970,7 @@ export function exprText(e: Expr): string | undefined {
     const x = exprText(e.expr);
     return x === undefined ? undefined : x + "!";
   }
-  if (e.kind === "AsExpr") return exprText(e.expr);
+  if (e.kind === "AsExpr" || e.kind === "SatisfiesExpr") return exprText(e.expr);
   if (e.kind === "CallExpr") {
     const c = exprText(e.callee);
     return c === undefined ? undefined : c + (e.args.length === 0 ? "()" : "(...)");

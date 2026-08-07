@@ -54,6 +54,11 @@ const CASES = [
   // two same-named classes apart — and a static FIELD read cannot be resolved when its
   // module is parsed (the class is in another file), so it is finished after the link.
   "statics",
+  // `export async function` — `async` is ERASED, so an exported one is an ordinary
+  // exported function. The export path is the only place that needed to learn it.
+  "async",
+  "async-await",      // an exported async function that itself awaits (identity)
+  "async-arrow",      // an exported async ARROW — an ordinary exported const
 ];
 
 describe("modules (differential vs node)", () => {
@@ -144,6 +149,13 @@ const REJECTIONS: { dir: string; code: string; needle: string }[] = [
   { dir: "bad-missing", code: "NT1701", needle: "cannot read module" },
   { dir: "bad-cycle", code: "NT1702", needle: "import cycle" },
   { dir: "bad-export", code: "NT1703", needle: "no exported member" },
+  // The floating-async guard is per-module in the parser, so an IMPORTED async
+  // function has to be seeded into the importing module's async set — otherwise
+  // `one()` without `await` prints `1` here and `Promise { 1 }` under node.
+  { dir: "bad-async-floating", code: "NT1020", needle: "without 'await'" },
+  // …and the ARROW spelling of that export, which the export table must publish as
+  // async too — otherwise the importing module has nothing to guard on.
+  { dir: "bad-async-arrow-floating", code: "NT1020", needle: "without 'await'" },
   // The ownership pass runs over the LINKED program, so a move and a later use in
   // a DIFFERENT module are still one dataflow — the diagnostic is unchanged.
   { dir: "bad-move", code: "NT1601", needle: "use of moved value" },
