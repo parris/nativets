@@ -18,7 +18,7 @@ import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
 import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
-import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError } from "./diagnostics.ts";
+import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError, unlinkedImportError } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
 
@@ -288,7 +288,13 @@ export function actorSendTy(t: Ty): Ty {
 
 export function check(program: Program): CheckedProgram {
   const functions = new Map<string, Sig>();
-  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []));
+  // Value bindings this module imports. A linked program has none left (the linker
+  // rewrites them to concrete names), so this is populated only for a single-module
+  // check — where it turns "unknown callee" into "you did not link".
+  const importedFrom = new Map<string, string>();
+  for (const im of program.imports ?? [])
+    for (const s of im.specs ?? []) if (!s.typeOnly) importedFrom.set(s.local, im.source);
+  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []), importedFrom);
   const builtins = () => {
     const s = new Scope();
     for (const n of BUILTIN_NUMBERS) s.declare(n, "number", true);
@@ -423,6 +429,10 @@ class Checker {
      *  program imported one, so `readFileSync` is an ordinary undefined name — and a
      *  user function of that name — in every program that did not. */
     private hostImports: Set<string> = new Set(),
+    /** Local name → the module specifier it was imported from, for a program that has NOT
+     *  been linked. Empty after linking (the linker rewrites the bindings), so this only
+     *  ever improves the diagnostic for a single-module check — it never accepts a call. */
+    private importedFrom: Map<string, string> = new Map(),
   ) {}
 
   /** The tagged record type a literal should take from its context, if any. */
@@ -2314,7 +2324,13 @@ class Checker {
       const sig = this.generics.has(e.callee.name)
         ? this.instantiate(e.callee.name, e, scope)
         : this.functions.get(e.callee.name);
-      if (!sig) throw nyi(NYI.CLOSURE, `call to '${e.callee.name}' (function values / unknown callee)`);
+      if (!sig) {
+        // An unknown name that this module IMPORTS is not the closure gap — it is an
+        // unlinked check. Say so, rather than sending the reader at captured environments.
+        const from = this.importedFrom.get(e.callee.name);
+        if (from !== undefined) throw unlinkedImportError(e.callee.name, from);
+        throw nyi(NYI.CLOSURE, `call to '${e.callee.name}' (function values / unknown callee)`);
+      }
       if (sig.rest) {
         const fixed = sig.params.length - 1;
         if (e.args.length < sig.required) throw typeError(`'${e.callee.name}' expects at least ${sig.required} args`);

@@ -193,6 +193,32 @@ export function nyi(spec: NyiSpec, what: string): NTError {
 }
 
 /**
+ * A call to a name this module IMPORTS, in a program that was never linked (NT1003).
+ *
+ * An imported binding is introduced by the linker (`src/modules.ts`), so `check()` run
+ * straight on a `parse()` result sees the callee as an unknown name and used to report it
+ * as the closure gap — "function values / unknown callee ... is not supported yet". That
+ * is a diagnostic about a feature the program does not use, on a call the compiler
+ * handles correctly the moment the graph is linked.
+ *
+ * It is measurement damage, and it has cost real time: `docs/self-hosting.md` already
+ * records driver.ts's NT1003 as "an artifact of the measurement, not a gap", and a
+ * self-hosting fleet still spent two lanes treating the same diagnostic on coverage.ts
+ * and driver.ts as a closure blocker to burn down.
+ *
+ * The CODE stays NT1003 so the coverage histogram keeps its shape; what changes is that
+ * the message now says which module the name came from, and that linking fixes it.
+ */
+export function unlinkedImportError(name: string, from: string): NTError {
+  return new NTError({
+    code: NYI.CLOSURE.code,
+    milestone: NYI.CLOSURE.milestone,
+    message: `call to '${name}', which is imported from "${from}" — this program was checked WITHOUT linking, so the binding does not exist yet`,
+    hint: `not a missing feature: the call compiles once the module graph is linked. Check via \`sourceToIR(source, path)\` (src/driver.ts) or \`linkProgram(source, path)\` (src/modules.ts) rather than \`check(parse(source))\`, which leaves every imported binding undeclared`,
+  });
+}
+
+/**
  * A bare `[]` with nothing to infer from and no contextual type (NT1001). nativets takes
  * an empty array literal's element type from CONTEXT — a binding/field annotation, a
  * declared return type, a parameter type, an assignment target, or the other arm of a
