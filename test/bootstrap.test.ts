@@ -243,7 +243,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1009", "NT1015", "NT1606", "NT2001"],
+      ["NT0001", "NT1006", "NT1009", "NT1015", "NT1606", "NT2001"],
     );
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
@@ -253,9 +253,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // (`import … with {type:"text"}`), then the export-async lane clearing
     // `export async function` at driver.ts:502.
     expect(byCode["NT1017"]).toBeUndefined();
-    // NT0001 is a SHRINK-ONLY ratchet from here: a new parse-level blocker means a lane
-    // regressed the frontier, not that the bucket legitimately grew.
-    expect(byCode["NT0001"]).toBeUndefined();
+    // NT0001 WAS asserted here as a shrink-only ratchet ("a new parse-level blocker means
+    // a lane regressed the frontier"). THAT WAS WRONG, and the static-members lane proved
+    // it: NT0001 is the GENERIC parse-error code, not a regression marker. `codegen.ts`
+    // cleared NT1015 (static members) and the module then got FURTHER and stopped on a
+    // different parse error at 582:33 — the bucket refilled because the frontier ADVANCED.
+    // Assert membership, which says which construct, not emptiness, which says nothing.
+    expect(byCode["NT0001"]!.sort()).toEqual(["codegen.ts"]);
     // RATCHET MOVE (collections): NT1014 is now EMPTY. It held lexer.ts on
     // `new Set([...])` for REGEX_AFTER_KEYWORD; `new Set(iterable)` compiles now, so the
     // module walks on to what sat behind it — NT2001, an object literal where a Map is
@@ -281,10 +285,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // union rather than its own; the standalone probe is what says whose blocker it is.
     // Under the link, general unions now dominate: NT1009 is the crux, and clearing it is
     // the single highest-leverage move left on the board.
+    // …and it has since SHRUNK from eight to six, which is the first time this bucket has
+    // ever gone down: the general-union lane landed the crux. `checker.ts` (whose
+    // `Record<string, number | "var">` named the problem) and `ownership.ts` both left it
+    // for NT1606. What remains under NT1009 is largely `ast.ts`'s INTERSECTION `&` and
+    // `parser.ts`'s optional element access `?.[]` — the code covers three features.
     expect(byCode["NT1009"]!.sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts",
-       "driver.ts", "ownership.ts", "parser.ts"],
+      ["ast.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "parser.ts"],
     );
+    // NEW BUCKET: diagnostics.ts left NT1606 (`[...spans].sort()` — the fresh-receiver
+    // lane) and stopped on a variadic spread, `Math.max(...spans.map(…))`.
+    expect(byCode["NT1006"]!.sort()).toEqual(["diagnostics.ts"]);
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not
@@ -295,7 +306,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // (not false-positive) blocker: lexer.ts now clears `new Set([...])` and stops on
     // `ESCAPES` declared `Map<string, string>` but initialized with an OBJECT LITERAL.
     expect(byCode["NT2001"]!.sort()).toEqual(["lexer.ts"]);
-    expect(byCode["NT1606"]!.sort()).toEqual(["diagnostics.ts"]);
+    // NT1606 changed HANDS entirely: diagnostics.ts left it (above), and checker.ts +
+    // ownership.ts arrived from NT1009 once general unions landed. Same bucket, none of
+    // the same modules — which is why membership, not size, is the thing to assert.
+    expect(byCode["NT1606"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
     // (The NT0001 membership assertion that stood here is gone: the bucket is empty, and
     // the shrink-only `toBeUndefined` above is now the thing that guards it.)
   });

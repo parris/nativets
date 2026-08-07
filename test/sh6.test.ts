@@ -226,23 +226,39 @@ afterAll(() => rmSync(corpusDir, { recursive: true, force: true }));
  * blocker UNMASKS the next, so codes churn while rungs do not.
  */
 const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
-  // NB `driver.ts`/`cli.ts` still read NT1017, but it is a DIFFERENT NT1017 since SH5
-  // landed compile-time text imports — `export async function` at driver.ts:502 rather
-  // than the text import at driver.ts:27. See the history note below.
-  "ast.ts": { rung: 0, code: "NT0001", blame: "self" },
+  // RE-MEASURED CENTRALLY after a twelve-lane round (2026-08-07). EVERY row changed except
+  // lexer.ts and modules.ts. NT1017 is gone tree-wide (`export async function` landed);
+  // NT0001 is down to one module, and it is a NEW one — codegen.ts got FURTHER when static
+  // members landed and stopped on an unnamed parse error behind them.
+  //
+  // Read the blame column carefully: `driver.ts` and `cli.ts` used to blame themselves and
+  // each other for NT1017; they now both blame `parser.ts`, whose `?.[]` they inherit
+  // through the link. That is not a regression — they cleared their own blocker and the
+  // link surfaced the deepest one they share.
+  "ast.ts": { rung: 0, code: "NT1009", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile; the module now stops on the ESCAPES object literal.
   "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
-  "diagnostics.ts": { rung: 0, code: "NT1606", blame: "self" },
-  "parser.ts": { rung: 0, code: "NT0001", blame: "self" },
-  "checker.ts": { rung: 0, code: "NT1009", blame: "self" },
-  "codegen.ts": { rung: 0, code: "NT1015", blame: "self" },
-  "coverage.ts": { rung: 0, code: "NT0001", blame: "ast.ts" },
-  "ownership.ts": { rung: 0, code: "NT1009", blame: "checker.ts" },
-  "driver.ts": { rung: 0, code: "NT1017", blame: "self" },
-  "cli.ts": { rung: 0, code: "NT1017", blame: "driver.ts" },
+  // Left NT1606 when `.sort()` on a FRESH receiver stopped being refused; now a variadic
+  // spread, `Math.max(...spans.map(…))`.
+  "diagnostics.ts": { rung: 0, code: "NT1006", blame: "self" },
+  // Left NT0001 (`satisfies`); the code is unchanged at NT1009 but the FEATURE is not —
+  // it is now optional element access `?.[]`, not a union.
+  "parser.ts": { rung: 0, code: "NT1009", blame: "self" },
+  // THE CRUX MOVED. `Record<string, number | "var">` is compiled; checker.ts is past
+  // NT1009 entirely and stops on `delete o.k`.
+  "checker.ts": { rung: 0, code: "NT1606", blame: "self" },
+  // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
+  "codegen.ts": { rung: 0, code: "NT0001", blame: "self" },
+  "coverage.ts": { rung: 0, code: "NT1009", blame: "ast.ts" },
+  // Still inherits checker.ts's blocker, but a DIFFERENT one — it followed checker.ts out
+  // of NT1009 and into NT1606. The long-standing "ownership.ts is credited with
+  // checker.ts's union" attribution trap, still visible, now with the union gone.
+  "ownership.ts": { rung: 0, code: "NT1606", blame: "checker.ts" },
+  "driver.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
+  "cli.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
   "modules.ts": { rung: 0, code: "NT1015", blame: "self" },
-  "coverage-preprocess.ts": { rung: 0, code: "NT0001", blame: "ast.ts" },
+  "coverage-preprocess.ts": { rung: 0, code: "NT1009", blame: "ast.ts" },
 };
 
 /*
@@ -308,7 +324,10 @@ const MODULES: Entry[] = Object.keys(BASELINE).map((file) => ({
 const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () => ["emit", corpusEntry] };
 
 /** Recorded separately from BASELINE: this is a different measurement of cli.ts. */
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1017" };
+// Stage-1 (cli.ts, the whole compiler through its real entry point) left NT1017 when
+// `export async function` landed and now stops on parser.ts's `?.[]` at 1109:66 —
+// inherited through the link, not cli.ts's own code. Still rung 0.
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1009" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -421,8 +440,12 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     for (const e of MODULES) {
       try { parse(read(e.file)); parseClean.push(e.file); } catch { /* blocked at parse */ }
     }
+    // SEVEN now, not six: `driver.ts` joined when `export async function` landed. The
+    // point of this test is unchanged and is the uncomfortable one — parsing clean has
+    // never once correlated with being closer to compiling.
     expect(parseClean.sort()).toEqual([
-      "cli.ts", "coverage-preprocess.ts", "coverage.ts", "diagnostics.ts", "lexer.ts", "ownership.ts",
+      "cli.ts", "coverage-preprocess.ts", "coverage.ts", "diagnostics.ts", "driver.ts",
+      "lexer.ts", "ownership.ts",
     ]);
     // ...and not one of them reaches IR.
     for (const file of parseClean) {
@@ -502,7 +525,7 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // improves, and the comparison below becomes the real gate.
       expect(`no compiled compiler yet (stage-1 at rung ${m.rung}, ${m.code}): ${m.error}`)
         .toBe(`no compiled compiler yet (stage-1 at rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}): `
-          + `[NT1017] 'export' of a 'async' declaration at 502:1 is not supported yet`);
+          + `[NT1009] optional element access '?.[]' at 1109:66 is not supported yet`);
       return;
     }
 
