@@ -487,6 +487,42 @@ const y: number[] | undefined = undefined;
 console.log(!x || (x = y) !== undefined || x.length === 0);
 `, "NT2001", "'x' is possibly undefined");
   });
+
+  // SOUNDNESS. The `||` direction, for a dotted name: the right operand runs when the
+  // left was FALSE, i.e. exactly when `d.spans` IS nullish. Narrowing there is the
+  // opposite of the truth. (The identifier form of this is pinned in "narrowing 3".)
+  test("`||` does NOT carry the POSITIVE fact to a dotted name", () => {
+    expectRejected(`
+function f(d: { spans: number[] | undefined }): boolean {
+  return d.spans !== undefined || d.spans.length === 0;
+}
+`, "NT2001", "'d.spans' is possibly undefined");
+  });
+
+  // SOUNDNESS. TypeScript: controlFlowTruthiness.ts `f1` — the ELSE branch keeps
+  // `string | undefined`. Truthiness is one-way: `0`, `""` and `false` are falsy while
+  // perfectly present, so a false test proves nothing about the tag.
+  test("truthiness narrows the TAKEN branch only", () => {
+    expectRejected(`
+let xs: number[] | undefined = [1];
+if (xs) {
+  console.log(xs.length);
+} else {
+  console.log(xs.length);
+}
+`, "NT2001", "'xs' is possibly undefined");
+  });
+
+  // A known LIMIT, pinned so it stays a refusal rather than becoming a wrong answer: the
+  // narrowing reaches `a.b`, but nativets' `&&`/`||` still require matching
+  // boolean/number/string operands, so the VALUE-returning `a && a.b` (node: `undefined`
+  // or a number) has no type here yet. Reject, never miscompile.
+  test("the value-returning `a && a.b` is still refused (matching-operand rule)", () => {
+    expectRejected(`
+let a: { b: number } | undefined = { b: 2 };
+console.log(a && a.b);
+`, "NT2001", "operands must be matching");
+  });
 });
 
 /*
