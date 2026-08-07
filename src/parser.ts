@@ -341,6 +341,12 @@ class Parser {
       base = tagValueIsEncodable(t.value) ? stringLitTy(t.value) : "string";
     }
     else if (t.type === "num") { this.next(); base = "number"; }   // numeric-literal type: 0
+    // A TEMPLATE-LITERAL type (`` `${string}[]` ``) erases to plain `string`: the raw
+    // inner text is dropped and the pattern is NOT enforced. A pattern that only ever
+    // constrains type-level strings cannot reach emitted code, and node — which strips
+    // types without checking them — has no opinion to disagree with. Recorded as a
+    // deliberate divergence in docs/divergences.md.
+    else if (t.type === "template") { this.next(); base = "string"; }
     else if (this.at("(")) base = this.parseParenOrFuncType();
     else if (this.at("{")) base = this.parseObjectType();
     else if (this.at("[")) base = this.parseTupleType();
