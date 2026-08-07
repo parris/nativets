@@ -342,8 +342,11 @@ describe("what a union may BE — refused, never guessed at", () => {
     expect(messageOf(moved)).toContain("SAME position");
   });
 
-  test("a SCALAR union is still NT1009 — only object unions are represented", () => {
-    expect(codeOf(`function f(x: number | string): void { console.log(x); }\nf(1);\n`)).toBe("NT1009");
+  test("a SCALAR union is now REPRESENTED (the general-union lane); mixing an object arm in is not", () => {
+    // Was NT1009 before this lane — a scalar union is now the `G<…>` tagged box.
+    expect(codeOf(`const x: number | string = 1;\nconsole.log(x);\n`)).toBe(null);
+    // A general union may only carry arms the BOX can hold and `typeof` can separate;
+    // an object arm is neither, so this stays refused rather than half-represented.
     expect(codeOf(`type T = number | { kind: "a" };\nconst v: T = 1;\nconsole.log(v);\n`)).toBe("NT1009");
     // an INTERSECTION is unchanged (still refused)
     expect(codeOf(`type T = { a: number } & { b: number };\nconst v: T = { a: 1, b: 2 };\nconsole.log(v);\n`)).toBe("NT1009");
@@ -364,5 +367,106 @@ describe("what a union may BE — refused, never guessed at", () => {
     expect(codeOf(`${SHAPES}const k = "square";\nconst s: Shape = { kind: k, size: 1 };\nconsole.log(s.kind);\n`)).toBe("NT2001");
     // the member's OWN fields are still checked against the member it selected
     expect(codeOf(`${SHAPES}const s: Shape = { kind: "square", size: "big" };\nconsole.log(s.kind);\n`)).toBe("NT2001");
+  });
+});
+
+/*
+ * GENERAL unions — arms that are NOT all object types, so there is no discriminant
+ * field inside the value and `typeof` must be the discriminant instead.
+ *
+ * REPRESENTATION (`src/ast.ts` — `isGeneralUnionTy`): encoded `G<a|b>` with members
+ * SORTED and de-duplicated, so `number | string` and `string | number` are the SAME
+ * type. At runtime it is a 2-slot heap block [tag, value] — the A2 nullable box's
+ * shape — where `tag` is the member's index in that canonical order and `value` is
+ * the arm packed by the existing `toSlot`. Deliberately NOT `U<…>`: an object union
+ * is the bare member pointer, so sharing the prefix would let 30-odd existing
+ * `isUnionTy` sites apply unboxed-object logic to a boxed value.
+ *
+ * Cases here are DERIVED, not mined: there is no TypeScript conformance checkout on
+ * this machine. `node` is still the oracle for every runtime-visible one.
+ */
+describe("GENERAL (non-object) unions — typeof is the discriminant", () => {
+  test("1. a `number | string` binding holds either arm, and prints as node does", async () => {
+    const src = `const a: number | string = 41;\nconst b: number | string = "hi";\nconsole.log(a);\nconsole.log(b);\n`;
+    expect(codeOf(src)).toBe(null);
+    const ours = await compileAndRun(src);
+    const oracle = runWithNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  // Behaviors 2 and 3 of the plan are ONE test: the only way to observe that the
+  // narrowing happened is to do something the arm allows and the union does not.
+  test("2. `typeof x === \"number\"` narrows to the number arm, the else arm to string", async () => {
+    const src = `let x: number | string = 41;
+if (typeof x === "number") { console.log("n", x + 1); } else { console.log("s", x.toUpperCase()); }
+x = "hi";
+if (typeof x === "number") { console.log("n", x + 1); } else { console.log("s", x.toUpperCase()); }
+`;
+    expect(codeOf(src)).toBe(null);
+    const ours = await compileAndRun(src);
+    const oracle = runWithNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  /*
+   * `Array.isArray` is folded from the STATIC type — for every other type that is
+   * exact. Admitting array arms made it reachable with a union operand, where the
+   * static type says nothing and the fold silently answered `false` for an array.
+   * That was a real silent wrong answer, found in this lane and fixed here: on a
+   * general union it is a RUNTIME test of the box's tag.
+   */
+  test("3. `Array.isArray` on a union is a RUNTIME tag test, not a static fold", async () => {
+    const src = `function f(v: number | number[]): boolean { return Array.isArray(v); }
+console.log(f([1, 2, 3]));
+console.log(f(7));
+`;
+    const ours = await compileAndRun(src);
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe("true\nfalse\n"); // the fold used to answer "false\nfalse\n"
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  /*
+   * Every operation that reads a union WITHOUT narrowing it. Each one below was
+   * measured against node first: three of them silently produced a wrong answer
+   * (they read the box's TAG, or the box POINTER, as if it were the value) and two
+   * emitted invalid IR. None of them may do that, so all five are refused and the
+   * hint says the one thing that fixes every case — narrow with `typeof` first.
+   *
+   * Implementing them is a genuine next rung (each is a tag dispatch, like the
+   * printer already is); refusing is what this lane can be SURE of.
+   */
+  describe("an operation that would read the box as if it were the value is REFUSED", () => {
+    const g = (body: string) => `function f(x: number | string): void { ${body} }\nf(1);\n`;
+    test("truthiness — node says 0 and \"\" are falsy; the box pointer is always truthy", () => {
+      expect(codeOf(g(`if (x) { console.log("t"); }`))).toBe("NT1009");
+      expect(messageOf(g(`if (x) { console.log("t"); }`))).toContain("typeof");
+    });
+    test("=== between two unions — it compared TAGS, so 1 === 2 was true", () => {
+      expect(codeOf(`function f(a: number | string, b: number | string): boolean { return a === b; }\nconsole.log(f(1, 2));\n`)).toBe("NT1009");
+    });
+    test("string concatenation and template literals", () => {
+      expect(codeOf(g(`console.log("v=" + x);`))).toBe("NT1009");
+      expect(codeOf(g("console.log(`v=${x}`);"))).toBe("NT1009");
+    });
+    test("JSON.stringify — it rendered the box as the literal `null`", () => {
+      expect(codeOf(g(`console.log(JSON.stringify(x));`))).toBe("NT1009");
+    });
+    test("...and NARROWING first makes every one of them work", async () => {
+      const src = `function f(x: number | string): void {
+  if (typeof x === "number") { console.log(!!x, "v=" + x, \`t=\${x}\`, JSON.stringify(x)); }
+  else { console.log(!!x, "v=" + x, \`t=\${x}\`, JSON.stringify(x)); }
+}
+f(0); f(1); f(""); f("a");
+`;
+      expect(codeOf(src)).toBe(null);
+      const ours = await compileAndRun(src);
+      const oracle = runWithNode(src);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.exitCode).toBe(oracle.exitCode);
+    });
   });
 });

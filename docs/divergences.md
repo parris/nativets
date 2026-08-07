@@ -317,6 +317,39 @@ Everything else about Batch 3:
   "unwrap it first"). It previously reached codegen and emitted invalid IR — a real defect, found
   by this lane through `URLSearchParams#get`.
 
+### General (non-object) unions — supported narrowly, refused loudly (`G<…>`)
+
+A union whose arms are not all object types (`number | string`, `number | number[]`) has no
+discriminant field inside the value, so it is a **tagged box**: a 2-slot `[tag, value]` block
+(the A2 nullable's shape) with `tag` = the arm's index in the union's canonical member order.
+Members are sorted and de-duplicated, so `number | string` and `string | number` are the same
+type with the same tag numbering.
+
+What works is what dispatches on that tag: `typeof`, `Array.isArray`, `console.log`, narrowing
+via either predicate, and union-typed parameters, returns and bindings. **Everything else is
+refused with `NT1009`**, because it is generated from the STATIC type — which for a `G<…>`
+describes the box, not the arm in it. Each was measured against node first, and each was
+silently wrong rather than loud:
+
+| Refused | What it did before the refusal |
+|---|---|
+| `if (x)` and every other truthiness position | tested the box POINTER — always true, so `0` and `""` came out truthy |
+| `a === b` between unions | compared the two boxes' TAGS, so `1 === 2` was true |
+| `JSON.stringify(x)` | rendered the box as the literal `null` |
+| `"" + x`, `` `${x}` `` | emitted invalid IR |
+
+Each is a tag dispatch away from working — the printer already is one — but reject-never-miscompile
+says the refusal lands first. Arms are restricted to `number`/`string`/`boolean`/arrays with
+*distinct* `typeof` tags: `number[] | {a: number}` is refused because `typeof` cannot tell those
+apart, and an object arm is refused outright. A 3-arm union narrows only when ONE arm survives
+the test — the else branch of a 3-arm union is a sub-union whose tags would need renumbering, so
+the binding stays the full union and arm-specific uses of it are refused.
+
+> **Pre-existing, and NOT fixed by that lane:** the A2 nullable box has three of the same holes,
+> two of them silently wrong. With `const x: number | undefined = [0].at(0)`, `if (x)` prints
+> `truthy` where node prints `falsy`, and `JSON.stringify(x)` prints `null` where node prints `0`;
+> `` `${x}` `` emits invalid IR. These predate general unions and need their own lane.
+
 ### Actor messages (B3 v5) — structured messages are COPIES, and the shape is checked
 
 node has no actors, so the whole surface (`spawn`/`send`/`receive`) is behavioral, not
@@ -462,13 +495,31 @@ Refused:
 ### Ordering: `.toSorted()`/`.toReversed()` instead of `.sort()`/`.reverse()`
 
 node's `.sort()` sorts **in place**, which the immutable-by-default model forbids, so `.sort()`
-is refused with `NT1606` pointing at **`.toSorted()`** — the ES2023 *copying* method, which is
+on a **shared** array is refused with `NT1606` pointing at **`.toSorted()`** — the ES2023 *copying* method, which is
 non-mutating in node too, so **node stays the oracle** (no divergence in what we do compile).
 `.toSorted()`, `.toSorted(cmp)` and `.toReversed()` are node-matched: the default comparator
 compares the elements' **string** forms (`[10, 9, 1].toSorted()` → `1, 10, 9`), and the sort is
 **stable** (a merge sort), as node's is required to be. A comparator may be any function value
 (inline arrow or a captured closure); its result is mapped to a sign, with `NaN` treated as `0`
 like node. (`.reverse()` still mutates — pre-existing, flagged above.)
+
+**`.sort()` on a FRESH receiver is allowed** (and is *not* a divergence — it is node's own
+answer). The immutability rule exists to stop one binding mutating an array another binding can
+still see. A newly constructed array has no other owner, so sorting it is unobservable:
+`[...xs].sort()`, `[3,1,2].sort()`, and `xs.map(f).sort()` / `.filter(f)` / `.concat(ys)` /
+`.slice(0)` results are accepted, while `xs.sort()`, an alias `const b = xs; b.sort()`, a
+parameter, a module-level array, and the result of a **plain function call** (`mk().sort()` — the
+callee may still own it) stay `NT1606`. Freshness is decided syntactically by `freshArray` in
+`src/ast.ts`, the single copy shared with codegen's receiver-temp free.
+
+On a fresh receiver `.sort()` is exactly `.toSorted()` — same value, and the temporary it would
+have sorted in place is discarded either way — so it is **rewritten to `toSorted`** in the
+checker and lowers through the copying path above. That is what keeps the permission safe: the
+rewrite means `.sort()` never hands its receiver back, so it cannot create the two-bindings-one-
+array alias that in-place mutation would need. Verified in the emitted IR (the fresh temp is
+freed exactly once, the result is a distinct pointer) and node-differentially in
+`test/immutable.test.ts`, including node's lexicographic default (`[10,9,1,100,2].sort()` →
+`1,10,100,2,9`).
 
 ### String relational compare (`<` `<=` `>` `>=`) is UTF-8 byte order
 

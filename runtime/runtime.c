@@ -370,6 +370,24 @@ int64_t nt_nonnull(const int64_t *box, const char *loc) {
   abort();
 }
 
+/* Unpack a GENERAL union box [tag, value] whose arm the checker proved. `want` is the
+ * arm's index in the union's canonical member order; `what` names it for the message.
+ *
+ * The proof is a compile-time one, so this check should never fire — it is here for the
+ * same reason nt_nonnull's is. If the flow analysis is ever wrong, the alternative is
+ * reinterpreting a `double` bit pattern as a `char *`: a phantom value or a segfault
+ * with no explanation. Panicking names the bug instead. */
+int64_t nt_union_arm(const int64_t *box, double want, const char *what, const char *loc) {
+  if (box && box[0] == (int64_t)want) return box[1];
+  fflush(stdout);
+  fprintf(stderr, "panic: union narrowing was wrong: expected the %s arm\n", what ? what : "?");
+  if (loc && *loc) fprintf(stderr, "  at %s\n", loc);
+  fprintf(stderr, "  help: this is a compiler bug — the checker proved an arm the value "
+                  "does not hold; please report it with the program that triggered it\n");
+  fflush(stderr);
+  abort();
+}
+
 /* ---- console.log building blocks ---- */
 
 /* The same conversion, exported for the other runtime translation units (the
