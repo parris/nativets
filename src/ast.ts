@@ -999,6 +999,20 @@ const FRESH_ARRAY_CALLS = new Set([
 ]);
 
 /**
+ * …and the array methods that return their RECEIVER rather than a fresh array — node's
+ * in-place mutators. `.reverse` is the only one accepted; every other one
+ * (`.push`/`.pop`/`.fill`/`.splice`/`.shift`/`.unshift`/`.copyWithin`) is refused with
+ * NT1606, and `.sort` only survives by being rewritten to `.toSorted` on a fresh
+ * receiver — which is exactly what keeps it from ever returning its receiver.
+ *
+ * Stated as a SET, and kept here beside `freshArray`, because THREE passes must agree on
+ * it: the checker (result type is the receiver's), codegen (never free a retained
+ * receiver temp), and the ownership pass (binding such a result makes an ALIAS, not a
+ * second owner — otherwise it double-frees). One canonical copy; do not re-declare it.
+ */
+export const RETAINS_RECEIVER = new Set(["reverse"]);
+
+/**
  * Does `e` evaluate to a NEWLY CONSTRUCTED array that nothing else aliases?
  *
  * The single source of truth for array freshness, used by two passes that must agree:
@@ -1010,10 +1024,19 @@ const FRESH_ARRAY_CALLS = new Set([
  * Conservative and purely SYNTACTIC: an array literal (including a spread copy
  * `[...xs]`, which builds a new array) and the array-returning methods above. A plain
  * function call is NOT fresh — it may hand back an array the callee still owns.
+ *
+ * A RETAINS_RECEIVER call PASSES freshness through rather than ending it: it hands back
+ * the pointer it was given, so its result is unowned exactly when its receiver was.
+ * `[1,2].reverse()` is still a temporary (codegen must free it; `.sort()` on it is still
+ * unobservable), while `a.reverse()` is `a` itself — the recursion bottoms out at the
+ * non-fresh Identifier, which is what stops either pass touching an owned binding.
  */
 export function freshArray(e: Expr): boolean {
   if (e.kind === "ArrayLiteral") return true;
-  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") return FRESH_ARRAY_CALLS.has(e.callee.property);
+  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") {
+    if (FRESH_ARRAY_CALLS.has(e.callee.property)) return true;
+    if (RETAINS_RECEIVER.has(e.callee.property)) return freshArray(e.callee.object);
+  }
   return false;
 }
 

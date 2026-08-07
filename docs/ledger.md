@@ -434,7 +434,11 @@ instructions, and it was 76% of that file. `git log` is the other view of the sa
   loop-body local is freed each iteration), and **reassignment** (`AssignExpr.dropOld` — the
   superseded value is freed after the RHS is evaluated). Unbound **temporaries** are freed where a
   chain consumes them (`s.split(",").length`, `xs.map(f).filter(g)` — only syntactically fresh
-  producers, and never `.reverse`, which returns its receiver). **Conditional moves get a drop
+  producers, and never `.reverse`, which returns its receiver). *(Later correction: `.reverse` now
+  PASSES freshness through rather than ending it — `[1,2].reverse().join()` frees the literal,
+  while `a.reverse().join()` still leaves `a` alone; and BINDING such a result makes an alias, not
+  a second owner, which is what used to double-free. See docs/divergences.md §Ordering.)*
+  **Conditional moves get a drop
   flag** (rustc's E0382 machinery): the lattice now tracks MAY-move (join OR, what the
   use-after-move check reads) *and* MUST-move (join AND), and a value moved on only some paths is
   still dropped — under a flag that costs nothing, since the move **nulls the slot**

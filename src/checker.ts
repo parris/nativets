@@ -2648,9 +2648,9 @@ class Checker {
     if (["forEach"].includes(method)) throw nyi(NYI.CLOSURE, `array .${method} (needs first-class function values)`);
 
     // --- ordering primitives (ES2023, non-mutating: node is the oracle) --------
-    // `.sort`/`.reverse` sort IN PLACE, which the immutable model forbids; the
-    // ES2023 copying pair is the supported spelling. `.toSorted()` with no
-    // comparator uses node's default (compare the elements' STRING forms).
+    // `.toSorted()` with no comparator uses node's default (compare the elements'
+    // STRING forms).
+    //
     // `.sort` mutates its receiver, which the immutable model forbids — UNLESS the
     // receiver is a FRESH array (`[...xs]`, an array literal, a `.map`/`.filter`/…
     // result). Fresh storage has no other owner, so sorting it is unobservable to any
@@ -2660,6 +2660,14 @@ class Checker {
     // the already node-exact copying path — including node's LEXICOGRAPHIC default
     // order. That also keeps `.sort` from ever returning its receiver, so it cannot
     // mint the alias that in-place mutation would need. See docs/divergences.md.
+    //
+    // `.reverse` is the one in-place mutator ACCEPTED on ANY receiver (see the
+    // `case "reverse"` below): it is node-compatible, and memory-safe because it DOES
+    // return its receiver and the ownership pass therefore treats a binding of its
+    // result as an ALIAS rather than a second owner. Do not read this block as
+    // rejecting it — an earlier comment here claimed it did, and that was never true.
+    // Note `freshArray` passes freshness THROUGH it, so `[3,1,2].reverse().sort()` is
+    // still a fresh receiver, while `a.reverse().sort()` is `a` and stays refused.
     if (method === "sort") {
       if (!freshArray(callee.object))
         throw mutationError("arrays are immutable: `.sort` would sort the array in place", "use `.toSorted()` (ES2023) — it returns a NEW sorted array and leaves the original alone");
@@ -2698,6 +2706,10 @@ class Checker {
       case "pop": throw mutationError("arrays are immutable: `.pop` would mutate the array in place", "use `arr.slice(0, -1)` for the shorter array, or `arr[arr.length - 1]` for the last element");
       case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
       case "indexOf": need(1); if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`); return "number";
+      // ACCEPTED, unlike its in-place siblings above: `.reverse` returns its RECEIVER,
+      // so the result type is `recv` and the two are the SAME array. `RETAINS_RECEIVER`
+      // (src/ownership.ts) is what keeps that single-owner; adding another such method
+      // means adding it there too, or its result binding double-frees.
       case "reverse": need(0); return recv;
       // --- stdlib Batch 1 (part 2): array fills ---
       case "flat": { // ONE level only (node's default depth); an explicit depth must be 1
