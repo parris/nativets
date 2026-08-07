@@ -2169,8 +2169,14 @@ class Checker {
     // `C.m` and let the ordinary named-call path below check the arguments. (A local
     // binding of the class's name wins, exactly as it would for any other identifier.)
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && !scope.lookup(e.callee.object.name)) {
-      const lowered = `${e.callee.object.name}.${e.callee.property}`;
+      const cname = e.callee.object.name, lowered = `${cname}.${e.callee.property}`;
       if (this.statics.has(lowered)) e.callee = { kind: "Identifier", name: lowered };
+      // The reverse mix-up: an INSTANCE method reached through the class name. It lowers
+      // to the same shape of name, so say so rather than leaving the class name to fail
+      // as an undefined identifier (in node the class object has no such property at all).
+      else if (this.functions.has(lowered)) {
+        throw typeError(`'${e.callee.property}' is an instance method of ${cname}, not a static — call it on an instance (\`inst.${e.callee.property}(…)\`)`);
+      }
     }
 
     // receiver.method(...)
@@ -2179,6 +2185,10 @@ class Checker {
       // class instance method: `inst.m(args)` → the lowered `C.m(this, …)`.
       const cls = classTag(recv);
       if (cls) {
+        // A STATIC is not on the instance — it has no receiver at all, so an instance
+        // cannot reach it (node: `p.make is not a function`). Point at the class.
+        if (this.statics.has(`${cls}.${e.callee.property}`))
+          throw typeError(`'${e.callee.property}' is a static method of ${cls}, not an instance method — call it on the class (\`${cls}.${e.callee.property}(…)\`)`);
         const msig = this.functions.get(`${cls}.${e.callee.property}`);
         if (!msig) {
           if (fieldType(recv, e.callee.property)) throw typeError(`'${e.callee.property}' is a field of ${cls}, not a method`);
