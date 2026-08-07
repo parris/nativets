@@ -684,6 +684,14 @@ What this buys and what it costs:
     erased there like anywhere else), and the async-ness travels on the export table — through
     `import { f as g }` and through `export { f } from "./m.ts"` — so an un-awaited call to an
     *imported* async function is `NT1020` too, not a silently-erased wrong answer.
+    It also holds for an async **arrow**, which is the same promise wearing different syntax:
+    `const f = async () => …` is guarded exactly as `async function f` is, and so are a direct
+    alias chain (`const g = f; g()`), an immediately-invoked `(async () => …)()`, and an
+    `export const f = async () => …` seen from an importing module.
+    **Known boundary:** the guard is NAME tracking in the parser, not dataflow, so an async
+    function that escapes into a *function parameter* (`run(f)`, then `f()` inside `run`) or is
+    returned as a value and called through the result is **not** reached today. Closing it needs
+    the async-ness to survive on the TYPE, which `Promise<T>` erasure currently discards.
   - The diagnostic points at the **actor model** (`spawn`/`send`/`receive`, Stage 22/27/31), which
     is nativets' concurrency primitive. Promises may simply be the wrong abstraction here.
 - `Promise<T>` in **type position** is erased to `T` (as are `Awaited<T>` and friends), so

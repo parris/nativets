@@ -119,6 +119,9 @@ class Parser {
    *  an importing module can seed its OWN `asyncFns` (see ParseOpts.asyncEnv). */
   private exportAsync = new Set<string>();
   private awaitedCalls = new Set<Expr>();        // call nodes that are the operand of an `await`
+  /** Arrow nodes that were written `async` — the bridge from an erased async ARROW back
+   *  to the NAME it gets bound to, which is what `asyncFns` (and the guard) work in. */
+  private asyncFnExprs = new Set<Expr>();
   private identCalls: { node: Expr; name: string; line: number; col: number }[] = [];
   /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
    *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
@@ -768,7 +771,13 @@ class Parser {
     if (this.at("let") || this.at("const")) {
       const d = this.parseVarDecl();
       this.eat(";");
-      for (const decl of d.decls) this.exportValues.set(decl.name, decl.name);
+      for (const decl of d.decls) {
+        this.exportValues.set(decl.name, decl.name);
+        // `export const f = async () => …` is just as promise-returning as `export async
+        // function f`, so it publishes async-ness the same way. parseDeclarator has
+        // already put an async arrow (or an alias of one) into `asyncFns`.
+        if (this.asyncFns.has(decl.name)) this.exportAsync.add(decl.name);
+      }
       return d;
     }
     throw nyi(NYI.MODULE, `'export' of a '${this.peek().value || this.peek().type}' declaration at ${kw.line}:${kw.col}`);
@@ -862,6 +871,16 @@ class Parser {
     let init: Expr;
     if (this.at("=")) { this.eat("="); init = this.parseAssign(); }
     else init = { kind: "UndefinedLiteral" };
+    // `const f = async () => …` makes `f` an async function under every name the guard
+    // cares about, exactly as `async function f` would — and a DIRECT alias (`const g = f`)
+    // carries that along, so a chain `const c = b; const b = a` stays guarded.
+    //
+    // BOUNDARY: this is name tracking, not dataflow. An async function that escapes into
+    // a PARAMETER (`run(one)` then `f()` inside `run`) is not reached, because the callee
+    // is only known interprocedurally. That residual hole is reported, not papered over.
+    if (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name))) {
+      this.asyncFns.add(name);
+    }
     return { name, annot, init };
   }
   private parseVarDecl(): VarDecl {
@@ -1606,7 +1625,15 @@ class Parser {
     // in this subset (no JSX / old-style casts), so it is unambiguous: erase the type-param
     // list and parse the arrow that follows.
     // `async (x) => …` / `async x => …` — `async` is erased (see the async/await note).
-    if (this.at("async") && (this.peek(1).value === "(" || this.peek(2).value === "=>")) { this.next(); return this.parseArrow(); }
+    if (this.at("async") && (this.peek(1).value === "(" || this.peek(2).value === "=>")) {
+      this.next();
+      const arrow = this.parseArrow();
+      // Remember WHICH node this is: erasure loses the `async`, but a `const` binding
+      // this arrow is every bit as promise-returning as an `async function`, and the
+      // floating-async guard is by NAME. parseDeclarator turns this back into a name.
+      this.asyncFnExprs.add(arrow);
+      return arrow;
+    }
     if (this.at("<")) {
       // An arrow is a VALUE, so it has no single instantiation site to specialize (M3
       // monomorphizes DECLARATIONS). Its type params are still brought into scope so the
@@ -1892,6 +1919,12 @@ class Parser {
         if (expr.callee.kind === "Identifier") {
           const loc = expr.callee.loc ?? { line: 0, col: 0 };
           this.identCalls.push({ node: expr, name: expr.callee.name, line: loc.line, col: loc.col });
+        } else if (this.asyncFnExprs.has(expr.callee)) {
+          // An immediately-invoked async arrow, `(async () => …)()`. It never binds a
+          // name, so the name-based path above cannot see it; the callee NODE is the
+          // identity. Recorded under a descriptive name so the guard reads the same.
+          this.identCalls.push({ node: expr, name: "(async arrow)", line: callLoc.line, col: callLoc.col });
+          this.asyncFns.add("(async arrow)"); // not a legal identifier, so it collides with nothing
         }
       } else if (this.at("<") && (pendingTypeArgs = this.tryCallTypeArgs())) {
         // Call-site type arguments `f<T>(x)` / `foo<string>()` — RECORDED on the call so
