@@ -354,30 +354,32 @@ function moduleOrder(
  *     inlining one would silently truncate the constant at that byte.
  */
 function materializeTextImports(program: Program, path: string, read: ReadModule): Stmt[] {
-  const out: Stmt[] = [];
-  for (const t of program.textImports ?? []) {
+  // `.map`, not a `push` loop: `arr.push` is NT1606 here, and this file has to stay
+  // inside the subset nativets can compile ITSELF in.
+  return (program.textImports ?? []).map((t) => {
     const target = resolveSpecifier(path, t.source);
+    const where = `(imported by ${show(path)}:${t.line}:${t.col})`;
     let text: string;
     try {
       text = read(target);
     } catch {
-      throw moduleError("NT1701", `cannot read the text import '${show(target)}' (imported by ${show(path)}:${t.line}:${t.col})`,
+      throw moduleError("NT1701", `cannot read the text import '${show(target)}' ${where}`,
         "a `with { type: \"text\" }` specifier is a path relative to the importing file, like an import specifier — check the path and the extension");
     }
     // `String.fromCharCode(0)`, not `"\0"`: that escape is not in nativets' lexer, so the
     // literal form would decode to the character `0` once this file compiles itself.
     const nul = text.indexOf(String.fromCharCode(0));
     if (nul >= 0) {
-      throw moduleError("NT1704", `the text import '${show(target)}' (imported by ${show(path)}:${t.line}:${t.col}) contains a NUL byte at offset ${nul}`,
+      throw moduleError("NT1704", `the text import '${show(target)}' ${where} contains a NUL byte at offset ${nul}`,
         "nativets strings are NUL-terminated, so a NUL in the file would silently truncate the constant. Text imports are for TEXT — read a binary file at run time instead");
     }
-    out.push({
+    const decl: VarDecl = {
       kind: "VarDecl",
       declKind: "const",
       decls: [{ name: t.local, annot: "string", init: { kind: "StringLiteral", value: text } }],
-    });
-  }
-  return out;
+    };
+    return decl as Stmt;
+  });
 }
 
 /* ------------------------------------------------------------------ linker */
@@ -393,7 +395,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     // Ordinary single-module program — but it may still inline text (SH5), which is a
     // read, not a graph edge, so it needs no linking pass.
     if (first.textImports?.length) {
-      first.body.unshift(...materializeTextImports(first, resolve(entryPath ?? "entry.ts"), read));
+      first.body = [...materializeTextImports(first, resolve(entryPath ?? "entry.ts"), read), ...first.body];
     }
     return first;
   }
@@ -442,7 +444,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     //    `const` at the head of the body BEFORE the rename below, so it is an ordinary
     //    top-level binding of this module and is mangled like any other.
     const program = parse(source, { typeEnv, file: path });
-    if (program.textImports?.length) program.body.unshift(...materializeTextImports(program, path, read));
+    if (program.textImports?.length) program.body = [...materializeTextImports(program, path, read), ...program.body];
 
     // 3. Rename map: imported locals → the exporting module's final names; own
     //    top-level bindings → a module-unique name (the entry keeps its own names,

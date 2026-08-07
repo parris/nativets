@@ -660,32 +660,33 @@ class Parser {
     this.eat("with");
     const attrs = this.parseImportAttributes(kw);
     if (this.at(";")) this.eat(";");
-    const kind = attrs.get("type");
-    if (kind !== "text") {
-      const shown = [...attrs].map(([k, v]) => `${k}: "${v}"`).join(", ");
+    // Exactly `type: "text"`, nothing more: an unrecognized attribute changes what the
+    // import MEANS, so it is named back to the user rather than ignored.
+    const first = attrs[0]!;
+    if (attrs.length !== 1 || first.key !== "type" || first.value !== "text") {
+      const shown = attrs.map((a) => `${a.key}: "${a.value}"`).join(", ");
       throw nyi(NYI.MODULE, `the import attribute \`with { ${shown} }\` at ${kw.line}:${kw.col} (only \`type: "text"\` is implemented — it inlines the file as a compile-time string)`);
     }
-    if (attrs.size !== 1) throw nyi(NYI.MODULE, `extra import attributes alongside \`type: "text"\` at ${kw.line}:${kw.col}`);
     this.textImports.push({ local, source, line: kw.line, col: kw.col });
     return { kind: "MultiStmt", stmts: [] }; // erased; the linker materializes the const
   }
 
   /** `{ type: "text" }` — an import-attributes clause. Keys may be identifiers or
    *  strings; every value must be a string literal (the spec allows nothing else). */
-  private parseImportAttributes(kw: Token): Map<string, string> {
+  private parseImportAttributes(kw: Token): { key: string; value: string }[] {
     this.eat("{");
-    const out = new Map<string, string>();
+    const out: { key: string; value: string }[] = [];
     while (!this.at("}")) {
       const key = this.expectKey();
       this.eat(":");
       const v = this.peek();
       if (v.type !== "str") throw parseError(`Expected a string import-attribute value at ${v.line}:${v.col}`);
       this.next();
-      out.set(key, v.value);
+      out.push({ key, value: v.value });
       if (this.at(",")) this.eat(","); else break;
     }
     this.eat("}");
-    if (out.size === 0) throw nyi(NYI.MODULE, `an empty import-attributes clause at ${kw.line}:${kw.col}`);
+    if (out.length === 0) throw nyi(NYI.MODULE, `an empty import-attributes clause at ${kw.line}:${kw.col}`);
     return out;
   }
 
