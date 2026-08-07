@@ -260,7 +260,10 @@ export function parseError(message: string): NTError {
  *   NT1701  a module could not be resolved / read
  *   NT1702  an import cycle (named, in order — never hang, never miscompile)
  *   NT1703  a module has no such export
+ *   NT1704  a `with { type: "text" }` import whose file cannot become a string
+ *           (a NUL byte: nativets strings are NUL-terminated, so inlining one would
+ *           silently truncate the constant — the worst outcome available)
  */
-export function moduleError(code: "NT1701" | "NT1702" | "NT1703", message: string, hint?: string): NTError {
+export function moduleError(code: "NT1701" | "NT1702" | "NT1703" | "NT1704", message: string, hint?: string): NTError {
   return new NTError({ code, message, hint });
 }

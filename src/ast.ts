@@ -779,6 +779,20 @@ export interface ImportSpec { imported: string; local: string; typeOnly?: boolea
 export interface ImportDecl { source: string; specs: ImportSpec[]; line: number; }
 
 /**
+ * SH5 — a COMPILE-TIME text import: `import src from "./x.c" with { type: "text" }`.
+ *
+ * Not a module edge: the target is not TypeScript and is never parsed. The linker
+ * reads it (relative to the importing file) and materializes `const <local> = "…"`,
+ * a plain string constant, at the top of that module's body. So the identifier is an
+ * ordinary `const string` by the time the checker runs, and the bytes end up in the
+ * `.ll` as an interned string — no runtime file I/O, no `node:fs` dependency.
+ *
+ * `col` is carried alongside `line` because a bad attribute or an unreadable file is
+ * reported at the `import` keyword, like every other module diagnostic.
+ */
+export interface TextImport { local: string; source: string; line: number; col: number; }
+
+/**
  * A module's export table. `values` maps an exported name to the LOCAL name that
  * backs it (`export { a as b }` ⇒ b→a); `reexports` maps an exported name to a
  * binding in another module (`export { x } from "./y.ts"`); `types` carries the
@@ -823,6 +837,9 @@ export interface Program {
   hostImports?: string[];
   /** Present only when the source declared imports (the linker's input). */
   imports?: ImportDecl[];
+  /** `with { type: "text" }` imports (SH5). Present only when the source used one;
+   *  the linker turns each into a `const` string and then they are gone. */
+  textImports?: TextImport[];
   exports?: ExportTable;
   /** Class names carrying the `@@mutable` compile-time attribute (decorators lane).
    *  Present only when the source used the attribute. A mutable class's instances

@@ -336,6 +336,50 @@ function moduleOrder(
   return order;
 }
 
+/* ------------------------------------------------------- text imports (SH5) */
+
+/**
+ * `import src from "./x.c" with { type: "text" }` — read the file NOW and hand back
+ * `const src = "<its bytes>";`, prepended to the importing module's body.
+ *
+ * This is the whole implementation: after it runs, `src` is an ordinary `const string`
+ * and nothing downstream (checker, ownership, codegen) knows a text import existed. The
+ * bytes reach the `.ll` as an interned string constant, so the compiled program does no
+ * file I/O at run time — which is the point, since this is how the compiler embeds its
+ * own C runtime into a single self-contained executable.
+ *
+ * Two refusals, both of the reject-don't-miscompile kind:
+ *   - an unreadable file is NT1701, like an unresolvable module;
+ *   - a file containing a NUL byte is NT1704. nativets strings are NUL-terminated, so
+ *     inlining one would silently truncate the constant at that byte.
+ */
+function materializeTextImports(program: Program, path: string, read: ReadModule): Stmt[] {
+  const out: Stmt[] = [];
+  for (const t of program.textImports ?? []) {
+    const target = resolveSpecifier(path, t.source);
+    let text: string;
+    try {
+      text = read(target);
+    } catch {
+      throw moduleError("NT1701", `cannot read the text import '${show(target)}' (imported by ${show(path)}:${t.line}:${t.col})`,
+        "a `with { type: \"text\" }` specifier is a path relative to the importing file, like an import specifier — check the path and the extension");
+    }
+    // `String.fromCharCode(0)`, not `"\0"`: that escape is not in nativets' lexer, so the
+    // literal form would decode to the character `0` once this file compiles itself.
+    const nul = text.indexOf(String.fromCharCode(0));
+    if (nul >= 0) {
+      throw moduleError("NT1704", `the text import '${show(target)}' (imported by ${show(path)}:${t.line}:${t.col}) contains a NUL byte at offset ${nul}`,
+        "nativets strings are NUL-terminated, so a NUL in the file would silently truncate the constant. Text imports are for TEXT — read a binary file at run time instead");
+    }
+    out.push({
+      kind: "VarDecl",
+      declKind: "const",
+      decls: [{ name: t.local, annot: "string", init: { kind: "StringLiteral", value: text } }],
+    });
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------------ linker */
 
 /**
@@ -345,7 +389,14 @@ function moduleOrder(
  */
 export function linkProgram(entrySource: string, entryPath?: string, read: ReadModule = defaultRead): Program {
   const first = parse(entrySource, { file: entryPath });
-  if (!first.imports?.length) return first; // ordinary single-module program
+  if (!first.imports?.length) {
+    // Ordinary single-module program — but it may still inline text (SH5), which is a
+    // read, not a graph edge, so it needs no linking pass.
+    if (first.textImports?.length) {
+      first.body.unshift(...materializeTextImports(first, resolve(entryPath ?? "entry.ts"), read));
+    }
+    return first;
+  }
 
   const entry = resolve(entryPath ?? "entry.ts");
   const sources = new Map<string, string>([[entry, entrySource]]);
@@ -387,8 +438,11 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
       }
     }
 
-    // 2. The real parse, with imported types in scope.
+    // 2. The real parse, with imported types in scope. A text import (SH5) becomes a
+    //    `const` at the head of the body BEFORE the rename below, so it is an ordinary
+    //    top-level binding of this module and is mangled like any other.
     const program = parse(source, { typeEnv, file: path });
+    if (program.textImports?.length) program.body.unshift(...materializeTextImports(program, path, read));
 
     // 3. Rename map: imported locals → the exporting module's final names; own
     //    top-level bindings → a module-unique name (the entry keeps its own names,

@@ -16,7 +16,7 @@ import {
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
-  ImportDecl, ExportTable,
+  ImportDecl, TextImport, ExportTable,
 } from "./ast.ts";
 
 /** Options for parsing ONE module of a program (see src/modules.ts). */
@@ -129,6 +129,10 @@ class Parser {
    *  ordinary single-file program, in which case `parseProgram` leaves them off the
    *  Program entirely — so every existing single-module path is untouched. */
   private imports: ImportDecl[] = [];
+  /** SH5: `import src from "./x.c" with { type: "text" }` — a COMPILE-TIME text import.
+   *  Recorded, not resolved: reading the file is the linker's job (src/modules.ts), which
+   *  is what owns path resolution and file I/O. The parser stays pure. */
+  private textImports: TextImport[] = [];
   /** Host FFI (SH4): the canonical names imported from a `node:` builtin module, plus
    *  the `as`-alias→canonical map applied when an identifier is parsed. A `node:` import
    *  binds a compiler BUILTIN, so there is no module to link — it is erased like a type. */
@@ -219,6 +223,7 @@ class Parser {
     // Only attach the module surface when the source actually used it, so a
     // single-file program's Program is byte-identical to what it always was.
     if (this.imports.length) program.imports = this.imports;
+    if (this.textImports.length) program.textImports = this.textImports;
     if (this.exportValues.size || this.exportReexports.size || this.exportTypes.size) {
       const types = new Map<string, Ty>();
       for (const n of this.exportTypes) { const t = this.typeAliases.get(n); if (t) types.set(n, t); }
@@ -607,6 +612,12 @@ class Parser {
     // (the linker still visits the module so its type exports resolve).
     const typeOnly = this.at("type") && this.peek(1).value === "{";
     if (typeOnly) this.next();
+    // `import src from "./x.c" with { type: "text" }` (SH5) — the ONE default-import
+    // shape that is supported, because it is not really an import: the attribute makes
+    // it a compile-time string constant. Recognized by the trailing `with`, so a plain
+    // `import x from "./y.ts"` still gets the NT1017 below.
+    if (!typeOnly && this.peek().type === "ident" && this.peek(1).value === "from"
+        && this.peek(2).type === "str" && this.peek(3).value === "with") return this.parseTextImport(kw);
     if (!this.at("{")) throw nyi(NYI.MODULE, `default import 'import ${this.peek().value} from …' at ${kw.line}:${kw.col}`);
     const clause = this.parseNamedClause();
     if (this.at(",")) throw nyi(NYI.MODULE, `a combined default + named import at ${kw.line}:${kw.col}`);
@@ -622,6 +633,9 @@ class Parser {
       return { kind: "MultiStmt", stmts: [] };
     }
     const source = this.parseSpecifier("from");
+    // An attribute on a NAMED import means something we do not implement (`type: "json"`
+    // binds parsed JSON, not a module) — refused rather than silently ignored.
+    if (this.at("with")) throw nyi(NYI.MODULE, `an import attribute on a named import at ${kw.line}:${kw.col} (only \`import s from "./f.txt" with { type: "text" }\` is supported)`);
     if (this.at(";")) this.eat(";");
     this.imports.push({
       source,
@@ -629,6 +643,50 @@ class Parser {
       line: kw.line,
     });
     return { kind: "MultiStmt", stmts: [] };
+  }
+
+  /**
+   * `import src from "./x.c" with { type: "text" }` (SH5) — a COMPILE-TIME text import.
+   *
+   * The referenced file is NOT a module: it is read verbatim by the linker and the
+   * identifier is bound to a string constant. Only `type: "text"` is implemented — every
+   * other attribute (notably node's `type: "json"`) is NT1017, because accepting one and
+   * treating it as text would silently change what the program means.
+   */
+  private parseTextImport(kw: Token): Stmt {
+    const local = this.expectIdent();
+    this.eat("from");
+    const source = this.parseSpecifier("from");
+    this.eat("with");
+    const attrs = this.parseImportAttributes(kw);
+    if (this.at(";")) this.eat(";");
+    const kind = attrs.get("type");
+    if (kind !== "text") {
+      const shown = [...attrs].map(([k, v]) => `${k}: "${v}"`).join(", ");
+      throw nyi(NYI.MODULE, `the import attribute \`with { ${shown} }\` at ${kw.line}:${kw.col} (only \`type: "text"\` is implemented — it inlines the file as a compile-time string)`);
+    }
+    if (attrs.size !== 1) throw nyi(NYI.MODULE, `extra import attributes alongside \`type: "text"\` at ${kw.line}:${kw.col}`);
+    this.textImports.push({ local, source, line: kw.line, col: kw.col });
+    return { kind: "MultiStmt", stmts: [] }; // erased; the linker materializes the const
+  }
+
+  /** `{ type: "text" }` — an import-attributes clause. Keys may be identifiers or
+   *  strings; every value must be a string literal (the spec allows nothing else). */
+  private parseImportAttributes(kw: Token): Map<string, string> {
+    this.eat("{");
+    const out = new Map<string, string>();
+    while (!this.at("}")) {
+      const key = this.expectKey();
+      this.eat(":");
+      const v = this.peek();
+      if (v.type !== "str") throw parseError(`Expected a string import-attribute value at ${v.line}:${v.col}`);
+      this.next();
+      out.set(key, v.value);
+      if (this.at(",")) this.eat(","); else break;
+    }
+    this.eat("}");
+    if (out.size === 0) throw nyi(NYI.MODULE, `an empty import-attributes clause at ${kw.line}:${kw.col}`);
+    return out;
   }
 
   /** Bind the named members of a `node:` builtin module (SH4). Each one must have a
