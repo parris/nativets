@@ -809,6 +809,44 @@ supported case is node-differential — there is **no runtime divergence**. The 
 | NT1020 | promises / concurrency: `Promise.*`, `new Promise`, `.then`/`.catch`/`.finally`, un-awaited `async` results | later | an event loop — or, the chosen answer, the **actor** model (`spawn`/`send`/`receive`). `async`/`await`/`fetch` themselves are ✅ supported (blocking; see §A) |
 | NT1025 | `console.log` of a value with no node-identical rendering: a **function value** anywhere, or a `Uint8Array`/`TextEncoder`/`TextDecoder`/`Response`/`Headers`/`URL`/`URLSearchParams` handle **nested inside** a printed value | later | objects, class instances, arrays, Map/Set and `Dyn` are ✅ node-exact (util.inspect, see above); this code covers only the leaf types that have no node-identical form here |
 
+### Optional-property objects: a LITERAL argument reshapes, a variable does not
+
+An object type's slot layout is decided by its type, not by the value: a field declared
+`a?: number` is a POINTER to a nullable box, while a field inferred `a: number` is a raw
+double in the slot. So `{a: 1}` and `{a?: number}` are structurally compatible but have
+**different layouts**, and passing one where the other is expected is only safe if
+something rebuilds the value.
+
+For an object **literal** that is exactly what happens — `retypeLiteral` rewrites it in the
+parameter's layout, the same way it has always rewritten a declaration's initializer
+(`const o: Opts = {a: 1}`). So all of these compile and match node:
+
+```ts
+interface Opts { a?: number }
+function f(o: Opts): number { return o.a ?? 0; }
+f({ a: 1 });          // 1
+f({});                // 0
+f({ a: undefined });  // 0
+```
+
+A **non-literal** argument is still rejected with `NT2001`, even though node runs it:
+
+```ts
+const v = { a: 1 };
+f(v);                 // node: 1 — we REFUSE
+```
+
+`v`'s layout was fixed at its own declaration and there is no literal at the call site to
+rewrite; accepting it would need codegen to **copy** the value into the parameter's layout,
+which is a separate feature (structural coercion) and is not implemented. This is a
+deliberate false rejection. The alternative — accepting it on the assignability predicate
+alone, without a reshape — produces a program that dereferences the raw double `1.0` as a
+pointer: it compiled, then died with **exit 255 and empty stdout**. Reject, never
+miscompile. Pinned in `test/optional-props.test.ts`.
+
+**Still refused for the same reason:** the same shape in RETURN position
+(`function g(): Opts { return { a: 1 }; }`) — a known gap, not a decision.
+
 ### Host FFI (SH4) — `node:fs` / `node:child_process`
 
 A `node:` import binds a **compiler builtin**, not a file: there is no `node_modules`, no JS to
