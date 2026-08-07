@@ -238,8 +238,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
       (byCode[code] ??= []).push(m);
     }
     // NT1017 (`node:fs`) is the SH4 host-FFI story; NT1027 is the regex refusal; the
-    // NT0001 survivors are a template-literal TYPE (`\`${string}[]\`` in ast.ts, which
-    // coverage.ts sees through the link) and `satisfies` in parser.ts.
+    // NT0001 survivors are all ONE construct — a template-literal TYPE (`\`${string}[]\``
+    // in ast.ts, which coverage.ts and coverage-preprocess.ts see through the link).
+    // `satisfies` in parser.ts used to be the second; the satisfies lane cleared it.
     expect(Object.keys(byCode).sort()).toEqual(
       ["NT0001", "NT1009", "NT1014", "NT1015", "NT1017", "NT1606"],
     );
@@ -259,7 +260,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // as character scanning (nativets has no RegExp, so its source may not use one).
     // `test/no-regex.test.ts` is the shrink-only lint that keeps it that way.
     expect(byCode["NT1027"]).toBeUndefined();
-    expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
+    // `parser.ts` joined this bucket by MOVING OUT of NT0001: the `satisfies` lane taught
+    // the parser `expr satisfies T`, so `… satisfies ExportTable` parses and the module
+    // now dies further in, on optional element access `?.[]`. A blocker moving from the
+    // anonymous bucket to a named one is the SH0 gradient working.
+    expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "ownership.ts", "parser.ts"]);
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not
@@ -269,7 +274,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     expect(byCode["NT2001"]).toBeUndefined();
     expect(byCode["NT1606"]!.sort()).toEqual(["diagnostics.ts"]);
     expect(byCode["NT0001"]!.sort()).toEqual(
-      ["ast.ts", "coverage-preprocess.ts", "coverage.ts", "parser.ts"],
+      ["ast.ts", "coverage-preprocess.ts", "coverage.ts"],
     );
   });
 
