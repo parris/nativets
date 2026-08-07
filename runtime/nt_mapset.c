@@ -159,6 +159,30 @@ NtColl *nt_set_remove_slot(NtColl *c, int ktype, int64_t kslot) { return coll_re
 typedef struct NtArrayOpaque NtArrayOpaque;
 extern NtArrayOpaque *nt_arr_new(double capd);
 extern double nt_arr_push(NtArrayOpaque *a, int64_t slot);
+extern double nt_arr_len(NtArrayOpaque *a);
+extern int64_t nt_arr_get(NtArrayOpaque *a, double idxd);
+
+/* `new Set(array)` — bulk construction. Routed through coll_put, the SAME path
+ * `.add` takes, so dedup (SameValueZero, via ntk) and the insertion-order log are
+ * maintained identically: a duplicate keeps its FIRST position and does not append. */
+NtColl *nt_coll_set_from_arr(NtArrayOpaque *a, int ktype) {
+  NtColl *c = nt_coll_set_new();
+  int64_t n = (int64_t)nt_arr_len(a);
+  for (int64_t i = 0; i < n; i++) c = coll_put(c, ntk(ktype, nt_arr_get(a, (double)i)), 0, 0);
+  return c;
+}
+
+/* `new Map(otherMap)` — walk the source's insertion-order log and re-put each pair,
+ * so the copy's own log is built in the same order. A FRESH handle, as node's copy is
+ * (`new Map(a) === a` is false, and `===` on a Map is handle identity here). */
+NtColl *nt_coll_map_from_coll(NtColl *src) {
+  NtColl *c = nt_coll_map_new();
+  for (int64_t i = 0; i < src->n; i++) {
+    NtKey k; k.type = src->buf->ktype[i]; k.slot = src->buf->keys[i];
+    c = coll_put(c, k, nt_map_get(src->m, k), 1);
+  }
+  return c;
+}
 
 NtArrayOpaque *nt_coll_keys(NtColl *c) {
   NtArrayOpaque *out = nt_arr_new((double)(c->n > 0 ? c->n : 1));

@@ -243,18 +243,24 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1009", "NT1014", "NT1015", "NT1606"],
+      ["NT1009", "NT1015", "NT1606", "NT2001"],
     );
-    // The NT1017 bucket is EMPTY for TWO reasons, landed a session apart. The text-import
-    // lane taught the compiler the bun text-asset import (`import runtimeSource from
-    // "…/runtime.c" with {type:"text"}`); then the export-async lane cleared the last one,
-    // `export async function` at driver.ts:502. Both cli.ts and driver.ts are past it.
+    // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
+    // right about their own change and wrong about the other's: main had cleared NT0001
+    // and NT1017, this lane had cleared NT1014, and neither could see the other.
+    //
+    // NT1017 is empty for two reasons landed a session apart — the text-import lane
+    // (`import … with {type:"text"}`), then the export-async lane clearing
+    // `export async function` at driver.ts:502.
     expect(byCode["NT1017"]).toBeUndefined();
     // NT0001 is a SHRINK-ONLY ratchet from here: a new parse-level blocker means a lane
     // regressed the frontier, not that the bucket legitimately grew.
     expect(byCode["NT0001"]).toBeUndefined();
-    // Unmasked by the lexer rewrite: `new Set([...])` for REGEX_AFTER_KEYWORD.
-    expect(byCode["NT1014"]!.sort()).toEqual(["lexer.ts"]);
+    // RATCHET MOVE (collections): NT1014 is now EMPTY. It held lexer.ts on
+    // `new Set([...])` for REGEX_AFTER_KEYWORD; `new Set(iterable)` compiles now, so the
+    // module walks on to what sat behind it — NT2001, an object literal where a Map is
+    // annotated. coverage-preprocess.ts left the same bucket and stops on NT1606.
+    expect(byCode["NT1014"]).toBeUndefined();
     // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
     // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
     // working, not a regression — the phase table above is what must never go backwards.
@@ -285,7 +291,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // narrow the terms to its right. It does now, and for dotted names too, so
     // `formatDiagnostic` type-checks and the module stops on the thing behind it:
     // NT1606, `[...diag.spans].sort(…)` — the immutable-data refusal.
-    expect(byCode["NT2001"]).toBeUndefined();
+    // …and it is REFILLED by the collections lane, with a different module and a real
+    // (not false-positive) blocker: lexer.ts now clears `new Set([...])` and stops on
+    // `ESCAPES` declared `Map<string, string>` but initialized with an OBJECT LITERAL.
+    expect(byCode["NT2001"]!.sort()).toEqual(["lexer.ts"]);
     expect(byCode["NT1606"]!.sort()).toEqual(["diagnostics.ts"]);
     // (The NT0001 membership assertion that stood here is gone: the bucket is empty, and
     // the shrink-only `toBeUndefined` above is now the thing that guards it.)

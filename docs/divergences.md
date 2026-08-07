@@ -441,6 +441,24 @@ Likewise refused, all with the working spelling in the hint:
 - `.entries()` outside the `[k, v]` loop (same reason).
 - `.forEach` on a Map/Set — use the (identically ordered) `for-of`.
 
+### `new Set(iterable)` / `new Map(iterable)`: which sources are accepted
+
+Bulk construction is **node-matched** for the sources we accept — the runtime folds the source
+through the same add/put path `.add`/`.set` take, so dedup (SameValueZero: `NaN` dedupes against
+itself, `-0` normalizes to `+0`) and the insertion-order log are maintained identically, and the
+first occurrence of a duplicate keeps its position. Accepted: `new Set(array)`, `new Set(otherSet)`,
+`new Map(otherMap)`. A copy is a **fresh handle**, as node's is — `new Set(a) === a` is `false`
+(`===` on a collection is handle identity here, so aliasing the source would have been visible).
+
+Refused:
+- **`new Set(string)`** (`NT1014`). node iterates a string by **code point** — `new Set("a😀b")`
+  has size 3 — while our string `for-of` walks **bytes**, which would silently build a 6-element
+  set. A `string` cannot be proven ASCII at compile time, so the refusal is unconditional; the
+  hint points at `new Set(s.split(""))` for ASCII input.
+- **`new Map([[k, v], …])`**, the entries form (`NT1014`) — it needs the `[key, value]` **tuple
+  type** we do not have (`["a", 1]` is already `NT2001`, "array elements must share a type").
+  Use `.set`.
+
 ### Ordering: `.toSorted()`/`.toReversed()` instead of `.sort()`/`.reverse()`
 
 node's `.sort()` sorts **in place**, which the immutable-by-default model forbids, so `.sort()`

@@ -230,7 +230,9 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // landed compile-time text imports — `export async function` at driver.ts:502 rather
   // than the text import at driver.ts:27. See the history note below.
   "ast.ts": { rung: 0, code: "NT0001", blame: "self" },
-  "lexer.ts": { rung: 0, code: "NT1014", blame: "self" },
+  // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
+  // `new Set(iterable)` compile; the module now stops on the ESCAPES object literal.
+  "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
   "diagnostics.ts": { rung: 0, code: "NT1606", blame: "self" },
   "parser.ts": { rung: 0, code: "NT0001", blame: "self" },
   "checker.ts": { rung: 0, code: "NT1009", blame: "self" },
@@ -267,9 +269,11 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
  * rung FLOOR held — no regressions — and five of the twelve moved to a different, deeper
  * blocker. What the movement shows:
  *
- *   - `NT1027` is an EMPTY bucket, as main claims. What sat behind it: `lexer.ts` now
- *     dies on `new Set([...])` (NT1014) at src/lexer.ts:101 — the regex-lexing support
- *     table survived the removal of the regex literals themselves.
+ *   - `NT1027` is an EMPTY bucket, as main claims. What sat behind it: `lexer.ts` then
+ *     died on `new Set([...])` (NT1014) at src/lexer.ts:101 — the regex-lexing support
+ *     table survived the removal of the regex literals themselves. (SUPERSEDED — the
+ *     collections lane made `new Set(iterable)` compile; `lexer.ts` walked on to
+ *     NT2001, the `ESCAPES` `Map<string, string>` initialized with an object literal.)
  *   - `NT1017` did NOT clear for `driver.ts`. SH4 cleared `node:fs`; what is left is
  *     `import runtimeSource from "../runtime/runtime.c" with { type: "text" }`
  *     (src/driver.ts:27) — the bun-specific text import that embeds the C runtime into

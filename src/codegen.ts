@@ -373,11 +373,13 @@ const DECLARES = [
   // The TS-level handle is nt_mapset.c's NtColl (HAMT + insertion-order key log),
   // so construction/size/iteration go through the nt_coll_* wrappers.
   "declare ptr @nt_coll_map_new()",
+  "declare ptr @nt_coll_map_from_coll(ptr)",
   "declare ptr @nt_map_put_slot(ptr, i32, i64, i64)",
   "declare i64 @nt_map_get_slot(ptr, i32, i64)",
   "declare i32 @nt_map_has_slot(ptr, i32, i64)",
   "declare ptr @nt_map_remove_slot(ptr, i32, i64)",
   "declare ptr @nt_coll_set_new()",
+  "declare ptr @nt_coll_set_from_arr(ptr, i32)",
   "declare ptr @nt_set_add_slot(ptr, i32, i64)",
   "declare i32 @nt_set_has_slot(ptr, i32, i64)",
   "declare ptr @nt_set_remove_slot(ptr, i32, i64)",
@@ -2187,8 +2189,33 @@ class FnGen {
       }
       case "NewExpr": {
         // Immutable collections (B2): fresh empty handle from the nt_hamt runtime.
-        if (e.callee === "Map") { const m = this.fresh(); this.emit(`${m} = call ptr @nt_coll_map_new()`); return { v: m, ty: e.ty! }; }
-        if (e.callee === "Set") { const s = this.fresh(); this.emit(`${s} = call ptr @nt_coll_set_new()`); return { v: s, ty: e.ty! }; }
+        if (e.callee === "Map") {
+          const m = this.fresh();
+          if (e.args.length === 1) { // `new Map(otherMap)` — a fresh, insertion-ordered copy
+            const src = this.genExpr(e.args[0]!);
+            this.emit(`${m} = call ptr @nt_coll_map_from_coll(ptr ${src.v})`);
+            return { v: m, ty: e.ty! };
+          }
+          this.emit(`${m} = call ptr @nt_coll_map_new()`);
+          return { v: m, ty: e.ty! };
+        }
+        if (e.callee === "Set") {
+          const s = this.fresh();
+          if (e.args.length === 1) {
+            // `new Set(array)` — the runtime folds the array through the same
+            // add path, so dedup and insertion order match node exactly. A Set
+            // source is materialized to its insertion-ordered key array first;
+            // that also makes the result a FRESH handle, as node's copy is
+            // (`new Set(a) === a` is false, and `===` on a Set is identity here).
+            const src = this.genExpr(e.args[0]!);
+            let arr = src.v;
+            if (isSetTy(src.ty)) { const k = this.fresh(); this.emit(`${k} = call ptr @nt_coll_keys(ptr ${src.v})`); arr = k; }
+            this.emit(`${s} = call ptr @nt_coll_set_from_arr(ptr ${arr}, i32 ${this.keyTag(setElemTy(e.ty!))})`);
+            return { v: s, ty: e.ty! };
+          }
+          this.emit(`${s} = call ptr @nt_coll_set_new()`);
+          return { v: s, ty: e.ty! };
+        }
         // Bytes (stdlib batch 2): `new Uint8Array(n)` -> zero-filled; `new Uint8Array([..])`
         // -> from the number array (each ToUint8). TextEncoder/TextDecoder are stateless
         // (no runtime object), represented by a null sentinel ptr.
