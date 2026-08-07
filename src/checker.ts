@@ -563,6 +563,13 @@ class Checker {
    * the guard's own facts on the branch selected by `positive`, plus any `x!` assertion
    * evaluated unconditionally in the test (which holds on BOTH branches). Facts about a
    * name the region assigns are dropped.
+   *
+   * The GUARD ITSELF is scanned for assignments too, not just the region: in
+   * `!x || (x = y) !== undefined || x.length === 0` the assignment runs BETWEEN the proof
+   * and the use, so by `x.length` the binding holds something the proof was never about
+   * (TypeScript refuses the same shape — `typeGuardsInRightOperandOfOrOrOperator.ts`,
+   * `foo2`). Evaluation order inside the guard is not modeled, so ANY assignment in it
+   * drops the fact: over-conservative, never wrong.
    */
   private factsFor(test: Expr, scope: Scope, positive: boolean, region: Stmt[], guards = true): NarrowFact[] {
     const out: NarrowFact[] = [];
@@ -570,6 +577,7 @@ class Checker {
     this.assertFacts(test, scope, out);
     if (!out.length) return out;
     const assigned = new Set<string>();
+    collectAssignedStmts(exprRegion(test), assigned, assigned, false);
     collectAssignedStmts(region, assigned, assigned, false);
     return out.filter((f) => !assigned.has(f.name) && !this.closureAssigned.has(f.name));
   }

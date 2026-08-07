@@ -438,6 +438,55 @@ console.log(render(zero, src));
 console.log(render(none, src));
 `);
   });
+
+  // The mixed-precedence shape: `&&` binds tighter than `||`, so the fact established by
+  // the `&&`'s left operand covers its right operand and STOPS at the `||`. TypeScript:
+  // controlFlowBinaryAndExpression.ts + controlFlowBinaryOrExpression.ts composed, which
+  // is the `a && a.b || c` idiom.
+  test("`a && a.b || c` — the `&&` fact reaches `a.b` and stops at the `||`", async () => {
+    await expectNode(`
+function pick(a: { b: number } | undefined, c: boolean): boolean {
+  return !!a && a.b > 0 || c;
+}
+let a: { b: number } | undefined = { b: 5 };
+console.log(pick(a, false));
+a = { b: -5 };
+console.log(pick(a, false));
+console.log(pick(a, true));
+a = undefined;
+console.log(pick(a, false));
+console.log(pick(a, true));
+`);
+  });
+
+  // SOUNDNESS. Narrowing a dotted name is only safe because the object cannot be
+  // rewritten in place; a `@@mutable` record can be, so it gets no path fact and the
+  // read is still refused. (An unsound narrowing here would hand codegen a bare value
+  // where a nullish box is sitting — the silent wrong answer the prime directive bans.)
+  test("a `@@mutable` record's field is NEVER narrowed", () => {
+    expectRejected(`
+@@mutable
+type Cell = { n: number[] | undefined };
+const c: Cell = { n: [1, 2] };
+if (c.n) {
+  c.n = undefined;
+  console.log(c.n.length);
+}
+`, "NT2001", "'c.n' is possibly undefined");
+  });
+
+  // SOUNDNESS. TypeScript: typeGuardsInRightOperandOfOrOrOperator.ts `foo2`/`foo3`
+  // ("modify x in right hand operand" — the narrowing stops). Here the assignment sits in
+  // a MIDDLE term of the chain, so it runs between the proof and the use: at `x.length`
+  // the binding holds `y`, not the value `!x` was about. node throws a TypeError on that
+  // line, so a narrowing here would be a proof of something false.
+  test("an assignment anywhere in the guard chain invalidates the narrowing", () => {
+    expectRejected(`
+let x: number[] | undefined = [1, 2];
+const y: number[] | undefined = undefined;
+console.log(!x || (x = y) !== undefined || x.length === 0);
+`, "NT2001", "'x' is possibly undefined");
+  });
 });
 
 /*
