@@ -317,7 +317,7 @@ so a compiler written with regexes cannot compile itself. All **29** regex liter
 
 | Module | Before | After |
 |---|---|---|
-| `diagnostics.ts` | `parse` — `NT1027` `/^\s*/` | **`ir`** — `NT2001`, `diag.spans.length` after `!diag.spans \|\|` (nullable narrowing does not flow across `\|\|`) |
+| `diagnostics.ts` | `parse` — `NT1027` `/^\s*/` | **`ir`** — `NT2001`, `diag.spans.length` after `!diag.spans \|\|` (nullable narrowing does not flow across `\|\|`) — **since cleared, see below** |
 | `ownership.ts` | `parse` — `NT1027` `/\$inner$/` | **`ir`** — `NT1009`, the scalar union in `checker.ts` via the link |
 | `lexer.ts` | `parse` — `NT1027` the `@@name` pragma | **`ir`** — `NT1014`, `new Set([…])` for `REGEX_AFTER_KEYWORD` |
 | `coverage-preprocess.ts` | `parse` — `NT1027` `/[A-Za-z_$]/` | **`ir`** — `NT0001`, the same template-literal TYPE as `ast.ts` |
@@ -339,6 +339,47 @@ weight is (a) old-vs-new token streams over 1,105 files including 702 borrowed t
 cases, (b) exhaustive BMP sweeps of every rewritten class, and (c) compiling each new
 helper **with nativets itself** — which is what caught the two blockers this lane nearly
 planted (a nullable-returning callback type, and an `arr.push`).
+
+### Re-measured after SHORT-CIRCUIT NARROWING — the `NT2001` bucket is empty
+
+The one `NT2001` on the frontier was a **false positive**: `src/diagnostics.ts:74`
+
+```ts
+if (!diag.spans || diag.spans.length === 0 || !source) {
+```
+
+is correct TypeScript and correct at runtime — the right operand of `||` only runs when
+`!diag.spans` was false — but the checker did not carry a guard's fact into the terms to
+its right, and could not narrow a **dotted name** at all. Both are fixed:
+
+- a bare truthiness test is a guard like `!== undefined` (TypeScript's
+  `controlFlowTruthiness.ts`), so `!x` on the left of `||` proves `x` for what follows;
+- a narrowing fact is about an access **path** (root binding + dotted suffix), not just a
+  name (`discriminantPropertyCheck.ts`). Sound because nativets objects are immutable
+  unless `@@mutable`: outside that tag the only way `d.spans` can change is a new value
+  bound to `d`. `@@mutable` receivers and `this` get no path facts.
+
+| Module | Before | After |
+|---|---|---|
+| `diagnostics.ts` | `ir` — `NT2001`, `diag.spans.length` after `!diag.spans \|\|` | `ir` — **`NT1606`**, `[...diag.spans].sort(…)` — arrays are immutable |
+
+Nothing else moved: `cli.ts` still dies on `'source' declared string but initialized with
+undefined` and `ownership.ts` on `'NO_MUTABLE' is not defined`, both unrelated to
+narrowing. Two adjacent gaps this measurement exposed, neither taken:
+
+- the **value-returning** `a && a.b` (node: `undefined` or a number) is still refused —
+  `&&`/`||` require matching `boolean`/`number`/`string` operands, so the narrowing
+  reaches `a.b` but the result has no type yet. Pinned as a refusal in
+  `test/narrowing.test.ts`;
+- a **string literal is not assignable to a `?Ustring` parameter** (`f("abc")` where the
+  parameter is `string | undefined`), which forces every fixture here to bind through an
+  annotated local.
+
+The same lane fixed a real soundness hole it found on the way: the region scanned for
+invalidating assignments covered only the code a fact *covers*, not the guard itself, so
+`!x || (x = y) !== undefined || x.length === 0` proved `x` present and then reassigned it
+before the use. node throws a `TypeError` there; nativets panicked at the unwrap rather
+than inventing a value, but a false proof is a false proof. The guard is now scanned too.
 
 ---
 
