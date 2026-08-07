@@ -17,6 +17,21 @@ import { NTError } from "../src/diagnostics.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
+/** Compile `src` through the real CLI and capture exactly what a user would see. */
+function cliEmit(src: string): { out: string; code: number } {
+  const dir = mkdtempSync(join(tmpdir(), "ntcodes-"));
+  try {
+    const f = join(dir, "case.ts");
+    writeFileSync(f, src);
+    const r = spawnSync("bun", ["run", join(HERE, "..", "src", "cli.ts"), "emit", f], {
+      encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+    });
+    return { out: `${r.stdout ?? ""}${r.stderr ?? ""}`, code: r.status ?? -1 };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /*
  * The NT code space is the project's public taxonomy: `coverage` groups blockers BY code,
  * and docs/divergences.md indexes by code. Two features sharing one code silently corrupts
@@ -103,21 +118,6 @@ describe("multi-span diagnostics", () => {
  * What is asserted is the shape of the refusal and a nonzero exit.
  */
 describe("no internal error reaches the user", () => {
-  /** Compile `src` through the real CLI and capture what a user would see. */
-  function cli(src: string): { out: string; code: number } {
-    const dir = mkdtempSync(join(tmpdir(), "ntcodes-"));
-    try {
-      const f = join(dir, "case.ts");
-      writeFileSync(f, src);
-      const r = spawnSync("bun", ["run", join(HERE, "..", "src", "cli.ts"), "emit", f], {
-        encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
-      });
-      return { out: `${r.stdout ?? ""}${r.stderr ?? ""}`, code: r.status ?? -1 };
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
-
   /** The shape every refusal must have: a code, a hint, a nonzero exit, NO stack trace. */
   function expectClean(out: string, code: number, ntCode: string): void {
     expect(out).toContain(`error[${ntCode}]`);
@@ -144,7 +144,7 @@ describe("no internal error reaches the user", () => {
   ];
   for (const [name, src] of THROWS) {
     test(`NT1004, not a stack trace: ${name}`, () => {
-      const { out, code } = cli(src);
+      const { out, code } = cliEmit(src);
       expectClean(out, code, "NT1004");
     });
   }
@@ -152,7 +152,7 @@ describe("no internal error reaches the user", () => {
   // The same construct INSIDE a try in the same function still compiles — the refusal is
   // scoped to what codegen genuinely cannot lower, and did not swallow the working case.
   test("a throw inside a try in the same function still compiles", () => {
-    const { out, code } = cli(`try { throw new Error("boom"); } catch (e) { console.log("caught"); }\n`);
+    const { out, code } = cliEmit(`try { throw new Error("boom"); } catch (e) { console.log("caught"); }\n`);
     expect(code).toBe(0);
     expect(out).not.toContain("error[");
   });
@@ -186,4 +186,32 @@ describe("broken compiler invariants are labelled as OUR bug, not an NT code", (
     const src = readFileSync(join(HERE, "..", "src", "codegen.ts"), "utf8");
     expect(src).not.toContain("throw new Error(");
   });
+});
+
+/*
+ * The lexer's own errors. `LexError` is a plain `Error` subclass (it must stay one: it
+ * lives in the compiler's OWN source, and `extends Error` is the only inheritance nativets
+ * compiles), so every lexical failure used to reach the user as a raw Bun stack trace
+ * naming src/lexer.ts — the same contract violation as codegen's, in a module reached by
+ * something as ordinary as a missing closing quote.
+ *
+ * node rejects all of these too (SyntaxError), so they are syntax errors, not deferred
+ * features: NT0001, the code every other parse failure already uses.
+ */
+describe("lexical errors are NT0001, not a stack trace", () => {
+  const LEXICAL: [string, string][] = [
+    ["unterminated string", 'const s = "unterminated;\nconsole.log(s);\n'],
+    ["unterminated template", "const s = `unterminated;\nconsole.log(s);\n"],
+    ["invalid \\x escape", 'const s = "\\xZZ";\nconsole.log(s);\n'],
+    ["unexpected character", "const a = 1 # 2;\nconsole.log(a);\n"],
+  ];
+  for (const [name, src] of LEXICAL) {
+    test(`NT0001, not a stack trace: ${name}`, () => {
+      const { out, code } = cliEmit(src);
+      expect(out).toContain("error[NT0001]");
+      expect(code).not.toBe(0);
+      expect(out).not.toContain("    at ");
+      expect(out).not.toContain("src/lexer.ts:");
+    });
+  }
 });
