@@ -37,29 +37,37 @@ import { sourceToIR } from "../src/driver.ts";
 const SRC = new URL("../src/", import.meta.url);
 const read = (m: string) => readFileSync(new URL(m, SRC), "utf8");
 
-/** Pipeline phases, in order. A module's score is how far it gets. */
-const PHASES = ["lex", "parse", "ir"] as const;
+/**
+ * Pipeline phases a module can COMPLETE, in order. A module's score is the last one
+ * it finished — so `lexed` means it tokenized and then failed to parse, and `ir` means
+ * `sourceToIR` RETURNED. `ir` is exactly SH6 rung 1 (test/sh6.test.ts), which carries
+ * the same measurement further (rung 2 links, rung 3 differentials against bun).
+ *
+ * The scale used to be failure-POINT named (`lex`/`parse`/`ir`) and its top rung was
+ * unreachable-by-failure: see the "phase scale itself is honest" tests below.
+ */
+const PHASES = ["none", "lexed", "parsed", "ir"] as const;
 type Phase = (typeof PHASES)[number];
 const rank = (p: Phase) => PHASES.indexOf(p);
 
-/** The furthest phase `module` survives, plus the first error that stopped it. */
+/** The furthest phase `module` completes, plus the first error that stopped it. */
 function phaseOf(module: string): { phase: Phase; error: string } {
   const source = read(module);
   try {
     lex(source);
   } catch (e) {
-    return { phase: "lex", error: msg(e) };
+    return { phase: "none", error: msg(e) };
   }
   try {
     parse(source);
   } catch (e) {
-    return { phase: "parse", error: msg(e) };
+    return { phase: "lexed", error: msg(e) };
   }
   try {
     // The whole-program link + check + ownership + codegen, entered at this module.
     sourceToIR(source, new URL(module, SRC).pathname);
   } catch (e) {
-    return { phase: "ir", error: msg(e) };
+    return { phase: "parsed", error: msg(e) };
   }
   return { phase: "ir", error: "" };
 }
@@ -67,10 +75,14 @@ function phaseOf(module: string): { phase: Phase; error: string } {
 const msg = (e: unknown) => String((e as Error)?.message ?? e).split("\n")[0]!.trim();
 
 /**
- * BASELINE — the furthest phase each module reaches today. `lex` means it does not
- * even tokenize; `ir` with no error would mean it produced LLVM IR.
+ * BASELINE — the furthest phase each module completes today. `none` means it does not
+ * even tokenize; `ir` means it produced LLVM IR.
  *
- * HISTORY. This table used to read `lex` for 8 of the 12: nativets has no `RegExp`
+ * NOTHING IS AT `ir`. Not one of the twelve modules produces IR, and the five rows that
+ * used to claim it were an artifact of the broken top rung, not progress. Read this
+ * table as "how far short", never as "how far along".
+ *
+ * HISTORY. This table used to read `none` for 8 of the 12: nativets has no `RegExp`
  * (a deliberate Tier-C refusal, docs/divergences.md) and the lexer did not tokenize
  * `/.../` at all, so the first `\` inside one was an "Unexpected character" that
  * killed the whole file. The coverage histogram could not show this, because its
@@ -83,33 +95,63 @@ const msg = (e: unknown) => String((e as Error)?.message ?? e).split("\n")[0]!.t
  * the blocker-tier test below.
  */
 const BASELINE: Record<string, Phase> = {
-  "ast.ts": "parse",
+  "ast.ts": "lexed",
   // RATCHET MOVE (regex removal): the scanner's seven character-class regexes are now
-  // spelled-out predicates. lexer.ts reaches `ir` and stops on NT1014 — `new
+  // spelled-out predicates. lexer.ts parses and stops in the checker on NT1014 — `new
   // Set([...])` for REGEX_AFTER_KEYWORD, which predates this change and was masked by it.
-  "lexer.ts": "ir",
+  "lexer.ts": "parsed",
   // RATCHET MOVE (regex removal): `formatDiagnostic`'s `^\s*` was the module's first
-  // blocker. Rewritten as a character scan, it now reaches `ir` and stops on the next
-  // thing behind it — NT2001, `diag.spans.length` in `!diag.spans || diag.spans.length
-  // === 0`, i.e. nullable narrowing does not flow across `||`.
-  "diagnostics.ts": "ir",
-  "parser.ts": "parse",
-  "checker.ts": "parse",
-  "codegen.ts": "parse",
-  "coverage.ts": "ir",
+  // blocker. Rewritten as a character scan, it now parses and stops on the next thing
+  // behind it — NT2001, `diag.spans.length` in `!diag.spans || diag.spans.length === 0`,
+  // i.e. nullable narrowing does not flow across `||`.
+  "diagnostics.ts": "parsed",
+  "parser.ts": "lexed",
+  "checker.ts": "lexed",
+  "codegen.ts": "lexed",
+  "coverage.ts": "parsed",
   // RATCHET MOVE (regex removal): `/\$inner$/` was ownership.ts's first blocker. Now it
   // lexes and parses, and stops where the whole-program link takes it — NT1009, the
   // scalar union in checker.ts, i.e. the same crux as checker.ts itself.
-  "ownership.ts": "ir",
-  "driver.ts": "parse",
-  "cli.ts": "parse",
-  "modules.ts": "parse",
+  "ownership.ts": "parsed",
+  "driver.ts": "lexed",
+  "cli.ts": "lexed",
+  "modules.ts": "lexed",
   // RATCHET MOVE (regex removal): the coverage preprocess is itself now regex-free, so
-  // the module whose job is to make `src/` measurable is measurable too. It reaches `ir`
-  // and stops on the SAME NT0001 as ast.ts — the template-literal TYPE — which it sees
+  // the module whose job is to make `src/` measurable is measurable too. It parses and
+  // stops on the SAME NT0001 as ast.ts — the template-literal TYPE — which it sees
   // through the whole-program link.
-  "coverage-preprocess.ts": "ir",
+  "coverage-preprocess.ts": "parsed",
 };
+
+describe("the phase scale itself is honest", () => {
+  /*
+   * REGRESSION. `phaseOf` used to return `phase: "ir"` on BOTH branches of its last
+   * try/catch — the catch AND the success path — so its top rung could not tell
+   * "produced LLVM IR" from "entered the IR pipeline and threw". Every module that
+   * merely lexed and parsed scored `ir`, the BASELINE below recorded `ir` for five of
+   * them, and docs/self-hosting.md then repeated that as "coverage.ts reaches IR".
+   * None of them reach IR. Nothing reaches IR.
+   *
+   * The scale is now COMPLETED phases, which is what "furthest phase reached" always
+   * meant to a reader: a module scores `parsed` when it parsed and then failed, and
+   * scores `ir` only when `sourceToIR` RETURNED. `ir` here is exactly SH6 rung 1
+   * (test/sh6.test.ts) — one vocabulary, two granularities, no third opinion.
+   */
+  test("`ir` means sourceToIR returned, and carries no error", () => {
+    for (const module of Object.keys(BASELINE)) {
+      const { phase, error } = phaseOf(module);
+      expect(phase === "ir" ? error : "").toBe("");
+    }
+  });
+
+  test("a module that throws inside sourceToIR does not score `ir`", () => {
+    // diagnostics.ts lexes and parses, then dies in the checker. Under the old scale
+    // it scored `ir`; the honest answer is `parsed`.
+    const { phase, error } = phaseOf("diagnostics.ts");
+    expect(phase).toBe("parsed");
+    expect(error).toContain("NT");
+  });
+});
 
 describe("SH0: bootstrap frontier (ratchet — a module may improve, never regress)", () => {
   for (const [module, floor] of Object.entries(BASELINE)) {
@@ -153,7 +195,7 @@ describe("SH1 tail: an executable script lexes", () => {
 
 describe("SH0: what actually blocks stage-1, measured (not the coverage heuristic)", () => {
   test("regex literals are the dominant blocker — 8 of 12 modules die in the LEXER", () => {
-    const stuckAtLex = Object.keys(BASELINE).filter((m) => phaseOf(m).phase === "lex");
+    const stuckAtLex = Object.keys(BASELINE).filter((m) => phaseOf(m).phase === "none");
     // Every one of these fails on the same construct.
     for (const m of stuckAtLex) {
       expect(phaseOf(m).error).toContain("Unexpected character");
