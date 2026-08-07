@@ -252,6 +252,48 @@ export function isUnionTy(t: Ty): boolean { return typeof t === "string" && t.st
 export function unionMembers(t: Ty): Ty[] { return splitTopLevel(t.slice(2, -1), "|") as Ty[]; }
 export function makeUnionTy(members: Ty[]): Ty { return `U<${members.join("|")}>` as Ty; }
 
+/* ============================================================
+ * GENERAL unions — arms that are not all object types, so nothing INSIDE the value
+ * can tell them apart. Encoded `G<a|b>`, deliberately a DIFFERENT prefix from the
+ * discriminated `U<…>`: a `U<…>` value is the bare member pointer, so sharing the
+ * prefix would let every existing `isUnionTy` site apply unboxed-object logic to
+ * what is in fact a box, which is a miscompile rather than an error.
+ *
+ * REPRESENTATION: a 2-slot heap block [tag, value] — the same shape as the A2
+ * nullable box — where `tag` is the member's index in the CANONICAL member order
+ * and `value` is the arm packed by the ordinary `toSlot`. The tag is an index, so
+ * the order is load-bearing at runtime: members are SORTED and de-duplicated by
+ * `makeGeneralUnionTy`, which makes `number | string` and `string | number` the
+ * same `Ty` with the same tag numbering (`===` stays type comparison, and a value
+ * can cross between the two spellings without renumbering).
+ * ============================================================ */
+export function isGeneralUnionTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("G<") && t.endsWith(">"); }
+export function generalUnionMembers(t: Ty): Ty[] { return splitTopLevel(t.slice(2, -1), "|") as Ty[]; }
+/** Canonicalize: de-duplicate and sort, so member order never depends on spelling. */
+export function makeGeneralUnionTy(members: Ty[]): Ty {
+  return `G<${[...new Set(members)].sort().join("|")}>` as Ty;
+}
+/** The tag a member carries in `t`, or -1 when it is not a member. */
+export function generalUnionTagOf(t: Ty, member: Ty): number { return generalUnionMembers(t).indexOf(member); }
+/**
+ * What `typeof` reports for a value of this static type — the ONLY discriminant a
+ * general union has, so it is also what decides whether one can be represented.
+ */
+export function typeofTagOf(t: Ty): string {
+  if (t === "number" || t === "string" || t === "boolean") return t;
+  return "object";
+}
+/**
+ * An arm a general union may carry. Kept deliberately narrow: only shapes whose
+ * `typeof` is a compile-time constant AND whose value round-trips through the
+ * box's `toSlot`/`fromSlot` unchanged. Nullables are excluded — `T | undefined`
+ * is already its own encoding and nesting the two boxes would give a value two
+ * different representations.
+ */
+export function isGeneralUnionArm(t: Ty): boolean {
+  return t === "number" || t === "string" || t === "boolean";
+}
+
 /**
  * The discriminant of a union: a field that is present at the SAME index in every
  * member, string-literal-typed in every member, with a DISTINCT value per member.

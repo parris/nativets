@@ -342,8 +342,11 @@ describe("what a union may BE — refused, never guessed at", () => {
     expect(messageOf(moved)).toContain("SAME position");
   });
 
-  test("a SCALAR union is still NT1009 — only object unions are represented", () => {
-    expect(codeOf(`function f(x: number | string): void { console.log(x); }\nf(1);\n`)).toBe("NT1009");
+  test("a SCALAR union is now REPRESENTED (the general-union lane); mixing an object arm in is not", () => {
+    // Was NT1009 before this lane — a scalar union is now the `G<…>` tagged box.
+    expect(codeOf(`const x: number | string = 1;\nconsole.log(x);\n`)).toBe(null);
+    // A general union may only carry arms the BOX can hold and `typeof` can separate;
+    // an object arm is neither, so this stays refused rather than half-represented.
     expect(codeOf(`type T = number | { kind: "a" };\nconst v: T = 1;\nconsole.log(v);\n`)).toBe("NT1009");
     // an INTERSECTION is unchanged (still refused)
     expect(codeOf(`type T = { a: number } & { b: number };\nconst v: T = { a: 1, b: 2 };\nconsole.log(v);\n`)).toBe("NT1009");
@@ -364,5 +367,31 @@ describe("what a union may BE — refused, never guessed at", () => {
     expect(codeOf(`${SHAPES}const k = "square";\nconst s: Shape = { kind: k, size: 1 };\nconsole.log(s.kind);\n`)).toBe("NT2001");
     // the member's OWN fields are still checked against the member it selected
     expect(codeOf(`${SHAPES}const s: Shape = { kind: "square", size: "big" };\nconsole.log(s.kind);\n`)).toBe("NT2001");
+  });
+});
+
+/*
+ * GENERAL unions — arms that are NOT all object types, so there is no discriminant
+ * field inside the value and `typeof` must be the discriminant instead.
+ *
+ * REPRESENTATION (`src/ast.ts` — `isGeneralUnionTy`): encoded `G<a|b>` with members
+ * SORTED and de-duplicated, so `number | string` and `string | number` are the SAME
+ * type. At runtime it is a 2-slot heap block [tag, value] — the A2 nullable box's
+ * shape — where `tag` is the member's index in that canonical order and `value` is
+ * the arm packed by the existing `toSlot`. Deliberately NOT `U<…>`: an object union
+ * is the bare member pointer, so sharing the prefix would let 30-odd existing
+ * `isUnionTy` sites apply unboxed-object logic to a boxed value.
+ *
+ * Cases here are DERIVED, not mined: there is no TypeScript conformance checkout on
+ * this machine. `node` is still the oracle for every runtime-visible one.
+ */
+describe("GENERAL (non-object) unions — typeof is the discriminant", () => {
+  test("1. a `number | string` binding holds either arm, and prints as node does", async () => {
+    const src = `const a: number | string = 41;\nconst b: number | string = "hi";\nconsole.log(a);\nconsole.log(b);\n`;
+    expect(codeOf(src)).toBe(null);
+    const ours = await compileAndRun(src);
+    const oracle = runWithNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
   });
 });

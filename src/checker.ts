@@ -17,6 +17,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
 import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
+import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, typeofTagOf } from "./ast.ts";
 import type { ArrowFunction } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError } from "./diagnostics.ts";
 
@@ -935,6 +936,12 @@ class Checker {
     if (isUnionTy(target)) {
       const members = unionWidenedMembers(target);
       if (isUnionTy(source)) return unionWidenedMembers(source).every((m) => members.includes(m));
+      return members.includes(source);
+    }
+    // A GENERAL union is a box: any arm (or a narrower general union) may flow in.
+    if (isGeneralUnionTy(target)) {
+      const members = generalUnionMembers(target);
+      if (isGeneralUnionTy(source)) return generalUnionMembers(source).every((m) => members.includes(m));
       return members.includes(source);
     }
     if (isNullableTy(target)) {
@@ -3140,6 +3147,10 @@ export function checkInspectable(ty: Ty, root: Ty, depth = 0): void {
     throw nyi(NYI.INSPECT, "console.log of a function value");
   }
   if (isNullableTy(ty)) return checkInspectable(baseTy(ty), root, depth);
+  // A GENERAL union carries its own tag, so codegen can dispatch and print the arm it
+  // actually holds — byte-for-byte what node prints. (A `U<…>` object union has no
+  // outer tag and stays refused; that is the case just below.)
+  if (isGeneralUnionTy(ty)) { for (const m of generalUnionMembers(ty)) checkInspectable(m, root, depth); return; }
   if (depth >= INSPECT_DEPTH_LIMIT) return; // rendered as `[Object]`/`[Array]`; contents unread
   if (isArrayTy(ty)) return checkInspectable(elemTy(ty), root, depth + 1);
   if (isSetTy(ty)) return checkInspectable(setElemTy(ty), root, depth + 1);
@@ -3161,7 +3172,7 @@ const INSPECT_DEPTH_LIMIT = 3;
 export function isPrintableTy(t: Ty): boolean {
   return (
     t === "number" || t === "boolean" || t === "string" || t === "undefined" || t === "void" ||
-    t === "null" || t === "Dyn" || isDateTy(t) || isNullableTy(t) ||
+    t === "null" || t === "Dyn" || isDateTy(t) || isNullableTy(t) || isGeneralUnionTy(t) ||
     isObjectTy(t) || isArrayTy(t) || isMapTy(t) || isSetTy(t) || isBytesTy(t)
   );
 }

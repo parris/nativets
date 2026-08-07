@@ -13,6 +13,7 @@ import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
   isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES,
+  makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -298,8 +299,12 @@ class Parser {
     if (!sawIntersect) {
       const u = this.discriminatedUnion(arms);
       if (u) return u;
+      // A GENERAL union: nothing inside the value distinguishes the arms, so it is
+      // boxed [tag, value] and `typeof` is the discriminant. Only arms `typeof` can
+      // actually tell apart are accepted — see `generalUnionArmsOk`.
+      if (uniq.every(isGeneralUnionArm) && new Set(uniq.map(typeofTagOf)).size === uniq.length) return makeGeneralUnionTy(uniq);
     }
-    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.map(widenLiteralTys).join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null' and a DISCRIMINATED union of object types — a common literal-typed tag field at the same position in every member — are supported)`);
+    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.map(widenLiteralTys).join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null', a DISCRIMINATED union of object types — a common literal-typed tag field at the same position in every member — and a general union of arms \`typeof\` can tell apart are supported)`);
   }
 
   /**

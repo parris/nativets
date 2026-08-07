@@ -15,6 +15,7 @@ import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, type FmtSpec } from 
 import { blockDrops } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
+import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
@@ -104,6 +105,7 @@ function freshArray(e: Expr): boolean {
 
 function llvmTy(ty: Ty): string {
   if (isUnionTy(ty)) return "ptr"; // SH2: the member object block itself — there is no box
+  if (isGeneralUnionTy(ty)) return "ptr"; // a general union IS a box: [tag, value], tag = member index
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*; URL/URLSearchParams = the URL/query TEXT
   switch (ty) {
     case "Date": return "double"; // stdlib batch 3: a Date IS its time value (epoch ms)
@@ -125,7 +127,7 @@ function llvmTy(ty: Ty): string {
 function userSym(name: string): string { return name === "main" ? "nt_user_main" : name; }
 
 function defaultZero(ty: Ty): string {
-  if (isUnionTy(ty)) return "null";
+  if (isUnionTy(ty) || isGeneralUnionTy(ty)) return "null";
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "null";
   switch (ty) {
     case "number": return "0x0000000000000000";
@@ -1450,7 +1452,7 @@ class FnGen {
     if (val.ty === "string") this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
     const t = this.fresh();
     if (val.ty === "number" || isDateTy(val.ty)) this.emit(`${t} = bitcast double ${val.v} to i64`); // a Date IS a double (batch 3)
-    else if (isUnionTy(val.ty) || val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    else if (isUnionTy(val.ty) || isGeneralUnionTy(val.ty) || val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -1459,7 +1461,7 @@ class FnGen {
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
     if (ty === "number" || isDateTy(ty)) this.emit(`${t} = bitcast i64 ${slot} to double`); // a Date IS a double (batch 3)
-    else if (isUnionTy(ty) || ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    else if (isUnionTy(ty) || isGeneralUnionTy(ty) || ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
@@ -1534,7 +1536,20 @@ class FnGen {
   /** Coerce a value to `target` at a store/assign boundary — boxes into a nullable if needed. */
   private coerce(val: Val, target: Ty): Val {
     if (isNullableTy(target) && !isNullableTy(val.ty)) return this.coerceNullable(val, target);
+    if (isGeneralUnionTy(target) && !isGeneralUnionTy(val.ty)) return this.coerceGeneralUnion(val, target);
     return val;
+  }
+
+  // ---- general union box [tag, value] ----
+  // Same two-slot block as the A2 nullable, but `tag` is the arm's INDEX in the
+  // union's canonical member order rather than a nullish marker. The checker has
+  // already proved `val.ty` is a member, so the tag is a compile-time constant and
+  // boxing costs one allocation and two stores — no runtime type test.
+  /** Box an arm value into a general union of type `target`. */
+  private coerceGeneralUnion(val: Val, target: Ty): Val {
+    const tag = generalUnionTagOf(target, val.ty);
+    if (tag < 0) throw new Error(`internal: ${val.ty} is not a member of ${target}`); // checker's job
+    return { v: this.nullBox(String(tag), this.toSlot(val)), ty: target };
   }
 
   /** i1 result of `a === b` for same-typed operands. */
@@ -2787,6 +2802,7 @@ class FnGen {
       return;
     }
     if (isNullableTy(val.ty)) { this.emitPrintNullable(val.v, baseTy(val.ty), stream); return; }
+    if (isGeneralUnionTy(val.ty)) { this.emitPrintGeneralUnion(val.v, val.ty, stream); return; }
     // A COMPOUND value (object / class instance / array / Map / Set) is rendered by
     // node's util.inspect. Before Stage 47 this fell through to `js_print_str` on the
     // heap POINTER — a silent wrong answer (usually a bare newline).
@@ -3154,6 +3170,35 @@ class FnGen {
     this.terminate(`br i1 ${isN}, label %${nLbl}, label %${pLbl}`);
     this.to(this.block(nLbl)); this.emit(`call void @${P}_str(ptr ${this.mod.intern("null")})`); this.terminate(`br label %${end}`);
     this.to(this.block(pLbl)); this.emitPrint({ v: this.fromSlot(this.nullVal(ptr), base), ty: base }, stream); this.terminate(`br label %${end}`);
+    this.to(this.block(end));
+  }
+
+  /**
+   * Print a general-union box by dispatching on its tag: each arm is unpacked to its
+   * own static type and handed to the ordinary printer, so what comes out is exactly
+   * what the arm would have printed on its own — which is exactly what node prints.
+   */
+  private emitPrintGeneralUnion(ptr: string, ty: Ty, stream: "out" | "err" = "out"): void {
+    const members = generalUnionMembers(ty);
+    const tag = this.nullTag(ptr);
+    const raw = this.nullVal(ptr);
+    const end = this.label("gpe");
+    members.forEach((m, i) => {
+      const hit = this.label("gph"), miss = this.label("gpm");
+      if (i === members.length - 1) {
+        // The last arm needs no test: the tag is one of the members by construction.
+        this.emitPrint({ v: this.fromSlot(raw, m), ty: m }, stream);
+        this.terminate(`br label %${end}`);
+        return;
+      }
+      const is = this.fresh();
+      this.emit(`${is} = icmp eq i64 ${tag}, ${i}`);
+      this.terminate(`br i1 ${is}, label %${hit}, label %${miss}`);
+      this.to(this.block(hit));
+      this.emitPrint({ v: this.fromSlot(raw, m), ty: m }, stream);
+      this.terminate(`br label %${end}`);
+      this.to(this.block(miss));
+    });
     this.to(this.block(end));
   }
 
