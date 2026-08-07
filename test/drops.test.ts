@@ -238,3 +238,63 @@ a = [9, 9];
 console.log(b.join(","));`)).toBe("NT1602");
   });
 });
+
+/*
+ * The for-of ITERABLE temporary.
+ *
+ * `for (const x of [3,2,1])` builds an array no binding owns, so the drop pass never
+ * sees it and the loop leaked it. Only the RECEIVER position had a temp-free rule
+ * (`freeReceiverTemp`); the iterable position had none.
+ *
+ * Cases are DERIVED from the ownership model, not mined — there is no test262 or
+ * TypeScript conformance checkout on this machine. `__arrLive()` is the oracle for
+ * ownership here; node is the oracle for the values.
+ */
+describe("drops: the for-of iterable temporary", () => {
+  test("a temporary iterable is freed when the loop ends", async () => {
+    const src = `
+function f(): number {
+  let t: number = 0;
+  for (const x of [3, 2, 1]) { t = t + x; }
+  return t;
+}
+console.log(f());
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("6\n0\n"); // node prints 6; 0 live ⇒ the literal was freed
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a temporary iterable is freed when the loop BREAKS", async () => {
+    // `break` jumps to the same join point the fall-through exit uses, so it must not
+    // skip the free (elsewhere `break` deliberately jumps past drops — not here).
+    const src = `
+function f(): number {
+  let t: number = 0;
+  for (const x of [3, 2, 1]) { t = t + x; break; }
+  return t;
+}
+console.log(f());
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("3\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a BINDING iterable is left to its owner (no double free)", async () => {
+    // The regression that matters: freeing here would free storage the binding still
+    // owns and the scope will drop again. Exit code pins that it did not.
+    const src = `
+function f(): number {
+  const a = [3, 2, 1];
+  let t: number = 0;
+  for (const x of a) { t = t + x; }
+  return t + a.length;
+}
+console.log(f());
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("9\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+});
