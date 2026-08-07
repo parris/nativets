@@ -624,9 +624,28 @@ class Checker {
       case "UnaryExpr":
         if (e.op === "!") this.guardFacts(e.operand, scope, !positive, out);
         return;
+      case "CallExpr":
+        // `Array.isArray(v)` — the idiomatic discriminant for an array arm, and the
+        // same closed-set reasoning as `typeof`: it narrows on both branches.
+        this.isArrayFacts(e, scope, positive, out);
+        return;
       default:
         return;
     }
+  }
+
+  /** `Array.isArray(x)` narrowing a general union — see `typeofFacts` for the rules. */
+  private isArrayFacts(e: Expr & { kind: "CallExpr" }, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+    const c = e.callee;
+    if (c.kind !== "MemberExpr" || c.property !== "isArray") return;
+    if (c.object.kind !== "Identifier" || c.object.name !== "Array" || scope.lookup("Array")) return;
+    if (e.args.length !== 1) return;
+    const p = this.accessPath(e.args[0]!, scope);
+    if (p === undefined || !isGeneralUnionTy(p.ty)) return;
+    const keep = generalUnionMembers(p.ty).filter((m) => isArrayTy(m) === matched);
+    if (keep.length !== 1) return;
+    if (out.some((f) => f.binding === p.binding && f.path === p.path)) return;
+    out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
   }
 
   /**

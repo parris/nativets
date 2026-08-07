@@ -409,4 +409,23 @@ if (typeof x === "number") { console.log("n", x + 1); } else { console.log("s", 
     expect(ours.stdout).toBe(oracle.stdout);
     expect(ours.exitCode).toBe(oracle.exitCode);
   });
+
+  /*
+   * `Array.isArray` is folded from the STATIC type — for every other type that is
+   * exact. Admitting array arms made it reachable with a union operand, where the
+   * static type says nothing and the fold silently answered `false` for an array.
+   * That was a real silent wrong answer, found in this lane and fixed here: on a
+   * general union it is a RUNTIME test of the box's tag.
+   */
+  test("3. `Array.isArray` on a union is a RUNTIME tag test, not a static fold", async () => {
+    const src = `function f(v: number | number[]): boolean { return Array.isArray(v); }
+console.log(f([1, 2, 3]));
+console.log(f(7));
+`;
+    const ours = await compileAndRun(src);
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe("true\nfalse\n"); // the fold used to answer "false\nfalse\n"
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
 });

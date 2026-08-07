@@ -21,3 +21,16 @@ const b: number | number[] = 9;
 console.log(a);
 console.log(b);
 console.log(typeof a, typeof b);
+
+// `Array.isArray` is the idiomatic discriminant for this shape, so it narrows too —
+// on both branches, including through a negated early return.
+function sum(v: number | number[]): number {
+  if (Array.isArray(v)) { let s = 0; for (const n of v) s = s + n; return s; }
+  return v;
+}
+function size(v: number | number[]): number {
+  if (!Array.isArray(v)) return v;
+  return v.length;
+}
+console.log(sum([1, 2, 3]), sum(7));
+console.log(size([1, 2, 3]), size(7));

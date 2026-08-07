@@ -2424,7 +2424,25 @@ class FnGen {
       if (ns === "Array" && !this.isBound("Array")) {
         if (p === "isArray") {
           const at = e.args[0]!.ty ?? "number";
-          this.genExpr(e.args[0]!); // evaluate for side effects
+          const a = this.genExpr(e.args[0]!); // evaluate for side effects
+          // On a GENERAL union the static type says nothing about which arm is in the
+          // box, so the fold below would answer `false` for an array — a silent wrong
+          // answer. Test the TAG instead: true iff it names an array arm.
+          if (isGeneralUnionTy(at)) {
+            const members = generalUnionMembers(at);
+            const tag = this.nullTag(a.v);
+            let acc = "false";
+            members.forEach((m, i) => {
+              if (!isArrayTy(m)) return;
+              const is = this.fresh();
+              this.emit(`${is} = icmp eq i64 ${tag}, ${i}`);
+              if (acc === "false") { acc = is; return; }
+              const or = this.fresh();
+              this.emit(`${or} = or i1 ${acc}, ${is}`);
+              acc = or;
+            });
+            return { v: acc, ty: "boolean" };
+          }
           return { v: isArrayTy(at) ? "true" : "false", ty: "boolean" };
         }
         if (p === "from") {
