@@ -34,6 +34,15 @@ describe("immutable-by-default: in-place mutation is rejected (NT1606)", () => {
     { name: "array compound element assignment arr[i] += v", code: `const a: number[] = [1, 2]; a[0] += 9; console.log(a[0]);` },
     { name: "object field assignment o.f = v", code: `const o: {x:number} = {x: 1}; o.x = 9; console.log(o.x);` },
     { name: "push while iterating (subsumes iterator invalidation)", code: `const a: number[] = [1, 2]; for (const x of a) { a.push(x); }` },
+    // `.sort` on an ALIASED receiver. These are the guard rail for the fresh-receiver
+    // permission below: sorting an array someone else can still observe is a mutation
+    // of THEIR data, and must stay refused. Loosening any of these would turn a correct
+    // refusal into a silent wrong answer, which is strictly worse than a false positive.
+    { name: "array .sort on a named binding", code: `const a: number[] = [3, 1]; a.sort(); console.log(a.join(","));` },
+    { name: "array .sort through an alias of a binding", code: `const a: number[] = [3, 1]; const b: number[] = a; b.sort(); console.log(b.join(","));` },
+    { name: "array .sort on a parameter (the CALLER owns it)", code: `function f(xs: number[]): number { xs.sort(); return xs.length; } console.log(f([3, 1]));` },
+    { name: "array .sort on a module-level array inside a function", code: `const g: number[] = [3, 1]; function f(): number { g.sort(); return g.length; } console.log(f());` },
+    { name: "array .sort on a function's returned array (callee may still own it)", code: `function mk(): number[] { return [3, 1]; } const s: number[] = mk().sort(); console.log(s.join(","));` },
   ];
 
   for (const c of REJECTED) {
