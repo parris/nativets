@@ -12,7 +12,7 @@
 
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, type FmtSpec } from "./checker.ts";
-import { blockDrops } from "./ast.ts";
+import { blockDrops, freshArray } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
@@ -87,20 +87,10 @@ function mentions(node: unknown, name: string): boolean {
   return false;
 }
 
-/** Array-producing calls that mint a FRESH, unaliased array. A user function call is
- *  deliberately absent: it may return a module-level array the caller does not own. */
-const FRESH_ARRAY_CALLS = new Set([
-  "map", "filter", "slice", "concat", "with", "toSorted", "toReversed", "flat", "flatMap",
-  "split", "keys", "values", "entries",
-]);
-/** …and the one array method that returns its RECEIVER (in-place, like node). */
+/** The one array method that returns its RECEIVER (in-place, like node).
+ *  (`freshArray`/`FRESH_ARRAY_CALLS` live in ast.ts — the checker needs the same
+ *  judgment, and two copies could drift.) */
 const RETAINS_RECEIVER = new Set(["reverse"]);
-
-function freshArray(e: Expr): boolean {
-  if (e.kind === "ArrayLiteral") return true;
-  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") return FRESH_ARRAY_CALLS.has(e.callee.property);
-  return false;
-}
 
 function llvmTy(ty: Ty): string {
   if (isUnionTy(ty)) return "ptr"; // SH2: the member object block itself — there is no box

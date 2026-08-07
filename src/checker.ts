@@ -7,9 +7,9 @@
  * supported programs.
  */
 
-import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt } from "./ast.ts";
+import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
-import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText } from "./ast.ts";
+import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText, freshArray } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
 // Stage 47 (console.log of compound values): the handle-type predicates the
@@ -2255,7 +2255,7 @@ class Checker {
         if (e.args.length !== 1 || !isBytesTy(this.type(e.args[0]!, scope))) throw typeError("TextDecoder.decode expects (Uint8Array)");
         return "string";
       }
-      if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee.property, e.args, scope);
+      if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee, e.args, scope);
       // stdlib Batch 1: Number#toFixed(digits) — the digit count must be a literal
       // 0..100 so the RangeError node throws for anything else is impossible here.
       if (recv === "number") {
@@ -2499,7 +2499,8 @@ class Checker {
     }
   }
 
-  private inferArrayMethod(recv: Ty, method: string, args: Expr[], scope: Scope): Ty {
+  private inferArrayMethod(recv: Ty, callee: MemberExpr, args: Expr[], scope: Scope): Ty {
+    const method = callee.property;
     const el = elemTy(recv);
     if (method === "map" || method === "filter" || method === "reduce" || method === "flatMap") return this.inferHof(el, method, args, scope);
     // stdlib Batch 1 (part 2): the predicate HOFs, same inline-arrow contract as map/filter.
@@ -2510,7 +2511,21 @@ class Checker {
     // `.sort`/`.reverse` sort IN PLACE, which the immutable model forbids; the
     // ES2023 copying pair is the supported spelling. `.toSorted()` with no
     // comparator uses node's default (compare the elements' STRING forms).
-    if (method === "sort") throw mutationError("arrays are immutable: `.sort` would sort the array in place", "use `.toSorted()` (ES2023) — it returns a NEW sorted array and leaves the original alone");
+    // `.sort` mutates its receiver, which the immutable model forbids — UNLESS the
+    // receiver is a FRESH array (`[...xs]`, an array literal, a `.map`/`.filter`/…
+    // result). Fresh storage has no other owner, so sorting it is unobservable to any
+    // other binding: there is no shared array to protect. On such a receiver `.sort()`
+    // is exactly `.toSorted()` (same VALUE; the temporary it would sort in place is
+    // discarded either way), so it is REWRITTEN to `toSorted` here and lowers through
+    // the already node-exact copying path — including node's LEXICOGRAPHIC default
+    // order. That also keeps `.sort` from ever returning its receiver, so it cannot
+    // mint the alias that in-place mutation would need. See docs/divergences.md.
+    if (method === "sort") {
+      if (!freshArray(callee.object))
+        throw mutationError("arrays are immutable: `.sort` would sort the array in place", "use `.toSorted()` (ES2023) — it returns a NEW sorted array and leaves the original alone");
+      callee.property = "toSorted";
+      return this.inferArrayMethod(recv, callee, args, scope);
+    }
     if (method === "toSorted") {
       if (args.length > 1) throw typeError(".toSorted expects 0..1 args");
       if (args.length === 0) {

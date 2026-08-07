@@ -462,13 +462,31 @@ Refused:
 ### Ordering: `.toSorted()`/`.toReversed()` instead of `.sort()`/`.reverse()`
 
 node's `.sort()` sorts **in place**, which the immutable-by-default model forbids, so `.sort()`
-is refused with `NT1606` pointing at **`.toSorted()`** — the ES2023 *copying* method, which is
+on a **shared** array is refused with `NT1606` pointing at **`.toSorted()`** — the ES2023 *copying* method, which is
 non-mutating in node too, so **node stays the oracle** (no divergence in what we do compile).
 `.toSorted()`, `.toSorted(cmp)` and `.toReversed()` are node-matched: the default comparator
 compares the elements' **string** forms (`[10, 9, 1].toSorted()` → `1, 10, 9`), and the sort is
 **stable** (a merge sort), as node's is required to be. A comparator may be any function value
 (inline arrow or a captured closure); its result is mapped to a sign, with `NaN` treated as `0`
 like node. (`.reverse()` still mutates — pre-existing, flagged above.)
+
+**`.sort()` on a FRESH receiver is allowed** (and is *not* a divergence — it is node's own
+answer). The immutability rule exists to stop one binding mutating an array another binding can
+still see. A newly constructed array has no other owner, so sorting it is unobservable:
+`[...xs].sort()`, `[3,1,2].sort()`, and `xs.map(f).sort()` / `.filter(f)` / `.concat(ys)` /
+`.slice(0)` results are accepted, while `xs.sort()`, an alias `const b = xs; b.sort()`, a
+parameter, a module-level array, and the result of a **plain function call** (`mk().sort()` — the
+callee may still own it) stay `NT1606`. Freshness is decided syntactically by `freshArray` in
+`src/ast.ts`, the single copy shared with codegen's receiver-temp free.
+
+On a fresh receiver `.sort()` is exactly `.toSorted()` — same value, and the temporary it would
+have sorted in place is discarded either way — so it is **rewritten to `toSorted`** in the
+checker and lowers through the copying path above. That is what keeps the permission safe: the
+rewrite means `.sort()` never hands its receiver back, so it cannot create the two-bindings-one-
+array alias that in-place mutation would need. Verified in the emitted IR (the fresh temp is
+freed exactly once, the result is a distinct pointer) and node-differentially in
+`test/immutable.test.ts`, including node's lexicographic default (`[10,9,1,100,2].sort()` →
+`1,10,100,2,9`).
 
 ### String relational compare (`<` `<=` `>` `>=`) is UTF-8 byte order
 
