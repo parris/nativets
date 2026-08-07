@@ -531,9 +531,18 @@ class Checker {
     return out.filter((f) => !assigned.has(f.name) && !this.closureAssigned.has(f.name));
   }
 
-  /** Facts from the guard itself: an equality against the matching nullish literal. */
+  /**
+   * Facts from the guard itself: an equality against the matching nullish literal, or a
+   * bare TRUTHINESS test. A truthy value is never nullish (the nullish tags are the two
+   * falsiest things there are), so `if (x)` proves the same thing `x !== undefined` does
+   * — TypeScript's `controlFlowTruthiness.ts`. Only the positive branch narrows: `0`,
+   * `""` and `false` are falsy while present, so the else branch proves nothing.
+   */
   private guardFacts(e: Expr, scope: Scope, positive: boolean, out: NarrowFact[]): void {
     switch (e.kind) {
+      case "Identifier":
+        if (positive) this.addFact(e, scope, null, out);
+        return;
       case "BinaryExpr": {
         const ne = e.op === "!==" || e.op === "!=";
         const eq = e.op === "===" || e.op === "==";

@@ -334,3 +334,47 @@ console.log((y !== undefined ? 1 : 2) ?? (x + 1));
 `, "NT2001", "?Unumber");
   });
 });
+
+/*
+ * narrowing 4 — TRUTHINESS, and the fact carried across a `||` / `&&` CHAIN.
+ *
+ * Reference cases mined from `microsoft/TypeScript`:
+ *   - tests/cases/conformance/controlFlow/controlFlowTruthiness.ts  (function `f1`:
+ *     `let x = foo(); if (x) { x /* string *\/ }` — a bare truthiness test narrows
+ *     `string | undefined` to `string`)
+ *   - tests/cases/conformance/expressions/typeGuards/typeGuardsInRightOperandOfOrOrOperator.ts
+ *     (its header states the rule: "In the right operand of a || operation, the type of a
+ *     variable or parameter is narrowed by any type guard in the left operand WHEN FALSE,
+ *     provided the right operand contains no assignments to the variable". `foo`:
+ *     `typeof x !== "string" || x.length === 10`; `foo4`: a three-term chain; `foo2`: an
+ *     assignment in the right operand stops the narrowing)
+ *   - tests/cases/conformance/expressions/typeGuards/typeGuardsInRightOperandOfAndAndOperator.ts
+ *     (the dual, "narrowed by any type guard in the left operand WHEN TRUE")
+ *   - tests/cases/compiler/discriminantPropertyCheck.ts  (functions `foo1`/`foo2`:
+ *     `x.bar && x.foo !== undefined` then `x.foo.length` — the narrowed thing is a
+ *     DOTTED NAME, not a bare identifier)
+ *   - tests/cases/conformance/controlFlow/controlFlowBinaryOrExpression.ts and
+ *     controlFlowBinaryAndExpression.ts  (the value-returning `a && b` / `a || b` forms)
+ *
+ * `typeof x === "string"` guards a UNION we do not have, so each borrowed case is
+ * transposed onto the nullable (`?U`/`?N`) box, which is the same "prove it, then use it"
+ * shape. node erases types entirely, so every case is node-differential.
+ */
+describe("narrowing 4 — truthiness across `||` and `&&`", () => {
+  // TypeScript: controlFlowTruthiness.ts `f1` + typeGuardsInRightOperandOfOrOrOperator.ts
+  // `foo` — `!xs` is false exactly where `xs` is present, so the right operand sees it.
+  test("`!xs || xs.length === 0` — a nullish array narrows in the right operand", async () => {
+    await expectNode(`
+function isEmpty(xs: number[] | undefined): boolean {
+  return !xs || xs.length === 0;
+}
+const none: number[] = [];
+let a: number[] | undefined = [1, 2, 3];
+console.log(isEmpty(a));
+a = none;
+console.log(isEmpty(a));
+a = undefined;
+console.log(isEmpty(a));
+`);
+  });
+});
