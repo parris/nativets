@@ -556,3 +556,217 @@ console.log(f(d));
     expect(formatDiagnostic(diag, source)).toContain("return d.spans.length;");
   });
 });
+
+/*
+ * TRUTHINESS of an A2 nullable box (`if (x)`, `x ? … : …`, `while (x)`, `!x`).
+ *
+ * `truthyOf` in src/codegen.ts was type-directed for boolean and number and then
+ * fell through to "treat it as a string and call js_str_len". A nullable is a
+ * POINTER to a 2-slot [tag, value] block, so that read hit the box itself: every
+ * nullable came out truthy regardless of what it held. Measured against node,
+ * 6 of the 8 shapes below were wrong, and only `undefined` was accidentally right.
+ *
+ * The rule has TWO halves and the second is the one that bites: a nullish arm is
+ * falsy, AND a PRESENT `0` / `NaN` / `""` / `false` is falsy too. Each is pinned
+ * separately rather than as one aggregate assertion.
+ *
+ * Cases are DERIVED (no test262/conformance checkout on this machine); node is the
+ * oracle for every one.
+ */
+describe("truthiness of a nullable box — the tag, then the VALUE", () => {
+  const cases: [string, string, string][] = [
+    ["present 0",     `const x: number | undefined = [0].at(0);`,     "F"],
+    ["present NaN",   `const x: number | undefined = [NaN].at(0);`,   "F"],
+    ["present 1",     `const x: number | undefined = [1].at(0);`,     "T"],
+    ["present \"\"",  `const x: string | undefined = [""].at(0);`,    "F"],
+    ["present \"a\"", `const x: string | undefined = ["a"].at(0);`,   "T"],
+    ["present false", `const x: boolean | undefined = [false].at(0);`,"F"],
+    ["present true",  `const x: boolean | undefined = [true].at(0);`, "T"],
+    ["undefined",     `const x: number | undefined = [1].at(5);`,     "F"],
+    ["null",          `let x: string | null = null;`,                 "F"],
+  ];
+  for (const [name, decl, want] of cases) {
+    test(`${name} is ${want === "T" ? "truthy" : "FALSY"}`, async () => {
+      const src = `${decl}\nconsole.log(x ? "T" : "F");\n`;
+      const oracle = runWithNode(src);
+      expect(oracle.stdout).toBe(`${want}\n`); // node is the oracle; assert it first
+      const ours = await compileAndRun(src);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.exitCode).toBe(oracle.exitCode);
+    });
+  }
+
+  test("`!x` and `while (x)` agree with `if (x)` — every condition position", async () => {
+    const src = `const z: number | undefined = [0].at(0);
+console.log(!z, !!z);
+let n = 0;
+while (z) { n = n + 1; break; }
+console.log(n);
+`;
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe("true false\n0\n");
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
+/*
+ * The same `truthyOf` fall-through, on the OTHER types it silently reached. These are
+ * not nullables, but they are the same defect and the same one-line fix, so they are
+ * pinned here rather than left for the next person to rediscover.
+ */
+describe("truthiness of the other types the string fall-through was reaching", () => {
+  test("an object is ALWAYS truthy — including an empty array and an empty record", async () => {
+    // node: `[]` and `{}` are truthy (a common JS gotcha). We answered FALSE for both.
+    const src = `const e: number[] = [];
+const a: number[] = [1];
+const o: { k: number } = { k: 1 };
+console.log(e ? "T" : "F", a ? "T" : "F", o ? "T" : "F");
+`;
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe("T T T\n");
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  test("a Dyn's truthiness is its JSON tag's — `JSON.parse(\"0\")` is falsy", async () => {
+    const src = `console.log(JSON.parse("0") ? "T" : "F", JSON.parse("1") ? "T" : "F");
+console.log(JSON.parse("\\"\\"") ? "T" : "F", JSON.parse("[]") ? "T" : "F", JSON.parse("null") ? "T" : "F");
+`;
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe("F T\nF T F\n"); // [] is truthy, "" and null are not
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
+/*
+ * JSON.stringify of a nullable box.
+ *
+ * `genJsonStringify` is a type-directed walk that ends in `return "null"` for any type
+ * it does not recognize — and a nullable was one of those, so EVERY nullable serialized
+ * as the literal `null` no matter what it held. Silent.
+ *
+ * node's rules here are genuinely subtle and were MEASURED, not reasoned out:
+ *   JSON.stringify(7)            -> "7"
+ *   JSON.stringify(null)         -> "null"
+ *   JSON.stringify(undefined)    -> the VALUE undefined, not any string
+ *   JSON.stringify({k: null})    -> {"k":null}
+ *   JSON.stringify({k: undefined}) -> {}          <- the key is OMITTED
+ * The two `undefined` shapes are handled separately (see the next describe); this one
+ * pins the half that is unambiguous.
+ */
+describe("JSON.stringify of a nullable renders the VALUE, not the box", () => {
+  const cases: [string, string, string][] = [
+    ["root, present number", `let x: number | null = 7;\nconsole.log(JSON.stringify(x));`, "7"],
+    ["root, present string", `let x: string | null = "a";\nconsole.log(JSON.stringify(x));`, `"a"`],
+    ["root, null arm",       `let x: string | null = null;\nconsole.log(JSON.stringify(x));`, "null"],
+    ["nested, present",      `const p: number | undefined = [7].at(0);\nconsole.log(JSON.stringify({ k: p }));`, `{"k":7}`],
+    ["nested, null arm",     `let n: string | null = null;\nconsole.log(JSON.stringify({ k: n }));`, `{"k":null}`],
+  ];
+  for (const [name, src, want] of cases) {
+    test(name, async () => {
+      const full = `${src}\n`;
+      const oracle = runWithNode(full);
+      expect(oracle.stdout).toBe(`${want}\n`); // node first — the oracle, not our guess
+      const ours = await compileAndRun(full);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.exitCode).toBe(oracle.exitCode);
+    });
+  }
+});
+
+/*
+ * The two `undefined` shapes JSON.stringify cannot express here. Both were silently
+ * wrong (each rendered the literal `null`); both are now refused with the fix named.
+ *
+ *   JSON.stringify(x)      where x is `T | undefined` and absent
+ *       node returns the VALUE `undefined` — not a string at all. Our JSON.stringify
+ *       is typed `string`, so there is nothing correct to return.
+ *   JSON.stringify({k: x}) where x is `T | undefined` and absent
+ *       node OMITS the key entirely (`{}`, not `{"k":null}`), which needs the key and
+ *       its separator decided at runtime.
+ *
+ * A `T | null` is unaffected in both positions — `null` is exactly what node emits.
+ */
+describe("the `undefined` shapes JSON.stringify cannot express are REFUSED, not guessed", () => {
+  const codeOf = (source: string): string | null => {
+    try { sourceToIR(source); return null; }
+    catch (e) { return e instanceof NTError ? e.diag.code : "NT9001"; }
+  };
+  const messageOf = (source: string): string => {
+    try { sourceToIR(source); return ""; }
+    catch (e) { return e instanceof NTError ? e.diag.message : String(e); }
+  };
+
+  test("a `T | undefined` at the ROOT is refused", () => {
+    const src = `const a: number | undefined = [7].at(9);\nconsole.log(JSON.stringify(a));\n`;
+    expect(codeOf(src)).toBe("NT1005");
+    expect(messageOf(src)).toContain("?? ");
+  });
+
+  test("a `T | undefined` FIELD is NOT refused — the key is OMITTED, as node does", async () => {
+    const src = `const p: number | undefined = [7].at(0);
+const a: number | undefined = [7].at(9);
+console.log(JSON.stringify({ k: a }));
+console.log(JSON.stringify({ k: p }));
+console.log(JSON.stringify({ a: a, b: 1 }));
+console.log(JSON.stringify({ a: 1, b: a }));
+console.log(JSON.stringify({ a: a, b: a }));
+`;
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe(`{}\n{"k":7}\n{"b":1}\n{"a":1}\n{}\n`); // node: the key vanishes, commas close up
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  test("key omission also works PRETTY-PRINTED, where the separator carries a newline+indent", async () => {
+    const src = `const p: number | undefined = [7].at(0);
+const a: number | undefined = [7].at(9);
+console.log(JSON.stringify({ a: a, b: 1, c: p }, null, 2));
+console.log(JSON.stringify({ x: a }, null, 2));
+console.log(JSON.stringify({ o: { k: a }, q: 3 }, null, 2));
+`;
+    const oracle = runWithNode(src);
+    // an emptied object is `{}` with NO newline inside it, even under an indent
+    expect(oracle.stdout).toBe(`{\n  "b": 1,\n  "c": 7\n}\n{}\n{\n  "o": {},\n  "q": 3\n}\n`);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  test("...but a `T | null` is fine in BOTH positions — `null` is what node emits", () => {
+    expect(codeOf(`let n: string | null = null;\nconsole.log(JSON.stringify(n));\n`)).toBe(null);
+    expect(codeOf(`let n: string | null = null;\nconsole.log(JSON.stringify({ k: n }));\n`)).toBe(null);
+  });
+});
+
+/*
+ * `${x}` and `"" + x` on a nullable box.
+ *
+ * The template form emitted INVALID IR (a clang error — loud, never a wrong answer)
+ * and concatenation was refused outright by an earlier lane, on the reasoning that
+ * `?? "…"` is "the only spelling whose output is unambiguous". node disagrees, and
+ * node is the specification: String(undefined) is "undefined" and String(null) is
+ * "null", exactly and without ambiguity. Both forms now match it.
+ */
+describe("string coercion of a nullable — `${x}` and `\"\" + x` match node", () => {
+  test("every arm, both spellings", async () => {
+    const src = `const p: number | undefined = [7].at(0);
+const a: number | undefined = [7].at(9);
+const s: string | undefined = ["hi"].at(0);
+let n: string | null = null;
+console.log(\`\${p}|\${a}|\${s}|\${n}\`);
+console.log("" + p, "" + a, "" + s, "" + n);
+`;
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe("7|undefined|hi|null\n7 undefined hi null\n");
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});

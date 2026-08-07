@@ -313,9 +313,11 @@ Everything else about Batch 3:
   normalization needs the Unicode character database and collation needs ICU
   (`"a".localeCompare("B")` is `-1` in node but `+1` under any byte compare — §A on string
   relational order).
-- **String concatenation with a `T | null` / `T | undefined` is now refused** (`NT1009`,
-  "unwrap it first"). It previously reached codegen and emitted invalid IR — a real defect, found
-  by this lane through `URLSearchParams#get`.
+- **String concatenation with a `T | null` / `T | undefined` was refused** (`NT1009`, "unwrap it
+  first") after it was found emitting invalid IR through `URLSearchParams#get`. That refusal has
+  since been LIFTED: node's coercion is unambiguous — `String(undefined)` is `"undefined"` and
+  `String(null)` is `"null"` — so `"" + x` and `` `${x}` `` now branch on the box tag and match
+  node exactly. See the nullable-box section below.
 
 ### General (non-object) unions — supported narrowly, refused loudly (`G<…>`)
 
@@ -345,10 +347,35 @@ apart, and an object arm is refused outright. A 3-arm union narrows only when ON
 the test — the else branch of a 3-arm union is a sub-union whose tags would need renumbering, so
 the binding stays the full union and arm-specific uses of it are refused.
 
-> **Pre-existing, and NOT fixed by that lane:** the A2 nullable box has three of the same holes,
-> two of them silently wrong. With `const x: number | undefined = [0].at(0)`, `if (x)` prints
-> `truthy` where node prints `falsy`, and `JSON.stringify(x)` prints `null` where node prints `0`;
-> `` `${x}` `` emits invalid IR. These predate general unions and need their own lane.
+> **Pre-existing, and not fixed by that lane** — since FIXED by the nullable-box lane below.
+
+### The A2 nullable box — reading the BOX instead of the value (three holes, now closed)
+
+A `T | undefined` / `T | null` is a 2-slot `[tag, value]` heap block. Three places generated code
+from the static type, met that pointer, and answered from it rather than from the value. Two were
+SILENT; all were measured against node, not reasoned out.
+
+| Was | node | ours, before |
+|---|---|---|
+| `if (x)` on any nullable | tag, then the VALUE — a present `0`/`NaN`/`""`/`false` is falsy | always **truthy** (it tested the box POINTER) |
+| `JSON.stringify(x)`, present | the value | the literal `null` |
+| `JSON.stringify({k: x})`, absent-undefined | `{}` — the key is **omitted** | `{"k":null}` |
+| `` `${x}` `` | `"undefined"` / `"null"` / the value | invalid IR (loud) |
+| `"" + x` | same | refused (`NT1009`) |
+
+All now match node. Two consequences worth knowing:
+
+- **Truthiness was fixed for more than nullables.** The same fall-through — "not a boolean or a
+  number, so treat it as a string and call `js_str_len`" — also reached objects and `Dyn`. `[]` and
+  `{}` came out **false** where node says every object is truthy, and `JSON.parse("0")` came out
+  true. `truthyOf` is exhaustive now, and a type on neither list throws rather than defaulting, so
+  the next box type added is a compiler error instead of a fresh silent wrong answer.
+- **`JSON.stringify(x)` at the ROOT of a `T | undefined` is REFUSED** (`NT1005`). node returns the
+  undefined VALUE there, not a string; our `JSON.stringify` is typed `string`, so `null` was wrong
+  and `"undefined"` would be wrong the moment the result is used as one. Use `x ?? null`, or
+  `T | null` — which serializes as `null` exactly like node. As an object FIELD it is fine: the key
+  is omitted, as node does. An `undefined` inside an ARRAY is unaffected — `null` is what node
+  writes there.
 
 ### Actor messages (B3 v5) — structured messages are COPIES, and the shape is checked
 
