@@ -130,9 +130,13 @@ export const NYI = {
   // Modules (SH1). `import { a, b as c } from "./m.ts"`, `import type`, side-effect
   // imports, `export` of function/const/let/class/type/interface, `export { a as b }`
   // and `export { x } from "./y.ts"` ARE supported (whole-program link, see
-  // src/modules.ts). What this code refuses is the module syntax outside that subset:
-  // `export default`, `import * as ns`, `export * from`, dynamic `import()`, and
-  // bare/node_modules specifiers.
+  // src/modules.ts). So is the ONE default-import shape that is not really an import,
+  // `import s from "./f.c" with { type: "text" }` (SH5): the file is read at compile
+  // time and the name binds a string constant. What this code refuses is the module
+  // syntax outside that subset: `export default`, a plain default import, `import * as
+  // ns`, `export * from`, dynamic `import()`, bare/node_modules specifiers, and any
+  // import attribute other than `type: "text"` (notably node's `type: "json"`, which
+  // binds PARSED json — accepting it as text would silently change the program).
   // Actor messages (B3 v5). `number`, `string` and STRUCTURED records/arrays of those
   // ARE sendable — a structured message is deep-copied on send (the structuredClone
   // walk) and carries its shape, so the receiver can verify it. What this code refuses
@@ -140,7 +144,7 @@ export const NYI = {
   // environment), a Map/Set/Uint8Array/Response handle, a `Dyn`, or a nullable box.
   // Isolation is the actor model's whole point, so we reject rather than share a pointer.
   ACTOR_MSG: { code: "NT1021", milestone: "later", hint: "actor messages are `number`, `string`, or a record/array of those (deep-copied on send). Send the data, not a handle — e.g. `{ id: number, name: string }` instead of a closure or a Map" },
-  MODULE: { code: "NT1017", milestone: "M3", hint: "supported module syntax: `import { a, b as c } from \"./rel/path.ts\"`, `import type { T } from …`, `import \"./m.ts\"`, `export function|const|let|class|type|interface`, `export { a as b }`, `export { x } from \"./y.ts\"`" },
+  MODULE: { code: "NT1017", milestone: "M3", hint: "supported module syntax: `import { a, b as c } from \"./rel/path.ts\"`, `import type { T } from …`, `import \"./m.ts\"`, `import text from \"./f.c\" with { type: \"text\" }`, `export function|const|let|class|type|interface`, `export { a as b }`, `export { x } from \"./y.ts\"`" },
   // `instanceof` is decided at COMPILE TIME from the static type of the left operand —
   // exact, because a value's static type IS its class here (user classes have no
   // inheritance, and there are no polymorphic references). What this code refuses is a
@@ -277,7 +281,10 @@ export function parseError(message: string): NTError {
  *   NT1701  a module could not be resolved / read
  *   NT1702  an import cycle (named, in order — never hang, never miscompile)
  *   NT1703  a module has no such export
+ *   NT1704  a `with { type: "text" }` import whose file cannot become a string
+ *           (a NUL byte: nativets strings are NUL-terminated, so inlining one would
+ *           silently truncate the constant — the worst outcome available)
  */
-export function moduleError(code: "NT1701" | "NT1702" | "NT1703", message: string, hint?: string): NTError {
+export function moduleError(code: "NT1701" | "NT1702" | "NT1703" | "NT1704", message: string, hint?: string): NTError {
   return new NTError({ code, message, hint });
 }

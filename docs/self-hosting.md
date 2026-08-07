@@ -453,6 +453,35 @@ invalidating assignments covered only the code a fact *covers*, not the guard it
 before the use. node throws a `TypeError` there; nativets panicked at the unwrap rather
 than inventing a value, but a false proof is a false proof. The guard is now scanned too.
 
+### Re-measured after COMPILE-TIME TEXT IMPORTS — `driver.ts` clears its last `NT1017`
+
+`import runtimeSource from "../runtime/runtime.c" with { type: "text" }` was the one blocker
+this document (and `test/sh6.test.ts`) called *structural*: not TypeScript we had refused, but
+a construct with no node semantics at all, which the compiler nevertheless depends on to embed
+its own C runtime. It is now compiled. The parser accepts the import-attributes clause, and the
+linker reads the file at compile time — relative to the importing module — and materializes
+`const <name> = "<bytes>";`, so everything downstream sees an ordinary `const string` and the
+bytes reach the `.ll` as an interned constant. `src/driver.ts` needed **no source change**.
+
+| Module | Before | After |
+|---|---|---|
+| `driver.ts` | `lexed` — `NT1017`, the text import at **27:1** | `lexed` — `NT1017`, `export async function` at **502:1** |
+| `cli.ts` | the same, inherited through the link | the same, inherited — 475 lines deeper |
+| every other module | — | **unchanged**, byte for byte |
+
+Same code, a very different place, and the rung did not move: `NT1017` is recorded for the
+gradient, never as a floor. All twelve embedded files (~305KB, `runtime/runtime.c` alone at
+147KB) round-trip byte for byte through the AST and the `.ll` — pinned by
+`test/textimport.test.ts`, which dumps and checksums the real files rather than a stand-in.
+
+**Next for `driver.ts`: `export async function`** (`buildBinary`/`buildObject` are `async`).
+`async` is already erased inside a function body; what is missing is `export` of one. Not
+chased here.
+
+Because node has no `type: "text"` attribute, this construct cannot be differential-tested the
+usual way — see `docs/divergences.md`, which records the divergence and how the oracle is split
+(a `main.ts`/`oracle.ts` twin per fixture, identical below the binding).
+
 ---
 
 ## Milestones
