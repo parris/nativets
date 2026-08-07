@@ -434,8 +434,24 @@ describe("stdlib batch 3: what is refused, precisely (NT1024)", () => {
     test(name, () => { expect(rejectCode(src)).toBe("NT1024"); });
   }
 
-  test("string concatenation with a `string | null` is refused, not miscompiled (NT1009)", () => {
-    expect(rejectCode(`const p = new URLSearchParams("a=1"); console.log("[" + p.get("a") + "]");`)).toBe("NT1009");
+  // WAS: "string concatenation with a `string | null` is refused, not miscompiled (NT1009)".
+  //
+  // That refusal is GONE, and this test now pins the opposite. The lane that added it
+  // reasoned that `?? "…"` was "the only spelling whose output is unambiguous" — but node
+  // defines the output exactly (`String(null)` is "null", `String(undefined)` is
+  // "undefined"), and node is the specification. Refusing a program node runs, with a
+  // defined answer we can produce, is a divergence with nothing behind it.
+  //
+  // The original concern was still half right, and worth keeping in view: the raw nullable
+  // BOX must never reach codegen as if it were a string. It used to, which is why `${x}`
+  // emitted invalid IR. The nullable-box lane made concatenation unwrap through the tag —
+  // so the box is handled, and the refusal is no longer earning anything.
+  test("string concatenation with a `string | null` matches node — not refused", async () => {
+    await expectMatchesNode(
+      `const p = new URLSearchParams("a=1");\n` +
+      `console.log("[" + p.get("a") + "]");\n` +   // present -> [1]
+      `console.log("[" + p.get("zz") + "]");\n`,   // absent  -> [null], as node prints it
+    );
   });
 });
 
