@@ -52,10 +52,13 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   // the WHOLE linked program (every module in the graph), not just this file — otherwise
   // every imported name would look undefined. A link failure (bad path, cycle, missing
   // export) falls through to the per-statement recovery path below, which reports it.
+  // A `with { type: "text" }` import (SH5) binds a name for the same reason, and only
+  // the link materializes it, so it takes the same path.
   let linked: Program | null = null;
   if (entryPath) {
     try {
-      if (parse(source).imports?.length) linked = linkProgram(source, entryPath);
+      const p = parse(source);
+      if (p.imports?.length || p.textImports?.length) linked = linkProgram(source, entryPath);
     } catch { /* reported by the recovery path */ }
   }
   // Coverage-only pre-strip: survive the module/type preamble (shebang, import,

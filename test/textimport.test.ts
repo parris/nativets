@@ -29,6 +29,7 @@ import { spawnSync } from "node:child_process";
 import { compileAndRunFile } from "./harness.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { NTError } from "../src/diagnostics.ts";
+import { coverage } from "../src/coverage.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DIR = join(HERE, "textimport");
@@ -179,6 +180,20 @@ describe("what is refused", () => {
    * time while the `.ll` still carried every byte — a wrong answer with nothing to see.
    * Refused at compile time instead.
    */
+  /*
+   * `coverage` is the instrument the self-hosting gradient is read off, so it must not
+   * invent a blocker. It reports statement by statement and never links — exactly why it
+   * already links a program that declares imports ("otherwise every imported name would
+   * look undefined"). A text import binds a name the same way, so it needs the same
+   * treatment: without it, `coverage src/driver.ts` would report twelve phantom NT2001s.
+   */
+  test("`coverage` does not invent a blocker for a text-imported binding", () => {
+    const entry = join(DIR, "basic", "main.ts");
+    const report = coverage(readFileSync(entry, "utf8"), entry);
+    expect({ compiles: report.compiles, blockers: report.blockers.map((b) => b.code) })
+      .toEqual({ compiles: true, blockers: [] });
+  });
+
   test("a NUL byte in the file is NT1704, not a silently truncated constant", () => {
     const bin = join(scratch, "with-nul.bin");
     const entry = join(scratch, "main.ts");
