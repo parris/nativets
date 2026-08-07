@@ -291,7 +291,7 @@ export function typeofTagOf(t: Ty): string {
  * different representations.
  */
 export function isGeneralUnionArm(t: Ty): boolean {
-  return t === "number" || t === "string" || t === "boolean";
+  return t === "number" || t === "string" || t === "boolean" || isArrayTy(t);
 }
 
 /**
