@@ -86,6 +86,45 @@ describe(".sort on a fresh receiver (node-differential)", () => {
       name: "spread copy [...xs].sort()",
       code: `const xs: number[] = [3, 1, 2]; const s: number[] = [...xs].sort(); console.log(s.join(",")); console.log(xs.join(","));`,
     },
+    {
+      // node's no-comparator `.sort()` compares the elements' STRING forms, so on
+      // numbers it is LEXICOGRAPHIC: [10, 9] stays [10, 9] and 100 sorts before 2.
+      // The case a hand-written test "obviously" gets wrong by assuming numeric order.
+      name: "default order is LEXICOGRAPHIC on numbers, not numeric",
+      code: `const xs: number[] = [10, 9, 1, 100, 2]; console.log([...xs].sort().join(","));`,
+    },
+    {
+      name: "array literal [3,1,2].sort()",
+      code: `console.log([3, 1, 2].sort().join(","));`,
+    },
+    {
+      name: "with a comparator (numeric order, unlike the default)",
+      code: `const xs: number[] = [10, 9, 1, 100, 2]; console.log([...xs].sort((a, b) => a - b).join(","));`,
+    },
+    {
+      name: ".map() result",
+      code: `const xs: number[] = [3, 1, 2]; console.log(xs.map((x) => x * 2).sort().join(",")); console.log(xs.join(","));`,
+    },
+    {
+      name: ".filter() result",
+      code: `const xs: number[] = [3, 1, 2, 4]; console.log(xs.filter((x) => x > 1).sort().join(",")); console.log(xs.join(","));`,
+    },
+    {
+      name: ".concat() result",
+      code: `const xs: number[] = [3, 1]; const ys: number[] = [2]; console.log(xs.concat(ys).sort().join(",")); console.log(xs.join(","));`,
+    },
+    {
+      name: ".slice(0) result",
+      code: `const xs: number[] = [3, 1, 2]; console.log(xs.slice(0).sort().join(",")); console.log(xs.join(","));`,
+    },
+    {
+      name: "string elements sort by code unit",
+      code: `const xs: string[] = ["pear", "Apple", "fig"]; console.log([...xs].sort().join(",")); console.log(xs.join(","));`,
+    },
+    {
+      name: "inside a function, on a spread of a parameter",
+      code: `function sorted(xs: number[]): number[] { return [...xs].sort(); } const a: number[] = [3, 1, 2]; console.log(sorted(a).join(",")); console.log(a.join(","));`,
+    },
   ];
 
   for (const c of CASES) {
