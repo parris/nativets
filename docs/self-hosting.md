@@ -411,6 +411,48 @@ a hard failure. The remaining hole: a module regressing to a code **already** in
 invisible to both. Closing that means ratcheting per-module blocker codes, not just the
 tree-wide set.
 
+### Re-measured after SHORT-CIRCUIT NARROWING — the `NT2001` bucket is empty
+
+The one `NT2001` on the frontier was a **false positive**: `src/diagnostics.ts:74`
+
+```ts
+if (!diag.spans || diag.spans.length === 0 || !source) {
+```
+
+is correct TypeScript and correct at runtime — the right operand of `||` only runs when
+`!diag.spans` was false — but the checker did not carry a guard's fact into the terms to
+its right, and could not narrow a **dotted name** at all. Both are fixed:
+
+- a bare truthiness test is a guard like `!== undefined` (TypeScript's
+  `controlFlowTruthiness.ts`), so `!x` on the left of `||` proves `x` for what follows;
+- a narrowing fact is about an access **path** (root binding + dotted suffix), not just a
+  name (`discriminantPropertyCheck.ts`). Sound because nativets objects are immutable
+  unless `@@mutable`: outside that tag the only way `d.spans` can change is a new value
+  bound to `d`. `@@mutable` receivers and `this` get no path facts.
+
+| Module | Before | After |
+|---|---|---|
+| `diagnostics.ts` | `parsed` — `NT2001`, `diag.spans.length` after `!diag.spans \|\|` | `parsed` — **`NT1606`**, `[...diag.spans].sort(…)` — arrays are immutable |
+
+Still `parsed`, not `ir`: clearing the narrowing false positive moved the blocker, not the
+rung. Nothing else moved either — `cli.ts` still dies on `'source' declared string but
+initialized with undefined` and `ownership.ts` on `'NO_MUTABLE' is not defined`, both
+unrelated to narrowing. Two adjacent gaps this measurement exposed, neither taken:
+
+- the **value-returning** `a && a.b` (node: `undefined` or a number) is still refused —
+  `&&`/`||` require matching `boolean`/`number`/`string` operands, so the narrowing
+  reaches `a.b` but the result has no type yet. Pinned as a refusal in
+  `test/narrowing.test.ts`;
+- a **string literal is not assignable to a `?Ustring` parameter** (`f("abc")` where the
+  parameter is `string | undefined`), which forces every fixture here to bind through an
+  annotated local.
+
+The same lane fixed a real soundness hole it found on the way: the region scanned for
+invalidating assignments covered only the code a fact *covers*, not the guard itself, so
+`!x || (x = y) !== undefined || x.length === 0` proved `x` present and then reassigned it
+before the use. node throws a `TypeError` there; nativets panicked at the unwrap rather
+than inventing a value, but a false proof is a false proof. The guard is now scanned too.
+
 ---
 
 ## Milestones

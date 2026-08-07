@@ -1768,14 +1768,14 @@ class Parser {
         const bang = this.eat("!");
         expr = { kind: "NonNullExpr", expr, loc: { line: bang.line, col: bang.col, file: this.file } };
       } else if (this.at(".")) {
-        this.eat(".");
-        expr = { kind: "MemberExpr", object: expr, property: this.expectIdent() };
+        const dot = this.eat(".");
+        expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), loc: { line: dot.line, col: dot.col, file: this.file } };
       } else if (this.at("?.")) {
         const t = this.eat("?.");
         // Optional call `?.()` and optional index `?.[]` are out of the A2 subset.
         if (this.at("(")) throw nyi(NYI.OPTIONAL_CHAIN, `optional call '?.()' at ${t.line}:${t.col}`);
         if (this.at("[")) throw nyi(NYI.OPTIONAL_CHAIN, `optional element access '?.[]' at ${t.line}:${t.col}`);
-        expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true };
+        expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true, loc: { line: t.line, col: t.col, file: this.file } };
       } else if (this.at("[")) {
         const br = this.eat("[");
         const index = this.parseExpression();

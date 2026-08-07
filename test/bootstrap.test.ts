@@ -103,7 +103,8 @@ const BASELINE: Record<string, Phase> = {
   // RATCHET MOVE (regex removal): `formatDiagnostic`'s `^\s*` was the module's first
   // blocker. Rewritten as a character scan, it now parses and stops on the next thing
   // behind it — NT2001, `diag.spans.length` in `!diag.spans || diag.spans.length === 0`,
-  // i.e. nullable narrowing does not flow across `||`.
+  // i.e. nullable narrowing does not flow across `||`. That narrowing has since landed
+  // (short-circuit lane), so the blocker moved on again: now NT1606, `[...diag.spans].sort(…)`.
   "diagnostics.ts": "parsed",
   "parser.ts": "lexed",
   "checker.ts": "lexed",
@@ -221,7 +222,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT0001 survivors are a template-literal TYPE (`\`${string}[]\`` in ast.ts, which
     // coverage.ts sees through the link) and `satisfies` in parser.ts.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT0001", "NT1009", "NT1014", "NT1015", "NT1017", "NT2001"],
+      ["NT0001", "NT1009", "NT1014", "NT1015", "NT1017", "NT1606"],
     );
     // MEASURED AFTER THE MERGE, not carried over from either branch: SH4 landed between
     // this lane's base and here, so `modules.ts` is past the host FFI and stops on
@@ -240,8 +241,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `test/no-regex.test.ts` is the shrink-only lint that keeps it that way.
     expect(byCode["NT1027"]).toBeUndefined();
     expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
-    // Unmasked by that rewrite: diagnostics.ts now gets all the way to the checker.
-    expect(byCode["NT2001"]!.sort()).toEqual(["diagnostics.ts"]);
+    // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
+    // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
+    // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not
+    // narrow the terms to its right. It does now, and for dotted names too, so
+    // `formatDiagnostic` type-checks and the module stops on the thing behind it:
+    // NT1606, `[...diag.spans].sort(…)` — the immutable-data refusal.
+    expect(byCode["NT2001"]).toBeUndefined();
+    expect(byCode["NT1606"]!.sort()).toEqual(["diagnostics.ts"]);
     expect(byCode["NT0001"]!.sort()).toEqual(
       ["ast.ts", "coverage-preprocess.ts", "coverage.ts", "parser.ts"],
     );
