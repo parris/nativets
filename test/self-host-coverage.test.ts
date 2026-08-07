@@ -108,9 +108,17 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     //     instead of being an anonymous "unparsed statement" — it moved buckets, it did
     //     not go away. See the NT1027 row in the histogram test below.
     //
-    // An empty NT0001 bucket is the meaningful invariant: every remaining blocker in the
-    // tree is a NAMED feature with a code, so it can be burned down deliberately.
-    const UNMASKED: Record<string, number> = {};
+    // "An empty NT0001 bucket" was previously called the meaningful invariant. It is NOT,
+    // and the static-members lane is the counter-example: `codegen.ts` cleared NT1015 and
+    // the module then reached FURTHER and stopped on an unnamed parse error at 582:33.
+    // NT0001 is the generic parse-error code, so clearing a NAMED blocker can legitimately
+    // refill it — the bucket growing means the frontier moved, not that anything regressed.
+    // What this table is for is naming each survivor explicitly, so a NEW one is a
+    // deliberate entry rather than a silent arrival.
+    const UNMASKED: Record<string, number> = {
+      // codegen.ts:582 — `Expected ']' but found 'program'`, unmasked by static members.
+      "codegen.ts": 1,
+    };
     for (const f of SRC_MODULES) {
       const r = coverage(src(f));
       const nt0001 = r.blockers.filter((b) => b.code === "NT0001").length;
@@ -154,19 +162,22 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     }
     // NT1027 (a regex literal) is new only as a NAME: it was inside the NT0001 bucket
     // until regex literals started lexing. Naming it is what makes it burnable-down.
-    // RESOLVED BY RE-MEASURING after two lanes merged; each branch was right about its
-    // own change and blind to the other's. NT0001 is gone from this list entirely (the
-    // template-literal-type and satisfies lanes). NT1014 SURVIVES as a single entry:
-    // `new Map([[k, v], …])` in ast.ts — the Set forms and the Map-COPY form compile now,
+    // RE-MEASURED CENTRALLY after a twelve-lane round. NT0001 is back with ONE entry —
+    // codegen.ts:582, unmasked when static members cleared NT1015 — so the earlier
+    // "NT0001 is gone entirely" reading held only between two merges. NT1014 survives as
+    // `new Map([[k, v], …])` in ast.ts: the Set forms and the Map-COPY form compile now,
     // but the ENTRIES form still needs a tuple type.
-    expect([...hist.keys()].sort()).toEqual(["NT1003", "NT1009", "NT1014", "NT1015", "NT1027", "NT1606"]);
-    // NT1606 is no longer the largest bucket — that was the immutability lane's result.
-    // It is back up to 2 now that clearing NT1014 exposed coverage-preprocess.ts's
-    // `.push`, but NT1009 (the general-union crux, at 4) is well ahead of it.
-    const max = Math.max(...hist.values());
-    expect(hist.get("NT1606")!).toBeLessThan(max);
-    // The largest bucket IS the crux. When unions land this should fall, not grow.
-    expect(max).toBe(hist.get("NT1009")!);
+    expect([...hist.keys()].sort()).toEqual(
+      ["NT0001", "NT1003", "NT1009", "NT1014", "NT1015", "NT1027", "NT1606"],
+    );
+    // NT1009 FELL from 4 to 3 — the first time the largest bucket has ever shrunk, and the
+    // general-union lane's whole result. It is still the largest, but the code now spans
+    // three DIFFERENT features (general unions are done; what is left is the intersection
+    // `&` in ast.ts and optional element access `?.[]` in parser.ts), so "NT1009 dominates"
+    // no longer means "unions dominate". Asserting the number, not just the ordering,
+    // because the next honest move is for this to keep falling.
+    expect(hist.get("NT1009")!).toBe(3);
+    expect(hist.get("NT1606")!).toBeLessThan(Math.max(...hist.values()));
   });
 
   test("every src module reaches analysis (no file dies on the module preamble)", () => {
