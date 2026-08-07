@@ -47,6 +47,9 @@ interface ModuleInfo {
   finalExports: Map<string, string>;
   /** exported type name → its shape, with class tags already renamed */
   finalTypes: Map<string, Ty>;
+  /** exported names that are `async` (following re-exports) — an importer needs these
+   *  to refuse a call without `await`, since erasure hides it (NT1020) */
+  asyncExports: Set<string>;
 }
 
 /* ---------------------------------------------------------------- renaming */
@@ -431,19 +434,24 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     // 1. Type environment: every imported name that names a TYPE in its module
     //    (an `export type`/`interface`, or an exported class's instance shape).
     const typeEnv = new Map<string, Ty>();
+    /** …and, on the same walk, every imported name that is an `export async function`,
+     *  under the LOCAL name this module calls it by (so `import { one as o }` guards
+     *  `o()`). Without it an un-awaited imported call is silently erased. */
+    const asyncEnv = new Set<string>();
     for (const imp of deps.get(path) ?? []) { // import list from the discovery parse
       const dep = mods.get(resolveSpecifier(path, imp.source));
       if (!dep) continue;
       for (const spec of imp.specs) {
         const t = dep.finalTypes.get(spec.imported);
         if (t !== undefined) typeEnv.set(spec.local, t);
+        if (dep.asyncExports.has(spec.imported)) asyncEnv.add(spec.local);
       }
     }
 
     // 2. The real parse, with imported types in scope. A text import (SH5) becomes a
     //    `const` at the head of the body BEFORE the rename below, so it is an ordinary
     //    top-level binding of this module and is mangled like any other.
-    const program = parse(source, { typeEnv, file: path });
+    const program = parse(source, { typeEnv, asyncEnv, file: path });
     if (program.textImports?.length) program.body = [...materializeTextImports(program, path, read), ...program.body];
 
     // 3. Rename map: imported locals → the exporting module's final names; own
@@ -481,6 +489,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     // 4. Publish this module's export table under the final names.
     const finalExports = new Map<string, string>();
     const finalTypes = new Map<string, Ty>();
+    const asyncExports = new Set<string>(program.exports?.asyncValues ?? []);
     for (const [exported, local] of program.exports?.values ?? []) finalExports.set(exported, names.get(local) ?? local);
     for (const [exported, ref] of program.exports?.reexports ?? []) {
       const dep = mods.get(resolveSpecifier(path, ref.source))!;
@@ -490,10 +499,13 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
           `exported members: ${[...dep.finalExports.keys()].join(", ") || "(none)"}`);
       }
       finalExports.set(exported, target);
+      // A re-export forwards async-ness too: `export { one } from "./lib.ts"` is still
+      // a promise-returning function to whoever imports it from HERE.
+      if (dep.asyncExports.has(ref.imported)) asyncExports.add(exported);
     }
     for (const [exported, ty] of program.exports?.types ?? []) finalTypes.set(exported, rewriteTy(ty, tags));
 
-    mods.set(path, { path, source, program, finalExports, finalTypes });
+    mods.set(path, { path, source, program, finalExports, finalTypes, asyncExports });
     body.push(...program.body);
   });
 

@@ -144,7 +144,7 @@ export const NYI = {
   // environment), a Map/Set/Uint8Array/Response handle, a `Dyn`, or a nullable box.
   // Isolation is the actor model's whole point, so we reject rather than share a pointer.
   ACTOR_MSG: { code: "NT1021", milestone: "later", hint: "actor messages are `number`, `string`, or a record/array of those (deep-copied on send). Send the data, not a handle — e.g. `{ id: number, name: string }` instead of a closure or a Map" },
-  MODULE: { code: "NT1017", milestone: "M3", hint: "supported module syntax: `import { a, b as c } from \"./rel/path.ts\"`, `import type { T } from …`, `import \"./m.ts\"`, `import text from \"./f.c\" with { type: \"text\" }`, `export function|const|let|class|type|interface`, `export { a as b }`, `export { x } from \"./y.ts\"`" },
+  MODULE: { code: "NT1017", milestone: "M3", hint: "supported module syntax: `import { a, b as c } from \"./rel/path.ts\"`, `import type { T } from …`, `import \"./m.ts\"`, `import text from \"./f.c\" with { type: \"text\" }`, `export [async] function|const|let|class|type|interface`, `export { a as b }`, `export { x } from \"./y.ts\"`" },
   // `instanceof` is decided at COMPILE TIME from the static type of the left operand —
   // exact, because a value's static type IS its class here (user classes have no
   // inheritance, and there are no polymorphic references). What this code refuses is a

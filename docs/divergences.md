@@ -648,6 +648,10 @@ What this buys and what it costs:
     follows it (under node that yields a *Promise* and lets the rest of the program run first).
     The one allowed form is the canonical entrypoint `main();` as the **last** top-level statement —
     with nothing after it, node's suspend-and-resume and our run-it-now produce identical output.
+    This holds **across module boundaries**: `export async function` is supported (the `async` is
+    erased there like anywhere else), and the async-ness travels on the export table — through
+    `import { f as g }` and through `export { f } from "./m.ts"` — so an un-awaited call to an
+    *imported* async function is `NT1020` too, not a silently-erased wrong answer.
   - The diagnostic points at the **actor model** (`spawn`/`send`/`receive`, Stage 22/27/31), which
     is nativets' concurrency primitive. Promises may simply be the wrong abstraction here.
 - `Promise<T>` in **type position** is erased to `T` (as are `Awaited<T>` and friends), so
