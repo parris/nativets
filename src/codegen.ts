@@ -56,6 +56,12 @@ const ACTOR_BUILTINS = new Set([
  *  reinterpret another's bits — a mismatch is a runtime error, not a miscompile.
  *  A STRUCTURED message additionally carries its shape (see `msgShape`), because the
  *  coarse kind alone cannot tell two different record types apart. */
+/** ` at line:col` for a node that carries its position, else "" — so a refusal names WHICH
+ *  construct it means, following the `at 12:3` convention the parser's NYI messages use. */
+function where(n: { line?: number; col?: number }): string {
+  return n.line === undefined ? "" : ` at ${n.line}:${n.col ?? 0}`;
+}
+
 function msgKind(ty: Ty): number {
   const b = baseTy(ty);
   return b === "string" ? 1 : isStructMsgTy(b) ? 2 : 0;
@@ -1320,7 +1326,15 @@ class FnGen {
       }
       case "ThrowStmt": {
         const h = this.tryHandlers[this.tryHandlers.length - 1];
-        if (!h) throw new Error("throw outside a try (unsupported)");
+        // A `throw` is lowered as a BRANCH to the enclosing `try`'s catch block, so the
+        // try must be in the same function frame. Crossing a frame — the ordinary "raise
+        // in the callee, handle at the call site" idiom — needs real unwinding, which does
+        // not exist yet. Refuse it; a raw internal error here used to print a Bun stack
+        // trace naming our own source files (CLAUDE.md: an NT**** with a hint, always).
+        if (!h) {
+          throw nyi(NYI.EXCEPTION, `\`throw\`${where(s)} that is not inside a \`try\` in the same function`,
+            "a throw is lowered as a branch to its enclosing `try`, so it must sit inside one IN THE SAME function — crossing a call boundary needs unwinding. Wrap the throwing code in a local `try`/`catch`, or return a result value (e.g. `T | undefined`) and check it at the call site");
+        }
         const v = this.genExpr(s.argument);
         if (h.excVar) this.emit(`store ${llvmTy(h.eType)} ${v.v}, ptr ${this.addr(h.excVar)}`);
         this.terminate(`br label %${h.catchLbl}`);

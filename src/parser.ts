@@ -886,7 +886,7 @@ class Parser {
     if (this.at("do")) return this.parseDoWhile();
     if (this.at("for")) return this.parseFor();
     if (this.at("switch")) return this.parseSwitch();
-    if (this.at("throw")) { this.eat("throw"); const a = this.parseExpression(); this.eat(";"); return { kind: "ThrowStmt", argument: a }; }
+    if (this.at("throw")) { const t = this.peek(); this.eat("throw"); const a = this.parseExpression(); this.eat(";"); return { kind: "ThrowStmt", argument: a, line: t.line, col: t.col }; }
     if (this.at("try")) return this.parseTry();
     if (this.at("break")) { this.eat("break"); this.eat(";"); return { kind: "BreakStmt" }; }
     if (this.at("continue")) { this.eat("continue"); this.eat(";"); return { kind: "ContinueStmt" }; }

@@ -188,8 +188,16 @@ export const NYI = {
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
 
-export function nyi(spec: NyiSpec, what: string): NTError {
-  return new NTError({ code: spec.code, message: `${what} is not supported yet`, milestone: spec.milestone, hint: spec.hint });
+/**
+ * A deferred feature, as the catalog entry describes it.
+ *
+ * `hint` overrides the catalog's generic hint for ONE site. A code covers a whole feature
+ * area, so its catalog hint has to speak for every site that uses it — but a refusal is
+ * only actionable when it names the workaround for the construct actually written. Where
+ * a site can be that specific, it says so here; everything else keeps the catalog text.
+ */
+export function nyi(spec: NyiSpec, what: string, hint?: string): NTError {
+  return new NTError({ code: spec.code, message: `${what} is not supported yet`, milestone: spec.milestone, hint: hint ?? spec.hint });
 }
 
 /**

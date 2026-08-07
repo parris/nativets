@@ -5,9 +5,17 @@
  */
 
 import { test, expect, describe } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+
 import { formatDiagnostic, NYI } from "../src/diagnostics.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { NTError } from "../src/diagnostics.ts";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 /*
  * The NT code space is the project's public taxonomy: `coverage` groups blockers BY code,
@@ -79,5 +87,73 @@ describe("multi-span diagnostics", () => {
     const rendered = formatDiagnostic(err!.diag, source);
     expect(rendered).toContain("const b = a;");
     expect(rendered).toContain("console.log(a.length);");
+  });
+});
+
+/*
+ * No INTERNAL error may reach the user (CLAUDE.md's prime directive: "anything we can't
+ * compile correctly gets an NT**** diagnostic with a hint").
+ *
+ * src/cli.ts's `guard` renders an NTError and exits 1; anything else propagates to Bun and
+ * prints a raw stack trace naming our own source files. So the contract is checked where
+ * the user stands — through the CLI — and the load-bearing assertion is the ABSENCE of a
+ * stack trace, not just the presence of a code.
+ *
+ * These are all REFUSALS, so node is not the oracle: node runs every one of these programs.
+ * What is asserted is the shape of the refusal and a nonzero exit.
+ */
+describe("no internal error reaches the user", () => {
+  /** Compile `src` through the real CLI and capture what a user would see. */
+  function cli(src: string): { out: string; code: number } {
+    const dir = mkdtempSync(join(tmpdir(), "ntcodes-"));
+    try {
+      const f = join(dir, "case.ts");
+      writeFileSync(f, src);
+      const r = spawnSync("bun", ["run", join(HERE, "..", "src", "cli.ts"), "emit", f], {
+        encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+      });
+      return { out: `${r.stdout ?? ""}${r.stderr ?? ""}`, code: r.status ?? -1 };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** The shape every refusal must have: a code, a hint, a nonzero exit, NO stack trace. */
+  function expectClean(out: string, code: number, ntCode: string): void {
+    expect(out).toContain(`error[${ntCode}]`);
+    expect(out).toContain("= help:");
+    expect(code).not.toBe(0);
+    // The regression that matters: an internal throw prints a Bun stack trace whose frames
+    // name our source files. None of those may appear.
+    expect(out).not.toContain("    at ");
+    expect(out).not.toContain("src/codegen.ts:");
+  }
+
+  // `throw` outside a `try` IN THE SAME FUNCTION. Every one of these is ordinary
+  // TypeScript that node runs; all of them reached `codegen.ts` line 1323's
+  // `throw new Error("throw outside a try (unsupported)")`.
+  const THROWS: [string, string][] = [
+    ["top-level throw", `console.log("before");\nthrow new Error("boom");\n`],
+    ["function throws, no try anywhere", `function f(): number { throw new Error("boom"); }\nconsole.log(f());\n`],
+    // The ordinary idiom: raise in the callee, handle at the call site.
+    ["function throws, try at the CALL SITE", `function f(): number { throw new Error("boom"); }\ntry { console.log(f()); } catch (e) { console.log("caught"); }\n`],
+    ["method throws, try at the call site", `class C { m(): number { throw new Error("b"); } }\ntry { console.log(new C().m()); } catch (e) { console.log("caught"); }\n`],
+    ["rethrow from a catch block", `try { throw new Error("a"); } catch (e) { throw new Error("b"); }\n`],
+    ["throw from an arrow", `const f = (): number => { throw new Error("b"); };\ntry { console.log(f()); } catch (e) { console.log("c"); }\n`],
+    ["throw from a finally block", `try { console.log(1); } finally { throw new Error("b"); }\n`],
+  ];
+  for (const [name, src] of THROWS) {
+    test(`NT1004, not a stack trace: ${name}`, () => {
+      const { out, code } = cli(src);
+      expectClean(out, code, "NT1004");
+    });
+  }
+
+  // The same construct INSIDE a try in the same function still compiles — the refusal is
+  // scoped to what codegen genuinely cannot lower, and did not swallow the working case.
+  test("a throw inside a try in the same function still compiles", () => {
+    const { out, code } = cli(`try { throw new Error("boom"); } catch (e) { console.log("caught"); }\n`);
+    expect(code).toBe(0);
+    expect(out).not.toContain("error[");
   });
 });
