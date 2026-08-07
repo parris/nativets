@@ -252,6 +252,48 @@ export function isUnionTy(t: Ty): boolean { return typeof t === "string" && t.st
 export function unionMembers(t: Ty): Ty[] { return splitTopLevel(t.slice(2, -1), "|") as Ty[]; }
 export function makeUnionTy(members: Ty[]): Ty { return `U<${members.join("|")}>` as Ty; }
 
+/* ============================================================
+ * GENERAL unions — arms that are not all object types, so nothing INSIDE the value
+ * can tell them apart. Encoded `G<a|b>`, deliberately a DIFFERENT prefix from the
+ * discriminated `U<…>`: a `U<…>` value is the bare member pointer, so sharing the
+ * prefix would let every existing `isUnionTy` site apply unboxed-object logic to
+ * what is in fact a box, which is a miscompile rather than an error.
+ *
+ * REPRESENTATION: a 2-slot heap block [tag, value] — the same shape as the A2
+ * nullable box — where `tag` is the member's index in the CANONICAL member order
+ * and `value` is the arm packed by the ordinary `toSlot`. The tag is an index, so
+ * the order is load-bearing at runtime: members are SORTED and de-duplicated by
+ * `makeGeneralUnionTy`, which makes `number | string` and `string | number` the
+ * same `Ty` with the same tag numbering (`===` stays type comparison, and a value
+ * can cross between the two spellings without renumbering).
+ * ============================================================ */
+export function isGeneralUnionTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("G<") && t.endsWith(">"); }
+export function generalUnionMembers(t: Ty): Ty[] { return splitTopLevel(t.slice(2, -1), "|") as Ty[]; }
+/** Canonicalize: de-duplicate and sort, so member order never depends on spelling. */
+export function makeGeneralUnionTy(members: Ty[]): Ty {
+  return `G<${[...new Set(members)].sort().join("|")}>` as Ty;
+}
+/** The tag a member carries in `t`, or -1 when it is not a member. */
+export function generalUnionTagOf(t: Ty, member: Ty): number { return generalUnionMembers(t).indexOf(member); }
+/**
+ * What `typeof` reports for a value of this static type — the ONLY discriminant a
+ * general union has, so it is also what decides whether one can be represented.
+ */
+export function typeofTagOf(t: Ty): string {
+  if (t === "number" || t === "string" || t === "boolean") return t;
+  return "object";
+}
+/**
+ * An arm a general union may carry. Kept deliberately narrow: only shapes whose
+ * `typeof` is a compile-time constant AND whose value round-trips through the
+ * box's `toSlot`/`fromSlot` unchanged. Nullables are excluded — `T | undefined`
+ * is already its own encoding and nesting the two boxes would give a value two
+ * different representations.
+ */
+export function isGeneralUnionArm(t: Ty): boolean {
+  return t === "number" || t === "string" || t === "boolean" || isArrayTy(t);
+}
+
 /**
  * The discriminant of a union: a field that is present at the SAME index in every
  * member, string-literal-typed in every member, with a DISTINCT value per member.
@@ -444,6 +486,65 @@ export function mapTypesDeep(n: unknown, f: (t: Ty) => Ty): void {
     else if (Array.isArray(v) && TY_LIST_FIELDS.has(k)) o[k] = v.map((t) => (typeof t === "string" ? f(t as Ty) : t));
     else mapTypesDeep(v, f);
   }
+}
+
+/**
+ * Rewrite every read of a STATIC field — `C.f` on a bare class name — into the plain
+ * Identifier `C.f`, the module-level `const` the parser lowered it to.
+ *
+ * This runs at the END of parsing, before any analysis, and that is the point: a static
+ * field is not a slot on a receiver, it is a module binding, so every pass that reasons
+ * about NAMES (globals promotion, closure capture, ownership) has to see an identifier or
+ * it does not see the read at all. No source identifier can contain a `.`, so the dotted
+ * name is unambiguous. Reflective, like `mapTypesDeep` — a rewrite that must not miss a
+ * position is safer written once over the object graph than per node kind.
+ *
+ * A `?.` link is left alone (rewriting it would silently drop the optional; a class name
+ * is never nullish, so the read is rejected instead).
+ */
+export function resolveStaticFieldReads(n: unknown, names: Set<string>, onAssign?: (name: string) => never): void {
+  if (!n || typeof n !== "object") return;
+  const o = n as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    const v = o[k];
+    if (!v || typeof v !== "object") continue;
+    // One flat view of the two node shapes this pass cares about. Deliberately NOT
+    // `Partial<MemberExpr> & {…}`: an intersection type is outside the subset nativets
+    // compiles, and this file is part of the compiler's own source (docs/self-hosting.md).
+    const e = v as { kind?: string; optional?: boolean; property?: string; field?: string; object?: { kind?: string; name?: string } };
+    const head = e.object?.kind === "Identifier" ? e.object.name : undefined;
+    if (head === undefined) { resolveStaticFieldReads(v, names, onAssign); continue; }
+    // `C.f = v` — a WRITE to a static field. Not a read, so never rewritten; the caller
+    // refuses it by name (a static field lowers to a `const`).
+    if (onAssign && e.kind === "FieldAssign" && names.has(`${head}.${e.field}`)) onAssign(`${head}.${e.field}`);
+    if (e.kind === "MemberExpr" && !e.optional && names.has(`${head}.${e.property}`)) {
+      o[k] = { kind: "Identifier", name: `${head}.${e.property}` } as Identifier;
+      continue;
+    }
+    resolveStaticFieldReads(v, names, onAssign);
+  }
+}
+
+/**
+ * Every name the program BINDS — declarations, function/arrow parameters, loop and catch
+ * bindings. Used to protect the static-field rewrite above: that rewrite is name-based and
+ * has no scope, so a binding that shadows a class name would silently redirect `C.f` to
+ * the class's static instead of the shadowing value. Collecting the binders lets the
+ * parser refuse that program outright rather than answer it wrongly.
+ */
+export function collectBindingNames(n: unknown, out: Set<string>): void {
+  if (!n || typeof n !== "object") return;
+  const o = n as Record<string, unknown>; // no intersection type: see `resolveStaticFieldReads`
+  const params = o.params as { name?: string }[] | undefined;
+  if (params && Array.isArray(params)) for (const p of params) if (p?.name) out.add(p.name);
+  switch (o.kind as string | undefined) {
+    case "VarDecl": for (const d of o.decls as { name: string }[]) out.add(d.name); break;
+    case "FuncDecl": out.add(o.name as string); break;
+    case "ForOfStmt": out.add(o.name as string); if (o.name2) out.add(o.name2 as string); break;
+    case "ForInStmt": out.add(o.name as string); break;
+    case "TryStmt": if (o.param) out.add(o.param as string); break;
+  }
+  for (const k of Object.keys(o)) collectBindingNames(o[k], out);
 }
 
 export type Expr =
@@ -724,6 +825,11 @@ export interface FuncDecl {
    *  a "setter". For an `@@mutable` class that is real in-place mutation, so the
    *  ownership pass requires the receiver to be OWNED (Rust's `&mut self`). */
   setter?: boolean;
+  /** A `static` class member: `C.m(…)` lowered WITHOUT the leading `this` parameter, so
+   *  it is called through the class name (`C.m(a)`) and never through an instance. The
+   *  flag is what separates it from the instance method of the same shape — both lower
+   *  to a top-level `C.m`, and only this says which one a call site may reach. */
+  isStatic?: boolean;
   /** Decorators lane: `this` must not be move-tracked in this frame — it is either the
    *  method's own private copy (copy-on-write setter) or a borrow it legitimately hands
    *  straight back (`return this` from a decorated constructor / an `@@mutable` method). */

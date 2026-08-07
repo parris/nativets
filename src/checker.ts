@@ -17,7 +17,12 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
 import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
-import type { ArrowFunction } from "./ast.ts";
+// The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
+// by `typeof` instead. Distinct from the discriminated-union machinery imported above.
+import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, typeofTagOf } from "./ast.ts";
+import type { ArrowFunction, BinaryExpr } from "./ast.ts";
+// `unlinkedImportError` says "you did not link" instead of blaming closures, for a call
+// to an imported binding that the standalone (unlinked) check cannot see.
 import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError, unlinkedImportError } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
@@ -335,6 +340,7 @@ export function check(program: Program): CheckedProgram {
     const ret = s.returnAnnot ?? "number";
     s.returnTy = ret;
     functions.set(s.name, { params, ret, required, defaults, rest });
+    if (s.isStatic) c.statics.add(s.name); // `static m()` → reachable only as `C.m(…)`
   }
 
   // pass 1.5: pre-declare the module-level bindings, so return-type inference and
@@ -415,6 +421,13 @@ class Checker {
    * NT1014 rejection. This set records the positions as they are checked.
    */
   private iterOk = new Set<Expr>();
+  /**
+   * `static` class methods, by their LOWERED name (`C.m`). A static has no receiver, so
+   * `C.m(a)` is a direct call to the lowered function — and an INSTANCE method, which
+   * lowers to the same shape of name, must NOT be reachable that way (in node a class
+   * object has no such property, so calling it is a TypeError, never a receiver-less call).
+   */
+  readonly statics = new Set<string>();
   constructor(
     private functions: Map<string, Sig>,
     /** Tags whose values mutate IN PLACE — `@@mutable` classes and `@@mutable` records.
@@ -608,8 +621,13 @@ class Checker {
       case "BinaryExpr": {
         const ne = e.op === "!==" || e.op === "!=";
         const eq = e.op === "===" || e.op === "==";
+        if (!ne && !eq) return;
+        // `typeof x === "number"` on a GENERAL union. Unlike the nullish tests below it
+        // narrows on BOTH polarities — the arms are a closed set, so ruling one out is
+        // as informative as picking one. `positive === eq` is "the tag matched".
+        this.typeofFacts(e, scope, positive === eq, out);
         // The value is non-nullish on the TRUE branch of `!==` and the FALSE branch of `===`.
-        if ((!ne && !eq) || positive !== ne) return;
+        if (positive !== ne) return;
         for (const [v, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
           // Both operand orders narrow — TypeScript's
           // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
@@ -628,9 +646,32 @@ class Checker {
       case "UnaryExpr":
         if (e.op === "!") this.guardFacts(e.operand, scope, !positive, out);
         return;
+      case "CallExpr":
+        // `Array.isArray(v)` — the idiomatic discriminant for an array arm, and the
+        // same closed-set reasoning as `typeof`: it narrows on both branches.
+        this.isArrayFacts(e, scope, positive, out);
+        return;
       default:
         return;
     }
+  }
+
+  /** `Array.isArray(x)` narrowing a general union — see `typeofFacts` for the rules.
+   *  Takes a plain `Expr` and re-tests `kind`: an `Expr & { kind: … }` intersection is
+   *  outside the subset we compile, and writing one here would add a self-host blocker
+   *  to our own source (which is exactly how this was caught). */
+  private isArrayFacts(e: Expr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+    if (e.kind !== "CallExpr") return;
+    const c = e.callee;
+    if (c.kind !== "MemberExpr" || c.property !== "isArray") return;
+    if (c.object.kind !== "Identifier" || c.object.name !== "Array" || scope.lookup("Array")) return;
+    if (e.args.length !== 1) return;
+    const p = this.accessPath(e.args[0]!, scope);
+    if (p === undefined || !isGeneralUnionTy(p.ty)) return;
+    const keep = generalUnionMembers(p.ty).filter((m) => isArrayTy(m) === matched);
+    if (keep.length !== 1) return;
+    if (out.some((f) => f.binding === p.binding && f.path === p.path)) return;
+    out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
   }
 
   /**
@@ -677,6 +718,31 @@ class Checker {
     if (kind !== null && nullishKind(p.ty) !== kind) return;
     if (out.some((f) => f.binding === p.binding && f.path === p.path)) return;
     out.push({ name: p.name, binding: p.binding, path: p.path, ty: baseTy(p.ty), constant: p.binding.constant, arrowDepth: this.arrowDepth });
+  }
+
+  /**
+   * `typeof x === "number"` against a GENERAL union — the only discriminant it has.
+   *
+   * `matched` says whether this branch is the one where the tag equalled the literal.
+   * The arms are a closed set, so both branches narrow: the matching one to the arms
+   * with that `typeof`, the other to the arms without it.
+   *
+   * A fact is only recorded when the surviving set is a SINGLE arm. A 3-arm union's
+   * else branch is a 2-arm SUB-union, whose tags are renumbered against its own
+   * canonical member order — narrowing to it would need the box retagged, so instead
+   * the binding simply stays the full union (still printable, still tag-correct) and
+   * any arm-specific use of it is refused. Conservative, never wrong.
+   */
+  private typeofFacts(e: BinaryExpr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+    for (const [t, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
+      if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") continue;
+      const p = this.accessPath(t.operand, scope);
+      if (p === undefined || !isGeneralUnionTy(p.ty)) continue;
+      const keep = generalUnionMembers(p.ty).filter((m) => (typeofTagOf(m) === lit.value) === matched);
+      if (keep.length !== 1) continue;
+      if (out.some((f) => f.binding === p.binding && f.path === p.path)) continue;
+      out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
+    }
   }
 
   /** The narrowed type for the path `e` reads here, if a fact covers it. */
@@ -971,6 +1037,12 @@ class Checker {
       if (isUnionTy(source)) return unionWidenedMembers(source).every((m) => members.includes(m));
       return members.includes(source);
     }
+    // A GENERAL union is a box: any arm (or a narrower general union) may flow in.
+    if (isGeneralUnionTy(target)) {
+      const members = generalUnionMembers(target);
+      if (isGeneralUnionTy(source)) return generalUnionMembers(source).every((m) => members.includes(m));
+      return members.includes(source);
+    }
     if (isNullableTy(target)) {
       const which = nullishKind(target);
       if (source === which) return true;                 // undefined→?U / null→?N
@@ -1157,7 +1229,7 @@ class Checker {
         }
         return;
       case "IfStmt": {
-        this.type(s.test, scope);
+        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
         // Two INDEPENDENT narrowings apply to the same arms, and a guard can want both
         // (see checkBlock): nullable FACTS from the guard hold in the branch it selects,
         // and a TAG test narrows each arm's union — the tested member in one, the
@@ -1180,12 +1252,12 @@ class Checker {
         return;
       }
       case "WhileStmt":
-        this.type(s.test, scope);
+        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
         return;
       case "DoWhileStmt":
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
-        this.type(s.test, scope);
+        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
         return;
       case "ForStmt": {
         const inner = scope.child();
@@ -1297,7 +1369,8 @@ class Checker {
       case "UndefinedLiteral": return "undefined";
       case "NullLiteral": return "null";
       case "TemplateLiteral":
-        for (const x of e.exprs) this.type(x, scope);
+        // Same box, same invalid IR, as string concatenation just above.
+        for (const x of e.exprs) refuseUnboxedUnion(this.type(x, scope), "a template literal");
         return "string";
       case "ArrayLiteral": {
         if (e.elements.length === 0) {
@@ -1559,6 +1632,9 @@ class Checker {
           // tagged pair, never truthiness, so `0` / `""` / `false` compare false.
           if (isNullableTy(l) && (r === "undefined" || r === "null")) return "boolean";
           if (isNullableTy(r) && (l === "undefined" || l === "null")) return "boolean";
+          // A general union is a BOX: `===` on it compared the two boxes' TAGS, so
+          // `1 === 2` came out true. Refuse until the arms are compared themselves.
+          for (const t of [l, r]) refuseUnboxedUnion(t, "`===`");
           if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`);
           return "boolean";
         }
@@ -1573,6 +1649,9 @@ class Checker {
           // concatenating one used to reach codegen and emit invalid IR. Unwrap first
           // (`?? "…"`), which is also the only spelling whose output is unambiguous.
           for (const t of [l, r]) if (isNullableTy(t)) throw nyi(NYI.OPTIONAL_CHAIN, `string concatenation with a \`${baseTy(t)} | ${nullishKind(t)}\` (unwrap it first, e.g. \`(x ?? "") + …\`)`);
+          // ...and a general union is the same two-slot box, which reached codegen and
+          // emitted invalid IR.
+          for (const t of [l, r]) refuseUnboxedUnion(t, "string concatenation");
           // stdlib Batch 3: `"" + date` is node's Date#toString — a LOCALE- and
           // zone-name-formatted human string ("Thu Jan 01 1970 … (GMT)"), which needs
           // the tz display-name tables. Refuse rather than approximate.
@@ -1621,7 +1700,7 @@ class Checker {
         throw typeError(`'${e.op}' operands must be matching boolean/number/string (got ${l}, ${r})`);
       }
       case "ConditionalExpr": {
-        this.type(e.test, scope);
+        refuseUnboxedUnion(this.type(e.test, scope), "a truthiness test");
         // Each arm sees the surrounding context; additionally an empty `[]` arm takes
         // its element type from the OTHER arm (`flag ? [1, 2] : []`), so type the
         // non-empty arm first and feed its type back.
@@ -2078,7 +2157,9 @@ class Checker {
       // SH2: the serializer is generated from the STATIC type, and an un-narrowed union
       // does not have one shape — it used to fall through to the literal `null`, which is
       // a silent wrong answer. Refuse; narrowing gives it a member to serialize.
-      checkUnionRenderable(this.type(e.args[0]!, scope), "JSON.stringify");
+      const jt = this.type(e.args[0]!, scope);
+      checkUnionRenderable(jt, "JSON.stringify");
+      refuseUnboxedUnion(jt, "JSON.stringify"); // rendered the box as the literal `null`
       // arg2 (replacer) — only `null`/`undefined` supported (no array/function replacer).
       if (e.args.length >= 2) {
         const r = e.args[1]!;
@@ -2233,12 +2314,31 @@ class Checker {
       return "number";
     }
 
+    // `C.m(args)` — a STATIC method call. The class name is a NAMESPACE, not a value, so
+    // there is no receiver to type: rewrite the callee to the lowered top-level function
+    // `C.m` and let the ordinary named-call path below check the arguments. (A local
+    // binding of the class's name wins, exactly as it would for any other identifier.)
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && !scope.lookup(e.callee.object.name)) {
+      const cname = e.callee.object.name, lowered = `${cname}.${e.callee.property}`;
+      if (this.statics.has(lowered)) e.callee = { kind: "Identifier", name: lowered };
+      // The reverse mix-up: an INSTANCE method reached through the class name. It lowers
+      // to the same shape of name, so say so rather than leaving the class name to fail
+      // as an undefined identifier (in node the class object has no such property at all).
+      else if (this.functions.has(lowered)) {
+        throw typeError(`'${e.callee.property}' is an instance method of ${cname}, not a static — call it on an instance (\`inst.${e.callee.property}(…)\`)`);
+      }
+    }
+
     // receiver.method(...)
     if (e.callee.kind === "MemberExpr") {
       const recv = this.type(e.callee.object, scope);
       // class instance method: `inst.m(args)` → the lowered `C.m(this, …)`.
       const cls = classTag(recv);
       if (cls) {
+        // A STATIC is not on the instance — it has no receiver at all, so an instance
+        // cannot reach it (node: `p.make is not a function`). Point at the class.
+        if (this.statics.has(`${cls}.${e.callee.property}`))
+          throw typeError(`'${e.callee.property}' is a static method of ${cls}, not an instance method — call it on the class (\`${cls}.${e.callee.property}(…)\`)`);
         const msig = this.functions.get(`${cls}.${e.callee.property}`);
         if (!msig) {
           if (fieldType(recv, e.callee.property)) throw typeError(`'${e.callee.property}' is a field of ${cls}, not a method`);
@@ -2776,7 +2876,7 @@ class Checker {
    * structural-object and nullable arms would accept values codegen does not box here.
    */
   private fitsParam(expected: Ty, actual: Ty): boolean {
-    return actual === expected || (isUnionTy(expected) && this.assignable(expected, actual));
+    return actual === expected || ((isUnionTy(expected) || isGeneralUnionTy(expected)) && this.assignable(expected, actual));
   }
 
   /**
@@ -3177,6 +3277,29 @@ export function checkConsoleArg(at: Ty, depth = 0): void {
  * the fix named. The union's own tag is what supplies the missing shape, at runtime and
  * with one branch per member; that is a follow-on, not a guess to make now.
  */
+/**
+ * Refuse an operation that would read a GENERAL union's box as if it were the value.
+ *
+ * Everything the box supports — printing, `typeof`, `Array.isArray` — dispatches on
+ * its tag. Everything else reaches code generated from the STATIC type, which for a
+ * `G<…>` describes the two-slot block, not the arm inside it. Each case below was
+ * measured against node before being refused, and each was silently wrong rather
+ * than loud: truthiness tested the box POINTER (always true, so `0` came out truthy),
+ * `===` compared TAGS (so `1 === 2` was true), `JSON.stringify` rendered the literal
+ * `null`, and concatenation emitted invalid IR.
+ *
+ * Every one of them is a tag dispatch away from working — the printer already is one
+ * — but "reject, never miscompile" says the refusal lands first.
+ */
+function refuseUnboxedUnion(ty: Ty, what: string): void {
+  if (!isGeneralUnionTy(ty)) return;
+  throw nyi(
+    NYI.OPTIONAL_CHAIN,
+    `${what} of the un-narrowed union ${generalUnionMembers(ty).join(" | ")} — it is a tagged box, so which arm it holds ` +
+      `is only known at RUNTIME. Narrow it first (\`if (typeof x === "${typeofTagOf(generalUnionMembers(ty)[0]!)}") { … }\`) and use the arm`,
+  );
+}
+
 export function checkUnionRenderable(ty: Ty, what: string): void {
   const u = findUnionIn(ty);
   if (u === undefined) return;
@@ -3265,6 +3388,10 @@ export function checkInspectable(ty: Ty, root: Ty, depth = 0): void {
     throw nyi(NYI.INSPECT, "console.log of a function value");
   }
   if (isNullableTy(ty)) return checkInspectable(baseTy(ty), root, depth);
+  // A GENERAL union carries its own tag, so codegen can dispatch and print the arm it
+  // actually holds — byte-for-byte what node prints. (A `U<…>` object union has no
+  // outer tag and stays refused; that is the case just below.)
+  if (isGeneralUnionTy(ty)) { for (const m of generalUnionMembers(ty)) checkInspectable(m, root, depth); return; }
   if (depth >= INSPECT_DEPTH_LIMIT) return; // rendered as `[Object]`/`[Array]`; contents unread
   if (isArrayTy(ty)) return checkInspectable(elemTy(ty), root, depth + 1);
   if (isSetTy(ty)) return checkInspectable(setElemTy(ty), root, depth + 1);
@@ -3286,7 +3413,7 @@ const INSPECT_DEPTH_LIMIT = 3;
 export function isPrintableTy(t: Ty): boolean {
   return (
     t === "number" || t === "boolean" || t === "string" || t === "undefined" || t === "void" ||
-    t === "null" || t === "Dyn" || isDateTy(t) || isNullableTy(t) ||
+    t === "null" || t === "Dyn" || isDateTy(t) || isNullableTy(t) || isGeneralUnionTy(t) ||
     isObjectTy(t) || isArrayTy(t) || isMapTy(t) || isSetTy(t) || isBytesTy(t)
   );
 }

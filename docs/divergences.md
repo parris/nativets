@@ -317,6 +317,39 @@ Everything else about Batch 3:
   "unwrap it first"). It previously reached codegen and emitted invalid IR — a real defect, found
   by this lane through `URLSearchParams#get`.
 
+### General (non-object) unions — supported narrowly, refused loudly (`G<…>`)
+
+A union whose arms are not all object types (`number | string`, `number | number[]`) has no
+discriminant field inside the value, so it is a **tagged box**: a 2-slot `[tag, value]` block
+(the A2 nullable's shape) with `tag` = the arm's index in the union's canonical member order.
+Members are sorted and de-duplicated, so `number | string` and `string | number` are the same
+type with the same tag numbering.
+
+What works is what dispatches on that tag: `typeof`, `Array.isArray`, `console.log`, narrowing
+via either predicate, and union-typed parameters, returns and bindings. **Everything else is
+refused with `NT1009`**, because it is generated from the STATIC type — which for a `G<…>`
+describes the box, not the arm in it. Each was measured against node first, and each was
+silently wrong rather than loud:
+
+| Refused | What it did before the refusal |
+|---|---|
+| `if (x)` and every other truthiness position | tested the box POINTER — always true, so `0` and `""` came out truthy |
+| `a === b` between unions | compared the two boxes' TAGS, so `1 === 2` was true |
+| `JSON.stringify(x)` | rendered the box as the literal `null` |
+| `"" + x`, `` `${x}` `` | emitted invalid IR |
+
+Each is a tag dispatch away from working — the printer already is one — but reject-never-miscompile
+says the refusal lands first. Arms are restricted to `number`/`string`/`boolean`/arrays with
+*distinct* `typeof` tags: `number[] | {a: number}` is refused because `typeof` cannot tell those
+apart, and an object arm is refused outright. A 3-arm union narrows only when ONE arm survives
+the test — the else branch of a 3-arm union is a sub-union whose tags would need renumbering, so
+the binding stays the full union and arm-specific uses of it are refused.
+
+> **Pre-existing, and NOT fixed by that lane:** the A2 nullable box has three of the same holes,
+> two of them silently wrong. With `const x: number | undefined = [0].at(0)`, `if (x)` prints
+> `truthy` where node prints `falsy`, and `JSON.stringify(x)` prints `null` where node prints `0`;
+> `` `${x}` `` emits invalid IR. These predate general unions and need their own lane.
+
 ### Actor messages (B3 v5) — structured messages are COPIES, and the shape is checked
 
 node has no actors, so the whole surface (`spawn`/`send`/`receive`) is behavioral, not
@@ -806,6 +839,33 @@ supported case is node-differential — there is **no runtime divergence**. The 
   specialization is driven by the types that actually flow, so a constraint adds nothing, but it
   is also **not enforced** (a bound violation surfaces as an ordinary error inside the
   specialization, not as a constraint violation at the call site).
+
+### `static` class members — supported, and the four refusals
+
+A static member has no receiver, so it is a **namespaced top-level definition**: `static m(…)`
+lowers to the function `C.m(…)` with no `this` parameter, and `static f = init` to a module-level
+`const C.f` initialized where the class is declared. Both are ordinary TypeScript that node runs
+unchanged, so every supported case is node-differential (`test/fixtures/classes/static-*.ts`,
+plus `test/modules/statics/` across a module boundary). What is refused:
+
+- **A static field with no initializer** (`static f: number;`) — it would read as `undefined`,
+  which is not a value this language has for a `const`. `NT1015`.
+- **Assignment to a static field** (`C.f = v`) — it is a `const`, like every other module-level
+  binding here (§A, immutable-by-default). `NT1606`, pointing at a static method instead. node
+  allows the write.
+- **A binding that shadows a class with static fields** — a read of `C.f` is resolved by NAME
+  (that is what makes it a module binding rather than a slot on a receiver), so a parameter
+  named after the class would silently redirect the read to the static. Refused with `NT1015`
+  rather than answered wrongly; node reads the shadowing value.
+- **A decorator on a static** (`@w static m()`) — a `@wrapper` is typed over the method's own
+  signature *with the receiver as its first parameter* (`docs/decorators.md`), and a static has
+  no receiver. `NT1015`.
+
+Reaching a member through the wrong side — a static through an instance, or an instance method
+through the class name — is a **compile-time rejection**. node throws a `TypeError` at runtime
+for both (the property genuinely does not exist there), so this rejects strictly earlier than
+node fails.
+
 | NT1020 | promises / concurrency: `Promise.*`, `new Promise`, `.then`/`.catch`/`.finally`, un-awaited `async` results | later | an event loop — or, the chosen answer, the **actor** model (`spawn`/`send`/`receive`). `async`/`await`/`fetch` themselves are ✅ supported (blocking; see §A) |
 | NT1025 | `console.log` of a value with no node-identical rendering: a **function value** anywhere, or a `Uint8Array`/`TextEncoder`/`TextDecoder`/`Response`/`Headers`/`URL`/`URLSearchParams` handle **nested inside** a printed value | later | objects, class instances, arrays, Map/Set and `Dyn` are ✅ node-exact (util.inspect, see above); this code covers only the leaf types that have no node-identical form here |
 
