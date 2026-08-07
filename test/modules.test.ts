@@ -192,6 +192,17 @@ describe("an unlinked import is reported as an unlinked import", () => {
     expect(diag.message).not.toContain("function values");
   });
 
+  // The `coverage` tool reaches the same call by a different road: it ERASES the import
+  // preamble (src/coverage-preprocess.ts) so a module whose preamble does not parse can
+  // still be measured, which drops the binding names too. docs/self-hosting.md attributes
+  // driver.ts's NT1003 to exactly this path, so it needs the honest message just as much.
+  test("the coverage tool names the unlinked import too", () => {
+    const r = coverage(SRC);
+    expect(r.firstError!.code).toBe("NT1003");
+    expect(r.firstError!.message).toContain("./dep.ts");
+    expect(r.firstError!.message).not.toContain("function values");
+  });
+
   test("a genuinely unknown callee still reports the closure gap", () => {
     let err: unknown;
     try { check(parse("console.log(nosuch(1));\n")); } catch (e) { err = e; }

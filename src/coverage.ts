@@ -7,7 +7,7 @@
  * so "unsupported" becomes an actionable, prioritized list.
  */
 
-import type { Program, Stmt, Expr } from "./ast.ts";
+import type { Program, Stmt, Expr, ImportDecl } from "./ast.ts";
 import { parse } from "./parser.ts";
 import { linkProgram } from "./modules.ts";
 import { check } from "./checker.ts";
@@ -153,6 +153,14 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   // table (`collectTypes` in, `typeEnv` out) and the `@@mutable` tag sets. Without them a
   // `@@mutable type Cell = …` in one statement would be invisible to the `c.n = 1` in the
   // next, and `coverage` would report an NT1606 the real compiler does not.
+  // The preprocess ERASES the import preamble, which drops the imported binding NAMES
+  // too — and then a call to one of them looks like a call to an unknown function, i.e.
+  // the closure gap, which is not what is wrong (see `unlinkedImportError`). Recover the
+  // names best-effort by parsing the whole file: when it parses we get them exactly, and
+  // when it does not — the very case the preprocess exists for — we are no worse off than
+  // before. Only the names are taken; the statements still come from the preprocess.
+  let imports: ImportDecl[] = [];
+  if (!linked) { try { imports = parse(source).imports ?? []; } catch { /* preamble does not parse; no names to recover */ } }
   const typeEnv = new Map<string, import("./ast.ts").Ty>();
   const mutableClasses = new Set<string>();
   const mutableRecords = new Set<string>();
@@ -180,6 +188,7 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   try {
     check(linked ?? {
       kind: "Program", body,
+      ...(imports.length ? { imports } : {}),
       ...(mutableClasses.size ? { mutableClasses: [...mutableClasses] } : {}),
       ...(mutableRecords.size ? { mutableRecords: [...mutableRecords] } : {}),
     });
