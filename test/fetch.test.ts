@@ -371,4 +371,26 @@ async function one(): Promise<number> { return 1; }
 one();
 console.log("after");
 `));
+
+  // An async ARROW is the same promise, so it gets the same guard: the guard tracks
+  // NAMES, and an arrow binds its name through a `const`, not a `function` keyword.
+  _test("un-awaited async ARROW whose value is used", () => rejects(`
+const one = async (): Promise<number> => 1;
+console.log(one());
+`));
+
+  // Re-binding an async function to a new name does not make it not-async. The guard
+  // follows a DIRECT alias chain (`const b = a`), which is what `const { x } = …`-free
+  // straight-line code actually looks like. See the boundary note in parseDeclarator.
+  _test("un-awaited call through an alias of an async arrow", () => rejects(`
+const one = async (): Promise<number> => 1;
+const two = one;
+console.log(two());
+`));
+
+  // An immediately-invoked async arrow never gets a name at all, so the name-based
+  // guard would miss it — it is caught on the callee NODE instead.
+  _test("un-awaited immediately-invoked async arrow", () => rejects(`
+console.log((async (): Promise<number> => 1)());
+`));
 });

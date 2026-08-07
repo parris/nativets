@@ -90,7 +90,7 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     expect(r.blockers).toEqual([]);
   });
 
-  test("NT0001 is CLEARED except TWO unmasked constructs (a regex literal, `satisfies`)", () => {
+  test("NT0001 is CLEARED across the whole tree — no unparsed statement remains", () => {
     // The NT0001 "unparsed statement" bucket was the #1 self-host blocker at x11 once
     // Stage 36 cleared NT1013. It was never one feature; the six causes were extracted
     // from real statements and closed one at a time (see test/selfhost-parse.test.ts):
@@ -98,18 +98,19 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // literals, `++`/`--` on a member or index target, `instanceof`, binding patterns in
     // parameters — plus parenthesized types and `delete`. Whole tree: ZERO.
     //
-    // Each surviving NT0001 is a blocker an EARLIER burn-down unmasked, which is what
-    // burning one down is supposed to do — not a parser regression:
+    // The bucket is now EMPTY. The last two entries were both blockers an earlier
+    // burn-down had unmasked, and each left the bucket a different way:
     //   - `parser.ts`: the mutable-records lane put `//@@mutable` on `class Parser`, so it
-    //     parses past `this.pos++` and reaches `… satisfies ExportTable` — the `satisfies`
-    //     operator, which nativets does not have.
-    // Everything else still parses.
+    //     parsed past `this.pos++` and reached `… satisfies ExportTable`. The `satisfies`
+    //     lane implemented the operator, so that statement PARSES now — genuinely gone.
+    //   - `checker.ts`: `t.replace(/[^A-Za-z0-9_]/g, "_")`. Regex literals now LEX and are
+    //     refused as **NT1027**, so that blocker is named (with its pattern and position)
+    //     instead of being an anonymous "unparsed statement" — it moved buckets, it did
+    //     not go away. See the NT1027 row in the histogram test below.
     //
-    // `checker.ts` USED to be here too, for `t.replace(/[^A-Za-z0-9_]/g, "_")`. Regex
-    // literals now LEX and are refused as **NT1027**, so that blocker is named (with its
-    // pattern and position) instead of being an anonymous "unparsed statement" — it moved
-    // buckets, it did not go away. See the NT1027 row in the histogram test below.
-    const UNMASKED: Record<string, number> = { "parser.ts": 1 };
+    // An empty NT0001 bucket is the meaningful invariant: every remaining blocker in the
+    // tree is a NAMED feature with a code, so it can be burned down deliberately.
+    const UNMASKED: Record<string, number> = {};
     for (const f of SRC_MODULES) {
       const r = coverage(src(f));
       const nt0001 = r.blockers.filter((b) => b.code === "NT0001").length;
@@ -149,7 +150,8 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     }
     // NT1027 (a regex literal) is new only as a NAME: it was inside the NT0001 bucket
     // until regex literals started lexing. Naming it is what makes it burnable-down.
-    expect([...hist.keys()].sort()).toEqual(["NT0001", "NT1003", "NT1009", "NT1014", "NT1015", "NT1027", "NT1606"]);
+    // NT0001 itself is no longer on this list at all — see the test above.
+    expect([...hist.keys()].sort()).toEqual(["NT1003", "NT1009", "NT1014", "NT1015", "NT1027", "NT1606"]);
     // NT1606 is no longer the largest bucket — that is the lane's whole result.
     for (const [code, n] of hist) if (code !== "NT1606") expect(n).toBeGreaterThanOrEqual(hist.get("NT1606")!);
   });

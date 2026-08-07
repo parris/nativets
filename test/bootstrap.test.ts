@@ -237,19 +237,22 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
       const code = /\[(NT\d+)\]/.exec(error)?.[1] ?? "other";
       (byCode[code] ??= []).push(m);
     }
-    // NT1017 (`node:fs`) is the SH4 host-FFI story; NT1027 is the regex refusal; the
-    // NT0001 survivors are a template-literal TYPE (`\`${string}[]\`` in ast.ts, which
-    // coverage.ts sees through the link) and `satisfies` in parser.ts.
+    // Re-measured centrally after a round of parallel lanes merged (see below). NT0001
+    // is now EMPTY tree-wide: its last two survivors were a template-literal TYPE
+    // (`\`${string}[]\`` in ast.ts, which coverage.ts and coverage-preprocess.ts saw
+    // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
+    // Every remaining stage-1 blocker now has a named NT code and a hint.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT0001", "NT1009", "NT1014", "NT1015", "NT1017", "NT1606"],
+      ["NT1009", "NT1014", "NT1015", "NT1606"],
     );
-    // MEASURED AFTER THE MERGE, not carried over from either branch: SH4 landed between
-    // this lane's base and here, so `modules.ts` is past the host FFI and stops on
-    // NT1015 instead. driver.ts's NT1017 is a DIFFERENT one — the bun text-asset import
-    // `import runtimeSource from "…/runtime.c" with {type:"text"}`, a bundler feature
-    // rather than a `node:` module, and an open SH7 question (the self-hosted compiler
-    // still has to embed its runtime somehow).
-    expect(byCode["NT1017"]!.sort()).toEqual(["cli.ts", "driver.ts"]);
+    // The NT1017 bucket is EMPTY for TWO reasons, landed a session apart. The text-import
+    // lane taught the compiler the bun text-asset import (`import runtimeSource from
+    // "…/runtime.c" with {type:"text"}`); then the export-async lane cleared the last one,
+    // `export async function` at driver.ts:502. Both cli.ts and driver.ts are past it.
+    expect(byCode["NT1017"]).toBeUndefined();
+    // NT0001 is a SHRINK-ONLY ratchet from here: a new parse-level blocker means a lane
+    // regressed the frontier, not that the bucket legitimately grew.
+    expect(byCode["NT0001"]).toBeUndefined();
     // Unmasked by the lexer rewrite: `new Set([...])` for REGEX_AFTER_KEYWORD.
     expect(byCode["NT1014"]!.sort()).toEqual(["lexer.ts"]);
     // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
@@ -259,7 +262,23 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // as character scanning (nativets has no RegExp, so its source may not use one).
     // `test/no-regex.test.ts` is the shrink-only lint that keeps it that way.
     expect(byCode["NT1027"]).toBeUndefined();
-    expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
+    // This bucket grew from two modules to EIGHT, and every arrival is a blocker moving
+    // FORWARD out of an earlier bucket — the SH0 gradient working, not a regression:
+    //   - `parser.ts` left NT0001: the satisfies lane taught the parser `expr satisfies T`,
+    //     so `… satisfies ExportTable` parses and the module dies further in.
+    //   - `ast.ts`, `coverage.ts`, `coverage-preprocess.ts` left NT0001: the
+    //     template-literal-type lane cleared `\`${string}[]\`` at ast.ts:14, which the
+    //     other two saw through the link.
+    //   - `cli.ts`, `driver.ts` left NT1017 — the text-asset import, then `export async
+    //     function`.
+    // NOTE this is the LINK view, so a module can appear here for an imported module's
+    // union rather than its own; the standalone probe is what says whose blocker it is.
+    // Under the link, general unions now dominate: NT1009 is the crux, and clearing it is
+    // the single highest-leverage move left on the board.
+    expect(byCode["NT1009"]!.sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts",
+       "driver.ts", "ownership.ts", "parser.ts"],
+    );
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not
@@ -268,9 +287,8 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT1606, `[...diag.spans].sort(…)` — the immutable-data refusal.
     expect(byCode["NT2001"]).toBeUndefined();
     expect(byCode["NT1606"]!.sort()).toEqual(["diagnostics.ts"]);
-    expect(byCode["NT0001"]!.sort()).toEqual(
-      ["ast.ts", "coverage-preprocess.ts", "coverage.ts", "parser.ts"],
-    );
+    // (The NT0001 membership assertion that stood here is gone: the bucket is empty, and
+    // the shrink-only `toBeUndefined` above is now the thing that guards it.)
   });
 
   test("coverage's preprocess still hides the regex blocker (histogram reads optimistic)", async () => {

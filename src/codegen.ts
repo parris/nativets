@@ -2109,6 +2109,9 @@ class FnGen {
         if (e.expr.ty === "Dyn") return this.genDynNarrow(this.genExpr(e.expr).v, e.ty);
         return { v: this.genExpr(e.expr).v, ty: e.ty };
       }
+
+      // `satisfies` never retypes, so it erases completely — no validator, no retag.
+      case "SatisfiesExpr": return this.genExpr(e.expr);
       /**
        * `expr!` — the non-null assertion. On a non-nullable operand it is the identity.
        * On a nullable it UNWRAPS the A2 tagged pair to the bare value.
@@ -3814,7 +3817,7 @@ class FnGen {
       case "TypeofExpr": this.subExpr(e.operand, map); return;
       case "CallExpr": this.subExpr(e.callee, map); for (const a of e.args) this.subExpr(a, map); return;
       case "NewExpr": for (const a of e.args) this.subExpr(a, map); return;
-      case "AsExpr": this.subExpr(e.expr, map); return;
+      case "AsExpr": case "SatisfiesExpr": this.subExpr(e.expr, map); return;
       case "NonNullExpr": this.subExpr(e.expr, map); return;
       case "InstanceOfExpr": this.subExpr(e.object, map); return;
       case "ArrowFunction": {

@@ -387,7 +387,7 @@ standalone column is the one that tells you what to fix:
 | Module | First blocker, standalone | The construct |
 |---|---|---|
 | `ast.ts` | `NT0001` 14:29 | template-literal **type** — `` `${string}[]` `` |
-| `parser.ts` | `NT0001` 225:95 | **`satisfies`** |
+| `parser.ts` | `NT1009` 1030:66 | optional element access — **`?.[]`** (was `NT0001` 225:95, `satisfies`, until the satisfies lane) |
 | `checker.ts` | `NT1009` | `Record<string, number \| "var">` — a general union |
 | `codegen.ts` | `NT1015` 475:3 | **`static`** class member |
 | `modules.ts` | `NT1015` | **generic class method** — `private t<T extends Ty \| undefined>` |

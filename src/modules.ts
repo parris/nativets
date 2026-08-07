@@ -192,7 +192,7 @@ class Renamer {
       case "AssignExpr": e.target = this.n(e.target); this.expr(e.value); return;
       case "IndexAssign": this.expr(e.object); this.expr(e.index); this.expr(e.value); return;
       case "FieldAssign": this.expr(e.object); this.expr(e.value); return;
-      case "AsExpr": e.ty = this.t(e.ty)!; this.expr(e.expr); return;
+      case "AsExpr": case "SatisfiesExpr": e.ty = this.t(e.ty)!; this.expr(e.expr); return;
       case "InstanceOfExpr": e.className = this.n(e.className); this.expr(e.object); return;
       case "NewExpr":
         e.callee = this.n(e.callee);

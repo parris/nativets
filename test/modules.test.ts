@@ -148,6 +148,9 @@ const REJECTIONS: { dir: string; code: string; needle: string }[] = [
   // function has to be seeded into the importing module's async set — otherwise
   // `one()` without `await` prints `1` here and `Promise { 1 }` under node.
   { dir: "bad-async-floating", code: "NT1020", needle: "without 'await'" },
+  // …and the ARROW spelling of that export, which the export table must publish as
+  // async too — otherwise the importing module has nothing to guard on.
+  { dir: "bad-async-arrow-floating", code: "NT1020", needle: "without 'await'" },
   // The ownership pass runs over the LINKED program, so a move and a later use in
   // a DIFFERENT module are still one dataflow — the diagnostic is unchanged.
   { dir: "bad-move", code: "NT1601", needle: "use of moved value" },

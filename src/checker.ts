@@ -640,7 +640,7 @@ class Checker {
       case "IndexExpr": go(e.object); go(e.index); return;
       case "UnaryExpr": go(e.operand); return;
       case "TypeofExpr": go(e.operand); return;
-      case "AsExpr": go(e.expr); return;
+      case "AsExpr": case "SatisfiesExpr": go(e.expr); return;
       case "InstanceOfExpr": go(e.object); return;
       case "BinaryExpr": go(e.left); go(e.right); return;
       case "LogicalExpr": go(e.left); return; // the right operand is conditional
@@ -1749,6 +1749,21 @@ class Checker {
         return "{message:string}";
       }
       case "AsExpr": { this.type(e.expr, scope); return e.ty; } // identity retype
+      /**
+       * `satisfies` CHECKS against the annotation but keeps the expression's own type.
+       * The annotation is passed down as the contextual hint (so an object literal is
+       * shaped by it, exactly as under a `const x: T =` annotation), and then the
+       * result is the INFERRED type, not `e.ty` — that is the whole difference from
+       * `as` on the line above.
+       */
+      case "SatisfiesExpr": {
+        const t = this.type(e.expr, scope, e.ty);
+        if (t !== e.ty && !this.assignable(e.ty, t)) {
+          throw typeError(`${t} does not satisfy ${e.ty}`, undefined,
+            `\`satisfies\` checks assignability without changing the type; use \`as ${e.ty}\` only if you mean to retype.`);
+        }
+        return t;
+      }
       // `expr!` NARROWS away the nullable arm — that is the point of the operator, and
       // why it cannot simply be erased. On a non-nullable operand it is the identity.
       case "NonNullExpr": return baseTy(this.type(e.expr, scope, hint));
@@ -2819,7 +2834,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "ObjectLiteral": e.properties.forEach((p) => collectIdents(p.value, out)); return;
     case "SpreadExpr": collectIdents(e.argument, out); return;
     case "SequenceExpr": e.exprs.forEach((x) => collectIdents(x, out)); return;
-    case "AsExpr": collectIdents(e.expr, out); return;
+    case "AsExpr": case "SatisfiesExpr": collectIdents(e.expr, out); return;
     case "NonNullExpr": collectIdents(e.expr, out); return;
     case "InstanceOfExpr": collectIdents(e.object, out); return; // the class name is not a value
     case "ArrowFunction": if (e.exprBody) collectIdents(e.body as Expr, out); return;
@@ -2866,7 +2881,7 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
     case "IndexExpr": go(e.object); go(e.index); return;
     case "UnaryExpr": go(e.operand); return;
     case "TypeofExpr": go(e.operand); return;
-    case "AsExpr": case "NonNullExpr": go(e.expr); return;
+    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": go(e.expr); return;
     case "InstanceOfExpr": go(e.object); return;
     case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
     case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;
