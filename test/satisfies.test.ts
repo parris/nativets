@@ -50,12 +50,21 @@ console.log(x.a);
 
   /*
    * The defining difference from \`as\`: the annotation is CHECKED against but never
-   * ADOPTED. \`{a,b} as {a:number}\` would lose \`b\`; \`satisfies\` keeps the literal's
-   * own inferred type, so \`x.b\` is still there.
+   * ADOPTED. \`lit as {a:number}\` would lose \`b\`; \`satisfies\` keeps the value's own
+   * inferred type, so \`x.b\` is still there.
+   *
+   * Deliberately goes through a BINDING rather than writing the object literal inline.
+   * TypeScript applies excess-property ("freshness") checking to a literal written
+   * directly under \`satisfies\`, so the inline spelling — `{ a: 1, b: 2 } satisfies
+   * { a: number }` — is an ERROR in tsc even though node runs it. We currently ACCEPT
+   * that spelling (see the KNOWN GAP note at the bottom of this file); this test is
+   * about the no-retype rule, so it uses the form that is valid either way rather than
+   * silently depending on the gap.
    */
   test("does not retype the expression — extra fields survive", async () => {
     await expectNode(`
-const x = { a: 1, b: 2 } satisfies { a: number };
+const lit = { a: 1, b: 2 };
+const x = lit satisfies { a: number };
 console.log(x.b);
 `);
   });
@@ -95,3 +104,23 @@ console.log(x.a);
 `, "NT2001", "{a:string} does not satisfy {a:number}");
   });
 });
+
+/*
+ * KNOWN GAPS — we are MORE PERMISSIVE than tsc here. Neither is a miscompile: in both
+ * cases the program we emit agrees with node. They are missing REFUSALS.
+ *
+ *  1. EXCESS-PROPERTY ("freshness") CHECKING. `{ a: 1, b: 2 } satisfies { a: number }`
+ *     is accepted; tsc reports "Object literal may only specify known properties, and
+ *     'b' does not exist in type '{ a: number; }'". Catching a typo'd key is one of the
+ *     headline reasons `satisfies` exists (the `bleu`/`blue` example in the TS 4.9
+ *     notes), so this gap costs real diagnostic value. Closing it needs a freshness
+ *     bit on object-literal types, which `checker.ts` does not currently carry — well
+ *     beyond this lane. NOTE: tsc's exact behavior here could NOT be verified locally
+ *     (no `typescript` dependency and no network); it is asserted from the spec.
+ *
+ *  2. NO `[no LineTerminator here]` RESTRICTION. TypeScript's grammar forbids a line
+ *     break before `satisfies`, so `const a = b \n satisfies(4)` is ASI'd into two
+ *     statements. We instead try to parse `satisfies (4)` as the operator and reject
+ *     the file. `as` has the identical pre-existing bug — this lane copied its shape
+ *     rather than introducing the flaw. Rejection, not miscompilation.
+ */
