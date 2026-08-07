@@ -291,10 +291,12 @@ console.log(ranked.join(","), words.join(","));`;
 });
 
 /*
- * `new Set(iterable)` — bulk construction. The behavior list is derived from node
- * directly (test262's `test/built-ins/Set/` is not vendored here, so the cases below
- * mirror the ones it covers by name: set-iterable, iterable-with-duplicates, and the
- * SameValueZero normalization asserted by prototype/add/adds-normalized-zero).
+ * `new Set(iterable)` — bulk construction.
+ *
+ * PROVENANCE: these cases are DERIVED, not mined. There is no test262 checkout on this
+ * machine, so `test/built-ins/Set/` was never opened and is not cited. Every expected
+ * value below comes from running the case under `node` (the project's oracle) — which
+ * is why each one goes through `matchesNode` rather than a hand-written literal alone.
  *
  * Construction is fully node-differential: the CONSTRUCTED set is identical to node's.
  * Only the later `.add`/`.delete` are the B2 persistence divergence.
@@ -309,9 +311,10 @@ for (const v of s) console.log(v);`;
   });
 
   test("duplicates dedupe and the FIRST occurrence keeps its position", async () => {
-    // test262 `Set/iterable-with-duplicates.js`: size counts distinct elements. The
-    // position rule is node's: re-adding an existing element does not move it, so
-    // "b" stays at index 1 even though it appears again after "c".
+    // Size counts distinct elements. The position rule is node's: re-adding an
+    // existing element does not move it, so "b" stays at index 1 even though it
+    // appears again after "c". Expected values DERIVED from running node (below),
+    // not mined from a reference suite — see the header note.
     const src = `
 console.log(new Set([1, 2, 2, 3]).size);
 for (const v of new Set(["a", "b", "c", "b", "a"])) console.log(v);`;
@@ -348,9 +351,10 @@ console.log(a === b, a === a);`;
   });
 
   test("SameValueZero: NaN dedupes against itself, and -0 is the same key as 0", async () => {
-    // test262 `Set/prototype/add/adds-normalized-zero.js` + the NaN case: Set uses
-    // SameValueZero, so NaN === NaN for membership (unlike `===`) and -0 is stored
-    // normalized to +0 — node prints the surviving element as `0`, never `-0`.
+    // Set uses SameValueZero, so NaN matches itself for membership (unlike `===`) and
+    // -0 is stored normalized to +0 — node prints the surviving element as `0`, never
+    // `-0`, which `1 / v === Infinity` pins down. DERIVED from running node, not mined
+    // from a reference suite — see the header note.
     const src = `
 const nan = new Set([NaN, NaN, 0 / 0]);
 console.log(nan.size, nan.has(NaN));
