@@ -1878,7 +1878,7 @@ class Checker {
           e.args.forEach((a, i) => {
             const exp = ctor.params[i + 1]!;
             const at = this.typeArg(a, exp, scope);
-            if (at !== exp && !this.assignable(exp, at)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`);
+            if (!this.fitsArg(exp, at, a)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`);
           });
           return objTy;
         }
@@ -2349,7 +2349,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = msig.params[i + 1]!;
           const at = this.typeArg(a, exp, scope);
-          if (at !== exp && !this.assignable(exp, at)) throw typeError(`'${cls}.${e.callee.property}' arg ${i} expects ${exp}, got ${at}`);
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${e.callee.property}' arg ${i} expects ${exp}, got ${at}`);
         });
         return msig.ret;
       }

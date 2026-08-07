@@ -114,6 +114,37 @@ describe("a parameter DEFAULT literal reshapes to the parameter's layout", () =>
 });
 
 /*
+ * `new C(...)` and `Cls.method(...)` — the SAME reshape, on the two argument paths that
+ * do not go through `inferCall`.
+ *
+ * These were WORSE than the plain-call case, and worse in the dangerous direction. The
+ * constructor arg check (checker.ts:1881) called `assignable` DIRECTLY rather than
+ * `fitsParam`, so it already ACCEPTED a structurally-compatible object literal — and then
+ * never reshaped it. Accept-without-reshape is exactly the crash: where an ordinary call
+ * safely rejected, `new C({a: 1})` compiled and died.
+ *
+ *     class Parser { constructor(opts: ParseOpts = {}) { ... } }
+ *     new Parser({ typeEnv: 10 })   // node: 10 | before: empty stdout, exit 255
+ *
+ * IR before, for the three call sites of the test below: `nt_obj_new(2.0)` for the DEFAULT
+ * (correct — the default fix landed first), but `nt_obj_new(1.0)` with a raw double in
+ * slot 0 for `{typeEnv: 10}`, and `nt_obj_new(0.0)` — zero slots — for `{}`. After: all
+ * three are `nt_obj_new(2.0)` with proper 2-slot boxes.
+ *
+ * This is `src/parser.ts:158` exactly: `constructor(private toks: Token[], opts: ParseOpts = {})`.
+ */
+describe("`new C(...)` reshapes its object-literal arguments too", () => {
+  const P = "interface ParseOpts { typeEnv?: number; asyncEnv?: number }\n" +
+    "class Parser {\n  te: number;\n" +
+    "  constructor(opts: ParseOpts = {}) { this.te = opts.typeEnv ?? -1; }\n" +
+    "  n(): number { return this.te; }\n}\n";
+
+  test("the default, an explicit literal, and an explicit empty literal", async () => {
+    await matchesNode(`${P}console.log(new Parser().n());\nconsole.log(new Parser({ typeEnv: 10 }).n());\nconsole.log(new Parser({}).n());\n`);
+  });
+});
+
+/*
  * THE BOUNDARY, pinned deliberately.
  *
  * Only an object LITERAL is reshaped, so only an object literal is accepted. A variable
