@@ -744,3 +744,29 @@ console.log(JSON.stringify({ o: { k: a }, q: 3 }, null, 2));
     expect(codeOf(`let n: string | null = null;\nconsole.log(JSON.stringify({ k: n }));\n`)).toBe(null);
   });
 });
+
+/*
+ * `${x}` and `"" + x` on a nullable box.
+ *
+ * The template form emitted INVALID IR (a clang error — loud, never a wrong answer)
+ * and concatenation was refused outright by an earlier lane, on the reasoning that
+ * `?? "…"` is "the only spelling whose output is unambiguous". node disagrees, and
+ * node is the specification: String(undefined) is "undefined" and String(null) is
+ * "null", exactly and without ambiguity. Both forms now match it.
+ */
+describe("string coercion of a nullable — `${x}` and `\"\" + x` match node", () => {
+  test("every arm, both spellings", async () => {
+    const src = `const p: number | undefined = [7].at(0);
+const a: number | undefined = [7].at(9);
+const s: string | undefined = ["hi"].at(0);
+let n: string | null = null;
+console.log(\`\${p}|\${a}|\${s}|\${n}\`);
+console.log("" + p, "" + a, "" + s, "" + n);
+`;
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe("7|undefined|hi|null\n7 undefined hi null\n");
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});

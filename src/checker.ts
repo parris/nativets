@@ -1626,10 +1626,12 @@ class Checker {
         if (e.op === "+" && (l === "string" || r === "string")) {
           // Response/Headers have no string coercion (they are opaque handles).
           for (const t of [l, r]) if (isResponseTy(t) || isHeadersTy(t)) throw nyi(NYI.OBJECT, `string concatenation with a ${t}`);
-          // A `T | null` / `T | undefined` is a two-slot BOX, not a renderable value —
-          // concatenating one used to reach codegen and emit invalid IR. Unwrap first
-          // (`?? "…"`), which is also the only spelling whose output is unambiguous.
-          for (const t of [l, r]) if (isNullableTy(t)) throw nyi(NYI.OPTIONAL_CHAIN, `string concatenation with a \`${baseTy(t)} | ${nullishKind(t)}\` (unwrap it first, e.g. \`(x ?? "") + …\`)`);
+          // A `T | null` / `T | undefined` used to be REFUSED here, on the reasoning that
+          // `?? "…"` is "the only spelling whose output is unambiguous". node disagrees and
+          // node is the specification: String(undefined) is "undefined" and String(null) is
+          // "null", exactly. `coerceToString` now branches on the tag and emits those, so
+          // this is ordinary concatenation — and `${x}`, which shares that path, no longer
+          // reaches codegen with a raw box and emits invalid IR.
           // ...and a general union is the same two-slot box, which reached codegen and
           // emitted invalid IR.
           for (const t of [l, r]) refuseUnboxedUnion(t, "string concatenation");

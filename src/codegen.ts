@@ -1470,6 +1470,10 @@ class FnGen {
     if (val.ty === "string") return val.v;
     if (val.ty === "undefined") return this.mod.intern("undefined");
     if (val.ty === "null") return this.mod.intern("null");
+    // A nullable BOX: node's String() of a nullish is the literal "undefined"/"null",
+    // and of a present value is that value's own coercion. Reaching codegen with the
+    // raw box is what emitted invalid IR for `${x}`.
+    if (isNullableTy(val.ty)) return this.coerceToStringNullable(val.v, baseTy(val.ty), nullishKind(val.ty));
     if (val.ty === "number") {
       const t = this.fresh();
       this.emit(`${t} = call ptr @js_num_to_str(double ${val.v})`);
@@ -1479,6 +1483,26 @@ class FnGen {
     this.emit(`${z} = zext i1 ${val.v} to i32`);
     const t = this.fresh();
     this.emit(`${t} = call ptr @js_bool_to_str(i32 ${z})`);
+    return t;
+  }
+
+  /** node's String() of a nullable box: "undefined"/"null" when nullish, else the value's. */
+  private coerceToStringNullable(ptr: string, base: Ty, which: "undefined" | "null"): string {
+    const slot = this.slot("string");
+    const present = this.fresh();
+    this.emit(`${present} = icmp eq i64 ${this.nullTag(ptr)}, 2`);
+    const pLbl = this.label("csp"), aLbl = this.label("csa"), end = this.label("cse");
+    this.terminate(`br i1 ${present}, label %${pLbl}, label %${aLbl}`);
+    this.to(this.block(pLbl));
+    const inner = this.coerceToString({ v: this.fromSlot(this.nullVal(ptr), base), ty: base });
+    this.emit(`store ptr ${inner}, ptr ${slot}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(aLbl));
+    this.emit(`store ptr ${this.mod.intern(which)}, ptr ${slot}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(end));
+    const t = this.fresh();
+    this.emit(`${t} = load ptr, ptr ${slot}`);
     return t;
   }
 
@@ -4330,10 +4354,16 @@ class FnGen {
     const body = this.fresh(); this.emit(`${body} = load ptr, ptr ${accSlot}`);
     const any = this.fresh(); this.emit(`${any} = load i1, ptr ${emittedSlot}`);
     // Every field vanished ⇒ node prints `{}` — with no newline/indent inside it.
+    // (The interned constants are hoisted rather than written inline: a nested template
+    // literal carrying an escape, inside another template's interpolation, is outside
+    // the subset our OWN lexer accepts, and this file has to parse under both.)
+    const bareOpen = this.mod.intern("{");
+    const bareClose = this.mod.intern("}");
+    const fullClose = this.mod.intern(pretty ? `\n${close}}` : "}");
     const openV = this.fresh();
-    this.emit(`${openV} = select i1 ${any}, ptr ${open}, ptr ${this.mod.intern("{")}`);
+    this.emit(`${openV} = select i1 ${any}, ptr ${open}, ptr ${bareOpen}`);
     const closeV = this.fresh();
-    this.emit(`${closeV} = select i1 ${any}, ptr ${this.mod.intern(pretty ? `\n${close}}` : "}")}, ptr ${this.mod.intern("}")}`);
+    this.emit(`${closeV} = select i1 ${any}, ptr ${fullClose}, ptr ${bareClose}`);
     return { v: this.concat(this.concat(openV, body), closeV), ty: "string" };
   }
 
