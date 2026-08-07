@@ -153,4 +153,34 @@ const p = Point.make();
     const msg = reject(`${CLS}console.log(Point.show(p));\n`);
     expect(msg).toContain("'show' is an instance method of Point");
   });
+  // A `C.f` READ is rewritten to the module-level `const C.f` a static field lowers to,
+  // and that rewrite is name-based, so a binding that SHADOWS the class name would make it
+  // read the wrong thing (node prints 99 here, and we printed 4 — a silent wrong answer,
+  // the one outcome the project refuses). Rejected instead.
+  test("a binding that shadows a class with static fields is rejected, not miscompiled", () => {
+    const msg = reject(`
+class Sym {
+  static width = 4;
+}
+function widthOf(Sym: { width: number }): number {
+  return Sym.width;
+}
+console.log(widthOf({ width: 99 }));
+`);
+    expect(msg).toContain("shadows class 'Sym'");
+  });
+  // Assignment to a static field. It lowers to a module-level `const`, and nothing in this
+  // language reassigns one, so this is a refusal — but it must say THAT, not "'Sym' is not
+  // defined", which reads as if the class did not exist. (Node prints 9.)
+  test("assigning a static field is refused by name, not as an undefined identifier", () => {
+    const msg = reject(`
+class Sym {
+  static width = 4;
+}
+Sym.width = 9;
+console.log(Sym.width);
+`);
+    expect(msg).toContain("Sym.width");
+    expect(msg).not.toContain("'Sym' is not defined");
+  });
 });

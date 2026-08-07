@@ -12,7 +12,7 @@ import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnosti
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
   isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
-  tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES,
+  tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, resolveStaticFieldReads, collectBindingNames,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -126,6 +126,9 @@ class Parser {
   /** Classes carrying `@@mutable` — TRUE in-place mutation (see docs/decorators.md).
    *  Published on the Program so the ownership pass and the checker can see it. */
   private readonly mutableClasses = new Set<string>();
+  /** `static` FIELD names, class-qualified (`C.f`) — the module-level bindings they
+   *  lower to, and what a `C.f` read is rewritten to once the file is parsed. */
+  private readonly staticFieldNames = new Set<string>();
   /** RECORD type names carrying `@@mutable` (`@@mutable type Cell = { n: number }`) —
    *  an extension of the class attribute to a `type`/`interface` declaration. The record
    *  is tagged with this name (`Cell{n:number}`), so mutability is NOMINAL rather than
@@ -218,6 +221,24 @@ class Parser {
     // Class members lower to top-level functions (`C.constructor`, `C.method`) so they
     // register + hoist alongside ordinary functions for the checker/codegen.
     body.push(...this.hoistedFns);
+    // A static field is a module-level `const C.f` (see `parseClass`), so every `C.f` READ
+    // becomes that identifier — here, once the whole file is parsed, because a function
+    // body may legally read a static of a class declared further down.
+    if (this.staticFieldNames.size) {
+      // The rewrite is by NAME and has no scope, so a binding that shadows the class name
+      // would redirect `C.f` to the static instead of the shadowing value — a silent wrong
+      // answer. Refuse the program instead (reject, never miscompile).
+      const bound = new Set<string>();
+      collectBindingNames(body, bound);
+      for (const f of this.staticFieldNames) {
+        const cls = f.slice(0, f.indexOf("."));
+        if (bound.has(cls)) throw nyi(NYI.CLASS_FEATURE, `a binding shadows class '${cls}', which has static fields (\`${f}\`); rename it`);
+      }
+      resolveStaticFieldReads(body, this.staticFieldNames, (n) => {
+        throw mutationError(`assignment to the static field '${n}'`,
+          "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead");
+      });
+    }
     const program: Program = { kind: "Program", body };
     // `@@mutable` classes (decorators lane). Attached only when the source used the
     // attribute, so an ordinary program's Program is byte-identical to what it was.
@@ -1080,6 +1101,7 @@ class Parser {
     const fieldInits: { field: string; value: Expr }[] = []; // declared-and-initialized fields → ctor prelude
     const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[]; setter: boolean; wrappers: string[] }[] = [];
     const statics: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[] }[] = []; // `static m(…)`
+    const staticFields: Stmt[] = []; // `static f = init` → a module-level `const C.f`
     let ctorParams: Param[] | null = null;
     let ctorBody: Stmt[] = [];
     while (!this.at("}") && this.peek().type !== "eof") {
@@ -1164,7 +1186,6 @@ class Parser {
         methods.push({ name: member, params, returnAnnot, body, setter, wrappers: memberWrappers });
         continue;
       }
-      if (isStatic) throw nyi(NYI.CLASS_FEATURE, `static field '${name}.${member}' at ${tok.line}:${tok.col} (static METHODS are supported)`);
       // field declaration: `name: Type;` / `name = init;` / `name: Type = init;` (optional `?`).
       // A field type comes from its annotation if present, else is inferred from the initializer
       // (`inferFieldTy`). An initializer is desugared into `this.name = init` prepended to the
@@ -1178,6 +1199,17 @@ class Parser {
       if (ty === undefined) {
         if (init === undefined) throw nyi(NYI.CLASS_FEATURE, `class field '${member}' needs a type annotation`);
         ty = this.inferFieldTy(init, member);
+      }
+      // A STATIC field is not a slot on the instance — it is module-level storage under a
+      // class-qualified name (`C.f`), initialized where the class is DECLARED, which is
+      // exactly a module-level `const C.f = init`. The dotted name cannot collide with any
+      // user binding (no source identifier contains a `.`), so it needs no other marker:
+      // a read of `C.f` finds it in scope and nothing else can.
+      if (isStatic) {
+        if (init === undefined) throw nyi(NYI.CLASS_FEATURE, `static field '${name}.${member}' has no initializer (it would read as \`undefined\`)`);
+        staticFields.push({ kind: "VarDecl", declKind: "const", decls: [{ name: `${name}.${member}`, annot: ty, init }] });
+        this.staticFieldNames.add(`${name}.${member}`);
+        continue;
       }
       fields.push({ key: member, ty });
       if (init !== undefined) fieldInits.push({ field: member, value: init });
@@ -1280,7 +1312,9 @@ class Parser {
     // `const`), so each wrapper is applied exactly ONCE — Python's `m = w(m)`, not a
     // per-call wrap. Function declarations hoist, so a decorator defined further down
     // the file is still in scope here.
-    return { kind: "MultiStmt", stmts: decorators };
+    // Static-field initializers run WHERE THE CLASS WAS DECLARED — before the decorator
+    // applications, which is TS's order (static fields are part of class definition).
+    return { kind: "MultiStmt", stmts: [...staticFields, ...decorators] };
   }
 
   /**
