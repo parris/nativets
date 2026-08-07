@@ -536,6 +536,8 @@ class Analyzer {
       case "SpreadExpr": this.expr(e.argument, state, false); return; // spread copies (borrow)
       case "NewExpr": for (const a of e.args) this.expr(a, state, false); return;
       case "AsExpr": this.expr(e.expr, state, false); return;
+      // `satisfies` is a pure type-layer check; ownership flows straight through it.
+      case "SatisfiesExpr": this.expr(e.expr, state, consume); return;
       // `expr!` is a type-level assertion; ownership flows straight through it.
       case "NonNullExpr": this.expr(e.expr, state, consume); return;
       case "InstanceOfExpr": this.expr(e.object, state, false); return; // a type TEST only borrows

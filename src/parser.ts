@@ -1700,7 +1700,10 @@ class Parser {
 
   private parseConditional(): Expr {
     let test = this.parseBinary(0);
-    while (this.at("as")) { this.eat("as"); test = { kind: "AsExpr", expr: test, ty: this.parseType() }; }
+    while (this.at("as") || this.at("satisfies")) {
+      if (this.at("as")) { this.eat("as"); test = { kind: "AsExpr", expr: test, ty: this.parseType() }; }
+      else { this.eat("satisfies"); test = { kind: "SatisfiesExpr", expr: test, ty: this.parseType() }; }
+    }
     if (this.at("?")) {
       this.eat("?");
       const consequent = this.parseAssign();
