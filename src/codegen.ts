@@ -1090,7 +1090,11 @@ class FnGen {
           return;
         }
         if (s.argument) {
-          const val = this.genExpr(s.argument);
+          // Coerced to the DECLARED return type, exactly as the HOF-callback return above
+          // is: `function f(): number | string { return 7 }` boxes the arm here. Done
+          // BEFORE the drops so the box's `toSlot` retain happens while the value is
+          // still live; a no-op when the types already match.
+          const val = this.coerce(this.genExpr(s.argument), this.retTy);
           this.emitDrops(s.drops ?? []); // free owned locals before returning (not the moved-out value)
           // RC strings: a returned local TRANSFERS its ownership to the caller (exclude it
           // from release). A returned borrow (param/field/index) is retained so the caller
