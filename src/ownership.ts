@@ -70,6 +70,41 @@ const NO_MUTABLE: MutableInfo = { classes: new Set(), setters: new Set(), setter
 /** Methods that mutate an array in place (so they conflict with a live borrow). */
 const MUTATING = new Set(["push", "pop"]);
 
+/**
+ * Array methods that hand back their RECEIVER rather than a fresh array — node's
+ * in-place mutators. `.reverse` is the only one we accept; every other in-place
+ * mutator (`.push`/`.pop`/`.fill`/`.splice`/`.shift`/`.unshift`/`.copyWithin`/`.sort`)
+ * is refused by the checker with NT1606, so it can never reach this pass.
+ *
+ * The rule is stated over a SET rather than one name so that admitting a second
+ * such method cannot silently skip the aliasing treatment: binding the result of one
+ * of these gives a value TWO names, and only the receiver may own it. Codegen reads
+ * the same set (`freeReceiverTemp`) — this is the one canonical copy.
+ */
+export const RETAINS_RECEIVER = new Set(["reverse"]);
+
+/** Does this call hand its receiver back? Only the ARRAY builtin does, so BOTH the
+ *  receiver and the result must be arrays — the method NAME alone is not enough. A user
+ *  class may define its own `.reverse()`, on any receiver, returning anything it built;
+ *  treating that as receiver-retaining would leak the fresh value it returns and
+ *  spuriously refuse handing it out. */
+function retainsReceiver(e: Expr): boolean {
+  if (e.kind !== "CallExpr" || e.callee.kind !== "MemberExpr") return false;
+  if (!RETAINS_RECEIVER.has(e.callee.property)) return false;
+  const recvTy = e.callee.object.ty;
+  return e.ty !== undefined && isArrayTy(e.ty) && recvTy !== undefined && isArrayTy(recvTy);
+}
+
+/** `a.reverse()` ⇒ `"a"`: a receiver-retaining call made directly on a BINDING, whose
+ *  result is therefore a second name for that binding's allocation. A chained receiver
+ *  (`a.map(f).reverse()`) is deliberately NOT a match — there the receiver is a fresh
+ *  temporary that no binding owns, so the result legitimately becomes its owner. */
+function retainedReceiver(e: Expr): string | null {
+  if (!retainsReceiver(e)) return null;
+  const base = (e as { callee: { object: Expr } }).callee.object;
+  return base.kind === "Identifier" ? base.name : null;
+}
+
 export interface OwnDiag { code: string; message: string; line: number; movedAt?: number; hint?: string; }
 
 /**
@@ -389,7 +424,15 @@ class Analyzer {
         if (this.arrowDepth > 0) this.arrowNames.add(e.name);
         // Moving out of a borrowed binding (by-borrow param / for-of element) is E0507.
         if (consume && this.borrowBindings.has(e.name)) {
-          this.report({ code: OWN_CODES.MOVE_OUT_OF_BORROW, message: `cannot move out of \`${e.name}\`: it is borrowed (the owner is elsewhere)`, line: e.loc?.line ?? 0 });
+          const owner = this.aliasOf.get(e.name);
+          this.report({
+            code: OWN_CODES.MOVE_OUT_OF_BORROW,
+            message: `cannot move out of \`${e.name}\`: it is borrowed (the owner is elsewhere)`,
+            line: e.loc?.line ?? 0,
+            hint: owner !== undefined && owner !== ""
+              ? `\`${e.name}\` names the value \`${owner}\` owns, so handing it out would leave \`${owner}\` to free a pointer the receiver still holds — hand out \`${owner}\` itself instead`
+              : undefined,
+          });
           return;
         }
         if (!this.linear.has(e.name)) return;
@@ -414,6 +457,17 @@ class Analyzer {
       case "CallExpr": {
         if (isMoveCall(e)) { this.expr(e.args[0]!, state, true); return; }
         if (isIdentityCall(e)) { this.expr(e.args[0]!, state, consume); return; }
+        // `a.reverse()` mutates in place and hands the SAME pointer back, so for
+        // ownership it is transparent — exactly like `Object.freeze(a)` above. The
+        // result IS the receiver, so a consuming position (`return a.reverse()`,
+        // `[a.reverse()]`) consumes `a` itself; a borrowing one leaves `a` owned.
+        // Without this the scope dropped `a` and returned the freed pointer.
+        // (A BINDING of the result reaches here with consume=false: `collectAliases`
+        // already made it an alias, so the receiver stays the one owner.)
+        if (retainsReceiver(e)) {
+          this.expr((e.callee as { object: Expr }).object, state, consume);
+          return;
+        }
         // A method call on a `@@mutable` instance hands back the RECEIVER (`return this`),
         // which the caller still owns — so its result is a BORROW. Consuming it (returning
         // it out of this function, storing it in a container, `move`ing it) would create a
@@ -573,10 +627,16 @@ function declaredLinear(list: Stmt[], aliases: Set<string>): string[] {
 }
 
 /**
- * Every `const b = a` whose static type is an `@@mutable` class instance — an ALIAS,
- * not a move (docs/decorators.md). Recorded as alias → owner. Aliases are excluded
- * from the owned/droppable sets everywhere, so the value is still freed exactly once,
- * by the original binding, and can never be double-freed through a second handle.
+ * Every binding that NAMES a value someone else owns — an ALIAS, not a move. Recorded
+ * as alias → owner. Aliases are excluded from the owned/droppable sets everywhere, so
+ * the value is still freed exactly once, by the original binding, and can never be
+ * double-freed through a second handle; and each is registered as a borrow, so it can
+ * never escape the owner's scope (returning one is NT1604).
+ *
+ * Two sources, sharing that one mechanism:
+ *   - `const b = a` (and `const c = a.bump()`) where the type is an `@@mutable` class
+ *     instance — the decorators model (docs/decorators.md);
+ *   - `const b = a.reverse()` on ANY linear value — the call returns its receiver.
  */
 function collectAliases(stmts: Stmt[], isMutableTy: (t: import("./ast.ts").Ty) => boolean, out: Map<string, string>): void {
   for (const s of stmts) {
@@ -587,6 +647,12 @@ function collectAliases(stmts: Stmt[], isMutableTy: (t: import("./ast.ts").Ty) =
         // hands back the receiver). `new C(…)` — and a factory function's return — are
         // fresh values, so those bindings are real owners and get the usual drop.
         for (const d of s.decls) {
+          // `const b = a.reverse()` — the call mutates in place and returns its
+          // RECEIVER, so `b` names the allocation `a` already owns. Recording it as an
+          // alias is what stops the scope freeing that one pointer through BOTH names.
+          // Independent of `@@mutable`: this applies to plain arrays.
+          const retained = retainedReceiver(d.init);
+          if (retained !== null) { out.set(d.name, retained); continue; }
           if (!isMutableTy(d.ty ?? "number")) continue;
           if (d.init.kind === "Identifier") out.set(d.name, d.init.name);
           else if (d.init.kind === "CallExpr" && d.init.callee.kind === "MemberExpr") {
@@ -678,7 +744,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
 
   const runScope = (body: Stmt[], params: { name: string; ty: import("./ast.ts").Ty }[], untrack: Set<string> = new Set()): string[] => {
     const aliases = new Map<string, string>();
-    if (mutable.classes.size) collectAliases(body, isMutableTy, aliases);
+    collectAliases(body, isMutableTy, aliases); // ALWAYS: the retains-receiver rule is not `@@mutable`-specific
     const varTy = new Map<string, import("./ast.ts").Ty>();
     if (mutable.classes.size) {
       for (const p of params) varTy.set(p.name, p.ty);

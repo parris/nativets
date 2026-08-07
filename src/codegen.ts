@@ -24,6 +24,7 @@ import { isUnionTy, unionDiscriminant } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
+import { RETAINS_RECEIVER } from "./ownership.ts";
 
 export function llvmDouble(n: number): string {
   const dv = new DataView(new ArrayBuffer(8));
@@ -93,12 +94,22 @@ const FRESH_ARRAY_CALLS = new Set([
   "map", "filter", "slice", "concat", "with", "toSorted", "toReversed", "flat", "flatMap",
   "split", "keys", "values", "entries",
 ]);
-/** …and the one array method that returns its RECEIVER (in-place, like node). */
-const RETAINS_RECEIVER = new Set(["reverse"]);
+/** …and the array methods that return their RECEIVER (in-place, like node): the set is
+ *  `RETAINS_RECEIVER`, imported from the ownership pass, which is where it has to live —
+ *  binding such a result makes an ALIAS, not a second owner, and only that pass can say
+ *  so. One canonical copy; do not re-declare it here. */
 
 function freshArray(e: Expr): boolean {
   if (e.kind === "ArrayLiteral") return true;
-  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") return FRESH_ARRAY_CALLS.has(e.callee.property);
+  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") {
+    if (FRESH_ARRAY_CALLS.has(e.callee.property)) return true;
+    // A RETAINS_RECEIVER call returns the pointer it was GIVEN, so the value it hands
+    // down a chain is an unowned temporary exactly when its own receiver was one:
+    // `[1,2].reverse().join()` must still free the literal, while `a.reverse().join()`
+    // must not free `a`. The recursion bottoms out at a non-fresh root (an Identifier),
+    // which is what keeps an owned binding off the temp-free path.
+    if (RETAINS_RECEIVER.has(e.callee.property)) return freshArray(e.callee.object);
+  }
   return false;
 }
 

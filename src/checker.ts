@@ -2464,9 +2464,14 @@ class Checker {
     if (["forEach"].includes(method)) throw nyi(NYI.CLOSURE, `array .${method} (needs first-class function values)`);
 
     // --- ordering primitives (ES2023, non-mutating: node is the oracle) --------
-    // `.sort`/`.reverse` sort IN PLACE, which the immutable model forbids; the
-    // ES2023 copying pair is the supported spelling. `.toSorted()` with no
-    // comparator uses node's default (compare the elements' STRING forms).
+    // `.sort` sorts IN PLACE, which the immutable model forbids; `.toSorted()` is the
+    // supported spelling, and with no comparator it uses node's default (compare the
+    // elements' STRING forms).
+    //
+    // `.reverse` is the one in-place mutator we ACCEPT (see the `case "reverse"` below
+    // and docs/divergences.md) — it is node-compatible, and memory-safe because the
+    // ownership pass treats a binding of its result as an ALIAS of the receiver rather
+    // than a second owner. Do not read this block as rejecting it.
     if (method === "sort") throw mutationError("arrays are immutable: `.sort` would sort the array in place", "use `.toSorted()` (ES2023) — it returns a NEW sorted array and leaves the original alone");
     if (method === "toSorted") {
       if (args.length > 1) throw typeError(".toSorted expects 0..1 args");
@@ -2500,6 +2505,10 @@ class Checker {
       case "pop": throw mutationError("arrays are immutable: `.pop` would mutate the array in place", "use `arr.slice(0, -1)` for the shorter array, or `arr[arr.length - 1]` for the last element");
       case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
       case "indexOf": need(1); if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`); return "number";
+      // ACCEPTED, unlike its in-place siblings above: `.reverse` returns its RECEIVER,
+      // so the result type is `recv` and the two are the SAME array. `RETAINS_RECEIVER`
+      // (src/ownership.ts) is what keeps that single-owner; adding another such method
+      // means adding it there too, or its result binding double-frees.
       case "reverse": need(0); return recv;
       // --- stdlib Batch 1 (part 2): array fills ---
       case "flat": { // ONE level only (node's default depth); an explicit depth must be 1

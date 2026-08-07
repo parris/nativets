@@ -10719,6 +10719,7 @@ L0:
   %t2 = call ptr @nt_str_split_n(ptr @.str.3, ptr @.str.4, double 0x7FF8000000000000)
   %t3 = call ptr @nt_arr_reverse(ptr %t2)
   %t4 = call ptr @nt_arr_join_str(ptr %t3, ptr @.str.4)
+  call void @nt_arr_free(ptr %t3)
   call void @js_print_str(ptr %t4)
   call void @js_print_newline()
   %t5 = call ptr @nt_arr_new(double 0x4008000000000000)

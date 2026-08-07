@@ -441,7 +441,7 @@ Likewise refused, all with the working spelling in the hint:
 - `.entries()` outside the `[k, v]` loop (same reason).
 - `.forEach` on a Map/Set — use the (identically ordered) `for-of`.
 
-### Ordering: `.toSorted()`/`.toReversed()` instead of `.sort()`/`.reverse()`
+### Ordering: `.toSorted()` instead of `.sort()` — but `.reverse()` is accepted
 
 node's `.sort()` sorts **in place**, which the immutable-by-default model forbids, so `.sort()`
 is refused with `NT1606` pointing at **`.toSorted()`** — the ES2023 *copying* method, which is
@@ -450,7 +450,26 @@ non-mutating in node too, so **node stays the oracle** (no divergence in what we
 compares the elements' **string** forms (`[10, 9, 1].toSorted()` → `1, 10, 9`), and the sort is
 **stable** (a merge sort), as node's is required to be. A comparator may be any function value
 (inline arrow or a captured closure); its result is mapped to a sign, with `NaN` treated as `0`
-like node. (`.reverse()` still mutates — pre-existing, flagged above.)
+like node.
+
+**`.reverse()` is NOT refused** — unlike every other in-place mutator. It reverses in place and
+returns its **receiver**, byte-for-byte like node, so `.toReversed()` is the *recommended*
+spelling but not the only one. (Prior to this being written down, both this section and the
+comment in `checker.ts` claimed `.reverse` was rejected alongside `.sort`; it never was.)
+
+Because the call hands back the receiver, binding its result gives one allocation **two names**
+(`const b = a.reverse()`). The ownership pass records `b` as an **alias** of `a` — the same
+mechanism `@@mutable` handles use — so `a` remains the single owner and the value is freed
+exactly once. Two consequences, both `NT16xx` refusals rather than divergences in behaviour:
+
+- **an alias may not escape its owner's scope** — `const b = a.reverse(); return b;` is `NT1604`,
+  since returning it would hand the caller a pointer this scope still drops. Write
+  `return a.reverse();` (which *moves* the array out) or `return a;` instead;
+- **the owner may not be reassigned while an alias is live** — `let a = …; const b = a.reverse();
+  a = […];` is `NT1602`, which would otherwise leave `b` dangling.
+
+Reading through both names is fine and matches node: after `const b = a.reverse()`, `a` and `b`
+are the same reversed array.
 
 ### String relational compare (`<` `<=` `>` `>=`) is UTF-8 byte order
 
@@ -480,7 +499,8 @@ spread, `JSON.stringify`, `===`) stays byte-identical to node — see `test/shar
 Consequence: `NT1603` iterator-
 invalidation is now unreachable (you can't mutate during iteration if you can't mutate). `.reverse`
 still mutates in place (which *matches* node, so not a divergence — but violates the frozen-value
-spirit; slated to reject/copy-return later). Heap `===`/`!==` on arrays/objects is **reference
+spirit; slated to reject/copy-return later). Because it returns its receiver, binding its result
+creates an alias rather than a second owner — see *Ordering* above. Heap `===`/`!==` on arrays/objects is **reference
 identity** (pointer comparison), matching JS `===` on objects.
 
 ### Strings are reference-counted, not linear (memory model)
