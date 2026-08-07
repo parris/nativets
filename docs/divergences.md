@@ -317,6 +317,39 @@ Everything else about Batch 3:
   "unwrap it first"). It previously reached codegen and emitted invalid IR — a real defect, found
   by this lane through `URLSearchParams#get`.
 
+### General (non-object) unions — supported narrowly, refused loudly (`G<…>`)
+
+A union whose arms are not all object types (`number | string`, `number | number[]`) has no
+discriminant field inside the value, so it is a **tagged box**: a 2-slot `[tag, value]` block
+(the A2 nullable's shape) with `tag` = the arm's index in the union's canonical member order.
+Members are sorted and de-duplicated, so `number | string` and `string | number` are the same
+type with the same tag numbering.
+
+What works is what dispatches on that tag: `typeof`, `Array.isArray`, `console.log`, narrowing
+via either predicate, and union-typed parameters, returns and bindings. **Everything else is
+refused with `NT1009`**, because it is generated from the STATIC type — which for a `G<…>`
+describes the box, not the arm in it. Each was measured against node first, and each was
+silently wrong rather than loud:
+
+| Refused | What it did before the refusal |
+|---|---|
+| `if (x)` and every other truthiness position | tested the box POINTER — always true, so `0` and `""` came out truthy |
+| `a === b` between unions | compared the two boxes' TAGS, so `1 === 2` was true |
+| `JSON.stringify(x)` | rendered the box as the literal `null` |
+| `"" + x`, `` `${x}` `` | emitted invalid IR |
+
+Each is a tag dispatch away from working — the printer already is one — but reject-never-miscompile
+says the refusal lands first. Arms are restricted to `number`/`string`/`boolean`/arrays with
+*distinct* `typeof` tags: `number[] | {a: number}` is refused because `typeof` cannot tell those
+apart, and an object arm is refused outright. A 3-arm union narrows only when ONE arm survives
+the test — the else branch of a 3-arm union is a sub-union whose tags would need renumbering, so
+the binding stays the full union and arm-specific uses of it are refused.
+
+> **Pre-existing, and NOT fixed by that lane:** the A2 nullable box has three of the same holes,
+> two of them silently wrong. With `const x: number | undefined = [0].at(0)`, `if (x)` prints
+> `truthy` where node prints `falsy`, and `JSON.stringify(x)` prints `null` where node prints `0`;
+> `` `${x}` `` emits invalid IR. These predate general unions and need their own lane.
+
 ### Actor messages (B3 v5) — structured messages are COPIES, and the shape is checked
 
 node has no actors, so the whole surface (`spawn`/`send`/`receive`) is behavioral, not
@@ -441,10 +474,28 @@ Likewise refused, all with the working spelling in the hint:
 - `.entries()` outside the `[k, v]` loop (same reason).
 - `.forEach` on a Map/Set — use the (identically ordered) `for-of`.
 
+### `new Set(iterable)` / `new Map(iterable)`: which sources are accepted
+
+Bulk construction is **node-matched** for the sources we accept — the runtime folds the source
+through the same add/put path `.add`/`.set` take, so dedup (SameValueZero: `NaN` dedupes against
+itself, `-0` normalizes to `+0`) and the insertion-order log are maintained identically, and the
+first occurrence of a duplicate keeps its position. Accepted: `new Set(array)`, `new Set(otherSet)`,
+`new Map(otherMap)`. A copy is a **fresh handle**, as node's is — `new Set(a) === a` is `false`
+(`===` on a collection is handle identity here, so aliasing the source would have been visible).
+
+Refused:
+- **`new Set(string)`** (`NT1014`). node iterates a string by **code point** — `new Set("a😀b")`
+  has size 3 — while our string `for-of` walks **bytes**, which would silently build a 6-element
+  set. A `string` cannot be proven ASCII at compile time, so the refusal is unconditional; the
+  hint points at `new Set(s.split(""))` for ASCII input.
+- **`new Map([[k, v], …])`**, the entries form (`NT1014`) — it needs the `[key, value]` **tuple
+  type** we do not have (`["a", 1]` is already `NT2001`, "array elements must share a type").
+  Use `.set`.
+
 ### Ordering: `.toSorted()` instead of `.sort()` — but `.reverse()` is accepted
 
 node's `.sort()` sorts **in place**, which the immutable-by-default model forbids, so `.sort()`
-is refused with `NT1606` pointing at **`.toSorted()`** — the ES2023 *copying* method, which is
+on a **shared** array is refused with `NT1606` pointing at **`.toSorted()`** — the ES2023 *copying* method, which is
 non-mutating in node too, so **node stays the oracle** (no divergence in what we do compile).
 `.toSorted()`, `.toSorted(cmp)` and `.toReversed()` are node-matched: the default comparator
 compares the elements' **string** forms (`[10, 9, 1].toSorted()` → `1, 10, 9`), and the sort is
@@ -470,6 +521,24 @@ exactly once. Two consequences, both `NT16xx` refusals rather than divergences i
 
 Reading through both names is fine and matches node: after `const b = a.reverse()`, `a` and `b`
 are the same reversed array.
+
+**`.sort()` on a FRESH receiver is allowed** (and is *not* a divergence — it is node's own
+answer). The immutability rule exists to stop one binding mutating an array another binding can
+still see. A newly constructed array has no other owner, so sorting it is unobservable:
+`[...xs].sort()`, `[3,1,2].sort()`, and `xs.map(f).sort()` / `.filter(f)` / `.concat(ys)` /
+`.slice(0)` results are accepted, while `xs.sort()`, an alias `const b = xs; b.sort()`, a
+parameter, a module-level array, and the result of a **plain function call** (`mk().sort()` — the
+callee may still own it) stay `NT1606`. Freshness is decided syntactically by `freshArray` in
+`src/ast.ts`, the single copy shared with codegen's receiver-temp free.
+
+On a fresh receiver `.sort()` is exactly `.toSorted()` — same value, and the temporary it would
+have sorted in place is discarded either way — so it is **rewritten to `toSorted`** in the
+checker and lowers through the copying path above. That is what keeps the permission safe: the
+rewrite means `.sort()` never hands its receiver back, so it cannot create the two-bindings-one-
+array alias that in-place mutation would need. Verified in the emitted IR (the fresh temp is
+freed exactly once, the result is a distinct pointer) and node-differentially in
+`test/immutable.test.ts`, including node's lexicographic default (`[10,9,1,100,2].sort()` →
+`1,10,100,2,9`).
 
 ### String relational compare (`<` `<=` `>` `>=`) is UTF-8 byte order
 
@@ -704,6 +773,14 @@ What this buys and what it costs:
     erased there like anywhere else), and the async-ness travels on the export table — through
     `import { f as g }` and through `export { f } from "./m.ts"` — so an un-awaited call to an
     *imported* async function is `NT1020` too, not a silently-erased wrong answer.
+    It also holds for an async **arrow**, which is the same promise wearing different syntax:
+    `const f = async () => …` is guarded exactly as `async function f` is, and so are a direct
+    alias chain (`const g = f; g()`), an immediately-invoked `(async () => …)()`, and an
+    `export const f = async () => …` seen from an importing module.
+    **Known boundary:** the guard is NAME tracking in the parser, not dataflow, so an async
+    function that escapes into a *function parameter* (`run(f)`, then `f()` inside `run`) or is
+    returned as a value and called through the result is **not** reached today. Closing it needs
+    the async-ness to survive on the TYPE, which `Promise<T>` erasure currently discards.
   - The diagnostic points at the **actor model** (`spawn`/`send`/`receive`, Stage 22/27/31), which
     is nativets' concurrency primitive. Promises may simply be the wrong abstraction here.
 - `Promise<T>` in **type position** is erased to `T` (as are `Awaited<T>` and friends), so

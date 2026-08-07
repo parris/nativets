@@ -7,9 +7,9 @@
  * supported programs.
  */
 
-import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt } from "./ast.ts";
+import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
-import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText } from "./ast.ts";
+import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText, freshArray } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
 // Stage 47 (console.log of compound values): the handle-type predicates the
@@ -17,8 +17,13 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
 import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
-import type { ArrowFunction } from "./ast.ts";
-import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError } from "./diagnostics.ts";
+// The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
+// by `typeof` instead. Distinct from the discriminated-union machinery imported above.
+import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, typeofTagOf } from "./ast.ts";
+import type { ArrowFunction, BinaryExpr } from "./ast.ts";
+// `unlinkedImportError` says "you did not link" instead of blaming closures, for a call
+// to an imported binding that the standalone (unlinked) check cannot see.
+import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError, unlinkedImportError } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
 
@@ -288,7 +293,13 @@ export function actorSendTy(t: Ty): Ty {
 
 export function check(program: Program): CheckedProgram {
   const functions = new Map<string, Sig>();
-  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []));
+  // Value bindings this module imports. A linked program has none left (the linker
+  // rewrites them to concrete names), so this is populated only for a single-module
+  // check — where it turns "unknown callee" into "you did not link".
+  const importedFrom = new Map<string, string>();
+  for (const im of program.imports ?? [])
+    for (const s of im.specs ?? []) if (!s.typeOnly) importedFrom.set(s.local, im.source);
+  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []), importedFrom);
   const builtins = () => {
     const s = new Scope();
     for (const n of BUILTIN_NUMBERS) s.declare(n, "number", true);
@@ -319,10 +330,10 @@ export function check(program: Program): CheckedProgram {
     let rest = false;
     s.params.forEach((p, i) => { if (p.rest) { if (i !== s.params.length - 1) throw typeError("rest parameter must be last"); rest = true; } });
     const params = s.params.map((p) => p.annot ?? (p.default ? c.type(p.default, builtins()) : "number"));
-    // Type each ANNOTATED default against its param type (the `??` above skips it when
-    // annotated) so its `.ty` is set for codegen and an empty-array default `[]` gets
-    // its element type from the annotation (`function f(a: T[] = [])`).
-    s.params.forEach((p, i) => { if (p.default && p.annot) c.type(p.default, builtins(), params[i]); });
+    // An ANNOTATED default is typed later, by `checkFunction`, against the MODULE scope —
+    // it may name a module-level const, which does not exist yet at this point in the
+    // pass. That re-typing is what sets its `.ty` for codegen and gives an empty-array
+    // default `[]` its element type from the annotation (`function f(a: T[] = [])`).
     const fixed = rest ? s.params.length - 1 : s.params.length;
     const required = s.params.slice(0, fixed).filter((p) => !p.default).length;
     const defaults = s.params.map((p) => p.default ?? null);
@@ -423,6 +434,10 @@ class Checker {
      *  program imported one, so `readFileSync` is an ordinary undefined name — and a
      *  user function of that name — in every program that did not. */
     private hostImports: Set<string> = new Set(),
+    /** Local name → the module specifier it was imported from, for a program that has NOT
+     *  been linked. Empty after linking (the linker rewrites the bindings), so this only
+     *  ever improves the diagnostic for a single-module check — it never accepts a call. */
+    private importedFrom: Map<string, string> = new Map(),
   ) {}
 
   /** The tagged record type a literal should take from its context, if any. */
@@ -598,8 +613,13 @@ class Checker {
       case "BinaryExpr": {
         const ne = e.op === "!==" || e.op === "!=";
         const eq = e.op === "===" || e.op === "==";
+        if (!ne && !eq) return;
+        // `typeof x === "number"` on a GENERAL union. Unlike the nullish tests below it
+        // narrows on BOTH polarities — the arms are a closed set, so ruling one out is
+        // as informative as picking one. `positive === eq` is "the tag matched".
+        this.typeofFacts(e, scope, positive === eq, out);
         // The value is non-nullish on the TRUE branch of `!==` and the FALSE branch of `===`.
-        if ((!ne && !eq) || positive !== ne) return;
+        if (positive !== ne) return;
         for (const [v, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
           // Both operand orders narrow — TypeScript's
           // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
@@ -618,9 +638,32 @@ class Checker {
       case "UnaryExpr":
         if (e.op === "!") this.guardFacts(e.operand, scope, !positive, out);
         return;
+      case "CallExpr":
+        // `Array.isArray(v)` — the idiomatic discriminant for an array arm, and the
+        // same closed-set reasoning as `typeof`: it narrows on both branches.
+        this.isArrayFacts(e, scope, positive, out);
+        return;
       default:
         return;
     }
+  }
+
+  /** `Array.isArray(x)` narrowing a general union — see `typeofFacts` for the rules.
+   *  Takes a plain `Expr` and re-tests `kind`: an `Expr & { kind: … }` intersection is
+   *  outside the subset we compile, and writing one here would add a self-host blocker
+   *  to our own source (which is exactly how this was caught). */
+  private isArrayFacts(e: Expr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+    if (e.kind !== "CallExpr") return;
+    const c = e.callee;
+    if (c.kind !== "MemberExpr" || c.property !== "isArray") return;
+    if (c.object.kind !== "Identifier" || c.object.name !== "Array" || scope.lookup("Array")) return;
+    if (e.args.length !== 1) return;
+    const p = this.accessPath(e.args[0]!, scope);
+    if (p === undefined || !isGeneralUnionTy(p.ty)) return;
+    const keep = generalUnionMembers(p.ty).filter((m) => isArrayTy(m) === matched);
+    if (keep.length !== 1) return;
+    if (out.some((f) => f.binding === p.binding && f.path === p.path)) return;
+    out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
   }
 
   /**
@@ -640,7 +683,7 @@ class Checker {
       case "IndexExpr": go(e.object); go(e.index); return;
       case "UnaryExpr": go(e.operand); return;
       case "TypeofExpr": go(e.operand); return;
-      case "AsExpr": go(e.expr); return;
+      case "AsExpr": case "SatisfiesExpr": go(e.expr); return;
       case "InstanceOfExpr": go(e.object); return;
       case "BinaryExpr": go(e.left); go(e.right); return;
       case "LogicalExpr": go(e.left); return; // the right operand is conditional
@@ -667,6 +710,31 @@ class Checker {
     if (kind !== null && nullishKind(p.ty) !== kind) return;
     if (out.some((f) => f.binding === p.binding && f.path === p.path)) return;
     out.push({ name: p.name, binding: p.binding, path: p.path, ty: baseTy(p.ty), constant: p.binding.constant, arrowDepth: this.arrowDepth });
+  }
+
+  /**
+   * `typeof x === "number"` against a GENERAL union — the only discriminant it has.
+   *
+   * `matched` says whether this branch is the one where the tag equalled the literal.
+   * The arms are a closed set, so both branches narrow: the matching one to the arms
+   * with that `typeof`, the other to the arms without it.
+   *
+   * A fact is only recorded when the surviving set is a SINGLE arm. A 3-arm union's
+   * else branch is a 2-arm SUB-union, whose tags are renumbered against its own
+   * canonical member order — narrowing to it would need the box retagged, so instead
+   * the binding simply stays the full union (still printable, still tag-correct) and
+   * any arm-specific use of it is refused. Conservative, never wrong.
+   */
+  private typeofFacts(e: BinaryExpr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+    for (const [t, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
+      if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") continue;
+      const p = this.accessPath(t.operand, scope);
+      if (p === undefined || !isGeneralUnionTy(p.ty)) continue;
+      const keep = generalUnionMembers(p.ty).filter((m) => (typeofTagOf(m) === lit.value) === matched);
+      if (keep.length !== 1) continue;
+      if (out.some((f) => f.binding === p.binding && f.path === p.path)) continue;
+      out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
+    }
   }
 
   /** The narrowed type for the path `e` reads here, if a fact covers it. */
@@ -835,7 +903,20 @@ class Checker {
   }
 
   checkFunction(fn: FuncDecl, base: Scope): void {
-    for (const p of fn.params) base.declare(p.name, p.annot ?? (p.default ? "number" : "number"), false);
+    // A default is an expression evaluated at CALL time, in the scope that encloses the
+    // function — so it can name a module-level binding (`= NO_MUTABLE`) just like the body
+    // can. The signature pass above cannot type it there: it runs before the module
+    // bindings exist, so all it has is a builtins-only scope. Type it HERE, where `base`
+    // is the module scope, purely to set `.ty` for codegen.
+    //
+    // Deliberately BEFORE the parameters are declared, so the module scope is all a
+    // default can see. `function f(a, b = a)` — a default reading the parameters to its
+    // left — is ordinary JavaScript, but codegen materializes defaults before the
+    // parameter allocas are stored, so it emits a load from an undefined `%a.addr` and
+    // clang rejects the module. Until that is fixed, such a default must keep failing the
+    // CHECKER, with an NT2001 naming the parameter, rather than reaching clang.
+    for (const p of fn.params) if (p.default && p.annot) this.type(p.default, base, p.annot);
+    for (const p of fn.params) base.declare(p.name, p.annot ?? "number", false);
     this.checkBlock(fn.body, base, fn.returnTy ?? "number");
     this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
   }
@@ -935,6 +1016,12 @@ class Checker {
     if (isUnionTy(target)) {
       const members = unionWidenedMembers(target);
       if (isUnionTy(source)) return unionWidenedMembers(source).every((m) => members.includes(m));
+      return members.includes(source);
+    }
+    // A GENERAL union is a box: any arm (or a narrower general union) may flow in.
+    if (isGeneralUnionTy(target)) {
+      const members = generalUnionMembers(target);
+      if (isGeneralUnionTy(source)) return generalUnionMembers(source).every((m) => members.includes(m));
       return members.includes(source);
     }
     if (isNullableTy(target)) {
@@ -1123,7 +1210,7 @@ class Checker {
         }
         return;
       case "IfStmt": {
-        this.type(s.test, scope);
+        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
         // Two INDEPENDENT narrowings apply to the same arms, and a guard can want both
         // (see checkBlock): nullable FACTS from the guard hold in the branch it selects,
         // and a TAG test narrows each arm's union — the tested member in one, the
@@ -1146,12 +1233,12 @@ class Checker {
         return;
       }
       case "WhileStmt":
-        this.type(s.test, scope);
+        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
         return;
       case "DoWhileStmt":
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
-        this.type(s.test, scope);
+        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
         return;
       case "ForStmt": {
         const inner = scope.child();
@@ -1263,7 +1350,8 @@ class Checker {
       case "UndefinedLiteral": return "undefined";
       case "NullLiteral": return "null";
       case "TemplateLiteral":
-        for (const x of e.exprs) this.type(x, scope);
+        // Same box, same invalid IR, as string concatenation just above.
+        for (const x of e.exprs) refuseUnboxedUnion(this.type(x, scope), "a template literal");
         return "string";
       case "ArrayLiteral": {
         if (e.elements.length === 0) {
@@ -1525,6 +1613,9 @@ class Checker {
           // tagged pair, never truthiness, so `0` / `""` / `false` compare false.
           if (isNullableTy(l) && (r === "undefined" || r === "null")) return "boolean";
           if (isNullableTy(r) && (l === "undefined" || l === "null")) return "boolean";
+          // A general union is a BOX: `===` on it compared the two boxes' TAGS, so
+          // `1 === 2` came out true. Refuse until the arms are compared themselves.
+          for (const t of [l, r]) refuseUnboxedUnion(t, "`===`");
           if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`);
           return "boolean";
         }
@@ -1539,6 +1630,9 @@ class Checker {
           // concatenating one used to reach codegen and emit invalid IR. Unwrap first
           // (`?? "…"`), which is also the only spelling whose output is unambiguous.
           for (const t of [l, r]) if (isNullableTy(t)) throw nyi(NYI.OPTIONAL_CHAIN, `string concatenation with a \`${baseTy(t)} | ${nullishKind(t)}\` (unwrap it first, e.g. \`(x ?? "") + …\`)`);
+          // ...and a general union is the same two-slot box, which reached codegen and
+          // emitted invalid IR.
+          for (const t of [l, r]) refuseUnboxedUnion(t, "string concatenation");
           // stdlib Batch 3: `"" + date` is node's Date#toString — a LOCALE- and
           // zone-name-formatted human string ("Thu Jan 01 1970 … (GMT)"), which needs
           // the tz display-name tables. Refuse rather than approximate.
@@ -1587,7 +1681,7 @@ class Checker {
         throw typeError(`'${e.op}' operands must be matching boolean/number/string (got ${l}, ${r})`);
       }
       case "ConditionalExpr": {
-        this.type(e.test, scope);
+        refuseUnboxedUnion(this.type(e.test, scope), "a truthiness test");
         // Each arm sees the surrounding context; additionally an empty `[]` arm takes
         // its element type from the OTHER arm (`flag ? [1, 2] : []`), so type the
         // non-empty arm first and feed its type back.
@@ -1673,8 +1767,20 @@ class Checker {
         // Immutable collections (B2). `new Map<K,V>()` / `new Set<T>()`; bare
         // `new Map()`/`new Set()` default to Map<string,number> / Set<string>.
         if (e.callee === "Map") {
-          if (e.args.length !== 0) throw nyi(NYI.COLLECTION, "new Map(iterable) (use .set)");
-          const k = e.typeArgs?.[0] ?? "string", v = e.typeArgs?.[1] ?? "number";
+          if (e.args.length > 1) throw typeError("new Map expects at most one argument (an iterable)");
+          let k = e.typeArgs?.[0] ?? "string", v = e.typeArgs?.[1] ?? "number";
+          if (e.args.length === 1) {
+            // Only the Map-COPY form. The entries form needs a [K, V] tuple type we
+            // do not have yet (`["a", 1]` is NT2001 on its own), so it stays refused.
+            // Refuse the entries form BEFORE typing it — `[["a", 1]]` would otherwise
+            // die as NT2001 ("elements must share a type"), which names the symptom
+            // rather than the missing tuple type.
+            const a0 = e.args[0]!;
+            if (a0.kind === "ArrayLiteral") throw nyi(NYI.COLLECTION, "new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set)");
+            const at = this.type(a0, scope);
+            if (!isMapTy(at)) throw nyi(NYI.COLLECTION, `new Map(${at}) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set)`);
+            k = mapKeyTy(at); v = mapValTy(at);
+          }
           // Keys ride an i64 slot tagged NT_K_STR (string) or NT_K_NUM (number) —
           // those are the two the runtime canonicalizes (SameValueZero), so keys are
           // restricted to string|number. Values ride a raw i64 slot, so any storable
@@ -1684,8 +1790,24 @@ class Checker {
           return makeMapTy(k, v);
         }
         if (e.callee === "Set") {
-          if (e.args.length !== 0) throw nyi(NYI.COLLECTION, "new Set(iterable) (use .add)");
-          const el = e.typeArgs?.[0] ?? "string";
+          if (e.args.length > 1) throw typeError("new Set expects at most one argument (an iterable)");
+          const declared = e.typeArgs?.[0];
+          let el = declared ?? "string";
+          if (e.args.length === 1) {
+            // `new Set(iterable)` — bulk construction. The element type comes from the
+            // argument (an array's element type), so `new Set([1,2,3])` is Set<number>
+            // without a type argument, exactly as node/tsc infer it.
+            const at = this.type(e.args[0]!, scope, declared ? (`${declared}[]` as Ty) : undefined);
+            if (isArrayTy(at)) el = elemTy(at);
+            else if (isSetTy(at)) el = setElemTy(at);
+            // A string is deliberately REFUSED: node iterates it by code point
+            // (`new Set("a😀b")` has size 3) while our string for-of walks bytes, so
+            // building it here would silently produce the wrong set. We cannot prove
+            // a string is ASCII at compile time, so the refusal is unconditional.
+            else if (at === "string") throw nyi(NYI.COLLECTION, "new Set(string) (node iterates a string by code point; split it yourself, e.g. new Set(s.split(\"\")) for ASCII)");
+            else throw nyi(NYI.COLLECTION, `new Set(${at}) (only an array or another Set is supported — build others with .add)`);
+            if (declared && el !== declared) throw typeError(`new Set<${declared}> from ${at} (element type must match)`);
+          }
           if (el !== "string" && el !== "number") throw nyi(NYI.COLLECTION, `Set of ${el}`);
           return makeSetTy(el);
         }
@@ -1749,6 +1871,21 @@ class Checker {
         return "{message:string}";
       }
       case "AsExpr": { this.type(e.expr, scope); return e.ty; } // identity retype
+      /**
+       * `satisfies` CHECKS against the annotation but keeps the expression's own type.
+       * The annotation is passed down as the contextual hint (so an object literal is
+       * shaped by it, exactly as under a `const x: T =` annotation), and then the
+       * result is the INFERRED type, not `e.ty` — that is the whole difference from
+       * `as` on the line above.
+       */
+      case "SatisfiesExpr": {
+        const t = this.type(e.expr, scope, e.ty);
+        if (t !== e.ty && !this.assignable(e.ty, t)) {
+          throw typeError(`${t} does not satisfy ${e.ty}`, undefined,
+            `\`satisfies\` checks assignability without changing the type; use \`as ${e.ty}\` only if you mean to retype.`);
+        }
+        return t;
+      }
       // `expr!` NARROWS away the nullable arm — that is the point of the operator, and
       // why it cannot simply be erased. On a non-nullable operand it is the identity.
       case "NonNullExpr": return baseTy(this.type(e.expr, scope, hint));
@@ -2001,7 +2138,9 @@ class Checker {
       // SH2: the serializer is generated from the STATIC type, and an un-narrowed union
       // does not have one shape — it used to fall through to the literal `null`, which is
       // a silent wrong answer. Refuse; narrowing gives it a member to serialize.
-      checkUnionRenderable(this.type(e.args[0]!, scope), "JSON.stringify");
+      const jt = this.type(e.args[0]!, scope);
+      checkUnionRenderable(jt, "JSON.stringify");
+      refuseUnboxedUnion(jt, "JSON.stringify"); // rendered the box as the literal `null`
       // arg2 (replacer) — only `null`/`undefined` supported (no array/function replacer).
       if (e.args.length >= 2) {
         const r = e.args[1]!;
@@ -2212,7 +2351,7 @@ class Checker {
         if (e.args.length !== 1 || !isBytesTy(this.type(e.args[0]!, scope))) throw typeError("TextDecoder.decode expects (Uint8Array)");
         return "string";
       }
-      if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee.property, e.args, scope);
+      if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee, e.args, scope);
       // stdlib Batch 1: Number#toFixed(digits) — the digit count must be a literal
       // 0..100 so the RangeError node throws for anything else is impossible here.
       if (recv === "number") {
@@ -2301,7 +2440,13 @@ class Checker {
       const sig = this.generics.has(e.callee.name)
         ? this.instantiate(e.callee.name, e, scope)
         : this.functions.get(e.callee.name);
-      if (!sig) throw nyi(NYI.CLOSURE, `call to '${e.callee.name}' (function values / unknown callee)`);
+      if (!sig) {
+        // An unknown name that this module IMPORTS is not the closure gap — it is an
+        // unlinked check. Say so, rather than sending the reader at captured environments.
+        const from = this.importedFrom.get(e.callee.name);
+        if (from !== undefined) throw unlinkedImportError(e.callee.name, from);
+        throw nyi(NYI.CLOSURE, `call to '${e.callee.name}' (function values / unknown callee)`);
+      }
       if (sig.rest) {
         const fixed = sig.params.length - 1;
         if (e.args.length < sig.required) throw typeError(`'${e.callee.name}' expects at least ${sig.required} args`);
@@ -2456,7 +2601,8 @@ class Checker {
     }
   }
 
-  private inferArrayMethod(recv: Ty, method: string, args: Expr[], scope: Scope): Ty {
+  private inferArrayMethod(recv: Ty, callee: MemberExpr, args: Expr[], scope: Scope): Ty {
+    const method = callee.property;
     const el = elemTy(recv);
     if (method === "map" || method === "filter" || method === "reduce" || method === "flatMap") return this.inferHof(el, method, args, scope);
     // stdlib Batch 1 (part 2): the predicate HOFs, same inline-arrow contract as map/filter.
@@ -2464,15 +2610,32 @@ class Checker {
     if (["forEach"].includes(method)) throw nyi(NYI.CLOSURE, `array .${method} (needs first-class function values)`);
 
     // --- ordering primitives (ES2023, non-mutating: node is the oracle) --------
-    // `.sort` sorts IN PLACE, which the immutable model forbids; `.toSorted()` is the
-    // supported spelling, and with no comparator it uses node's default (compare the
-    // elements' STRING forms).
+    // `.toSorted()` with no comparator uses node's default (compare the elements'
+    // STRING forms).
     //
-    // `.reverse` is the one in-place mutator we ACCEPT (see the `case "reverse"` below
-    // and docs/divergences.md) — it is node-compatible, and memory-safe because the
-    // ownership pass treats a binding of its result as an ALIAS of the receiver rather
-    // than a second owner. Do not read this block as rejecting it.
-    if (method === "sort") throw mutationError("arrays are immutable: `.sort` would sort the array in place", "use `.toSorted()` (ES2023) — it returns a NEW sorted array and leaves the original alone");
+    // `.sort` mutates its receiver, which the immutable model forbids — UNLESS the
+    // receiver is a FRESH array (`[...xs]`, an array literal, a `.map`/`.filter`/…
+    // result). Fresh storage has no other owner, so sorting it is unobservable to any
+    // other binding: there is no shared array to protect. On such a receiver `.sort()`
+    // is exactly `.toSorted()` (same VALUE; the temporary it would sort in place is
+    // discarded either way), so it is REWRITTEN to `toSorted` here and lowers through
+    // the already node-exact copying path — including node's LEXICOGRAPHIC default
+    // order. That also keeps `.sort` from ever returning its receiver, so it cannot
+    // mint the alias that in-place mutation would need. See docs/divergences.md.
+    //
+    // `.reverse` is the one in-place mutator ACCEPTED on ANY receiver (see the
+    // `case "reverse"` below): it is node-compatible, and memory-safe because it DOES
+    // return its receiver and the ownership pass therefore treats a binding of its
+    // result as an ALIAS rather than a second owner. Do not read this block as
+    // rejecting it — an earlier comment here claimed it did, and that was never true.
+    // Note `freshArray` passes freshness THROUGH it, so `[3,1,2].reverse().sort()` is
+    // still a fresh receiver, while `a.reverse().sort()` is `a` and stays refused.
+    if (method === "sort") {
+      if (!freshArray(callee.object))
+        throw mutationError("arrays are immutable: `.sort` would sort the array in place", "use `.toSorted()` (ES2023) — it returns a NEW sorted array and leaves the original alone");
+      callee.property = "toSorted";
+      return this.inferArrayMethod(recv, callee, args, scope);
+    }
     if (method === "toSorted") {
       if (args.length > 1) throw typeError(".toSorted expects 0..1 args");
       if (args.length === 0) {
@@ -2687,7 +2850,7 @@ class Checker {
    * structural-object and nullable arms would accept values codegen does not box here.
    */
   private fitsParam(expected: Ty, actual: Ty): boolean {
-    return actual === expected || (isUnionTy(expected) && this.assignable(expected, actual));
+    return actual === expected || ((isUnionTy(expected) || isGeneralUnionTy(expected)) && this.assignable(expected, actual));
   }
 
   private typeArg(a: Expr, expected: Ty, scope: Scope): Ty {
@@ -2813,7 +2976,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "ObjectLiteral": e.properties.forEach((p) => collectIdents(p.value, out)); return;
     case "SpreadExpr": collectIdents(e.argument, out); return;
     case "SequenceExpr": e.exprs.forEach((x) => collectIdents(x, out)); return;
-    case "AsExpr": collectIdents(e.expr, out); return;
+    case "AsExpr": case "SatisfiesExpr": collectIdents(e.expr, out); return;
     case "NonNullExpr": collectIdents(e.expr, out); return;
     case "InstanceOfExpr": collectIdents(e.object, out); return; // the class name is not a value
     case "ArrowFunction": if (e.exprBody) collectIdents(e.body as Expr, out); return;
@@ -2860,7 +3023,7 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
     case "IndexExpr": go(e.object); go(e.index); return;
     case "UnaryExpr": go(e.operand); return;
     case "TypeofExpr": go(e.operand); return;
-    case "AsExpr": case "NonNullExpr": go(e.expr); return;
+    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": go(e.expr); return;
     case "InstanceOfExpr": go(e.object); return;
     case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
     case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;
@@ -3061,6 +3224,29 @@ export function checkConsoleArg(at: Ty, depth = 0): void {
  * the fix named. The union's own tag is what supplies the missing shape, at runtime and
  * with one branch per member; that is a follow-on, not a guess to make now.
  */
+/**
+ * Refuse an operation that would read a GENERAL union's box as if it were the value.
+ *
+ * Everything the box supports — printing, `typeof`, `Array.isArray` — dispatches on
+ * its tag. Everything else reaches code generated from the STATIC type, which for a
+ * `G<…>` describes the two-slot block, not the arm inside it. Each case below was
+ * measured against node before being refused, and each was silently wrong rather
+ * than loud: truthiness tested the box POINTER (always true, so `0` came out truthy),
+ * `===` compared TAGS (so `1 === 2` was true), `JSON.stringify` rendered the literal
+ * `null`, and concatenation emitted invalid IR.
+ *
+ * Every one of them is a tag dispatch away from working — the printer already is one
+ * — but "reject, never miscompile" says the refusal lands first.
+ */
+function refuseUnboxedUnion(ty: Ty, what: string): void {
+  if (!isGeneralUnionTy(ty)) return;
+  throw nyi(
+    NYI.OPTIONAL_CHAIN,
+    `${what} of the un-narrowed union ${generalUnionMembers(ty).join(" | ")} — it is a tagged box, so which arm it holds ` +
+      `is only known at RUNTIME. Narrow it first (\`if (typeof x === "${typeofTagOf(generalUnionMembers(ty)[0]!)}") { … }\`) and use the arm`,
+  );
+}
+
 export function checkUnionRenderable(ty: Ty, what: string): void {
   const u = findUnionIn(ty);
   if (u === undefined) return;
@@ -3149,6 +3335,10 @@ export function checkInspectable(ty: Ty, root: Ty, depth = 0): void {
     throw nyi(NYI.INSPECT, "console.log of a function value");
   }
   if (isNullableTy(ty)) return checkInspectable(baseTy(ty), root, depth);
+  // A GENERAL union carries its own tag, so codegen can dispatch and print the arm it
+  // actually holds — byte-for-byte what node prints. (A `U<…>` object union has no
+  // outer tag and stays refused; that is the case just below.)
+  if (isGeneralUnionTy(ty)) { for (const m of generalUnionMembers(ty)) checkInspectable(m, root, depth); return; }
   if (depth >= INSPECT_DEPTH_LIMIT) return; // rendered as `[Object]`/`[Array]`; contents unread
   if (isArrayTy(ty)) return checkInspectable(elemTy(ty), root, depth + 1);
   if (isSetTy(ty)) return checkInspectable(setElemTy(ty), root, depth + 1);
@@ -3170,7 +3360,7 @@ const INSPECT_DEPTH_LIMIT = 3;
 export function isPrintableTy(t: Ty): boolean {
   return (
     t === "number" || t === "boolean" || t === "string" || t === "undefined" || t === "void" ||
-    t === "null" || t === "Dyn" || isDateTy(t) || isNullableTy(t) ||
+    t === "null" || t === "Dyn" || isDateTy(t) || isNullableTy(t) || isGeneralUnionTy(t) ||
     isObjectTy(t) || isArrayTy(t) || isMapTy(t) || isSetTy(t) || isBytesTy(t)
   );
 }

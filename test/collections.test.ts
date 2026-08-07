@@ -290,6 +290,118 @@ console.log(ranked.join(","), words.join(","));`;
   });
 });
 
+/*
+ * `new Set(iterable)` — bulk construction.
+ *
+ * PROVENANCE: these cases are DERIVED, not mined. There is no test262 checkout on this
+ * machine, so `test/built-ins/Set/` was never opened and is not cited. Every expected
+ * value below comes from running the case under `node` (the project's oracle) — which
+ * is why each one goes through `matchesNode` rather than a hand-written literal alone.
+ *
+ * Construction is fully node-differential: the CONSTRUCTED set is identical to node's.
+ * Only the later `.add`/`.delete` are the B2 persistence divergence.
+ */
+describe("new Set(iterable)", () => {
+  test("new Set([1,2,3]) has node's size and iterates in insertion order", async () => {
+    const src = `
+const s = new Set([3, 1, 2]);
+console.log(s.size);
+for (const v of s) console.log(v);`;
+    expect(await matchesNode(src)).toBe("3\n3\n1\n2\n");
+  });
+
+  test("duplicates dedupe and the FIRST occurrence keeps its position", async () => {
+    // Size counts distinct elements. The position rule is node's: re-adding an
+    // existing element does not move it, so "b" stays at index 1 even though it
+    // appears again after "c". Expected values DERIVED from running node (below),
+    // not mined from a reference suite — see the header note.
+    const src = `
+console.log(new Set([1, 2, 2, 3]).size);
+for (const v of new Set(["a", "b", "c", "b", "a"])) console.log(v);`;
+    expect(await matchesNode(src)).toBe("3\na\nb\nc\n");
+  });
+
+  test("the no-argument forms still work (`new Set()` / `new Set<number>()`)", async () => {
+    const src = `
+const bare = new Set<string>();
+const nums = new Set<number>();
+console.log(bare.size, nums.size);
+console.log(bare.add("x").size, nums.add(1).add(1).size);`;
+    expect(await matchesNode(src)).toBe("0 0\n1 1\n");
+  });
+
+  test("new Set(anotherSet) copies it, preserving the source's insertion order", async () => {
+    const src = `
+const a = new Set(["z", "a", "m"]);
+const b = new Set(a);
+console.log(b.size, b.has("a"), b.has("q"));
+for (const v of b) console.log(v);`;
+    expect(await matchesNode(src)).toBe("3 true false\nz\na\nm\n");
+  });
+
+  test("the copy is a FRESH handle — `new Set(a) === a` is false, as in node", async () => {
+    // Our Set is persistent, so handing back the SAME NtColl would be unobservable
+    // through .has/.size/iteration — but `===` on a Set is handle identity here, so
+    // sharing would print `true` where node prints `false`. Copy, don't alias.
+    const src = `
+const a = new Set([1, 2]);
+const b = new Set(a);
+console.log(a === b, a === a);`;
+    expect(await matchesNode(src)).toBe("false true\n");
+  });
+
+  test("SameValueZero: NaN dedupes against itself, and -0 is the same key as 0", async () => {
+    // Set uses SameValueZero, so NaN matches itself for membership (unlike `===`) and
+    // -0 is stored normalized to +0 — node prints the surviving element as `0`, never
+    // `-0`, which `1 / v === Infinity` pins down. DERIVED from running node, not mined
+    // from a reference suite — see the header note.
+    const src = `
+const nan = new Set([NaN, NaN, 0 / 0]);
+console.log(nan.size, nan.has(NaN));
+const zero = new Set([-0, 0]);
+console.log(zero.size, zero.has(0), zero.has(-0));
+for (const v of zero) console.log(v, 1 / v);
+const negFirst = new Set([-0]);
+for (const v of negFirst) console.log(v, 1 / v);`;
+    expect(await matchesNode(src)).toBe("1 true\n1 true true\n0 Infinity\n0 Infinity\n");
+  });
+
+  test("a STRING argument is refused (NT1014) rather than iterated as bytes", () => {
+    // node iterates a string by CODE POINT: `new Set("a😀b")` has size 3. Our string
+    // for-of walks BYTES today, so building the set that way would give size 6 — a
+    // silent wrong answer. The checker cannot prove a `string` is ASCII, so the
+    // refusal is unconditional. Reject, never miscompile.
+    expect(codeOf(`const s = new Set("abc");`)).toBe("NT1014");
+    expect(codeOf(`const t = "abc"; const s = new Set(t);`)).toBe("NT1014");
+    let msg = "";
+    try { sourceToIR(`const s = new Set("abc");`); } catch (e) { msg = (e as NTError).message; }
+    expect(msg).toContain("code point");
+  });
+});
+
+/*
+ * `new Map(iterable)` rode the SAME NT1014 line as `new Set(iterable)`, so it comes
+ * along: the Map-copy form is now supported. The ENTRIES form stays refused — it needs
+ * a tuple type we do not have (`["a", 1]` is already NT2001, "array elements must share
+ * a type"), so it is a deeper blocker than this lane, not an oversight.
+ */
+describe("new Map(iterable)", () => {
+  test("new Map(anotherMap) copies it, preserving insertion order", async () => {
+    const src = `
+const a = new Map<string, number>().set("z", 1).set("a", 2);
+const b = new Map(a);
+console.log(b.size, b.get("z"), b.get("a"), b.has("q"), a === b);
+for (const k of b.keys()) console.log(k);`;
+    expect(await matchesNode(src)).toBe("2 1 2 false false\nz\na\n");
+  });
+
+  test("the entries form stays refused (NT1014) — no tuple type yet", () => {
+    let msg = "";
+    try { sourceToIR(`const m = new Map([["a", 1]]);`); } catch (e) { msg = (e as NTError).message; }
+    expect(msg).toContain("tuple");
+  });
+});
+
 describe("Map/Set iteration — what is refused (reject, never miscompile)", () => {
   const M = 'const m = new Map<string, number>().set("a", 1);\n';
   const S = "const s = new Set<number>().add(1);\n";

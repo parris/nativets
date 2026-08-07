@@ -12,9 +12,10 @@
 
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, type FmtSpec } from "./checker.ts";
-import { blockDrops } from "./ast.ts";
+import { blockDrops, freshArray, RETAINS_RECEIVER } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
+import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
@@ -24,7 +25,6 @@ import { isUnionTy, unionDiscriminant } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI } from "./diagnostics.ts";
-import { RETAINS_RECEIVER } from "./ownership.ts";
 
 export function llvmDouble(n: number): string {
   const dv = new DataView(new ArrayBuffer(8));
@@ -88,33 +88,12 @@ function mentions(node: unknown, name: string): boolean {
   return false;
 }
 
-/** Array-producing calls that mint a FRESH, unaliased array. A user function call is
- *  deliberately absent: it may return a module-level array the caller does not own. */
-const FRESH_ARRAY_CALLS = new Set([
-  "map", "filter", "slice", "concat", "with", "toSorted", "toReversed", "flat", "flatMap",
-  "split", "keys", "values", "entries",
-]);
-/** …and the array methods that return their RECEIVER (in-place, like node): the set is
- *  `RETAINS_RECEIVER`, imported from the ownership pass, which is where it has to live —
- *  binding such a result makes an ALIAS, not a second owner, and only that pass can say
- *  so. One canonical copy; do not re-declare it here. */
-
-function freshArray(e: Expr): boolean {
-  if (e.kind === "ArrayLiteral") return true;
-  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") {
-    if (FRESH_ARRAY_CALLS.has(e.callee.property)) return true;
-    // A RETAINS_RECEIVER call returns the pointer it was GIVEN, so the value it hands
-    // down a chain is an unowned temporary exactly when its own receiver was one:
-    // `[1,2].reverse().join()` must still free the literal, while `a.reverse().join()`
-    // must not free `a`. The recursion bottoms out at a non-fresh root (an Identifier),
-    // which is what keeps an owned binding off the temp-free path.
-    if (RETAINS_RECEIVER.has(e.callee.property)) return freshArray(e.callee.object);
-  }
-  return false;
-}
+/* `freshArray`/`FRESH_ARRAY_CALLS` and `RETAINS_RECEIVER` all live in ast.ts — the
+ * checker and the ownership pass need the same judgments, and copies could drift. */
 
 function llvmTy(ty: Ty): string {
   if (isUnionTy(ty)) return "ptr"; // SH2: the member object block itself — there is no box
+  if (isGeneralUnionTy(ty)) return "ptr"; // a general union IS a box: [tag, value], tag = member index
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*; URL/URLSearchParams = the URL/query TEXT
   switch (ty) {
     case "Date": return "double"; // stdlib batch 3: a Date IS its time value (epoch ms)
@@ -136,7 +115,7 @@ function llvmTy(ty: Ty): string {
 function userSym(name: string): string { return name === "main" ? "nt_user_main" : name; }
 
 function defaultZero(ty: Ty): string {
-  if (isUnionTy(ty)) return "null";
+  if (isUnionTy(ty) || isGeneralUnionTy(ty)) return "null";
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "null";
   switch (ty) {
     case "number": return "0x0000000000000000";
@@ -230,6 +209,7 @@ const DECLARES = [
   "declare i64 @nt_arr_index(ptr, double, ptr)",
   // `expr!` — unwrap the A2 tagged pair, PANIC when the assertion is false (Stage 41 shape)
   "declare i64 @nt_nonnull(ptr, ptr)",
+  "declare i64 @nt_union_arm(ptr, double, ptr, ptr)",
   "declare ptr @nt_str_index(ptr, double, ptr)",
   "declare void @nt_panic_bounds(ptr, double, double, ptr)",
   "declare i64 @nt_arr_pop(ptr)",
@@ -384,11 +364,13 @@ const DECLARES = [
   // The TS-level handle is nt_mapset.c's NtColl (HAMT + insertion-order key log),
   // so construction/size/iteration go through the nt_coll_* wrappers.
   "declare ptr @nt_coll_map_new()",
+  "declare ptr @nt_coll_map_from_coll(ptr)",
   "declare ptr @nt_map_put_slot(ptr, i32, i64, i64)",
   "declare i64 @nt_map_get_slot(ptr, i32, i64)",
   "declare i32 @nt_map_has_slot(ptr, i32, i64)",
   "declare ptr @nt_map_remove_slot(ptr, i32, i64)",
   "declare ptr @nt_coll_set_new()",
+  "declare ptr @nt_coll_set_from_arr(ptr, i32)",
   "declare ptr @nt_set_add_slot(ptr, i32, i64)",
   "declare i32 @nt_set_has_slot(ptr, i32, i64)",
   "declare ptr @nt_set_remove_slot(ptr, i32, i64)",
@@ -1098,7 +1080,11 @@ class FnGen {
           return;
         }
         if (s.argument) {
-          const val = this.genExpr(s.argument);
+          // Coerced to the DECLARED return type, exactly as the HOF-callback return above
+          // is: `function f(): number | string { return 7 }` boxes the arm here. Done
+          // BEFORE the drops so the box's `toSlot` retain happens while the value is
+          // still live; a no-op when the types already match.
+          const val = this.coerce(this.genExpr(s.argument), this.retTy);
           this.emitDrops(s.drops ?? []); // free owned locals before returning (not the moved-out value)
           // RC strings: a returned local TRANSFERS its ownership to the caller (exclude it
           // from release). A returned borrow (param/field/index) is retained so the caller
@@ -1461,7 +1447,7 @@ class FnGen {
     if (val.ty === "string") this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
     const t = this.fresh();
     if (val.ty === "number" || isDateTy(val.ty)) this.emit(`${t} = bitcast double ${val.v} to i64`); // a Date IS a double (batch 3)
-    else if (isUnionTy(val.ty) || val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    else if (isUnionTy(val.ty) || isGeneralUnionTy(val.ty) || val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -1470,7 +1456,7 @@ class FnGen {
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
     if (ty === "number" || isDateTy(ty)) this.emit(`${t} = bitcast i64 ${slot} to double`); // a Date IS a double (batch 3)
-    else if (isUnionTy(ty) || ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    else if (isUnionTy(ty) || isGeneralUnionTy(ty) || ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
@@ -1483,8 +1469,17 @@ class FnGen {
    * uses — so if the analysis is ever wrong it PANICS at the read with a location,
    * exactly like a false assertion, and never yields a phantom value.
    */
-  private narrowRead(e: { narrowed?: boolean; loc?: Loc }, r: Val): Val {
-    if (!e.narrowed || !isNullableTy(r.ty)) return r;
+  private narrowRead(e: { narrowed?: boolean; loc?: Loc; ty?: Ty }, r: Val): Val {
+    if (!e.narrowed) return r;
+    // A GENERAL union is a BOX, so a narrowed read UNPACKS it at the arm the checker
+    // proved — and re-checks the tag, for the same reason the nullable case does.
+    if (isGeneralUnionTy(r.ty) && e.ty !== undefined && e.ty !== r.ty) {
+      const arm = e.ty;
+      const slot = this.fresh();
+      this.emit(`${slot} = call i64 @nt_union_arm(ptr ${r.v}, double ${llvmDouble(generalUnionTagOf(r.ty, arm))}, ptr ${this.mod.intern(arm)}, ptr ${this.locArg(e.loc) ?? "null"})`);
+      return { v: this.fromSlot(slot, arm), ty: arm };
+    }
+    if (!isNullableTy(r.ty)) return r;
     const base = baseTy(r.ty);
     const slot = this.fresh();
     this.emit(`${slot} = call i64 @nt_nonnull(ptr ${r.v}, ptr ${this.locArg(e.loc) ?? "null"})`);
@@ -1545,7 +1540,20 @@ class FnGen {
   /** Coerce a value to `target` at a store/assign boundary — boxes into a nullable if needed. */
   private coerce(val: Val, target: Ty): Val {
     if (isNullableTy(target) && !isNullableTy(val.ty)) return this.coerceNullable(val, target);
+    if (isGeneralUnionTy(target) && !isGeneralUnionTy(val.ty)) return this.coerceGeneralUnion(val, target);
     return val;
+  }
+
+  // ---- general union box [tag, value] ----
+  // Same two-slot block as the A2 nullable, but `tag` is the arm's INDEX in the
+  // union's canonical member order rather than a nullish marker. The checker has
+  // already proved `val.ty` is a member, so the tag is a compile-time constant and
+  // boxing costs one allocation and two stores — no runtime type test.
+  /** Box an arm value into a general union of type `target`. */
+  private coerceGeneralUnion(val: Val, target: Ty): Val {
+    const tag = generalUnionTagOf(target, val.ty);
+    if (tag < 0) throw new Error(`internal: ${val.ty} is not a member of ${target}`); // checker's job
+    return { v: this.nullBox(String(tag), this.toSlot(val)), ty: target };
   }
 
   /** i1 result of `a === b` for same-typed operands. */
@@ -1859,6 +1867,9 @@ class FnGen {
         // A runtime-nullable value's typeof depends on its tag: undefined→"undefined",
         // null→"object", present→typeof(base). Branch at runtime.
         if (isNullableTy(inner)) return this.genTypeofNullable(this.genExpr(e.operand).v, baseTy(inner));
+        // A general union's typeof is likewise a RUNTIME fact — it is the whole point of
+        // the box's tag, and it is what the checker's narrowing is reading.
+        if (isGeneralUnionTy(inner)) return this.genTypeofGeneralUnion(this.genExpr(e.operand).v, inner);
         const name =
           inner === "undefined" || inner === "void" ? "undefined" :
           inner === "null" ? "object" :
@@ -2130,6 +2141,9 @@ class FnGen {
         if (e.expr.ty === "Dyn") return this.genDynNarrow(this.genExpr(e.expr).v, e.ty);
         return { v: this.genExpr(e.expr).v, ty: e.ty };
       }
+
+      // `satisfies` never retypes, so it erases completely — no validator, no retag.
+      case "SatisfiesExpr": return this.genExpr(e.expr);
       /**
        * `expr!` — the non-null assertion. On a non-nullable operand it is the identity.
        * On a nullable it UNWRAPS the A2 tagged pair to the bare value.
@@ -2195,8 +2209,33 @@ class FnGen {
       }
       case "NewExpr": {
         // Immutable collections (B2): fresh empty handle from the nt_hamt runtime.
-        if (e.callee === "Map") { const m = this.fresh(); this.emit(`${m} = call ptr @nt_coll_map_new()`); return { v: m, ty: e.ty! }; }
-        if (e.callee === "Set") { const s = this.fresh(); this.emit(`${s} = call ptr @nt_coll_set_new()`); return { v: s, ty: e.ty! }; }
+        if (e.callee === "Map") {
+          const m = this.fresh();
+          if (e.args.length === 1) { // `new Map(otherMap)` — a fresh, insertion-ordered copy
+            const src = this.genExpr(e.args[0]!);
+            this.emit(`${m} = call ptr @nt_coll_map_from_coll(ptr ${src.v})`);
+            return { v: m, ty: e.ty! };
+          }
+          this.emit(`${m} = call ptr @nt_coll_map_new()`);
+          return { v: m, ty: e.ty! };
+        }
+        if (e.callee === "Set") {
+          const s = this.fresh();
+          if (e.args.length === 1) {
+            // `new Set(array)` — the runtime folds the array through the same
+            // add path, so dedup and insertion order match node exactly. A Set
+            // source is materialized to its insertion-ordered key array first;
+            // that also makes the result a FRESH handle, as node's copy is
+            // (`new Set(a) === a` is false, and `===` on a Set is identity here).
+            const src = this.genExpr(e.args[0]!);
+            let arr = src.v;
+            if (isSetTy(src.ty)) { const k = this.fresh(); this.emit(`${k} = call ptr @nt_coll_keys(ptr ${src.v})`); arr = k; }
+            this.emit(`${s} = call ptr @nt_coll_set_from_arr(ptr ${arr}, i32 ${this.keyTag(setElemTy(e.ty!))})`);
+            return { v: s, ty: e.ty! };
+          }
+          this.emit(`${s} = call ptr @nt_coll_set_new()`);
+          return { v: s, ty: e.ty! };
+        }
         // Bytes (stdlib batch 2): `new Uint8Array(n)` -> zero-filled; `new Uint8Array([..])`
         // -> from the number array (each ToUint8). TextEncoder/TextDecoder are stateless
         // (no runtime object), represented by a null sentinel ptr.
@@ -2403,7 +2442,25 @@ class FnGen {
       if (ns === "Array" && !this.isBound("Array")) {
         if (p === "isArray") {
           const at = e.args[0]!.ty ?? "number";
-          this.genExpr(e.args[0]!); // evaluate for side effects
+          const a = this.genExpr(e.args[0]!); // evaluate for side effects
+          // On a GENERAL union the static type says nothing about which arm is in the
+          // box, so the fold below would answer `false` for an array — a silent wrong
+          // answer. Test the TAG instead: true iff it names an array arm.
+          if (isGeneralUnionTy(at)) {
+            const members = generalUnionMembers(at);
+            const tag = this.nullTag(a.v);
+            let acc = "false";
+            members.forEach((m, i) => {
+              if (!isArrayTy(m)) return;
+              const is = this.fresh();
+              this.emit(`${is} = icmp eq i64 ${tag}, ${i}`);
+              if (acc === "false") { acc = is; return; }
+              const or = this.fresh();
+              this.emit(`${or} = or i1 ${acc}, ${is}`);
+              acc = or;
+            });
+            return { v: acc, ty: "boolean" };
+          }
           return { v: isArrayTy(at) ? "true" : "false", ty: "boolean" };
         }
         if (p === "from") {
@@ -2798,6 +2855,7 @@ class FnGen {
       return;
     }
     if (isNullableTy(val.ty)) { this.emitPrintNullable(val.v, baseTy(val.ty), stream); return; }
+    if (isGeneralUnionTy(val.ty)) { this.emitPrintGeneralUnion(val.v, val.ty, stream); return; }
     // A COMPOUND value (object / class instance / array / Map / Set) is rendered by
     // node's util.inspect. Before Stage 47 this fell through to `js_print_str` on the
     // heap POINTER — a silent wrong answer (usually a bare newline).
@@ -3168,6 +3226,35 @@ class FnGen {
     this.to(this.block(end));
   }
 
+  /**
+   * Print a general-union box by dispatching on its tag: each arm is unpacked to its
+   * own static type and handed to the ordinary printer, so what comes out is exactly
+   * what the arm would have printed on its own — which is exactly what node prints.
+   */
+  private emitPrintGeneralUnion(ptr: string, ty: Ty, stream: "out" | "err" = "out"): void {
+    const members = generalUnionMembers(ty);
+    const tag = this.nullTag(ptr);
+    const raw = this.nullVal(ptr);
+    const end = this.label("gpe");
+    members.forEach((m, i) => {
+      const hit = this.label("gph"), miss = this.label("gpm");
+      if (i === members.length - 1) {
+        // The last arm needs no test: the tag is one of the members by construction.
+        this.emitPrint({ v: this.fromSlot(raw, m), ty: m }, stream);
+        this.terminate(`br label %${end}`);
+        return;
+      }
+      const is = this.fresh();
+      this.emit(`${is} = icmp eq i64 ${tag}, ${i}`);
+      this.terminate(`br i1 ${is}, label %${hit}, label %${miss}`);
+      this.to(this.block(hit));
+      this.emitPrint({ v: this.fromSlot(raw, m), ty: m }, stream);
+      this.terminate(`br label %${end}`);
+      this.to(this.block(miss));
+    });
+    this.to(this.block(end));
+  }
+
   /** Runtime typeof of a nullable box: tag 0→"undefined", 1→"object" (null), else typeof(base). */
   private genTypeofNullable(ptr: string, base: Ty): Val {
     const baseName = base === "undefined" || base === "void" ? "undefined" : isFuncTy(base) ? "function" : isObjectTy(base) || isArrayTy(base) ? "object" : base;
@@ -3185,6 +3272,25 @@ class FnGen {
     this.to(this.block(end));
     const t = this.fresh(); this.emit(`${t} = load ptr, ptr ${slot}`);
     return { v: t, ty: "string" };
+  }
+
+  /**
+   * Runtime `typeof` of a general-union box: select the arm's `typeof` name by tag.
+   * A chain of `select`s rather than blocks — every arm's answer is a constant string,
+   * so there is nothing to branch around.
+   */
+  private genTypeofGeneralUnion(ptr: string, ty: Ty): Val {
+    const members = generalUnionMembers(ty);
+    const tag = this.nullTag(ptr);
+    let acc = this.mod.intern(typeofTagOf(members[members.length - 1]!)); // the last arm needs no test
+    for (let i = members.length - 2; i >= 0; i--) {
+      const is = this.fresh();
+      this.emit(`${is} = icmp eq i64 ${tag}, ${i}`);
+      const sel = this.fresh();
+      this.emit(`${sel} = select i1 ${is}, ptr ${this.mod.intern(typeofTagOf(members[i]!))}, ptr ${acc}`);
+      acc = sel;
+    }
+    return { v: acc, ty: "string" };
   }
 
   /** Read `.prop` from a NON-nullable object/string/array value (object slot, or `.length`). */
@@ -3835,7 +3941,7 @@ class FnGen {
       case "TypeofExpr": this.subExpr(e.operand, map); return;
       case "CallExpr": this.subExpr(e.callee, map); for (const a of e.args) this.subExpr(a, map); return;
       case "NewExpr": for (const a of e.args) this.subExpr(a, map); return;
-      case "AsExpr": this.subExpr(e.expr, map); return;
+      case "AsExpr": case "SatisfiesExpr": this.subExpr(e.expr, map); return;
       case "NonNullExpr": this.subExpr(e.expr, map); return;
       case "InstanceOfExpr": this.subExpr(e.object, map); return;
       case "ArrowFunction": {
@@ -4817,10 +4923,11 @@ class FnGen {
     const argVals: string[] = [];
     for (let i = 0; i < sig.params.length; i++) {
       const provided = args[i];
-      // An omitted default is coerced to the param type — boxing an `undefined`
-      // default into a nullable optional param (`f(x?: T)`). No-op for same-typed
-      // defaults, so ordinary default params are unaffected.
-      argVals.push(provided ? this.genExpr(provided).v : this.coerce(this.genExpr(sig.defaults[i]!), sig.params[i]!).v);
+      // Coerced to the param type — boxing an `undefined` default into a nullable
+      // optional param (`f(x?: T)`), and boxing an ARM into a general-union param
+      // (`f(v: number | string)`, called as `f(41)`). A no-op when the types already
+      // match, so ordinary params are unaffected.
+      argVals.push(this.coerce(this.genExpr(provided ?? sig.defaults[i]!), sig.params[i]!).v);
     }
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");
     if (sig.ret === "void") {

@@ -252,6 +252,48 @@ export function isUnionTy(t: Ty): boolean { return typeof t === "string" && t.st
 export function unionMembers(t: Ty): Ty[] { return splitTopLevel(t.slice(2, -1), "|") as Ty[]; }
 export function makeUnionTy(members: Ty[]): Ty { return `U<${members.join("|")}>` as Ty; }
 
+/* ============================================================
+ * GENERAL unions — arms that are not all object types, so nothing INSIDE the value
+ * can tell them apart. Encoded `G<a|b>`, deliberately a DIFFERENT prefix from the
+ * discriminated `U<…>`: a `U<…>` value is the bare member pointer, so sharing the
+ * prefix would let every existing `isUnionTy` site apply unboxed-object logic to
+ * what is in fact a box, which is a miscompile rather than an error.
+ *
+ * REPRESENTATION: a 2-slot heap block [tag, value] — the same shape as the A2
+ * nullable box — where `tag` is the member's index in the CANONICAL member order
+ * and `value` is the arm packed by the ordinary `toSlot`. The tag is an index, so
+ * the order is load-bearing at runtime: members are SORTED and de-duplicated by
+ * `makeGeneralUnionTy`, which makes `number | string` and `string | number` the
+ * same `Ty` with the same tag numbering (`===` stays type comparison, and a value
+ * can cross between the two spellings without renumbering).
+ * ============================================================ */
+export function isGeneralUnionTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("G<") && t.endsWith(">"); }
+export function generalUnionMembers(t: Ty): Ty[] { return splitTopLevel(t.slice(2, -1), "|") as Ty[]; }
+/** Canonicalize: de-duplicate and sort, so member order never depends on spelling. */
+export function makeGeneralUnionTy(members: Ty[]): Ty {
+  return `G<${[...new Set(members)].sort().join("|")}>` as Ty;
+}
+/** The tag a member carries in `t`, or -1 when it is not a member. */
+export function generalUnionTagOf(t: Ty, member: Ty): number { return generalUnionMembers(t).indexOf(member); }
+/**
+ * What `typeof` reports for a value of this static type — the ONLY discriminant a
+ * general union has, so it is also what decides whether one can be represented.
+ */
+export function typeofTagOf(t: Ty): string {
+  if (t === "number" || t === "string" || t === "boolean") return t;
+  return "object";
+}
+/**
+ * An arm a general union may carry. Kept deliberately narrow: only shapes whose
+ * `typeof` is a compile-time constant AND whose value round-trips through the
+ * box's `toSlot`/`fromSlot` unchanged. Nullables are excluded — `T | undefined`
+ * is already its own encoding and nesting the two boxes would give a value two
+ * different representations.
+ */
+export function isGeneralUnionArm(t: Ty): boolean {
+  return t === "number" || t === "string" || t === "boolean" || isArrayTy(t);
+}
+
 /**
  * The discriminant of a union: a field that is present at the SAME index in every
  * member, string-literal-typed in every member, with a DISTINCT value per member.
@@ -472,6 +514,7 @@ export type Expr =
   | ArrowFunction
   | NewExpr
   | AsExpr
+  | SatisfiesExpr
   | NonNullExpr
   | InstanceOfExpr
   | CallExpr;
@@ -649,6 +692,13 @@ export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
 export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; loc?: Loc; }
 export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
+/**
+ * `expr satisfies Type` — CHECKED but never ADOPTED. `as` replaces the expression's
+ * type with `ty`; `satisfies` only proves assignability to `ty` and leaves the
+ * expression's own inferred type in place, which is the entire reason the operator
+ * exists. Erases at codegen, exactly like `as`.
+ */
+export interface SatisfiesExpr { kind: "SatisfiesExpr"; expr: Expr; ty: Ty; }
 /**
  * `expr!` — TypeScript's NON-NULL ASSERTION. Unlike `as`, it is not an identity: it
  * NARROWS `T | undefined` / `T | null` to `T`, which is the whole reason it exists and
@@ -874,6 +924,55 @@ export function mutableTags(p: Program): Set<string> {
   return new Set([...(p.mutableClasses ?? []), ...(p.mutableRecords ?? [])]);
 }
 
+/** Array-producing calls that mint a FRESH, unaliased array. A user function call is
+ *  deliberately absent: it may return a module-level array the caller does not own. */
+const FRESH_ARRAY_CALLS = new Set([
+  "map", "filter", "slice", "concat", "with", "toSorted", "toReversed", "flat", "flatMap",
+  "split", "keys", "values", "entries",
+]);
+
+/**
+ * …and the array methods that return their RECEIVER rather than a fresh array — node's
+ * in-place mutators. `.reverse` is the only one accepted; every other one
+ * (`.push`/`.pop`/`.fill`/`.splice`/`.shift`/`.unshift`/`.copyWithin`) is refused with
+ * NT1606, and `.sort` only survives by being rewritten to `.toSorted` on a fresh
+ * receiver — which is exactly what keeps it from ever returning its receiver.
+ *
+ * Stated as a SET, and kept here beside `freshArray`, because THREE passes must agree on
+ * it: the checker (result type is the receiver's), codegen (never free a retained
+ * receiver temp), and the ownership pass (binding such a result makes an ALIAS, not a
+ * second owner — otherwise it double-frees). One canonical copy; do not re-declare it.
+ */
+export const RETAINS_RECEIVER = new Set(["reverse"]);
+
+/**
+ * Does `e` evaluate to a NEWLY CONSTRUCTED array that nothing else aliases?
+ *
+ * The single source of truth for array freshness, used by two passes that must agree:
+ * codegen frees a fresh receiver temporary after a method call, and the checker permits
+ * `.sort()` on a fresh receiver (sorting storage with no other owner is unobservable —
+ * see docs/divergences.md). Two copies of this judgment could drift into a codegen that
+ * frees what the checker thinks is shared, so there is exactly one.
+ *
+ * Conservative and purely SYNTACTIC: an array literal (including a spread copy
+ * `[...xs]`, which builds a new array) and the array-returning methods above. A plain
+ * function call is NOT fresh — it may hand back an array the callee still owns.
+ *
+ * A RETAINS_RECEIVER call PASSES freshness through rather than ending it: it hands back
+ * the pointer it was given, so its result is unowned exactly when its receiver was.
+ * `[1,2].reverse()` is still a temporary (codegen must free it; `.sort()` on it is still
+ * unobservable), while `a.reverse()` is `a` itself — the recursion bottoms out at the
+ * non-fresh Identifier, which is what stops either pass touching an owned binding.
+ */
+export function freshArray(e: Expr): boolean {
+  if (e.kind === "ArrayLiteral") return true;
+  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") {
+    if (FRESH_ARRAY_CALLS.has(e.callee.property)) return true;
+    if (RETAINS_RECEIVER.has(e.callee.property)) return freshArray(e.callee.object);
+  }
+  return false;
+}
+
 /**
  * The source text of an expression, for a diagnostic that has to NAME the thing it is
  * about. Deliberately partial: names, field reads, element reads and calls over those —
@@ -900,7 +999,7 @@ export function exprText(e: Expr): string | undefined {
     const x = exprText(e.expr);
     return x === undefined ? undefined : x + "!";
   }
-  if (e.kind === "AsExpr") return exprText(e.expr);
+  if (e.kind === "AsExpr" || e.kind === "SatisfiesExpr") return exprText(e.expr);
   if (e.kind === "CallExpr") {
     const c = exprText(e.callee);
     return c === undefined ? undefined : c + (e.args.length === 0 ? "()" : "(...)");

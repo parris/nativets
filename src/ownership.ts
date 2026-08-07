@@ -24,7 +24,7 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
-import { isArrayTy, isObjectTy, isUnionTy, setBlockDrops, classTag, mutableTags } from "./ast.ts";
+import { isArrayTy, isObjectTy, isUnionTy, setBlockDrops, classTag, mutableTags, RETAINS_RECEIVER } from "./ast.ts";
 
 /** The linear (single-owner, move-checked + dropped) types: heap aggregates. A
  *  DISCRIMINATED UNION (SH2) is one of them: its value IS a member's object block, so
@@ -69,19 +69,6 @@ const NO_MUTABLE: MutableInfo = { classes: new Set(), setters: new Set(), setter
 
 /** Methods that mutate an array in place (so they conflict with a live borrow). */
 const MUTATING = new Set(["push", "pop"]);
-
-/**
- * Array methods that hand back their RECEIVER rather than a fresh array — node's
- * in-place mutators. `.reverse` is the only one we accept; every other in-place
- * mutator (`.push`/`.pop`/`.fill`/`.splice`/`.shift`/`.unshift`/`.copyWithin`/`.sort`)
- * is refused by the checker with NT1606, so it can never reach this pass.
- *
- * The rule is stated over a SET rather than one name so that admitting a second
- * such method cannot silently skip the aliasing treatment: binding the result of one
- * of these gives a value TWO names, and only the receiver may own it. Codegen reads
- * the same set (`freeReceiverTemp`) — this is the one canonical copy.
- */
-export const RETAINS_RECEIVER = new Set(["reverse"]);
 
 /** Does this call hand its receiver back? Only the ARRAY builtin does, so BOTH the
  *  receiver and the result must be arrays — the method NAME alone is not enough. A user
@@ -590,6 +577,8 @@ class Analyzer {
       case "SpreadExpr": this.expr(e.argument, state, false); return; // spread copies (borrow)
       case "NewExpr": for (const a of e.args) this.expr(a, state, false); return;
       case "AsExpr": this.expr(e.expr, state, false); return;
+      // `satisfies` is a pure type-layer check; ownership flows straight through it.
+      case "SatisfiesExpr": this.expr(e.expr, state, consume); return;
       // `expr!` is a type-level assertion; ownership flows straight through it.
       case "NonNullExpr": this.expr(e.expr, state, consume); return;
       case "InstanceOfExpr": this.expr(e.object, state, false); return; // a type TEST only borrows
