@@ -4233,11 +4233,44 @@ class FnGen {
     // the QUOTED ISO string — and `null` for a non-finite time value (toJSON checks
     // the time value first, so an Invalid Date serializes rather than throwing).
     if (isDateTy(ty)) { const t = this.fresh(); this.emit(`${t} = call ptr @nt_date_to_json(double ${val.v})`); return { v: t, ty: "string" }; }
+    // A nullable BOX: `null` for either nullish arm, otherwise the value it carries.
+    // (An absent UNDEFINED arm is not `null` in node — at the root it is the undefined
+    // VALUE and in an object the key is dropped — so those two shapes are refused by
+    // the checker rather than rendered here. See `refuseNullableStringify`.)
+    if (isNullableTy(ty)) return this.genJsonNullable(val.v, baseTy(ty), indent, depth);
     if (isArrayTy(ty)) return this.genJsonArray(val, indent, depth);
     if (isObjectTy(ty)) return this.genJsonObject(val, indent, depth);
     return { v: this.mod.intern("null"), ty: "string" };
   }
 
+  /** JSON for a nullable box: nullish -> `null`, present -> the base value's JSON. */
+  private genJsonNullable(ptr: string, base: Ty, indent: string, depth: number): Val {
+    const slot = this.slot("string");
+    const present = this.fresh();
+    this.emit(`${present} = icmp eq i64 ${this.nullTag(ptr)}, 2`);
+    const pLbl = this.label("jnp"), aLbl = this.label("jna"), end = this.label("jne");
+    this.terminate(`br i1 ${present}, label %${pLbl}, label %${aLbl}`);
+    this.to(this.block(pLbl));
+    const inner = this.genJsonStringify({ v: this.fromSlot(this.nullVal(ptr), base), ty: base }, indent, depth);
+    this.emit(`store ptr ${inner.v}, ptr ${slot}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(aLbl));
+    this.emit(`store ptr ${this.mod.intern("null")}, ptr ${slot}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(end));
+    const t = this.fresh();
+    this.emit(`${t} = load ptr, ptr ${slot}`);
+    return { v: t, ty: "string" };
+  }
+
+  /**
+   * JSON for an object. A field typed `T | undefined` is OMITTED when absent — node
+   * drops the key rather than writing `null` — so both the key and its SEPARATOR are
+   * runtime decisions, and the comma has to close up behind a dropped field. That is
+   * what the `emitted` flag is for: it says whether anything has been written yet, so
+   * the first surviving field takes no comma wherever it lands. A field with no
+   * undefined arm keeps the old compile-time path.
+   */
   private genJsonObject(val: Val, indent = "", depth = 0): Val {
     const fields = objectFields(val.ty);
     const pretty = indent !== "";
@@ -4245,18 +4278,72 @@ class FnGen {
     if (fields.length === 0) return { v: this.mod.intern("{}"), ty: "string" };
     const inner = pretty ? indent.repeat(depth + 1) : "";
     const close = pretty ? indent.repeat(depth) : "";
-    let acc = this.mod.intern(pretty ? `{\n${inner}` : "{");
-    fields.forEach((f, i) => {
-      if (i > 0) acc = this.concat(acc, this.mod.intern(pretty ? `,\n${inner}` : ","));
-      acc = this.concat(acc, this.mod.intern(pretty ? `"${f.key}": ` : `"${f.key}":`));
-      const gep = this.fresh();
-      this.emit(`${gep} = getelementptr i64, ptr ${val.v}, i64 ${fieldIndex(val.ty, f.key)}`);
-      const slot = this.fresh();
-      this.emit(`${slot} = load i64, ptr ${gep}`);
-      acc = this.concat(acc, this.genJsonStringify({ v: this.fromSlot(slot, f.ty), ty: f.ty }, indent, depth + 1).v);
-    });
-    acc = this.concat(acc, this.mod.intern(pretty ? `\n${close}}` : "}"));
-    return { v: acc, ty: "string" };
+    const optional = (t: Ty) => isNullableTy(t) && nullishKind(t) === "undefined";
+
+    // Fast path: nothing can vanish, so the separators are known at compile time.
+    // Kept byte-identical to the pre-omission emission (same order of interned
+    // constants) so it does not churn every record's IR snapshot.
+    if (!fields.some((f) => optional(f.ty))) {
+      let acc = this.mod.intern(pretty ? `{\n${inner}` : "{");
+      fields.forEach((f, i) => {
+        if (i > 0) acc = this.concat(acc, this.mod.intern(pretty ? `,\n${inner}` : ","));
+        acc = this.concat(acc, this.mod.intern(pretty ? `"${f.key}": ` : `"${f.key}":`));
+        acc = this.concat(acc, this.genJsonStringify(this.loadField(val, f.key, f.ty), indent, depth + 1).v);
+      });
+      return { v: this.concat(acc, this.mod.intern(pretty ? `\n${close}}` : "}")), ty: "string" };
+    }
+
+    const sep = this.mod.intern(pretty ? `,\n${inner}` : ",");
+    const open = this.mod.intern(pretty ? `{\n${inner}` : "{");
+    const accSlot = this.slot("string");
+    const emittedSlot = this.slot("boolean");
+    this.emit(`store ptr ${this.mod.intern("")}, ptr ${accSlot}`);
+    this.emit(`store i1 false, ptr ${emittedSlot}`);
+    // Append `<sep?>"key":<json>` and record that something was written.
+    const writeField = (key: string, jsonV: string): void => {
+      const cur = this.fresh(); this.emit(`${cur} = load ptr, ptr ${accSlot}`);
+      const had = this.fresh(); this.emit(`${had} = load i1, ptr ${emittedSlot}`);
+      const lead = this.fresh();
+      this.emit(`${lead} = select i1 ${had}, ptr ${sep}, ptr ${this.mod.intern("")}`);
+      let a = this.concat(cur, lead);
+      a = this.concat(a, this.mod.intern(pretty ? `"${key}": ` : `"${key}":`));
+      a = this.concat(a, jsonV);
+      this.emit(`store ptr ${a}, ptr ${accSlot}`);
+      this.emit(`store i1 true, ptr ${emittedSlot}`);
+    };
+
+    for (const f of fields) {
+      const fv = this.loadField(val, f.key, f.ty);
+      if (!optional(f.ty)) { writeField(f.key, this.genJsonStringify(fv, indent, depth + 1).v); continue; }
+      const base = baseTy(f.ty);
+      const present = this.fresh();
+      this.emit(`${present} = icmp eq i64 ${this.nullTag(fv.v)}, 2`);
+      const pLbl = this.label("jop"), end = this.label("joe");
+      this.terminate(`br i1 ${present}, label %${pLbl}, label %${end}`);
+      this.to(this.block(pLbl));
+      // Present: render the BASE value — `{k: undefined}` is the only dropped shape,
+      // and this arm is proved present, so there is no nullable left to unwrap.
+      writeField(f.key, this.genJsonStringify({ v: this.fromSlot(this.nullVal(fv.v), base), ty: base }, indent, depth + 1).v);
+      this.terminate(`br label %${end}`);
+      this.to(this.block(end));
+    }
+    const body = this.fresh(); this.emit(`${body} = load ptr, ptr ${accSlot}`);
+    const any = this.fresh(); this.emit(`${any} = load i1, ptr ${emittedSlot}`);
+    // Every field vanished ⇒ node prints `{}` — with no newline/indent inside it.
+    const openV = this.fresh();
+    this.emit(`${openV} = select i1 ${any}, ptr ${open}, ptr ${this.mod.intern("{")}`);
+    const closeV = this.fresh();
+    this.emit(`${closeV} = select i1 ${any}, ptr ${this.mod.intern(pretty ? `\n${close}}` : "}")}, ptr ${this.mod.intern("}")}`);
+    return { v: this.concat(this.concat(openV, body), closeV), ty: "string" };
+  }
+
+  /** Load object field `key` (typed `ty`) out of the record `val`. */
+  private loadField(val: Val, key: string, ty: Ty): Val {
+    const gep = this.fresh();
+    this.emit(`${gep} = getelementptr i64, ptr ${val.v}, i64 ${fieldIndex(val.ty, key)}`);
+    const slot = this.fresh();
+    this.emit(`${slot} = load i64, ptr ${gep}`);
+    return { v: this.fromSlot(slot, ty), ty };
   }
 
   private genJsonArray(val: Val, indent = "", depth = 0): Val {

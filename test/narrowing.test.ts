@@ -642,3 +642,105 @@ console.log(JSON.parse("\\"\\"") ? "T" : "F", JSON.parse("[]") ? "T" : "F", JSON
     expect(ours.exitCode).toBe(oracle.exitCode);
   });
 });
+
+/*
+ * JSON.stringify of a nullable box.
+ *
+ * `genJsonStringify` is a type-directed walk that ends in `return "null"` for any type
+ * it does not recognize — and a nullable was one of those, so EVERY nullable serialized
+ * as the literal `null` no matter what it held. Silent.
+ *
+ * node's rules here are genuinely subtle and were MEASURED, not reasoned out:
+ *   JSON.stringify(7)            -> "7"
+ *   JSON.stringify(null)         -> "null"
+ *   JSON.stringify(undefined)    -> the VALUE undefined, not any string
+ *   JSON.stringify({k: null})    -> {"k":null}
+ *   JSON.stringify({k: undefined}) -> {}          <- the key is OMITTED
+ * The two `undefined` shapes are handled separately (see the next describe); this one
+ * pins the half that is unambiguous.
+ */
+describe("JSON.stringify of a nullable renders the VALUE, not the box", () => {
+  const cases: [string, string, string][] = [
+    ["root, present number", `let x: number | null = 7;\nconsole.log(JSON.stringify(x));`, "7"],
+    ["root, present string", `let x: string | null = "a";\nconsole.log(JSON.stringify(x));`, `"a"`],
+    ["root, null arm",       `let x: string | null = null;\nconsole.log(JSON.stringify(x));`, "null"],
+    ["nested, present",      `const p: number | undefined = [7].at(0);\nconsole.log(JSON.stringify({ k: p }));`, `{"k":7}`],
+    ["nested, null arm",     `let n: string | null = null;\nconsole.log(JSON.stringify({ k: n }));`, `{"k":null}`],
+  ];
+  for (const [name, src, want] of cases) {
+    test(name, async () => {
+      const full = `${src}\n`;
+      const oracle = runWithNode(full);
+      expect(oracle.stdout).toBe(`${want}\n`); // node first — the oracle, not our guess
+      const ours = await compileAndRun(full);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.exitCode).toBe(oracle.exitCode);
+    });
+  }
+});
+
+/*
+ * The two `undefined` shapes JSON.stringify cannot express here. Both were silently
+ * wrong (each rendered the literal `null`); both are now refused with the fix named.
+ *
+ *   JSON.stringify(x)      where x is `T | undefined` and absent
+ *       node returns the VALUE `undefined` — not a string at all. Our JSON.stringify
+ *       is typed `string`, so there is nothing correct to return.
+ *   JSON.stringify({k: x}) where x is `T | undefined` and absent
+ *       node OMITS the key entirely (`{}`, not `{"k":null}`), which needs the key and
+ *       its separator decided at runtime.
+ *
+ * A `T | null` is unaffected in both positions — `null` is exactly what node emits.
+ */
+describe("the `undefined` shapes JSON.stringify cannot express are REFUSED, not guessed", () => {
+  const codeOf = (source: string): string | null => {
+    try { sourceToIR(source); return null; }
+    catch (e) { return e instanceof NTError ? e.diag.code : "NT9001"; }
+  };
+  const messageOf = (source: string): string => {
+    try { sourceToIR(source); return ""; }
+    catch (e) { return e instanceof NTError ? e.diag.message : String(e); }
+  };
+
+  test("a `T | undefined` at the ROOT is refused", () => {
+    const src = `const a: number | undefined = [7].at(9);\nconsole.log(JSON.stringify(a));\n`;
+    expect(codeOf(src)).toBe("NT1005");
+    expect(messageOf(src)).toContain("?? ");
+  });
+
+  test("a `T | undefined` FIELD is NOT refused — the key is OMITTED, as node does", async () => {
+    const src = `const p: number | undefined = [7].at(0);
+const a: number | undefined = [7].at(9);
+console.log(JSON.stringify({ k: a }));
+console.log(JSON.stringify({ k: p }));
+console.log(JSON.stringify({ a: a, b: 1 }));
+console.log(JSON.stringify({ a: 1, b: a }));
+console.log(JSON.stringify({ a: a, b: a }));
+`;
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe(`{}\n{"k":7}\n{"b":1}\n{"a":1}\n{}\n`); // node: the key vanishes, commas close up
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  test("key omission also works PRETTY-PRINTED, where the separator carries a newline+indent", async () => {
+    const src = `const p: number | undefined = [7].at(0);
+const a: number | undefined = [7].at(9);
+console.log(JSON.stringify({ a: a, b: 1, c: p }, null, 2));
+console.log(JSON.stringify({ x: a }, null, 2));
+console.log(JSON.stringify({ o: { k: a }, q: 3 }, null, 2));
+`;
+    const oracle = runWithNode(src);
+    // an emptied object is `{}` with NO newline inside it, even under an indent
+    expect(oracle.stdout).toBe(`{\n  "b": 1,\n  "c": 7\n}\n{}\n{\n  "o": {},\n  "q": 3\n}\n`);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  test("...but a `T | null` is fine in BOTH positions — `null` is what node emits", () => {
+    expect(codeOf(`let n: string | null = null;\nconsole.log(JSON.stringify(n));\n`)).toBe(null);
+    expect(codeOf(`let n: string | null = null;\nconsole.log(JSON.stringify({ k: n }));\n`)).toBe(null);
+  });
+});

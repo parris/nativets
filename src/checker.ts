@@ -2141,6 +2141,7 @@ class Checker {
       const jt = this.type(e.args[0]!, scope);
       checkUnionRenderable(jt, "JSON.stringify");
       refuseUnboxedUnion(jt, "JSON.stringify"); // rendered the box as the literal `null`
+      refuseUndefinedStringify(jt); // at the ROOT node returns the undefined VALUE — no string is right
       // arg2 (replacer) — only `null`/`undefined` supported (no array/function replacer).
       if (e.args.length >= 2) {
         const r = e.args[1]!;
@@ -3232,6 +3233,28 @@ function refuseUnboxedUnion(ty: Ty, what: string): void {
     NYI.OPTIONAL_CHAIN,
     `${what} of the un-narrowed union ${generalUnionMembers(ty).join(" | ")} — it is a tagged box, so which arm it holds ` +
       `is only known at RUNTIME. Narrow it first (\`if (typeof x === "${typeofTagOf(generalUnionMembers(ty)[0]!)}") { … }\`) and use the arm`,
+  );
+}
+
+/**
+ * Refuse the two `JSON.stringify` shapes an `undefined` arm cannot express here.
+ *
+ * node DROPS an undefined rather than rendering it, and drops it differently by
+ * position: at the root `JSON.stringify(x)` returns the VALUE `undefined` (not a
+ * string — our `JSON.stringify` is typed `string`, so there is nothing correct to
+ * return), and in an object the KEY IS OMITTED (`{}`, not `{"k":null}`), which needs
+ * the key and its separator decided at runtime. Both used to render the literal
+ * `null`, silently. An ARRAY element is the one position where node does render
+ * `null`, so it is unaffected — as is a `T | null` everywhere.
+ */
+function refuseUndefinedStringify(ty: Ty): void {
+  if (!isNullableTy(ty) || nullishKind(ty) !== "undefined") return;
+  throw nyi(
+    NYI.JSON,
+    `JSON.stringify of a \`${baseTy(ty)} | undefined\` at the ROOT — node returns the undefined VALUE there, not a string, ` +
+      `so the literal \`null\` this used to render was wrong and no string is right either. ` +
+      `Give it a value first (\`x ?? null\`), or use \`${baseTy(ty)} | null\`, which serializes as \`null\` exactly like node. ` +
+      `(As an object FIELD it is fine — the key is omitted, as node does.)`,
   );
 }
 
