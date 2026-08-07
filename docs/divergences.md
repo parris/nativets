@@ -529,7 +529,12 @@ still see. A newly constructed array has no other owner, so sorting it is unobse
 `.slice(0)` results are accepted, while `xs.sort()`, an alias `const b = xs; b.sort()`, a
 parameter, a module-level array, and the result of a **plain function call** (`mk().sort()` — the
 callee may still own it) stay `NT1606`. Freshness is decided syntactically by `freshArray` in
-`src/ast.ts`, the single copy shared with codegen's receiver-temp free.
+`src/ast.ts`, the single copy shared with codegen's receiver-temp free and the ownership pass.
+
+The two rules compose through that one definition: `.reverse()` **passes freshness through**
+(it hands back the pointer it was given), so `[3,1,2].reverse().sort()` is still a fresh
+receiver and is accepted, while `xs.reverse().sort()` bottoms out at `xs` and stays `NT1606` —
+sorting storage `xs` can still see is exactly what the rule exists to stop.
 
 On a fresh receiver `.sort()` is exactly `.toSorted()` — same value, and the temporary it would
 have sorted in place is discarded either way — so it is **rewritten to `toSorted`** in the
