@@ -129,12 +129,24 @@ export function lex(source: string): Token[] {
     }
   };
 
+  // A leading UTF-8 BOM (U+FEFF) is not part of the program. node strips it and so does
+  // tsc, so a BOM-prefixed file that runs fine under node must compile here — it used to
+  // die with a raw `LexError: Unexpected character ' ' at 1:1` (not even a banded
+  // diagnostic, and naming an unprintable character). Found by running the TypeScript
+  // conformance union corpus, 13 of whose 25 files are BOM-prefixed.
+  //
+  // Only at offset 0. ECMAScript actually puts U+FEFF (<ZWNBSP>) in WhiteSpace
+  // *everywhere* — `const a<FEFF>= 1` runs under node — but the main scan loop below
+  // recognizes only ` \t\r\n` as space anyway, so a mid-file FEFF still (correctly)
+  // rejects rather than miscompiles. Widening the whole whitespace class is its own job.
+  if (source.charCodeAt(0) === 0xfeff) advance();
+
   // A `#!` shebang on line 1 is not JavaScript — it is a hashbang comment (TC39
   // "HashbangComment", which node and every JS engine strip before parsing). It is
   // skipped to end-of-line rather than tokenized, so an executable script such as
   // our OWN `src/cli.ts` (`#!/usr/bin/env bun`) lexes. Only at offset 0: a `#`
   // anywhere else is still an "Unexpected character". (SH1 tail, self-hosting.)
-  if (source.startsWith("#!")) {
+  if (source.startsWith("#!", i)) {
     while (i < source.length && source[i] !== "\n") advance();
   }
 
