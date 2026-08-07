@@ -634,8 +634,12 @@ class Checker {
     }
   }
 
-  /** `Array.isArray(x)` narrowing a general union — see `typeofFacts` for the rules. */
-  private isArrayFacts(e: Expr & { kind: "CallExpr" }, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+  /** `Array.isArray(x)` narrowing a general union — see `typeofFacts` for the rules.
+   *  Takes a plain `Expr` and re-tests `kind`: an `Expr & { kind: … }` intersection is
+   *  outside the subset we compile, and writing one here would add a self-host blocker
+   *  to our own source (which is exactly how this was caught). */
+  private isArrayFacts(e: Expr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+    if (e.kind !== "CallExpr") return;
     const c = e.callee;
     if (c.kind !== "MemberExpr" || c.property !== "isArray") return;
     if (c.object.kind !== "Identifier" || c.object.name !== "Array" || scope.lookup("Array")) return;

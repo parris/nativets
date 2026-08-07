@@ -317,6 +317,39 @@ Everything else about Batch 3:
   "unwrap it first"). It previously reached codegen and emitted invalid IR — a real defect, found
   by this lane through `URLSearchParams#get`.
 
+### General (non-object) unions — supported narrowly, refused loudly (`G<…>`)
+
+A union whose arms are not all object types (`number | string`, `number | number[]`) has no
+discriminant field inside the value, so it is a **tagged box**: a 2-slot `[tag, value]` block
+(the A2 nullable's shape) with `tag` = the arm's index in the union's canonical member order.
+Members are sorted and de-duplicated, so `number | string` and `string | number` are the same
+type with the same tag numbering.
+
+What works is what dispatches on that tag: `typeof`, `Array.isArray`, `console.log`, narrowing
+via either predicate, and union-typed parameters, returns and bindings. **Everything else is
+refused with `NT1009`**, because it is generated from the STATIC type — which for a `G<…>`
+describes the box, not the arm in it. Each was measured against node first, and each was
+silently wrong rather than loud:
+
+| Refused | What it did before the refusal |
+|---|---|
+| `if (x)` and every other truthiness position | tested the box POINTER — always true, so `0` and `""` came out truthy |
+| `a === b` between unions | compared the two boxes' TAGS, so `1 === 2` was true |
+| `JSON.stringify(x)` | rendered the box as the literal `null` |
+| `"" + x`, `` `${x}` `` | emitted invalid IR |
+
+Each is a tag dispatch away from working — the printer already is one — but reject-never-miscompile
+says the refusal lands first. Arms are restricted to `number`/`string`/`boolean`/arrays with
+*distinct* `typeof` tags: `number[] | {a: number}` is refused because `typeof` cannot tell those
+apart, and an object arm is refused outright. A 3-arm union narrows only when ONE arm survives
+the test — the else branch of a 3-arm union is a sub-union whose tags would need renumbering, so
+the binding stays the full union and arm-specific uses of it are refused.
+
+> **Pre-existing, and NOT fixed by that lane:** the A2 nullable box has three of the same holes,
+> two of them silently wrong. With `const x: number | undefined = [0].at(0)`, `if (x)` prints
+> `truthy` where node prints `falsy`, and `JSON.stringify(x)` prints `null` where node prints `0`;
+> `` `${x}` `` emits invalid IR. These predate general unions and need their own lane.
+
 ### Actor messages (B3 v5) — structured messages are COPIES, and the shape is checked
 
 node has no actors, so the whole surface (`spawn`/`send`/`receive`) is behavioral, not
