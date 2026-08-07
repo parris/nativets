@@ -2715,7 +2715,7 @@ class Checker {
    * structural-object and nullable arms would accept values codegen does not box here.
    */
   private fitsParam(expected: Ty, actual: Ty): boolean {
-    return actual === expected || (isUnionTy(expected) && this.assignable(expected, actual));
+    return actual === expected || ((isUnionTy(expected) || isGeneralUnionTy(expected)) && this.assignable(expected, actual));
   }
 
   private typeArg(a: Expr, expected: Ty, scope: Scope): Ty {

@@ -4883,10 +4883,11 @@ class FnGen {
     const argVals: string[] = [];
     for (let i = 0; i < sig.params.length; i++) {
       const provided = args[i];
-      // An omitted default is coerced to the param type — boxing an `undefined`
-      // default into a nullable optional param (`f(x?: T)`). No-op for same-typed
-      // defaults, so ordinary default params are unaffected.
-      argVals.push(provided ? this.genExpr(provided).v : this.coerce(this.genExpr(sig.defaults[i]!), sig.params[i]!).v);
+      // Coerced to the param type — boxing an `undefined` default into a nullable
+      // optional param (`f(x?: T)`), and boxing an ARM into a general-union param
+      // (`f(v: number | string)`, called as `f(41)`). A no-op when the types already
+      // match, so ordinary params are unaffected.
+      argVals.push(this.coerce(this.genExpr(provided ?? sig.defaults[i]!), sig.params[i]!).v);
     }
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");
     if (sig.ret === "void") {
