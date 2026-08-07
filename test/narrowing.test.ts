@@ -412,4 +412,30 @@ console.log(isEmpty(zero));
 console.log(isEmpty(none));
 `);
   });
+
+  // TypeScript: typeGuardsInRightOperandOfOrOrOperator.ts `foo4` — a chain of three
+  // guards, where each term is narrowed by EVERY term to its left. Written as
+  // `src/diagnostics.ts`'s own `formatDiagnostic` guard, which is the case that blocks
+  // self-hosting: `if (!diag.spans || diag.spans.length === 0 || !source) return …`,
+  // then both `diag.spans` and `source` are narrowed below the guard.
+  test("a three-term `||` chain composes left to right, and narrows past the guard", async () => {
+    await expectNode(`
+function render(d: { spans: number[] | undefined }, source: string | undefined): string {
+  if (!d.spans || d.spans.length === 0 || !source) {
+    return "compact";
+  }
+  return source.toUpperCase() + "/" + d.spans.length;
+}
+const some: { spans: number[] | undefined } = { spans: [1, 2] };
+const empty: number[] = [];
+const zero: { spans: number[] | undefined } = { spans: empty };
+const none: { spans: number[] | undefined } = { spans: undefined };
+const src: string | undefined = "abc";
+const nosrc: string | undefined = undefined;
+console.log(render(some, src));
+console.log(render(some, nosrc));
+console.log(render(zero, src));
+console.log(render(none, src));
+`);
+  });
 });
