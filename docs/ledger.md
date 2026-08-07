@@ -736,6 +736,26 @@ instructions, and it was 76% of that file. `git log` is the other view of the sa
   Stage 48's guarantee holds unchanged: the `isPrintableTy` net still means **no input prints
   nothing**. Tests: `test/console.test.ts` (118, node-differential on BOTH streams except the
   refusal table and the deliberate non-literal panic).
+- **SH5 ✅ (compile-time text imports — `import s from "./f.c" with { type: "text" }`)**
+  The one self-hosting blocker that was not "TypeScript we refused": `src/driver.ts` embeds the
+  twelve C files of the runtime (~305KB, `runtime/runtime.c` alone 147KB) with bun's text-asset
+  import, so `bun build --compile` yields a self-contained binary. The parser now accepts an
+  import-attributes clause, and the LINKER reads the file at compile time — relative to the
+  importing module — and materializes `const <name> = "<bytes>";`. Nothing downstream knows a
+  text import existed: it is an ordinary `const string`, interned into the `.ll`, with no runtime
+  file I/O and no `node:fs`. `src/driver.ts` needed **no source change**. Measured effect:
+  `driver.ts` (and `cli.ts` through it) moves from `NT1017` at **driver.ts:27** to `NT1017` at
+  **driver.ts:502** (`export async function`) — same code, 475 lines deeper; no other module's
+  first blocker moved. The risk was never the syntax but the 147KB literal, so the fixtures assert
+  the real bytes: a hostile pure-ASCII payload (quotes, backslashes, every control character but
+  NUL, DEL, printf specifiers, LLVM's own `c"\00"` escape text, a 4000-char line), a multi-byte
+  UTF-8 payload, and all twelve embedded C files dumped verbatim and checksummed. **node has no
+  `type: "text"` attribute**, so this construct has no node oracle — recorded in
+  `docs/divergences.md`, with the oracle split into a `main.ts`/`oracle.ts` twin per fixture that
+  is identical below the binding. Refused: any other attribute including node's `type: "json"`
+  (which binds PARSED json — **`NT1017`**), an unreadable file (**`NT1701`**), and a file
+  containing a NUL byte (**`NT1704`**), since nativets strings are `strlen`-based and inlining one
+  would silently truncate the constant. Tests: `test/textimport.test.ts` (12).
 - **Cross-compile ✅** real linked binaries running on the **Android emulator** and **iOS
   simulator** (verified through Stage 7, arrays included), plus an iOS-device arm64 Mach-O.
 
