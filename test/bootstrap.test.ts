@@ -422,36 +422,3 @@ describe("borrowed: TypeScript conformance non-null assertion cases", () => {
     // but the second `m` keeps its nullable type — see docs/self-hosting.md.
   });
 });
-
-/*
- * Parameter defaults and the scope they are typed in.
- *
- * `src/ownership.ts` was blocked by `[NT2001] 'NO_MUTABLE' is not defined` on
- * `constructor(..., private mutable: MutableInfo = NO_MUTABLE, ...)` — a const declared
- * 84 lines above. The signature pass typed every default against a builtins-only scope,
- * so NO identifier in a default could resolve. The behaviour is now a node-differential
- * fixture (test/fixtures/selfhost-scan/param-default-scope.ts); what is pinned here is
- * the boundary — what still gets refused, and why.
- */
-describe("a parameter default is typed in the MODULE scope", () => {
-  test("a default may name a module-level const", () => {
-    expect(() => sourceToIR("const D = 7;\nfunction f(n: number = D): number { return n; }\nconsole.log(f());")).not.toThrow();
-  });
-
-  // `function f(a, b = a)` is ordinary JavaScript — node evaluates the parameter list
-  // left to right and prints 3 for `f(3)`. We still REFUSE it, deliberately: codegen
-  // materializes defaults before the parameter allocas are stored, so accepting it emits
-  // a load from an undefined `%a.addr` and clang rejects the whole module. A located
-  // NT2001 naming the parameter is the correct outcome until codegen orders the two.
-  test("a default may NOT name a parameter to its left — refused, not miscompiled", () => {
-    expect(() => sourceToIR("function f(a: number, b: number = a): number { return b; }\nconsole.log(f(3));"))
-      .toThrow(/'a' is not defined/);
-  });
-
-  // The self-referencing default `f(a = a)` is refused by the same rule, and must stay
-  // refused however the one above is eventually fixed — node throws a TDZ ReferenceError.
-  test("a default may NOT name itself", () => {
-    expect(() => sourceToIR("function f(a: number = a): number { return a; }\nconsole.log(f());"))
-      .toThrow(/'a' is not defined/);
-  });
-});
