@@ -923,7 +923,18 @@ class Checker {
     // parameter allocas are stored, so it emits a load from an undefined `%a.addr` and
     // clang rejects the module. Until that is fixed, such a default must keep failing the
     // CHECKER, with an NT2001 naming the parameter, rather than reaching clang.
-    for (const p of fn.params) if (p.default && p.annot) this.type(p.default, base, p.annot);
+    for (const p of fn.params) {
+      if (!p.default || !p.annot) continue;
+      const t = this.type(p.default, base, p.annot);
+      // ...and then RESHAPE it to the parameter's slot layout, the same way a declaration's
+      // initializer is reshaped. Without this, `function g(o: Opts = {})` materialized the
+      // default in the literal's OWN layout — `nt_obj_new(0)`, zero slots — while the body
+      // reads slot 0 as a pointer to a nullable box, because that is what `{a?: number}`
+      // is. Reading off the end of a 0-slot object: it compiled clean and died at runtime
+      // with exit 255 and empty stdout where node printed a value. Guarded by `assignable`
+      // so this only ever rewrites a layout, never masks a genuine type mismatch.
+      if (this.assignable(p.annot, t)) this.retypeLiteral(p.default, p.annot);
+    }
     for (const p of fn.params) base.declare(p.name, p.annot ?? "number", false);
     this.checkBlock(fn.body, base, fn.returnTy ?? "number");
     this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
@@ -2481,7 +2492,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = i < fixed ? sig.params[i]! : restElem;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsParam(exp, at)) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`);
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`);
         });
         return sig.ret;
       }
@@ -2490,7 +2501,7 @@ class Checker {
       }
       e.args.forEach((a, i) => {
         const at = this.typeArg(a, sig.params[i]!, scope); // contextual: function-typed params type their arrow args
-        if (!this.fitsParam(sig.params[i]!, at)) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`);
+        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`);
       });
       return sig.ret;
     }
@@ -2499,7 +2510,7 @@ class Checker {
     if (isFuncTy(ct)) {
       const ps = funcParams(ct);
       if (e.args.length !== ps.length) throw typeError(`call expects ${ps.length} arguments, got ${e.args.length}`);
-      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsParam(ps[i]!, at)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`); });
+      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`); });
       return funcRet(ct);
     }
     throw nyi(NYI.CLOSURE, "unsupported call target");
@@ -2866,6 +2877,33 @@ class Checker {
    */
   private fitsParam(expected: Ty, actual: Ty): boolean {
     return actual === expected || ((isUnionTy(expected) || isGeneralUnionTy(expected)) && this.assignable(expected, actual));
+  }
+
+  /**
+   * Does this ARGUMENT fit the parameter — reshaping it if that is what makes it fit?
+   *
+   * `assignable` already decides object compatibility structurally, optional fields and
+   * all, so `f({a:1})` against `f(o: {a?: number})` is a legal call. What stopped it was
+   * that nothing retyped the literal: the caller emitted `{a:1}`'s own one-raw-double
+   * layout while the callee reads that slot as a POINTER to a nullable box, so accepting
+   * the call on the predicate alone compiles a program that dereferences `1.0` and dies
+   * (exit 255, empty stdout — measured, and pinned in test/optional-props.test.ts).
+   *
+   * The declaration path solved this long ago: `const o: Opts = {a:1}` type-checks with
+   * `assignable` and then calls `retypeLiteral` to rebuild the initializer in the DECLARED
+   * layout. This is that same recipe, reused rather than reinvented — which is also why
+   * acceptance is conditional on the reshape being POSSIBLE. `retypeLiteral` only rewrites
+   * an object literal, so only an object literal may be accepted here. An argument that is
+   * a variable, a call result or any other expression of a merely structurally-compatible
+   * type has a layout already fixed by its own declaration and nothing to rewrite, so it
+   * keeps being REFUSED. Widening that too is the memory bug, not the feature.
+   */
+  private fitsArg(expected: Ty, actual: Ty, arg: Expr): boolean {
+    if (this.fitsParam(expected, actual)) return true;
+    if (arg.kind !== "ObjectLiteral") return false;
+    if (!isObjectTy(baseTy(expected)) || !this.assignable(expected, actual)) return false;
+    this.retypeLiteral(arg, expected);
+    return true;
   }
 
   private typeArg(a: Expr, expected: Ty, scope: Scope): Ty {
