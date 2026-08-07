@@ -851,3 +851,37 @@ export interface Program {
 export function mutableTags(p: Program): Set<string> {
   return new Set([...(p.mutableClasses ?? []), ...(p.mutableRecords ?? [])]);
 }
+
+/**
+ * The source text of an expression, for a diagnostic that has to NAME the thing it is
+ * about. Deliberately partial: names, field reads, element reads and calls over those —
+ * the shapes a "this value needs handling" message points at. Anything else returns
+ * undefined and the caller says something generic, because the alternative (the old
+ * `(e as any).name ?? "value"`) reported every dotted receiver as the word `value`, an
+ * identifier that appears nowhere in the program being compiled.
+ */
+export function exprText(e: Expr): string | undefined {
+  if (e.kind === "Identifier") return e.name;
+  if (e.kind === "MemberExpr") {
+    const o = exprText(e.object);
+    return o === undefined ? undefined : o + (e.optional === true ? "?." : ".") + e.property;
+  }
+  if (e.kind === "IndexExpr") {
+    const o = exprText(e.object);
+    if (o === undefined) return undefined;
+    if (e.index.kind === "NumberLiteral") return o + "[" + String(e.index.value) + "]";
+    if (e.index.kind === "StringLiteral") return o + '["' + e.index.value + '"]';
+    const i = exprText(e.index);
+    return i === undefined ? undefined : o + "[" + i + "]";
+  }
+  if (e.kind === "NonNullExpr") {
+    const x = exprText(e.expr);
+    return x === undefined ? undefined : x + "!";
+  }
+  if (e.kind === "AsExpr") return exprText(e.expr);
+  if (e.kind === "CallExpr") {
+    const c = exprText(e.callee);
+    return c === undefined ? undefined : c + (e.args.length === 0 ? "()" : "(...)");
+  }
+  return undefined;
+}

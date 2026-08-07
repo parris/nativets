@@ -9,7 +9,7 @@
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
-import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags } from "./ast.ts";
+import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
 // Stage 47 (console.log of compound values): the handle-type predicates the
@@ -1379,7 +1379,17 @@ class Checker {
         // optional chain (a trailing non-optional member after a `?.`).
         if (isNullableTy(ot)) {
           if (!e.optional && !isOptChainExpr(e.object)) {
-            throw typeError(`'${(e.object as any).name ?? "value"}' is possibly ${nullishKind(ot)}; use '?.'`);
+            // Name the RECEIVER as it was written (`d.spans`, not the fabricated word
+            // `value`) and point at the `.` that is not allowed, so the reader can find
+            // it. Getting both wrong is what once hid this rejection in `diagnostics.ts`.
+            const what = exprText(e.object);
+            throw typeError(
+              `${what === undefined ? "this value" : `'${what}'`} is possibly ${nullishKind(ot)}`,
+              e.loc,
+              `use '?.' (\`${what ?? "value"}?.${e.property}\` short-circuits the whole chain to undefined), ` +
+              `or prove it non-nullish first — \`if (${what ?? "value"}) { … }\`, an early \`return\`, or \`!\``,
+              "this read is not proved non-nullish",
+            );
           }
           const ft = this.fieldOnBase(baseTy(ot), e.property);
           return makeNullable("undefined", baseTy(ft));

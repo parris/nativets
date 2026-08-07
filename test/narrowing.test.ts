@@ -439,3 +439,35 @@ console.log(render(none, src));
 `);
   });
 });
+
+/*
+ * narrowing 5 — the refusal itself.
+ *
+ * When narrowing legitimately does NOT apply, NT2001 has to be findable. Two defects made
+ * it the opposite: `typeError` attached no span, so the diagnostic had no location at all;
+ * and the message read the object's `.name`, which only exists on an Identifier, so every
+ * dotted receiver was reported as the fabricated word `value` — a name that appears
+ * nowhere in the program.
+ */
+describe("narrowing 5 — an un-narrowed read says WHAT and WHERE", () => {
+  test("the message names the dotted path and carries its line:col", () => {
+    const source = `
+function f(d: { spans: number[] | undefined }): number {
+  return d.spans.length;
+}
+const d: { spans: number[] | undefined } = { spans: undefined };
+console.log(f(d));
+`;
+    let err: unknown;
+    try { sourceToIR(source); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(NTError);
+    const diag = (err as NTError).diag;
+    expect(diag.code).toBe("NT2001");
+    // `d.spans`, not `value` — and the `.` of the offending `.length` read.
+    expect(diag.message).toBe("'d.spans' is possibly undefined at 3:17");
+    expect(diag.hint).toContain("?.");
+    expect(diag.spans).toEqual([{ line: 3, label: "this read is not proved non-nullish", primary: true }]);
+    // With the source in hand it renders rustc-style, pointing at the actual line.
+    expect(formatDiagnostic(diag, source)).toContain("return d.spans.length;");
+  });
+});
