@@ -224,8 +224,25 @@ export function decoratorError(message: string, hint: string): NTError {
   return new NTError({ code: "NT1023", message, milestone: "later", hint });
 }
 
-export function typeError(message: string): NTError {
-  return new NTError({ code: "NT2001", message });
+/**
+ * A type error (NT2001).
+ *
+ * `at` is the position of the offending expression, when the caller knows it. It is worth
+ * threading: a diagnostic with no location at all is the difference between "there is a
+ * bug somewhere in this 3000-line file" and a jump to the line. It goes BOTH into the
+ * message (so the compact one-line form, which is what `coverage` and the self-hosting
+ * frontier print, still says where) and into a primary span (so `formatDiagnostic` with
+ * the source underlines the line, rustc-style). `hint` is the fix, kept out of the
+ * message so `coverage` can show it separately.
+ */
+export function typeError(message: string, at?: { line: number; col: number }, hint?: string, label = "here"): NTError {
+  if (at === undefined) return new NTError({ code: "NT2001", message, hint });
+  return new NTError({
+    code: "NT2001",
+    message: `${message} at ${at.line}:${at.col}`,
+    hint,
+    spans: [{ line: at.line, label, primary: true }],
+  });
 }
 
 /**

@@ -231,7 +231,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // than the text import at driver.ts:27. See the history note below.
   "ast.ts": { rung: 0, code: "NT0001", blame: "self" },
   "lexer.ts": { rung: 0, code: "NT1014", blame: "self" },
-  "diagnostics.ts": { rung: 0, code: "NT2001", blame: "self" },
+  "diagnostics.ts": { rung: 0, code: "NT1606", blame: "self" },
   "parser.ts": { rung: 0, code: "NT0001", blame: "self" },
   "checker.ts": { rung: 0, code: "NT1009", blame: "self" },
   "codegen.ts": { rung: 0, code: "NT1015", blame: "self" },
@@ -283,6 +283,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
  *     design, and only a pipeline measurement like this one sees it at all. It is also
  *     reported with NO span, and the identifier it names ('value') does not occur in
  *     `src/diagnostics.ts` — so it is currently unlocatable from the diagnostic alone.
+ *
+ * After the short-circuit-narrowing lane, `diagnostics.ts` moves **NT2001 -> NT1606**:
+ * `formatDiagnostic`'s `if (!diag.spans || diag.spans.length === 0 || !source)` now
+ * type-checks (a guard narrows every term to its right, and the narrowed thing may be a
+ * dotted name), and what is behind it is `[...diag.spans].sort(…)` at src/diagnostics.ts
+ * — the immutable-data refusal, an NT16xx and so still outside the coverage histogram.
+ * The same lane fixed the two defects the note above describes: NT2001 now carries a
+ * primary span and names the receiver as written (`'diag.spans'`, not `'value'`).
  */
 
 /** As a library (no argv) — every module compiled as its own entry. */
