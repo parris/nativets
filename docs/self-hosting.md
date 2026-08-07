@@ -340,6 +340,35 @@ cases, (b) exhaustive BMP sweeps of every rewritten class, and (c) compiling eac
 helper **with nativets itself** — which is what caught the two blockers this lane nearly
 planted (a nullable-returning callback type, and an `arr.push`).
 
+### Re-measured after COMPILE-TIME TEXT IMPORTS — `driver.ts` clears its last `NT1017`
+
+`import runtimeSource from "../runtime/runtime.c" with { type: "text" }` was the one blocker
+this document (and `test/sh6.test.ts`) called *structural*: not TypeScript we had refused, but
+a construct with no node semantics at all, which the compiler nevertheless depends on to embed
+its own C runtime. It is now compiled. The parser accepts the import-attributes clause, and the
+linker reads the file at compile time — relative to the importing module — and materializes
+`const <name> = "<bytes>";`, so everything downstream sees an ordinary `const string` and the
+bytes reach the `.ll` as an interned constant. `src/driver.ts` needed **no source change**.
+
+| Module | Before | After |
+|---|---|---|
+| `driver.ts` | `parse` — `NT1017`, the text import at **27:1** | `parse` — `NT1017`, `export async function` at **502:1** |
+| `cli.ts` | the same, inherited through the link | the same, inherited — 475 lines deeper |
+| every other module | — | **unchanged**, byte for byte |
+
+Same code, a very different place: `NT1017` is recorded for the gradient, never as a floor.
+All twelve embedded files (~305KB, `runtime/runtime.c` alone at 147KB) round-trip byte for byte
+through the AST and the `.ll` — pinned by `test/textimport.test.ts`, which dumps and checksums
+the real files rather than a stand-in.
+
+**Next for `driver.ts`: `export async function`** (`buildBinary`/`buildObject` are `async`).
+`async` is already erased inside a function body; what is missing is `export` of one. Not
+chased here.
+
+Because node has no `type: "text"` attribute, this construct cannot be differential-tested the
+usual way — see `docs/divergences.md`, which records the divergence and how the oracle is split
+(a `main.ts`/`oracle.ts` twin per fixture, identical below the binding).
+
 ---
 
 ## Milestones
@@ -442,7 +471,8 @@ planted (a nullable-returning callback type, and an `arr.push`).
   — are all past the host FFI. `cli.ts` and `modules.ts` now stop on a **regex literal** (NT1027,
   the deliberate Tier-C refusal) and `driver.ts` on a *different* NT1017: the bun text-asset import
   `import runtimeSource from "../runtime/runtime.c" with { type: "text" }`, a bundler feature rather
-  than a `node:` module. `NT1028` does not appear in the frontier at all.
+  than a `node:` module. `NT1028` does not appear in the frontier at all. **That text import is now
+  compiled too** — see "Re-measured after COMPILE-TIME TEXT IMPORTS" above.
 - **SH5 — Close the tail.** Run the SH0 gradient again; burn down remaining Tier-1 features the
   source actually uses (generics beyond `Map`/`Set`, specific string/array methods, spread/
   destructuring — mostly already supported). Keep going until `coverage src/<bundle>.ts` is clean.

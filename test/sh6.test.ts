@@ -226,6 +226,9 @@ afterAll(() => rmSync(corpusDir, { recursive: true, force: true }));
  * blocker UNMASKS the next, so codes churn while rungs do not.
  */
 const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
+  // NB `driver.ts`/`cli.ts` still read NT1017, but it is a DIFFERENT NT1017 since SH5
+  // landed compile-time text imports — `export async function` at driver.ts:502 rather
+  // than the text import at driver.ts:27. See the history note below.
   "ast.ts": { rung: 0, code: "NT0001", blame: "self" },
   "lexer.ts": { rung: 0, code: "NT1014", blame: "self" },
   "diagnostics.ts": { rung: 0, code: "NT2001", blame: "self" },
@@ -241,6 +244,18 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
 };
 
 /*
+ * SH5 — compile-time text imports (`with { type: "text" }`). The blocker this file
+ * called "structural" is gone: the parser accepts the import-attributes clause and the
+ * linker inlines the file as a string constant, so `src/driver.ts` now parses all
+ * twelve of its embedded C files (~305KB) and reaches `export async function` at
+ * driver.ts:502. Every rung FLOOR held. Two rows moved WITHIN NT1017:
+ *
+ *   driver.ts  NT1017 @ 27:1  (text import)  ->  NT1017 @ 502:1 (`export async`)
+ *   cli.ts     the same, inherited
+ *
+ * so the `code` column is unchanged while the frontier moved 475 lines deeper — which
+ * is exactly why `code` is recorded for the gradient and never used as a floor.
+ *
  * BASELINE HISTORY — recorded because the deltas are the measurement's whole output.
  *
  * First recorded (before SH4 and the regex removal landed):
@@ -260,7 +275,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
  *     (src/driver.ts:27) — the bun-specific text import that embeds the C runtime into
  *     the single executable. `cli.ts` inherits it. This is structural: a self-hosted
  *     nativets needs its own answer for embedding the runtime, and no host-FFI work
- *     removes it.
+ *     removes it. (SUPERSEDED — SH5 gave it that answer; see the note above the
+ *     history. The construct is now compiled, not refused.)
  *   - `diagnostics.ts` now dies with **NT2001**, the TYPE-ERROR band. That matters for
  *     the gradient: `coverage` deliberately counts only the NT1xxx band (an NT2xxx is
  *     "a real user error"), so this blocker is invisible to the coverage histogram by
@@ -418,7 +434,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
  * ATTRIBUTION — which FILE a module's blocker actually lives in, which the diagnostic
  * itself does not say. `sourceToIR` compiles a whole PROGRAM (SH1 merges the import
  * graph), so a module is routinely stopped by a file it merely imports: `cli.ts` reports
- * `driver.ts`'s text import, `ownership.ts` reports `checker.ts`'s union. Aiming a
+ * `driver.ts`'s `export async`, `ownership.ts` reports `checker.ts`'s union. Aiming a
  * burn-down at the reporting module would be aiming it at the wrong file.
  *
  * A module is blamed on a dependency when that dependency, compiled as its OWN entry,
@@ -474,7 +490,7 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // improves, and the comparison below becomes the real gate.
       expect(`no compiled compiler yet (stage-1 at rung ${m.rung}, ${m.code}): ${m.error}`)
         .toBe(`no compiled compiler yet (stage-1 at rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}): `
-          + `[NT1017] default import 'import runtimeSource from …' at 27:1 is not supported yet`);
+          + `[NT1017] 'export' of a 'async' declaration at 502:1 is not supported yet`);
       return;
     }
 

@@ -361,6 +361,42 @@ bindings. Two deliberate differences:
   `export * from`, and no dynamic `import()` — each is `NT1017` with a hint naming the supported
   form. (`NT1701` = unreadable module, `NT1703` = no such export.)
 
+### Text imports (SH5) — `with { type: "text" }`, a construct node does not have
+
+```ts
+import runtimeSource from "../runtime/runtime.c" with { type: "text" };
+```
+
+The file is read **at compile time**, relative to the importing file, and the identifier binds a
+plain **string constant** that lands in the `.ll` as an interned literal. No runtime file I/O and
+no `node:fs`: this is how the compiler embeds its own C runtime (twelve files, ~305KB) so a
+single executable is self-contained. Semantics are **bun's**, so `src/driver.ts` compiles
+unchanged under both.
+
+**node cannot run a program that uses it.** node implements only `with { type: "json" }`; there
+is no `text` attribute, so a fixture using one fails to load and the ordinary
+"stdout must equal `node <file>`" oracle does not exist for this construct. That is the
+divergence, and it is deliberate: bun's semantics are the specification here rather than node's,
+because the construct's whole purpose is to be resolved before a program runs.
+
+The oracle is not abandoned, only split. Every fixture in `test/textimport/` is a pair — a
+`main.ts` using the text import and an `oracle.ts` obtaining the same string with
+`readFileSync`, identical line for line below the binding. node therefore still decides what the
+string **is** and what `.length`, indexing, comparison and printing do with it; only the import
+form itself is unverifiable against node. The one line a pair may differ on is `String#length`,
+which is UTF-8 byte-oriented here (§A.2) — the twin prints `Buffer.byteLength` so the two mean
+the same thing.
+
+Two refusals, both of the reject-don't-miscompile kind:
+
+- **Any attribute other than `type: "text"` is `NT1017`**, including node's own
+  `type: "json"` — that one binds *parsed JSON*, not source text, so accepting it and handing
+  back the text would be a silent wrong answer. A plain default import (no attribute) stays
+  `NT1017` too; the attribute is what makes this form compilable.
+- **A NUL byte in the file is `NT1704`.** nativets strings are NUL-terminated (`js_str_len` is
+  `strlen`), so an inlined NUL would truncate the constant at run time while the `.ll` still
+  carried every byte. Text imports are for text; refuse rather than truncate.
+
 `node` is our oracle. Two kinds of "we differ from node" exist, tracked separately.
 
 ## A. Semantic divergences (we compile it, but differ deliberately)
