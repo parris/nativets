@@ -556,3 +556,89 @@ console.log(f(d));
     expect(formatDiagnostic(diag, source)).toContain("return d.spans.length;");
   });
 });
+
+/*
+ * TRUTHINESS of an A2 nullable box (`if (x)`, `x ? … : …`, `while (x)`, `!x`).
+ *
+ * `truthyOf` in src/codegen.ts was type-directed for boolean and number and then
+ * fell through to "treat it as a string and call js_str_len". A nullable is a
+ * POINTER to a 2-slot [tag, value] block, so that read hit the box itself: every
+ * nullable came out truthy regardless of what it held. Measured against node,
+ * 6 of the 8 shapes below were wrong, and only `undefined` was accidentally right.
+ *
+ * The rule has TWO halves and the second is the one that bites: a nullish arm is
+ * falsy, AND a PRESENT `0` / `NaN` / `""` / `false` is falsy too. Each is pinned
+ * separately rather than as one aggregate assertion.
+ *
+ * Cases are DERIVED (no test262/conformance checkout on this machine); node is the
+ * oracle for every one.
+ */
+describe("truthiness of a nullable box — the tag, then the VALUE", () => {
+  const cases: [string, string, string][] = [
+    ["present 0",     `const x: number | undefined = [0].at(0);`,     "F"],
+    ["present NaN",   `const x: number | undefined = [NaN].at(0);`,   "F"],
+    ["present 1",     `const x: number | undefined = [1].at(0);`,     "T"],
+    ["present \"\"",  `const x: string | undefined = [""].at(0);`,    "F"],
+    ["present \"a\"", `const x: string | undefined = ["a"].at(0);`,   "T"],
+    ["present false", `const x: boolean | undefined = [false].at(0);`,"F"],
+    ["present true",  `const x: boolean | undefined = [true].at(0);`, "T"],
+    ["undefined",     `const x: number | undefined = [1].at(5);`,     "F"],
+    ["null",          `let x: string | null = null;`,                 "F"],
+  ];
+  for (const [name, decl, want] of cases) {
+    test(`${name} is ${want === "T" ? "truthy" : "FALSY"}`, async () => {
+      const src = `${decl}\nconsole.log(x ? "T" : "F");\n`;
+      const oracle = runWithNode(src);
+      expect(oracle.stdout).toBe(`${want}\n`); // node is the oracle; assert it first
+      const ours = await compileAndRun(src);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.exitCode).toBe(oracle.exitCode);
+    });
+  }
+
+  test("`!x` and `while (x)` agree with `if (x)` — every condition position", async () => {
+    const src = `const z: number | undefined = [0].at(0);
+console.log(!z, !!z);
+let n = 0;
+while (z) { n = n + 1; break; }
+console.log(n);
+`;
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe("true false\n0\n");
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
+/*
+ * The same `truthyOf` fall-through, on the OTHER types it silently reached. These are
+ * not nullables, but they are the same defect and the same one-line fix, so they are
+ * pinned here rather than left for the next person to rediscover.
+ */
+describe("truthiness of the other types the string fall-through was reaching", () => {
+  test("an object is ALWAYS truthy — including an empty array and an empty record", async () => {
+    // node: `[]` and `{}` are truthy (a common JS gotcha). We answered FALSE for both.
+    const src = `const e: number[] = [];
+const a: number[] = [1];
+const o: { k: number } = { k: 1 };
+console.log(e ? "T" : "F", a ? "T" : "F", o ? "T" : "F");
+`;
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe("T T T\n");
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  test("a Dyn's truthiness is its JSON tag's — `JSON.parse(\"0\")` is falsy", async () => {
+    const src = `console.log(JSON.parse("0") ? "T" : "F", JSON.parse("1") ? "T" : "F");
+console.log(JSON.parse("\\"\\"") ? "T" : "F", JSON.parse("[]") ? "T" : "F", JSON.parse("null") ? "T" : "F");
+`;
+    const oracle = runWithNode(src);
+    expect(oracle.stdout).toBe("F T\nF T F\n"); // [] is truthy, "" and null are not
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});

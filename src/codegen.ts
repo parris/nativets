@@ -307,6 +307,7 @@ const DECLARES = [
   "declare ptr @nt_json_parse(ptr)",
   "declare double @nt_dyn_as_number(ptr)",
   "declare i32 @nt_dyn_as_bool(ptr)",
+  "declare i32 @nt_dyn_truthy(ptr)",
   "declare ptr @nt_dyn_as_string(ptr)",
   "declare i32 @nt_dyn_require_object(ptr)",
   "declare ptr @nt_dyn_require_field(ptr, ptr)",
@@ -1390,7 +1391,20 @@ class FnGen {
     return this.truthyOf(this.genExpr(e));
   }
 
-  /** i1 truthiness of an already-evaluated value (JS ToBoolean for the supported types). */
+  /**
+   * i1 truthiness of an already-evaluated value — JS ToBoolean, type-directed.
+   *
+   * This used to handle boolean and number and then FALL THROUGH to "assume it is a
+   * string and call js_str_len". Every other type is a POINTER, so that read hit the
+   * heap block itself and invented an answer from its first word: a nullable box was
+   * always truthy (so a present `0` came out true), `[]` and `{}` came out FALSE where
+   * node says both are true, and `JSON.parse("0")` came out true. All silent.
+   *
+   * It is exhaustive now, and the fallback is the JS rule rather than a guess: every
+   * remaining value IS an object, and an object is ALWAYS truthy — `[]`, `{}`, an empty
+   * Map, a Date, a function. Anything not on either list throws rather than defaulting,
+   * so a future box type is a loud compiler error instead of a fresh wrong answer.
+   */
   private truthyOf(val: Val): string {
     if (val.ty === "boolean") return val.v;
     if (val.ty === "number") {
@@ -1398,11 +1412,57 @@ class FnGen {
       this.emit(`${t} = fcmp one double ${val.v}, 0.0`); // NaN and 0 are falsy
       return t;
     }
-    // string: truthy iff non-empty
-    const len = this.fresh();
-    this.emit(`${len} = call double @js_str_len(ptr ${val.v})`);
+    if (val.ty === "string") {
+      const len = this.fresh();
+      this.emit(`${len} = call double @js_str_len(ptr ${val.v})`);
+      const t = this.fresh();
+      this.emit(`${t} = fcmp one double ${len}, 0.0`);
+      return t;
+    }
+    // The two nullish VALUES are falsy; so is a `void` (an absent result).
+    if (val.ty === "undefined" || val.ty === "null" || val.ty === "void") return "false";
+    // A nullable BOX: the tag decides first, then the value it carries.
+    if (isNullableTy(val.ty)) return this.truthyNullable(val.v, baseTy(val.ty));
+    // A Dyn's truthiness is its JSON tag's — a runtime fact, so the runtime decides.
+    if (val.ty === "Dyn") {
+      const t = this.fresh();
+      this.emit(`${t} = call i32 @nt_dyn_truthy(ptr ${val.v})`);
+      const b = this.fresh();
+      this.emit(`${b} = icmp ne i32 ${t}, 0`);
+      return b;
+    }
+    // Everything below is a JS object, and an object is always truthy — including an
+    // EMPTY array/object/Map/Set, and including a Date whose time value is NaN.
+    if (
+      isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) ||
+      isBytesTy(val.ty) || isBytesRefTy(val.ty) || isFetchRefTy(val.ty) || isUrlRefTy(val.ty) ||
+      isDateTy(val.ty) || isResponseTy(val.ty) || isHeadersTy(val.ty) || isTextEncoderTy(val.ty) || isTextDecoderTy(val.ty)
+    ) return "true";
+    throw new Error(`internal: no truthiness rule for ${val.ty} — add one rather than defaulting`);
+  }
+
+  /**
+   * i1 truthiness of a nullable box: falsy when nullish (tag < 2), otherwise the
+   * truthiness of the value it carries. Branched rather than computed unconditionally
+   * because the absent case's value slot is 0, and unpacking that as a string would
+   * hand `js_str_len` a null pointer.
+   */
+  private truthyNullable(ptr: string, base: Ty): string {
+    const slot = this.slot("boolean");
+    const present = this.fresh();
+    this.emit(`${present} = icmp eq i64 ${this.nullTag(ptr)}, 2`);
+    const pLbl = this.label("tvp"), aLbl = this.label("tva"), end = this.label("tve");
+    this.terminate(`br i1 ${present}, label %${pLbl}, label %${aLbl}`);
+    this.to(this.block(pLbl));
+    const inner = this.truthyOf({ v: this.fromSlot(this.nullVal(ptr), base), ty: base });
+    this.emit(`store i1 ${inner}, ptr ${slot}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(aLbl));
+    this.emit(`store i1 false, ptr ${slot}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(end));
     const t = this.fresh();
-    this.emit(`${t} = fcmp one double ${len}, 0.0`);
+    this.emit(`${t} = load i1, ptr ${slot}`);
     return t;
   }
 
