@@ -716,6 +716,11 @@ export interface FuncDecl {
    *  a "setter". For an `@@mutable` class that is real in-place mutation, so the
    *  ownership pass requires the receiver to be OWNED (Rust's `&mut self`). */
   setter?: boolean;
+  /** A `static` class member: `C.m(…)` lowered WITHOUT the leading `this` parameter, so
+   *  it is called through the class name (`C.m(a)`) and never through an instance. The
+   *  flag is what separates it from the instance method of the same shape — both lower
+   *  to a top-level `C.m`, and only this says which one a call site may reach. */
+  isStatic?: boolean;
   /** Decorators lane: `this` must not be move-tracked in this frame — it is either the
    *  method's own private copy (copy-on-write setter) or a borrow it legitimately hands
    *  straight back (`return this` from a decorated constructor / an `@@mutable` method). */

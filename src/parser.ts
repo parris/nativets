@@ -51,7 +51,13 @@ const BIN: Record<string, Op> = {
 const ASSIGN_OPS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="]);
 // Access modifiers erased on class members and, on ctor params, promoted to parameter properties.
 const PARAM_ACCESS = new Set(["private", "public", "protected", "readonly"]);
+// What follows a class member's NAME. A modifier keyword (`readonly`, `static`, …) counts
+// as a modifier only when the next token is NOT one of these — otherwise the keyword is
+// itself the member's name (`static(): T`, `private: T`).
+const MEMBER_START = new Set(["(", ":", "?", "="]);
 // Class-member modifiers/accessors that change semantics — still deferred (NT1015).
+// (`static` is handled in `parseClass`; it stays listed so `static static` and friends
+// still land on the deferral rather than silently parsing.)
 const REJECTED_MEMBER_MODS = new Set(["static", "abstract", "declare", "override", "get", "set", "async"]);
 const SCALARS = new Set(["number", "boolean", "string", "void", "undefined", "null"]);
 /**
@@ -1073,6 +1079,7 @@ class Parser {
     const fields: { key: string; ty: Ty }[] = [];
     const fieldInits: { field: string; value: Expr }[] = []; // declared-and-initialized fields → ctor prelude
     const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[]; setter: boolean; wrappers: string[] }[] = [];
+    const statics: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[] }[] = []; // `static m(…)`
     let ctorParams: Param[] | null = null;
     let ctorBody: Stmt[] = [];
     while (!this.at("}") && this.peek().type !== "eof") {
@@ -1101,10 +1108,19 @@ class Parser {
         if (nv === "(" || nv === ":" || nv === "?" || nv === "=") break;
         this.next();
       }
+      // `static m(…)` — a static member has NO receiver: the class name is a NAMESPACE,
+      // so a static method lowers to the plain top-level function `C.m(…)` with no `this`
+      // parameter, and `C.m(args)` calls it directly. A modifier keyword counts only when
+      // it PREFIXES a member (same rule as the access modifiers above), so a member
+      // literally named `static` is left alone.
+      let isStatic = false;
+      if (this.peek().type === "ident" && this.peek().value === "static" && !MEMBER_START.has(this.peek(1).value)) {
+        this.next();
+        isStatic = true;
+      }
       const tok = this.peek();
       // Modifiers/accessors that change semantics (static/get/set/…) stay deferred (NT1015).
-      const nextV = this.peek(1).value, nextIsMemberStart = nextV === "(" || nextV === ":" || nextV === "?" || nextV === "=";
-      if (tok.type === "ident" && REJECTED_MEMBER_MODS.has(tok.value) && !nextIsMemberStart) throw nyi(NYI.CLASS_FEATURE, `class member modifier/accessor '${tok.value}' at ${tok.line}:${tok.col}`);
+      if (tok.type === "ident" && REJECTED_MEMBER_MODS.has(tok.value) && !MEMBER_START.has(this.peek(1).value)) throw nyi(NYI.CLASS_FEATURE, `class member modifier/accessor '${tok.value}' at ${tok.line}:${tok.col}`);
       if (this.at("[")) throw nyi(NYI.CLASS_FEATURE, `computed/index class member at ${tok.line}:${tok.col}`);
       const member = this.expectIdent();
       if (memberWrappers.length && !(this.peek().value === "(" && member !== "constructor")) {
@@ -1113,7 +1129,7 @@ class Parser {
           "a `@wrapper` attaches to a METHOD. Decorate the whole class (`@wrapper class C { … }`) to wrap its constructor; fields cannot be decorated",
         );
       }
-      if (member === "constructor" && this.at("(")) {
+      if (member === "constructor" && this.at("(") && !isStatic) {
         if (ctorParams) throw parseError(`Duplicate constructor at ${tok.line}:${tok.col}`);
         ctorParams = this.parseParamList(true); // ctor: access-modified params → parameter properties
         const patternPrelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
@@ -1129,6 +1145,16 @@ class Parser {
         const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
         let returnAnnot: Ty | undefined;
         if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
+        // A static method has no receiver, so it is parsed as a plain function: `this` is
+        // not writable (nor readable) inside it, and it can never be a setter.
+        if (isStatic) {
+          // A `@wrapper` wraps a value with a receiver as its first parameter (see
+          // `applyWrappers`); a static has none, so the two do not compose yet. Refuse
+          // rather than drop the decorator.
+          if (memberWrappers.length) throw nyi(NYI.CLASS_FEATURE, `decorator on static method '${name}.${member}' at ${tok.line}:${tok.col}`);
+          statics.push({ name: member, params, returnAnnot, body: [...prelude, ...this.parseBlock()] });
+          continue;
+        }
         // A METHOD may assign `this.f` too. Whether it does is the whole distinction
         // between a plain method and a SETTER (docs/decorators.md), so record it.
         this.thisWritable = true; this.thisAssigned = false;
@@ -1138,6 +1164,7 @@ class Parser {
         methods.push({ name: member, params, returnAnnot, body, setter, wrappers: memberWrappers });
         continue;
       }
+      if (isStatic) throw nyi(NYI.CLASS_FEATURE, `static field '${name}.${member}' at ${tok.line}:${tok.col} (static METHODS are supported)`);
       // field declaration: `name: Type;` / `name = init;` / `name: Type = init;` (optional `?`).
       // A field type comes from its annotation if present, else is inferred from the initializer
       // (`inferFieldTy`). An initializer is desugared into `this.name = init` prepended to the
@@ -1233,6 +1260,16 @@ class Parser {
       if (m.setter) { fn.setter = true; this.lowerSetter(fn, name, isMutable, selfMarker); }
       if (m.wrappers.length) this.applyWrappers(fn, m.wrappers, emitted, decorators);
       else emitted.push(fn);
+    }
+    // Each STATIC method → the plain top-level `C.m(…params)`: no `this`, so it differs
+    // from an instance method only in the missing receiver — which is exactly what the
+    // `isStatic` flag tells the checker, so `C.m(a)` resolves to this function and
+    // `inst.m(a)` does not.
+    for (const m of statics) {
+      emitted.push({
+        kind: "FuncDecl", name: `${name}.${m.name}`,
+        params: m.params, returnAnnot: m.returnAnnot, body: m.body, isStatic: true,
+      } as FuncDecl);
     }
     // Substitute the self MARKER for the real instance type, everywhere it reached.
     const unself = (t: Ty): Ty => (t.includes(selfMarker) ? (t.split(selfMarker).join(objTy) as Ty) : t);

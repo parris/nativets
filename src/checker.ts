@@ -329,6 +329,7 @@ export function check(program: Program): CheckedProgram {
     const ret = s.returnAnnot ?? "number";
     s.returnTy = ret;
     functions.set(s.name, { params, ret, required, defaults, rest });
+    if (s.isStatic) c.statics.add(s.name); // `static m()` → reachable only as `C.m(…)`
   }
 
   // pass 1.5: pre-declare the module-level bindings, so return-type inference and
@@ -409,6 +410,13 @@ class Checker {
    * NT1014 rejection. This set records the positions as they are checked.
    */
   private iterOk = new Set<Expr>();
+  /**
+   * `static` class methods, by their LOWERED name (`C.m`). A static has no receiver, so
+   * `C.m(a)` is a direct call to the lowered function — and an INSTANCE method, which
+   * lowers to the same shape of name, must NOT be reachable that way (in node a class
+   * object has no such property, so calling it is a TypeError, never a receiver-less call).
+   */
+  readonly statics = new Set<string>();
   constructor(
     private functions: Map<string, Sig>,
     /** Tags whose values mutate IN PLACE — `@@mutable` classes and `@@mutable` records.
@@ -2154,6 +2162,15 @@ class Checker {
       for (const a of e.args) { if (this.type(a, scope) !== "number") throw typeError(`Math.${m} needs numbers`); }
       if (arity !== "var" && e.args.length !== arity) throw typeError(`Math.${m} expects ${arity} args`);
       return "number";
+    }
+
+    // `C.m(args)` — a STATIC method call. The class name is a NAMESPACE, not a value, so
+    // there is no receiver to type: rewrite the callee to the lowered top-level function
+    // `C.m` and let the ordinary named-call path below check the arguments. (A local
+    // binding of the class's name wins, exactly as it would for any other identifier.)
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && !scope.lookup(e.callee.object.name)) {
+      const lowered = `${e.callee.object.name}.${e.callee.property}`;
+      if (this.statics.has(lowered)) e.callee = { kind: "Identifier", name: lowered };
     }
 
     // receiver.method(...)
