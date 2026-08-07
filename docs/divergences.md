@@ -597,6 +597,38 @@ twin-file strategy (`test/pipeline/*.ts` + hand-desugared `*.twin.ts`, gated by
 standard JS/TS, our `|>` will diverge from conforming TS (same token, different lowering) — this
 entry is that pre-registered divergence.
 
+### Template-literal TYPES parse and erase to `string` — the pattern is NOT enforced
+
+A template-literal type — `` `${string}` ``, `` `user-${string}` ``, `` `{${string}}` `` — is
+accepted anywhere a type is (alias RHS, union arm, parameter/return annotation, object field,
+array element, generic type argument, `as`) and **erases to plain `string`**. The literal
+segments and the `${…}` placeholders are parsed for grammar and then dropped; we never check
+that a value matches the pattern. `tsc` *does* check it, so this is a divergence from
+**TypeScript**, and the only one in this document that has no node-side half:
+
+- **node has no opinion.** It strips types without checking them, so the differential oracle
+  agrees with us by construction — for every program in this class, `node` and nativets print
+  the same thing. There is nothing here to miscompile.
+- **The pattern cannot reach emitted code.** A template-literal type constrains which *strings*
+  are well-typed; it never selects a different representation, a different instruction, or a
+  different amount of storage. Every value it describes is already a UTF-8 string. So enforcing
+  it would buy static strictness only, at the cost of a string-pattern matcher in the checker.
+- **Consequence, stated plainly:** `const id: \`user-${string}\` = "nothing-like-it"` compiles
+  here and is an error under `tsc`. We accept a program a stricter type-checker rejects. That is
+  the safe direction for *this* construct — it widens what type-checks without widening what
+  the generated code can do — but it is a real gap, and a pattern typo will not be caught.
+
+**Interaction with `dyn as T` (next entry).** Narrowing a `Dyn` through a template-literal
+type emits the ordinary **string** validator: `parsed.id as \`user-${string}\`` checks *that it
+is a string* and nothing more, so a non-matching string passes (node agrees — it prints the
+same thing), while a non-string still throws the documented runtime `TypeError`. The pattern
+adds no validation; it neither tightens nor weakens the string check itself.
+
+This is what unblocked the compiler's own `src/ast.ts:14`
+(`` export type Ty = ScalarTy | `${string}[]` | `{${string}}` ``) — the only template-literal
+type site in `src/`; before it, that line was a hard `NT0001` parse error. Fixtures:
+`test/selfhost-types/template-literal-type*.ts`, each differential against node.
+
 ### `dyn as T` performs runtime validation (io-ts/zod semantics)
 
 `JSON.parse(s)` returns a dynamic `Dyn`; narrowing it with `x as T` emits a validator that
@@ -648,6 +680,10 @@ What this buys and what it costs:
     follows it (under node that yields a *Promise* and lets the rest of the program run first).
     The one allowed form is the canonical entrypoint `main();` as the **last** top-level statement —
     with nothing after it, node's suspend-and-resume and our run-it-now produce identical output.
+    This holds **across module boundaries**: `export async function` is supported (the `async` is
+    erased there like anywhere else), and the async-ness travels on the export table — through
+    `import { f as g }` and through `export { f } from "./m.ts"` — so an un-awaited call to an
+    *imported* async function is `NT1020` too, not a silently-erased wrong answer.
   - The diagnostic points at the **actor model** (`spawn`/`send`/`receive`, Stage 22/27/31), which
     is nativets' concurrency primitive. Promises may simply be the wrong abstraction here.
 - `Promise<T>` in **type position** is erased to `T` (as are `Awaited<T>` and friends), so
