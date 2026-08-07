@@ -377,4 +377,39 @@ a = undefined;
 console.log(isEmpty(a));
 `);
   });
+
+  // TypeScript: typeGuardsInRightOperandOfAndAndOperator.ts `foo` — the dual rule, and
+  // discriminantPropertyCheck.ts `foo2` for the object receiver.
+  test("`!!o && o.a > 0` — a nullish object narrows in the right operand", async () => {
+    await expectNode(`
+function hasPositive(o: { a: number } | undefined): boolean {
+  return !!o && o.a > 0;
+}
+let o: { a: number } | undefined = { a: 7 };
+console.log(hasPositive(o));
+o = { a: -1 };
+console.log(hasPositive(o));
+o = undefined;
+console.log(hasPositive(o));
+`);
+  });
+
+  // TypeScript: compiler/discriminantPropertyCheck.ts (`foo1`: `x.bar && x.foo !== undefined`
+  // then `x.foo.length`) — the narrowed thing is a DOTTED NAME. This is the exact shape
+  // `src/diagnostics.ts` (`formatDiagnostic`) is written in, so it is also the
+  // self-hosting case.
+  test("a dotted name narrows: `!d.spans || d.spans.length === 0`", async () => {
+    await expectNode(`
+function isEmpty(d: { spans: number[] | undefined }): boolean {
+  return !d.spans || d.spans.length === 0;
+}
+const some: { spans: number[] | undefined } = { spans: [1, 2] };
+const empty: number[] = [];
+const zero: { spans: number[] | undefined } = { spans: empty };
+const none: { spans: number[] | undefined } = { spans: undefined };
+console.log(isEmpty(some));
+console.log(isEmpty(zero));
+console.log(isEmpty(none));
+`);
+  });
 });

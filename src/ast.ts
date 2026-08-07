@@ -535,6 +535,14 @@ export interface MemberExpr {
   property: string;
   optional?: boolean; // `?.` optional-chaining link (A2)
   ty?: Ty;
+  /** Set by the parser on a field read the programmer actually wrote (the `.` token).
+   *  Two consumers: the "possibly undefined" diagnostic points here, and a NARROWED
+   *  read (below) unwraps with this location so a wrong proof panics where it was used. */
+  loc?: Loc;
+  /** Control-flow narrowing of a DOTTED NAME — the same flag `Identifier` carries, for
+   *  the same reason: `ty` above is the BASE type and codegen must unwrap the tagged
+   *  pair at this read. Written on every read, so a stale `true` cannot survive. */
+  narrowed?: boolean;
 }
 
 /** obj[expr] element access */

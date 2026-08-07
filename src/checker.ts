@@ -74,8 +74,16 @@ interface Binding {
   narrowedFrom?: Ty;
 }
 
-/** One control-flow narrowing fact — see the narrowing section on `Checker`. */
-interface NarrowFact { name: string; binding: Binding; ty: Ty; constant: boolean; arrowDepth: number }
+/**
+ * One control-flow narrowing fact — see the narrowing section on `Checker`. The thing it
+ * is about is an ACCESS PATH: the root `binding` plus `path`, the dotted suffix read off
+ * it (`""` for the bare name, `".spans"` for `diag.spans`). `name` is the root's name,
+ * which is what the "was it assigned in this region?" filter looks at.
+ */
+interface NarrowFact { name: string; binding: Binding; path: string; ty: Ty; constant: boolean; arrowDepth: number }
+
+/** The root binding + dotted suffix an expression reads, and the type at the end of it. */
+interface AccessPath { name: string; binding: Binding; path: string; ty: Ty }
 
 class Scope {
   private vars = new Map<string, Binding>();
@@ -450,6 +458,14 @@ class Checker {
    * names the BINDING OBJECT, not the name, so an inner declaration that shadows the
    * name is unaffected. Reads consult the innermost frame.
    *
+   * What a fact is ABOUT is an access PATH, not only a name: `diag.spans` narrows just
+   * like `x` does (TypeScript's `discriminantPropertyCheck.ts`). A dotted path is only
+   * eligible when every object along it is IMMUTABLE — nativets objects are immutable by
+   * default and only a `@@mutable` tag can rewrite a field in place, so outside that tag
+   * the single way `d.spans` can change is a new value bound to `d`, which the
+   * assigned-name filter below already catches. A `@@mutable` object, and `this` (a
+   * constructor/setter may write through it), get no path facts at all.
+   *
    * Two rules keep it sound (the model is TypeScript's own, `narrowingPastLastAssignment.ts`):
    *   - a fact is dropped if the region ASSIGNS to that name anywhere (including inside
    *     an arrow in it), so a loop back-edge can never observe a stale narrowing;
@@ -463,8 +479,8 @@ class Checker {
    * value.
    * ============================================================ */
 
-  /** One proved fact: this binding is not nullish here, so it reads as `ty`. */
-  private narrowStack: { binding: Binding; ty: Ty; constant: boolean; arrowDepth: number }[][] = [];
+  /** One proved fact: this access path is not nullish here, so it reads as `ty`. */
+  private narrowStack: NarrowFact[][] = [];
   /** Nesting depth of arrow bodies being typed (a `let` narrowing stops at depth+1). */
   private arrowDepth = 0;
   /** Names assigned inside SOME arrow body anywhere in the program — never narrowable. */
@@ -476,15 +492,42 @@ class Checker {
     collectAssignedStmts(body, direct, this.closureAssigned, false);
   }
 
-  /** The narrowed type of `b` here, or undefined if no fact covers it. */
-  private narrowedTy(b: Binding): Ty | undefined {
+  /** The narrowed type of the path `b` + `path` here, or undefined if no fact covers it. */
+  private narrowedTy(b: Binding, path: string): Ty | undefined {
     for (let i = this.narrowStack.length - 1; i >= 0; i--) {
       for (const f of this.narrowStack[i]!) {
-        if (f.binding !== b) continue;
+        if (f.binding !== b || f.path !== path) continue;
         return !f.constant && this.arrowDepth > f.arrowDepth ? undefined : f.ty;
       }
     }
     return undefined;
+  }
+
+  /**
+   * The access path `e` denotes, if it is one: a plain name, or a chain of ordinary field
+   * reads over one. Each step reports the type ALREADY NARROWED at that step, so
+   * `!a || !a.b || a.b.c` can walk through `a`'s own fact to reach `a.b`.
+   *
+   * Refused (so no fact is ever recorded for them): `this` and `@@mutable` receivers,
+   * whose fields can be rewritten in place; a `?.` link, whose result is a fresh nullable
+   * rather than the field itself; and anything computed (a call, an index), which is not
+   * a stable name for a value.
+   */
+  private accessPath(e: Expr, scope: Scope): AccessPath | undefined {
+    if (e.kind === "Identifier") {
+      if (e.name === "this") return undefined;
+      const b = scope.lookup(e.name);
+      if (!b) return undefined;
+      return { name: e.name, binding: b, path: "", ty: this.narrowedTy(b, "") ?? b.ty };
+    }
+    if (e.kind !== "MemberExpr" || e.optional === true) return undefined;
+    const base = this.accessPath(e.object, scope);
+    if (base === undefined) return undefined;
+    if (!isObjectTy(base.ty) || this.isMutableTy(base.ty)) return undefined;
+    const ft = fieldType(base.ty, e.property);
+    if (ft === undefined) return undefined;
+    const path = base.path + "." + e.property;
+    return { name: base.name, binding: base.binding, path, ty: this.narrowedTy(base.binding, path) ?? ft };
   }
 
   /**
@@ -541,6 +584,7 @@ class Checker {
   private guardFacts(e: Expr, scope: Scope, positive: boolean, out: NarrowFact[]): void {
     switch (e.kind) {
       case "Identifier":
+      case "MemberExpr":
         if (positive) this.addFact(e, scope, null, out);
         return;
       case "BinaryExpr": {
@@ -552,7 +596,7 @@ class Checker {
           // Both operand orders narrow — TypeScript's
           // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
           const lt = (lit as { ty?: Ty }).ty;
-          if (v.kind === "Identifier" && (lt === "undefined" || lt === "null")) this.addFact(v, scope, lt, out);
+          if (lt === "undefined" || lt === "null") this.addFact(v, scope, lt, out);
         }
         return;
       }
@@ -581,7 +625,7 @@ class Checker {
     const go = (x: Expr) => this.assertFacts(x, scope, out);
     switch (e.kind) {
       case "NonNullExpr":
-        if (e.expr.kind === "Identifier") this.addFact(e.expr, scope, null, out);
+        this.addFact(e.expr, scope, null, out);
         go(e.expr);
         return;
       case "MemberExpr": go(e.object); return;
@@ -603,17 +647,24 @@ class Checker {
   }
 
   /**
-   * Add "this binding is not nullish" — but only when the test can actually prove it.
-   * A nullable carries ONE nullish arm, so comparing a `T | null` against `undefined`
-   * proves nothing (the tags never match); `kind` is the literal that was compared
-   * against, or null for a `!` assertion, which proves it outright.
+   * Add "this access path is not nullish" — but only when the test can actually prove it,
+   * and only for something that IS a path (anything else is silently no fact). A nullable
+   * carries ONE nullish arm, so comparing a `T | null` against `undefined` proves nothing
+   * (the tags never match); `kind` is the literal that was compared against, or null for a
+   * truthiness test / `!` assertion, which prove it outright.
    */
-  private addFact(id: Extract<Expr, { kind: "Identifier" }>, scope: Scope, kind: Ty | null, out: NarrowFact[]): void {
-    const b = scope.lookup(id.name);
-    if (!b || !isNullableTy(b.ty)) return;
-    if (kind !== null && nullishKind(b.ty) !== kind) return;
-    if (out.some((f) => f.binding === b)) return;
-    out.push({ name: id.name, binding: b, ty: baseTy(b.ty), constant: b.constant, arrowDepth: this.arrowDepth });
+  private addFact(e: Expr, scope: Scope, kind: Ty | null, out: NarrowFact[]): void {
+    const p = this.accessPath(e, scope);
+    if (p === undefined || !isNullableTy(p.ty)) return;
+    if (kind !== null && nullishKind(p.ty) !== kind) return;
+    if (out.some((f) => f.binding === p.binding && f.path === p.path)) return;
+    out.push({ name: p.name, binding: p.binding, path: p.path, ty: baseTy(p.ty), constant: p.binding.constant, arrowDepth: this.arrowDepth });
+  }
+
+  /** The narrowed type for the path `e` reads here, if a fact covers it. */
+  private narrowedPath(e: Expr, scope: Scope): Ty | undefined {
+    const p = this.accessPath(e, scope);
+    return p === undefined ? undefined : this.narrowedTy(p.binding, p.path);
   }
 
   /**
@@ -1297,7 +1348,7 @@ class Checker {
         // Control-flow narrowing: on this path the binding was PROVED non-nullish, so it
         // reads as its base type and codegen unwraps the tagged pair here. Always
         // written, so a `true` stamped by an earlier typing pass cannot go stale.
-        const narrowed = this.narrowedTy(b);
+        const narrowed = this.narrowedTy(b, "");
         e.narrowed = narrowed !== undefined;
         return narrowed ?? b.ty;
       }
@@ -1357,7 +1408,12 @@ class Checker {
         if (isObjectTy(ot)) {
           const ft = fieldType(ot, e.property);
           if (!ft) throw typeError(`Property '${e.property}' does not exist on ${ot}`);
-          return ft; // a redundant `?.` on a non-nullable object is allowed (result unchanged)
+          // Control-flow narrowing of a DOTTED NAME: `if (d.spans) { d.spans.length }`
+          // reads the same immutable field, proved non-nullish. Always written, so a
+          // `true` stamped by an earlier typing pass cannot go stale.
+          const narrowed = this.narrowedPath(e, scope);
+          e.narrowed = narrowed !== undefined;
+          return narrowed ?? ft; // a redundant `?.` on a non-nullable object is allowed (result unchanged)
         }
         throw typeError(`Property '${e.property}' does not exist on ${ot}`);
       }

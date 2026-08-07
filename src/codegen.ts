@@ -1472,7 +1472,7 @@ class FnGen {
    * uses — so if the analysis is ever wrong it PANICS at the read with a location,
    * exactly like a false assertion, and never yields a phantom value.
    */
-  private narrowRead(e: Extract<Expr, { kind: "Identifier" }>, r: Val): Val {
+  private narrowRead(e: { narrowed?: boolean; loc?: Loc }, r: Val): Val {
     if (!e.narrowed || !isNullableTy(r.ty)) return r;
     const base = baseTy(r.ty);
     const slot = this.fresh();
@@ -1835,7 +1835,10 @@ class FnGen {
           this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${idx}`);
           const slot = this.fresh();
           this.emit(`${slot} = load i64, ptr ${gep}`);
-          return { v: this.fromSlot(slot, ft), ty: ft };
+          // A DOTTED NAME the checker narrowed unwraps here, by the same `nt_nonnull` an
+          // identifier read uses — the object is immutable, so the field cannot have been
+          // rewritten since the proof, and a wrong proof panics rather than inventing one.
+          return this.narrowRead(e, { v: this.fromSlot(slot, ft), ty: ft });
         }
         throw new Error(`Unsupported member .${e.property}`);
       }
