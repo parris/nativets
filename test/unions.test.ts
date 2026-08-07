@@ -394,4 +394,19 @@ describe("GENERAL (non-object) unions — typeof is the discriminant", () => {
     expect(ours.stdout).toBe(oracle.stdout);
     expect(ours.exitCode).toBe(oracle.exitCode);
   });
+
+  // Behaviors 2 and 3 of the plan are ONE test: the only way to observe that the
+  // narrowing happened is to do something the arm allows and the union does not.
+  test("2. `typeof x === \"number\"` narrows to the number arm, the else arm to string", async () => {
+    const src = `let x: number | string = 41;
+if (typeof x === "number") { console.log("n", x + 1); } else { console.log("s", x.toUpperCase()); }
+x = "hi";
+if (typeof x === "number") { console.log("n", x + 1); } else { console.log("s", x.toUpperCase()); }
+`;
+    expect(codeOf(src)).toBe(null);
+    const ours = await compileAndRun(src);
+    const oracle = runWithNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
 });

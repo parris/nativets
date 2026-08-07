@@ -221,6 +221,7 @@ const DECLARES = [
   "declare i64 @nt_arr_index(ptr, double, ptr)",
   // `expr!` — unwrap the A2 tagged pair, PANIC when the assertion is false (Stage 41 shape)
   "declare i64 @nt_nonnull(ptr, ptr)",
+  "declare i64 @nt_union_arm(ptr, double, ptr, ptr)",
   "declare ptr @nt_str_index(ptr, double, ptr)",
   "declare void @nt_panic_bounds(ptr, double, double, ptr)",
   "declare i64 @nt_arr_pop(ptr)",
@@ -1474,8 +1475,17 @@ class FnGen {
    * uses — so if the analysis is ever wrong it PANICS at the read with a location,
    * exactly like a false assertion, and never yields a phantom value.
    */
-  private narrowRead(e: { narrowed?: boolean; loc?: Loc }, r: Val): Val {
-    if (!e.narrowed || !isNullableTy(r.ty)) return r;
+  private narrowRead(e: { narrowed?: boolean; loc?: Loc; ty?: Ty }, r: Val): Val {
+    if (!e.narrowed) return r;
+    // A GENERAL union is a BOX, so a narrowed read UNPACKS it at the arm the checker
+    // proved — and re-checks the tag, for the same reason the nullable case does.
+    if (isGeneralUnionTy(r.ty) && e.ty !== undefined && e.ty !== r.ty) {
+      const arm = e.ty;
+      const slot = this.fresh();
+      this.emit(`${slot} = call i64 @nt_union_arm(ptr ${r.v}, double ${llvmDouble(generalUnionTagOf(r.ty, arm))}, ptr ${this.mod.intern(arm)}, ptr ${this.locArg(e.loc) ?? "null"})`);
+      return { v: this.fromSlot(slot, arm), ty: arm };
+    }
+    if (!isNullableTy(r.ty)) return r;
     const base = baseTy(r.ty);
     const slot = this.fresh();
     this.emit(`${slot} = call i64 @nt_nonnull(ptr ${r.v}, ptr ${this.locArg(e.loc) ?? "null"})`);
@@ -1863,6 +1873,9 @@ class FnGen {
         // A runtime-nullable value's typeof depends on its tag: undefined→"undefined",
         // null→"object", present→typeof(base). Branch at runtime.
         if (isNullableTy(inner)) return this.genTypeofNullable(this.genExpr(e.operand).v, baseTy(inner));
+        // A general union's typeof is likewise a RUNTIME fact — it is the whole point of
+        // the box's tag, and it is what the checker's narrowing is reading.
+        if (isGeneralUnionTy(inner)) return this.genTypeofGeneralUnion(this.genExpr(e.operand).v, inner);
         const name =
           inner === "undefined" || inner === "void" ? "undefined" :
           inner === "null" ? "object" :
@@ -3219,6 +3232,25 @@ class FnGen {
     this.to(this.block(end));
     const t = this.fresh(); this.emit(`${t} = load ptr, ptr ${slot}`);
     return { v: t, ty: "string" };
+  }
+
+  /**
+   * Runtime `typeof` of a general-union box: select the arm's `typeof` name by tag.
+   * A chain of `select`s rather than blocks — every arm's answer is a constant string,
+   * so there is nothing to branch around.
+   */
+  private genTypeofGeneralUnion(ptr: string, ty: Ty): Val {
+    const members = generalUnionMembers(ty);
+    const tag = this.nullTag(ptr);
+    let acc = this.mod.intern(typeofTagOf(members[members.length - 1]!)); // the last arm needs no test
+    for (let i = members.length - 2; i >= 0; i--) {
+      const is = this.fresh();
+      this.emit(`${is} = icmp eq i64 ${tag}, ${i}`);
+      const sel = this.fresh();
+      this.emit(`${sel} = select i1 ${is}, ptr ${this.mod.intern(typeofTagOf(members[i]!))}, ptr ${acc}`);
+      acc = sel;
+    }
+    return { v: acc, ty: "string" };
   }
 
   /** Read `.prop` from a NON-nullable object/string/array value (object slot, or `.length`). */

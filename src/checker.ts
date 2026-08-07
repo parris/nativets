@@ -18,7 +18,7 @@ import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
 import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
 import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, typeofTagOf } from "./ast.ts";
-import type { ArrowFunction } from "./ast.ts";
+import type { ArrowFunction, BinaryExpr } from "./ast.ts";
 import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
@@ -599,8 +599,13 @@ class Checker {
       case "BinaryExpr": {
         const ne = e.op === "!==" || e.op === "!=";
         const eq = e.op === "===" || e.op === "==";
+        if (!ne && !eq) return;
+        // `typeof x === "number"` on a GENERAL union. Unlike the nullish tests below it
+        // narrows on BOTH polarities — the arms are a closed set, so ruling one out is
+        // as informative as picking one. `positive === eq` is "the tag matched".
+        this.typeofFacts(e, scope, positive === eq, out);
         // The value is non-nullish on the TRUE branch of `!==` and the FALSE branch of `===`.
-        if ((!ne && !eq) || positive !== ne) return;
+        if (positive !== ne) return;
         for (const [v, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
           // Both operand orders narrow — TypeScript's
           // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
@@ -668,6 +673,31 @@ class Checker {
     if (kind !== null && nullishKind(p.ty) !== kind) return;
     if (out.some((f) => f.binding === p.binding && f.path === p.path)) return;
     out.push({ name: p.name, binding: p.binding, path: p.path, ty: baseTy(p.ty), constant: p.binding.constant, arrowDepth: this.arrowDepth });
+  }
+
+  /**
+   * `typeof x === "number"` against a GENERAL union — the only discriminant it has.
+   *
+   * `matched` says whether this branch is the one where the tag equalled the literal.
+   * The arms are a closed set, so both branches narrow: the matching one to the arms
+   * with that `typeof`, the other to the arms without it.
+   *
+   * A fact is only recorded when the surviving set is a SINGLE arm. A 3-arm union's
+   * else branch is a 2-arm SUB-union, whose tags are renumbered against its own
+   * canonical member order — narrowing to it would need the box retagged, so instead
+   * the binding simply stays the full union (still printable, still tag-correct) and
+   * any arm-specific use of it is refused. Conservative, never wrong.
+   */
+  private typeofFacts(e: BinaryExpr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+    for (const [t, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
+      if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") continue;
+      const p = this.accessPath(t.operand, scope);
+      if (p === undefined || !isGeneralUnionTy(p.ty)) continue;
+      const keep = generalUnionMembers(p.ty).filter((m) => (typeofTagOf(m) === lit.value) === matched);
+      if (keep.length !== 1) continue;
+      if (out.some((f) => f.binding === p.binding && f.path === p.path)) continue;
+      out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
+    }
   }
 
   /** The narrowed type for the path `e` reads here, if a fact covers it. */
