@@ -14,6 +14,7 @@ import { test, expect, describe } from "bun:test";
 import { sourceToIR } from "../src/driver.ts";
 import { coverage } from "../src/coverage.ts";
 import { NTError } from "../src/diagnostics.ts";
+import { compileAndRun, runWithNode } from "./harness.ts";
 
 /** Compile far enough to hit parse+check; return the NT code if it was rejected. */
 function rejectCode(src: string): string | null {
@@ -67,4 +68,32 @@ describe("immutable-by-default: in-place mutation is rejected (NT1606)", () => {
     expect(rejectCode(`const a: number[] = [1, 2]; const b: number[] = a.with(0, 9); console.log(b[0]);`)).toBeNull();
     expect(rejectCode(`const o: {x:number} = {x: 1}; const p: {x:number} = {...o, x: 9}; console.log(p.x);`)).toBeNull();
   });
+});
+
+/*
+ * `.sort()` on a FRESH receiver is not a mutation of anyone's data.
+ *
+ * The immutability rule protects against mutating a SHARED array. A freshly built
+ * temporary — `[...xs]`, an array literal — has no sharer, so sorting it is
+ * unobservable to any other binding and NT1606 is a false positive there. On such a
+ * receiver `.sort()` is exactly `.toSorted()`, which is already node-exact (including
+ * node's LEXICOGRAPHIC default order for numbers), so that is what it lowers to.
+ * The aliased cases stay refused — see the REJECTED table above.
+ */
+describe(".sort on a fresh receiver (node-differential)", () => {
+  const CASES: { name: string; code: string }[] = [
+    {
+      name: "spread copy [...xs].sort()",
+      code: `const xs: number[] = [3, 1, 2]; const s: number[] = [...xs].sort(); console.log(s.join(",")); console.log(xs.join(","));`,
+    },
+  ];
+
+  for (const c of CASES) {
+    test(`${c.name} compiles and matches node`, async () => {
+      const oracle = runWithNode(c.code);
+      const ours = await compileAndRun(c.code);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.exitCode).toBe(oracle.exitCode);
+    });
+  }
 });

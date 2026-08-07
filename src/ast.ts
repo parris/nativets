@@ -874,6 +874,32 @@ export function mutableTags(p: Program): Set<string> {
   return new Set([...(p.mutableClasses ?? []), ...(p.mutableRecords ?? [])]);
 }
 
+/** Array-producing calls that mint a FRESH, unaliased array. A user function call is
+ *  deliberately absent: it may return a module-level array the caller does not own. */
+const FRESH_ARRAY_CALLS = new Set([
+  "map", "filter", "slice", "concat", "with", "toSorted", "toReversed", "flat", "flatMap",
+  "split", "keys", "values", "entries",
+]);
+
+/**
+ * Does `e` evaluate to a NEWLY CONSTRUCTED array that nothing else aliases?
+ *
+ * The single source of truth for array freshness, used by two passes that must agree:
+ * codegen frees a fresh receiver temporary after a method call, and the checker permits
+ * `.sort()` on a fresh receiver (sorting storage with no other owner is unobservable —
+ * see docs/divergences.md). Two copies of this judgment could drift into a codegen that
+ * frees what the checker thinks is shared, so there is exactly one.
+ *
+ * Conservative and purely SYNTACTIC: an array literal (including a spread copy
+ * `[...xs]`, which builds a new array) and the array-returning methods above. A plain
+ * function call is NOT fresh — it may hand back an array the callee still owns.
+ */
+export function freshArray(e: Expr): boolean {
+  if (e.kind === "ArrayLiteral") return true;
+  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") return FRESH_ARRAY_CALLS.has(e.callee.property);
+  return false;
+}
+
 /**
  * The source text of an expression, for a diagnostic that has to NAME the thing it is
  * about. Deliberately partial: names, field reads, element reads and calls over those —
