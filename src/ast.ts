@@ -466,15 +466,17 @@ export function resolveStaticFieldReads(n: unknown, names: Set<string>, onAssign
   for (const k of Object.keys(o)) {
     const v = o[k];
     if (!v || typeof v !== "object") continue;
-    // `C.f = v` — a WRITE to a static field. It is not a read, so it is not rewritten;
-    // the caller refuses it by name (a static field lowers to a `const`).
-    const a = v as Partial<FieldAssign> & { object?: { kind?: string; name?: string } };
-    if (onAssign && a.kind === "FieldAssign" && a.object?.kind === "Identifier" && names.has(`${a.object.name}.${a.field}`)) {
-      onAssign(`${a.object.name}.${a.field}`);
-    }
-    const m = v as Partial<MemberExpr> & { object?: { kind?: string; name?: string } };
-    if (m.kind === "MemberExpr" && !m.optional && m.object?.kind === "Identifier" && names.has(`${m.object.name}.${m.property}`)) {
-      o[k] = { kind: "Identifier", name: `${m.object.name}.${m.property}` } as Identifier;
+    // One flat view of the two node shapes this pass cares about. Deliberately NOT
+    // `Partial<MemberExpr> & {…}`: an intersection type is outside the subset nativets
+    // compiles, and this file is part of the compiler's own source (docs/self-hosting.md).
+    const e = v as { kind?: string; optional?: boolean; property?: string; field?: string; object?: { kind?: string; name?: string } };
+    const head = e.object?.kind === "Identifier" ? e.object.name : undefined;
+    if (head === undefined) { resolveStaticFieldReads(v, names, onAssign); continue; }
+    // `C.f = v` — a WRITE to a static field. Not a read, so never rewritten; the caller
+    // refuses it by name (a static field lowers to a `const`).
+    if (onAssign && e.kind === "FieldAssign" && names.has(`${head}.${e.field}`)) onAssign(`${head}.${e.field}`);
+    if (e.kind === "MemberExpr" && !e.optional && names.has(`${head}.${e.property}`)) {
+      o[k] = { kind: "Identifier", name: `${head}.${e.property}` } as Identifier;
       continue;
     }
     resolveStaticFieldReads(v, names, onAssign);
@@ -490,10 +492,10 @@ export function resolveStaticFieldReads(n: unknown, names: Set<string>, onAssign
  */
 export function collectBindingNames(n: unknown, out: Set<string>): void {
   if (!n || typeof n !== "object") return;
-  const o = n as Record<string, unknown> & { kind?: string };
+  const o = n as Record<string, unknown>; // no intersection type: see `resolveStaticFieldReads`
   const params = o.params as { name?: string }[] | undefined;
   if (params && Array.isArray(params)) for (const p of params) if (p?.name) out.add(p.name);
-  switch (o.kind) {
+  switch (o.kind as string | undefined) {
     case "VarDecl": for (const d of o.decls as { name: string }[]) out.add(d.name); break;
     case "FuncDecl": out.add(o.name as string); break;
     case "ForOfStmt": out.add(o.name as string); if (o.name2) out.add(o.name2 as string); break;
