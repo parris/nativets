@@ -183,6 +183,25 @@ describe("SH1 tail: an executable script lexes", () => {
     expect(toks.some((t) => t.value === "const")).toBe(true);
   });
 
+  // A leading UTF-8 BOM (U+FEFF) is not part of the program either. node strips it
+  // (verified: a BOM-prefixed `console.log("ok")` prints `ok`, exit 0), and so does
+  // tsc. Found via the TypeScript conformance union corpus — 13 of its 25 files are
+  // BOM-prefixed, and every one of them died in the lexer.
+  test("a leading U+FEFF BOM is not part of the program", () => {
+    expect(() => lex('﻿console.log("ok");\n')).not.toThrow();
+    const toks = lex("﻿const a = 1;\n");
+    expect(toks.some((t) => t.value === "const")).toBe(true);
+  });
+
+  test("a BOM followed by a shebang skips both", () => {
+    // `<BOM>#!/usr/bin/env node` is a real shape — an executable script saved by an
+    // editor that writes a BOM. node runs it (verified: prints, exit 0), so the shebang
+    // scan has to start after the BOM rather than at offset 0.
+    const toks = lex('﻿#!/usr/bin/env node\nconst a = 1;\n');
+    expect(toks.some((t) => t.value === "const")).toBe(true);
+    expect(toks.some((t) => t.value === "!")).toBe(false);
+  });
+
   test("`#` anywhere else is still an error", () => {
     expect(() => lex('const a = 1;\n#!not a shebang\n')).toThrow();
   });
