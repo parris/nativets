@@ -807,6 +807,14 @@ double nt_arr_push(NtArray *a, int64_t slot) {
     int64_t nc = a->cap * 2;
     int64_t *nd = (int64_t *)nativets_alloc(sizeof(int64_t) * (size_t)nc);
     memcpy(nd, a->data, sizeof(int64_t) * (size_t)a->len);
+    /* The superseded block is owned SOLELY by this header, so it must be released
+     * here or every doubling abandons one: growing to n leaked the whole chain
+     * (cap 4 -> 400 elements leaked 4064 bytes in 7 blocks). `a->data` never
+     * escapes — `arr_freeze` already frees it after copying into the trie, and
+     * every other holder (`nt_arr_copy`, `nt_arr_extend_own`) copies or MOVES it
+     * with the source nulled — so nothing can still be reading the old block.
+     * free(NULL) is a no-op, which covers a header that has no block yet. */
+    free(a->data);
     a->data = nd; a->cap = nc;
   }
   a->data[a->len++] = slot;

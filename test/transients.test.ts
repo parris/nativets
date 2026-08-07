@@ -446,4 +446,48 @@ console.log(revAlias.join(",") + "|" + rev.join(",") + "|" + [4, 5, 6].reverse()
       rmSync(dir, { recursive: true, force: true });
     }
   }, 120_000);
+
+  /*
+   * A LEAK gate, deliberately separate from the no-UAF gate above and deliberately
+   * Linux-only.
+   *
+   * `nt_arr_push` grew the flat block by allocating a new one and never releasing the
+   * old, so every doubling abandoned a block: growing an array to 400 elements leaked
+   * 4064 bytes in 7 blocks (32+64+…+2048 — the whole chain). Nothing in the suite could
+   * see it. `__arrLive()` counts HEADERS, and the header was always freed correctly; the
+   * abandoned blocks are invisible to every counter we expose. Only LeakSanitizer sees
+   * this class, and LSan exists only on Linux — so this test is skipped on macOS rather
+   * than silently meaning nothing there, the same platform trap documented above.
+   *
+   * Scope: the growth path ONLY. The suite still leaks at the boundaries
+   * docs/ownership.md documents (element objects/arrays, call-argument temporaries), so
+   * this asserts on a program that touches none of them.
+   */
+  test.skipIf(process.platform === "darwin")("no leak from flat-block GROWTH (LeakSanitizer, Linux only)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nativets-leak-"));
+    try {
+      // 400 pieces from a 4-slot initial block = 7 doublings. Only split + .length:
+      // no element objects, no call-argument temporaries, no for-of temporary.
+      const src = `function f(): number { return "x".repeat(400).split("").length; }
+console.log(f());`;
+      const ll = join(dir, "module.ll");
+      writeFileSync(ll, emitIR(src));
+      const bin = join(dir, "prog");
+      const built = spawnSync("clang", [
+        "-O1", "-g", "-fsanitize=address", "-DNT_PVEC",
+        ll, join(ROOT, "runtime/runtime.c"), join(ROOT, "runtime/nt_pvec.c"),
+        "-lm", "-o", bin,
+      ], { encoding: "utf8" });
+      expect(built.status).toBe(0);
+      const run = spawnSync(bin, [], {
+        encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+        env: { ...process.env, ASAN_OPTIONS: "detect_leaks=1" },
+      });
+      expect(run.stderr).not.toContain("LeakSanitizer");
+      expect(run.stdout).toBe("400\n");
+      expect(run.status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

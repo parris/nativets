@@ -1248,6 +1248,20 @@ class FnGen {
         this.emit(`store double ${iN}, ptr ${idx}`);
         this.terminate(`br label %${condLbl}`);
         this.to(this.block(endLbl));
+        // The ITERABLE temporary: `for (const x of [3,2,1])` iterates an array no
+        // binding owns, so the drop pass never sees it and it leaked. Freed here, at
+        // the single join point every exit lands on — including `break`, which
+        // elsewhere deliberately jumps PAST drops but here cannot skip this one.
+        //
+        // Only a syntactically FRESH array (`freshArray`, the same judgment
+        // `freeReceiverTemp` uses) — never a binding, whose owner drops it, and never a
+        // plain call result, which the callee may still own. A `for (… of map)` walks a
+        // key array `nt_coll_keys` just minted, which nothing else can reference.
+        // Elements are not freed here, exactly as `nt_arr_free` never frees them.
+        // A `return` out of the body still jumps past this: a leak, never a UAF.
+        if (!isStr && !isBytes && (mapV !== null || freshArray(s.iterable))) {
+          this.emit(`call void @nt_arr_free(ptr ${src.v})`);
+        }
         return;
       }
       case "SwitchStmt": {
