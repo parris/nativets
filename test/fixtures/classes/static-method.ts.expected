@@ -1,0 +1,7 @@
+@nt.g.count
+007
+abcd
+----
+define i32 @main() {
+  ret i32 0
+      ; deep

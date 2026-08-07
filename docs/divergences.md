@@ -839,6 +839,33 @@ supported case is node-differential — there is **no runtime divergence**. The 
   specialization is driven by the types that actually flow, so a constraint adds nothing, but it
   is also **not enforced** (a bound violation surfaces as an ordinary error inside the
   specialization, not as a constraint violation at the call site).
+
+### `static` class members — supported, and the four refusals
+
+A static member has no receiver, so it is a **namespaced top-level definition**: `static m(…)`
+lowers to the function `C.m(…)` with no `this` parameter, and `static f = init` to a module-level
+`const C.f` initialized where the class is declared. Both are ordinary TypeScript that node runs
+unchanged, so every supported case is node-differential (`test/fixtures/classes/static-*.ts`,
+plus `test/modules/statics/` across a module boundary). What is refused:
+
+- **A static field with no initializer** (`static f: number;`) — it would read as `undefined`,
+  which is not a value this language has for a `const`. `NT1015`.
+- **Assignment to a static field** (`C.f = v`) — it is a `const`, like every other module-level
+  binding here (§A, immutable-by-default). `NT1606`, pointing at a static method instead. node
+  allows the write.
+- **A binding that shadows a class with static fields** — a read of `C.f` is resolved by NAME
+  (that is what makes it a module binding rather than a slot on a receiver), so a parameter
+  named after the class would silently redirect the read to the static. Refused with `NT1015`
+  rather than answered wrongly; node reads the shadowing value.
+- **A decorator on a static** (`@w static m()`) — a `@wrapper` is typed over the method's own
+  signature *with the receiver as its first parameter* (`docs/decorators.md`), and a static has
+  no receiver. `NT1015`.
+
+Reaching a member through the wrong side — a static through an instance, or an instance method
+through the class name — is a **compile-time rejection**. node throws a `TypeError` at runtime
+for both (the property genuinely does not exist there), so this rejects strictly earlier than
+node fails.
+
 | NT1020 | promises / concurrency: `Promise.*`, `new Promise`, `.then`/`.catch`/`.finally`, un-awaited `async` results | later | an event loop — or, the chosen answer, the **actor** model (`spawn`/`send`/`receive`). `async`/`await`/`fetch` themselves are ✅ supported (blocking; see §A) |
 | NT1025 | `console.log` of a value with no node-identical rendering: a **function value** anywhere, or a `Uint8Array`/`TextEncoder`/`TextDecoder`/`Response`/`Headers`/`URL`/`URLSearchParams` handle **nested inside** a printed value | later | objects, class instances, arrays, Map/Set and `Dyn` are ✅ node-exact (util.inspect, see above); this code covers only the leaf types that have no node-identical form here |
 

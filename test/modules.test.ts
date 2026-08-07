@@ -51,6 +51,11 @@ const CASES = [
   // specialization's body can be the only reader of a module-level binding (here the
   // generic `label<T>` reads `PREFIX`, and is instantiated at both number and string).
   "generics",
+  // Cross-feature: `static` members across a module boundary. A static lowers to a
+  // module-level name (`C.m` / `C.f`), so the linker's per-module mangling is what keeps
+  // two same-named classes apart — and a static FIELD read cannot be resolved when its
+  // module is parsed (the class is in another file), so it is finished after the link.
+  "statics",
   // `export async function` — `async` is ERASED, so an exported one is an ordinary
   // exported function. The export path is the only place that needed to learn it.
   "async",

@@ -15,7 +15,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { buildBinary } from "../src/driver.ts";
+import { buildBinary, sourceToIR } from "../src/driver.ts";
+import { NTError } from "../src/diagnostics.ts";
 
 async function run(source: string): Promise<{ stdout: string; status: number | null }> {
   const dir = mkdtempSync(join(tmpdir(), "classes-"));
@@ -110,5 +111,76 @@ console.log(e.describe());
     const r = await run(source);
     expect(r.stdout).toBe("bad input\n42\nbad input (42)\n");
     expect(r.status).toBe(0);
+  });
+});
+
+/*
+ * `static` members. The happy paths are node-differential fixtures
+ * (test/fixtures/classes/static-*.ts) — node runs static methods natively. What lives
+ * here is the reject-don't-miscompile edge: a static and an instance method lower to the
+ * SAME shape of name (`C.m`) and differ only in the receiver, so each must be reachable
+ * exactly one way. Node throws a TypeError at RUNTIME for both mix-ups ("C.show is not a
+ * function" / "p.make is not a function"), so it cannot be the oracle for a program we
+ * reject at COMPILE time — we reject strictly earlier, which is the intended direction.
+ */
+describe("static members", () => {
+  const CLS = `
+class Point {
+  x: number;
+  constructor(x: number) { this.x = x; }
+  static make(): Point { return new Point(1); }
+  show(): string { return "x=" + this.x; }
+}
+const p = Point.make();
+`;
+  /** Compile far enough to hit parse+check; return the rejection message, else null. */
+  function reject(src: string): string | null {
+    try {
+      sourceToIR(src);
+      return null;
+    } catch (e) {
+      return e instanceof NTError ? `${e.code}: ${e.message}` : String(e);
+    }
+  }
+
+  test("a STATIC method called through an instance is rejected, not miscompiled", () => {
+    const msg = reject(`${CLS}console.log(p.make());\n`);
+    expect(msg).toContain("'make' is a static method of Point");
+    expect(msg).toContain("Point.make(");
+  });
+
+  test("an INSTANCE method called through the class name is rejected", () => {
+    const msg = reject(`${CLS}console.log(Point.show(p));\n`);
+    expect(msg).toContain("'show' is an instance method of Point");
+  });
+  // A `C.f` READ is rewritten to the module-level `const C.f` a static field lowers to,
+  // and that rewrite is name-based, so a binding that SHADOWS the class name would make it
+  // read the wrong thing (node prints 99 here, and we printed 4 — a silent wrong answer,
+  // the one outcome the project refuses). Rejected instead.
+  test("a binding that shadows a class with static fields is rejected, not miscompiled", () => {
+    const msg = reject(`
+class Sym {
+  static width = 4;
+}
+function widthOf(Sym: { width: number }): number {
+  return Sym.width;
+}
+console.log(widthOf({ width: 99 }));
+`);
+    expect(msg).toContain("shadows class 'Sym'");
+  });
+  // Assignment to a static field. It lowers to a module-level `const`, and nothing in this
+  // language reassigns one, so this is a refusal — but it must say THAT, not "'Sym' is not
+  // defined", which reads as if the class did not exist. (Node prints 9.)
+  test("assigning a static field is refused by name, not as an undefined identifier", () => {
+    const msg = reject(`
+class Sym {
+  static width = 4;
+}
+Sym.width = 9;
+console.log(Sym.width);
+`);
+    expect(msg).toContain("Sym.width");
+    expect(msg).not.toContain("'Sym' is not defined");
   });
 });

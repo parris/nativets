@@ -488,6 +488,65 @@ export function mapTypesDeep(n: unknown, f: (t: Ty) => Ty): void {
   }
 }
 
+/**
+ * Rewrite every read of a STATIC field — `C.f` on a bare class name — into the plain
+ * Identifier `C.f`, the module-level `const` the parser lowered it to.
+ *
+ * This runs at the END of parsing, before any analysis, and that is the point: a static
+ * field is not a slot on a receiver, it is a module binding, so every pass that reasons
+ * about NAMES (globals promotion, closure capture, ownership) has to see an identifier or
+ * it does not see the read at all. No source identifier can contain a `.`, so the dotted
+ * name is unambiguous. Reflective, like `mapTypesDeep` — a rewrite that must not miss a
+ * position is safer written once over the object graph than per node kind.
+ *
+ * A `?.` link is left alone (rewriting it would silently drop the optional; a class name
+ * is never nullish, so the read is rejected instead).
+ */
+export function resolveStaticFieldReads(n: unknown, names: Set<string>, onAssign?: (name: string) => never): void {
+  if (!n || typeof n !== "object") return;
+  const o = n as Record<string, unknown>;
+  for (const k of Object.keys(o)) {
+    const v = o[k];
+    if (!v || typeof v !== "object") continue;
+    // One flat view of the two node shapes this pass cares about. Deliberately NOT
+    // `Partial<MemberExpr> & {…}`: an intersection type is outside the subset nativets
+    // compiles, and this file is part of the compiler's own source (docs/self-hosting.md).
+    const e = v as { kind?: string; optional?: boolean; property?: string; field?: string; object?: { kind?: string; name?: string } };
+    const head = e.object?.kind === "Identifier" ? e.object.name : undefined;
+    if (head === undefined) { resolveStaticFieldReads(v, names, onAssign); continue; }
+    // `C.f = v` — a WRITE to a static field. Not a read, so never rewritten; the caller
+    // refuses it by name (a static field lowers to a `const`).
+    if (onAssign && e.kind === "FieldAssign" && names.has(`${head}.${e.field}`)) onAssign(`${head}.${e.field}`);
+    if (e.kind === "MemberExpr" && !e.optional && names.has(`${head}.${e.property}`)) {
+      o[k] = { kind: "Identifier", name: `${head}.${e.property}` } as Identifier;
+      continue;
+    }
+    resolveStaticFieldReads(v, names, onAssign);
+  }
+}
+
+/**
+ * Every name the program BINDS — declarations, function/arrow parameters, loop and catch
+ * bindings. Used to protect the static-field rewrite above: that rewrite is name-based and
+ * has no scope, so a binding that shadows a class name would silently redirect `C.f` to
+ * the class's static instead of the shadowing value. Collecting the binders lets the
+ * parser refuse that program outright rather than answer it wrongly.
+ */
+export function collectBindingNames(n: unknown, out: Set<string>): void {
+  if (!n || typeof n !== "object") return;
+  const o = n as Record<string, unknown>; // no intersection type: see `resolveStaticFieldReads`
+  const params = o.params as { name?: string }[] | undefined;
+  if (params && Array.isArray(params)) for (const p of params) if (p?.name) out.add(p.name);
+  switch (o.kind as string | undefined) {
+    case "VarDecl": for (const d of o.decls as { name: string }[]) out.add(d.name); break;
+    case "FuncDecl": out.add(o.name as string); break;
+    case "ForOfStmt": out.add(o.name as string); if (o.name2) out.add(o.name2 as string); break;
+    case "ForInStmt": out.add(o.name as string); break;
+    case "TryStmt": if (o.param) out.add(o.param as string); break;
+  }
+  for (const k of Object.keys(o)) collectBindingNames(o[k], out);
+}
+
 export type Expr =
   | NumberLiteral
   | BooleanLiteral
@@ -766,6 +825,11 @@ export interface FuncDecl {
    *  a "setter". For an `@@mutable` class that is real in-place mutation, so the
    *  ownership pass requires the receiver to be OWNED (Rust's `&mut self`). */
   setter?: boolean;
+  /** A `static` class member: `C.m(…)` lowered WITHOUT the leading `this` parameter, so
+   *  it is called through the class name (`C.m(a)`) and never through an instance. The
+   *  flag is what separates it from the instance method of the same shape — both lower
+   *  to a top-level `C.m`, and only this says which one a call site may reach. */
+  isStatic?: boolean;
   /** Decorators lane: `this` must not be move-tracked in this frame — it is either the
    *  method's own private copy (copy-on-write setter) or a borrow it legitimately hands
    *  straight back (`return this` from a decorated constructor / an `@@mutable` method). */

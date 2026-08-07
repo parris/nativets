@@ -29,7 +29,8 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve, relative } from "node:path";
 
 import { parse } from "./parser.ts";
-import { moduleError } from "./diagnostics.ts";
+import { moduleError, mutationError } from "./diagnostics.ts";
+import { resolveStaticFieldReads } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Ty, Declarator, Param, ArrowFunction, VarDecl, FuncDecl, ImportDecl,
 } from "./ast.ts";
@@ -509,6 +510,25 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     body.push(...program.body);
   });
 
+  // A STATIC field lowers to a module-level `const C.f`, and a read of one is rewritten to
+  // that binding — but only the declaring module could do it at parse time, so a read from
+  // ANOTHER module is still a `C.f` member expression here. Finish the job over the merged
+  // body, where every static field is visible under its FINAL (mangled) name: a dotted
+  // binding name is one, and nothing else can produce one (no source identifier has a `.`).
+  const staticFields = new Set<string>();
+  const scanStatics = (list: Stmt[]): void => {
+    for (const s of list) {
+      if (s.kind === "VarDecl") { for (const d of s.decls) if (d.name.includes(".")) staticFields.add(d.name); }
+      else if (s.kind === "MultiStmt") scanStatics(s.stmts); // a class lowers to one of these
+    }
+  };
+  scanStatics(body);
+  if (staticFields.size) {
+    resolveStaticFieldReads(body, staticFields, (n) => {
+      throw mutationError(`assignment to the static field '${n}'`,
+        "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead");
+    });
+  }
   const merged: Program = { kind: "Program", body };
   if (mutableClasses.size) merged.mutableClasses = [...mutableClasses];
   if (mutableRecords.size) merged.mutableRecords = [...mutableRecords];
