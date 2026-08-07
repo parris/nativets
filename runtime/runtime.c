@@ -1324,6 +1324,21 @@ int32_t nt_dyn_as_bool(NtDyn *d) {
   return d->boolean;
 }
 
+/* JS ToBoolean over a Dyn's tag — `if (JSON.parse(s))`. Unlike nt_dyn_as_bool this
+ * COERCES rather than requiring a boolean: every JSON value has a truthiness in node,
+ * and only these are falsy — null, false, 0 (and -0), NaN, and "". An array or object
+ * is always truthy, INCLUDING an empty one. */
+int32_t nt_dyn_truthy(NtDyn *d) {
+  if (!d) return 0;
+  switch (d->tag) {
+    case DYN_NULL: return 0;
+    case DYN_BOOL: return d->boolean != 0;
+    case DYN_NUM:  return d->num != 0.0 && d->num == d->num; /* 0/-0 and NaN are falsy */
+    case DYN_STR:  return d->str && d->str[0] != '\0';
+    default:       return 1; /* DYN_ARR / DYN_OBJ — an object is always truthy */
+  }
+}
+
 const char *nt_dyn_as_string(NtDyn *d) {
   if (!d || d->tag != DYN_STR) { nt_exc_raise("TypeError: expected string"); return ""; }
   return d->str;

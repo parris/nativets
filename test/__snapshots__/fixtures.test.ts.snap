@@ -57,6 +57,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -189,11 +190,13 @@ declare double @nt_gui_mouse_y()
 declare i32 @nt_gui_mouse_pressed()
 declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
 declare ptr @nt_coll_map_new()
+declare ptr @nt_coll_map_from_coll(ptr)
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
 declare i32 @nt_map_has_slot(ptr, i32, i64)
 declare ptr @nt_map_remove_slot(ptr, i32, i64)
 declare ptr @nt_coll_set_new()
+declare ptr @nt_coll_set_from_arr(ptr, i32)
 declare ptr @nt_set_add_slot(ptr, i32, i64)
 declare i32 @nt_set_has_slot(ptr, i32, i64)
 declare ptr @nt_set_remove_slot(ptr, i32, i64)
@@ -438,6 +441,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -570,11 +574,13 @@ declare double @nt_gui_mouse_y()
 declare i32 @nt_gui_mouse_pressed()
 declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
 declare ptr @nt_coll_map_new()
+declare ptr @nt_coll_map_from_coll(ptr)
 declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
 declare i64 @nt_map_get_slot(ptr, i32, i64)
 declare i32 @nt_map_has_slot(ptr, i32, i64)
 declare ptr @nt_map_remove_slot(ptr, i32, i64)
 declare ptr @nt_coll_set_new()
+declare ptr @nt_coll_set_from_arr(ptr, i32)
 declare ptr @nt_set_add_slot(ptr, i32, i64)
 declare i32 @nt_set_has_slot(ptr, i32, i64)
 declare ptr @nt_set_remove_slot(ptr, i32, i64)
@@ -751,6 +757,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -1159,6 +1166,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -1465,6 +1473,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -1778,6 +1787,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -2145,6 +2155,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -2501,6 +2512,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -2860,6 +2872,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -3268,6 +3281,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -3619,6 +3633,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -3915,6 +3930,1182 @@ L0:
 "
 `;
 
+exports[`fixtures classes/static-field.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare void @js_eprint_begin()
+declare void @js_eprint_num(double)
+declare void @js_eprint_bool(i32)
+declare void @js_eprint_str(ptr)
+declare void @js_eprint_sep()
+declare void @js_eprint_newline()
+declare void @nt_fmt_guard(ptr, double)
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare i32 @js_str_cmp(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_index(ptr, double, ptr)
+declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
+declare ptr @nt_str_index(ptr, double, ptr)
+declare void @nt_panic_bounds(ptr, double, double, ptr)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_to_sorted(ptr, i32)
+declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)
+declare ptr @nt_arr_to_reversed(ptr)
+declare ptr @nt_arr_with(ptr, double, i64, ptr)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare double @nt_arr_nodes()
+declare double @nt_arr_node_allocs()
+declare double @nt_arr_transients()
+declare void @nt_arr_extend_own(ptr, ptr)
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare double @nt_date_now()
+declare ptr @nt_btoa(ptr)
+declare ptr @nt_atob(ptr)
+declare ptr @nt_from_char_code(double)
+declare ptr @nt_from_code_point(double)
+declare i32 @nt_num_is_finite(double)
+declare i32 @nt_num_is_integer(double)
+declare i32 @nt_num_is_safe_integer(double)
+declare ptr @nt_arr_from_str(ptr)
+declare double @js_str_char_code_at(ptr, double)
+declare double @js_str_code_point_at(ptr, double)
+declare ptr @js_str_at(ptr, double)
+declare ptr @js_str_pad_end(ptr, double, ptr)
+declare i32 @js_str_starts_with(ptr, ptr, double)
+declare i32 @js_str_ends_with(ptr, ptr, double)
+declare ptr @js_str_replace(ptr, ptr, ptr, i32)
+declare double @js_str_last_index_of(ptr, ptr)
+declare ptr @nt_str_split_n(ptr, ptr, double)
+declare double @nt_arr_at_index(ptr, double)
+declare double @nt_arr_last_indexof_num(ptr, double)
+declare double @nt_arr_last_indexof_str(ptr, ptr)
+declare ptr @nt_arr_concat(ptr, ptr)
+declare ptr @nt_arr_flat1(ptr)
+declare ptr @js_num_to_fixed(double, double)
+declare ptr @js_num_to_radix_string(double, double)
+declare ptr @nt_url_protocol(ptr)
+declare ptr @nt_url_host(ptr)
+declare ptr @nt_url_hostname(ptr)
+declare ptr @nt_url_pathname(ptr)
+declare ptr @nt_url_search(ptr)
+declare ptr @nt_url_hash(ptr)
+declare double @nt_date_field(double, double, double)
+declare ptr @nt_date_to_iso(double)
+declare double @nt_date_from_ms(double)
+declare double @nt_date_parse(ptr)
+declare ptr @nt_date_inspect(double)
+declare ptr @nt_date_to_json(double)
+declare ptr @nt_url_validate(ptr)
+declare ptr @nt_url_port(ptr)
+declare ptr @nt_url_origin(ptr)
+declare ptr @nt_qs_init(ptr)
+declare ptr @nt_qs_get(ptr, ptr)
+declare ptr @nt_qs_get_all(ptr, ptr)
+declare ptr @nt_qs_to_string(ptr)
+declare ptr @nt_encode_uri_component(ptr)
+declare ptr @nt_decode_uri_component(ptr)
+declare ptr @nt_encode_uri(ptr)
+declare ptr @nt_decode_uri(ptr)
+declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
+declare ptr @nt_http_get(ptr, ptr, ptr)
+declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)
+declare ptr @nt_headers_get(ptr, ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare ptr @nt_read_key()
+declare void @nt_raw_mode(i32)
+declare void @nt_exit(double)
+declare ptr @nt_read_file(ptr)
+declare void @nt_write_file(ptr, ptr)
+declare i32 @nt_path_exists(ptr)
+declare ptr @nt_mkdtemp(ptr)
+declare ptr @nt_readdir(ptr)
+declare void @nt_rm(ptr, i32, i32)
+declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)
+declare ptr @nt_path_join(ptr, ptr)
+declare ptr @nt_path_resolve(ptr, ptr)
+declare ptr @nt_path_dirname(ptr)
+declare ptr @nt_path_basename(ptr)
+declare ptr @nt_path_relative(ptr, ptr)
+declare ptr @nt_os_tmpdir()
+declare ptr @nt_os_homedir()
+declare ptr @nt_file_url_to_path(ptr)
+declare void @nt_gui_init_window(double, double, ptr)
+declare i32 @nt_gui_window_should_close()
+declare void @nt_gui_set_target_fps(double)
+declare void @nt_gui_begin_draw()
+declare void @nt_gui_end_draw()
+declare void @nt_gui_clear_background(double)
+declare void @nt_gui_draw_text(ptr, double, double, double, double)
+declare void @nt_gui_draw_rect(double, double, double, double, double)
+declare double @nt_gui_mouse_x()
+declare double @nt_gui_mouse_y()
+declare i32 @nt_gui_mouse_pressed()
+declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
+declare ptr @nt_coll_map_new()
+declare ptr @nt_coll_map_from_coll(ptr)
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare ptr @nt_coll_set_new()
+declare ptr @nt_coll_set_from_arr(ptr, i32)
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_coll_size(ptr)
+declare ptr @nt_coll_keys(ptr)
+declare ptr @nt_coll_values(ptr)
+declare ptr @nt_bytes_new(double)
+declare ptr @nt_bytes_from_arr(ptr)
+declare double @nt_bytes_get(ptr, double)
+declare void @nt_bytes_set(ptr, double, double)
+declare double @nt_bytes_index(ptr, double, ptr)
+declare void @nt_bytes_index_set(ptr, double, double, ptr)
+declare double @nt_bytes_len(ptr)
+declare ptr @nt_bytes_encode(ptr)
+declare ptr @nt_bytes_decode(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+declare ptr @nt_insp_new(ptr, ptr, double, double, double)
+declare void @nt_insp_add(ptr, ptr)
+declare ptr @nt_insp_done(ptr)
+declare ptr @nt_insp_num(double)
+declare ptr @nt_insp_str(ptr)
+declare ptr @nt_insp_entry(ptr, ptr)
+declare ptr @nt_insp_pair(ptr, ptr)
+declare ptr @nt_insp_coll_open(ptr, double)
+declare ptr @nt_insp_len_open(ptr, double)
+declare ptr @nt_insp_more(double)
+declare ptr @nt_dyn_inspect(ptr, double)
+declare ptr @nt_dyn_display(ptr, double)
+declare ptr @nt_dyn_str_or_null(ptr)
+
+@.str.0 = private unnamed_addr constant [2 x i8] c":\\00"
+@.str.1 = private unnamed_addr constant [5 x i8] c"slot\\00"
+@.str.2 = private unnamed_addr constant [7 x i8] c"@nt.g.\\00"
+@.str.3 = private unnamed_addr constant [6 x i8] c"count\\00"
+@.str.4 = private unnamed_addr constant [6 x i8] c"total\\00"
+
+@nt.g.Sym.width = internal global double 0x0000000000000000
+@nt.g.Sym.prefix = internal global ptr null
+
+define ptr @label(ptr %n) {
+entry:
+  %n.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %n, ptr %n.addr
+  %t0 = load ptr, ptr %n.addr
+  %t1 = call ptr @Sym.of(ptr %t0)
+  %t2 = call ptr @js_str_concat(ptr %t1, ptr @.str.0)
+  %t3 = load double, ptr @nt.g.Sym.width
+  %t4 = call ptr @js_num_to_str(double %t3)
+  %t5 = call ptr @js_str_concat(ptr %t2, ptr %t4)
+  ret ptr %t5
+}
+
+define void @Sym.constructor(ptr %this) {
+entry:
+  %this.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  ret void
+}
+
+define ptr @Sym.of(ptr %name) {
+entry:
+  %name.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %name, ptr %name.addr
+  %t0 = load ptr, ptr @nt.g.Sym.prefix
+  %t1 = load ptr, ptr %name.addr
+  %t2 = call ptr @js_str_concat(ptr %t0, ptr %t1)
+  ret ptr %t2
+}
+
+define void @Emitter.constructor(ptr %this, double %n) {
+entry:
+  %this.addr = alloca ptr
+  %n.addr = alloca double
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  store double %n, ptr %n.addr
+  %t0 = load ptr, ptr %this.addr
+  %t1 = load double, ptr %n.addr
+  %t2 = bitcast double %t1 to i64
+  %t3 = getelementptr i64, ptr %t0, i64 0
+  store i64 %t2, ptr %t3
+  %t4 = bitcast i64 %t2 to double
+  ret void
+}
+
+define ptr @Emitter.emit(ptr %this) {
+entry:
+  %this.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  %t0 = load ptr, ptr %this.addr
+  %t1 = getelementptr i64, ptr %t0, i64 0
+  %t2 = load i64, ptr %t1
+  %t3 = bitcast i64 %t2 to double
+  %t4 = call ptr @js_num_to_str(double %t3)
+  %t5 = call ptr @js_str_concat(ptr @.str.1, ptr %t4)
+  %t6 = call ptr @label(ptr %t5)
+  ret ptr %t6
+}
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  br label %L0
+L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
+  store ptr null, ptr @nt.g.Sym.prefix
+  %rc0 = call ptr @nt_str_retain(ptr @.str.2)
+  store ptr @.str.2, ptr @nt.g.Sym.prefix
+  store double 0x4010000000000000, ptr @nt.g.Sym.width
+  %t1 = load ptr, ptr @nt.g.Sym.prefix
+  call void @js_print_str(ptr %t1)
+  call void @js_print_newline()
+  %t2 = load double, ptr @nt.g.Sym.width
+  call void @js_print_num(double %t2)
+  call void @js_print_newline()
+  %t3 = call ptr @Sym.of(ptr @.str.3)
+  call void @js_print_str(ptr %t3)
+  call void @js_print_newline()
+  %t4 = call ptr @label(ptr @.str.4)
+  call void @js_print_str(ptr %t4)
+  call void @js_print_newline()
+  %t5 = call ptr @nt_obj_new(double 0x3FF0000000000000)
+  call void @Emitter.constructor(ptr %t5, double 0x401C000000000000)
+  %t6 = call ptr @Emitter.emit(ptr %t5)
+  call void @js_print_str(ptr %t6)
+  call void @js_print_newline()
+  %t7 = load ptr, ptr @nt.g.Sym.prefix
+  call void @nt_str_release(ptr %t7)
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures classes/static-instance-mix.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare void @js_eprint_begin()
+declare void @js_eprint_num(double)
+declare void @js_eprint_bool(i32)
+declare void @js_eprint_str(ptr)
+declare void @js_eprint_sep()
+declare void @js_eprint_newline()
+declare void @nt_fmt_guard(ptr, double)
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare i32 @js_str_cmp(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_index(ptr, double, ptr)
+declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
+declare ptr @nt_str_index(ptr, double, ptr)
+declare void @nt_panic_bounds(ptr, double, double, ptr)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_to_sorted(ptr, i32)
+declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)
+declare ptr @nt_arr_to_reversed(ptr)
+declare ptr @nt_arr_with(ptr, double, i64, ptr)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare double @nt_arr_nodes()
+declare double @nt_arr_node_allocs()
+declare double @nt_arr_transients()
+declare void @nt_arr_extend_own(ptr, ptr)
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare double @nt_date_now()
+declare ptr @nt_btoa(ptr)
+declare ptr @nt_atob(ptr)
+declare ptr @nt_from_char_code(double)
+declare ptr @nt_from_code_point(double)
+declare i32 @nt_num_is_finite(double)
+declare i32 @nt_num_is_integer(double)
+declare i32 @nt_num_is_safe_integer(double)
+declare ptr @nt_arr_from_str(ptr)
+declare double @js_str_char_code_at(ptr, double)
+declare double @js_str_code_point_at(ptr, double)
+declare ptr @js_str_at(ptr, double)
+declare ptr @js_str_pad_end(ptr, double, ptr)
+declare i32 @js_str_starts_with(ptr, ptr, double)
+declare i32 @js_str_ends_with(ptr, ptr, double)
+declare ptr @js_str_replace(ptr, ptr, ptr, i32)
+declare double @js_str_last_index_of(ptr, ptr)
+declare ptr @nt_str_split_n(ptr, ptr, double)
+declare double @nt_arr_at_index(ptr, double)
+declare double @nt_arr_last_indexof_num(ptr, double)
+declare double @nt_arr_last_indexof_str(ptr, ptr)
+declare ptr @nt_arr_concat(ptr, ptr)
+declare ptr @nt_arr_flat1(ptr)
+declare ptr @js_num_to_fixed(double, double)
+declare ptr @js_num_to_radix_string(double, double)
+declare ptr @nt_url_protocol(ptr)
+declare ptr @nt_url_host(ptr)
+declare ptr @nt_url_hostname(ptr)
+declare ptr @nt_url_pathname(ptr)
+declare ptr @nt_url_search(ptr)
+declare ptr @nt_url_hash(ptr)
+declare double @nt_date_field(double, double, double)
+declare ptr @nt_date_to_iso(double)
+declare double @nt_date_from_ms(double)
+declare double @nt_date_parse(ptr)
+declare ptr @nt_date_inspect(double)
+declare ptr @nt_date_to_json(double)
+declare ptr @nt_url_validate(ptr)
+declare ptr @nt_url_port(ptr)
+declare ptr @nt_url_origin(ptr)
+declare ptr @nt_qs_init(ptr)
+declare ptr @nt_qs_get(ptr, ptr)
+declare ptr @nt_qs_get_all(ptr, ptr)
+declare ptr @nt_qs_to_string(ptr)
+declare ptr @nt_encode_uri_component(ptr)
+declare ptr @nt_decode_uri_component(ptr)
+declare ptr @nt_encode_uri(ptr)
+declare ptr @nt_decode_uri(ptr)
+declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
+declare ptr @nt_http_get(ptr, ptr, ptr)
+declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)
+declare ptr @nt_headers_get(ptr, ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare ptr @nt_read_key()
+declare void @nt_raw_mode(i32)
+declare void @nt_exit(double)
+declare ptr @nt_read_file(ptr)
+declare void @nt_write_file(ptr, ptr)
+declare i32 @nt_path_exists(ptr)
+declare ptr @nt_mkdtemp(ptr)
+declare ptr @nt_readdir(ptr)
+declare void @nt_rm(ptr, i32, i32)
+declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)
+declare ptr @nt_path_join(ptr, ptr)
+declare ptr @nt_path_resolve(ptr, ptr)
+declare ptr @nt_path_dirname(ptr)
+declare ptr @nt_path_basename(ptr)
+declare ptr @nt_path_relative(ptr, ptr)
+declare ptr @nt_os_tmpdir()
+declare ptr @nt_os_homedir()
+declare ptr @nt_file_url_to_path(ptr)
+declare void @nt_gui_init_window(double, double, ptr)
+declare i32 @nt_gui_window_should_close()
+declare void @nt_gui_set_target_fps(double)
+declare void @nt_gui_begin_draw()
+declare void @nt_gui_end_draw()
+declare void @nt_gui_clear_background(double)
+declare void @nt_gui_draw_text(ptr, double, double, double, double)
+declare void @nt_gui_draw_rect(double, double, double, double, double)
+declare double @nt_gui_mouse_x()
+declare double @nt_gui_mouse_y()
+declare i32 @nt_gui_mouse_pressed()
+declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
+declare ptr @nt_coll_map_new()
+declare ptr @nt_coll_map_from_coll(ptr)
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare ptr @nt_coll_set_new()
+declare ptr @nt_coll_set_from_arr(ptr, i32)
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_coll_size(ptr)
+declare ptr @nt_coll_keys(ptr)
+declare ptr @nt_coll_values(ptr)
+declare ptr @nt_bytes_new(double)
+declare ptr @nt_bytes_from_arr(ptr)
+declare double @nt_bytes_get(ptr, double)
+declare void @nt_bytes_set(ptr, double, double)
+declare double @nt_bytes_index(ptr, double, ptr)
+declare void @nt_bytes_index_set(ptr, double, double, ptr)
+declare double @nt_bytes_len(ptr)
+declare ptr @nt_bytes_encode(ptr)
+declare ptr @nt_bytes_decode(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+declare ptr @nt_insp_new(ptr, ptr, double, double, double)
+declare void @nt_insp_add(ptr, ptr)
+declare ptr @nt_insp_done(ptr)
+declare ptr @nt_insp_num(double)
+declare ptr @nt_insp_str(ptr)
+declare ptr @nt_insp_entry(ptr, ptr)
+declare ptr @nt_insp_pair(ptr, ptr)
+declare ptr @nt_insp_coll_open(ptr, double)
+declare ptr @nt_insp_len_open(ptr, double)
+declare ptr @nt_insp_more(double)
+declare ptr @nt_dyn_inspect(ptr, double)
+declare ptr @nt_dyn_display(ptr, double)
+declare ptr @nt_dyn_str_or_null(ptr)
+
+@.str.0 = private unnamed_addr constant [2 x i8] c"(\\00"
+@.str.1 = private unnamed_addr constant [3 x i8] c", \\00"
+@.str.2 = private unnamed_addr constant [2 x i8] c")\\00"
+
+define void @Point.constructor(ptr %this, double %x, double %y) {
+entry:
+  %this.addr = alloca ptr
+  %x.addr = alloca double
+  %y.addr = alloca double
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  store double %x, ptr %x.addr
+  store double %y, ptr %y.addr
+  %t0 = load ptr, ptr %this.addr
+  %t1 = load double, ptr %x.addr
+  %t2 = bitcast double %t1 to i64
+  %t3 = getelementptr i64, ptr %t0, i64 0
+  store i64 %t2, ptr %t3
+  %t4 = bitcast i64 %t2 to double
+  %t5 = load ptr, ptr %this.addr
+  %t6 = load double, ptr %y.addr
+  %t7 = bitcast double %t6 to i64
+  %t8 = getelementptr i64, ptr %t5, i64 1
+  store i64 %t7, ptr %t8
+  %t9 = bitcast i64 %t7 to double
+  ret void
+}
+
+define ptr @Point.show(ptr %this) {
+entry:
+  %this.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  %t0 = load ptr, ptr %this.addr
+  %t1 = getelementptr i64, ptr %t0, i64 0
+  %t2 = load i64, ptr %t1
+  %t3 = bitcast i64 %t2 to double
+  %t4 = call ptr @js_num_to_str(double %t3)
+  %t5 = call ptr @js_str_concat(ptr @.str.0, ptr %t4)
+  %t6 = call ptr @js_str_concat(ptr %t5, ptr @.str.1)
+  %t7 = load ptr, ptr %this.addr
+  %t8 = getelementptr i64, ptr %t7, i64 1
+  %t9 = load i64, ptr %t8
+  %t10 = bitcast i64 %t9 to double
+  %t11 = call ptr @js_num_to_str(double %t10)
+  %t12 = call ptr @js_str_concat(ptr %t6, ptr %t11)
+  %t13 = call ptr @js_str_concat(ptr %t12, ptr @.str.2)
+  ret ptr %t13
+}
+
+define i1 @Point.far(ptr %this) {
+entry:
+  %this.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  %t0 = load ptr, ptr %this.addr
+  %t1 = call double @Point.manhattan(ptr %t0)
+  %t2 = fcmp ogt double %t1, 0x4024000000000000
+  ret i1 %t2
+}
+
+define ptr @Point.origin() {
+entry:
+  br label %L0
+L0:
+  %t0 = call ptr @nt_obj_new(double 0x4000000000000000)
+  call void @Point.constructor(ptr %t0, double 0x0000000000000000, double 0x0000000000000000)
+  ret ptr %t0
+}
+
+define double @Point.manhattan(ptr %p) {
+entry:
+  %p.addr = alloca ptr
+  %s1 = alloca double
+  %s5 = alloca double
+  br label %L0
+L0:
+  store ptr %p, ptr %p.addr
+  %t0 = load ptr, ptr %p.addr
+  %t1 = getelementptr i64, ptr %t0, i64 0
+  %t2 = load i64, ptr %t1
+  %t3 = bitcast i64 %t2 to double
+  %t4 = fcmp olt double %t3, 0x0000000000000000
+  br i1 %t4, label %tern2, label %ternelse3
+tern2:
+  %t5 = load ptr, ptr %p.addr
+  %t6 = getelementptr i64, ptr %t5, i64 0
+  %t7 = load i64, ptr %t6
+  %t8 = bitcast i64 %t7 to double
+  %t9 = fneg double %t8
+  store double %t9, ptr %s1
+  br label %ternend4
+ternelse3:
+  %t10 = load ptr, ptr %p.addr
+  %t11 = getelementptr i64, ptr %t10, i64 0
+  %t12 = load i64, ptr %t11
+  %t13 = bitcast i64 %t12 to double
+  store double %t13, ptr %s1
+  br label %ternend4
+ternend4:
+  %t14 = load double, ptr %s1
+  %t15 = load ptr, ptr %p.addr
+  %t16 = getelementptr i64, ptr %t15, i64 1
+  %t17 = load i64, ptr %t16
+  %t18 = bitcast i64 %t17 to double
+  %t19 = fcmp olt double %t18, 0x0000000000000000
+  br i1 %t19, label %tern6, label %ternelse7
+tern6:
+  %t20 = load ptr, ptr %p.addr
+  %t21 = getelementptr i64, ptr %t20, i64 1
+  %t22 = load i64, ptr %t21
+  %t23 = bitcast i64 %t22 to double
+  %t24 = fneg double %t23
+  store double %t24, ptr %s5
+  br label %ternend8
+ternelse7:
+  %t25 = load ptr, ptr %p.addr
+  %t26 = getelementptr i64, ptr %t25, i64 1
+  %t27 = load i64, ptr %t26
+  %t28 = bitcast i64 %t27 to double
+  store double %t28, ptr %s5
+  br label %ternend8
+ternend8:
+  %t29 = load double, ptr %s5
+  %t30 = fadd double %t14, %t29
+  ret double %t30
+}
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  %o.addr = alloca ptr
+  %p.addr = alloca ptr
+  %q.addr = alloca ptr
+  br label %L0
+L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
+  %t0 = call ptr @Point.origin()
+  store ptr %t0, ptr %o.addr
+  %t1 = load ptr, ptr %o.addr
+  %t2 = call ptr @Point.show(ptr %t1)
+  call void @js_print_str(ptr %t2)
+  call void @js_print_newline()
+  %t3 = load ptr, ptr %o.addr
+  %t4 = call double @Point.manhattan(ptr %t3)
+  call void @js_print_num(double %t4)
+  call void @js_print_newline()
+  %t5 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t6 = fneg double 0x4010000000000000
+  call void @Point.constructor(ptr %t5, double 0x4008000000000000, double %t6)
+  store ptr %t5, ptr %p.addr
+  %t7 = load ptr, ptr %p.addr
+  %t8 = call ptr @Point.show(ptr %t7)
+  call void @js_print_str(ptr %t8)
+  call void @js_print_newline()
+  %t9 = load ptr, ptr %p.addr
+  %t10 = call double @Point.manhattan(ptr %t9)
+  call void @js_print_num(double %t10)
+  call void @js_print_newline()
+  %t11 = load ptr, ptr %p.addr
+  %t12 = call i1 @Point.far(ptr %t11)
+  %t13 = zext i1 %t12 to i32
+  call void @js_print_bool(i32 %t13)
+  call void @js_print_newline()
+  %t14 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t15 = fneg double 0x4022000000000000
+  call void @Point.constructor(ptr %t14, double %t15, double 0x4022000000000000)
+  store ptr %t14, ptr %q.addr
+  %t16 = load ptr, ptr %q.addr
+  %t17 = call i1 @Point.far(ptr %t16)
+  %t18 = zext i1 %t17 to i32
+  call void @js_print_bool(i32 %t18)
+  call void @js_print_newline()
+  %t19 = load ptr, ptr %o.addr
+  call void @nt_obj_free(ptr %t19)
+  %t20 = load ptr, ptr %p.addr
+  call void @nt_obj_free(ptr %t20)
+  %t21 = load ptr, ptr %q.addr
+  call void @nt_obj_free(ptr %t21)
+  ret i32 0
+}
+"
+`;
+
+exports[`fixtures classes/static-method.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare void @js_eprint_begin()
+declare void @js_eprint_num(double)
+declare void @js_eprint_bool(i32)
+declare void @js_eprint_str(ptr)
+declare void @js_eprint_sep()
+declare void @js_eprint_newline()
+declare void @nt_fmt_guard(ptr, double)
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare i32 @js_str_cmp(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_index(ptr, double, ptr)
+declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
+declare ptr @nt_str_index(ptr, double, ptr)
+declare void @nt_panic_bounds(ptr, double, double, ptr)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_to_sorted(ptr, i32)
+declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)
+declare ptr @nt_arr_to_reversed(ptr)
+declare ptr @nt_arr_with(ptr, double, i64, ptr)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare double @nt_arr_nodes()
+declare double @nt_arr_node_allocs()
+declare double @nt_arr_transients()
+declare void @nt_arr_extend_own(ptr, ptr)
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare double @nt_date_now()
+declare ptr @nt_btoa(ptr)
+declare ptr @nt_atob(ptr)
+declare ptr @nt_from_char_code(double)
+declare ptr @nt_from_code_point(double)
+declare i32 @nt_num_is_finite(double)
+declare i32 @nt_num_is_integer(double)
+declare i32 @nt_num_is_safe_integer(double)
+declare ptr @nt_arr_from_str(ptr)
+declare double @js_str_char_code_at(ptr, double)
+declare double @js_str_code_point_at(ptr, double)
+declare ptr @js_str_at(ptr, double)
+declare ptr @js_str_pad_end(ptr, double, ptr)
+declare i32 @js_str_starts_with(ptr, ptr, double)
+declare i32 @js_str_ends_with(ptr, ptr, double)
+declare ptr @js_str_replace(ptr, ptr, ptr, i32)
+declare double @js_str_last_index_of(ptr, ptr)
+declare ptr @nt_str_split_n(ptr, ptr, double)
+declare double @nt_arr_at_index(ptr, double)
+declare double @nt_arr_last_indexof_num(ptr, double)
+declare double @nt_arr_last_indexof_str(ptr, ptr)
+declare ptr @nt_arr_concat(ptr, ptr)
+declare ptr @nt_arr_flat1(ptr)
+declare ptr @js_num_to_fixed(double, double)
+declare ptr @js_num_to_radix_string(double, double)
+declare ptr @nt_url_protocol(ptr)
+declare ptr @nt_url_host(ptr)
+declare ptr @nt_url_hostname(ptr)
+declare ptr @nt_url_pathname(ptr)
+declare ptr @nt_url_search(ptr)
+declare ptr @nt_url_hash(ptr)
+declare double @nt_date_field(double, double, double)
+declare ptr @nt_date_to_iso(double)
+declare double @nt_date_from_ms(double)
+declare double @nt_date_parse(ptr)
+declare ptr @nt_date_inspect(double)
+declare ptr @nt_date_to_json(double)
+declare ptr @nt_url_validate(ptr)
+declare ptr @nt_url_port(ptr)
+declare ptr @nt_url_origin(ptr)
+declare ptr @nt_qs_init(ptr)
+declare ptr @nt_qs_get(ptr, ptr)
+declare ptr @nt_qs_get_all(ptr, ptr)
+declare ptr @nt_qs_to_string(ptr)
+declare ptr @nt_encode_uri_component(ptr)
+declare ptr @nt_decode_uri_component(ptr)
+declare ptr @nt_encode_uri(ptr)
+declare ptr @nt_decode_uri(ptr)
+declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
+declare ptr @nt_http_get(ptr, ptr, ptr)
+declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)
+declare ptr @nt_headers_get(ptr, ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare ptr @nt_read_key()
+declare void @nt_raw_mode(i32)
+declare void @nt_exit(double)
+declare ptr @nt_read_file(ptr)
+declare void @nt_write_file(ptr, ptr)
+declare i32 @nt_path_exists(ptr)
+declare ptr @nt_mkdtemp(ptr)
+declare ptr @nt_readdir(ptr)
+declare void @nt_rm(ptr, i32, i32)
+declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)
+declare ptr @nt_path_join(ptr, ptr)
+declare ptr @nt_path_resolve(ptr, ptr)
+declare ptr @nt_path_dirname(ptr)
+declare ptr @nt_path_basename(ptr)
+declare ptr @nt_path_relative(ptr, ptr)
+declare ptr @nt_os_tmpdir()
+declare ptr @nt_os_homedir()
+declare ptr @nt_file_url_to_path(ptr)
+declare void @nt_gui_init_window(double, double, ptr)
+declare i32 @nt_gui_window_should_close()
+declare void @nt_gui_set_target_fps(double)
+declare void @nt_gui_begin_draw()
+declare void @nt_gui_end_draw()
+declare void @nt_gui_clear_background(double)
+declare void @nt_gui_draw_text(ptr, double, double, double, double)
+declare void @nt_gui_draw_rect(double, double, double, double, double)
+declare double @nt_gui_mouse_x()
+declare double @nt_gui_mouse_y()
+declare i32 @nt_gui_mouse_pressed()
+declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
+declare ptr @nt_coll_map_new()
+declare ptr @nt_coll_map_from_coll(ptr)
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare ptr @nt_coll_set_new()
+declare ptr @nt_coll_set_from_arr(ptr, i32)
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_coll_size(ptr)
+declare ptr @nt_coll_keys(ptr)
+declare ptr @nt_coll_values(ptr)
+declare ptr @nt_bytes_new(double)
+declare ptr @nt_bytes_from_arr(ptr)
+declare double @nt_bytes_get(ptr, double)
+declare void @nt_bytes_set(ptr, double, double)
+declare double @nt_bytes_index(ptr, double, ptr)
+declare void @nt_bytes_index_set(ptr, double, double, ptr)
+declare double @nt_bytes_len(ptr)
+declare ptr @nt_bytes_encode(ptr)
+declare ptr @nt_bytes_decode(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+declare ptr @nt_insp_new(ptr, ptr, double, double, double)
+declare void @nt_insp_add(ptr, ptr)
+declare ptr @nt_insp_done(ptr)
+declare ptr @nt_insp_num(double)
+declare ptr @nt_insp_str(ptr)
+declare ptr @nt_insp_entry(ptr, ptr)
+declare ptr @nt_insp_pair(ptr, ptr)
+declare ptr @nt_insp_coll_open(ptr, double)
+declare ptr @nt_insp_len_open(ptr, double)
+declare ptr @nt_insp_more(double)
+declare ptr @nt_dyn_inspect(ptr, double)
+declare ptr @nt_dyn_display(ptr, double)
+declare ptr @nt_dyn_str_or_null(ptr)
+
+@.str.0 = private unnamed_addr constant [7 x i8] c"@nt.g.\\00"
+@.str.1 = private unnamed_addr constant [1 x i8] c"\\00"
+@.str.2 = private unnamed_addr constant [3 x i8] c"  \\00"
+@.str.3 = private unnamed_addr constant [6 x i8] c"count\\00"
+@.str.4 = private unnamed_addr constant [2 x i8] c"7\\00"
+@.str.5 = private unnamed_addr constant [2 x i8] c"0\\00"
+@.str.6 = private unnamed_addr constant [5 x i8] c"abcd\\00"
+@.str.7 = private unnamed_addr constant [2 x i8] c"-\\00"
+@.str.8 = private unnamed_addr constant [21 x i8] c"define i32 @main() {\\00"
+@.str.9 = private unnamed_addr constant [10 x i8] c"ret i32 0\\00"
+@.str.10 = private unnamed_addr constant [7 x i8] c"; deep\\00"
+
+define void @Sym.constructor(ptr %this) {
+entry:
+  %this.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  ret void
+}
+
+define ptr @Sym.globalSym(ptr %name) {
+entry:
+  %name.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %name, ptr %name.addr
+  %t0 = load ptr, ptr %name.addr
+  %t1 = call ptr @js_str_concat(ptr @.str.0, ptr %t0)
+  %t2 = call ptr @js_str_concat(ptr %t1, ptr @.str.1)
+  ret ptr %t2
+}
+
+define void @Fmt.constructor(ptr %this) {
+entry:
+  %this.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  ret void
+}
+
+define ptr @Fmt.pad(ptr %s, double %width, ptr %fill) {
+entry:
+  %s.addr = alloca ptr
+  %width.addr = alloca double
+  %fill.addr = alloca ptr
+  %out.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %s, ptr %s.addr
+  store double %width, ptr %width.addr
+  store ptr %fill, ptr %fill.addr
+  store ptr null, ptr %out.addr
+  %t0 = load ptr, ptr %s.addr
+  %rc1 = call ptr @nt_str_retain(ptr %t0)
+  store ptr %t0, ptr %out.addr
+  br label %while1
+while1:
+  %t2 = load ptr, ptr %out.addr
+  %t3 = call double @js_str_len(ptr %t2)
+  %t4 = load double, ptr %width.addr
+  %t5 = fcmp olt double %t3, %t4
+  br i1 %t5, label %body2, label %endwhile3
+body2:
+  %t6 = load ptr, ptr %fill.addr
+  %t7 = load ptr, ptr %out.addr
+  %t8 = call ptr @js_str_concat(ptr %t6, ptr %t7)
+  store ptr %t8, ptr %out.addr
+  br label %while1
+endwhile3:
+  %t9 = load ptr, ptr %out.addr
+  ret ptr %t9
+}
+
+define void @Ir.constructor(ptr %this) {
+entry:
+  %this.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  ret void
+}
+
+define ptr @Ir.indent(double %depth) {
+entry:
+  %depth.addr = alloca double
+  br label %L0
+L0:
+  store double %depth, ptr %depth.addr
+  %t0 = load double, ptr %depth.addr
+  %t1 = fcmp ole double %t0, 0x0000000000000000
+  br i1 %t1, label %then1, label %endif2
+then1:
+  %rc2 = call ptr @nt_str_retain(ptr @.str.1)
+  ret ptr @.str.1
+endif2:
+  %t3 = load double, ptr %depth.addr
+  %t4 = fsub double %t3, 0x3FF0000000000000
+  %t5 = call ptr @Ir.indent(double %t4)
+  %t6 = call ptr @js_str_concat(ptr @.str.2, ptr %t5)
+  ret ptr %t6
+}
+
+define ptr @Ir.line(double %depth, ptr %text) {
+entry:
+  %depth.addr = alloca double
+  %text.addr = alloca ptr
+  br label %L0
+L0:
+  store double %depth, ptr %depth.addr
+  store ptr %text, ptr %text.addr
+  %t0 = load double, ptr %depth.addr
+  %t1 = call ptr @Ir.indent(double %t0)
+  %t2 = load ptr, ptr %text.addr
+  %t3 = call ptr @js_str_concat(ptr %t1, ptr %t2)
+  ret ptr %t3
+}
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  br label %L0
+L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
+  %t0 = call ptr @Sym.globalSym(ptr @.str.3)
+  call void @js_print_str(ptr %t0)
+  call void @js_print_newline()
+  %t1 = call ptr @Fmt.pad(ptr @.str.4, double 0x4008000000000000, ptr @.str.5)
+  call void @js_print_str(ptr %t1)
+  call void @js_print_newline()
+  %t2 = call ptr @Fmt.pad(ptr @.str.6, double 0x4008000000000000, ptr @.str.5)
+  call void @js_print_str(ptr %t2)
+  call void @js_print_newline()
+  %t3 = call ptr @Fmt.pad(ptr @.str.1, double 0x4010000000000000, ptr @.str.7)
+  call void @js_print_str(ptr %t3)
+  call void @js_print_newline()
+  %t4 = call ptr @Ir.line(double 0x0000000000000000, ptr @.str.8)
+  call void @js_print_str(ptr %t4)
+  call void @js_print_newline()
+  %t5 = call ptr @Ir.line(double 0x3FF0000000000000, ptr @.str.9)
+  call void @js_print_str(ptr %t5)
+  call void @js_print_newline()
+  %t6 = call ptr @Ir.line(double 0x4008000000000000, ptr @.str.10)
+  call void @js_print_str(ptr %t6)
+  call void @js_print_newline()
+  ret i32 0
+}
+"
+`;
+
 exports[`fixtures generics/array-generic.ts emits stable LLVM IR (snapshot) 1`] = `
 "; ModuleID = 'nativets'
 declare void @js_print_num(double)
@@ -3972,6 +5163,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -4267,6 +5459,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -4574,6 +5767,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -4887,6 +6081,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -5172,6 +6367,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -5705,6 +6901,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -6019,6 +7216,367 @@ nce4:
 "
 `;
 
+exports[`fixtures selfhost-scan/param-default-scope.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare void @js_eprint_begin()
+declare void @js_eprint_num(double)
+declare void @js_eprint_bool(i32)
+declare void @js_eprint_str(ptr)
+declare void @js_eprint_sep()
+declare void @js_eprint_newline()
+declare void @nt_fmt_guard(ptr, double)
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare i32 @js_str_cmp(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @fmax(double, double)
+declare double @fmin(double, double)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_index(ptr, double, ptr)
+declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
+declare ptr @nt_str_index(ptr, double, ptr)
+declare void @nt_panic_bounds(ptr, double, double, ptr)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_to_sorted(ptr, i32)
+declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)
+declare ptr @nt_arr_to_reversed(ptr)
+declare ptr @nt_arr_with(ptr, double, i64, ptr)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare double @nt_arr_nodes()
+declare double @nt_arr_node_allocs()
+declare double @nt_arr_transients()
+declare void @nt_arr_extend_own(ptr, ptr)
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare double @nt_date_now()
+declare ptr @nt_btoa(ptr)
+declare ptr @nt_atob(ptr)
+declare ptr @nt_from_char_code(double)
+declare ptr @nt_from_code_point(double)
+declare i32 @nt_num_is_finite(double)
+declare i32 @nt_num_is_integer(double)
+declare i32 @nt_num_is_safe_integer(double)
+declare ptr @nt_arr_from_str(ptr)
+declare double @js_str_char_code_at(ptr, double)
+declare double @js_str_code_point_at(ptr, double)
+declare ptr @js_str_at(ptr, double)
+declare ptr @js_str_pad_end(ptr, double, ptr)
+declare i32 @js_str_starts_with(ptr, ptr, double)
+declare i32 @js_str_ends_with(ptr, ptr, double)
+declare ptr @js_str_replace(ptr, ptr, ptr, i32)
+declare double @js_str_last_index_of(ptr, ptr)
+declare ptr @nt_str_split_n(ptr, ptr, double)
+declare double @nt_arr_at_index(ptr, double)
+declare double @nt_arr_last_indexof_num(ptr, double)
+declare double @nt_arr_last_indexof_str(ptr, ptr)
+declare ptr @nt_arr_concat(ptr, ptr)
+declare ptr @nt_arr_flat1(ptr)
+declare ptr @js_num_to_fixed(double, double)
+declare ptr @js_num_to_radix_string(double, double)
+declare ptr @nt_url_protocol(ptr)
+declare ptr @nt_url_host(ptr)
+declare ptr @nt_url_hostname(ptr)
+declare ptr @nt_url_pathname(ptr)
+declare ptr @nt_url_search(ptr)
+declare ptr @nt_url_hash(ptr)
+declare double @nt_date_field(double, double, double)
+declare ptr @nt_date_to_iso(double)
+declare double @nt_date_from_ms(double)
+declare double @nt_date_parse(ptr)
+declare ptr @nt_date_inspect(double)
+declare ptr @nt_date_to_json(double)
+declare ptr @nt_url_validate(ptr)
+declare ptr @nt_url_port(ptr)
+declare ptr @nt_url_origin(ptr)
+declare ptr @nt_qs_init(ptr)
+declare ptr @nt_qs_get(ptr, ptr)
+declare ptr @nt_qs_get_all(ptr, ptr)
+declare ptr @nt_qs_to_string(ptr)
+declare ptr @nt_encode_uri_component(ptr)
+declare ptr @nt_decode_uri_component(ptr)
+declare ptr @nt_encode_uri(ptr)
+declare ptr @nt_decode_uri(ptr)
+declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
+declare ptr @nt_http_get(ptr, ptr, ptr)
+declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)
+declare ptr @nt_headers_get(ptr, ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare ptr @nt_read_key()
+declare void @nt_raw_mode(i32)
+declare void @nt_exit(double)
+declare ptr @nt_read_file(ptr)
+declare void @nt_write_file(ptr, ptr)
+declare i32 @nt_path_exists(ptr)
+declare ptr @nt_mkdtemp(ptr)
+declare ptr @nt_readdir(ptr)
+declare void @nt_rm(ptr, i32, i32)
+declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)
+declare ptr @nt_path_join(ptr, ptr)
+declare ptr @nt_path_resolve(ptr, ptr)
+declare ptr @nt_path_dirname(ptr)
+declare ptr @nt_path_basename(ptr)
+declare ptr @nt_path_relative(ptr, ptr)
+declare ptr @nt_os_tmpdir()
+declare ptr @nt_os_homedir()
+declare ptr @nt_file_url_to_path(ptr)
+declare void @nt_gui_init_window(double, double, ptr)
+declare i32 @nt_gui_window_should_close()
+declare void @nt_gui_set_target_fps(double)
+declare void @nt_gui_begin_draw()
+declare void @nt_gui_end_draw()
+declare void @nt_gui_clear_background(double)
+declare void @nt_gui_draw_text(ptr, double, double, double, double)
+declare void @nt_gui_draw_rect(double, double, double, double, double)
+declare double @nt_gui_mouse_x()
+declare double @nt_gui_mouse_y()
+declare i32 @nt_gui_mouse_pressed()
+declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
+declare ptr @nt_coll_map_new()
+declare ptr @nt_coll_map_from_coll(ptr)
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare ptr @nt_coll_set_new()
+declare ptr @nt_coll_set_from_arr(ptr, i32)
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_coll_size(ptr)
+declare ptr @nt_coll_keys(ptr)
+declare ptr @nt_coll_values(ptr)
+declare ptr @nt_bytes_new(double)
+declare ptr @nt_bytes_from_arr(ptr)
+declare double @nt_bytes_get(ptr, double)
+declare void @nt_bytes_set(ptr, double, double)
+declare double @nt_bytes_index(ptr, double, ptr)
+declare void @nt_bytes_index_set(ptr, double, double, ptr)
+declare double @nt_bytes_len(ptr)
+declare ptr @nt_bytes_encode(ptr)
+declare ptr @nt_bytes_decode(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+declare ptr @nt_insp_new(ptr, ptr, double, double, double)
+declare void @nt_insp_add(ptr, ptr)
+declare ptr @nt_insp_done(ptr)
+declare ptr @nt_insp_num(double)
+declare ptr @nt_insp_str(ptr)
+declare ptr @nt_insp_entry(ptr, ptr)
+declare ptr @nt_insp_pair(ptr, ptr)
+declare ptr @nt_insp_coll_open(ptr, double)
+declare ptr @nt_insp_len_open(ptr, double)
+declare ptr @nt_insp_more(double)
+declare ptr @nt_dyn_inspect(ptr, double)
+declare ptr @nt_dyn_display(ptr, double)
+declare ptr @nt_dyn_str_or_null(ptr)
+
+@.str.0 = private unnamed_addr constant [9 x i8] c"fallback\\00"
+@.str.1 = private unnamed_addr constant [6 x i8] c"given\\00"
+
+@nt.g.DEFAULT_N = internal global double 0x0000000000000000
+@nt.g.DEFAULT_S = internal global ptr null
+
+define double @withNum(double %n) {
+entry:
+  %n.addr = alloca double
+  br label %L0
+L0:
+  store double %n, ptr %n.addr
+  %t0 = load double, ptr %n.addr
+  %t1 = fmul double %t0, 0x4000000000000000
+  ret double %t1
+}
+
+define ptr @withStr(ptr %s) {
+entry:
+  %s.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %s, ptr %s.addr
+  %t0 = load ptr, ptr %s.addr
+  %t1 = call ptr @js_str_upper(ptr %t0)
+  ret ptr %t1
+}
+
+define double @offset(double %n) {
+entry:
+  %n.addr = alloca double
+  br label %L0
+L0:
+  store double %n, ptr %n.addr
+  %t0 = load double, ptr %n.addr
+  ret double %t0
+}
+
+define void @Box.constructor(ptr %this, double %n) {
+entry:
+  %this.addr = alloca ptr
+  %n.addr = alloca double
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  store double %n, ptr %n.addr
+  %t0 = load ptr, ptr %this.addr
+  %t1 = load double, ptr %n.addr
+  %t2 = bitcast double %t1 to i64
+  %t3 = getelementptr i64, ptr %t0, i64 0
+  store i64 %t2, ptr %t3
+  %t4 = bitcast i64 %t2 to double
+  ret void
+}
+
+define double @Box.get(ptr %this) {
+entry:
+  %this.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  %t0 = load ptr, ptr %this.addr
+  %t1 = getelementptr i64, ptr %t0, i64 0
+  %t2 = load i64, ptr %t1
+  %t3 = bitcast i64 %t2 to double
+  ret double %t3
+}
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  br label %L0
+L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
+  store ptr null, ptr @nt.g.DEFAULT_S
+  store double 0x401C000000000000, ptr @nt.g.DEFAULT_N
+  %rc0 = call ptr @nt_str_retain(ptr @.str.0)
+  store ptr @.str.0, ptr @nt.g.DEFAULT_S
+  %t1 = load double, ptr @nt.g.DEFAULT_N
+  %t2 = call double @withNum(double %t1)
+  %t3 = call double @withNum(double 0x3FF0000000000000)
+  call void @js_print_num(double %t2)
+  call void @js_print_sep()
+  call void @js_print_num(double %t3)
+  call void @js_print_newline()
+  %t4 = load ptr, ptr @nt.g.DEFAULT_S
+  %t5 = call ptr @withStr(ptr %t4)
+  %t6 = call ptr @withStr(ptr @.str.1)
+  call void @nt_fmt_guard(ptr %t5, double 0x3FF0000000000000)
+  call void @js_print_str(ptr %t5)
+  call void @js_print_sep()
+  call void @js_print_str(ptr %t6)
+  call void @js_print_newline()
+  %t7 = load double, ptr @nt.g.DEFAULT_N
+  %t8 = fadd double %t7, 0x3FF0000000000000
+  %t9 = call double @offset(double %t8)
+  %t10 = call double @offset(double 0x0000000000000000)
+  call void @js_print_num(double %t9)
+  call void @js_print_sep()
+  call void @js_print_num(double %t10)
+  call void @js_print_newline()
+  %t11 = call ptr @nt_obj_new(double 0x3FF0000000000000)
+  %t12 = load double, ptr @nt.g.DEFAULT_N
+  call void @Box.constructor(ptr %t11, double %t12)
+  %t13 = call double @Box.get(ptr %t11)
+  %t14 = call ptr @nt_obj_new(double 0x3FF0000000000000)
+  call void @Box.constructor(ptr %t14, double 0x3FF0000000000000)
+  %t15 = call double @Box.get(ptr %t14)
+  call void @js_print_num(double %t13)
+  call void @js_print_sep()
+  call void @js_print_num(double %t15)
+  call void @js_print_newline()
+  %t16 = load ptr, ptr @nt.g.DEFAULT_S
+  call void @nt_str_release(ptr %t16)
+  ret i32 0
+}
+"
+`;
+
 exports[`fixtures selfhost-scan/scanners.ts emits stable LLVM IR (snapshot) 1`] = `
 "; ModuleID = 'nativets'
 declare void @js_print_num(double)
@@ -6076,6 +7634,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -8217,6 +9776,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -8471,6 +10031,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -8729,6 +10290,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -8984,6 +10546,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -9239,6 +10802,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -9495,6 +11059,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -9752,6 +11317,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -10012,6 +11578,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -10281,6 +11848,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -10536,6 +12104,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -10934,6 +12503,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -11261,6 +12831,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -11558,6 +13129,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -11945,6 +13517,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -12322,6 +13895,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -12713,6 +14287,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -13192,6 +14767,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -13522,6 +15098,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -13903,6 +15480,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -14233,6 +15811,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -14501,6 +16080,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -14785,6 +16365,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -15055,6 +16636,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -15346,6 +16928,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -15620,6 +17203,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -15894,6 +17478,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -16371,6 +17956,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -16666,6 +18252,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -16956,6 +18543,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -17304,6 +18892,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -17579,6 +19168,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -18037,6 +19627,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -18302,6 +19893,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -18652,6 +20244,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -19005,6 +20598,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -19299,6 +20893,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -19568,6 +21163,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -19861,6 +21457,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -20155,6 +21752,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -20497,6 +22095,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -20810,6 +22409,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -21173,6 +22773,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -21446,6 +23047,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -21769,6 +23371,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -22086,6 +23689,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -22366,6 +23970,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -22710,6 +24315,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -23099,6 +24705,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -23526,6 +25133,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -23851,6 +25459,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -24180,6 +25789,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -24651,6 +26261,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -24961,6 +26572,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -25266,6 +26878,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -25569,6 +27182,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -25877,6 +27491,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -26205,6 +27820,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -26619,6 +28235,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -26963,6 +28580,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -27260,6 +28878,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -27549,6 +29168,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -27884,6 +29504,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -28200,6 +29821,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -28689,6 +30311,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -29107,6 +30730,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -29481,6 +31105,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -29821,6 +31446,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -30154,6 +31780,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -30414,6 +32041,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -30671,6 +32299,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -30946,6 +32575,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -31319,6 +32949,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -31865,6 +33496,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -32348,6 +33980,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -32707,6 +34340,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -33140,6 +34774,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -33440,6 +35075,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -33814,6 +35450,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -34113,6 +35750,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -34667,6 +36305,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -35058,6 +36697,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -35496,6 +37136,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -35762,6 +37403,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -36038,6 +37680,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -36305,6 +37948,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -36568,6 +38212,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -36850,6 +38495,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -37133,6 +38779,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -37405,6 +39052,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -37765,6 +39413,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -38149,6 +39798,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -38618,6 +40268,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -39002,6 +40653,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -39356,6 +41008,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -39875,6 +41528,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -40311,6 +41965,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -40661,6 +42316,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -41009,6 +42665,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -41401,6 +43058,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -41765,6 +43423,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -42052,6 +43711,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -42398,6 +44058,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -42711,6 +44372,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -43019,6 +44681,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -43338,6 +45001,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -43698,6 +45362,7 @@ declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
 declare ptr @nt_str_index(ptr, double, ptr)
 declare void @nt_panic_bounds(ptr, double, double, ptr)
 declare i64 @nt_arr_pop(ptr)
@@ -44052,1540 +45717,6 @@ rede5:
   call void @nt_obj_free(ptr %t90)
   %t91 = load ptr, ptr %nv.addr
   call void @nt_arr_free(ptr %t91)
-  ret i32 0
-}
-"
-`;
-
-exports[`fixtures selfhost-scan/param-default-scope.ts emits stable LLVM IR (snapshot) 1`] = `
-"; ModuleID = 'nativets'
-declare void @js_print_num(double)
-declare void @js_print_bool(i32)
-declare void @js_print_str(ptr)
-declare void @js_print_sep()
-declare void @js_print_newline()
-declare void @js_eprint_begin()
-declare void @js_eprint_num(double)
-declare void @js_eprint_bool(i32)
-declare void @js_eprint_str(ptr)
-declare void @js_eprint_sep()
-declare void @js_eprint_newline()
-declare void @nt_fmt_guard(ptr, double)
-declare double @pow(double, double)
-declare ptr @js_str_concat(ptr, ptr)
-declare double @js_str_len(ptr)
-declare i32 @js_str_eq(ptr, ptr)
-declare i32 @js_str_cmp(ptr, ptr)
-declare ptr @js_num_to_str(double)
-declare ptr @js_bool_to_str(i32)
-declare double @js_bit_and(double, double)
-declare double @js_bit_or(double, double)
-declare double @js_bit_xor(double, double)
-declare double @js_bit_not(double)
-declare double @js_shl(double, double)
-declare double @js_shr(double, double)
-declare double @js_ushr(double, double)
-declare double @js_str_to_num(ptr)
-declare double @js_math_round(double)
-declare double @js_parse_int(ptr, double)
-declare double @js_parse_float(ptr)
-declare double @floor(double)
-declare double @ceil(double)
-declare double @sqrt(double)
-declare double @trunc(double)
-declare double @fabs(double)
-declare double @fmax(double, double)
-declare double @fmin(double, double)
-declare ptr @js_str_upper(ptr)
-declare ptr @js_str_lower(ptr)
-declare ptr @js_str_trim(ptr)
-declare ptr @js_str_char_at(ptr, double)
-declare ptr @js_str_slice(ptr, double, double)
-declare ptr @js_str_substring(ptr, double, double)
-declare ptr @js_str_repeat(ptr, double)
-declare ptr @js_str_pad_start(ptr, double, ptr)
-declare i32 @js_str_includes(ptr, ptr)
-declare double @js_str_index_of(ptr, ptr)
-declare ptr @nt_str_retain(ptr)
-declare void @nt_str_release(ptr)
-declare double @nt_str_live()
-declare ptr @nt_arr_new(double)
-declare double @nt_arr_push(ptr, i64)
-declare i64 @nt_arr_get(ptr, double)
-declare i64 @nt_arr_index(ptr, double, ptr)
-declare i64 @nt_nonnull(ptr, ptr)
-declare ptr @nt_str_index(ptr, double, ptr)
-declare void @nt_panic_bounds(ptr, double, double, ptr)
-declare i64 @nt_arr_pop(ptr)
-declare double @nt_arr_len(ptr)
-declare ptr @nt_arr_join_num(ptr, ptr)
-declare ptr @nt_arr_join_str(ptr, ptr)
-declare i32 @nt_arr_includes_num(ptr, double)
-declare i32 @nt_arr_includes_str(ptr, ptr)
-declare double @nt_arr_indexof_num(ptr, double)
-declare double @nt_arr_indexof_str(ptr, ptr)
-declare ptr @nt_arr_copy(ptr)
-declare ptr @nt_arr_to_sorted(ptr, i32)
-declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)
-declare ptr @nt_arr_to_reversed(ptr)
-declare ptr @nt_arr_with(ptr, double, i64, ptr)
-declare void @nt_arr_free(ptr)
-declare double @nt_arr_live()
-declare double @nt_arr_nodes()
-declare double @nt_arr_node_allocs()
-declare double @nt_arr_transients()
-declare void @nt_arr_extend_own(ptr, ptr)
-declare ptr @nt_obj_new(double)
-declare void @nt_obj_free(ptr)
-declare double @nt_obj_live()
-declare ptr @nt_str_split(ptr, ptr)
-declare ptr @nt_arr_reverse(ptr)
-declare double @nt_date_now()
-declare ptr @nt_btoa(ptr)
-declare ptr @nt_atob(ptr)
-declare ptr @nt_from_char_code(double)
-declare ptr @nt_from_code_point(double)
-declare i32 @nt_num_is_finite(double)
-declare i32 @nt_num_is_integer(double)
-declare i32 @nt_num_is_safe_integer(double)
-declare ptr @nt_arr_from_str(ptr)
-declare double @js_str_char_code_at(ptr, double)
-declare double @js_str_code_point_at(ptr, double)
-declare ptr @js_str_at(ptr, double)
-declare ptr @js_str_pad_end(ptr, double, ptr)
-declare i32 @js_str_starts_with(ptr, ptr, double)
-declare i32 @js_str_ends_with(ptr, ptr, double)
-declare ptr @js_str_replace(ptr, ptr, ptr, i32)
-declare double @js_str_last_index_of(ptr, ptr)
-declare ptr @nt_str_split_n(ptr, ptr, double)
-declare double @nt_arr_at_index(ptr, double)
-declare double @nt_arr_last_indexof_num(ptr, double)
-declare double @nt_arr_last_indexof_str(ptr, ptr)
-declare ptr @nt_arr_concat(ptr, ptr)
-declare ptr @nt_arr_flat1(ptr)
-declare ptr @js_num_to_fixed(double, double)
-declare ptr @js_num_to_radix_string(double, double)
-declare ptr @nt_url_protocol(ptr)
-declare ptr @nt_url_host(ptr)
-declare ptr @nt_url_hostname(ptr)
-declare ptr @nt_url_pathname(ptr)
-declare ptr @nt_url_search(ptr)
-declare ptr @nt_url_hash(ptr)
-declare double @nt_date_field(double, double, double)
-declare ptr @nt_date_to_iso(double)
-declare double @nt_date_from_ms(double)
-declare double @nt_date_parse(ptr)
-declare ptr @nt_date_inspect(double)
-declare ptr @nt_date_to_json(double)
-declare ptr @nt_url_validate(ptr)
-declare ptr @nt_url_port(ptr)
-declare ptr @nt_url_origin(ptr)
-declare ptr @nt_qs_init(ptr)
-declare ptr @nt_qs_get(ptr, ptr)
-declare ptr @nt_qs_get_all(ptr, ptr)
-declare ptr @nt_qs_to_string(ptr)
-declare ptr @nt_encode_uri_component(ptr)
-declare ptr @nt_decode_uri_component(ptr)
-declare ptr @nt_encode_uri(ptr)
-declare ptr @nt_decode_uri(ptr)
-declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
-declare ptr @nt_http_get(ptr, ptr, ptr)
-declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)
-declare ptr @nt_headers_get(ptr, ptr)
-declare ptr @nt_arr_slice(ptr, double, double)
-declare void @nt_arr_extend(ptr, ptr)
-declare ptr @js_json_quote(ptr)
-declare ptr @nt_json_parse(ptr)
-declare double @nt_dyn_as_number(ptr)
-declare i32 @nt_dyn_as_bool(ptr)
-declare ptr @nt_dyn_as_string(ptr)
-declare i32 @nt_dyn_require_object(ptr)
-declare ptr @nt_dyn_require_field(ptr, ptr)
-declare i32 @nt_dyn_require_array(ptr)
-declare double @nt_dyn_len(ptr)
-declare ptr @nt_dyn_elem(ptr, double)
-declare ptr @nt_dyn_get_field(ptr, ptr)
-declare void @nt_dyn_print(ptr)
-declare i32 @nt_exc_pending()
-declare ptr @nt_exc_message()
-declare void @nt_exc_clear()
-declare void @nt_exc_abort()
-declare void @nt_init_args(i32, ptr)
-declare ptr @nt_argv()
-declare ptr @nt_getenv(ptr)
-declare ptr @nt_read_line()
-declare ptr @nt_read_stdin()
-declare ptr @nt_read_key()
-declare void @nt_raw_mode(i32)
-declare void @nt_exit(double)
-declare ptr @nt_read_file(ptr)
-declare void @nt_write_file(ptr, ptr)
-declare i32 @nt_path_exists(ptr)
-declare ptr @nt_mkdtemp(ptr)
-declare ptr @nt_readdir(ptr)
-declare void @nt_rm(ptr, i32, i32)
-declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)
-declare ptr @nt_path_join(ptr, ptr)
-declare ptr @nt_path_resolve(ptr, ptr)
-declare ptr @nt_path_dirname(ptr)
-declare ptr @nt_path_basename(ptr)
-declare ptr @nt_path_relative(ptr, ptr)
-declare ptr @nt_os_tmpdir()
-declare ptr @nt_os_homedir()
-declare ptr @nt_file_url_to_path(ptr)
-declare void @nt_gui_init_window(double, double, ptr)
-declare i32 @nt_gui_window_should_close()
-declare void @nt_gui_set_target_fps(double)
-declare void @nt_gui_begin_draw()
-declare void @nt_gui_end_draw()
-declare void @nt_gui_clear_background(double)
-declare void @nt_gui_draw_text(ptr, double, double, double, double)
-declare void @nt_gui_draw_rect(double, double, double, double, double)
-declare double @nt_gui_mouse_x()
-declare double @nt_gui_mouse_y()
-declare i32 @nt_gui_mouse_pressed()
-declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
-declare ptr @nt_coll_map_new()
-declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
-declare i64 @nt_map_get_slot(ptr, i32, i64)
-declare i32 @nt_map_has_slot(ptr, i32, i64)
-declare ptr @nt_map_remove_slot(ptr, i32, i64)
-declare ptr @nt_coll_set_new()
-declare ptr @nt_set_add_slot(ptr, i32, i64)
-declare i32 @nt_set_has_slot(ptr, i32, i64)
-declare ptr @nt_set_remove_slot(ptr, i32, i64)
-declare i64 @nt_coll_size(ptr)
-declare ptr @nt_coll_keys(ptr)
-declare ptr @nt_coll_values(ptr)
-declare ptr @nt_bytes_new(double)
-declare ptr @nt_bytes_from_arr(ptr)
-declare double @nt_bytes_get(ptr, double)
-declare void @nt_bytes_set(ptr, double, double)
-declare double @nt_bytes_index(ptr, double, ptr)
-declare void @nt_bytes_index_set(ptr, double, double, ptr)
-declare double @nt_bytes_len(ptr)
-declare ptr @nt_bytes_encode(ptr)
-declare ptr @nt_bytes_decode(ptr)
-declare void @nt_sched_init()
-declare i64 @nt_spawn_closure(ptr, ptr, i64)
-declare void @nt_send_slot(i64, i64)
-declare i64 @nt_receive_slot()
-declare i64 @nt_self()
-declare void @nt_drain()
-declare void @nt_register(ptr, i64)
-declare i64 @nt_whereis(ptr)
-declare void @nt_link(i64)
-declare i64 @nt_monitor(i64)
-declare void @nt_trap_exit(i32)
-declare void @nt_actor_exit(i64, i64)
-declare void @nt_crash(i64)
-declare void @nt_kill(i64)
-declare i64 @nt_sup_new(i64, i64, i64)
-declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
-declare i64 @nt_sup_start(i64)
-declare ptr @nt_insp_new(ptr, ptr, double, double, double)
-declare void @nt_insp_add(ptr, ptr)
-declare ptr @nt_insp_done(ptr)
-declare ptr @nt_insp_num(double)
-declare ptr @nt_insp_str(ptr)
-declare ptr @nt_insp_entry(ptr, ptr)
-declare ptr @nt_insp_pair(ptr, ptr)
-declare ptr @nt_insp_coll_open(ptr, double)
-declare ptr @nt_insp_len_open(ptr, double)
-declare ptr @nt_insp_more(double)
-declare ptr @nt_dyn_inspect(ptr, double)
-declare ptr @nt_dyn_display(ptr, double)
-declare ptr @nt_dyn_str_or_null(ptr)
-
-@.str.0 = private unnamed_addr constant [9 x i8] c"fallback\\00"
-@.str.1 = private unnamed_addr constant [6 x i8] c"given\\00"
-
-@nt.g.DEFAULT_N = internal global double 0x0000000000000000
-@nt.g.DEFAULT_S = internal global ptr null
-
-define double @withNum(double %n) {
-entry:
-  %n.addr = alloca double
-  br label %L0
-L0:
-  store double %n, ptr %n.addr
-  %t0 = load double, ptr %n.addr
-  %t1 = fmul double %t0, 0x4000000000000000
-  ret double %t1
-}
-
-define ptr @withStr(ptr %s) {
-entry:
-  %s.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %s, ptr %s.addr
-  %t0 = load ptr, ptr %s.addr
-  %t1 = call ptr @js_str_upper(ptr %t0)
-  ret ptr %t1
-}
-
-define double @offset(double %n) {
-entry:
-  %n.addr = alloca double
-  br label %L0
-L0:
-  store double %n, ptr %n.addr
-  %t0 = load double, ptr %n.addr
-  ret double %t0
-}
-
-define void @Box.constructor(ptr %this, double %n) {
-entry:
-  %this.addr = alloca ptr
-  %n.addr = alloca double
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  store double %n, ptr %n.addr
-  %t0 = load ptr, ptr %this.addr
-  %t1 = load double, ptr %n.addr
-  %t2 = bitcast double %t1 to i64
-  %t3 = getelementptr i64, ptr %t0, i64 0
-  store i64 %t2, ptr %t3
-  %t4 = bitcast i64 %t2 to double
-  ret void
-}
-
-define double @Box.get(ptr %this) {
-entry:
-  %this.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  %t0 = load ptr, ptr %this.addr
-  %t1 = getelementptr i64, ptr %t0, i64 0
-  %t2 = load i64, ptr %t1
-  %t3 = bitcast i64 %t2 to double
-  ret double %t3
-}
-
-define i32 @main(i32 %argc, ptr %argv) {
-entry:
-  br label %L0
-L0:
-  call void @nt_init_args(i32 %argc, ptr %argv)
-  store ptr null, ptr @nt.g.DEFAULT_S
-  store double 0x401C000000000000, ptr @nt.g.DEFAULT_N
-  %rc0 = call ptr @nt_str_retain(ptr @.str.0)
-  store ptr @.str.0, ptr @nt.g.DEFAULT_S
-  %t1 = load double, ptr @nt.g.DEFAULT_N
-  %t2 = call double @withNum(double %t1)
-  %t3 = call double @withNum(double 0x3FF0000000000000)
-  call void @js_print_num(double %t2)
-  call void @js_print_sep()
-  call void @js_print_num(double %t3)
-  call void @js_print_newline()
-  %t4 = load ptr, ptr @nt.g.DEFAULT_S
-  %t5 = call ptr @withStr(ptr %t4)
-  %t6 = call ptr @withStr(ptr @.str.1)
-  call void @nt_fmt_guard(ptr %t5, double 0x3FF0000000000000)
-  call void @js_print_str(ptr %t5)
-  call void @js_print_sep()
-  call void @js_print_str(ptr %t6)
-  call void @js_print_newline()
-  %t7 = load double, ptr @nt.g.DEFAULT_N
-  %t8 = fadd double %t7, 0x3FF0000000000000
-  %t9 = call double @offset(double %t8)
-  %t10 = call double @offset(double 0x0000000000000000)
-  call void @js_print_num(double %t9)
-  call void @js_print_sep()
-  call void @js_print_num(double %t10)
-  call void @js_print_newline()
-  %t11 = call ptr @nt_obj_new(double 0x3FF0000000000000)
-  %t12 = load double, ptr @nt.g.DEFAULT_N
-  call void @Box.constructor(ptr %t11, double %t12)
-  %t13 = call double @Box.get(ptr %t11)
-  %t14 = call ptr @nt_obj_new(double 0x3FF0000000000000)
-  call void @Box.constructor(ptr %t14, double 0x3FF0000000000000)
-  %t15 = call double @Box.get(ptr %t14)
-  call void @js_print_num(double %t13)
-  call void @js_print_sep()
-  call void @js_print_num(double %t15)
-  call void @js_print_newline()
-  %t16 = load ptr, ptr @nt.g.DEFAULT_S
-  call void @nt_str_release(ptr %t16)
-  ret i32 0
-}
-"
-`;
-
-exports[`fixtures classes/static-field.ts emits stable LLVM IR (snapshot) 1`] = `
-"; ModuleID = 'nativets'
-declare void @js_print_num(double)
-declare void @js_print_bool(i32)
-declare void @js_print_str(ptr)
-declare void @js_print_sep()
-declare void @js_print_newline()
-declare void @js_eprint_begin()
-declare void @js_eprint_num(double)
-declare void @js_eprint_bool(i32)
-declare void @js_eprint_str(ptr)
-declare void @js_eprint_sep()
-declare void @js_eprint_newline()
-declare void @nt_fmt_guard(ptr, double)
-declare double @pow(double, double)
-declare ptr @js_str_concat(ptr, ptr)
-declare double @js_str_len(ptr)
-declare i32 @js_str_eq(ptr, ptr)
-declare i32 @js_str_cmp(ptr, ptr)
-declare ptr @js_num_to_str(double)
-declare ptr @js_bool_to_str(i32)
-declare double @js_bit_and(double, double)
-declare double @js_bit_or(double, double)
-declare double @js_bit_xor(double, double)
-declare double @js_bit_not(double)
-declare double @js_shl(double, double)
-declare double @js_shr(double, double)
-declare double @js_ushr(double, double)
-declare double @js_str_to_num(ptr)
-declare double @js_math_round(double)
-declare double @js_parse_int(ptr, double)
-declare double @js_parse_float(ptr)
-declare double @floor(double)
-declare double @ceil(double)
-declare double @sqrt(double)
-declare double @trunc(double)
-declare double @fabs(double)
-declare double @fmax(double, double)
-declare double @fmin(double, double)
-declare ptr @js_str_upper(ptr)
-declare ptr @js_str_lower(ptr)
-declare ptr @js_str_trim(ptr)
-declare ptr @js_str_char_at(ptr, double)
-declare ptr @js_str_slice(ptr, double, double)
-declare ptr @js_str_substring(ptr, double, double)
-declare ptr @js_str_repeat(ptr, double)
-declare ptr @js_str_pad_start(ptr, double, ptr)
-declare i32 @js_str_includes(ptr, ptr)
-declare double @js_str_index_of(ptr, ptr)
-declare ptr @nt_str_retain(ptr)
-declare void @nt_str_release(ptr)
-declare double @nt_str_live()
-declare ptr @nt_arr_new(double)
-declare double @nt_arr_push(ptr, i64)
-declare i64 @nt_arr_get(ptr, double)
-declare i64 @nt_arr_index(ptr, double, ptr)
-declare i64 @nt_nonnull(ptr, ptr)
-declare i64 @nt_union_arm(ptr, double, ptr, ptr)
-declare ptr @nt_str_index(ptr, double, ptr)
-declare void @nt_panic_bounds(ptr, double, double, ptr)
-declare i64 @nt_arr_pop(ptr)
-declare double @nt_arr_len(ptr)
-declare ptr @nt_arr_join_num(ptr, ptr)
-declare ptr @nt_arr_join_str(ptr, ptr)
-declare i32 @nt_arr_includes_num(ptr, double)
-declare i32 @nt_arr_includes_str(ptr, ptr)
-declare double @nt_arr_indexof_num(ptr, double)
-declare double @nt_arr_indexof_str(ptr, ptr)
-declare ptr @nt_arr_copy(ptr)
-declare ptr @nt_arr_to_sorted(ptr, i32)
-declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)
-declare ptr @nt_arr_to_reversed(ptr)
-declare ptr @nt_arr_with(ptr, double, i64, ptr)
-declare void @nt_arr_free(ptr)
-declare double @nt_arr_live()
-declare double @nt_arr_nodes()
-declare double @nt_arr_node_allocs()
-declare double @nt_arr_transients()
-declare void @nt_arr_extend_own(ptr, ptr)
-declare ptr @nt_obj_new(double)
-declare void @nt_obj_free(ptr)
-declare double @nt_obj_live()
-declare ptr @nt_str_split(ptr, ptr)
-declare ptr @nt_arr_reverse(ptr)
-declare double @nt_date_now()
-declare ptr @nt_btoa(ptr)
-declare ptr @nt_atob(ptr)
-declare ptr @nt_from_char_code(double)
-declare ptr @nt_from_code_point(double)
-declare i32 @nt_num_is_finite(double)
-declare i32 @nt_num_is_integer(double)
-declare i32 @nt_num_is_safe_integer(double)
-declare ptr @nt_arr_from_str(ptr)
-declare double @js_str_char_code_at(ptr, double)
-declare double @js_str_code_point_at(ptr, double)
-declare ptr @js_str_at(ptr, double)
-declare ptr @js_str_pad_end(ptr, double, ptr)
-declare i32 @js_str_starts_with(ptr, ptr, double)
-declare i32 @js_str_ends_with(ptr, ptr, double)
-declare ptr @js_str_replace(ptr, ptr, ptr, i32)
-declare double @js_str_last_index_of(ptr, ptr)
-declare ptr @nt_str_split_n(ptr, ptr, double)
-declare double @nt_arr_at_index(ptr, double)
-declare double @nt_arr_last_indexof_num(ptr, double)
-declare double @nt_arr_last_indexof_str(ptr, ptr)
-declare ptr @nt_arr_concat(ptr, ptr)
-declare ptr @nt_arr_flat1(ptr)
-declare ptr @js_num_to_fixed(double, double)
-declare ptr @js_num_to_radix_string(double, double)
-declare ptr @nt_url_protocol(ptr)
-declare ptr @nt_url_host(ptr)
-declare ptr @nt_url_hostname(ptr)
-declare ptr @nt_url_pathname(ptr)
-declare ptr @nt_url_search(ptr)
-declare ptr @nt_url_hash(ptr)
-declare double @nt_date_field(double, double, double)
-declare ptr @nt_date_to_iso(double)
-declare double @nt_date_from_ms(double)
-declare double @nt_date_parse(ptr)
-declare ptr @nt_date_inspect(double)
-declare ptr @nt_date_to_json(double)
-declare ptr @nt_url_validate(ptr)
-declare ptr @nt_url_port(ptr)
-declare ptr @nt_url_origin(ptr)
-declare ptr @nt_qs_init(ptr)
-declare ptr @nt_qs_get(ptr, ptr)
-declare ptr @nt_qs_get_all(ptr, ptr)
-declare ptr @nt_qs_to_string(ptr)
-declare ptr @nt_encode_uri_component(ptr)
-declare ptr @nt_decode_uri_component(ptr)
-declare ptr @nt_encode_uri(ptr)
-declare ptr @nt_decode_uri(ptr)
-declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
-declare ptr @nt_http_get(ptr, ptr, ptr)
-declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)
-declare ptr @nt_headers_get(ptr, ptr)
-declare ptr @nt_arr_slice(ptr, double, double)
-declare void @nt_arr_extend(ptr, ptr)
-declare ptr @js_json_quote(ptr)
-declare ptr @nt_json_parse(ptr)
-declare double @nt_dyn_as_number(ptr)
-declare i32 @nt_dyn_as_bool(ptr)
-declare ptr @nt_dyn_as_string(ptr)
-declare i32 @nt_dyn_require_object(ptr)
-declare ptr @nt_dyn_require_field(ptr, ptr)
-declare i32 @nt_dyn_require_array(ptr)
-declare double @nt_dyn_len(ptr)
-declare ptr @nt_dyn_elem(ptr, double)
-declare ptr @nt_dyn_get_field(ptr, ptr)
-declare void @nt_dyn_print(ptr)
-declare i32 @nt_exc_pending()
-declare ptr @nt_exc_message()
-declare void @nt_exc_clear()
-declare void @nt_exc_abort()
-declare void @nt_init_args(i32, ptr)
-declare ptr @nt_argv()
-declare ptr @nt_getenv(ptr)
-declare ptr @nt_read_line()
-declare ptr @nt_read_stdin()
-declare ptr @nt_read_key()
-declare void @nt_raw_mode(i32)
-declare void @nt_exit(double)
-declare ptr @nt_read_file(ptr)
-declare void @nt_write_file(ptr, ptr)
-declare i32 @nt_path_exists(ptr)
-declare ptr @nt_mkdtemp(ptr)
-declare ptr @nt_readdir(ptr)
-declare void @nt_rm(ptr, i32, i32)
-declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)
-declare ptr @nt_path_join(ptr, ptr)
-declare ptr @nt_path_resolve(ptr, ptr)
-declare ptr @nt_path_dirname(ptr)
-declare ptr @nt_path_basename(ptr)
-declare ptr @nt_path_relative(ptr, ptr)
-declare ptr @nt_os_tmpdir()
-declare ptr @nt_os_homedir()
-declare ptr @nt_file_url_to_path(ptr)
-declare void @nt_gui_init_window(double, double, ptr)
-declare i32 @nt_gui_window_should_close()
-declare void @nt_gui_set_target_fps(double)
-declare void @nt_gui_begin_draw()
-declare void @nt_gui_end_draw()
-declare void @nt_gui_clear_background(double)
-declare void @nt_gui_draw_text(ptr, double, double, double, double)
-declare void @nt_gui_draw_rect(double, double, double, double, double)
-declare double @nt_gui_mouse_x()
-declare double @nt_gui_mouse_y()
-declare i32 @nt_gui_mouse_pressed()
-declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
-declare ptr @nt_coll_map_new()
-declare ptr @nt_coll_map_from_coll(ptr)
-declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
-declare i64 @nt_map_get_slot(ptr, i32, i64)
-declare i32 @nt_map_has_slot(ptr, i32, i64)
-declare ptr @nt_map_remove_slot(ptr, i32, i64)
-declare ptr @nt_coll_set_new()
-declare ptr @nt_coll_set_from_arr(ptr, i32)
-declare ptr @nt_set_add_slot(ptr, i32, i64)
-declare i32 @nt_set_has_slot(ptr, i32, i64)
-declare ptr @nt_set_remove_slot(ptr, i32, i64)
-declare i64 @nt_coll_size(ptr)
-declare ptr @nt_coll_keys(ptr)
-declare ptr @nt_coll_values(ptr)
-declare ptr @nt_bytes_new(double)
-declare ptr @nt_bytes_from_arr(ptr)
-declare double @nt_bytes_get(ptr, double)
-declare void @nt_bytes_set(ptr, double, double)
-declare double @nt_bytes_index(ptr, double, ptr)
-declare void @nt_bytes_index_set(ptr, double, double, ptr)
-declare double @nt_bytes_len(ptr)
-declare ptr @nt_bytes_encode(ptr)
-declare ptr @nt_bytes_decode(ptr)
-declare void @nt_sched_init()
-declare i64 @nt_spawn_closure(ptr, ptr, i64)
-declare void @nt_send_slot(i64, i64)
-declare i64 @nt_receive_slot()
-declare i64 @nt_self()
-declare void @nt_drain()
-declare void @nt_register(ptr, i64)
-declare i64 @nt_whereis(ptr)
-declare void @nt_link(i64)
-declare i64 @nt_monitor(i64)
-declare void @nt_trap_exit(i32)
-declare void @nt_actor_exit(i64, i64)
-declare void @nt_crash(i64)
-declare void @nt_kill(i64)
-declare i64 @nt_sup_new(i64, i64, i64)
-declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
-declare i64 @nt_sup_start(i64)
-declare ptr @nt_insp_new(ptr, ptr, double, double, double)
-declare void @nt_insp_add(ptr, ptr)
-declare ptr @nt_insp_done(ptr)
-declare ptr @nt_insp_num(double)
-declare ptr @nt_insp_str(ptr)
-declare ptr @nt_insp_entry(ptr, ptr)
-declare ptr @nt_insp_pair(ptr, ptr)
-declare ptr @nt_insp_coll_open(ptr, double)
-declare ptr @nt_insp_len_open(ptr, double)
-declare ptr @nt_insp_more(double)
-declare ptr @nt_dyn_inspect(ptr, double)
-declare ptr @nt_dyn_display(ptr, double)
-declare ptr @nt_dyn_str_or_null(ptr)
-
-@.str.0 = private unnamed_addr constant [2 x i8] c":\\00"
-@.str.1 = private unnamed_addr constant [5 x i8] c"slot\\00"
-@.str.2 = private unnamed_addr constant [7 x i8] c"@nt.g.\\00"
-@.str.3 = private unnamed_addr constant [6 x i8] c"count\\00"
-@.str.4 = private unnamed_addr constant [6 x i8] c"total\\00"
-
-@nt.g.Sym.width = internal global double 0x0000000000000000
-@nt.g.Sym.prefix = internal global ptr null
-
-define ptr @label(ptr %n) {
-entry:
-  %n.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %n, ptr %n.addr
-  %t0 = load ptr, ptr %n.addr
-  %t1 = call ptr @Sym.of(ptr %t0)
-  %t2 = call ptr @js_str_concat(ptr %t1, ptr @.str.0)
-  %t3 = load double, ptr @nt.g.Sym.width
-  %t4 = call ptr @js_num_to_str(double %t3)
-  %t5 = call ptr @js_str_concat(ptr %t2, ptr %t4)
-  ret ptr %t5
-}
-
-define void @Sym.constructor(ptr %this) {
-entry:
-  %this.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  ret void
-}
-
-define ptr @Sym.of(ptr %name) {
-entry:
-  %name.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %name, ptr %name.addr
-  %t0 = load ptr, ptr @nt.g.Sym.prefix
-  %t1 = load ptr, ptr %name.addr
-  %t2 = call ptr @js_str_concat(ptr %t0, ptr %t1)
-  ret ptr %t2
-}
-
-define void @Emitter.constructor(ptr %this, double %n) {
-entry:
-  %this.addr = alloca ptr
-  %n.addr = alloca double
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  store double %n, ptr %n.addr
-  %t0 = load ptr, ptr %this.addr
-  %t1 = load double, ptr %n.addr
-  %t2 = bitcast double %t1 to i64
-  %t3 = getelementptr i64, ptr %t0, i64 0
-  store i64 %t2, ptr %t3
-  %t4 = bitcast i64 %t2 to double
-  ret void
-}
-
-define ptr @Emitter.emit(ptr %this) {
-entry:
-  %this.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  %t0 = load ptr, ptr %this.addr
-  %t1 = getelementptr i64, ptr %t0, i64 0
-  %t2 = load i64, ptr %t1
-  %t3 = bitcast i64 %t2 to double
-  %t4 = call ptr @js_num_to_str(double %t3)
-  %t5 = call ptr @js_str_concat(ptr @.str.1, ptr %t4)
-  %t6 = call ptr @label(ptr %t5)
-  ret ptr %t6
-}
-
-define i32 @main(i32 %argc, ptr %argv) {
-entry:
-  br label %L0
-L0:
-  call void @nt_init_args(i32 %argc, ptr %argv)
-  store ptr null, ptr @nt.g.Sym.prefix
-  %rc0 = call ptr @nt_str_retain(ptr @.str.2)
-  store ptr @.str.2, ptr @nt.g.Sym.prefix
-  store double 0x4010000000000000, ptr @nt.g.Sym.width
-  %t1 = load ptr, ptr @nt.g.Sym.prefix
-  call void @js_print_str(ptr %t1)
-  call void @js_print_newline()
-  %t2 = load double, ptr @nt.g.Sym.width
-  call void @js_print_num(double %t2)
-  call void @js_print_newline()
-  %t3 = call ptr @Sym.of(ptr @.str.3)
-  call void @js_print_str(ptr %t3)
-  call void @js_print_newline()
-  %t4 = call ptr @label(ptr @.str.4)
-  call void @js_print_str(ptr %t4)
-  call void @js_print_newline()
-  %t5 = call ptr @nt_obj_new(double 0x3FF0000000000000)
-  call void @Emitter.constructor(ptr %t5, double 0x401C000000000000)
-  %t6 = call ptr @Emitter.emit(ptr %t5)
-  call void @js_print_str(ptr %t6)
-  call void @js_print_newline()
-  %t7 = load ptr, ptr @nt.g.Sym.prefix
-  call void @nt_str_release(ptr %t7)
-  ret i32 0
-}
-"
-`;
-
-exports[`fixtures classes/static-instance-mix.ts emits stable LLVM IR (snapshot) 1`] = `
-"; ModuleID = 'nativets'
-declare void @js_print_num(double)
-declare void @js_print_bool(i32)
-declare void @js_print_str(ptr)
-declare void @js_print_sep()
-declare void @js_print_newline()
-declare void @js_eprint_begin()
-declare void @js_eprint_num(double)
-declare void @js_eprint_bool(i32)
-declare void @js_eprint_str(ptr)
-declare void @js_eprint_sep()
-declare void @js_eprint_newline()
-declare void @nt_fmt_guard(ptr, double)
-declare double @pow(double, double)
-declare ptr @js_str_concat(ptr, ptr)
-declare double @js_str_len(ptr)
-declare i32 @js_str_eq(ptr, ptr)
-declare i32 @js_str_cmp(ptr, ptr)
-declare ptr @js_num_to_str(double)
-declare ptr @js_bool_to_str(i32)
-declare double @js_bit_and(double, double)
-declare double @js_bit_or(double, double)
-declare double @js_bit_xor(double, double)
-declare double @js_bit_not(double)
-declare double @js_shl(double, double)
-declare double @js_shr(double, double)
-declare double @js_ushr(double, double)
-declare double @js_str_to_num(ptr)
-declare double @js_math_round(double)
-declare double @js_parse_int(ptr, double)
-declare double @js_parse_float(ptr)
-declare double @floor(double)
-declare double @ceil(double)
-declare double @sqrt(double)
-declare double @trunc(double)
-declare double @fabs(double)
-declare double @fmax(double, double)
-declare double @fmin(double, double)
-declare ptr @js_str_upper(ptr)
-declare ptr @js_str_lower(ptr)
-declare ptr @js_str_trim(ptr)
-declare ptr @js_str_char_at(ptr, double)
-declare ptr @js_str_slice(ptr, double, double)
-declare ptr @js_str_substring(ptr, double, double)
-declare ptr @js_str_repeat(ptr, double)
-declare ptr @js_str_pad_start(ptr, double, ptr)
-declare i32 @js_str_includes(ptr, ptr)
-declare double @js_str_index_of(ptr, ptr)
-declare ptr @nt_str_retain(ptr)
-declare void @nt_str_release(ptr)
-declare double @nt_str_live()
-declare ptr @nt_arr_new(double)
-declare double @nt_arr_push(ptr, i64)
-declare i64 @nt_arr_get(ptr, double)
-declare i64 @nt_arr_index(ptr, double, ptr)
-declare i64 @nt_nonnull(ptr, ptr)
-declare i64 @nt_union_arm(ptr, double, ptr, ptr)
-declare ptr @nt_str_index(ptr, double, ptr)
-declare void @nt_panic_bounds(ptr, double, double, ptr)
-declare i64 @nt_arr_pop(ptr)
-declare double @nt_arr_len(ptr)
-declare ptr @nt_arr_join_num(ptr, ptr)
-declare ptr @nt_arr_join_str(ptr, ptr)
-declare i32 @nt_arr_includes_num(ptr, double)
-declare i32 @nt_arr_includes_str(ptr, ptr)
-declare double @nt_arr_indexof_num(ptr, double)
-declare double @nt_arr_indexof_str(ptr, ptr)
-declare ptr @nt_arr_copy(ptr)
-declare ptr @nt_arr_to_sorted(ptr, i32)
-declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)
-declare ptr @nt_arr_to_reversed(ptr)
-declare ptr @nt_arr_with(ptr, double, i64, ptr)
-declare void @nt_arr_free(ptr)
-declare double @nt_arr_live()
-declare double @nt_arr_nodes()
-declare double @nt_arr_node_allocs()
-declare double @nt_arr_transients()
-declare void @nt_arr_extend_own(ptr, ptr)
-declare ptr @nt_obj_new(double)
-declare void @nt_obj_free(ptr)
-declare double @nt_obj_live()
-declare ptr @nt_str_split(ptr, ptr)
-declare ptr @nt_arr_reverse(ptr)
-declare double @nt_date_now()
-declare ptr @nt_btoa(ptr)
-declare ptr @nt_atob(ptr)
-declare ptr @nt_from_char_code(double)
-declare ptr @nt_from_code_point(double)
-declare i32 @nt_num_is_finite(double)
-declare i32 @nt_num_is_integer(double)
-declare i32 @nt_num_is_safe_integer(double)
-declare ptr @nt_arr_from_str(ptr)
-declare double @js_str_char_code_at(ptr, double)
-declare double @js_str_code_point_at(ptr, double)
-declare ptr @js_str_at(ptr, double)
-declare ptr @js_str_pad_end(ptr, double, ptr)
-declare i32 @js_str_starts_with(ptr, ptr, double)
-declare i32 @js_str_ends_with(ptr, ptr, double)
-declare ptr @js_str_replace(ptr, ptr, ptr, i32)
-declare double @js_str_last_index_of(ptr, ptr)
-declare ptr @nt_str_split_n(ptr, ptr, double)
-declare double @nt_arr_at_index(ptr, double)
-declare double @nt_arr_last_indexof_num(ptr, double)
-declare double @nt_arr_last_indexof_str(ptr, ptr)
-declare ptr @nt_arr_concat(ptr, ptr)
-declare ptr @nt_arr_flat1(ptr)
-declare ptr @js_num_to_fixed(double, double)
-declare ptr @js_num_to_radix_string(double, double)
-declare ptr @nt_url_protocol(ptr)
-declare ptr @nt_url_host(ptr)
-declare ptr @nt_url_hostname(ptr)
-declare ptr @nt_url_pathname(ptr)
-declare ptr @nt_url_search(ptr)
-declare ptr @nt_url_hash(ptr)
-declare double @nt_date_field(double, double, double)
-declare ptr @nt_date_to_iso(double)
-declare double @nt_date_from_ms(double)
-declare double @nt_date_parse(ptr)
-declare ptr @nt_date_inspect(double)
-declare ptr @nt_date_to_json(double)
-declare ptr @nt_url_validate(ptr)
-declare ptr @nt_url_port(ptr)
-declare ptr @nt_url_origin(ptr)
-declare ptr @nt_qs_init(ptr)
-declare ptr @nt_qs_get(ptr, ptr)
-declare ptr @nt_qs_get_all(ptr, ptr)
-declare ptr @nt_qs_to_string(ptr)
-declare ptr @nt_encode_uri_component(ptr)
-declare ptr @nt_decode_uri_component(ptr)
-declare ptr @nt_encode_uri(ptr)
-declare ptr @nt_decode_uri(ptr)
-declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
-declare ptr @nt_http_get(ptr, ptr, ptr)
-declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)
-declare ptr @nt_headers_get(ptr, ptr)
-declare ptr @nt_arr_slice(ptr, double, double)
-declare void @nt_arr_extend(ptr, ptr)
-declare ptr @js_json_quote(ptr)
-declare ptr @nt_json_parse(ptr)
-declare double @nt_dyn_as_number(ptr)
-declare i32 @nt_dyn_as_bool(ptr)
-declare ptr @nt_dyn_as_string(ptr)
-declare i32 @nt_dyn_require_object(ptr)
-declare ptr @nt_dyn_require_field(ptr, ptr)
-declare i32 @nt_dyn_require_array(ptr)
-declare double @nt_dyn_len(ptr)
-declare ptr @nt_dyn_elem(ptr, double)
-declare ptr @nt_dyn_get_field(ptr, ptr)
-declare void @nt_dyn_print(ptr)
-declare i32 @nt_exc_pending()
-declare ptr @nt_exc_message()
-declare void @nt_exc_clear()
-declare void @nt_exc_abort()
-declare void @nt_init_args(i32, ptr)
-declare ptr @nt_argv()
-declare ptr @nt_getenv(ptr)
-declare ptr @nt_read_line()
-declare ptr @nt_read_stdin()
-declare ptr @nt_read_key()
-declare void @nt_raw_mode(i32)
-declare void @nt_exit(double)
-declare ptr @nt_read_file(ptr)
-declare void @nt_write_file(ptr, ptr)
-declare i32 @nt_path_exists(ptr)
-declare ptr @nt_mkdtemp(ptr)
-declare ptr @nt_readdir(ptr)
-declare void @nt_rm(ptr, i32, i32)
-declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)
-declare ptr @nt_path_join(ptr, ptr)
-declare ptr @nt_path_resolve(ptr, ptr)
-declare ptr @nt_path_dirname(ptr)
-declare ptr @nt_path_basename(ptr)
-declare ptr @nt_path_relative(ptr, ptr)
-declare ptr @nt_os_tmpdir()
-declare ptr @nt_os_homedir()
-declare ptr @nt_file_url_to_path(ptr)
-declare void @nt_gui_init_window(double, double, ptr)
-declare i32 @nt_gui_window_should_close()
-declare void @nt_gui_set_target_fps(double)
-declare void @nt_gui_begin_draw()
-declare void @nt_gui_end_draw()
-declare void @nt_gui_clear_background(double)
-declare void @nt_gui_draw_text(ptr, double, double, double, double)
-declare void @nt_gui_draw_rect(double, double, double, double, double)
-declare double @nt_gui_mouse_x()
-declare double @nt_gui_mouse_y()
-declare i32 @nt_gui_mouse_pressed()
-declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
-declare ptr @nt_coll_map_new()
-declare ptr @nt_coll_map_from_coll(ptr)
-declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
-declare i64 @nt_map_get_slot(ptr, i32, i64)
-declare i32 @nt_map_has_slot(ptr, i32, i64)
-declare ptr @nt_map_remove_slot(ptr, i32, i64)
-declare ptr @nt_coll_set_new()
-declare ptr @nt_coll_set_from_arr(ptr, i32)
-declare ptr @nt_set_add_slot(ptr, i32, i64)
-declare i32 @nt_set_has_slot(ptr, i32, i64)
-declare ptr @nt_set_remove_slot(ptr, i32, i64)
-declare i64 @nt_coll_size(ptr)
-declare ptr @nt_coll_keys(ptr)
-declare ptr @nt_coll_values(ptr)
-declare ptr @nt_bytes_new(double)
-declare ptr @nt_bytes_from_arr(ptr)
-declare double @nt_bytes_get(ptr, double)
-declare void @nt_bytes_set(ptr, double, double)
-declare double @nt_bytes_index(ptr, double, ptr)
-declare void @nt_bytes_index_set(ptr, double, double, ptr)
-declare double @nt_bytes_len(ptr)
-declare ptr @nt_bytes_encode(ptr)
-declare ptr @nt_bytes_decode(ptr)
-declare void @nt_sched_init()
-declare i64 @nt_spawn_closure(ptr, ptr, i64)
-declare void @nt_send_slot(i64, i64)
-declare i64 @nt_receive_slot()
-declare i64 @nt_self()
-declare void @nt_drain()
-declare void @nt_register(ptr, i64)
-declare i64 @nt_whereis(ptr)
-declare void @nt_link(i64)
-declare i64 @nt_monitor(i64)
-declare void @nt_trap_exit(i32)
-declare void @nt_actor_exit(i64, i64)
-declare void @nt_crash(i64)
-declare void @nt_kill(i64)
-declare i64 @nt_sup_new(i64, i64, i64)
-declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
-declare i64 @nt_sup_start(i64)
-declare ptr @nt_insp_new(ptr, ptr, double, double, double)
-declare void @nt_insp_add(ptr, ptr)
-declare ptr @nt_insp_done(ptr)
-declare ptr @nt_insp_num(double)
-declare ptr @nt_insp_str(ptr)
-declare ptr @nt_insp_entry(ptr, ptr)
-declare ptr @nt_insp_pair(ptr, ptr)
-declare ptr @nt_insp_coll_open(ptr, double)
-declare ptr @nt_insp_len_open(ptr, double)
-declare ptr @nt_insp_more(double)
-declare ptr @nt_dyn_inspect(ptr, double)
-declare ptr @nt_dyn_display(ptr, double)
-declare ptr @nt_dyn_str_or_null(ptr)
-
-@.str.0 = private unnamed_addr constant [2 x i8] c"(\\00"
-@.str.1 = private unnamed_addr constant [3 x i8] c", \\00"
-@.str.2 = private unnamed_addr constant [2 x i8] c")\\00"
-
-define void @Point.constructor(ptr %this, double %x, double %y) {
-entry:
-  %this.addr = alloca ptr
-  %x.addr = alloca double
-  %y.addr = alloca double
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  store double %x, ptr %x.addr
-  store double %y, ptr %y.addr
-  %t0 = load ptr, ptr %this.addr
-  %t1 = load double, ptr %x.addr
-  %t2 = bitcast double %t1 to i64
-  %t3 = getelementptr i64, ptr %t0, i64 0
-  store i64 %t2, ptr %t3
-  %t4 = bitcast i64 %t2 to double
-  %t5 = load ptr, ptr %this.addr
-  %t6 = load double, ptr %y.addr
-  %t7 = bitcast double %t6 to i64
-  %t8 = getelementptr i64, ptr %t5, i64 1
-  store i64 %t7, ptr %t8
-  %t9 = bitcast i64 %t7 to double
-  ret void
-}
-
-define ptr @Point.show(ptr %this) {
-entry:
-  %this.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  %t0 = load ptr, ptr %this.addr
-  %t1 = getelementptr i64, ptr %t0, i64 0
-  %t2 = load i64, ptr %t1
-  %t3 = bitcast i64 %t2 to double
-  %t4 = call ptr @js_num_to_str(double %t3)
-  %t5 = call ptr @js_str_concat(ptr @.str.0, ptr %t4)
-  %t6 = call ptr @js_str_concat(ptr %t5, ptr @.str.1)
-  %t7 = load ptr, ptr %this.addr
-  %t8 = getelementptr i64, ptr %t7, i64 1
-  %t9 = load i64, ptr %t8
-  %t10 = bitcast i64 %t9 to double
-  %t11 = call ptr @js_num_to_str(double %t10)
-  %t12 = call ptr @js_str_concat(ptr %t6, ptr %t11)
-  %t13 = call ptr @js_str_concat(ptr %t12, ptr @.str.2)
-  ret ptr %t13
-}
-
-define i1 @Point.far(ptr %this) {
-entry:
-  %this.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  %t0 = load ptr, ptr %this.addr
-  %t1 = call double @Point.manhattan(ptr %t0)
-  %t2 = fcmp ogt double %t1, 0x4024000000000000
-  ret i1 %t2
-}
-
-define ptr @Point.origin() {
-entry:
-  br label %L0
-L0:
-  %t0 = call ptr @nt_obj_new(double 0x4000000000000000)
-  call void @Point.constructor(ptr %t0, double 0x0000000000000000, double 0x0000000000000000)
-  ret ptr %t0
-}
-
-define double @Point.manhattan(ptr %p) {
-entry:
-  %p.addr = alloca ptr
-  %s1 = alloca double
-  %s5 = alloca double
-  br label %L0
-L0:
-  store ptr %p, ptr %p.addr
-  %t0 = load ptr, ptr %p.addr
-  %t1 = getelementptr i64, ptr %t0, i64 0
-  %t2 = load i64, ptr %t1
-  %t3 = bitcast i64 %t2 to double
-  %t4 = fcmp olt double %t3, 0x0000000000000000
-  br i1 %t4, label %tern2, label %ternelse3
-tern2:
-  %t5 = load ptr, ptr %p.addr
-  %t6 = getelementptr i64, ptr %t5, i64 0
-  %t7 = load i64, ptr %t6
-  %t8 = bitcast i64 %t7 to double
-  %t9 = fneg double %t8
-  store double %t9, ptr %s1
-  br label %ternend4
-ternelse3:
-  %t10 = load ptr, ptr %p.addr
-  %t11 = getelementptr i64, ptr %t10, i64 0
-  %t12 = load i64, ptr %t11
-  %t13 = bitcast i64 %t12 to double
-  store double %t13, ptr %s1
-  br label %ternend4
-ternend4:
-  %t14 = load double, ptr %s1
-  %t15 = load ptr, ptr %p.addr
-  %t16 = getelementptr i64, ptr %t15, i64 1
-  %t17 = load i64, ptr %t16
-  %t18 = bitcast i64 %t17 to double
-  %t19 = fcmp olt double %t18, 0x0000000000000000
-  br i1 %t19, label %tern6, label %ternelse7
-tern6:
-  %t20 = load ptr, ptr %p.addr
-  %t21 = getelementptr i64, ptr %t20, i64 1
-  %t22 = load i64, ptr %t21
-  %t23 = bitcast i64 %t22 to double
-  %t24 = fneg double %t23
-  store double %t24, ptr %s5
-  br label %ternend8
-ternelse7:
-  %t25 = load ptr, ptr %p.addr
-  %t26 = getelementptr i64, ptr %t25, i64 1
-  %t27 = load i64, ptr %t26
-  %t28 = bitcast i64 %t27 to double
-  store double %t28, ptr %s5
-  br label %ternend8
-ternend8:
-  %t29 = load double, ptr %s5
-  %t30 = fadd double %t14, %t29
-  ret double %t30
-}
-
-define i32 @main(i32 %argc, ptr %argv) {
-entry:
-  %o.addr = alloca ptr
-  %p.addr = alloca ptr
-  %q.addr = alloca ptr
-  br label %L0
-L0:
-  call void @nt_init_args(i32 %argc, ptr %argv)
-  %t0 = call ptr @Point.origin()
-  store ptr %t0, ptr %o.addr
-  %t1 = load ptr, ptr %o.addr
-  %t2 = call ptr @Point.show(ptr %t1)
-  call void @js_print_str(ptr %t2)
-  call void @js_print_newline()
-  %t3 = load ptr, ptr %o.addr
-  %t4 = call double @Point.manhattan(ptr %t3)
-  call void @js_print_num(double %t4)
-  call void @js_print_newline()
-  %t5 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t6 = fneg double 0x4010000000000000
-  call void @Point.constructor(ptr %t5, double 0x4008000000000000, double %t6)
-  store ptr %t5, ptr %p.addr
-  %t7 = load ptr, ptr %p.addr
-  %t8 = call ptr @Point.show(ptr %t7)
-  call void @js_print_str(ptr %t8)
-  call void @js_print_newline()
-  %t9 = load ptr, ptr %p.addr
-  %t10 = call double @Point.manhattan(ptr %t9)
-  call void @js_print_num(double %t10)
-  call void @js_print_newline()
-  %t11 = load ptr, ptr %p.addr
-  %t12 = call i1 @Point.far(ptr %t11)
-  %t13 = zext i1 %t12 to i32
-  call void @js_print_bool(i32 %t13)
-  call void @js_print_newline()
-  %t14 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t15 = fneg double 0x4022000000000000
-  call void @Point.constructor(ptr %t14, double %t15, double 0x4022000000000000)
-  store ptr %t14, ptr %q.addr
-  %t16 = load ptr, ptr %q.addr
-  %t17 = call i1 @Point.far(ptr %t16)
-  %t18 = zext i1 %t17 to i32
-  call void @js_print_bool(i32 %t18)
-  call void @js_print_newline()
-  %t19 = load ptr, ptr %o.addr
-  call void @nt_obj_free(ptr %t19)
-  %t20 = load ptr, ptr %p.addr
-  call void @nt_obj_free(ptr %t20)
-  %t21 = load ptr, ptr %q.addr
-  call void @nt_obj_free(ptr %t21)
-  ret i32 0
-}
-"
-`;
-
-exports[`fixtures classes/static-method.ts emits stable LLVM IR (snapshot) 1`] = `
-"; ModuleID = 'nativets'
-declare void @js_print_num(double)
-declare void @js_print_bool(i32)
-declare void @js_print_str(ptr)
-declare void @js_print_sep()
-declare void @js_print_newline()
-declare void @js_eprint_begin()
-declare void @js_eprint_num(double)
-declare void @js_eprint_bool(i32)
-declare void @js_eprint_str(ptr)
-declare void @js_eprint_sep()
-declare void @js_eprint_newline()
-declare void @nt_fmt_guard(ptr, double)
-declare double @pow(double, double)
-declare ptr @js_str_concat(ptr, ptr)
-declare double @js_str_len(ptr)
-declare i32 @js_str_eq(ptr, ptr)
-declare i32 @js_str_cmp(ptr, ptr)
-declare ptr @js_num_to_str(double)
-declare ptr @js_bool_to_str(i32)
-declare double @js_bit_and(double, double)
-declare double @js_bit_or(double, double)
-declare double @js_bit_xor(double, double)
-declare double @js_bit_not(double)
-declare double @js_shl(double, double)
-declare double @js_shr(double, double)
-declare double @js_ushr(double, double)
-declare double @js_str_to_num(ptr)
-declare double @js_math_round(double)
-declare double @js_parse_int(ptr, double)
-declare double @js_parse_float(ptr)
-declare double @floor(double)
-declare double @ceil(double)
-declare double @sqrt(double)
-declare double @trunc(double)
-declare double @fabs(double)
-declare double @fmax(double, double)
-declare double @fmin(double, double)
-declare ptr @js_str_upper(ptr)
-declare ptr @js_str_lower(ptr)
-declare ptr @js_str_trim(ptr)
-declare ptr @js_str_char_at(ptr, double)
-declare ptr @js_str_slice(ptr, double, double)
-declare ptr @js_str_substring(ptr, double, double)
-declare ptr @js_str_repeat(ptr, double)
-declare ptr @js_str_pad_start(ptr, double, ptr)
-declare i32 @js_str_includes(ptr, ptr)
-declare double @js_str_index_of(ptr, ptr)
-declare ptr @nt_str_retain(ptr)
-declare void @nt_str_release(ptr)
-declare double @nt_str_live()
-declare ptr @nt_arr_new(double)
-declare double @nt_arr_push(ptr, i64)
-declare i64 @nt_arr_get(ptr, double)
-declare i64 @nt_arr_index(ptr, double, ptr)
-declare i64 @nt_nonnull(ptr, ptr)
-declare i64 @nt_union_arm(ptr, double, ptr, ptr)
-declare ptr @nt_str_index(ptr, double, ptr)
-declare void @nt_panic_bounds(ptr, double, double, ptr)
-declare i64 @nt_arr_pop(ptr)
-declare double @nt_arr_len(ptr)
-declare ptr @nt_arr_join_num(ptr, ptr)
-declare ptr @nt_arr_join_str(ptr, ptr)
-declare i32 @nt_arr_includes_num(ptr, double)
-declare i32 @nt_arr_includes_str(ptr, ptr)
-declare double @nt_arr_indexof_num(ptr, double)
-declare double @nt_arr_indexof_str(ptr, ptr)
-declare ptr @nt_arr_copy(ptr)
-declare ptr @nt_arr_to_sorted(ptr, i32)
-declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)
-declare ptr @nt_arr_to_reversed(ptr)
-declare ptr @nt_arr_with(ptr, double, i64, ptr)
-declare void @nt_arr_free(ptr)
-declare double @nt_arr_live()
-declare double @nt_arr_nodes()
-declare double @nt_arr_node_allocs()
-declare double @nt_arr_transients()
-declare void @nt_arr_extend_own(ptr, ptr)
-declare ptr @nt_obj_new(double)
-declare void @nt_obj_free(ptr)
-declare double @nt_obj_live()
-declare ptr @nt_str_split(ptr, ptr)
-declare ptr @nt_arr_reverse(ptr)
-declare double @nt_date_now()
-declare ptr @nt_btoa(ptr)
-declare ptr @nt_atob(ptr)
-declare ptr @nt_from_char_code(double)
-declare ptr @nt_from_code_point(double)
-declare i32 @nt_num_is_finite(double)
-declare i32 @nt_num_is_integer(double)
-declare i32 @nt_num_is_safe_integer(double)
-declare ptr @nt_arr_from_str(ptr)
-declare double @js_str_char_code_at(ptr, double)
-declare double @js_str_code_point_at(ptr, double)
-declare ptr @js_str_at(ptr, double)
-declare ptr @js_str_pad_end(ptr, double, ptr)
-declare i32 @js_str_starts_with(ptr, ptr, double)
-declare i32 @js_str_ends_with(ptr, ptr, double)
-declare ptr @js_str_replace(ptr, ptr, ptr, i32)
-declare double @js_str_last_index_of(ptr, ptr)
-declare ptr @nt_str_split_n(ptr, ptr, double)
-declare double @nt_arr_at_index(ptr, double)
-declare double @nt_arr_last_indexof_num(ptr, double)
-declare double @nt_arr_last_indexof_str(ptr, ptr)
-declare ptr @nt_arr_concat(ptr, ptr)
-declare ptr @nt_arr_flat1(ptr)
-declare ptr @js_num_to_fixed(double, double)
-declare ptr @js_num_to_radix_string(double, double)
-declare ptr @nt_url_protocol(ptr)
-declare ptr @nt_url_host(ptr)
-declare ptr @nt_url_hostname(ptr)
-declare ptr @nt_url_pathname(ptr)
-declare ptr @nt_url_search(ptr)
-declare ptr @nt_url_hash(ptr)
-declare double @nt_date_field(double, double, double)
-declare ptr @nt_date_to_iso(double)
-declare double @nt_date_from_ms(double)
-declare double @nt_date_parse(ptr)
-declare ptr @nt_date_inspect(double)
-declare ptr @nt_date_to_json(double)
-declare ptr @nt_url_validate(ptr)
-declare ptr @nt_url_port(ptr)
-declare ptr @nt_url_origin(ptr)
-declare ptr @nt_qs_init(ptr)
-declare ptr @nt_qs_get(ptr, ptr)
-declare ptr @nt_qs_get_all(ptr, ptr)
-declare ptr @nt_qs_to_string(ptr)
-declare ptr @nt_encode_uri_component(ptr)
-declare ptr @nt_decode_uri_component(ptr)
-declare ptr @nt_encode_uri(ptr)
-declare ptr @nt_decode_uri(ptr)
-declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
-declare ptr @nt_http_get(ptr, ptr, ptr)
-declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)
-declare ptr @nt_headers_get(ptr, ptr)
-declare ptr @nt_arr_slice(ptr, double, double)
-declare void @nt_arr_extend(ptr, ptr)
-declare ptr @js_json_quote(ptr)
-declare ptr @nt_json_parse(ptr)
-declare double @nt_dyn_as_number(ptr)
-declare i32 @nt_dyn_as_bool(ptr)
-declare ptr @nt_dyn_as_string(ptr)
-declare i32 @nt_dyn_require_object(ptr)
-declare ptr @nt_dyn_require_field(ptr, ptr)
-declare i32 @nt_dyn_require_array(ptr)
-declare double @nt_dyn_len(ptr)
-declare ptr @nt_dyn_elem(ptr, double)
-declare ptr @nt_dyn_get_field(ptr, ptr)
-declare void @nt_dyn_print(ptr)
-declare i32 @nt_exc_pending()
-declare ptr @nt_exc_message()
-declare void @nt_exc_clear()
-declare void @nt_exc_abort()
-declare void @nt_init_args(i32, ptr)
-declare ptr @nt_argv()
-declare ptr @nt_getenv(ptr)
-declare ptr @nt_read_line()
-declare ptr @nt_read_stdin()
-declare ptr @nt_read_key()
-declare void @nt_raw_mode(i32)
-declare void @nt_exit(double)
-declare ptr @nt_read_file(ptr)
-declare void @nt_write_file(ptr, ptr)
-declare i32 @nt_path_exists(ptr)
-declare ptr @nt_mkdtemp(ptr)
-declare ptr @nt_readdir(ptr)
-declare void @nt_rm(ptr, i32, i32)
-declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)
-declare ptr @nt_path_join(ptr, ptr)
-declare ptr @nt_path_resolve(ptr, ptr)
-declare ptr @nt_path_dirname(ptr)
-declare ptr @nt_path_basename(ptr)
-declare ptr @nt_path_relative(ptr, ptr)
-declare ptr @nt_os_tmpdir()
-declare ptr @nt_os_homedir()
-declare ptr @nt_file_url_to_path(ptr)
-declare void @nt_gui_init_window(double, double, ptr)
-declare i32 @nt_gui_window_should_close()
-declare void @nt_gui_set_target_fps(double)
-declare void @nt_gui_begin_draw()
-declare void @nt_gui_end_draw()
-declare void @nt_gui_clear_background(double)
-declare void @nt_gui_draw_text(ptr, double, double, double, double)
-declare void @nt_gui_draw_rect(double, double, double, double, double)
-declare double @nt_gui_mouse_x()
-declare double @nt_gui_mouse_y()
-declare i32 @nt_gui_mouse_pressed()
-declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
-declare ptr @nt_coll_map_new()
-declare ptr @nt_coll_map_from_coll(ptr)
-declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
-declare i64 @nt_map_get_slot(ptr, i32, i64)
-declare i32 @nt_map_has_slot(ptr, i32, i64)
-declare ptr @nt_map_remove_slot(ptr, i32, i64)
-declare ptr @nt_coll_set_new()
-declare ptr @nt_coll_set_from_arr(ptr, i32)
-declare ptr @nt_set_add_slot(ptr, i32, i64)
-declare i32 @nt_set_has_slot(ptr, i32, i64)
-declare ptr @nt_set_remove_slot(ptr, i32, i64)
-declare i64 @nt_coll_size(ptr)
-declare ptr @nt_coll_keys(ptr)
-declare ptr @nt_coll_values(ptr)
-declare ptr @nt_bytes_new(double)
-declare ptr @nt_bytes_from_arr(ptr)
-declare double @nt_bytes_get(ptr, double)
-declare void @nt_bytes_set(ptr, double, double)
-declare double @nt_bytes_index(ptr, double, ptr)
-declare void @nt_bytes_index_set(ptr, double, double, ptr)
-declare double @nt_bytes_len(ptr)
-declare ptr @nt_bytes_encode(ptr)
-declare ptr @nt_bytes_decode(ptr)
-declare void @nt_sched_init()
-declare i64 @nt_spawn_closure(ptr, ptr, i64)
-declare void @nt_send_slot(i64, i64)
-declare i64 @nt_receive_slot()
-declare i64 @nt_self()
-declare void @nt_drain()
-declare void @nt_register(ptr, i64)
-declare i64 @nt_whereis(ptr)
-declare void @nt_link(i64)
-declare i64 @nt_monitor(i64)
-declare void @nt_trap_exit(i32)
-declare void @nt_actor_exit(i64, i64)
-declare void @nt_crash(i64)
-declare void @nt_kill(i64)
-declare i64 @nt_sup_new(i64, i64, i64)
-declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
-declare i64 @nt_sup_start(i64)
-declare ptr @nt_insp_new(ptr, ptr, double, double, double)
-declare void @nt_insp_add(ptr, ptr)
-declare ptr @nt_insp_done(ptr)
-declare ptr @nt_insp_num(double)
-declare ptr @nt_insp_str(ptr)
-declare ptr @nt_insp_entry(ptr, ptr)
-declare ptr @nt_insp_pair(ptr, ptr)
-declare ptr @nt_insp_coll_open(ptr, double)
-declare ptr @nt_insp_len_open(ptr, double)
-declare ptr @nt_insp_more(double)
-declare ptr @nt_dyn_inspect(ptr, double)
-declare ptr @nt_dyn_display(ptr, double)
-declare ptr @nt_dyn_str_or_null(ptr)
-
-@.str.0 = private unnamed_addr constant [7 x i8] c"@nt.g.\\00"
-@.str.1 = private unnamed_addr constant [1 x i8] c"\\00"
-@.str.2 = private unnamed_addr constant [3 x i8] c"  \\00"
-@.str.3 = private unnamed_addr constant [6 x i8] c"count\\00"
-@.str.4 = private unnamed_addr constant [2 x i8] c"7\\00"
-@.str.5 = private unnamed_addr constant [2 x i8] c"0\\00"
-@.str.6 = private unnamed_addr constant [5 x i8] c"abcd\\00"
-@.str.7 = private unnamed_addr constant [2 x i8] c"-\\00"
-@.str.8 = private unnamed_addr constant [21 x i8] c"define i32 @main() {\\00"
-@.str.9 = private unnamed_addr constant [10 x i8] c"ret i32 0\\00"
-@.str.10 = private unnamed_addr constant [7 x i8] c"; deep\\00"
-
-define void @Sym.constructor(ptr %this) {
-entry:
-  %this.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  ret void
-}
-
-define ptr @Sym.globalSym(ptr %name) {
-entry:
-  %name.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %name, ptr %name.addr
-  %t0 = load ptr, ptr %name.addr
-  %t1 = call ptr @js_str_concat(ptr @.str.0, ptr %t0)
-  %t2 = call ptr @js_str_concat(ptr %t1, ptr @.str.1)
-  ret ptr %t2
-}
-
-define void @Fmt.constructor(ptr %this) {
-entry:
-  %this.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  ret void
-}
-
-define ptr @Fmt.pad(ptr %s, double %width, ptr %fill) {
-entry:
-  %s.addr = alloca ptr
-  %width.addr = alloca double
-  %fill.addr = alloca ptr
-  %out.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %s, ptr %s.addr
-  store double %width, ptr %width.addr
-  store ptr %fill, ptr %fill.addr
-  store ptr null, ptr %out.addr
-  %t0 = load ptr, ptr %s.addr
-  %rc1 = call ptr @nt_str_retain(ptr %t0)
-  store ptr %t0, ptr %out.addr
-  br label %while1
-while1:
-  %t2 = load ptr, ptr %out.addr
-  %t3 = call double @js_str_len(ptr %t2)
-  %t4 = load double, ptr %width.addr
-  %t5 = fcmp olt double %t3, %t4
-  br i1 %t5, label %body2, label %endwhile3
-body2:
-  %t6 = load ptr, ptr %fill.addr
-  %t7 = load ptr, ptr %out.addr
-  %t8 = call ptr @js_str_concat(ptr %t6, ptr %t7)
-  store ptr %t8, ptr %out.addr
-  br label %while1
-endwhile3:
-  %t9 = load ptr, ptr %out.addr
-  ret ptr %t9
-}
-
-define void @Ir.constructor(ptr %this) {
-entry:
-  %this.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  ret void
-}
-
-define ptr @Ir.indent(double %depth) {
-entry:
-  %depth.addr = alloca double
-  br label %L0
-L0:
-  store double %depth, ptr %depth.addr
-  %t0 = load double, ptr %depth.addr
-  %t1 = fcmp ole double %t0, 0x0000000000000000
-  br i1 %t1, label %then1, label %endif2
-then1:
-  %rc2 = call ptr @nt_str_retain(ptr @.str.1)
-  ret ptr @.str.1
-endif2:
-  %t3 = load double, ptr %depth.addr
-  %t4 = fsub double %t3, 0x3FF0000000000000
-  %t5 = call ptr @Ir.indent(double %t4)
-  %t6 = call ptr @js_str_concat(ptr @.str.2, ptr %t5)
-  ret ptr %t6
-}
-
-define ptr @Ir.line(double %depth, ptr %text) {
-entry:
-  %depth.addr = alloca double
-  %text.addr = alloca ptr
-  br label %L0
-L0:
-  store double %depth, ptr %depth.addr
-  store ptr %text, ptr %text.addr
-  %t0 = load double, ptr %depth.addr
-  %t1 = call ptr @Ir.indent(double %t0)
-  %t2 = load ptr, ptr %text.addr
-  %t3 = call ptr @js_str_concat(ptr %t1, ptr %t2)
-  ret ptr %t3
-}
-
-define i32 @main(i32 %argc, ptr %argv) {
-entry:
-  br label %L0
-L0:
-  call void @nt_init_args(i32 %argc, ptr %argv)
-  %t0 = call ptr @Sym.globalSym(ptr @.str.3)
-  call void @js_print_str(ptr %t0)
-  call void @js_print_newline()
-  %t1 = call ptr @Fmt.pad(ptr @.str.4, double 0x4008000000000000, ptr @.str.5)
-  call void @js_print_str(ptr %t1)
-  call void @js_print_newline()
-  %t2 = call ptr @Fmt.pad(ptr @.str.6, double 0x4008000000000000, ptr @.str.5)
-  call void @js_print_str(ptr %t2)
-  call void @js_print_newline()
-  %t3 = call ptr @Fmt.pad(ptr @.str.1, double 0x4010000000000000, ptr @.str.7)
-  call void @js_print_str(ptr %t3)
-  call void @js_print_newline()
-  %t4 = call ptr @Ir.line(double 0x0000000000000000, ptr @.str.8)
-  call void @js_print_str(ptr %t4)
-  call void @js_print_newline()
-  %t5 = call ptr @Ir.line(double 0x3FF0000000000000, ptr @.str.9)
-  call void @js_print_str(ptr %t5)
-  call void @js_print_newline()
-  %t6 = call ptr @Ir.line(double 0x4008000000000000, ptr @.str.10)
-  call void @js_print_str(ptr %t6)
-  call void @js_print_newline()
   ret i32 0
 }
 "
