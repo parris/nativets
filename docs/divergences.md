@@ -618,6 +618,12 @@ that a value matches the pattern. `tsc` *does* check it, so this is a divergence
   the safe direction for *this* construct — it widens what type-checks without widening what
   the generated code can do — but it is a real gap, and a pattern typo will not be caught.
 
+**Interaction with `dyn as T` (next entry).** Narrowing a `Dyn` through a template-literal
+type emits the ordinary **string** validator: `parsed.id as \`user-${string}\`` checks *that it
+is a string* and nothing more, so a non-matching string passes (node agrees — it prints the
+same thing), while a non-string still throws the documented runtime `TypeError`. The pattern
+adds no validation; it neither tightens nor weakens the string check itself.
+
 This is what unblocked the compiler's own `src/ast.ts:14`
 (`` export type Ty = ScalarTy | `${string}[]` | `{${string}}` ``) — the only template-literal
 type site in `src/`; before it, that line was a hard `NT0001` parse error. Fixtures:
