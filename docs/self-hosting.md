@@ -26,6 +26,14 @@ conveniences, not requirements.
 
 ## Where we are (measured, not guessed)
 
+> **Read this first.** The sections below are a chronological series of re-measurements,
+> each one true when written. For the CURRENT frontier jump to
+> [Re-measured at SH6](#re-measured-at-sh6--the-frontier-per-module-standalone). The
+> headline there: **no module reaches IR**, and the per-module blocker table is the list
+> of things to fix. Two earlier sections overstated progress and now carry inline
+> corrections — a "reaches `ir`" claim that was a harness bug, and a regex count that
+> measured first-blockers instead of the construct.
+
 `nativets coverage src/*.ts` today fails at **parse time on ~line 10 of every file** — before any
 type or codegen analysis can even run:
 
@@ -280,6 +288,13 @@ That reorders the plan. **`!` is now the cheapest win** and unblocks five module
 need regex removed, so the "~28 sites, Path B" rewrite is far smaller than the wall
 suggested — measuring first was the right call.
 
+> **WRONG, and instructive.** "Only two modules genuinely need regex removed" counted the
+> modules whose *first* blocker was `NT1027`. That is not the same question. The actual
+> rewrite touched **29 regex literals across 8 of the 12 modules** — the other six were
+> masked behind a nearer blocker, exactly the unmasking this document keeps observing
+> everywhere else. A first-blocker histogram measures what to fix NEXT; it never measures
+> how much of a construct is in the tree. For that, count the construct.
+
 `test/bootstrap.test.ts` pins all of this as a **ratchet** — each module's furthest
 phase is recorded and may improve but never regress, so new compiler code cannot
 silently grow the gap (the lint this document asks for under "Keeping the gap from
@@ -317,15 +332,26 @@ so a compiler written with regexes cannot compile itself. All **29** regex liter
 
 | Module | Before | After |
 |---|---|---|
-| `diagnostics.ts` | `parse` — `NT1027` `/^\s*/` | **`ir`** — `NT2001`, `diag.spans.length` after `!diag.spans \|\|` (nullable narrowing does not flow across `\|\|`) — **since cleared, see below** |
-| `ownership.ts` | `parse` — `NT1027` `/\$inner$/` | **`ir`** — `NT1009`, the scalar union in `checker.ts` via the link |
-| `lexer.ts` | `parse` — `NT1027` the `@@name` pragma | **`ir`** — `NT1014`, `new Set([…])` for `REGEX_AFTER_KEYWORD` |
-| `coverage-preprocess.ts` | `parse` — `NT1027` `/[A-Za-z_$]/` | **`ir`** — `NT0001`, the same template-literal TYPE as `ast.ts` |
-| `ast.ts` (6), `driver.ts` (7), `modules.ts`, `cli.ts` | regex-free now, but their FIRST blocker was already something else | unchanged (`NT0001` line 14, `NT1017` `node:fs` ×3) |
+| `diagnostics.ts` | `lexed` — `NT1027` `/^\s*/` | **`parsed`** — `NT2001`, `diag.spans.length` after `!diag.spans \|\|` (nullable narrowing does not flow across `\|\|`) |
+| `ownership.ts` | `lexed` — `NT1027` `/\$inner$/` | **`parsed`** — `NT1009`, the scalar union in `checker.ts` via the link |
+| `lexer.ts` | `lexed` — `NT1027` the `@@name` pragma | **`parsed`** — `NT1014`, `new Set([…])` for `REGEX_AFTER_KEYWORD` |
+| `coverage-preprocess.ts` | `lexed` — `NT1027` `/[A-Za-z_$]/` | **`parsed`** — `NT0001`, the same template-literal TYPE as `ast.ts` |
+| `ast.ts` (6), `driver.ts` (7), `modules.ts`, `cli.ts` | regex-free now, but their FIRST blocker was already something else | unchanged (`NT0001` line 14; `NT1017` ×2 — see the correction below) |
 
-Four modules moved `parse` → `ir`; four had a nearer blocker and did not move. Nothing
+Four modules moved `lexed` → `parsed`; four had a nearer blocker and did not move. Nothing
 regressed. The blocker count *rose*, which is the ratchet working: clearing a blocker
 unmasks what was behind it.
+
+> **CORRECTED at SH6.** This table originally read **`ir`** in the "After" column and
+> `parse` in "Before", and the summary claimed four modules reached IR. **They did not.**
+> `test/bootstrap.test.ts`'s `phaseOf` returned `phase: "ir"` from *both* branches of its
+> last `try`/`catch`, so its top rung could not distinguish "produced LLVM IR" from
+> "entered the IR pipeline and threw" — every module that merely lexed and parsed scored
+> `ir`. The scale is now COMPLETED phases (`none`/`lexed`/`parsed`/`ir`) and `ir` means
+> `sourceToIR` returned. The rows above are re-stated on the corrected scale; the *errors*
+> they record were always right, and an error is precisely the proof that IR was never
+> produced. The `node:fs ×3` note is also corrected: SH4 cleared `node:fs`, and the two
+> remaining `NT1017`s are the bun text-asset import, not a `node:` module.
 
 **What this measurement does NOT establish.** A byte-identical-IR diff over every fixture
 is the natural way to prove a compiler source rewrite is observationally null, and it is
@@ -339,6 +365,51 @@ weight is (a) old-vs-new token streams over 1,105 files including 702 borrowed t
 cases, (b) exhaustive BMP sweeps of every rewritten class, and (c) compiling each new
 helper **with nativets itself** — which is what caught the two blockers this lane nearly
 planted (a nullable-returning callback type, and an `arr.push`).
+
+### Re-measured at SH6 — the frontier, per module, standalone
+
+`test/sh6.test.ts` is the first instrument that asks the question that matters: does
+nativets compile the compiler's own source into something that BEHAVES like the bun-run
+compiler? Its answer, at `main` with SH4, the regex removal, `!` and the NT0001 tail all
+landed:
+
+**All twelve `src/*.ts` modules, and `cli.ts` (stage-1), sit at rung 0. Nothing reaches
+IR.** Every earlier "reaches `ir`" in this document was the `phaseOf` artifact corrected
+above.
+
+SH6 also exposed a measurement confound that had been quietly inflating the picture.
+`sourceToIR(source, entryPath)` runs the **whole-program link**, so a module's recorded
+blocker may belong to a module it *imports*, not to itself. `ownership.ts` was credited
+with `NT1009` — but that union lives in `checker.ts`, which `ownership.ts` imports.
+Measuring each module standalone (`parse` + `check`, no link) separates the two, and the
+standalone column is the one that tells you what to fix:
+
+| Module | First blocker, standalone | The construct |
+|---|---|---|
+| `ast.ts` | `NT0001` 14:29 | template-literal **type** — `` `${string}[]` `` |
+| `parser.ts` | `NT0001` 225:95 | **`satisfies`** |
+| `checker.ts` | `NT1009` | `Record<string, number \| "var">` — a general union |
+| `codegen.ts` | `NT1015` 475:3 | **`static`** class member |
+| `modules.ts` | `NT1015` | **generic class method** — `private t<T extends Ty \| undefined>` |
+| `driver.ts` | `NT1017` 27:1 | the **text-asset import** (12 of them, 305 KB of C) |
+| `lexer.ts`, `coverage-preprocess.ts` | `NT1014` | `new Set(iterable)` |
+| `diagnostics.ts` | `NT2001` | narrowing does not flow across `\|\|` |
+| `cli.ts` | `NT2001` | `'source' declared string but initialized with undefined` |
+| `ownership.ts` | `NT2001` | `'NO_MUTABLE' is not defined` |
+| `coverage.ts` | `NT1003` | call to `parse` (function value / unknown callee) |
+
+These are **first** blockers. Each one cleared unmasks the next, so this is a ratchet
+grind, not an eleven-item list — the same shape every earlier re-measurement had.
+
+**The gap is being widened by ordinary feature work.** Two of the blockers above were
+planted by recent, unrelated stages: `new Set([...])` arrived with the regex-lexing table,
+and the text import arrived with the single-binary embed. Neither author was doing
+self-hosting work. What catches this today is `test/bootstrap.test.ts`, which runs in CI
+(`.github/workflows/ci.yml` runs the full `bun test`) and holds two ratchets — a per-module
+phase floor, and the set of NT codes present across the tree, so a *new* code appearing is
+a hard failure. The remaining hole: a module regressing to a code **already** in the set is
+invisible to both. Closing that means ratcheting per-module blocker codes, not just the
+tree-wide set.
 
 ### Re-measured after SHORT-CIRCUIT NARROWING — the `NT2001` bucket is empty
 
@@ -361,11 +432,12 @@ its right, and could not narrow a **dotted name** at all. Both are fixed:
 
 | Module | Before | After |
 |---|---|---|
-| `diagnostics.ts` | `ir` — `NT2001`, `diag.spans.length` after `!diag.spans \|\|` | `ir` — **`NT1606`**, `[...diag.spans].sort(…)` — arrays are immutable |
+| `diagnostics.ts` | `parsed` — `NT2001`, `diag.spans.length` after `!diag.spans \|\|` | `parsed` — **`NT1606`**, `[...diag.spans].sort(…)` — arrays are immutable |
 
-Nothing else moved: `cli.ts` still dies on `'source' declared string but initialized with
-undefined` and `ownership.ts` on `'NO_MUTABLE' is not defined`, both unrelated to
-narrowing. Two adjacent gaps this measurement exposed, neither taken:
+Still `parsed`, not `ir`: clearing the narrowing false positive moved the blocker, not the
+rung. Nothing else moved either — `cli.ts` still dies on `'source' declared string but
+initialized with undefined` and `ownership.ts` on `'NO_MUTABLE' is not defined`, both
+unrelated to narrowing. Two adjacent gaps this measurement exposed, neither taken:
 
 - the **value-returning** `a && a.b` (node: `undefined` or a number) is still refused —
   `&&`/`||` require matching `boolean`/`number`/`string` operands, so the narrowing
