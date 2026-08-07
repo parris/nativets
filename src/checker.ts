@@ -1179,7 +1179,7 @@ class Checker {
         }
         return;
       case "IfStmt": {
-        this.type(s.test, scope);
+        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
         // Two INDEPENDENT narrowings apply to the same arms, and a guard can want both
         // (see checkBlock): nullable FACTS from the guard hold in the branch it selects,
         // and a TAG test narrows each arm's union — the tested member in one, the
@@ -1202,12 +1202,12 @@ class Checker {
         return;
       }
       case "WhileStmt":
-        this.type(s.test, scope);
+        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
         return;
       case "DoWhileStmt":
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
-        this.type(s.test, scope);
+        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
         return;
       case "ForStmt": {
         const inner = scope.child();
@@ -1319,7 +1319,8 @@ class Checker {
       case "UndefinedLiteral": return "undefined";
       case "NullLiteral": return "null";
       case "TemplateLiteral":
-        for (const x of e.exprs) this.type(x, scope);
+        // Same box, same invalid IR, as string concatenation just above.
+        for (const x of e.exprs) refuseUnboxedUnion(this.type(x, scope), "a template literal");
         return "string";
       case "ArrayLiteral": {
         if (e.elements.length === 0) {
@@ -1581,6 +1582,9 @@ class Checker {
           // tagged pair, never truthiness, so `0` / `""` / `false` compare false.
           if (isNullableTy(l) && (r === "undefined" || r === "null")) return "boolean";
           if (isNullableTy(r) && (l === "undefined" || l === "null")) return "boolean";
+          // A general union is a BOX: `===` on it compared the two boxes' TAGS, so
+          // `1 === 2` came out true. Refuse until the arms are compared themselves.
+          for (const t of [l, r]) refuseUnboxedUnion(t, "`===`");
           if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`);
           return "boolean";
         }
@@ -1595,6 +1599,9 @@ class Checker {
           // concatenating one used to reach codegen and emit invalid IR. Unwrap first
           // (`?? "…"`), which is also the only spelling whose output is unambiguous.
           for (const t of [l, r]) if (isNullableTy(t)) throw nyi(NYI.OPTIONAL_CHAIN, `string concatenation with a \`${baseTy(t)} | ${nullishKind(t)}\` (unwrap it first, e.g. \`(x ?? "") + …\`)`);
+          // ...and a general union is the same two-slot box, which reached codegen and
+          // emitted invalid IR.
+          for (const t of [l, r]) refuseUnboxedUnion(t, "string concatenation");
           // stdlib Batch 3: `"" + date` is node's Date#toString — a LOCALE- and
           // zone-name-formatted human string ("Thu Jan 01 1970 … (GMT)"), which needs
           // the tz display-name tables. Refuse rather than approximate.
@@ -1643,7 +1650,7 @@ class Checker {
         throw typeError(`'${e.op}' operands must be matching boolean/number/string (got ${l}, ${r})`);
       }
       case "ConditionalExpr": {
-        this.type(e.test, scope);
+        refuseUnboxedUnion(this.type(e.test, scope), "a truthiness test");
         // Each arm sees the surrounding context; additionally an empty `[]` arm takes
         // its element type from the OTHER arm (`flag ? [1, 2] : []`), so type the
         // non-empty arm first and feed its type back.
@@ -2057,7 +2064,9 @@ class Checker {
       // SH2: the serializer is generated from the STATIC type, and an un-narrowed union
       // does not have one shape — it used to fall through to the literal `null`, which is
       // a silent wrong answer. Refuse; narrowing gives it a member to serialize.
-      checkUnionRenderable(this.type(e.args[0]!, scope), "JSON.stringify");
+      const jt = this.type(e.args[0]!, scope);
+      checkUnionRenderable(jt, "JSON.stringify");
+      refuseUnboxedUnion(jt, "JSON.stringify"); // rendered the box as the literal `null`
       // arg2 (replacer) — only `null`/`undefined` supported (no array/function replacer).
       if (e.args.length >= 2) {
         const r = e.args[1]!;
@@ -3108,6 +3117,29 @@ export function checkConsoleArg(at: Ty, depth = 0): void {
  * the fix named. The union's own tag is what supplies the missing shape, at runtime and
  * with one branch per member; that is a follow-on, not a guess to make now.
  */
+/**
+ * Refuse an operation that would read a GENERAL union's box as if it were the value.
+ *
+ * Everything the box supports — printing, `typeof`, `Array.isArray` — dispatches on
+ * its tag. Everything else reaches code generated from the STATIC type, which for a
+ * `G<…>` describes the two-slot block, not the arm inside it. Each case below was
+ * measured against node before being refused, and each was silently wrong rather
+ * than loud: truthiness tested the box POINTER (always true, so `0` came out truthy),
+ * `===` compared TAGS (so `1 === 2` was true), `JSON.stringify` rendered the literal
+ * `null`, and concatenation emitted invalid IR.
+ *
+ * Every one of them is a tag dispatch away from working — the printer already is one
+ * — but "reject, never miscompile" says the refusal lands first.
+ */
+function refuseUnboxedUnion(ty: Ty, what: string): void {
+  if (!isGeneralUnionTy(ty)) return;
+  throw nyi(
+    NYI.OPTIONAL_CHAIN,
+    `${what} of the un-narrowed union ${generalUnionMembers(ty).join(" | ")} — it is a tagged box, so which arm it holds ` +
+      `is only known at RUNTIME. Narrow it first (\`if (typeof x === "${typeofTagOf(generalUnionMembers(ty)[0]!)}") { … }\`) and use the arm`,
+  );
+}
+
 export function checkUnionRenderable(ty: Ty, what: string): void {
   const u = findUnionIn(ty);
   if (u === undefined) return;

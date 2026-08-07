@@ -428,4 +428,45 @@ console.log(f(7));
     expect(ours.stdout).toBe(oracle.stdout);
     expect(ours.exitCode).toBe(oracle.exitCode);
   });
+
+  /*
+   * Every operation that reads a union WITHOUT narrowing it. Each one below was
+   * measured against node first: three of them silently produced a wrong answer
+   * (they read the box's TAG, or the box POINTER, as if it were the value) and two
+   * emitted invalid IR. None of them may do that, so all five are refused and the
+   * hint says the one thing that fixes every case — narrow with `typeof` first.
+   *
+   * Implementing them is a genuine next rung (each is a tag dispatch, like the
+   * printer already is); refusing is what this lane can be SURE of.
+   */
+  describe("an operation that would read the box as if it were the value is REFUSED", () => {
+    const g = (body: string) => `function f(x: number | string): void { ${body} }\nf(1);\n`;
+    test("truthiness — node says 0 and \"\" are falsy; the box pointer is always truthy", () => {
+      expect(codeOf(g(`if (x) { console.log("t"); }`))).toBe("NT1009");
+      expect(messageOf(g(`if (x) { console.log("t"); }`))).toContain("typeof");
+    });
+    test("=== between two unions — it compared TAGS, so 1 === 2 was true", () => {
+      expect(codeOf(`function f(a: number | string, b: number | string): boolean { return a === b; }\nconsole.log(f(1, 2));\n`)).toBe("NT1009");
+    });
+    test("string concatenation and template literals", () => {
+      expect(codeOf(g(`console.log("v=" + x);`))).toBe("NT1009");
+      expect(codeOf(g("console.log(`v=${x}`);"))).toBe("NT1009");
+    });
+    test("JSON.stringify — it rendered the box as the literal `null`", () => {
+      expect(codeOf(g(`console.log(JSON.stringify(x));`))).toBe("NT1009");
+    });
+    test("...and NARROWING first makes every one of them work", async () => {
+      const src = `function f(x: number | string): void {
+  if (typeof x === "number") { console.log(!!x, "v=" + x, \`t=\${x}\`, JSON.stringify(x)); }
+  else { console.log(!!x, "v=" + x, \`t=\${x}\`, JSON.stringify(x)); }
+}
+f(0); f(1); f(""); f("a");
+`;
+      expect(codeOf(src)).toBe(null);
+      const ours = await compileAndRun(src);
+      const oracle = runWithNode(src);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.exitCode).toBe(oracle.exitCode);
+    });
+  });
 });
