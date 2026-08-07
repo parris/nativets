@@ -392,7 +392,8 @@ standalone column is the one that tells you what to fix:
 | `codegen.ts` | `NT1015` 475:3 | **`static`** class member |
 | `modules.ts` | `NT1015` | **generic class method** — `private t<T extends Ty \| undefined>` |
 | `driver.ts` | `NT1017` 27:1 | the **text-asset import** (12 of them, 305 KB of C) |
-| `lexer.ts`, `coverage-preprocess.ts` | `NT1014` | `new Set(iterable)` |
+| `lexer.ts` | `NT2001` | `ESCAPES` declared `Map<string, string>` but initialized with an **object literal** |
+| `coverage-preprocess.ts` | `NT1606` | array **`.push`** (arrays are immutable) |
 | `diagnostics.ts` | `NT2001` | narrowing does not flow across `\|\|` |
 | `cli.ts` | `NT2001` | `'source' declared string but initialized with undefined` |
 | `ownership.ts` | `NT2001` | `'NO_MUTABLE' is not defined` |

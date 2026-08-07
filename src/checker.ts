@@ -1673,8 +1673,20 @@ class Checker {
         // Immutable collections (B2). `new Map<K,V>()` / `new Set<T>()`; bare
         // `new Map()`/`new Set()` default to Map<string,number> / Set<string>.
         if (e.callee === "Map") {
-          if (e.args.length !== 0) throw nyi(NYI.COLLECTION, "new Map(iterable) (use .set)");
-          const k = e.typeArgs?.[0] ?? "string", v = e.typeArgs?.[1] ?? "number";
+          if (e.args.length > 1) throw typeError("new Map expects at most one argument (an iterable)");
+          let k = e.typeArgs?.[0] ?? "string", v = e.typeArgs?.[1] ?? "number";
+          if (e.args.length === 1) {
+            // Only the Map-COPY form. The entries form needs a [K, V] tuple type we
+            // do not have yet (`["a", 1]` is NT2001 on its own), so it stays refused.
+            // Refuse the entries form BEFORE typing it — `[["a", 1]]` would otherwise
+            // die as NT2001 ("elements must share a type"), which names the symptom
+            // rather than the missing tuple type.
+            const a0 = e.args[0]!;
+            if (a0.kind === "ArrayLiteral") throw nyi(NYI.COLLECTION, "new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set)");
+            const at = this.type(a0, scope);
+            if (!isMapTy(at)) throw nyi(NYI.COLLECTION, `new Map(${at}) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set)`);
+            k = mapKeyTy(at); v = mapValTy(at);
+          }
           // Keys ride an i64 slot tagged NT_K_STR (string) or NT_K_NUM (number) —
           // those are the two the runtime canonicalizes (SameValueZero), so keys are
           // restricted to string|number. Values ride a raw i64 slot, so any storable
@@ -1684,8 +1696,24 @@ class Checker {
           return makeMapTy(k, v);
         }
         if (e.callee === "Set") {
-          if (e.args.length !== 0) throw nyi(NYI.COLLECTION, "new Set(iterable) (use .add)");
-          const el = e.typeArgs?.[0] ?? "string";
+          if (e.args.length > 1) throw typeError("new Set expects at most one argument (an iterable)");
+          const declared = e.typeArgs?.[0];
+          let el = declared ?? "string";
+          if (e.args.length === 1) {
+            // `new Set(iterable)` — bulk construction. The element type comes from the
+            // argument (an array's element type), so `new Set([1,2,3])` is Set<number>
+            // without a type argument, exactly as node/tsc infer it.
+            const at = this.type(e.args[0]!, scope, declared ? (`${declared}[]` as Ty) : undefined);
+            if (isArrayTy(at)) el = elemTy(at);
+            else if (isSetTy(at)) el = setElemTy(at);
+            // A string is deliberately REFUSED: node iterates it by code point
+            // (`new Set("a😀b")` has size 3) while our string for-of walks bytes, so
+            // building it here would silently produce the wrong set. We cannot prove
+            // a string is ASCII at compile time, so the refusal is unconditional.
+            else if (at === "string") throw nyi(NYI.COLLECTION, "new Set(string) (node iterates a string by code point; split it yourself, e.g. new Set(s.split(\"\")) for ASCII)");
+            else throw nyi(NYI.COLLECTION, `new Set(${at}) (only an array or another Set is supported — build others with .add)`);
+            if (declared && el !== declared) throw typeError(`new Set<${declared}> from ${at} (element type must match)`);
+          }
           if (el !== "string" && el !== "number") throw nyi(NYI.COLLECTION, `Set of ${el}`);
           return makeSetTy(el);
         }

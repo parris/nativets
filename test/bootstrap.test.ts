@@ -241,7 +241,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT0001 survivors are a template-literal TYPE (`\`${string}[]\`` in ast.ts, which
     // coverage.ts sees through the link) and `satisfies` in parser.ts.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT0001", "NT1009", "NT1014", "NT1015", "NT1017", "NT1606"],
+      ["NT0001", "NT1009", "NT1015", "NT1017", "NT1606", "NT2001"],
     );
     // MEASURED AFTER THE MERGE, not carried over from either branch: SH4 landed between
     // this lane's base and here, so `modules.ts` is past the host FFI and stops on
@@ -250,8 +250,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // rather than a `node:` module, and an open SH7 question (the self-hosted compiler
     // still has to embed its runtime somehow).
     expect(byCode["NT1017"]!.sort()).toEqual(["cli.ts", "driver.ts"]);
-    // Unmasked by the lexer rewrite: `new Set([...])` for REGEX_AFTER_KEYWORD.
-    expect(byCode["NT1014"]!.sort()).toEqual(["lexer.ts"]);
+    // RATCHET MOVE (collections): the NT1014 bucket is now EMPTY. It held lexer.ts on
+    // `new Set([...])` for REGEX_AFTER_KEYWORD; `new Set(iterable)` compiles now, so the
+    // module walks on to what sat behind it (NT2001, below).
+    expect(byCode["NT1014"]).toBeUndefined();
     // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
     // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
     // working, not a regression — the phase table above is what must never go backwards.
@@ -266,7 +268,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // narrow the terms to its right. It does now, and for dotted names too, so
     // `formatDiagnostic` type-checks and the module stops on the thing behind it:
     // NT1606, `[...diag.spans].sort(…)` — the immutable-data refusal.
-    expect(byCode["NT2001"]).toBeUndefined();
+    // …and it is REFILLED by the collections lane, with a different module and a real
+    // (not false-positive) blocker: lexer.ts now clears `new Set([...])` and stops on
+    // `ESCAPES` declared `Map<string, string>` but initialized with an OBJECT LITERAL.
+    expect(byCode["NT2001"]!.sort()).toEqual(["lexer.ts"]);
     expect(byCode["NT1606"]!.sort()).toEqual(["diagnostics.ts"]);
     expect(byCode["NT0001"]!.sort()).toEqual(
       ["ast.ts", "coverage-preprocess.ts", "coverage.ts", "parser.ts"],
