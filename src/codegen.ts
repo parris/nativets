@@ -24,7 +24,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from ".
 import { isUnionTy, unionDiscriminant } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
-import { nyi, NYI } from "./diagnostics.ts";
+import { nyi, NYI, internalError } from "./diagnostics.ts";
 
 export function llvmDouble(n: number): string {
   const dv = new DataView(new ArrayBuffer(8));
@@ -1568,7 +1568,7 @@ class FnGen {
   /** Box an arm value into a general union of type `target`. */
   private coerceGeneralUnion(val: Val, target: Ty): Val {
     const tag = generalUnionTagOf(target, val.ty);
-    if (tag < 0) throw new Error(`internal: ${val.ty} is not a member of ${target}`); // checker's job
+    if (tag < 0) throw internalError(`${val.ty} is not a member of the union ${target}`); // the checker proved membership
     return { v: this.nullBox(String(tag), this.toSlot(val)), ty: target };
   }
 
@@ -1743,7 +1743,7 @@ class FnGen {
       }
 
       case "SpreadExpr":
-        throw new Error(`codegen reached unsupported expression ${e.kind}`);
+        throw internalError(`codegen reached the expression kind ${e.kind}, which the checker should have expanded or refused`);
 
       case "TemplateLiteral": {
         let acc = this.mod.intern(e.quasis[0]!);
@@ -1875,7 +1875,7 @@ class FnGen {
           // rewritten since the proof, and a wrong proof panics rather than inventing one.
           return this.narrowRead(e, { v: this.fromSlot(slot, ft), ty: ft });
         }
-        throw new Error(`Unsupported member .${e.property}`);
+        throw internalError(`no member lowering for .${e.property} on ${e.object.ty ?? "an untyped receiver"}`);
       }
 
       case "TypeofExpr": {
@@ -2616,7 +2616,7 @@ class FnGen {
     // arbitrary expression callee of function type, e.g. compose(f,g)(x)
     const ct = e.callee.ty;
     if (ct && isFuncTy(ct)) return this.genCallValueFrom(this.genExpr(e.callee).v, ct, e.args);
-    throw new Error("Unsupported call target in codegen");
+    throw internalError(`no call lowering for a callee of kind ${e.callee.kind}${e.callee.ty ? ` typed ${e.callee.ty}` : ""}`);
   }
 
   /**
@@ -3386,7 +3386,7 @@ class FnGen {
       return { v: acc, ty: "number" };
     }
     const fn = MATH_FN1[method];
-    if (!fn) throw new Error(`unsupported Math.${method}`);
+    if (!fn) throw internalError(`no lowering for Math.${method}, which the checker admitted`);
     const t = this.fresh();
     this.emit(`${t} = call double @${fn}(double ${vals[0]})`);
     return { v: t, ty: "number" };
@@ -3467,7 +3467,7 @@ class FnGen {
         this.emit(`${oob} = icmp eq ptr ${r}, null`);
         return { v: this.nullBox(this.nullTagIf(oob), this.toSlot({ v: r, ty: "string" })), ty: makeNullable("undefined", "string") };
       }
-      default: throw new Error(`unsupported string method .${method}`);
+      default: throw internalError(`no lowering for string method .${method}, which the checker admitted`);
     }
   }
 
@@ -3782,7 +3782,7 @@ class FnGen {
       case "map": return this.genMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "filter": return this.genFilter(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "reduce": return this.genReduce(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, args[1]!);
-      default: throw new Error(`unsupported array method .${method}`);
+      default: throw internalError(`no lowering for array method .${method}, which the checker admitted`);
     }
   }
 
@@ -4503,7 +4503,7 @@ class FnGen {
       }
     }
     // Unreachable: the checker only admits a name that HOST_FUNCS has a signature for.
-    throw new Error(`host builtin '${name}' has no lowering`);
+    throw internalError(`host builtin '${name}' has no lowering, but the checker has a signature for it`);
   }
 
   private genGlobal(name: string, args: Expr[], retTy?: Ty): Val | null {

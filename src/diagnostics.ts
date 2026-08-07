@@ -41,6 +41,34 @@ export class NTError extends Error {
 }
 
 /**
+ * A broken COMPILER INVARIANT — deliberately not an `NT****` code.
+ *
+ * An NT code says "your program uses something we do not compile yet", and its hint tells
+ * the reader how to write it differently. That is exactly the wrong thing to say here: an
+ * `InternalError` means the frontend accepted something codegen cannot lower, so the
+ * defect is OURS and there is nothing for the user to work around. Dressing one up as an
+ * NT code would send someone rewriting correct code to dodge our bug.
+ *
+ * So these stay loud, and the stack trace is kept on purpose — it is the useful artifact
+ * in a bug report. What changes is that the message says whose fault it is.
+ */
+export class InternalError extends Error {
+  constructor(detail: string) {
+    super(
+      `internal compiler error: ${detail}\n` +
+      `  This is a bug in nativets, not in your program: the frontend accepted something\n` +
+      `  codegen cannot lower, which the checker should have refused first. Please report\n` +
+      `  it with the program that triggered it. The stack trace below is part of that report.`,
+    );
+    this.name = "InternalError";
+  }
+}
+/** Shorthand for the throw sites. */
+export function internalError(detail: string): InternalError {
+  return new InternalError(detail);
+}
+
+/**
  * How many leading whitespace characters `s` has — the `^\s*` of ECMAScript's `\s`
  * (WhiteSpace + LineTerminator), scanned by code unit. nativets deliberately has no
  * `RegExp` (docs/divergences.md), so the compiler's own source may not use one either.

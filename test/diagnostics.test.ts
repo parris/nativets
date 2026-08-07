@@ -5,13 +5,13 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-import { formatDiagnostic, NYI } from "../src/diagnostics.ts";
+import { formatDiagnostic, NYI, internalError } from "../src/diagnostics.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { NTError } from "../src/diagnostics.ts";
 
@@ -155,5 +155,35 @@ describe("no internal error reaches the user", () => {
     const { out, code } = cli(`try { throw new Error("boom"); } catch (e) { console.log("caught"); }\n`);
     expect(code).toBe(0);
     expect(out).not.toContain("error[");
+  });
+});
+
+/*
+ * The other side of the split. These sites are NOT user-reachable constructs: each one
+ * means the frontend accepted something codegen cannot lower, so an NT code would be a
+ * lie — it would hand the user a workaround for OUR bug. They keep their stack trace on
+ * purpose (it is the bug-report artifact); what is pinned here is that the message says
+ * whose defect it is, and that it never claims to be an NT diagnostic.
+ */
+describe("broken compiler invariants are labelled as OUR bug, not an NT code", () => {
+  test("InternalError names the defect as ours and asks for a report", () => {
+    const e = internalError("no lowering for array method .frobnicate");
+    expect(e).toBeInstanceOf(Error);
+    expect(e.name).toBe("InternalError");
+    expect(e.message).toContain("internal compiler error:");
+    expect(e.message).toContain("no lowering for array method .frobnicate");
+    expect(e.message).toContain("bug in nativets, not in your program");
+    expect(e.message).toContain("report");
+    // Never an NT code: `coverage` groups blockers by code, and a compiler defect is not
+    // a language feature anyone can burn down.
+    expect(e.message).not.toContain("error[NT");
+    expect(e).not.toBeInstanceOf(NTError);
+  });
+
+  // src/codegen.ts must route EVERY internal failure through it — a bare `throw new
+  // Error` there is what printed a raw Bun stack trace with no explanation at all.
+  test("src/codegen.ts contains no bare `throw new Error`", () => {
+    const src = readFileSync(join(HERE, "..", "src", "codegen.ts"), "utf8");
+    expect(src).not.toContain("throw new Error(");
   });
 });
