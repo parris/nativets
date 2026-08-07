@@ -12,7 +12,7 @@
 
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, type FmtSpec } from "./checker.ts";
-import { blockDrops, freshArray } from "./ast.ts";
+import { blockDrops, freshArray, RETAINS_RECEIVER } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
@@ -88,10 +88,8 @@ function mentions(node: unknown, name: string): boolean {
   return false;
 }
 
-/** The one array method that returns its RECEIVER (in-place, like node).
- *  (`freshArray`/`FRESH_ARRAY_CALLS` live in ast.ts — the checker needs the same
- *  judgment, and two copies could drift.) */
-const RETAINS_RECEIVER = new Set(["reverse"]);
+/* `freshArray`/`FRESH_ARRAY_CALLS` and `RETAINS_RECEIVER` all live in ast.ts — the
+ * checker and the ownership pass need the same judgments, and copies could drift. */
 
 function llvmTy(ty: Ty): string {
   if (isUnionTy(ty)) return "ptr"; // SH2: the member object block itself — there is no box

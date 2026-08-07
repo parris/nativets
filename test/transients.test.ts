@@ -387,9 +387,14 @@ const snap2: number[] = v.with(99, 88);         // clones the tail
 for (let i = 0; i < 200; i = i + 1) { v = [...v, i]; }   // consuming appends
 const objs: { a: number }[] = [{ a: 1 }, { a: 2 }];
 const built: number[] = build(2000);
+// .reverse() returns its RECEIVER, so revAlias is a second NAME for rev, not a second
+// owner. Freeing it through both names was a double free — this is the ASan gate on it.
+const rev: number[] = [1, 2, 3];
+const revAlias: number[] = rev.reverse();
 console.log(v.length, v[0], v[299], snap[50], snap2[99], snap.length);
 console.log(built.length, built[1999], objs[1].a, churn(50));
-console.log(built.slice(0, 4).map((x: number): number => x * 2).join(","));`;
+console.log(built.slice(0, 4).map((x: number): number => x * 2).join(","));
+console.log(revAlias.join(",") + "|" + rev.join(",") + "|" + [4, 5, 6].reverse().join(","));`;
 
   test("ASan + UBSan run of a program exercising every new drop path", () => {
     const dir = mkdtempSync(join(tmpdir(), "nativets-asan-"));
@@ -436,7 +441,7 @@ console.log(built.slice(0, 4).map((x: number): number => x * 2).join(","));`;
       expect(run.stderr).not.toContain("AddressSanitizer");
       expect(run.stderr).not.toContain("runtime error");
       expect(run.status).toBe(0);
-      expect(run.stdout).toBe("300 5 199 77 88 100\n2000 1999 2 225\n0,2,4,6\n");
+      expect(run.stdout).toBe("300 5 199 77 88 100\n2000 1999 2 225\n0,2,4,6\n3,2,1|3,2,1|6,5,4\n");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
