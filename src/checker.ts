@@ -319,10 +319,10 @@ export function check(program: Program): CheckedProgram {
     let rest = false;
     s.params.forEach((p, i) => { if (p.rest) { if (i !== s.params.length - 1) throw typeError("rest parameter must be last"); rest = true; } });
     const params = s.params.map((p) => p.annot ?? (p.default ? c.type(p.default, builtins()) : "number"));
-    // Type each ANNOTATED default against its param type (the `??` above skips it when
-    // annotated) so its `.ty` is set for codegen and an empty-array default `[]` gets
-    // its element type from the annotation (`function f(a: T[] = [])`).
-    s.params.forEach((p, i) => { if (p.default && p.annot) c.type(p.default, builtins(), params[i]); });
+    // An ANNOTATED default is typed later, by `checkFunction`, against the MODULE scope —
+    // it may name a module-level const, which does not exist yet at this point in the
+    // pass. That re-typing is what sets its `.ty` for codegen and gives an empty-array
+    // default `[]` its element type from the annotation (`function f(a: T[] = [])`).
     const fixed = rest ? s.params.length - 1 : s.params.length;
     const required = s.params.slice(0, fixed).filter((p) => !p.default).length;
     const defaults = s.params.map((p) => p.default ?? null);
@@ -835,7 +835,20 @@ class Checker {
   }
 
   checkFunction(fn: FuncDecl, base: Scope): void {
-    for (const p of fn.params) base.declare(p.name, p.annot ?? (p.default ? "number" : "number"), false);
+    // A default is an expression evaluated at CALL time, in the scope that encloses the
+    // function — so it can name a module-level binding (`= NO_MUTABLE`) just like the body
+    // can. The signature pass above cannot type it there: it runs before the module
+    // bindings exist, so all it has is a builtins-only scope. Type it HERE, where `base`
+    // is the module scope, purely to set `.ty` for codegen.
+    //
+    // Deliberately BEFORE the parameters are declared, so the module scope is all a
+    // default can see. `function f(a, b = a)` — a default reading the parameters to its
+    // left — is ordinary JavaScript, but codegen materializes defaults before the
+    // parameter allocas are stored, so it emits a load from an undefined `%a.addr` and
+    // clang rejects the module. Until that is fixed, such a default must keep failing the
+    // CHECKER, with an NT2001 naming the parameter, rather than reaching clang.
+    for (const p of fn.params) if (p.default && p.annot) this.type(p.default, base, p.annot);
+    for (const p of fn.params) base.declare(p.name, p.annot ?? "number", false);
     this.checkBlock(fn.body, base, fn.returnTy ?? "number");
     this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
   }
