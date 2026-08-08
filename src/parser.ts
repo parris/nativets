@@ -1896,7 +1896,12 @@ class Parser {
           const name = this.expectIdent();
           const optional = this.at("?"); if (optional) this.eat("?"); // `(x?: T) =>`
           let annot: Ty | undefined;
-          if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
+          if (this.at(":")) {
+            this.eat(":");
+            const t = this.parseTypeAsyncAware();
+            annot = t.ty;
+            if (t.asyncFn) this.asyncFns.add(name); // see parseParamList — same rule, arrow syntax
+          }
           let def: Expr | undefined;
           if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
           params.push(this.mkParam(name, annot, def, rest, optional));

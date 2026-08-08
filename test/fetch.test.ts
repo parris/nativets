@@ -407,4 +407,12 @@ const one = async (): Promise<number> => 1;
 function callit(f: () => Promise<number>): number { return f(); }
 console.log(callit(one));
 `));
+
+  // An ARROW's parameter list is parsed by a different routine, and a higher-order
+  // callback is far more often an arrow than a `function` — so it gets the same rule.
+  _test("un-awaited call through a `() => Promise<T>` parameter of an ARROW", () => rejects(`
+const one = async (): Promise<number> => 1;
+const callit = (f: () => Promise<number>): number => f();
+console.log(callit(one));
+`));
 });
