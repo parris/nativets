@@ -243,7 +243,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1006", "NT1009", "NT1015", "NT1023", "NT1027", "NT2001"],
+      ["NT1009", "NT1015", "NT1023", "NT1027", "NT1606", "NT2001"],
     );
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
@@ -311,9 +311,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     expect(byCode["NT1009"]!.sort()).toEqual(
       ["ast.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "parser.ts"],
     );
-    // NEW BUCKET: diagnostics.ts left NT1606 (`[...spans].sort()` — the fresh-receiver
-    // lane) and stopped on a variadic spread, `Math.max(...spans.map(…))`.
-    expect(byCode["NT1006"]!.sort()).toEqual(["diagnostics.ts"]);
+    // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
+    // the fresh-receiver lane) -> NT1006 (`Math.max(...)`, cleared by the variadic lane) ->
+    // back to NT1606, this time a `.push` on a NAMED accumulator. That last shape is
+    // deliberately NOT covered by the fresh-receiver rule, and the freshpush lane
+    // established why: permitting it needs in-place mutation on an owned named local,
+    // which is how the `.reverse` double free happened.
+    expect(byCode["NT1006"]).toBeUndefined();
+    expect(byCode["NT1606"]!.sort()).toEqual(["diagnostics.ts"]);
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not
@@ -327,11 +332,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT1606 changed HANDS entirely: diagnostics.ts left it (above), and checker.ts +
     // ownership.ts arrived from NT1009 once general unions landed. Same bucket, none of
     // the same modules — which is why membership, not size, is the thing to assert.
-    // NT1606 is EMPTY now — checker.ts and ownership.ts both moved on to NT1027 when the
-    // `delete o.k` refusal was sharpened. Stated as membership-of-nothing rather than as
-    // an invariant: see the NT1027 note above for why "this bucket is permanently empty"
-    // is a claim this file has now got wrong twice.
-    expect(byCode["NT1606"]).toBeUndefined();
+    // (NT1606 is asserted above. It emptied when checker.ts and ownership.ts moved to
+    // NT1027, then refilled with diagnostics.ts — the third time a bucket here has emptied
+    // and refilled. Membership, never emptiness.)
     // (The NT0001 membership assertion that stood here is gone: the bucket is empty, and
     // the shrink-only `toBeUndefined` above is now the thing that guards it.)
   });
