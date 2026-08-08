@@ -282,6 +282,34 @@ describe("`%j` and the direct call agree", () => {
   }
 });
 
+// THE REGRESSION THIS PINS, in the CLAUDE.md style: `console.log("%j", undefined)`
+// printed `undefined` — node-correct — and routing `%j` through the direct call's
+// predicate turned it into an `NT1005` refusal. A fix that trades a correct answer for a
+// wrong REJECTION is still a regression, and it nearly shipped inside a commit whose
+// message says it closes eight silent wrong answers.
+//
+// node is why the two differ: `%j` does not RETURN the stringify result, it CONCATENATES
+// it (`formatWithOptions` does `tempStr = tryStringify(arg)` and joins), so a value
+// stringify DROPS prints the literal `undefined`. The direct call has a `string` result
+// type here and the undefined VALUE does not fit in one, so it stays refused. Both
+// directions are pinned, because pinning only one lets the other drift back.
+describe("`%j` of undefined prints `undefined`, where the direct call is refused", () => {
+  test("`%j` of undefined compiles", () => {
+    expect(rejectCode(`console.log("%j", undefined);`)).toBe(null);
+  });
+  test("the direct call on the same value stays refused", () => {
+    expect(rejectCode(`console.log(JSON.stringify(undefined));`)).toBe("NT1005");
+  });
+});
+
+// (Only the `undefined` LITERAL is measured. A `void`-typed CALL is accepted by the same
+//  arm, but it cannot be pinned against node here: `console.log(f())` for `f(): void`
+//  prints `0` in nativets and `undefined` in node — a PRE-EXISTING wrong answer that has
+//  nothing to do with JSON and predates this lane. Reported separately.)
+differential("`%j` of undefined matches node", [
+  { name: "%j of the undefined literal", code: `console.log("%j", undefined);` },
+]);
+
 differential("`%j` of a Map/Set/Uint8Array now matches node", [
   { name: "%j of a Map", code: `const m = new Map<string, number>(); m.set("a", 1); console.log("%j", m);` },
   { name: "%j of a Set", code: `const s = new Set<string>(); s.add("a"); console.log("%j", s);` },

@@ -4222,12 +4222,22 @@ export function checkFormatArg(spec: FmtSpec, at: Ty): void {
     return;
   }
   if (spec === "j") {
-    // `%j` IS `JSON.stringify`, so it accepts exactly what the direct call accepts —
+    // `%j` IS `JSON.stringify`, so it accepts everything the direct call accepts —
     // ONE predicate, not two lists kept in step. They used to disagree: `%j` refused
     // a Map/Set outright while the direct call rendered the literal `null` for one.
-    // Now both render `{}`, as node does. (The nullable strip above is why the one
-    // asymmetry survives: `%j` of a `T | undefined` prints `undefined` at runtime,
-    // which node does too, where the `string`-typed direct call cannot.)
+    // Now both render `{}`, as node does.
+    //
+    // It accepts strictly MORE, in exactly one place, and node is why. `%j` does not
+    // RETURN the stringify result, it CONCATENATES it — node's `formatWithOptions`
+    // does `tempStr = tryStringify(arg)` and joins — so a value stringify DROPS
+    // prints the literal `undefined` rather than having no answer. `console.log("%j",
+    // undefined)` is `undefined` in node, and `genFormatArg`'s `%j` arm emits exactly
+    // that. Routing `%j` through the direct call's predicate WITHOUT this carve-out
+    // turned that into an NT1005 refusal — trading a node-correct answer for a wrong
+    // rejection, which is a regression like any other. The direct
+    // `JSON.stringify(undefined)` is still refused: its result type is `string` here
+    // and the undefined VALUE does not fit in one.
+    if (at === "undefined" || at === "void") return;
     return checkJsonStringifyArg(at, "root");
   }
   // %d / %i / %f

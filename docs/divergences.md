@@ -176,12 +176,20 @@ approximation:
 
 - **`%o`** of a compound (node adds `showHidden`: `[ 1, 2, 3, [length]: 3 ]`) — use `%O`;
 - **`%j`** of whatever `JSON.stringify` itself refuses — a `Dyn` or a `URL`/`Response`
-  handle — and **nothing else**. `%j` IS `JSON.stringify`, so it now routes through the one
-  predicate (`checkJsonStringifyArg`) and the two accept the same set BY CONSTRUCTION. It
-  previously refused a `Map`/`Set` outright while the direct call rendered the literal
-  `null` for one; both now render `{}`, which is what node prints for every Map and every
-  Set. The one asymmetry left is deliberate: `%j` of a `T | undefined` prints `undefined`,
-  as node does, where the `string`-typed direct call has no right answer and is refused;
+  handle. `%j` IS `JSON.stringify`, so it routes through the one predicate
+  (`checkJsonStringifyArg`) rather than keeping a second list in step. It previously refused
+  a `Map`/`Set` outright while the direct call rendered the literal `null` for one; both now
+  render `{}`, which is what node prints for every Map and every Set.
+
+  `%j` accepts strictly MORE in exactly one place, and node is the reason: `%j` does not
+  RETURN the stringify result, it CONCATENATES it (`formatWithOptions` does
+  `tempStr = tryStringify(arg)` and joins), so a value stringify DROPS prints the literal
+  `undefined` instead of having no answer. `console.log("%j", undefined)` is `undefined` in
+  node and in nativets; the direct `JSON.stringify(undefined)` stays refused, because its
+  result type is `string` here and the undefined VALUE does not fit in one. The same holds
+  for a `T | undefined`. Routing `%j` through the direct call's predicate without that
+  carve-out is a REGRESSION — a node-correct answer traded for a wrong rejection — and
+  `test/json-fallthrough.test.ts` pins both directions;
 
 - **`%d`/`%i`/`%f`** of an array or `Dyn`, which node coerces through `ToPrimitive`
   (`String([1,2,3])` is `"1,2,3"`, so `%f` of it is `1`);
