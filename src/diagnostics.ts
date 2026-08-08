@@ -408,3 +408,34 @@ export function parseError(message: string): NTError {
 export function moduleError(code: "NT1701" | "NT1702" | "NT1703" | "NT1704", message: string, hint?: string): NTError {
   return new NTError({ code, message, hint });
 }
+
+/**
+ * NT1705 — a string or template LITERAL whose value contains a NUL (U+0000).
+ *
+ * The same rule as NT1704, on the other door. A nativets string is a NUL-terminated
+ * UTF-8 `const char *` in the C runtime — `js_str_len` is literally `strlen` — so a NUL
+ * *inside* a value ends it. `const s = "a\0b"; console.log(s.length)` printed `1` where
+ * node prints `3`, with nothing to warn anyone: a silent wrong answer, which the prime
+ * directive calls the worst outcome available. NT1704 had guarded exactly one way for a
+ * NUL to get in (a text import's bytes); this guards the ones the source can spell.
+ *
+ * The check is on the DECODED value, so every spelling lands here at once — `\0`,
+ * `\x00`, `\\u0000`, `\u{0}`, and a raw NUL byte pasted into the source — rather than
+ * one rule per escape syntax. `\0` followed by a decimal digit is caught too: that is
+ * ECMAScript's LegacyOctalEscapeSequence (`"\01"` is `"\x01"`, NOT NUL + "1"), a
+ * SyntaxError in strict mode, and we do not implement it — so refusing beats decoding
+ * it wrongly.
+ *
+ * This refuses programs node accepts, so it is recorded in docs/divergences.md. It
+ * cannot cover a NUL computed at RUN time (`String.fromCharCode(0)`, a byte off the
+ * host FS); those stay open and are recorded there too. Claiming otherwise would be
+ * false confidence — a compile-time rule only sees compile-time values.
+ */
+export function nulLiteral(what: string, line: number, col: number): NTError {
+  return new NTError({
+    code: "NT1705",
+    message: `${what} contains a NUL (U+0000) at ${line}:${col}`,
+    hint: "a nativets string is NUL-terminated UTF-8, so a NUL inside one would truncate it — `\"a\\0b\".length` would be 1, not 3. Use a different sentinel, or build the bytes with a Uint8Array, which can hold a zero",
+    spans: [{ line, label: "this literal cannot become a nativets string", primary: true }],
+  });
+}
