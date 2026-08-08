@@ -195,6 +195,12 @@ class Parser {
   /** Every argument position that hands an ASYNC function value to a call, checked once the
    *  whole file is parsed (declarations hoist, so a callee may not be known yet). */
   private asyncEscapes: { callee: string | null; index: number; arg: string; line: number; col: number }[] = [];
+  /** Functions whose RETURN type is written `(…) => Promise<T>` — they hand an async
+   *  function back, so `pick()()` is a call to an async function. */
+  private returnsAsyncFn = new Set<string>();
+  /** Whether the function body currently being parsed declares such a return type — the
+   *  one thing that makes `return <an async function>` legal (see parseReturn). */
+  private returnsAsyncFnStack: boolean[] = [];
   private identCalls: { node: Expr; name: string; line: number; col: number }[] = [];
   /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
    *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
@@ -1317,8 +1323,19 @@ class Parser {
       if (this.lastPromiseParams.size) this.promiseParamsByFn.set(name, this.lastPromiseParams);
       const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
       let returnAnnot: Ty | undefined;
-      if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
-      const body = [...prelude, ...this.parseBlock()];
+      let retAsyncFn = false;
+      if (this.at(":")) {
+        this.eat(":");
+        const t = this.parseTypeAsyncAware();
+        returnAnnot = t.ty;
+        // `function pick(): () => Promise<T>` hands an async function BACK: `pick()()` is
+        // then a call to an async function, and gets the same floating-async guard.
+        retAsyncFn = t.asyncFn;
+        if (retAsyncFn) this.returnsAsyncFn.add(name);
+      }
+      this.returnsAsyncFnStack.push(retAsyncFn);
+      let body: Stmt[];
+      try { body = [...prelude, ...this.parseBlock()]; } finally { this.returnsAsyncFnStack.pop(); }
       return typeParams.length
         ? { kind: "FuncDecl", name, params, returnAnnot, body, typeParams }
         : { kind: "FuncDecl", name, params, returnAnnot, body };
@@ -1718,9 +1735,22 @@ class Parser {
   }
 
   private parseReturn(): Stmt {
-    this.eat("return");
+    const kw = this.eat("return");
     if (this.at(";")) { this.eat(";"); return { kind: "ReturnStmt", argument: null }; }
     const argument = this.parseExpression();
+    // Returning an async function VALUE is the same escape as passing one (see
+    // checkAsyncEscapes), and the same declaration carries it back: only a return type
+    // written `(…) => Promise<T>` says the caller is getting an async function.
+    const isAsyncVal = this.asyncFnExprs.has(argument) ||
+      (argument.kind === "Identifier" && this.asyncFns.has(argument.name));
+    if (isAsyncVal && this.returnsAsyncFnStack[this.returnsAsyncFnStack.length - 1] !== true) {
+      const shown = argument.kind === "Identifier" ? `'${argument.name}'` : "an async arrow";
+      throw nyi(
+        NYI.ASYNC,
+        `returning async function ${shown} at ${kw.line}:${kw.col} from a function whose return type is not declared '(…) => Promise<T>' ` +
+        `(under node the value it returns is a Promise, so the promise would be dropped)`,
+      );
+    }
     this.eat(";");
     return { kind: "ReturnStmt", argument };
   }
@@ -1961,14 +1991,19 @@ class Parser {
     // arrow has no name of its own until parseDeclarator binds it (see promiseParamsByFn).
     const promiseIdx = arrowPromiseIdx;
     const mk = (a: Expr): Expr => { if (promiseIdx.size) this.promiseParamsByArrow.set(a, promiseIdx); return a; };
-    if (this.at(":")) { this.eat(":"); this.parseType(); }
+    let retAsyncFn = false;
+    if (this.at(":")) { this.eat(":"); retAsyncFn = this.parseTypeAsyncAware().asyncFn; }
     this.eat("=>");
-    if (this.at("{")) return mk({ kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false });
-    const body = this.parseAssign();
-    // A pattern parameter needs statements to bind its names, so an expression body
-    // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
-    if (prelude.length) return mk({ kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false });
-    return mk({ kind: "ArrowFunction", params, body, exprBody: true });
+    // An arrow's body is a function body for the return-escape rule too (see parseReturn).
+    this.returnsAsyncFnStack.push(retAsyncFn);
+    try {
+      if (this.at("{")) return mk({ kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false });
+      const body = this.parseAssign();
+      // A pattern parameter needs statements to bind its names, so an expression body
+      // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
+      if (prelude.length) return mk({ kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false });
+      return mk({ kind: "ArrowFunction", params, body, exprBody: true });
+    } finally { this.returnsAsyncFnStack.pop(); }
   }
 
   private parseAssign(): Expr {
@@ -2316,6 +2351,13 @@ class Parser {
           // identity. Recorded under a descriptive name so the guard reads the same.
           this.identCalls.push({ node: expr, name: "(async arrow)", line: callLoc.line, col: callLoc.col });
           this.asyncFns.add("(async arrow)"); // not a legal identifier, so it collides with nothing
+        } else if (expr.callee.kind === "CallExpr" && expr.callee.callee.kind === "Identifier" &&
+                   this.returnsAsyncFn.has(expr.callee.callee.name)) {
+          // `pick()()`, where `pick(): () => Promise<T>` — the callee is the RESULT of a
+          // call, so there is no name; the declared return type is the identity.
+          const label = `${expr.callee.callee.name}()`;
+          this.identCalls.push({ node: expr, name: label, line: callLoc.line, col: callLoc.col });
+          this.asyncFns.add(label); // `pick()` is not an identifier, so it collides with nothing
         }
         // Record every argument that hands an ASYNC function VALUE across this call — the
         // one place the guard's name tracking ends. Checked after the file is parsed

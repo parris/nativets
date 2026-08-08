@@ -427,4 +427,21 @@ const one = async (): Promise<number> => 1;
 function twice(f: () => number): number { return f() + f(); }
 console.log(twice(one));
 `));
+
+  // The other direction out of a function: an async function RETURNED as a value. The
+  // return annotation carries it exactly as a parameter annotation does, so calling the
+  // result is a call to an async function and needs the same `await`.
+  _test("un-awaited call through a returned `() => Promise<T>`", () => rejects(`
+const one = async (): Promise<number> => 1;
+function pick(): () => Promise<number> { return one; }
+console.log(pick()());
+`));
+
+  // …and returning one where the annotation does NOT say so drops the promise the same
+  // way an argument does.
+  _test("async value returned where the annotation is not `() => Promise<T>`", () => rejects(`
+const one = async (): Promise<number> => 1;
+function pick(): () => number { return one; }
+console.log(pick()());
+`));
 });
