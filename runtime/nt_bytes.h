@@ -20,6 +20,7 @@ void        nt_bytes_set(NtBytes *b, double i, double v); /* write, JS ToUint8 w
 double      nt_bytes_index(NtBytes *b, double i, const char *loc);            /* u[i], panics OOB */
 void        nt_bytes_index_set(NtBytes *b, double i, double v, const char *loc); /* u[i]=v, panics OOB */
 double      nt_bytes_len(NtBytes *b);
+const char *nt_bytes_json(NtBytes *b, const char *unit, double depth); /* JSON.stringify: {"0":1,…} */
 NtBytes    *nt_bytes_encode(const char *s);  /* TextEncoder: UTF-8 bytes of s        */
 const char *nt_bytes_decode(NtBytes *b);     /* TextDecoder: bytes as UTF-8 string    */
 

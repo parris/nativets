@@ -1118,23 +1118,50 @@ void *nt_arr_to_reversed(NtArray *a) {
   return out;
 }
 
-/* JSON-quote a string: wrap in quotes, escape " \ and control chars */
+/* JSON-quote a string: wrap in quotes, escape " \ and control chars.
+ *
+ * RFC 8259 §7 forbids a LITERAL character below U+0020 inside a string, so every
+ * one of them has to be escaped — the five with a short form as that form, the
+ * rest as `\u00XX`. This used to escape only `" \ \n \t \r` and pass the other 27
+ * through raw, which emitted output that was not JSON and did not survive its own
+ * `JSON.parse`. node's QuoteJSONString (ECMA-262 25.5.2.3) is the oracle: it takes
+ * the short form for \b \t \n \f \r, and `\u00XX` for anything else under 0x20.
+ * U+007F is NOT a JSON control character and stays literal, as in node.
+ * (`c` is read through `unsigned char` so a high byte of a UTF-8 sequence is not a
+ * negative `char` and does not fall into the escape range.) */
 const char *js_json_quote(const char *s) {
+  static const char *HEX = "0123456789abcdef";
   SB sb; sb_init(&sb);
   sb_append(&sb, "\"", 1);
   for (const char *p = s; *p; p++) {
-    char c = *p;
+    unsigned char c = (unsigned char)*p;
     switch (c) {
       case '"':  sb_append(&sb, "\\\"", 2); break;
       case '\\': sb_append(&sb, "\\\\", 2); break;
+      case '\b': sb_append(&sb, "\\b", 2); break;
+      case '\f': sb_append(&sb, "\\f", 2); break;
       case '\n': sb_append(&sb, "\\n", 2); break;
-      case '\t': sb_append(&sb, "\\t", 2); break;
       case '\r': sb_append(&sb, "\\r", 2); break;
-      default:   sb_append(&sb, &c, 1);
+      case '\t': sb_append(&sb, "\\t", 2); break;
+      default:
+        if (c < 0x20) {
+          char esc[6] = { '\\', 'u', '0', '0', HEX[(c >> 4) & 0xf], HEX[c & 0xf] };
+          sb_append(&sb, esc, 6);
+        } else {
+          sb_append(&sb, (const char *)&c, 1);
+        }
     }
   }
   sb_append(&sb, "\"", 1);
   const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
+}
+
+/* number -> JSON, allocated. NOT `js_num_to_str`: JSON has no non-finite number
+ * (RFC 8259 §6), and node's SerializeJSONNumber (ECMA-262 25.5.2.2) writes `null`
+ * for one. Sharing `String(x)` here emitted a bare `NaN`/`Infinity` token. */
+const char *nt_json_num(double v) {
+  if (!isfinite(v)) return "null";
+  return js_num_to_str(v);
 }
 
 /* ---- JSON.parse -> tagged dynamic value (Dyn) ----

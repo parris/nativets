@@ -1,0 +1,10 @@
+const u = new Uint8Array(3); u[0] = 1; u[1] = 255; u[2] = 0;
+const e = new Uint8Array(0);
+const s = new Set<string>(); s.add("a");
+const m = new Map<string, string>(); m.set("a", "1");
+console.log(JSON.stringify(u, null, 2));
+console.log(JSON.stringify(e, null, 2));
+console.log(JSON.stringify({ u: u, n: 1 }, null, 2));
+console.log(JSON.stringify({ s: s, m: m }, null, 2));
+console.log(JSON.stringify(u));
+console.log(JSON.stringify(e));

@@ -2221,7 +2221,9 @@ class Checker {
       const jt = this.type(e.args[0]!, scope);
       checkUnionRenderable(jt, "JSON.stringify");
       refuseUnboxedUnion(jt, "JSON.stringify"); // rendered the box as the literal `null`
-      refuseUndefinedStringify(jt); // at the ROOT node returns the undefined VALUE — no string is right
+      // Exhaustive: everything the serializer has no node-exact rule for is refused
+      // here, including the `undefined` at the ROOT that used to render `null`.
+      checkJsonStringifyArg(jt, "root");
       // arg2 (replacer) — only `null`/`undefined` supported (no array/function replacer).
       if (e.args.length >= 2) {
         const r = e.args[1]!;
@@ -3397,6 +3399,92 @@ function refuseUndefinedStringify(ty: Ty): void {
   );
 }
 
+/**
+ * Where a value sits in the JSON being built. node treats the positions
+ * differently for anything it DROPS — at the ROOT `JSON.stringify` returns the
+ * undefined VALUE, in an object the KEY IS OMITTED, and in an array it writes
+ * `null` — so the three are decided separately rather than one standing in for
+ * the others. (Today no droppable type can actually reach `"element"`: an array
+ * OF a function/Map/Set/Uint8Array is `NT1001`. The case is kept anyway, so that
+ * lifting NT1001 produces a refusal here rather than a fresh wrong answer.)
+ */
+type JsonPos = "root" | "field" | "element";
+
+/**
+ * Can `JSON.stringify` render `ty` EXACTLY as node does, in position `pos`?
+ * Throws the refusal naming the type and the fix if not.
+ *
+ * This is the checker half of removing `genJsonStringify`'s default-to-`null`.
+ * That function used to end in `return this.mod.intern("null")`, so every type
+ * nobody had written a rule for silently serialized as the literal `null` —
+ * `Map`, `Set`, `Uint8Array`, a function, a `JSON.parse` result and the
+ * `undefined` VALUE were all already wrong against node, and the nested ones were
+ * invisible because they sat inside an otherwise-correct object
+ * (`{"m":null,"ok":1}`). Same shape as the `truthyOf` fall-through in
+ * `docs/divergences.md`, and the same fix: be exhaustive on both sides.
+ *
+ * The walk MIRRORS `genJsonStringify`'s, case for case, so the two are one
+ * decision written twice — a type admitted here has a rule there, and a type with
+ * no rule there is refused here. Codegen's tail is an `internalError`, i.e. a
+ * broken invariant between the pair, never a user-facing path.
+ *
+ * `%j` IS `JSON.stringify`, so `checkFormatArg` routes through this too and the
+ * two accept the same set by construction rather than by being kept in step.
+ */
+export function checkJsonStringifyArg(ty: Ty, pos: JsonPos): void {
+  if (ty === "number" || ty === "boolean" || ty === "string" || ty === "null") return;
+  if (isDateTy(ty)) return; // Date.prototype.toJSON — the quoted ISO string
+  // A Map/Set has no own ENUMERABLE property, so node serializes EVERY one of them
+  // as `{}` whatever it holds. A constant, not an approximation, so it is rendered.
+  if (isMapTy(ty) || isSetTy(ty)) return;
+  // A typed array's own enumerable properties are its INDICES: `{"0":1,"1":255}`.
+  if (isBytesTy(ty)) return;
+  // A function serializes as `undefined`, so it follows the positional rule below.
+  if (isFuncTy(ty)) {
+    if (pos === "field") return; // node omits the key; genJsonObject drops the field
+    throw nyi(
+      NYI.JSON,
+      `JSON.stringify of a function at the ${pos === "root" ? "ROOT" : "position of an ARRAY element"} — node ` +
+        (pos === "root"
+          ? `returns the undefined VALUE there, not a string, so the literal \`null\` this used to render was wrong and no string is right either. `
+          : `writes \`null\` there, which nativets does not generate for a function element. `) +
+        `Serialize the data instead of the callback. (As an object FIELD it is fine — the key is omitted, as node does.)`,
+    );
+  }
+  // The bare nullish VALUES. `undefined` at the root is the same shape as
+  // `T | undefined` at the root, and gets the same answer: there is no right string.
+  if (ty === "undefined" || ty === "void") {
+    if (pos === "element") return; // node writes `null`, which genJsonNullable emits
+    throw nyi(
+      NYI.JSON,
+      `JSON.stringify of \`${ty}\` — node returns the undefined VALUE, not a string, so the literal \`null\` ` +
+        `this used to render was wrong and no string is right either. Pass \`null\`, which serializes as \`null\` exactly like node.`,
+    );
+  }
+  if (isNullableTy(ty)) {
+    if (pos === "root") refuseUndefinedStringify(ty); // a `?U` box: no right string here
+    return checkJsonStringifyArg(baseTy(ty), pos);    // a `?N` box renders `null`; check what it carries
+  }
+  if (isArrayTy(ty)) return checkJsonStringifyArg(elemTy(ty), "element");
+  if (isObjectTy(ty)) { for (const f of objectFields(ty)) checkJsonStringifyArg(f.ty, "field"); return; }
+  throw nyi(NYI.JSON, `JSON.stringify of a ${ty} — nativets generates the serializer from the STATIC type and has ` +
+    `no node-exact rendering for this one, and the literal \`null\` it used to emit was a silent wrong answer. ` +
+    jsonStringifyFix(ty));
+}
+
+/** The nearest thing that DOES serialize, per refused type — a refusal is only
+ *  useful with the fix attached (`src/diagnostics.ts`, the `NT****` contract). */
+function jsonStringifyFix(ty: Ty): string {
+  if (ty === "Dyn")
+    return "A `JSON.parse` result is already JSON — keep the original string rather than re-stringifying it, " +
+      "or narrow it (`d as T`) and stringify the `T`.";
+  if (isUrlTy(ty)) return "node serializes a URL through `URL.prototype.toJSON`, i.e. `u.href` — stringify that string.";
+  if (isSearchParamsTy(ty)) return "node writes `{}` for it (no own enumerable property); write `p.toString()` if you want the query.";
+  if (isBytesRefTy(ty)) return "a TextEncoder/TextDecoder carries no data; stringify the `Uint8Array` or the string instead.";
+  if (isResponseTy(ty) || isHeadersTy(ty)) return "stringify the parts you want (e.g. `r.status`, or the parsed body).";
+  return "Build the JSON from values that do have one.";
+}
+
 export function checkUnionRenderable(ty: Ty, what: string): void {
   const u = findUnionIn(ty);
   if (u === undefined) return;
@@ -3454,8 +3542,13 @@ export function checkFormatArg(spec: FmtSpec, at: Ty): void {
     return;
   }
   if (spec === "j") {
-    if (!scalar && !isObjectTy(at) && !isArrayTy(at)) throw nyi(NYI.CONSOLE, `\`%j\` of a ${at} (JSON.stringify has no faithful form for it here) — use \`%O\``);
-    return;
+    // `%j` IS `JSON.stringify`, so it accepts exactly what the direct call accepts —
+    // ONE predicate, not two lists kept in step. They used to disagree: `%j` refused
+    // a Map/Set outright while the direct call rendered the literal `null` for one.
+    // Now both render `{}`, as node does. (The nullable strip above is why the one
+    // asymmetry survives: `%j` of a `T | undefined` prints `undefined` at runtime,
+    // which node does too, where the `string`-typed direct call cannot.)
+    return checkJsonStringifyArg(at, "root");
   }
   // %d / %i / %f
   if (!scalar && !isObjectTy(at) && !isMapTy(at) && !isSetTy(at))
