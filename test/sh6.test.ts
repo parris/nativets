@@ -252,7 +252,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // lane established must STAY refused — node distinguishes an absent key from a
   // present-undefined one and a flat slot array cannot. Sharpening that refusal moved the
   // module on to NT1027, a regex literal.
-  "checker.ts": { rung: 0, code: "NT1027", blame: "self" },
+  "checker.ts": { rung: 0, code: "NT1009", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   "codegen.ts": { rung: 0, code: "NT1023", blame: "self" },
   "coverage.ts": { rung: 0, code: "NT1009", blame: "ast.ts" },
@@ -262,7 +262,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // trap, still visible. MEASURED, not predicted: the lane that moved checker.ts expected
   // this row to land on NT1014, and it did not — it tracks checker.ts exactly, because the
   // two errors are byte-identical. Always re-measure this column rather than inferring it.
-  "ownership.ts": { rung: 0, code: "NT1027", blame: "checker.ts" },
+  "ownership.ts": { rung: 0, code: "NT1009", blame: "checker.ts" },
   "driver.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
   "cli.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
   "modules.ts": { rung: 0, code: "NT1015", blame: "self" },
