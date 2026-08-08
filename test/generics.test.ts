@@ -245,6 +245,27 @@ console.log(grow(1));
     expect(r.code).toBe("NT1015");
   });
 
+  /*
+   * The shapes AROUND a generic method that are still refused. Each used to be — or would
+   * naturally become — a message naming the wrong construct, which is what CLAUDE.md's
+   * "a code with a hint that names the real problem" forbids. In particular a generic
+   * method was once reported as `class field 't' needs a type annotation`: the parser
+   * reads the member name, tests for `(`, and a `<` fails that test, so it fell into the
+   * FIELD branch. Derived from the real blocker at src/modules.ts:122 — no conformance
+   * suite is available in this repo, so these are DERIVED, not mined.
+   */
+  test("9d-bis. a generic STATIC method is refused, naming the real construct", () => {
+    const r = rejection(`class C { static t<T>(x: T): T { return x; } }\nconsole.log(C.t(5));\n`);
+    expect(r.code).toBe("NT1013");
+    expect(r.message).not.toContain("needs a type annotation");
+    expect(r.message).toContain("generic STATIC method");
+  });
+
+  test("9d-ter. type parameters on a constructor / a field name the real construct", () => {
+    expect(rejection(`class C { constructor<T>(x: T) {} }\nconsole.log(1);\n`).message).toContain("Type parameters on a constructor");
+    expect(rejection(`class C { t<number>; }\nconsole.log(1);\n`).message).toContain("Type parameters on class field");
+  });
+
   test("9e. a generic nobody calls emits NOTHING (zero instantiations)", () => {
     const ir = emitIR(`function unused<T>(x: T): T { return x; }\nconsole.log(1);\n`);
     expect(ir).not.toContain("@unused");
@@ -252,6 +273,154 @@ console.log(grow(1));
 
   test("9f. an argument that mismatches the RESOLVED instantiation is an ordinary type error", () => {
     const r = rejection(`function same<T>(a: T, b: T): T { return a; }\nconsole.log(same(1, "x"));\n`);
+    expect(r.code).toBe("NT2001");
+  });
+});
+
+/*
+ * Generic METHODS on a class — the same monomorphization, not a second mechanism.
+ *
+ * A method already lowers to the top-level `FuncDecl` `C.m(this, …params)` (parser), so a
+ * generic method is that same FuncDecl carrying `typeParams`. The checker's existing
+ * template registration picks it up with no special case; the only receiver-specific bits
+ * are that the template's leading `this` matches no argument (`recvOffset`) and that the
+ * call is retargeted by rewriting the callee's PROPERTY rather than its name, since
+ * codegen rebuilds the symbol as `${classTag(receiver)}.${property}`.
+ *
+ * Generic CLASSES (`class Box<T>`) remain out of scope and refused — see 9d above.
+ *
+ * node runs every case unmodified (it just strips the annotations), so node stays the
+ * oracle. Cases are DERIVED — no TypeScript conformance suite is available in this repo.
+ */
+describe("M3 monomorphization: generic methods", () => {
+  test("m1. a generic method at ONE type", async () => {
+    const out = await matches(`
+class C {
+  t<T>(x: T): T { return x; }
+}
+const c = new C();
+console.log(c.t(5));
+`);
+    expect(out).toBe("5\n");
+  });
+
+  test("m2. the SAME method at TWO types specializes twice", async () => {
+    const out = await matches(`
+class C {
+  t<T>(x: T): T { return x; }
+}
+const c = new C();
+console.log(c.t(5));
+console.log(c.t("a"));
+`);
+    expect(out).toBe("5\na\n");
+  });
+
+  test("m3. two type parameters, inferred independently", async () => {
+    const out = await matches(`
+class Pair {
+  first<A, B>(a: A, b: B): A { return a; }
+}
+const p = new Pair();
+console.log(p.first(1, "x"));
+console.log(p.first("y", 2));
+`);
+    expect(out).toBe("1\ny\n");
+  });
+
+  test("m4. explicit call-site type arguments pin the instantiation", async () => {
+    const out = await matches(`
+class C {
+  t<T>(x: T): T { return x; }
+}
+const c = new C();
+console.log(c.t<string>("a"));
+`);
+    expect(out).toBe("a\n");
+  });
+
+  // NB: a parameter property (`constructor(private p: string)`) is NOT erasable syntax, so
+  // node refuses to run it and it cannot appear in a differential case — hence the plain
+  // field + explicit assignment here. See the header of test/classes.test.ts.
+  test("m5. the method body may use `this` (the receiver still flows)", async () => {
+    const out = await matches(`
+class Tagger {
+  prefix: string;
+  constructor(p: string) { this.prefix = p; }
+  tag<T>(x: T): string { return this.prefix + x; }
+}
+const t = new Tagger("v=");
+console.log(t.tag(7));
+console.log(t.tag("s"));
+`);
+    expect(out).toBe("v=7\nv=s\n");
+  });
+
+  test("m6. a constrained type parameter — the constraint is erased, as for functions", async () => {
+    // This is the exact shape of the real blocker, src/modules.ts:122
+    // (`private t<T extends Ty | undefined>(t: T): T`).
+    const out = await matches(`
+type Ty = string;
+class Renamer {
+  t<T extends Ty | undefined>(x: T): T { return x; }
+}
+const r = new Renamer();
+console.log(r.t("a"));
+console.log(r.t(undefined));
+`);
+    expect(out).toBe("a\nundefined\n");
+  });
+
+  test("m7. two RECEIVERS of the same class share one specialization per type", async () => {
+    const out = await matches(`
+class C {
+  t<T>(x: T): T { return x; }
+}
+const a = new C();
+const b = new C();
+console.log(a.t(1));
+console.log(b.t(2));
+`);
+    expect(out).toBe("1\n2\n");
+  });
+
+  test("m8. a generic method nobody calls emits NOTHING", () => {
+    const ir = emitIR(`class C {\n  t<T>(x: T): T { return x; }\n}\nconsole.log(1);\n`);
+    // `@C.t(` is the symbol a NON-generic `t` would define (verified: the same class with
+    // `t(x: number)` emits `define double @C.t(ptr %this, double %x)`), so this assertion
+    // can genuinely fail — the template must not be emitted as written.
+    expect(ir).not.toContain("@C.t(");
+  });
+
+  test("m9. each specialization is emitted, and each still takes the receiver", () => {
+    const ir = emitIR(`
+class C {
+  t<T>(x: T): T { return x; }
+}
+const c = new C();
+console.log(c.t(5));
+console.log(c.t("a"));
+`);
+    // One specialization per instantiation, mangled off the dotted method symbol — and
+    // `ptr %this` first in BOTH, which is the whole receiver question this lane had to
+    // answer. The unspecialized template must not survive.
+    expect(ir).toContain("define double @C.t$number(ptr %this, double %x)");
+    expect(ir).toContain("define ptr @C.t$string(ptr %this, ptr %x)");
+    expect(ir).not.toContain("@C.t(");
+    // `#T` is the marker for an unsubstituted type parameter; one reaching codegen is the
+    // failure monomorphization exists to prevent. (Belt-and-braces: the checker's own
+    // `mapTypesDeep` guard would throw first, which would also turn this test red.)
+    expect(ir).not.toContain("#T");
+  });
+
+  test("m10. an uninferable type parameter is refused, naming the method", () => {
+    const r = rejection(`class C {\n  t<T>(): number { return 1; }\n}\nconst c = new C();\nconsole.log(c.t());\n`);
+    expect(r.code).toBe("NT1013");
+    expect(r.message).toContain("generic method");
+  });
+
+  test("m11. an argument mismatching the RESOLVED instantiation is an ordinary type error", () => {
+    const r = rejection(`class C {\n  same<T>(a: T, b: T): T { return a; }\n}\nconst c = new C();\nconsole.log(c.same(1, "x"));\n`);
     expect(r.code).toBe("NT2001");
   });
 });
