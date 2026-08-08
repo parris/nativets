@@ -1312,6 +1312,35 @@ class Checker {
     return m;
   }
 
+  /**
+   * Resolve `base[index]` on a NON-nullable base — the shared tail of the `IndexExpr`
+   * case. Split out so an OPTIONAL element access (`a?.[i]`) reaches exactly the same
+   * rules after its nullish guard, instead of growing a parallel path that could drift:
+   * the guard decides whether the base may be nullish, this decides what indexing it
+   * means. `checkStaticBounds` therefore still runs under `?.`, which is what keeps the
+   * Stage 41 out-of-bounds rule independent of the `?.` rule.
+   */
+  private indexResultTy(ot: Ty, e: Extract<Expr, { kind: "IndexExpr" }>, scope: Scope): Ty {
+    if (ot === "Dyn") { this.type(e.index, scope); return "Dyn"; } // dynamic element/field — runtime tag check
+    if (isUnionTy(ot)) { // SH2: `u["kind"]` is the same read as `u.kind`
+      if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
+      return this.fieldOnBase(ot, e.index.value);
+    }
+    if (isObjectTy(ot)) {
+      if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
+      const ft = fieldType(ot, e.index.value);
+      if (!ft) throw typeError(`Property '${e.index.value}' does not exist on ${ot}`);
+      return ft;
+    }
+    const it = this.type(e.index, scope);
+    if (it !== "number") throw typeError("index must be number");
+    this.checkStaticBounds(e, ot, scope);
+    if (isArrayTy(ot)) return elemTy(ot);
+    if (ot === "string") return "string";
+    if (isBytesTy(ot)) return "number"; // Uint8Array element read -> 0..255
+    throw nyi(NYI.ARRAY, `index access on ${ot}`);
+  }
+
   /** Resolve `.prop` on a NON-nullable base (object field, or string/array `.length`). */
   private fieldOnBase(base: Ty, prop: string): Ty {
     // SH2: only the DISCRIMINANT is readable on an un-narrowed union — it is the one
@@ -1702,24 +1731,24 @@ class Checker {
       }
       case "IndexExpr": {
         const ot = this.type(e.object, scope);
-        if (ot === "Dyn") { this.type(e.index, scope); return "Dyn"; } // dynamic element/field — runtime tag check
-        if (isUnionTy(ot)) { // SH2: `u["kind"]` is the same read as `u.kind`
-          if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
-          return this.fieldOnBase(ot, e.index.value);
+        // Indexing a possibly-nullish base: the result is nullable (the whole chain
+        // short-circuits to `undefined` if the base is nullish). Legal only when THIS
+        // link is `?.[`, or the base is itself an ongoing optional chain — the exact
+        // rule `?.b` uses above, so the two link kinds stay interchangeable.
+        if (isNullableTy(ot)) {
+          if (!e.optional && !isOptChainExpr(e.object)) {
+            const what = exprText(e.object);
+            throw typeError(
+              `${what === undefined ? "this value" : `'${what}'`} is possibly ${nullishKind(ot)}`,
+              e.loc,
+              `use '?.[' (\`${what ?? "value"}?.[…]\` short-circuits the whole chain to undefined), ` +
+              `or prove it non-nullish first — \`if (${what ?? "value"}) { … }\`, an early \`return\`, or \`!\``,
+              "this read is not proved non-nullish",
+            );
+          }
+          return makeNullable("undefined", baseTy(this.indexResultTy(baseTy(ot), e, scope)));
         }
-        if (isObjectTy(ot)) {
-          if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
-          const ft = fieldType(ot, e.index.value);
-          if (!ft) throw typeError(`Property '${e.index.value}' does not exist on ${ot}`);
-          return ft;
-        }
-        const it = this.type(e.index, scope);
-        if (it !== "number") throw typeError("index must be number");
-        this.checkStaticBounds(e, ot, scope);
-        if (isArrayTy(ot)) return elemTy(ot);
-        if (ot === "string") return "string";
-        if (isBytesTy(ot)) return "number"; // Uint8Array element read -> 0..255
-        throw nyi(NYI.ARRAY, `index access on ${ot}`);
+        return this.indexResultTy(ot, e, scope);
       }
       case "TypeofExpr":
         this.type(e.operand, scope);
@@ -3892,9 +3921,16 @@ function escapingWritesStmts(body: Stmt[], bound: Set<string>, out: Map<string, 
   }
 }
 
-/** True if `e` is a member access that is part of an optional chain (some `?.` to its left). */
+/**
+ * True if `e` is a member/element access that is part of an optional chain (some `?.` to
+ * its left). Both link kinds count in both positions: `a?.[i].b` and `a?.b[i]` are each
+ * one chain, and a trailing non-optional link stays inside it — which is what makes the
+ * WHOLE chain short-circuit rather than just the guarded link.
+ */
 export function isOptChainExpr(e: Expr): boolean {
-  return e.kind === "MemberExpr" && (!!e.optional || isOptChainExpr(e.object));
+  if (e.kind === "MemberExpr") return !!e.optional || isOptChainExpr(e.object);
+  if (e.kind === "IndexExpr") return !!e.optional || isOptChainExpr(e.object);
+  return false;
 }
 
 /**
