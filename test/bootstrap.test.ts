@@ -243,7 +243,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT0001", "NT1006", "NT1009", "NT1015", "NT1606", "NT2001"],
+      ["NT0001", "NT1006", "NT1009", "NT1015", "NT1027", "NT2001"],
     );
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
@@ -268,10 +268,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
     // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
     // working, not a regression — the phase table above is what must never go backwards.
-    // NT1027 is now GONE: every regex the compiler's own source used has been rewritten
-    // as character scanning (nativets has no RegExp, so its source may not use one).
-    // `test/no-regex.test.ts` is the shrink-only lint that keeps it that way.
-    expect(byCode["NT1027"]).toBeUndefined();
+    // NT1027 was asserted EMPTY here, on the reasoning that every regex in the compiler's
+    // own source had been rewritten as character scanning. IT IS BACK, and that is the
+    // frontier ADVANCING, not a regression: checker.ts cleared NT1009 (general unions) and
+    // then NT1606 (`delete o.k`, sharpened into a permanent refusal), and the module now
+    // reaches far enough to hit a regex literal it never got to before. ownership.ts
+    // inherits the identical error through the link.
+    //
+    // This is the SECOND time an emptied bucket has been pinned as if empty were an
+    // invariant, and the second time that was wrong (NT0001 was the first, refilled by the
+    // static-members lane). Assert MEMBERSHIP — which names the construct — not emptiness,
+    // which quietly asserts that no module will ever reach that construct again.
+    expect(byCode["NT1027"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
     // This bucket grew from two modules to EIGHT, and every arrival is a blocker moving
     // FORWARD out of an earlier bucket — the SH0 gradient working, not a regression:
     //   - `parser.ts` left NT0001: the satisfies lane taught the parser `expr satisfies T`,
@@ -309,7 +317,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT1606 changed HANDS entirely: diagnostics.ts left it (above), and checker.ts +
     // ownership.ts arrived from NT1009 once general unions landed. Same bucket, none of
     // the same modules — which is why membership, not size, is the thing to assert.
-    expect(byCode["NT1606"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
+    // NT1606 is EMPTY now — checker.ts and ownership.ts both moved on to NT1027 when the
+    // `delete o.k` refusal was sharpened. Stated as membership-of-nothing rather than as
+    // an invariant: see the NT1027 note above for why "this bucket is permanently empty"
+    // is a claim this file has now got wrong twice.
+    expect(byCode["NT1606"]).toBeUndefined();
     // (The NT0001 membership assertion that stood here is gone: the bucket is empty, and
     // the shrink-only `toBeUndefined` above is now the thing that guards it.)
   });
