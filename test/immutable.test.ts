@@ -27,6 +27,18 @@ function rejectCode(src: string): string | null {
   }
 }
 
+/** The HINT a rejection carries. A refusal is only as good as the way out it names,
+ *  so the hint is asserted like any other behavior. */
+function rejectHint(src: string): string | null {
+  try {
+    sourceToIR(src);
+    return null;
+  } catch (e) {
+    if (e instanceof NTError) return e.diag.hint ?? null;
+    throw e;
+  }
+}
+
 describe("immutable-by-default: in-place mutation is rejected (NT1606)", () => {
   const REJECTED: { name: string; code: string }[] = [
     { name: "array .push", code: `const a: number[] = [1, 2]; a.push(3); console.log(a.length);` },
@@ -63,11 +75,129 @@ describe("immutable-by-default: in-place mutation is rejected (NT1606)", () => {
     expect(r.firstError?.code).toBe("NT1606");
   });
 
+  /*
+   * `.push` is refused on EVERY receiver — including a fresh one, unlike `.sort`. See
+   * the "why .push gets no fresh-receiver permission" note below for the reasoning; the
+   * point of pinning the fresh shapes HERE is that they are refused deliberately, not
+   * by omission, and that a later lane widening `freshArray` cannot quietly admit them.
+   */
+  const PUSH_REJECTED: { name: string; code: string }[] = [
+    { name: "push through an alias of a binding", code: `const a: number[] = [1, 2]; const b: number[] = a; b.push(3); console.log(b.length);` },
+    { name: "push on a parameter (the CALLER owns it)", code: `function f(xs: number[]): number { xs.push(3); return xs.length; } console.log(f([1, 2]));` },
+    { name: "push on a module-level array inside a function", code: `const g: number[] = [1, 2]; function f(): number { g.push(3); return g.length; } console.log(f());` },
+    { name: "push on a function's returned array (callee may still own it)", code: `function mk(): number[] { return [1, 2]; } const n: number = mk().push(3); console.log(n);` },
+    { name: "push on a FRESH array literal (no fresh-receiver permission)", code: `const n: number = [1, 2].push(3); console.log(n);` },
+    { name: "push on a FRESH spread copy (no fresh-receiver permission)", code: `const xs: number[] = [1, 2]; const n: number = [...xs].push(3); console.log(n);` },
+    { name: "push on a FRESH .map result (no fresh-receiver permission)", code: `const xs: number[] = [1, 2]; const n: number = xs.map((x) => x).push(3); console.log(n);` },
+  ];
+
+  for (const c of PUSH_REJECTED) {
+    test(`rejects ${c.name}`, () => {
+      expect(rejectCode(c.code)).toBe("NT1606");
+    });
+  }
+
+  /*
+   * A refusal that does not name the working alternative reads as a dead end. `[...arr,
+   * x]` alone answers "how do I append once" but NOT "how do I accumulate in a loop",
+   * which is the shape that actually hits this diagnostic (five times in
+   * src/coverage-preprocess.ts alone). The reassignment form is the answer, and it is
+   * not a copy per element: codegen's consuming-append lowers it to an in-place append
+   * when nothing else shares the storage.
+   */
+  test("the .push rejection names the loop accumulator, not just the one-shot spread", () => {
+    const hint = rejectHint(`const a: number[] = [1, 2]; a.push(3); console.log(a.length);`);
+    expect(hint).toContain("[...arr, x]");
+    expect(hint).toContain("acc = [...acc, x]");
+  });
+
   test("immutable replacements still compile (spread append, .with, object spread)", () => {
     expect(rejectCode(`const a: number[] = [1, 2]; const b: number[] = [...a, 3]; console.log(b.length);`)).toBeNull();
     expect(rejectCode(`const a: number[] = [1, 2]; const b: number[] = a.with(0, 9); console.log(b[0]);`)).toBeNull();
     expect(rejectCode(`const o: {x:number} = {x: 1}; const p: {x:number} = {...o, x: 9}; console.log(p.x);`)).toBeNull();
   });
+});
+
+/*
+ * WHY `.push` GETS NO FRESH-RECEIVER PERMISSION (and `.sort` does).
+ *
+ * `.sort` became legal on a fresh receiver by being REWRITTEN to the copying
+ * `.toSorted()`: same VALUE, no mutation, so no aliasing question is ever asked.
+ * `.push` has no such equivalent — its value is the new LENGTH and its whole point is
+ * the side effect on the receiver.
+ *
+ * A fresh receiver COULD be permitted safely, by the same copying trick: `e.push(x)`
+ * on a fresh `e` is exactly `[...e, x].length`, because the mutated array is a
+ * temporary nothing can name. But that is the proof it is USELESS — the mutation is
+ * unobservable precisely because the result is discarded, so `[1,2].push(3)` is dead
+ * code and no real program writes it. The permission would buy zero expressiveness
+ * while adding an in-place-mutation path to a method that has already produced one
+ * double free (a retained receiver owned by two bindings) and one leak (a realloc that
+ * abandoned the old block). The useful shape — `xs.push(x)` on a NAMED accumulator —
+ * needs real in-place mutation on a binding, which is the aliasing hazard itself.
+ *
+ * So `.push` stays refused everywhere, and the accumulator below is the replacement:
+ * already legal, node-exact, and single-owner. It is also not a copy per element —
+ * codegen's consuming-append lowers `acc = [...acc, x]` to an in-place append when the
+ * storage has no other sharer.
+ *
+ * These assertions pin OWNERSHIP, not just output: stdout was correct throughout the
+ * double free that motivated this rule, so every case pins the exit code and
+ * `__arrLive()` too.
+ */
+describe("the accumulator that replaces .push is single-owner", () => {
+  test("200 appends leave no live array and no double free", async () => {
+    const src = `
+function build(n: number): number {
+  let out: number[] = [];
+  for (let i = 0; i < n; i++) out = [...out, i];
+  return out.length;
+}
+console.log(build(200));
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("200\n0\n"); // every intermediate freed; nothing leaked
+    expect(r.exitCode).toBe(0); //        a double free would die on a signal here
+  });
+
+  test("the accumulated array is freed exactly once when it outlives the loop", async () => {
+    const src = `
+let out: string[] = [];
+for (let i = 0; i < 3; i++) out = [...out, "x"];
+console.log(out.join(","));
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("x,x,x\n1\n"); // `out` is still in scope: exactly one live
+    expect(r.exitCode).toBe(0);
+  });
+
+  const NODE_CASES: { name: string; code: string }[] = [
+    {
+      name: "numeric accumulator in a loop",
+      code: `let out: number[] = []; for (let i = 0; i < 5; i++) out = [...out, i * 2]; console.log(out.join(",")); console.log(out.length);`,
+    },
+    {
+      name: "conditional append (the .filter-by-hand shape)",
+      code: `const xs: number[] = [1, 2, 3, 4, 5]; let out: number[] = []; for (const x of xs) { if (x % 2 === 1) out = [...out, x]; } console.log(out.join(","));`,
+    },
+    {
+      name: "accumulator local to a function, returned",
+      code: `function evens(n: number): number[] { let out: number[] = []; for (let i = 0; i < n; i++) { if (i % 2 === 0) out = [...out, i]; } return out; } console.log(evens(7).join(","));`,
+    },
+    {
+      name: "appending more than one element at a time",
+      code: `let out: number[] = []; for (let i = 0; i < 3; i++) out = [...out, i, i]; console.log(out.join(","));`,
+    },
+  ];
+
+  for (const c of NODE_CASES) {
+    test(`${c.name} matches node`, async () => {
+      const oracle = runWithNode(c.code);
+      const ours = await compileAndRun(c.code);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.exitCode).toBe(oracle.exitCode);
+    });
+  }
 });
 
 /*

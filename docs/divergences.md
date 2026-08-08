@@ -572,6 +572,49 @@ freed exactly once, the result is a distinct pointer) and node-differentially in
 `test/immutable.test.ts`, including node's lexicographic default (`[10,9,1,100,2].sort()` →
 `1,10,100,2,9`).
 
+### `.push()` gets NO fresh-receiver permission — unlike `.sort()`
+
+The obvious next question after the rule above is whether `.push` can take the same treatment.
+It **cannot usefully**, and it is refused on *every* receiver, fresh ones included.
+
+The `.sort` permission works because `.sort` on a fresh receiver is rewritten to the **copying**
+`.toSorted()` — same value, no mutation, so the aliasing question is never asked. `.push` has no
+such equivalent: its value is the new **length**, and its whole purpose is the side effect.
+
+A fresh receiver *could* be permitted by the same trick — `e.push(x)` on a fresh `e` is exactly
+`[...e, x].length`, since the mutated array is a temporary nothing can name. But that is precisely
+why it is **useless**: the mutation is unobservable *because* the result is discarded, so
+`[1,2].push(3)` and `xs.map(f).push(9)` are dead code and no real program writes them. The
+permission would buy zero expressiveness while adding an in-place path to the one method that has
+already produced both a **double free** (a retained receiver owned by two bindings) and a **leak**
+(a realloc that abandoned the old block). The shape people actually want — `xs.push(x)` on a named
+accumulator — is *not* fresh, and needs real in-place mutation on a binding: the aliasing hazard
+itself. A narrower correct rule beats a broad one with a use-after-free.
+
+**The replacement is the accumulator**, already legal and node-exact:
+
+```ts
+let acc: T[] = [];
+for (…) acc = [...acc, x];
+```
+
+This is *not* a copy per element — codegen's consuming-append (`consumingSpread`) lowers it to an
+in-place append whenever nothing else shares the storage. Verified single-owner: 200 appends in a
+loop leave `__arrLive() === 0` at exit and exit code 0, and the emitted IR has exactly **one**
+`nt_arr_free` site for the superseded array. The negatives — a named binding, an alias, a
+parameter, a module-level array, a function's returned array, and all three fresh shapes — are
+pinned in `test/immutable.test.ts`.
+
+Two limits of the accumulator, both correct refusals rather than divergences:
+- appending a **borrowed** loop element (`for (const t of src) acc = [...acc, t]`) is `NT1604`
+  (cannot move out of a borrow); construct a fresh element instead (`{ ...t }` / a new literal),
+  which compiles and matches node;
+- assigning the accumulator from **inside a closure** currently **miscompiles** — captures are
+  by value (`writeCapture` in `src/codegen.ts` stores into the closure env, never the enclosing
+  alloca), so the write is silently dropped. This is a known open bug, not a divergence: it
+  affects *any* write to a captured variable, not just arrays, and must become a refusal until
+  by-reference capture exists.
+
 ### String relational compare (`<` `<=` `>` `>=`) is UTF-8 byte order
 
 node compares strings by **UTF-16 code units**; we compare our UTF-8 bytes (`strcmp`), which is

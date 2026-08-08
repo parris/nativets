@@ -2696,7 +2696,14 @@ class Checker {
       // Immutable-by-default (Phase B): `.push`/`.pop` mutate in place, which the
       // model forbids. Reject with NT1606 pointing at the non-mutating replacement
       // (rather than silently diverging from node's mutate-and-return semantics).
-      case "push": throw mutationError("arrays are immutable: `.push` would mutate the array in place", "build a new array instead: `[...arr, x]` — the original is unchanged");
+      //
+      // `.push` gets NO fresh-receiver permission, unlike `.sort` just above — see the
+      // note on `freshArray` in ast.ts. The hint names the ACCUMULATOR form as well as
+      // the one-shot spread: `[...arr, x]` answers "append once" but not "build this up
+      // in a loop", which is the shape that actually reaches here. The reassignment form
+      // is not a copy per element — codegen's consuming-append (`consumingSpread`)
+      // lowers it to an in-place append whenever nothing else shares the storage.
+      case "push": throw mutationError("arrays are immutable: `.push` would mutate the array in place", "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign: `let acc: T[] = []; acc = [...acc, x]` — that appends in place when nothing else shares it");
       // The rest of node's in-place mutators (stdlib Batch 1): same treatment as
       // .push/.pop — refuse and name the immutable replacement.
       case "fill": throw mutationError("arrays are immutable: `.fill` would overwrite the array in place", "build a new array instead, e.g. `arr.map(() => v)` for a same-length fill, or `arr.with(i, v)` for one slot");
