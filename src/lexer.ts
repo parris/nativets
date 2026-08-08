@@ -112,9 +112,30 @@ function regexCanStart(prev: Token | undefined): boolean {
   return true;
 }
 
-const ESCAPES: Record<string, string> = {
-  n: "\n", t: "\t", r: "\r", "\\": "\\", "'": "'", '"': '"', "`": "`", "0": "\0",
-};
+/**
+ * The single-character escapes, as a `switch` rather than a lookup table.
+ *
+ * It was `const ESCAPES: Record<string, string>` read as `ESCAPES[e] ?? e`, and nativets
+ * cannot compile either half: `Record<K,V>` erases to `Map<K,V>` (so an object literal
+ * cannot initialize it), and indexing an object by a VARIABLE key is refused because
+ * node's `o[k]` consults the prototype chain — `o["toString"]` is a FUNCTION in node,
+ * and an own-keys-only lowering would answer `undefined`. A `switch` has neither problem,
+ * is what a hand-written lexer would reach for anyway, and keeps this file inside the
+ * subset the compiler compiles (docs/self-hosting.md).
+ */
+function escapeChar(e: string): string {
+  switch (e) {
+    case "n": return "\n";
+    case "t": return "\t";
+    case "r": return "\r";
+    case "\\": return "\\";
+    case "'": return "'";
+    case '"': return '"';
+    case "`": return "`";
+    case "0": return "\0";
+    default: return e; // an unknown escape is the character itself — `\q` is `q`
+  }
+}
 
 export function lex(source: string): Token[] {
   const tokens: Token[] = [];
@@ -286,7 +307,7 @@ export function lex(source: string): Token[] {
             advance(); advance();
             continue;
           }
-          s += ESCAPES[e] ?? e;
+          s += escapeChar(e);
           advance();
         } else {
           if (source[i] === "\n") throw new LexError(`Unterminated string at ${line}:${col}`);

@@ -439,6 +439,35 @@ function specializeDecl(tmpl: FuncDecl, name: string, bindings: Map<string, Ty>)
  * Only the `?U` (undefined) arm is refused. A `?N` field (`a: T | null`) always HAS its
  * key in node, so the static answer is already right and stays accepted.
  */
+/**
+ * Render an annotation the way the SOURCE spells it: the erased type's arguments under
+ * the identifier actually written. `Record<K,V>` erases to `Map<K,V>`, so a mismatch
+ * built from the erasure alone reported a `Map` to an author who wrote `Record` and sent
+ * them looking for a type that is nowhere in their file.
+ */
+function asWritten(annot: Ty, head: string | undefined): string {
+  const a = String(annot);
+  if (head === undefined || a.startsWith(head)) return a;
+  const lt = a.indexOf("<");
+  return lt < 0 ? a : `${head}${a.slice(lt)}`; // an alias erasing to a shape keeps the shape
+}
+
+/**
+ * The `Record`-specific half of that diagnostic: say WHY the erasure exists and name the
+ * two real fixes. Only fires for a `Record` annotation initialized with an object
+ * literal, which is the shape TypeScript accepts and this compiler cannot.
+ */
+function dictHint(annot: Ty, head: string | undefined, got: Ty): string | undefined {
+  if (head !== "Record" || !isMapTy(annot) || !isObjectTy(got)) return undefined;
+  const k = mapKeyTy(annot), v = mapValTy(annot);
+  const fs = objectFields(got);
+  const sample = fs.length > 0 ? fs[0]!.key : "k";
+  return `\`Record<${k}, ${v}>\` is compiled as \`Map<${k}, ${v}>\` here — a dictionary with RUNTIME keys — because an object's fields are fixed slots named by its TYPE, ` +
+    `and a \`Record\`'s key set is by definition not statically known. An object literal cannot initialize one. ` +
+    `Build it with \`new Map<${k}, ${v}>().set("${sample}", …)\` and read it with \`.get(k)\`. ` +
+    `Annotating the exact shape instead (\`{ ${sample}: ${v} }\`) also works, but ONLY if every read uses a LITERAL key — an object is indexed by a string literal here, so \`o[someVariable]\` stays refused`;
+}
+
 function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
   const opt = objectFields(ot).find((f) => isNullableTy(f.ty) && nullishKind(f.ty) === "undefined");
   if (opt === undefined) return;
@@ -1337,7 +1366,8 @@ class Checker {
           }
           const t = this.type(d.init, scope, d.annot); // annotation is the context (e.g. `const a: T[] = []`)
           if (d.annot && d.annot !== t && !this.assignable(d.annot, t)) {
-            throw typeError(`'${d.name}' declared ${d.annot} but initialized with ${t}`);
+            throw typeError(`'${d.name}' declared ${asWritten(d.annot, d.annotHead)} but initialized with ${t}`,
+              undefined, dictHint(d.annot, d.annotHead, t));
           }
           // Reshape the initializer literal to the declared slot layout (fill omitted
           // optional fields, box scalars into nullable fields) — runs AFTER inference,
