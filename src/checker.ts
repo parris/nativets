@@ -1221,7 +1221,12 @@ class Checker {
    */
   private reshapable(e: Expr, target: Ty, source: Ty): boolean {
     const base = baseTy(target);
-    if (baseTy(source) === base) return true;             // same layout — nothing to rewrite
+    const src = baseTy(source);
+    if (src === base) return true;                        // same layout — nothing to rewrite
+    // A nullish initializer has no layout to rewrite: `const a: {b:C} | null = null` stores
+    // the null, and there is no literal to rebuild. Without this the guard refused it —
+    // caught by test/fixtures/stage21-a2/{10_short_circuit_rest,17_null_undefined_flow}.ts.
+    if (src === "null" || src === "undefined") return true;
     if (isObjectTy(base)) return e.kind === "ObjectLiteral";
     if (isArrayTy(base) && isObjectTy(elemTy(base))) return e.kind === "ArrayLiteral";
     return true;

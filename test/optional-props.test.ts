@@ -292,6 +292,13 @@ describe("what is deliberately NOT reshaped", () => {
    * accepting it needs codegen to COPY into the target layout, which is a feature
    * (structural coercion) rather than a predicate change.
    */
+  test("a NULLISH initializer needs no reshape and is unaffected", async () => {
+    // The guard's first spelling refused `const a: {b:C} | null = null` — there is no
+    // literal to rebuild, and none is needed. Caught by
+    // test/fixtures/stage21-a2/{10_short_circuit_rest,17_null_undefined_flow}.ts.
+    await matchesNode("type C = { c: number };\ntype B = { b: C } | null;\nconst a: B = null;\nconsole.log(a === null ? \"null\" : \"set\");\n");
+  });
+
   test("a non-literal INITIALIZER of a compatible type is refused, not miscompiled", () => {
     const src = "type Opts = { a?: number };\n" +
       "const v = { a: 1 };\nconst o: Opts = v;\nconsole.log(o.a ?? 0);\n";
