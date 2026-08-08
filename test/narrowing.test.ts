@@ -340,7 +340,7 @@ if (x !== undefined) {
   clear();
   console.log(x + 1);
 }
-`, "NT1029", "captured binding");
+`, "NT1031", "captured binding");
   });
 
   test("`??` does NOT carry a guard fact to its right operand", () => {

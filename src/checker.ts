@@ -3862,7 +3862,10 @@ function refsInStmt(s: Stmt, name: string, skip: ArrowFunction): boolean {
   const goE = (x: Expr) => refsInExpr(x, name, skip);
   const goS = (b: Stmt[]) => referencesName(b, name, skip);
   switch (s.kind) {
-    case "VarDecl": return s.decls.some((d) => goE(d.init));
+    // Same optional-`init` hazard as `escapingWritesStmts` below: an uninitialized
+    // `let a: string;` anywhere in the ENCLOSING body is walked by this pass, and a
+    // declarator with no initializer contributes no occurrence of the name.
+    case "VarDecl": return s.decls.some((d) => (d.init ? goE(d.init) : false));
     case "ReturnStmt": return s.argument ? goE(s.argument) : false;
     case "ThrowStmt": return goE(s.argument);
     case "ExprStmt": return goE(s.expr);
@@ -3889,7 +3892,11 @@ function escapingWritesStmts(body: Stmt[], bound: Set<string>, out: Map<string, 
   const goS = (b: Stmt[]) => escapingWritesStmts(b, bound, out);
   for (const s of body) {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) goE(d.init); break;
+      // `d.init` is OPTIONAL: `let a: string;` (definite assignment) declares without
+      // initializing, and an uninitialized declarator holds no expression to walk. This
+      // walker used to assume every declarator had one and crashed on `e.kind` of
+      // `undefined` — a compiler crash, not a diagnostic, on correct TypeScript.
+      case "VarDecl": for (const d of s.decls) if (d.init) goE(d.init); break;
       case "ReturnStmt": if (s.argument) goE(s.argument); break;
       case "ThrowStmt": goE(s.argument); break;
       case "ExprStmt": goE(s.expr); break;
