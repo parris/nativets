@@ -141,11 +141,15 @@ const isClear = (b: Blocker) => b.stage === "clear";
  * 1169:66, reddening a test while nothing had moved. A position is not the fact.
  */
 function normalize(message: string): string {
-  return message
+  const one = message
     .split("\n")[0]!
     .trim()
     .replace(/\b\d+:\d+\b/g, "L:C")
     .replace(/\bline \d+\b/g, "line N");
+  // A few diagnostics inline a whole type (`parser.ts`'s `BIN` table dumps ~700 characters
+  // of `Record<…>`), which makes the baseline unreadable and its diffs unreviewable. The
+  // head is what identifies the construct; the tail is the same fact restated.
+  return one.length > 200 ? `${one.slice(0, 200)}…` : one;
 }
 
 /**
@@ -298,16 +302,16 @@ function explain(module: string, column: string, verdict: Verdict, recorded: Blo
 function gitHint(module: string, recorded: Blocker): string {
   const rev = baseline.recordedAt?.rev;
   if (!rev) return "";
-  const show = spawnSync("git", ["show", `${rev}:src/${module}`], { encoding: "utf8", cwd: pathOf("") });
-  if (show.status !== 0 || !show.stdout) return `\n  (the recorded revision ${rev} is not in this clone, so no before/after could be taken)`;
-  const then = measureStandalone(show.stdout);
+  const blob = spawnSync("git", ["show", `${rev}:src/${module}`], { encoding: "utf8", cwd: pathOf("") });
+  if (blob.status !== 0 || !blob.stdout) return `\n  (the recorded revision ${rev} is not in this clone, so no before/after could be taken)`;
+  const then = measureStandalone(blob.stdout);
   return then.code === recorded.code && then.message === recorded.message
     ? `\n  ADVISORY: the compiler STILL refuses '${recorded.message}' when handed src/${module} as of ${rev}.\n` +
       `  So the frontier did not move — your edit changed which construct is hit first.`
-    : `\n  ADVISORY: handed src/${module} as of ${rev}, today's compiler reports '${show2(then)}' instead of\n` +
-      `  the recorded blocker — so the compiler DID move too, and re-recording is probably right.`;
+    : `\n  ADVISORY: handed src/${module} as of ${rev}, today's compiler reports\n` +
+      `  '${isClear(then) ? "CLEAR" : `${then.code} ${then.message}`}' instead of the recorded blocker —\n` +
+      `  so the compiler DID move too, and re-recording is probably right.`;
 }
-const show2 = (b: Blocker) => (isClear(b) ? "CLEAR" : `${b.code} ${b.message}`);
 
 /* ============================================================
  * The baseline

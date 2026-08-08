@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-08",
-    "rev": "4053cf6"
+    "rev": "6a6037b"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "9167ddf4f5f7b89a",
+      "sha256": "f5e9a67c6ae168f1",
       "standalone": {
         "stage": "parse",
         "code": "NT1030",
@@ -18,16 +18,16 @@
       }
     },
     "checker.ts": {
-      "sha256": "45060658eae52b2b",
+      "sha256": "37365649c2b7d2d0",
       "standalone": {
         "stage": "parse",
-        "code": "NT1009",
-        "message": "[NT1009] optional element access '?.[]' at L:C is not supported yet"
+        "code": "NT1023",
+        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
       },
       "linked": {
         "stage": "parse",
-        "code": "NT1009",
-        "message": "[NT1009] optional element access '?.[]' at L:C is not supported yet"
+        "code": "NT1023",
+        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
       }
     },
     "cli.ts": {
@@ -39,12 +39,12 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1009",
-        "message": "[NT1009] optional element access '?.[]' at L:C is not supported yet"
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
       }
     },
     "codegen.ts": {
-      "sha256": "2f0d2f26edad9885",
+      "sha256": "969bab8002647ead",
       "standalone": {
         "stage": "parse",
         "code": "NT1023",
@@ -84,7 +84,7 @@
       }
     },
     "diagnostics.ts": {
-      "sha256": "359ca3fdc856990c",
+      "sha256": "547141beddcb6aeb",
       "standalone": {
         "stage": "check",
         "code": "NT1606",
@@ -106,8 +106,8 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1009",
-        "message": "[NT1009] optional element access '?.[]' at L:C is not supported yet"
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
       }
     },
     "lexer.ts": {
@@ -132,8 +132,8 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1009",
-        "message": "[NT1009] optional element access '?.[]' at L:C is not supported yet"
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
       }
     },
     "ownership.ts": {
@@ -145,21 +145,21 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1009",
-        "message": "[NT1009] optional element access '?.[]' at L:C is not supported yet"
+        "code": "NT1023",
+        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
       }
     },
     "parser.ts": {
-      "sha256": "b2a3479532f1bb09",
+      "sha256": "7725813fd8c71b4e",
       "standalone": {
-        "stage": "parse",
-        "code": "NT1009",
-        "message": "[NT1009] optional element access '?.[]' at L:C is not supported yet"
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] 'BIN' declared Record<string,{prec:number,right:?Uboolean,logical:?Uboolean}> but initialized with {**:{prec:number,right:boolean},*:{prec:number},/:{prec:number},%:{prec:number},+:{prec:numb…"
       },
       "linked": {
-        "stage": "parse",
-        "code": "NT1009",
-        "message": "[NT1009] optional element access '?.[]' at L:C is not supported yet"
+        "stage": "link",
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
       }
     }
   }
