@@ -243,7 +243,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1009", "NT1023", "NT1606", "NT2001"],
+      ["NT1009", "NT1023", "NT1030", "NT1606", "NT2001"],
     );
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
@@ -326,8 +326,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // Which makes `?.[]` the highest-leverage blocker on the board by a wide margin:
     // nothing else on this list moves more than one module.
     expect(byCode["NT1009"]!.sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts",
-       "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+      ["checker.ts", "cli.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
+    // NEW CODE, and it SPLIT the NT1009 bucket rather than adding to it. NT1030 is the
+    // forward-reference / recursive-type refusal: `resolveNamed` used to return `number`
+    // for a type name declared later in the same file, silently. ast.ts owns it (all 29
+    // `Expr` members were being erased); coverage.ts and coverage-preprocess.ts inherit it.
+    //
+    // This is the most honest the table has ever been about ast.ts. Its recorded blocker
+    // was a general union at line 880 — the one place the erasure happened to collide with
+    // something that complained. It is now the FIRST erasure, at line 521.
+    expect(byCode["NT1030"]!.sort()).toEqual(
+      ["ast.ts", "coverage-preprocess.ts", "coverage.ts"],
     );
     // NT1015 is empty — the generic-method lane cleared modules.ts's, and codegen.ts's
     // static-member site was cleared earlier. (A fact about today; this file has been

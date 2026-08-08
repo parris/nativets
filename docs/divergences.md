@@ -504,6 +504,90 @@ collection**, where node returns a **boolean**; (3) ~~`.get` of an absent key re
 via the A2 nullable machinery (miss → `undefined`, node-matched byte-for-byte). Fixtures
 use the *use-the-returned-handle* pattern, whose observable output matches node.
 
+### `Record<K, V>` is a `Map`, not an object — and an object literal cannot initialize one
+
+In TypeScript `Record<K, V>` is an **object** type, so `const o: Record<string, string> = { a: "1" }`
+is ordinary code and `o["a"]` prints `1` under node. nativets erases `Record<K, V>` to its
+**`Map<K, V>`** (`parseGenericType`, `src/parser.ts`), so that program is **rejected**:
+
+```
+error[NT2001]: 'o' declared Record<string,string> but initialized with {a:string}
+```
+
+**Why the erasure is the right one.** An object here is a flat slot array whose field list comes
+from its TYPE, and a `Record`'s key set is by definition *not* statically known — that is the
+whole point of the type. So `Record` cannot be an object in this model without runtime-keyed
+objects (the same machinery whose absence forces the `delete` and key-enumeration refusals
+above). A `Map` is what a dictionary with runtime keys already is.
+
+**The read side cannot match node either, and that is the deeper reason.** node's `o[k]` consults
+the **prototype chain**. Measured on `{ n: "N" }`:
+
+| expression | node |
+|---|---|
+| `o["n"]` / `o["zz"]` | `"N"` / `undefined` |
+| `o["toString"]`, `o["constructor"]`, `o["hasOwnProperty"]` | a **function** |
+| `o["__proto__"]` | an **object** |
+| `o["toString"] ?? FALLBACK` | the inherited **function**, not the fallback |
+
+nativets objects have no prototype chain — a literal-key `o.toString` is refused outright
+("Property 'toString' does not exist on `{n:string}`") — so *any* own-keys-only lowering of a
+variable-key index would answer `undefined` where node answers a function. Indexing an object by
+a non-literal key therefore stays refused, and a `Map` is the sound alternative: node's own
+`m.get("toString")` is `undefined`, which we match exactly.
+
+**What to write instead:** build the dictionary with `new Map<K, V>()` and a `.set(k, v)` chain,
+reading it with `.get(k)`. Note that the **entries-array constructor is not available** —
+`new Map([["n","\n"]])` is `NT1014` ("the entries form needs a `[key, value]` tuple type we do not
+have yet; use `.set`"), so a table of any size becomes a `.set` chain. If the key set really is
+fixed, annotating the exact object shape (`{ n: string, t: string }`) also works — but only where
+every read uses a **literal** key. The compiler's own lexer took a third option for its escape
+table: a `switch`, which is what a hand-written lexer would reach for anyway and which reads
+better than eight chained `.set`s (`escapeChar`, `src/lexer.ts`).
+
+**Known imprecision:** `Record` and `Map` erase to the same `Ty`, so the two are the same type to
+the checker; only the diagnostic distinguishes them, by keeping the annotation's leading
+identifier as written (`annotHead`, `src/ast.ts`). A `Record`-annotated **parameter** is simply a
+`Map` parameter, with no trace of the spelling.
+
+#### STANDING CONCLUSION — variable-key indexing cannot match node under ANY representation
+
+> Stated as a conclusion, not a status, because it does not depend on what we implement next.
+
+**`o[k]` with a non-literal `k` cannot be made node-exact by any representation available to
+us**, because node resolves it through `Object.prototype` and nativets has no prototype chain.
+Whatever the value is backed by — a slot array, a HAMT, a comparison chain — `o["toString"]` is a
+function in node and is not one here. Only a real prototype chain closes it, which this language
+should not have.
+
+Two corollaries worth having in writing, because each looks like a fix until you check it:
+
+- **"Compile a literal-initialized `Record` to a real object and lower `rec[e]` to a comparison
+  chain over its own keys."** Tempting, and the reasoning that gets you there is sound as far as
+  it goes: objects are immutable (Stage 29), so a literal's key set is fixed *forever* — there is
+  no `o[k] = v` that could add one — which means the key set is static and only the QUERY is
+  dynamic. It still ships a silent wrong answer: the chain answers `undefined` for `toString` /
+  `constructor` / `hasOwnProperty` / `__proto__`, and `ESCAPES[e] ?? e` would take the fallback
+  where node takes the inherited function. That is exactly the expression that motivates the idea.
+- **"Accept an object literal where a `Map` is expected, so `Record` values can be built."** This
+  makes `Record` values *constructible* and thereby REACHES divergences that are unreachable
+  today: `console.log(rec)` prints `Map(1) {…}` where node prints `{ n: '\n' }`, and
+  `JSON.stringify` differs too. It would add two silent wrong answers to remove one refusal.
+
+**Why today's behaviour is already safe**, which is the justification the mapping never had
+written down: nativets objects have no prototype chain *and* the literal-key path refuses
+inherited names outright ("Property 'toString' does not exist on `{n:string}`"), so the question
+never gets asked. A `Map` is sound on the same axis — node's own `m.get("toString")` is
+`undefined`, matching us exactly.
+
+**The design that would actually work, sketched and NOT taken.** A comparison chain over the
+object's own keys, and *on a miss* a check against the ~12 `Object.prototype` names that
+**panics** rather than returning `undefined` — reusing the Stage 41 out-of-bounds panic mechanism
+(the headline divergence at the top of this file). It is sound because it never answers where it
+would be wrong, and cheap because only misses pay for the extra comparisons. It is a **stage, not
+a lane**: it needs the chain in codegen, the name table in the runtime, and the panic path. Do not
+implement the chain without the miss guard — the guard is the entire reason the chain is legal.
+
 ### Map/Set iteration: insertion-ordered (node-matched), but the iterators are arrays
 
 Iteration **order matches node exactly** — node guarantees insertion order and the runtime keeps
@@ -593,6 +677,53 @@ array alias that in-place mutation would need. Verified in the emitted IR (the f
 freed exactly once, the result is a distinct pointer) and node-differentially in
 `test/immutable.test.ts`, including node's lexicographic default (`[10,9,1,100,2].sort()` →
 `1,10,100,2,9`).
+
+### `.push()` gets NO fresh-receiver permission — unlike `.sort()`
+
+The obvious next question after the rule above is whether `.push` can take the same treatment.
+It **cannot usefully**, and it is refused on *every* receiver, fresh ones included.
+
+The `.sort` permission works because `.sort` on a fresh receiver is rewritten to the **copying**
+`.toSorted()` — same value, no mutation, so the aliasing question is never asked. `.push` has no
+such equivalent: its value is the new **length**, and its whole purpose is the side effect.
+
+A fresh receiver *could* be permitted by the same trick — `e.push(x)` on a fresh `e` is exactly
+`[...e, x].length`, since the mutated array is a temporary nothing can name. But that is precisely
+why it is **useless**: the mutation is unobservable *because* the result is discarded, so
+`[1,2].push(3)` and `xs.map(f).push(9)` are dead code and no real program writes them. The
+permission would buy zero expressiveness while adding an in-place path to the one method that has
+already produced both a **double free** (a retained receiver owned by two bindings) and a **leak**
+(a realloc that abandoned the old block). The shape people actually want — `xs.push(x)` on a named
+accumulator — is *not* fresh, and needs real in-place mutation on a binding: the aliasing hazard
+itself. A narrower correct rule beats a broad one with a use-after-free.
+
+**The replacement is the accumulator**, already legal and node-exact:
+
+```ts
+let acc: T[] = [];
+for (…) acc = [...acc, x];
+```
+
+This is *not* a copy per element — codegen's consuming-append (`consumingSpread`) lowers it to an
+in-place append (`nt_arr_extend_own` **moves** the old block rather than copying it) whenever
+nothing else shares the storage, so it is **O(1) amortized**. Worth stating explicitly because it
+is the surprising direction: under node this exact spelling really *is* O(n²) — **12.4 s** for
+100 000 appends, against **21 ms** for the same program built here, scaling linearly across
+100k/200k/400k. Verified single-owner: 200 appends leave `__arrLive() === 0` at exit with exit
+code 0, and the emitted IR has exactly **one** `nt_arr_free` site for the superseded array —
+not zero (a leak), not two (a double free). The negatives — a named binding, an alias, a
+parameter, a module-level array, a function's returned array, and all three fresh shapes — are
+pinned in `test/immutable.test.ts`.
+
+Two limits of the accumulator, both correct refusals rather than divergences:
+- appending a **borrowed** loop element (`for (const t of src) acc = [...acc, t]`) is `NT1604`
+  (cannot move out of a borrow); construct a fresh element instead (`{ ...t }` / a new literal),
+  which compiles and matches node;
+- assigning the accumulator from **inside a closure** currently **miscompiles** — captures are
+  by value (`writeCapture` in `src/codegen.ts` stores into the closure env, never the enclosing
+  alloca), so the write is silently dropped. This is a known open bug, not a divergence: it
+  affects *any* write to a captured variable, not just arrays, and must become a refusal until
+  by-reference capture exists.
 
 ### String relational compare (`<` `<=` `>` `>=`) is UTF-8 byte order
 
@@ -1031,6 +1162,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
+| NT1030 | a type name used above its declaration, and any **recursive** type | later | type names resolve in SOURCE ORDER; a self-containing type needs a nominal `Ty` — see below |
 
 ### Spreading a value INTO a call — the three cases, and why only two compile
 
@@ -1199,6 +1331,88 @@ yields a Buffer), a computed encoding, `spawnSync` without `{ encoding: "utf8" }
 would silently change what the program does.
 
 | NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`) |
+
+### Type names resolve in SOURCE ORDER, and recursive types are not representable (NT1030)
+
+TypeScript resolves type names anywhere in a file; nativets' parser is single-pass and
+resolves them **in source order**. A name used above its declaration is refused with
+`NT1030`. This is a real divergence — node runs such a program, and TypeScript accepts it —
+and it is a refusal, never a miscompile.
+
+It used to be neither. `resolveNamed` fell back to `number` for any unregistered name, so
+the annotation was silently erased and the program failed later against the *value*:
+`'x' declared number but initialized with {kind:string,a:number}`. That message names
+neither the type nor the cause, and it cost a round of self-hosting work — `ForStmt.init:
+VarDecl | Expr | null` in `src/ast.ts` read as a union-representation bug when in fact
+`Expr` (declared at ast.ts:550, its 29 member interfaces from 621) had already been erased
+to `number` before the union code saw it. Only names declared **in the same file** are
+refused; an imported or stdlib name still falls back, which is what keeps the blast radius
+at one file — measured across all 141 files in `src/` and `test/fixtures/`.
+
+**Recursion is the harder half, and it is not a parser problem.** `interface N { next: N }`
+cannot be fixed by reordering: the reference resolves while `N` itself is still being
+parsed. The real obstacle is the type encoding. `Ty` is a **structural string**
+(`src/ast.ts`) — `{a:number,b:string}`, `number[]` — chosen precisely so `===` is type
+comparison. A type that contains itself has no finite structural string, so no amount of
+two-pass resolution helps; a two-pass parser would replace the silent erasure with infinite
+expansion.
+
+Supporting it honestly requires a **nominal, by-reference form in `Ty`** — a type that names
+a declaration instead of spelling out its shape — plus every structural comparison,
+widening, and layout decision taught to resolve through it. That is a foundational change to
+the type representation, not a union feature and not a small one. Until it exists, the
+compiler's own `Expr`/`Stmt` unions (`src/ast.ts`) are outside the subset nativets compiles,
+and **that, not any single union or intersection, is what gates `src/ast.ts` self-hosting**.
+
+### Closures capture by VALUE — a write to a capture is refused (`NT1029`)
+
+A closure's environment is a heap block `[fn_ptr, cap0, cap1, …]`, and codegen fills the capture
+slots **when the closure is built**. Reading one loads its slot; that is a snapshot, and for a
+binding nobody writes a snapshot IS the by-reference answer, so the overwhelming majority of
+closures — every read of a capture — compile and match node exactly.
+
+Writing one does not. `writeCapture` stores back into the closure's own slot and never into the
+enclosing frame's `%x.addr`, while **JS closures capture by reference**. Until this refusal, the
+difference was silent — right exit code, wrong number:
+
+```ts
+let n: number = 0;
+const add = () => { n = n + 1; };
+add(); add();
+console.log(n);            // node: 2      nativets, before NT1029: 0   (both exit 0)
+```
+
+So a captured write is **refused**, except in the one shape where the by-value slot *is* the whole
+variable. Both conditions must hold:
+
+1. **Nothing outside the closure mentions the binding.** That covers a later read (`return n`), a
+   later write (`n = 10`, which the snapshot predates), and a *second* closure over the same
+   binding — which would get its own slot and drift away from the first.
+2. **The binding is a `number`.** The other types were measured in exactly the safe shape and are
+   not safe: a captured `number[]` rewritten this way died with `panic: index out of bounds: the
+   length is 0` where node printed `1 2 3`, and a captured `string` printed correctly but **leaks**
+   — `writeCapture` emits a bare `store i64` and never releases the string it overwrites.
+
+What that carve-out buys is the escaping-counter idiom, which is common, correct today, and
+differential-tested (`test/fixtures/stage11/counter.ts`):
+
+```ts
+function makeCounter() { let count = 0; return () => { count++; return count; }; }
+```
+
+`makeCounter`'s frame is gone before the closure ever runs and never names `count` again, so
+nothing can observe the stale copy. Accumulating in an **inlined** `map`/`filter`/`reduce`
+callback is likewise unaffected: those run in the enclosing frame, so they write the real
+binding, and the `NT1029` hint points at them.
+
+The rule is decided in `computeCaptures` (`src/checker.ts`) and pinned in
+`test/capture-write.test.ts`, whose false-positive wall — a closure-local shadowing an outer
+name, an arrow parameter, a nested arrow writing its own parameter — is the part most worth
+keeping green. Lifting the refusal means **boxing** the captured cell: allocate the variable on
+the heap and store the box pointer in the env slot, so every closure and the enclosing frame
+share one cell. That is a real feature, not a patch, and it is what would let condition 2 go away.
+
+| NT1029 | a closure writing a binding it captured, where the write would be observable (or the binding is not a `number`) | later | by-reference capture: box the captured cell so every closure and the declaring frame share one |
 
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
