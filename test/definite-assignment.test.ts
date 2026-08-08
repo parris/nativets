@@ -273,4 +273,45 @@ console.log(s);
 `, "NT1600");
     expect(e.diag.message).toContain("redeclared");
   });
+
+  /* ----------------------------------------------------------------
+   * 20-21. Making `init` OPTIONAL was the right fix, but it is a change every
+   * declarator walker in the compiler has to have learned. The capture-write pass
+   * (NT1031) is newer than this feature and had NOT: both of its walkers read
+   * `d.init` unconditionally and switched on `.kind` of `undefined`, so the compiler
+   * CRASHED with a raw `TypeError` — no NT code, no span, no hint.
+   *
+   * That is worse than either outcome the prime directive contemplates: not a wrong
+   * answer, but not a refusal either. Both programs below are ordinary TypeScript that
+   * node runs without complaint, and the bare `let` is never even the thing under
+   * analysis — it just has to be SOMEWHERE the pass walks.
+   * ---------------------------------------------------------------- */
+
+  // 20. `refsInStmt` — the enclosing body is scanned for other uses of the captured
+  //     name, and an uninitialized `let` ANYWHERE in that body crashed the scan.
+  //     `count` is mentioned only inside the closure, so NT1031 does not apply and the
+  //     program compiles; `spare` is unrelated to the capture and merely has to be
+  //     present for the walker to trip over it.
+  test("a bare declaration beside a capturing closure does not crash the compiler", async () => {
+    await expectNode(`
+let spare: string;
+let count = 0;
+const bump = () => { count = count + 1; return count; };
+spare = "ok";
+console.log(bump(), bump(), spare);
+`);
+  });
+
+  // 21. `escapingWritesStmts` — the same hazard on the other side of the rule, where
+  //     the bare declaration is INSIDE the closure whose writes are being collected.
+  test("a bare declaration inside a closure does not crash the compiler", async () => {
+    await expectNode(`
+const label = (): string => {
+  let out: string;
+  out = "inner";
+  return out;
+};
+console.log(label());
+`);
+  });
 });
