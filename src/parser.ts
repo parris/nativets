@@ -204,7 +204,48 @@ class Parser {
   /** Arrow nodes that were written `async` — the bridge from an erased async ARROW back
    *  to the NAME it gets bound to, which is what `asyncFns` (and the guard) work in. */
   private asyncFnExprs = new Set<Expr>();
-  private identCalls: { node: Expr; name: string; line: number; col: number }[] = [];
+  /** HIGHER-ORDER async. `asyncFns` is name tracking, and a name does not survive a call
+   *  boundary: `run(one)` binds the async arrow to `run`'s parameter, where the guard has
+   *  never heard of it. The declared TYPE is what crosses that boundary — a parameter
+   *  annotated `(…) => Promise<T>` is exactly as promise-returning as an `async function`
+   *  — but `Promise<T>` ERASES to `T` in `parseGenericType`, so the fact has to be caught
+   *  syntactically while the annotation is being read. `parseFuncType` sets this to
+   *  whether the OUTERMOST function type it just parsed returns a written `Promise<…>`;
+   *  every reader resets it to false immediately before parsing the annotation. */
+  private fnTyReturnsPromise = false;
+  /** Parameter INDICES annotated `(…) => Promise<T>`, per callable — by function name for a
+   *  `function f(…)`, by arrow NODE for `const f = (…) => …` (bound to its name in
+   *  parseDeclarator). This is the only place the async-ness of an argument can be
+   *  RE-ESTABLISHED after it crosses a call, so it is also what says whether an escape is
+   *  safe: handing an async value to a parameter NOT in this set loses it silently. */
+  private promiseParamsByFn = new Map<string, Set<number>>();
+  private promiseParamsByArrow = new Map<Expr, Set<number>>();
+  /** Filled by whichever parameter list was parsed last; read immediately after. */
+  private lastPromiseParams = new Set<number>();
+  private lastPromiseParamNames = new Set<string>();
+  /** SCOPED, unlike `asyncFns`. A parameter name is not a module-level fact: two unrelated
+   *  functions both taking an `f` — one `() => Promise<number>`, one `() => number` — must
+   *  not contaminate each other, and putting parameters in the flat set did exactly that
+   *  (`twice(f: () => number) { return f() + f(); }` was rejected because a DIFFERENT
+   *  function's `f` was promise-typed). One frame per function/arrow body being parsed. */
+  private asyncParamScopes: Set<string>[] = [];
+  /** Every argument position that hands a function value to a call, checked once the whole
+   *  file is parsed — declarations hoist, so neither the callee nor an `async function`
+   *  argument is necessarily known yet at the call site. `scopedAsync` is the part that
+   *  CANNOT be re-derived later: it is the enclosing parameter scope at the call. */
+  private asyncEscapes: {
+    callee: string | null; index: number; argName: string | null;
+    asyncArrow: boolean; scopedAsync: boolean; line: number; col: number;
+  }[] = [];
+  /** `return <a function value>`, checked post-parse for the same hoisting reason. */
+  private returnEscapes: { argName: string | null; asyncArrow: boolean; scopedAsync: boolean; declared: boolean; line: number; col: number }[] = [];
+  /** Functions whose RETURN type is written `(…) => Promise<T>` — they hand an async
+   *  function back, so `pick()()` is a call to an async function. */
+  private returnsAsyncFn = new Set<string>();
+  /** Whether the function body currently being parsed declares such a return type — the
+   *  one thing that makes `return <an async function>` legal (see parseReturn). */
+  private returnsAsyncFnStack: boolean[] = [];
+  private identCalls: { node: Expr; name: string; line: number; col: number; scopedAsync?: boolean }[] = [];
   /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
    *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
   private inErrorCtor = false;
@@ -430,6 +471,7 @@ class Parser {
     const body: Stmt[] = [];
     while (this.peek().type !== "eof") body.push(this.parseStatement());
     this.checkFloatingAsyncCalls(body);
+    this.checkAsyncEscapes();
     // Class members lower to top-level functions (`C.constructor`, `C.method`) so they
     // register + hoist alongside ordinary functions for the checker/codegen.
     body.push(...this.hoistedFns);
@@ -485,12 +527,59 @@ class Parser {
     const last = body[body.length - 1];
     const entrypoint = last && last.kind === "ExprStmt" ? last.expr : null;
     for (const c of this.identCalls) {
-      if (!this.asyncFns.has(c.name) || this.awaitedCalls.has(c.node) || c.node === entrypoint) continue;
+      if (!(c.scopedAsync || this.asyncFns.has(c.name))) continue;
+      if (this.awaitedCalls.has(c.node) || c.node === entrypoint) continue;
       throw nyi(
         NYI.ASYNC,
         `calling async function '${c.name}' without 'await' at ${c.line}:${c.col} (its value is a Promise under node; nativets runs it to completion immediately)`,
       );
     }
+  }
+
+  /**
+   * Reject handing an async function VALUE to a parameter that is not declared to receive
+   * one. `checkFloatingAsyncCalls` re-establishes async-ness on the far side of a call from
+   * the parameter's declared type (`(…) => Promise<T>`) — so an escape is safe exactly when
+   * the callee declares that type at that position. Everything else drops the promise on
+   * the floor: `twice(f: () => number)` given an async arrow computes `1 + 1` where node
+   * concatenates two pending promises. An unknown callee (a method, a builtin, a value) is
+   * also an escape, because there is no declared parameter to carry the fact.
+   */
+  private checkAsyncEscapes(): void {
+    const why = "(under node the value it returns is a Promise, so the promise would be dropped)";
+    for (const e of this.asyncEscapes) {
+      if (!this.isAsyncValue(e.asyncArrow, e.argName, e.scopedAsync)) continue;
+      if (e.callee !== null && this.promiseParamsByFn.get(e.callee)?.has(e.index)) continue;
+      const shown = e.argName !== null ? `'${e.argName}'` : "an async arrow";
+      const where = e.callee !== null ? `to '${e.callee}'` : "to a call";
+      throw nyi(
+        NYI.ASYNC,
+        `passing async function ${shown} as argument ${e.index + 1} ${where} at ${e.line}:${e.col} ` +
+        `— that parameter is not declared '(…) => Promise<T>' ${why}`,
+      );
+    }
+    for (const r of this.returnEscapes) {
+      if (r.declared || !this.isAsyncValue(r.asyncArrow, r.argName, r.scopedAsync)) continue;
+      const shown = r.argName !== null ? `'${r.argName}'` : "an async arrow";
+      throw nyi(
+        NYI.ASYNC,
+        `returning async function ${shown} at ${r.line}:${r.col} from a function whose return type ` +
+        `is not declared '(…) => Promise<T>' ${why}`,
+      );
+    }
+  }
+
+  /** Is this escaped value an async function? `scopedAsync` was decided at the escape (it
+   *  depends on the parameter scope there); a NAME is resolved now, so a hoisted
+   *  `async function` declared later than the escape still counts. */
+  private isAsyncValue(asyncArrow: boolean, name: string | null, scopedAsync: boolean): boolean {
+    return asyncArrow || scopedAsync || (name !== null && this.asyncFns.has(name));
+  }
+
+  /** Is `n` a `(…) => Promise<T>` parameter of some enclosing body being parsed? */
+  private inAsyncParamScope(n: string): boolean {
+    for (const s of this.asyncParamScopes) if (s.has(n)) return true;
+    return false;
   }
 
   // ---- types (permissive; we only need scalars precisely) ----
@@ -753,7 +842,21 @@ class Parser {
     }
     this.eat(")");
     this.eat("=>");
-    return `(${params.join(",")})=>${this.parseType()}` as Ty;
+    // Peek BEFORE parsing: `Promise<T>` erases to `T` (parseGenericType), so the only
+    // place the promise is still visible is the token stream. Assigned (not or-ed) after
+    // the return type is parsed, so the OUTERMOST function type has the last word:
+    // `() => (() => Promise<T>)` returns a function, not a promise.
+    const retPromise = this.peek().value === "Promise" && this.peek(1).value === "<";
+    const ret = this.parseType();
+    this.fnTyReturnsPromise = retPromise;
+    return `(${params.join(",")})=>${ret}` as Ty;
+  }
+  /** Parse a type annotation, reporting whether it is a promise-returning FUNCTION type
+   *  (`(…) => Promise<T>`) — see `fnTyReturnsPromise`. */
+  private parseTypeAsyncAware(): { ty: Ty; asyncFn: boolean } {
+    this.fnTyReturnsPromise = false;
+    const ty = this.parseType();
+    return { ty, asyncFn: this.fnTyReturnsPromise };
   }
   private parseObjectType(): Ty {
     this.eat("{");
@@ -1181,12 +1284,17 @@ class Parser {
     // cares about, exactly as `async function f` would — and a DIRECT alias (`const g = f`)
     // carries that along, so a chain `const c = b; const b = a` stays guarded.
     //
-    // BOUNDARY: this is name tracking, not dataflow. An async function that escapes into
-    // a PARAMETER (`run(one)` then `f()` inside `run`) is not reached, because the callee
-    // is only known interprocedurally. That residual hole is reported, not papered over.
+    // The escape into a PARAMETER (`run(one)` then `f()` inside `run`) is no longer a hole:
+    // it is carried by the declared TYPE instead of the name (see fnTyReturnsPromise) and,
+    // where the type does not carry it, refused at the argument (see checkAsyncEscapes).
     if (init !== undefined &&
         (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name)))) {
       this.asyncFns.add(name);
+    }
+    // `const run = (f: () => Promise<T>) => …` — bind the arrow's promise-typed parameters
+    // to the name calls will actually use, so `run(one)` is a legal escape.
+    if (init !== undefined && this.promiseParamsByArrow.has(init)) {
+      this.promiseParamsByFn.set(name, this.promiseParamsByArrow.get(init)!);
     }
     return { name, annot, annotHead, init };
   }
@@ -1318,6 +1426,8 @@ class Parser {
   private parseParamList(ctor = false): Param[] {
     this.eat("(");
     const params: Param[] = [];
+    const promiseIdx = new Set<number>();
+    const promiseNames = new Set<string>();
     if (!this.at(")")) {
       do {
         if (this.at(")")) break; // trailing comma in the param list
@@ -1336,7 +1446,15 @@ class Parser {
         const pname = this.expectIdent();
         const optional = this.at("?"); if (optional) this.eat("?"); // `f(x?: T)`
         let annot: Ty | undefined;
-        if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
+        if (this.at(":")) {
+          this.eat(":");
+          const t = this.parseTypeAsyncAware();
+          annot = t.ty;
+          // A `(…) => Promise<T>` parameter holds an async function, whoever passed it.
+          // Calling it is exactly `one()` on an `async function one`, so it gets the same
+          // floating-async guard — scoped to this body (see asyncParamScopes).
+          if (t.asyncFn) { promiseNames.add(pname); promiseIdx.add(params.length); }
+        }
         let def: Expr | undefined;
         if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
         if (paramProp && rest) throw nyi(NYI.CLASS_FEATURE, "a rest parameter cannot be a parameter property");
@@ -1346,6 +1464,8 @@ class Parser {
       } while (this.at(",") && (this.eat(","), true));
     }
     this.eat(")");
+    this.lastPromiseParams = promiseIdx;
+    this.lastPromiseParamNames = promiseNames;
     return params;
   }
 
@@ -1359,10 +1479,25 @@ class Parser {
     if (typeParams.length) this.typeParamScopes.push(new Set(typeParams));
     try {
       const params = this.parseParamList();
+      if (this.lastPromiseParams.size) this.promiseParamsByFn.set(name, this.lastPromiseParams);
+      const promiseNames = this.lastPromiseParamNames;
       const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
       let returnAnnot: Ty | undefined;
-      if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
-      const body = [...prelude, ...this.parseBlock()];
+      let retAsyncFn = false;
+      if (this.at(":")) {
+        this.eat(":");
+        const t = this.parseTypeAsyncAware();
+        returnAnnot = t.ty;
+        // `function pick(): () => Promise<T>` hands an async function BACK: `pick()()` is
+        // then a call to an async function, and gets the same floating-async guard.
+        retAsyncFn = t.asyncFn;
+        if (retAsyncFn) this.returnsAsyncFn.add(name);
+      }
+      this.returnsAsyncFnStack.push(retAsyncFn);
+      this.asyncParamScopes.push(promiseNames);
+      let body: Stmt[];
+      try { body = [...prelude, ...this.parseBlock()]; }
+      finally { this.returnsAsyncFnStack.pop(); this.asyncParamScopes.pop(); }
       return typeParams.length
         ? { kind: "FuncDecl", name, params, returnAnnot, body, typeParams }
         : { kind: "FuncDecl", name, params, returnAnnot, body };
@@ -1762,9 +1897,23 @@ class Parser {
   }
 
   private parseReturn(): Stmt {
-    this.eat("return");
+    const kw = this.eat("return");
     if (this.at(";")) { this.eat(";"); return { kind: "ReturnStmt", argument: null }; }
     const argument = this.parseExpression();
+    // Returning an async function VALUE is the same escape as passing one (see
+    // checkAsyncEscapes), and the same declaration carries it back: only a return type
+    // written `(…) => Promise<T>` says the caller is getting an async function. Recorded,
+    // not thrown, because an `async function` returned before its declaration hoists.
+    const asyncArrow = this.asyncFnExprs.has(argument);
+    if (asyncArrow || argument.kind === "Identifier") {
+      const argName = argument.kind === "Identifier" ? argument.name : null;
+      this.returnEscapes.push({
+        argName, asyncArrow,
+        scopedAsync: argName !== null && this.inAsyncParamScope(argName),
+        declared: this.returnsAsyncFnStack[this.returnsAsyncFnStack.length - 1] === true,
+        line: kw.line, col: kw.col,
+      });
+    }
     this.eat(";");
     return { kind: "ReturnStmt", argument };
   }
@@ -1973,6 +2122,8 @@ class Parser {
 
   private parseArrow(): Expr {
     const params: Param[] = [];
+    const arrowPromiseIdx = new Set<number>();
+    const arrowPromiseNames = new Set<string>();
     if (this.at("(")) {
       this.eat("(");
       if (!this.at(")")) {
@@ -1983,7 +2134,13 @@ class Parser {
           const name = this.expectIdent();
           const optional = this.at("?"); if (optional) this.eat("?"); // `(x?: T) =>`
           let annot: Ty | undefined;
-          if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
+          if (this.at(":")) {
+            this.eat(":");
+            const t = this.parseTypeAsyncAware();
+            annot = t.ty;
+            // see parseParamList — same rule, arrow syntax
+            if (t.asyncFn) { arrowPromiseNames.add(name); arrowPromiseIdx.add(params.length); }
+          }
           let def: Expr | undefined;
           if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
           params.push(this.mkParam(name, annot, def, rest, optional));
@@ -1994,14 +2151,24 @@ class Parser {
       params.push({ name: this.expectIdent() });
     }
     const prelude = this.takeParamPrelude();
-    if (this.at(":")) { this.eat(":"); this.parseType(); }
+    // Which parameters are `(…) => Promise<T>` — recorded against the arrow NODE, since an
+    // arrow has no name of its own until parseDeclarator binds it (see promiseParamsByFn).
+    const promiseIdx = arrowPromiseIdx;
+    const mk = (a: Expr): Expr => { if (promiseIdx.size) this.promiseParamsByArrow.set(a, promiseIdx); return a; };
+    let retAsyncFn = false;
+    if (this.at(":")) { this.eat(":"); retAsyncFn = this.parseTypeAsyncAware().asyncFn; }
     this.eat("=>");
-    if (this.at("{")) return { kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false };
-    const body = this.parseAssign();
-    // A pattern parameter needs statements to bind its names, so an expression body
-    // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
-    if (prelude.length) return { kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false };
-    return { kind: "ArrowFunction", params, body, exprBody: true };
+    // An arrow's body is a function body for the return-escape rule too (see parseReturn).
+    this.returnsAsyncFnStack.push(retAsyncFn);
+    this.asyncParamScopes.push(arrowPromiseNames);
+    try {
+      if (this.at("{")) return mk({ kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false });
+      const body = this.parseAssign();
+      // A pattern parameter needs statements to bind its names, so an expression body
+      // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
+      if (prelude.length) return mk({ kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false });
+      return mk({ kind: "ArrowFunction", params, body, exprBody: true });
+    } finally { this.returnsAsyncFnStack.pop(); this.asyncParamScopes.pop(); }
   }
 
   private parseAssign(): Expr {
@@ -2342,14 +2509,36 @@ class Parser {
         // can be rejected after the whole program is parsed (see checkFloatingAsyncCalls).
         if (expr.callee.kind === "Identifier") {
           const loc = expr.callee.loc ?? { line: 0, col: 0 };
-          this.identCalls.push({ node: expr, name: expr.callee.name, line: loc.line, col: loc.col });
+          const scopedAsync = this.inAsyncParamScope(expr.callee.name);
+          this.identCalls.push({ node: expr, name: expr.callee.name, line: loc.line, col: loc.col, scopedAsync });
         } else if (this.asyncFnExprs.has(expr.callee)) {
           // An immediately-invoked async arrow, `(async () => …)()`. It never binds a
           // name, so the name-based path above cannot see it; the callee NODE is the
           // identity. Recorded under a descriptive name so the guard reads the same.
           this.identCalls.push({ node: expr, name: "(async arrow)", line: callLoc.line, col: callLoc.col });
           this.asyncFns.add("(async arrow)"); // not a legal identifier, so it collides with nothing
+        } else if (expr.callee.kind === "CallExpr" && expr.callee.callee.kind === "Identifier" &&
+                   this.returnsAsyncFn.has(expr.callee.callee.name)) {
+          // `pick()()`, where `pick(): () => Promise<T>` — the callee is the RESULT of a
+          // call, so there is no name; the declared return type is the identity.
+          const label = `${expr.callee.callee.name}()`;
+          this.identCalls.push({ node: expr, name: label, line: callLoc.line, col: callLoc.col });
+          this.asyncFns.add(label); // `pick()` is not an identifier, so it collides with nothing
         }
+        // Record every argument that could hand an ASYNC function VALUE across this call —
+        // the one place the guard's name tracking ends. Resolved after the file is parsed
+        // (see checkAsyncEscapes): both the callee and an `async function` argument hoist.
+        const calleeName = expr.callee.kind === "Identifier" ? expr.callee.name : null;
+        args.forEach((a, i) => {
+          const asyncArrow = this.asyncFnExprs.has(a);
+          if (!asyncArrow && a.kind !== "Identifier") return;
+          const argName = a.kind === "Identifier" ? a.name : null;
+          this.asyncEscapes.push({
+            callee: calleeName, index: i, argName, asyncArrow,
+            scopedAsync: argName !== null && this.inAsyncParamScope(argName),
+            line: callLoc.line, col: callLoc.col,
+          });
+        });
       } else if (this.at("<") && (pendingTypeArgs = this.tryCallTypeArgs())) {
         // Call-site type arguments `f<T>(x)` / `foo<string>()` — RECORDED on the call so
         // M3 can pin the instantiation explicitly (they were previously erased). Only
