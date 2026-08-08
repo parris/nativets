@@ -1187,6 +1187,12 @@ class Checker {
       }
       return true;
     }
+    // An ARRAY is compatible when its ELEMENTS are. Without this arm two array types were
+    // compatible only by identity, so an element type differing by nothing more than an
+    // optional field was refused — while the identical shape at the top level was fine.
+    // Sound for the same reason the object arm is: acceptance is gated by `reshapable`,
+    // so only a literal whose elements can be rebuilt in the target layout gets through.
+    if (isArrayTy(target) && isArrayTy(source)) return this.assignable(elemTy(target), elemTy(source));
     return false;
   }
 
@@ -1230,6 +1236,17 @@ class Checker {
         const ft = fieldType(base, p.key);
         if (ft) this.retypeLiteral(p.value, ft);
       }
+      return;
+    }
+    // ...and into an ARRAY literal's elements. This comment's promise of "object/array
+    // literal (recursively)" was true of the doc and not of the body: only `ObjectLiteral`
+    // was ever matched, so `[{line:1,primary:true}]` against `{line:number,primary?:boolean}[]`
+    // kept the literal's own layout even where the predicate accepted it — the exit-255
+    // shape this file is about.
+    if (e.kind === "ArrayLiteral" && isArrayTy(base)) {
+      e.ty = base;
+      const et = elemTy(base);
+      for (const el of e.elements) this.retypeLiteral(el, et);
     }
   }
 
@@ -1585,8 +1602,19 @@ class Checker {
         // SH2: the elements of a `Shape[]` have DIFFERENT types by design — they share
         // the union, not one object shape. Accept exactly when every element is one of
         // its members (the same identity rule `assignable` uses for a union target).
-        const want = hint !== undefined && isArrayTy(hint) && isUnionTy(elemTy(hint)) ? elemTy(hint) : undefined;
-        if (want !== undefined && tys.every((t) => this.assignable(want, t))) return hint as Ty;
+        // The annotated ELEMENT type wins whenever every element fits it AND can be
+        // rebuilt in its layout. This started as a union-only rule (a `Shape[]`'s elements
+        // have different types by design), but the same thing is true of records that
+        // differ only in an OPTIONAL field: `const xs: Span[] = [{line:1,primary:true},
+        // {line:4}]` has two element types, neither of which is `Span`, and inferring
+        // bottom-up could only report "array elements must share a type". `reshapable`
+        // keeps it honest — an element that cannot be rewritten falls through to the
+        // identity rule below rather than being accepted with the wrong layout.
+        const want = hint !== undefined && isArrayTy(hint) ? elemTy(hint) : undefined;
+        if (want !== undefined && tys.every((t, i) => this.assignable(want, t) && this.reshapable(e.elements[i]!, want, t))) {
+          e.elements.forEach((el) => this.retypeLiteral(el, want));
+          return hint as Ty;
+        }
         const first = tys[0]!;
         if (!tys.every((t) => t === first)) throw typeError(`array elements must share a type (got ${[...new Set(tys)].join(", ")})`);
         // A `Date` is represented AS a double (stdlib batch 3), so `Date[]` is a
@@ -3217,8 +3245,14 @@ class Checker {
    */
   private fitsArg(expected: Ty, actual: Ty, arg: Expr): boolean {
     if (this.fitsParam(expected, actual)) return true;
-    if (arg.kind !== "ObjectLiteral") return false;
-    if (!isObjectTy(baseTy(expected)) || !this.assignable(expected, actual)) return false;
+    // An ARRAY literal is reshapable for exactly the same reason an object literal is —
+    // its elements are literals the checker can rebuild — so `f([{line:1,primary:true}])`
+    // against `Span[]` is a legal call. Anything that is not a literal keeps being
+    // refused: its layout is already fixed by its own declaration.
+    if (arg.kind !== "ObjectLiteral" && arg.kind !== "ArrayLiteral") return false;
+    const base = baseTy(expected);
+    if (!isObjectTy(base) && !isArrayTy(base)) return false;
+    if (!this.assignable(expected, actual) || !this.reshapable(arg, expected, actual)) return false;
     this.retypeLiteral(arg, expected);
     return true;
   }
