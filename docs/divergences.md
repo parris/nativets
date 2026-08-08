@@ -1342,6 +1342,42 @@ the type representation, not a union feature and not a small one. Until it exist
 compiler's own `Expr`/`Stmt` unions (`src/ast.ts`) are outside the subset nativets compiles,
 and **that, not any single union or intersection, is what gates `src/ast.ts` self-hosting**.
 
+### A parameter default makes a `function` parameter optional — but not a value ARROW's
+
+A parameter's **type** now comes from its default in every parameter position — `(n = 1)` is
+`number`, `(s = "a")` is `string`, `(b = true)` is `boolean`, TypeScript's widening rule. What
+does **not** hold uniformly is the *arity* half:
+
+```ts
+function f(n = 1) { return n + 1; }
+f();                        // 2 — the default fires, node-exact
+
+const g = (n = 1) => n + 1;
+g();                        // node: 2      nativets: [NT2001] 'g' expects 1 arguments, got 0
+```
+
+A named function has a real signature (`Sig.required` / `Sig.defaults`, `src/checker.ts`) and
+codegen materializes the missing arguments at the call site. A **value arrow** is a closure, and a
+nativets function type is the flat string `(number)=>number` — it has no notion of an optional
+parameter, so a short call has nothing to consult. It is a refusal, not a wrong answer, and it is
+an asymmetry between two spellings of the same thing rather than a considered rule.
+
+Two related refusals of node-correct programs, from the same missing notion of optionality:
+
+- **An explicit `undefined` argument does not trigger the default.** `f(undefined)` prints `2` in
+  node (`undefined` is exactly what "argument absent" means in JS); we refuse the argument —
+  `'f' arg 0 expects number, got undefined` — so the rule is unreachable rather than wrong.
+- **A default may not name a parameter to its left.** `function f(a, b = a)` is ordinary
+  JavaScript; codegen materializes defaults before the parameter allocas are stored, so accepting
+  it would emit a load from an undefined `%a.addr`. Refused with `'a' is not defined`.
+
+What a default **may not be**: `undefined`, `null`, or `[]`. TypeScript answers those with `any`,
+`null`/`undefined` and `any[]`; none is a nativets type, so each is refused with a hint naming the
+two ways out rather than guessed. Pinned in `test/param-defaults.test.ts`.
+
+Lifting the arrow case means giving function types a required-arity — every `funcParams` consumer,
+assignability, and a call-site pad in codegen. A real feature, not a patch.
+
 ### Closures capture by VALUE — a write to a capture is refused (`NT1029`)
 
 A closure's environment is a heap block `[fn_ptr, cap0, cap1, …]`, and codegen fills the capture
