@@ -23,6 +23,7 @@ import { test, expect, describe } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 
 import { lex } from "../src/lexer.ts";
+import { sourceToIR } from "../src/driver.ts";
 
 const SRC = new URL("../src/", import.meta.url);
 
@@ -33,6 +34,38 @@ const SRC = new URL("../src/", import.meta.url);
  */
 const REMAINING: Record<string, number> = {}; // EMPTY — all 29 removed. Keep it that way.
 
+/**
+ * Count regex literals in `source`, INCLUDING inside template substitutions.
+ *
+ * A one-level token scan is not enough, and that gap was not hypothetical: the lexer
+ * emits a template literal as a SINGLE token whose value is its raw inner text, so a
+ * regex inside `${…}` produces no `regex` token at the top level. checker.ts's
+ * `` `${base}$${args.map((t) => t.replace(/[^A-Za-z0-9_]/g, "_")).join("$")}`  ``
+ * hid behind exactly that for its whole life while this lint reported zero — the
+ * parser still refused it (NT1027, raised from `parseExpressionFrom` on the
+ * substitution), so it surfaced as checker.ts's self-host blocker instead of here.
+ *
+ * Recursing into template values matches what the parser does (`buildTemplate`
+ * re-lexes each substitution) and costs no false positives: a `/` in a template's
+ * TEXT is only lexed as a regex where the parser would also read one, and comments
+ * are skipped by the lexer, so prose mentioning `/…/` is invisible. Verified across
+ * all 12 `src/` modules — zero hits with the tree clean, one hit the moment the
+ * checker.ts literal is put back.
+ */
+function regexLiterals(source: string): string[] {
+  const out: string[] = [];
+  const walk = (text: string, depth: number): void => {
+    let toks;
+    try { toks = [...lex(text)]; } catch { return; } // a substitution alone need not lex
+    for (const t of toks) {
+      if (t.type === "regex") out.push(depth === 0 ? `${t.line}  ${t.value}` : `${t.line}  ${t.value} (in a template substitution)`);
+      else if (t.type === "template") walk(t.value, depth + 1);
+    }
+  };
+  walk(source, 0);
+  return out;
+}
+
 describe("no RegExp in the compiler's own source", () => {
   test("no `src/` module contains a regex literal", () => {
     // The lexer itself is the judge: it tokenizes `/.../` precisely so the construct is
@@ -42,16 +75,161 @@ describe("no RegExp in the compiler's own source", () => {
     const where: string[] = [];
     for (const f of readdirSync(SRC).filter((f) => f.endsWith(".ts")).sort()) {
       const source = readFileSync(new URL(f, SRC), "utf8");
-      for (const t of lex(source)) {
-        if (t.type !== "regex") continue;
+      for (const hit of regexLiterals(source)) {
         found[f] = (found[f] ?? 0) + 1;
-        where.push(`${f}:${t.line}  ${t.value}`);
+        where.push(`${f}:${hit}`);
       }
     }
     expect({ found, where: where.length }).toEqual({
       found: REMAINING,
       where: Object.values(REMAINING).reduce((a, b) => a + b, 0),
     });
+  });
+
+  /*
+   * The ratchet must be able to FAIL, or it is not a ratchet. These are the shapes it
+   * has to catch — the second is the one that got through for real.
+   */
+  test("the scan catches a regex at top level AND inside a template substitution", () => {
+    expect(regexLiterals(`const x = s.replace(/[^A-Za-z0-9_]/g, "_");`)).toHaveLength(1);
+    // The exact line that was checker.ts's blocker.
+    const hidden = "const stem = `${base}$${args.map((t) => t.replace(/[^A-Za-z0-9_]/g, \"_\")).join(\"$\")}`;";
+    expect(regexLiterals(hidden)).toHaveLength(1);
+    expect(regexLiterals(hidden)[0]).toContain("in a template substitution");
+    // …and nested one level deeper still.
+    expect(regexLiterals("const a = `${`${x.replace(/a/g, \"b\")}`}`;")).toHaveLength(1);
+  });
+
+  test("no false positives: a `/` in template TEXT or in a comment is not a regex", () => {
+    expect(regexLiterals("const u = `https://example.com/a/b`;")).toEqual([]);
+    expect(regexLiterals("// see /[a-z]/g for the old spelling\nconst x = 1;")).toEqual([]);
+    expect(regexLiterals("/* was `t.replace(/[^A-Za-z0-9_]/g, \"_\")` */\nconst x = 1;")).toEqual([]);
+    expect(regexLiterals("const q = a / b / c;")).toEqual([]);
+  });
+});
+
+/*
+ * checker.ts's generic-instantiation name mangler — `${base}$${args…}`, where each type
+ * argument had every non-`\w` character replaced: `.replace(/[^A-Za-z0-9_]/g, "_")`.
+ *
+ * This one HID from the lint above for its whole life: it sits inside a template literal,
+ * and the lexer emits a template as ONE token whose value is raw inner text, so no
+ * `regex` token was ever produced for it. The parser still refused it (NT1027, via
+ * `parseExpressionFrom` on the substitution), which is how it surfaced — as checker.ts's
+ * self-host blocker. The lint is extended below to look inside substitutions.
+ *
+ * The class is `[A-Za-z0-9_]` = `\w`, which does NOT include `$` — `$` is the mangler's
+ * own separator, so it MUST be replaced. `ast.ts`'s `isIdentPart` is `[A-Za-z0-9_$]` and
+ * would be the wrong predicate here; that is the trap this pins shut.
+ *
+ * Cases are DERIVED (from the regex's own semantics and the Ty encoding in ast.ts) —
+ * no external suite was opened. The end-to-end names were MEASURED off the unmodified
+ * compiler before the rewrite, and are reproduced here exactly.
+ */
+describe("checker: the instantiation mangler `[^A-Za-z0-9_]` -> `_`", () => {
+  const mangleArg = (t: string) => {
+    let out = "";
+    for (let i = 0; i < t.length; i++) {
+      const c = t[i]!;
+      out += (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "_" ? c : "_";
+    }
+    return out;
+  };
+
+  test("agrees with the regex on every BMP code point", () => {
+    const wrong: string[] = [];
+    for (let n = 0; n <= 0xffff; n++) {
+      const ch = String.fromCharCode(n);
+      if (mangleArg(ch) !== ch.replace(/[^A-Za-z0-9_]/g, "_")) wrong.push("U+" + n.toString(16).padStart(4, "0"));
+    }
+    expect(wrong.slice(0, 10)).toEqual([]);
+  });
+
+  test("`$` is NOT a word character here — the separator must be escaped", () => {
+    // If this ever returns "$", `ast.ts`'s isIdentPart has been substituted for `\w`
+    // and `id<T>` instantiated at a type containing `$` could collide with the separator.
+    expect(mangleArg("$")).toBe("_");
+    expect(mangleArg("a$b")).toBe("a_b");
+  });
+
+  test("the edges a hand-scan gets wrong: empty, position 0, final position, replace-ALL", () => {
+    for (const [input, want] of [
+      ["", ""],                       // empty input
+      ["[", "_"],                     // a match that is the whole string
+      ["[abc", "_abc"],               // match at position 0
+      ["abc]", "abc_"],               // match at the very end
+      ["[]", "__"],                   // adjacent matches — `g`, not replace-first
+      ["a-b-c", "a_b_c"],             // interleaved
+      ["___", "___"],                 // `_` survives; it is IN the class
+      ["number", "number"],           // nothing to replace
+    ] as const) {
+      expect([input, mangleArg(input)]).toEqual([input, want]);
+    }
+  });
+
+  test("the real Ty encodings that reach the mangler (ast.ts)", () => {
+    for (const [ty, want] of [
+      ["number", "number"],
+      ["string[]", "string__"],
+      ["number[][]", "number____"],
+      ["{a:number}", "_a_number_"],
+      ["{name:string,age:number}", "_name_string_age_number_"],
+      ["?Ustring", "_Ustring"],       // the A2 nullable encoding
+    ] as const) {
+      expect([ty, mangleArg(ty)]).toEqual([ty, want]);
+    }
+  });
+
+  test("the regex has no `u` flag, so a NON-BMP char is TWO code units and TWO `_`", () => {
+    // The trap: `for (const c of t)` iterates CODE POINTS and would yield one `_`.
+    // The regex iterates UTF-16 code units. Length is preserved exactly, always.
+    expect(mangleArg("\u{1D54F}")).toBe("__");
+    expect(mangleArg("a\u{1D54F}b")).toBe("a__b");
+    expect(mangleArg("\u{1F600}")).toBe("__");
+    for (const s of ["", "a", "é", "\u{1D54F}", "a\u{1D54F}b", "{a:number}"]) {
+      expect([s, mangleArg(s).length]).toEqual([s, s.length]);
+    }
+  });
+
+  /*
+   * END-TO-END, through the real call site. The predicate above is only equivalent in
+   * isolation; these assert the MANGLED SYMBOL NAMES the compiler actually emits. Every
+   * expected value here was measured against the unmodified compiler BEFORE the rewrite,
+   * so this is the safety net that tells a faithful rewrite from a subtly different one.
+   */
+  const defsIn = (src: string): string[] =>
+    sourceToIR(src)
+      .split("\n")
+      .filter((l) => l.startsWith("define "))
+      .map((l) => { const at = l.indexOf("@"); return l.slice(at, l.indexOf("(", at)); })
+      .filter((n) => n !== "@main");
+
+  test("emitted specialization names — scalars, arrays, object types", () => {
+    for (const [want, src] of [
+      ["@id$number", `function id<T>(x: T): T { return x; }\nconsole.log(id(1));\n`],
+      ["@id$string", `function id<T>(x: T): T { return x; }\nconsole.log(id("a"));\n`],
+      ["@id$boolean", `function id<T>(x: T): T { return x; }\nconsole.log(id(true));\n`],
+      // T = number[] — the `[` and `]` are the non-word characters being replaced.
+      ["@n$number__", `function n<T>(xs: T[]): number { return xs.length; }\nconst a: number[][] = [[1],[2]];\nconsole.log(n(a));\n`],
+      ["@n$string__", `function n<T>(xs: T[]): number { return xs.length; }\nconst a: string[][] = [["x"]];\nconsole.log(n(a));\n`],
+      // T = {a:number} — braces and the colon all become `_`.
+      ["@n$_a_number_", `function n<T>(xs: T[]): number { return xs.length; }\nconst a: { a: number }[] = [{ a: 1 }];\nconsole.log(n(a));\n`],
+    ] as const) {
+      expect([want, defsIn(src)]).toEqual([want, [want]]);
+    }
+  });
+
+  test("two type parameters keep the `$` separator between them", () => {
+    expect(defsIn(`function pair<A, B>(a: A, b: B): number { return 1; }\nconsole.log(pair(1, "s"));\n`))
+      .toEqual(["@pair$number$string"]);
+  });
+
+  test("two DISTINCT instantiations of one generic get distinct names", () => {
+    expect(defsIn(
+      `function n<T>(xs: T[]): number { return xs.length; }\n` +
+      `const a: number[][] = [[1]];\nconst b: { q: string }[] = [{ q: "z" }];\n` +
+      `console.log(n(a), n(b));\n`,
+    ).sort()).toEqual(["@n$_q_string_", "@n$number__"]);
   });
 });
 

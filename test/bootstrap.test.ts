@@ -243,7 +243,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1009", "NT1015", "NT1023", "NT1027", "NT1606", "NT2001"],
+      ["NT1009", "NT1023", "NT1606", "NT2001"],
     );
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
@@ -289,7 +289,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // invariant, and the second time that was wrong (NT0001 was the first, refilled by the
     // static-members lane). Assert MEMBERSHIP — which names the construct — not emptiness,
     // which quietly asserts that no module will ever reach that construct again.
-    expect(byCode["NT1027"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
+    // NT1027 is EMPTY AGAIN — the mangler's `t.replace(/[^A-Za-z0-9_]/g,"_")` is now a
+    // character scan, verified equivalent to the original over 20,000 fuzzed inputs.
+    // Third state for this bucket today (empty -> {checker,ownership} -> empty), which is
+    // why the note above says to assert membership and treat emptiness as a fact about
+    // today rather than an invariant.
+    expect(byCode["NT1027"]).toBeUndefined();
     // This bucket grew from two modules to EIGHT, and every arrival is a blocker moving
     // FORWARD out of an earlier bucket — the SH0 gradient working, not a regression:
     //   - `parser.ts` left NT0001: the satisfies lane taught the parser `expr satisfies T`,
@@ -308,9 +313,26 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `Record<string, number | "var">` named the problem) and `ownership.ts` both left it
     // for NT1606. What remains under NT1009 is largely `ast.ts`'s INTERSECTION `&` and
     // `parser.ts`'s optional element access `?.[]` — the code covers three features.
+    // Back to EIGHT — but read the blame column before calling that a regression. Only
+    // ast.ts and parser.ts own an NT1009; checker.ts joined by CLEARING its regex and
+    // reaching parser.ts's `?.[]`, and the other four inherit through the link. Clearing
+    // `?.[]` should collapse most of this bucket at once, which is why it is the single
+    // highest-leverage blocker on the board.
+    // NINE of twelve, and this is CONSOLIDATION rather than regression — read the blame
+    // column. Only ast.ts and parser.ts OWN an NT1009. checker.ts arrived by clearing its
+    // regex; modules.ts by clearing its generic method; the rest inherit through the link,
+    // and SIX of them trace to parser.ts's `?.[]` directly or transitively.
+    //
+    // Which makes `?.[]` the highest-leverage blocker on the board by a wide margin:
+    // nothing else on this list moves more than one module.
     expect(byCode["NT1009"]!.sort()).toEqual(
-      ["ast.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "parser.ts"],
+      ["ast.ts", "checker.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts",
+       "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
+    // NT1015 is empty — the generic-method lane cleared modules.ts's, and codegen.ts's
+    // static-member site was cleared earlier. (A fact about today; this file has been
+    // wrong three times treating an emptied bucket as an invariant.)
+    expect(byCode["NT1015"]).toBeUndefined();
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
     // the fresh-receiver lane) -> NT1006 (`Math.max(...)`, cleared by the variadic lane) ->
     // back to NT1606, this time a `.push` on a NAMED accumulator. That last shape is
@@ -351,10 +373,26 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // parse), and an assertion on them makes this test fail for the *good* reason —
     // progress — which trains people to edit it rather than read it. The gap between
     // "coverage says clean" and "the compiler refuses it" is the invariant.
+    // WAS `expect(r.blockers.length).toBe(0)`. Definite assignment cleared cli.ts's
+    // `let source: string;`, so coverage now reaches further and reports ONE blocker —
+    // and that blocker is ITSELF an artifact: the preprocess strips imports, so
+    // `readFileSync` reads as an unknown callee (NT1003), the same artifact class the
+    // standalone probe invents for any cross-module call.
+    //
+    // Counting blockers was pinning the symptom. The INVARIANT is the GAP: whatever
+    // coverage reports, it is not what actually stops the module. Asserted that way now,
+    // so this survives the frontier moving instead of failing for the good reason.
     const r = coverage(read("cli.ts"));
     expect(r.parsed).toBe(true);
-    expect(r.blockers.length).toBe(0);
-    expect(() => sourceToIR(read("cli.ts"), new URL("cli.ts", SRC).pathname)).toThrow();
+    const covCodes = r.blockers.map((b) => b.code);
+    let realCode = "";
+    try { sourceToIR(read("cli.ts"), new URL("cli.ts", SRC).pathname); } catch (e) {
+      realCode = /\[(NT\d+)\]/.exec(String((e as Error).message))?.[1] ?? "";
+    }
+    // The pipeline DOES refuse it...
+    expect(realCode).not.toBe("");
+    // ...and coverage does not see that reason. That is the gap, and it is the point.
+    expect(covCodes).not.toContain(realCode);
   });
 });
 

@@ -1059,6 +1059,15 @@ class FnGen {
       case "VarDecl": {
         for (const d of s.decls) {
           const ty = d.ty ?? "number";
+          // A bare `let x: T;` has no initializer. Store the slot's DEFAULT ZERO — not
+          // the `undefined` literal, whose `0` is ill-typed for a `double` or a `ptr`
+          // slot. The checker has already proved the binding is assigned before any read
+          // (definite assignment), so this zero is never observed; it only keeps the slot
+          // well-defined. Nothing is retained: no value has been bound yet.
+          if (!d.init) {
+            this.emit(`store ${llvmTy(ty)} ${defaultZero(ty)}, ptr ${this.addr(d.name)}`);
+            continue;
+          }
           const val = this.coerce(this.genExpr(d.init), ty);
           // RC: an aliased string (identifier/field/index/literal) gains a new owner
           // → retain. A fresh producer is consumed (its rc=1 transfers to this local).
@@ -4045,7 +4054,7 @@ class FnGen {
 
   private subStmt(s: Stmt, map: Map<string, string>): void {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) { this.subExpr(d.init, map); if (map.has(d.name)) d.name = map.get(d.name)!; } break;
+      case "VarDecl": for (const d of s.decls) { if (d.init) this.subExpr(d.init, map); if (map.has(d.name)) d.name = map.get(d.name)!; } break;
       case "ReturnStmt": if (s.argument) this.subExpr(s.argument, map); break;
       case "IfStmt": this.subExpr(s.test, map); this.subStmts(s.consequent, map); if (s.alternate) this.subStmts(s.alternate, map); break;
       case "WhileStmt": this.subExpr(s.test, map); this.subStmts(s.body, map); break;
@@ -4072,6 +4081,13 @@ class FnGen {
         for (const p of s.params) if (p.default) this.subExpr(p.default, child);
         this.subStmts(s.body, child); break;
       }
+      // A drop set names LOCALS, so it has to be renamed with them. Unreachable today —
+      // ownership walks an arrow body with `seq`, not `scoped`, so no marker is placed
+      // inside one — but the silent `default` below would have kept the pre-rename names
+      // and made `emitDrops` load an `%x.addr` that no longer exists. Renaming here costs
+      // nothing and stops that being a live miscompile the day arrow-body locals become
+      // linear-tracked.
+      case "BlockDrops": s.names = s.names.map((n) => map.get(n) ?? n); break;
       default: break; // BreakStmt / ContinueStmt
     }
   }
