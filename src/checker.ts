@@ -413,6 +413,35 @@ function specializeDecl(tmpl: FuncDecl, name: string, bindings: Map<string, Ty>)
   return spec;
 }
 
+/**
+ * Key ENUMERATION needs a runtime key set; we only have a compile-time one.
+ *
+ * An object here is a flat slot array whose field list comes from its TYPE
+ * (`objectFields`), so `Object.keys`/`for-in` lower to a constant string array. node
+ * decides the key set per VALUE at runtime, and an OPTIONAL field is exactly where the
+ * two part company: `f({})` and `f({a: 1})` reach the same call site with the same
+ * static type and different correct answers, so there is no compile-time answer to give.
+ *
+ * This used to print the declared key list regardless — `Object.keys({b: 2})` on
+ * `{a?: number, b: number}` returned `["a","b"]` where node returns `["b"]`, exit 0 on
+ * both sides. A silent wrong answer, so it is a refusal now.
+ *
+ * Only the `?U` (undefined) arm is refused. A `?N` field (`a: T | null`) always HAS its
+ * key in node, so the static answer is already right and stays accepted.
+ */
+function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
+  const opt = objectFields(ot).find((f) => isNullableTy(f.ty) && nullishKind(f.ty) === "undefined");
+  if (opt === undefined) return;
+  throw nyi(
+    forIn ? NYI.FOR_IN : NYI.OBJECT,
+    `${what} of an object with the optional field '${opt.key}'`,
+    "a key set is decided at compile time here (from the TYPE), but node decides it per value at runtime — `{}` and " +
+    `\`{${opt.key}: …}\` share this type and have different key sets, so there is no answer to give. ` +
+    `Read the field instead (\`o.${opt.key} !== undefined\`), or make it REQUIRED and assign \`undefined\` when it is missing. ` +
+    `Note that \`${opt.key}: T | undefined\` is encoded exactly like \`${opt.key}?: T\` here, so it is refused too even though its key is always present in node`,
+  );
+}
+
 class Checker {
   private loopDepth = 0;
   private switchDepth = 0;
@@ -1295,6 +1324,7 @@ class Checker {
       case "ForInStmt": {
         const ot = this.type(s.object, scope);
         if (!isObjectTy(ot)) throw nyi(NYI.FOR_IN, `for-in over ${ot}`);
+        enumerableOrThrow(ot, "for-in", true);
         const inner = scope.child();
         inner.declare(s.name, "string", false); // keys are strings
         this.loopDepth++; this.checkBlock(s.body, inner, ret); this.loopDepth--;
@@ -2248,6 +2278,7 @@ class Checker {
       if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
       const ot = this.type(e.args[0]!, scope);
       if (!isObjectTy(ot)) throw typeError(`Object.${p} expects an object`);
+      enumerableOrThrow(ot, `Object.${p}`);
       // `getOwnPropertyNames` == `keys` for a plain record (no non-enumerable props here).
       if (p === "keys" || p === "getOwnPropertyNames") return "string[]";
       if (p === "entries") {
