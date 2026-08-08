@@ -557,9 +557,19 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // forward TYPE reference (NT1030), inherited by every module that imports ast.ts,
       // which is all of them. The construct string is updated, not dropped; naming it is
       // the whole point of the assertion.
+      //
+      // RE-MEASURED AGAIN by the type-hoisting lane, and this is the interesting part: the
+      // forward reference was MASKING the real blocker. Top-level type declarations hoist
+      // now, so ast.ts:521's `as Identifier` resolves and 19 of ast.ts's 64 type
+      // declarations along with it — but the other 45 (`Expr`, `Stmt` and their members)
+      // are one mutually-recursive cluster, which hoisting cannot touch and no reordering
+      // can fix. Same code, same rung, DIFFERENT construct: still NT1030, now for the
+      // reason that actually gates self-hosting. Lifting it means a nominal, by-reference
+      // form in `Ty` (docs/divergences.md), not a parser change.
       expect(`stage-1 rung ${m.rung}, ${m.code}`)
         .toBe(`stage-1 rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}`);
-      expect(m.error).toContain("before its declaration");
+      expect(m.error).toContain("recursive type");
+      expect(m.error).toContain("contains itself through 'Expr'");
       return;
     }
 

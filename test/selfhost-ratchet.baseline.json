@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-08",
-    "rev": "6e83b38"
+    "rev": "76307ea"
   },
   "modules": {
     "ast.ts": {
@@ -9,12 +9,12 @@
       "standalone": {
         "stage": "parse",
         "code": "NT1030",
-        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
       },
       "linked": {
         "stage": "parse",
         "code": "NT1030",
-        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
       }
     },
     "checker.ts": {
@@ -40,7 +40,7 @@
       "linked": {
         "stage": "link",
         "code": "NT1030",
-        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
       }
     },
     "codegen.ts": {
@@ -66,7 +66,7 @@
       "linked": {
         "stage": "link",
         "code": "NT1030",
-        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
       }
     },
     "coverage.ts": {
@@ -80,7 +80,7 @@
       "linked": {
         "stage": "link",
         "code": "NT1030",
-        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
       }
     },
     "diagnostics.ts": {
@@ -107,7 +107,7 @@
       "linked": {
         "stage": "link",
         "code": "NT1030",
-        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
       }
     },
     "lexer.ts": {
@@ -133,7 +133,7 @@
       "linked": {
         "stage": "link",
         "code": "NT1030",
-        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
       }
     },
     "ownership.ts": {
@@ -150,7 +150,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "c13a348fd7d748a4",
+      "sha256": "0aa58b702350ad9c",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -159,7 +159,7 @@
       "linked": {
         "stage": "link",
         "code": "NT1030",
-        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
       }
     }
   }
