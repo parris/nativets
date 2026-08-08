@@ -239,9 +239,11 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile; the module now stops on the ESCAPES object literal.
   "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
-  // Left NT1606 when `.sort()` on a FRESH receiver stopped being refused; now a variadic
-  // spread, `Math.max(...spans.map(…))`.
-  "diagnostics.ts": { rung: 0, code: "NT1006", blame: "self" },
+  // Round the houses: NT1606 (`[...spans].sort()`) -> NT1006 (`Math.max(...spans.map(…))`)
+  // -> back to NT1606, now a `.push` on a NAMED accumulator — a shape the fresh-receiver
+  // rule deliberately does not cover, because permitting it needs in-place mutation of an
+  // owned named local. Same code, a genuinely different blocker each time.
+  "diagnostics.ts": { rung: 0, code: "NT1606", blame: "self" },
   // Left NT0001 (`satisfies`); the code is unchanged at NT1009 but the FEATURE is not —
   // it is now optional element access `?.[]`, not a union.
   "parser.ts": { rung: 0, code: "NT1009", blame: "self" },
