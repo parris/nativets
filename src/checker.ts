@@ -851,23 +851,29 @@ class Checker {
    * The caller then type-checks the arguments against that fully-concrete signature, so
    * an argument mismatch is reported exactly like any ordinary call.
    */
-  private instantiate(name: string, e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope): Sig {
+  private instantiate(name: string, e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope, recvOffset = 0): Sig {
     const tmpl = this.generics.get(name)!;
     const tps = tmpl.typeParams!;
     const bindings = new Map<string, Ty>();
+    // A generic METHOD is the same template with a leading `this` parameter that no
+    // argument corresponds to (`recvOffset` 1). Drop it before matching arguments to
+    // parameters so every index below is a plain positional match, exactly as for a
+    // function. `this` is never generic, so it can never carry a binding.
+    const sigParams = tmpl.params.slice(recvOffset);
+    const what = recvOffset ? "generic method" : "generic function";
 
     if (e.typeArgs?.length) {
       // Explicit call-site type args pin the instantiation positionally.
       if (e.typeArgs.length > tps.length) throw typeError(`'${name}' takes ${tps.length} type argument(s), got ${e.typeArgs.length}`);
       e.typeArgs.forEach((t, i) => bindings.set(tps[i]!, t));
     }
-    const patterns = tmpl.params.map((p) => p.annot ?? "number");
+    const patterns = sigParams.map((p) => p.annot ?? "number");
     // Round 1 — plain arguments. An ARROW argument is deferred: it needs the (possibly
     // still-unbound) parameter pattern as its contextual type before it can be typed.
     e.args.forEach((a, i) => {
       const pat = patterns[Math.min(i, patterns.length - 1)];
       if (!pat || !hasTypeParam(pat) || a.kind === "ArrowFunction") return;
-      unifyTypeParams(tmpl.params[i]?.rest ? elemTy(pat) : pat, this.type(a, scope), bindings);
+      unifyTypeParams(sigParams[i]?.rest ? elemTy(pat) : pat, this.type(a, scope), bindings);
     });
     // Round 2 — arrow arguments, now that the other parameters have bound what they can:
     // `mapAll<T, U>(xs: T[], f: (t: T) => U)` learns T from `xs`, types the arrow with
@@ -882,16 +888,16 @@ class Checker {
 
     const missing = tps.filter((t) => !bindings.has(t));
     if (missing.length) {
-      throw nyi(NYI.GENERIC, `cannot infer type argument${missing.length > 1 ? "s" : ""} ${missing.map((m) => `'${m}'`).join(", ")} for generic function '${name}'; pass them explicitly (\`${name}<${tps.join(", ")}>(…)\`)`);
+      throw nyi(NYI.GENERIC, `cannot infer type argument${missing.length > 1 ? "s" : ""} ${missing.map((m) => `'${m}'`).join(", ")} for ${what} '${name}'; pass them explicitly (\`${name}<${tps.join(", ")}>(…)\`)`);
     }
     const typeArgs = tps.map((t) => bindings.get(t)!);
     for (const t of typeArgs) {
-      if (hasTypeParam(t)) throw nyi(NYI.GENERIC, `generic function '${name}' instantiated with an unresolved type parameter (nested generics are not supported)`);
+      if (hasTypeParam(t)) throw nyi(NYI.GENERIC, `${what} '${name}' instantiated with an unresolved type parameter (nested generics are not supported)`);
     }
 
     const key = `${name}|${typeArgs.join("|")}`;
     const memo = this.instances.get(key);
-    if (memo) { (e.callee as { name: string }).name = memo; return this.functions.get(memo)!; }
+    if (memo) { this.retarget(e, memo, recvOffset); return this.functions.get(memo)!; }
 
     // POLYMORPHIC RECURSION (`f<T>` calling `f<T[]>`) has no finite monomorphization —
     // each level demands a strictly bigger type. Memoization can't see it (every key is
@@ -917,8 +923,23 @@ class Checker {
     this.specialized.push(spec);
     if (!spec.returnAnnot) { sig.ret = this.inferReturnType(spec, this.genericBase!()); spec.returnTy = sig.ret; }
     this.pending.push(spec); // body checked in the drain loop (keeps recursion finite)
-    (e.callee as { name: string }).name = mangled;
+    this.retarget(e, mangled, recvOffset);
     return sig;
+  }
+
+  /**
+   * Point a call at its specialization. A FUNCTION call has an Identifier callee, so the
+   * name is replaced outright. A METHOD call has a MemberExpr callee, and everything
+   * downstream (the checker's own method path, and codegen's `C.m` lookup) rebuilds the
+   * symbol as `${classTag(receiver)}.${property}` — so the specialization is selected by
+   * rewriting the PROPERTY to the mangled tail (`t` → `t$number`). The receiver
+   * expression is left untouched, which is what keeps `this` flowing normally.
+   */
+  private retarget(e: Extract<Expr, { kind: "CallExpr" }>, mangled: string, recvOffset: number): void {
+    if (recvOffset === 0) { (e.callee as { name: string }).name = mangled; return; }
+    // `mangled` is the whole dotted symbol (`C.t$number`); a class name cannot contain a
+    // `.`, so everything after the first one is the property.
+    (e.callee as { property: string }).property = mangled.slice(mangled.indexOf(".") + 1);
   }
 
   /** Whitelist `e` as an iteration position (see `iterOk`). */
@@ -2402,7 +2423,13 @@ class Checker {
         // cannot reach it (node: `p.make is not a function`). Point at the class.
         if (this.statics.has(`${cls}.${e.callee.property}`))
           throw typeError(`'${e.callee.property}' is a static method of ${cls}, not an instance method — call it on the class (\`${cls}.${e.callee.property}(…)\`)`);
-        const msig = this.functions.get(`${cls}.${e.callee.property}`);
+        // A GENERIC method is a TEMPLATE, not a signature: resolve its type arguments
+        // from these arguments and instantiate, then check the call against the
+        // fully-concrete specialization exactly like an ordinary method. `recvOffset` 1
+        // tells `instantiate` that the template's leading `this` has no argument.
+        const msig = this.generics.has(`${cls}.${e.callee.property}`)
+          ? this.instantiate(`${cls}.${e.callee.property}`, e, scope, 1)
+          : this.functions.get(`${cls}.${e.callee.property}`);
         if (!msig) {
           if (fieldType(recv, e.callee.property)) throw typeError(`'${e.callee.property}' is a field of ${cls}, not a method`);
           throw typeError(`Method '${e.callee.property}' does not exist on ${cls}`);
