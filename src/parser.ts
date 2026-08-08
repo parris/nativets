@@ -139,6 +139,13 @@ class Parser {
   /** The type name `resolveNamed` last refused on. Read by `hoistTypeDecls` off a
    *  sub-parser to build the dependency edge it needs to tell a cycle from a chain. */
   private blockedOn: string | undefined;
+  /** Every `class X` declared in this file. A class declares a TYPE too (`parseClass`
+   *  registers its instance shape), and classes are NOT hoisted — so the hoisting
+   *  fixpoint has to know to keep its hands off a declaration that names one. */
+  private declaredClassNames = new Set<string>();
+  /** True on a sub-parser built by `hoistTypeDecls` — i.e. this parse is resolving ONE
+   *  declaration ahead of the file, and may only use what hoisting can actually see. */
+  private hoisting = false;
   /** Top-level functions synthesized from class members (ctor + methods), appended to
    *  the program body after parsing so they hoist like ordinary function declarations. */
   private hoistedFns: Stmt[] = [];
@@ -216,6 +223,7 @@ class Parser {
       const n = toks[i + 1]!;
       if (t.type === "punct" && t.value === "{") depth++;
       else if (t.type === "punct" && t.value === "}") depth--;
+      else if (t.type === "ident" && t.value === "class" && n.type === "ident") this.declaredClassNames.add(n.value);
       else if ((t.value === "interface" || t.value === "type") && t.type === "ident" && n.type === "ident") {
         // `type X =` only — `type` is not a reserved word, so `const type = 1` must not
         // register `= 1` as a declaration. `interface` is always a declaration.
@@ -264,6 +272,7 @@ class Parser {
       for (const name of pending) {
         const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
         sub.pos = this.typeDeclStarts.get(name)!;
+        sub.hoisting = true;
         try {
           sub.parseStatement();
         } catch (e) {
@@ -321,6 +330,16 @@ class Parser {
     // Declared in this file, but not yet — so `typeAliases` does not have it and the
     // fallback below would erase it to `number`. That erasure is silent and the failure
     // it causes surfaces much later, blaming whatever value was annotated with it.
+    // HOIST MODE ONLY. A class declares a type as well, and classes are not part of the
+    // hoisting fixpoint (their instance shape is only known once `parseClass` runs). If a
+    // declaration names one, resolving it HERE would erase the class to `number` for every
+    // use above it — a silent erasure whose failure surfaces later, blaming the value. So
+    // the declaration is left unresolved and the main parse reports it on the TYPE, exactly
+    // as it did before hoisting existed. Never reaches the user: `hoistTypeDecls` catches it.
+    if (this.hoisting && this.declaredClassNames.has(id)) {
+      this.blockedOn = id;
+      throw nyi(NYI.FORWARD_TYPE, `type '${id}' names a class, which type hoisting does not resolve`);
+    }
     const declaredAt = this.declaredTypeLines.get(id);
     if (declaredAt !== undefined) {
       const used = this.toks[this.pos - 1]?.line ?? declaredAt;

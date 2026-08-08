@@ -120,6 +120,23 @@ console.log(f());`);
     expect(r.hint).toContain("top level");
   });
 
+  // A CLASS also declares a type (`parseClass` registers the instance shape), and classes
+  // are NOT part of the hoisting fixpoint. So an interface with a class-typed field must
+  // not be hoisted past the class: resolving it early would erase `C` to `number` and the
+  // refusal would move to the VALUE (`'get' arg 0 expects {c:number}`) — the exact
+  // misdirection NT1030 exists to end. The refusal has to stay on the TYPE.
+  test("an interface with a class-typed field is not hoisted past the class, and the refusal names the type", () => {
+    const r = reject(`
+function get(b: Box): number { return b.c.n; }
+class C { n: number; constructor(n: number) { this.n = n; } }
+interface Box { c: C; }
+const b: Box = { c: new C(7) };
+console.log(get(b));`);
+    expect(r.code).toBe("NT1030");
+    expect(r.message).toContain("'Box'"); // the TYPE is named...
+    expect(r.message).not.toContain("'get'"); // ...never the value that used it
+  });
+
   // `interface N { next: N | null }` — a linked list. The self-reference resolves while
   // N itself is still being parsed, so it can never be registered in time. Reordering
   // cannot fix this one, which is why it gets its own wording.
