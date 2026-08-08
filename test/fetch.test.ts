@@ -415,4 +415,16 @@ const one = async (): Promise<number> => 1;
 const callit = (f: () => Promise<number>): number => f();
 console.log(callit(one));
 `));
+
+  // The type is only load-bearing if it is TRUE. `f: () => number` is a lie about an
+  // async function (tsc rejects the assignment; node runs it and yields two promises,
+  // printing `[object Promise][object Promise]`), and once the lie is believed the
+  // callee is compiled as an ordinary function and the promise disappears. So the
+  // ESCAPE itself is checked: an async value may only be handed to a parameter that
+  // declares it promise-returning.
+  _test("async value passed to a parameter that is NOT `() => Promise<T>`", () => rejects(`
+const one = async (): Promise<number> => 1;
+function twice(f: () => number): number { return f() + f(); }
+console.log(twice(one));
+`));
 });
