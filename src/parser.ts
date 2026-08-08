@@ -7,8 +7,8 @@
  * them with a precise NT-coded diagnostic that `coverage` can report.
  */
 
-import { lex, LexError, type Token } from "./lexer.ts";
-import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnostics.ts";
+import { lex, LexError, decodeEscapeAt, type Token } from "./lexer.ts";
+import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral } from "./diagnostics.ts";
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
   isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
@@ -2253,7 +2253,14 @@ class Parser {
     const t = this.peek();
     if (t.type === "num") { this.next(); return { kind: "NumberLiteral", value: Number(t.value) }; }
     if (t.type === "str") { this.next(); return { kind: "StringLiteral", value: t.value }; }
-    if (t.type === "template") { this.next(); return this.buildTemplate(t.value); }
+    if (t.type === "template") {
+      this.next();
+      // The shared escape decoder can fail (a malformed `\xHH`), and a template is split
+      // HERE rather than in `lex`, so its LexError has to reach the same NT0001 that
+      // `tokenize` gives the identical escape inside a quoted string.
+      try { return this.buildTemplate(t.value, t); }
+      catch (e) { if (e instanceof LexError) throw parseError(e.message); throw e; }
+    }
     // A regex literal LEXES (so the file survives) but has no representation: nativets
     // has no RegExp by design (Tier C). Refused here, located, instead of miscompiled.
     if (t.type === "regex") throw nyi(NYI.REGEX, `regular expression literal ${t.value} at ${t.line}:${t.col}`);
@@ -2318,13 +2325,23 @@ class Parser {
     return { kind: "ObjectLiteral", properties };
   }
 
-  private buildTemplate(raw: string): Expr {
+  private buildTemplate(raw: string, tok: Token): Expr {
     const quasis: string[] = [];
     const exprs: Expr[] = [];
+    const nul = String.fromCharCode(0);
     let cur = "";
     let i = 0;
     while (i < raw.length) {
-      if (raw[i] === "\\") { cur += decodeEscape(raw[i + 1]!); i += 2; continue; }
+      if (raw[i] === "\\") {
+        // The LEXER's decoder, not a second smaller one — see `decodeEscapeAt`.
+        const [text, next] = decodeEscapeAt(raw, i, tok.line, tok.col);
+        // NT1705, the same rule `tokenize` puts on a quoted string: a template's escapes
+        // are decoded here, so this is the only place a `\0`/`\x00` inside one is visible.
+        if (text.indexOf(nul) >= 0) throw nulLiteral("this template literal", tok.line, tok.col);
+        cur += text;
+        i = next;
+        continue;
+      }
       if (raw[i] === "$" && raw[i + 1] === "{") {
         quasis.push(cur); cur = "";
         i += 2;
@@ -2404,11 +2421,6 @@ function valueReturns(list: Stmt[]): Expr[] {
   return out;
 }
 
-function decodeEscape(ch: string): string {
-  const map: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", "`": "`", "$": "$" };
-  return map[ch] ?? ch;
-}
-
 /**
  * Tokenize, turning a lexical failure into the ordinary NT0001 syntax error.
  *
@@ -2421,12 +2433,35 @@ function decodeEscape(ch: string): string {
  * uses — not deferred features. The message already carries `at line:col`.
  */
 function tokenize(source: string): Token[] {
+  let tokens: Token[];
   try {
-    return lex(source);
+    tokens = lex(source);
   } catch (e) {
     if (e instanceof LexError) throw parseError(e.message);
     throw e;
   }
+  return checkNoNul(tokens);
+}
+
+/**
+ * NT1705 — refuse a string literal whose decoded value contains a NUL (U+0000).
+ *
+ * Here, over the TOKEN stream, rather than at the one `parsePrimary` site that builds a
+ * `StringLiteral`: a `str` token is also an object key, an import specifier and a string
+ * LITERAL TYPE, and every one of those becomes a runtime string. One pass over the tokens
+ * covers all of them and cannot be forgotten when a new consumer of `str` is added.
+ *
+ * Template literals are not decoded yet at this point (the token holds RAW inner text, and
+ * `buildTemplate` splits it), so a template's own escapes are checked there. A raw NUL
+ * BYTE pasted into a template's text is visible here and is caught here.
+ */
+function checkNoNul(tokens: Token[]): Token[] {
+  const nul = String.fromCharCode(0);
+  for (const t of tokens) {
+    if (t.type === "str" && t.value.indexOf(nul) >= 0) throw nulLiteral("this string literal", t.line, t.col);
+    if (t.type === "template" && t.value.indexOf(nul) >= 0) throw nulLiteral("this template literal", t.line, t.col);
+  }
+  return tokens;
 }
 
 export function parse(source: string, opts: ParseOpts = {}): Program {

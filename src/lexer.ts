@@ -132,9 +132,99 @@ function escapeChar(e: string): string {
     case "'": return "'";
     case '"': return '"';
     case "`": return "`";
-    case "0": return "\0";
+    // `String.fromCharCode(0)`, not the `"\0"` literal: a NUL inside a string literal is
+    // itself NT1705 (a nativets string is NUL-terminated), so writing one HERE would make
+    // this file un-self-hostable — src/*.ts has to stay inside the subset nativets
+    // compiles (docs/self-hosting.md). `src/modules.ts` spells its NUL the same way.
+    case "0": return String.fromCharCode(0);
     default: return e; // an unknown escape is the character itself — `\q` is `q`
   }
+}
+
+/**
+ * Decode ONE escape sequence. `raw[i]` is the backslash; returns the decoded text and the
+ * index just past the sequence.
+ *
+ * It exists so the STRING scanner below and the parser's TEMPLATE splitter
+ * (`buildTemplate`) decode escapes the same way. They did not: a template's decoder knew
+ * only `\n \t \r \\ \` \$` and fell through to the escaped character for everything else,
+ * so `` `a\0b` `` was "a0b" and `` `a\x00b` `` was "ax00b" — wrong VALUES that a `.length`
+ * assertion cannot see, since the wrong answer is the same length as the right one. One
+ * decoder, one set of rules, one place to fix the next escape.
+ *
+ * The two contexts differ only in which quote needs escaping, and `escapeChar` already
+ * maps `'`, `"` and `` ` `` to themselves; `\$` (template-only) falls through to `$` for
+ * the same reason node does — an unrecognized escape is the character itself.
+ */
+export function decodeEscapeAt(raw: string, i: number, line: number, col: number): [string, number] {
+  const e = raw[i + 1] ?? "";
+  // LegacyOctalEscapeSequence (ECMAScript Annex B.1.2). `\1`…`\7`, and `\0` when a
+  // DECIMAL DIGIT follows it — that combination is octal, not the NUL escape: node reads
+  // `"\01"` as U+0001, while we used to read `\0` as NUL and then append a literal "1",
+  // which truncated the string AND named the wrong character. `\1` alone was just as
+  // wrong: it decoded to the character "1" (charCodeAt 49) where node says 1.
+  //
+  // Every one of these is a SyntaxError in strict mode, and a TypeScript module is
+  // strict, so refusing them is not a divergence — it is the same answer node gives:
+  // "Octal escape sequences are not allowed in strict mode."
+  //
+  // `\8` and `\9` are NOT octal (NonOctalDecimalEscapeSequence) and already decode as
+  // node does, so they fall through to `escapeChar`. A BARE `\0` also falls through, and
+  // is the NUL escape it has always been — refused downstream as NT1705, for a different
+  // reason and with a different message.
+  if (e >= "1" && e <= "7") {
+    throw new LexError(`Octal escape sequences are not allowed at ${line}:${col}`);
+  }
+  if (e === "0") {
+    const d = raw[i + 2] ?? "";
+    if (d >= "0" && d <= "9") throw new LexError(`Octal escape sequences are not allowed at ${line}:${col}`);
+  }
+  if (e === "x") {
+    // `\xHH` — two-hex-digit byte escape (e.g. `\x1b` = ESC), as node does. Only a
+    // LOWERCASE `x` starts one: node reads `\X00` as the three characters "X00".
+    const h = (raw[i + 2] ?? "") + (raw[i + 3] ?? "");
+    if (h.length !== 2 || !isHexDigit(h[0]!) || !isHexDigit(h[1]!)) {
+      throw new LexError(`Invalid \\x escape at ${line}:${col}`);
+    }
+    return [String.fromCharCode(parseInt(h, 16)), i + 4];
+  }
+  if (e === "u") {
+    // `\uHHHH` and `\u{H+}` (ECMAScript UnicodeEscapeSequence). These were NOT escapes
+    // the lexer knew: `\u` fell through to "an unknown escape is the character itself",
+    // so a four-hex-digit escape naming "A" compiled to the SEVEN characters `au0041b`
+    // where node gives `aAb` — a silent wrong answer, and the only reason a NUL spelled
+    // as a \u escape did not read as a NUL at all.
+    // Malformed forms are a SyntaxError in node (test262
+    // language/literals/string/unicode-escape-no-hex-err-{double,single}.js), so they are
+    // a LexError here rather than a decoded guess.
+    if (raw[i + 2] === "{") {
+      let j = i + 3;
+      let hex = "";
+      while (j < raw.length && raw[j] !== "}") { hex += raw[j]; j++; }
+      if (raw[j] !== "}" || hex.length === 0 || !allHexDigits(hex)) {
+        throw new LexError(`Invalid \\u{…} escape at ${line}:${col}`);
+      }
+      const cp = parseInt(hex, 16);
+      // > 0x10FFFF is "undefined Unicode code-point" — a SyntaxError, not a clamp.
+      if (cp > 0x10ffff) throw new LexError(`Invalid \\u{…} escape at ${line}:${col}: ${hex} is above 10FFFF`);
+      return [String.fromCodePoint(cp), j + 1];
+    }
+    const h = (raw[i + 2] ?? "") + (raw[i + 3] ?? "") + (raw[i + 4] ?? "") + (raw[i + 5] ?? "");
+    if (h.length !== 4 || !allHexDigits(h)) throw new LexError(`Invalid \\u escape at ${line}:${col}`);
+    // fromCharCode, not fromCodePoint: `\uHHHH` names a UTF-16 CODE UNIT, so an adjacent
+    // pair — a high-surrogate escape followed by a low-surrogate one — has to combine
+    // into ONE astral character exactly as it does in node, which it does because both
+    // code units land in the same JS string here.
+    return [String.fromCharCode(parseInt(h, 16)), i + 6];
+  }
+  return [escapeChar(e), i + 2];
+}
+
+/** `^[0-9a-fA-F]+$`, and non-empty — nativets has no RegExp (NT1027), so it is a loop. */
+function allHexDigits(s: string): boolean {
+  if (s.length === 0) return false;
+  for (const c of s) if (!isHexDigit(c)) return false;
+  return true;
 }
 
 export function lex(source: string): Token[] {
@@ -293,22 +383,9 @@ export function lex(source: string): Token[] {
       let s = "";
       while (i < source.length && source[i] !== quote) {
         if (source[i] === "\\") {
-          advance();
-          const e = source[i]!;
-          if (e === "x") {
-            // `\xHH` — two-hex-digit byte escape (e.g. `\x1b` = ESC), as node does.
-            advance();
-            const h = (source[i] ?? "") + (source[i + 1] ?? "");
-            // `^[0-9a-fA-F]{2}$` — exactly two hex digits (`h` is at most two chars).
-            if (h.length !== 2 || !isHexDigit(h[0]!) || !isHexDigit(h[1]!)) {
-              throw new LexError(`Invalid \\x escape at ${line}:${col}`);
-            }
-            s += String.fromCharCode(parseInt(h, 16));
-            advance(); advance();
-            continue;
-          }
-          s += escapeChar(e);
-          advance();
+          const [text, next] = decodeEscapeAt(source, i, line, col);
+          s += text;
+          advance(next - i);
         } else {
           if (source[i] === "\n") throw new LexError(`Unterminated string at ${line}:${col}`);
           s += source[i];
