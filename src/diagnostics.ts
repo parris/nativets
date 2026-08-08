@@ -34,6 +34,12 @@ export interface Diagnostic {
 }
 
 export class NTError extends Error {
+  // `name` is DECLARED, not just assigned. nativets models `extends Error` as an
+  // inherited `message: string` and nothing else, so a bare `this.name = ...` is a write
+  // to a field the class does not have. Declaring it makes the slot real, keeps
+  // `e.name === "NTError"` true under bun exactly as before, and is a no-op for
+  // TypeScript. SH6 blocker 5 of 6 for this module (docs/self-hosting.md).
+  name: string;
   constructor(readonly diag: Diagnostic) {
     super(`[${diag.code}] ${diag.message}`);
     this.name = "NTError";
@@ -53,6 +59,7 @@ export class NTError extends Error {
  * in a bug report. What changes is that the message says whose fault it is.
  */
 export class InternalError extends Error {
+  name: string;
   constructor(detail: string) {
     super(
       `internal compiler error: ${detail}\n` +
