@@ -1866,14 +1866,26 @@ class Parser {
     // cannot mean what node means — refuse it the same way as `o.f = v`, naming the
     // mutation rather than reporting the statement as unparseable.
     if (this.at("delete") && this.startsExpression(this.peek(1))) {
-      this.eat("delete");
-      this.parseUnary();
+      const kw = this.eat("delete");
+      const target = this.parseUnary();
+      // node's `delete` does two DIFFERENT things, so it gets two different refusals.
+      // An index whose key is not a string literal is the ARRAY reading: node punches a
+      // HOLE (`delete xs[0]` leaves `length` at 3 and `Object.keys` at ["1","2"]), which
+      // a dense i64 slot array cannot represent — and the record advice below is not just
+      // unhelpful there, it is wrong, since an array has no optional fields to declare.
+      if (target.kind === "IndexExpr" && target.index.kind !== "StringLiteral") {
+        throw mutationError(
+          `arrays are immutable: \`delete xs[i]\` would punch a hole in place at ${kw.line}:${kw.col}`,
+          "node's array `delete` leaves a HOLE — `length` is unchanged and the slot reads `undefined` — which a dense array cannot represent. " +
+          "Build a new array without the element: `xs.filter((_, i) => i !== 0)`, or `[...xs.slice(0, i), ...xs.slice(i + 1)]`",
+        );
+      }
       // NOTE (mutable records): `@@mutable` does NOT make `delete` legal. A record's
       // SHAPE is its type — fields are static slots resolved at compile time — so removing
       // a key would change the value's type mid-program, which is a different (and much
       // larger) feature than assigning a slot in place. Refused precisely instead.
       throw mutationError(
-        "objects are immutable: `delete o.k` would remove a key in place",
+        `objects are immutable: \`delete o.k\` would remove a key in place at ${kw.line}:${kw.col}`,
         "a record's shape is its TYPE (fields are static slots), so a key cannot be removed at runtime even from a `@@mutable` record. " +
         "Declare the field optional (`k?: T`) and set it to `undefined`, or rebuild without the key",
       );

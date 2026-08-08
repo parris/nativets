@@ -142,11 +142,12 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
       for (const b of coverage(src(f)).blockers) if (b.code === "NT1606") nt1606.push({ file: f, feature: b.feature });
     }
     //
-    // It is now TWO: clearing `new Set(iterable)` (NT1014) in coverage-preprocess.ts
-    // UNMASKED the `.push` behind it. Burning a blocker down reveals the next one —
-    // the count going UP here is the collections lane's result, not a regression.
-    expect(nt1606.map((b) => b.file).sort()).toEqual(["checker.ts", "coverage-preprocess.ts"]);
-    expect(nt1606.find((b) => b.file === "checker.ts")!.feature).toContain("delete o.k");
+    // It went to TWO when clearing `new Set(iterable)` (NT1014) in coverage-preprocess.ts
+    // UNMASKED the `.push` behind it, and is back to ONE now: checker.ts's `delete o.k`
+    // moved out when that refusal was sharpened, and the module walked on to a regex
+    // literal (NT1027). The remaining entry is the real one — coverage-preprocess.ts's
+    // named accumulators, which the fresh-receiver rule deliberately does NOT cover.
+    expect(nt1606.map((b) => b.file).sort()).toEqual(["coverage-preprocess.ts"]);
     expect(nt1606.find((b) => b.file === "coverage-preprocess.ts")!.feature).toContain(".push");
   });
 

@@ -245,16 +245,22 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT0001 (`satisfies`); the code is unchanged at NT1009 but the FEATURE is not —
   // it is now optional element access `?.[]`, not a union.
   "parser.ts": { rung: 0, code: "NT1009", blame: "self" },
-  // THE CRUX MOVED. `Record<string, number | "var">` is compiled; checker.ts is past
-  // NT1009 entirely and stops on `delete o.k`.
-  "checker.ts": { rung: 0, code: "NT1606", blame: "self" },
+  // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
+  // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
+  // lane established must STAY refused — node distinguishes an absent key from a
+  // present-undefined one and a flat slot array cannot. Sharpening that refusal moved the
+  // module on to NT1027, a regex literal.
+  "checker.ts": { rung: 0, code: "NT1027", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   "codegen.ts": { rung: 0, code: "NT0001", blame: "self" },
   "coverage.ts": { rung: 0, code: "NT1009", blame: "ast.ts" },
-  // Still inherits checker.ts's blocker, but a DIFFERENT one — it followed checker.ts out
-  // of NT1009 and into NT1606. The long-standing "ownership.ts is credited with
-  // checker.ts's union" attribution trap, still visible, now with the union gone.
-  "ownership.ts": { rung: 0, code: "NT1606", blame: "checker.ts" },
+  // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
+  // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
+  // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
+  // trap, still visible. MEASURED, not predicted: the lane that moved checker.ts expected
+  // this row to land on NT1014, and it did not — it tracks checker.ts exactly, because the
+  // two errors are byte-identical. Always re-measure this column rather than inferring it.
+  "ownership.ts": { rung: 0, code: "NT1027", blame: "checker.ts" },
   "driver.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
   "cli.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
   "modules.ts": { rung: 0, code: "NT1015", blame: "self" },

@@ -604,6 +604,55 @@ spirit; slated to reject/copy-return later). Because it returns its receiver, bi
 creates an alias rather than a second owner — see *Ordering* above. Heap `===`/`!==` on arrays/objects is **reference
 identity** (pointer comparison), matching JS `===` on objects.
 
+### `delete` is REFUSED — because absent and present-`undefined` are the same value here
+
+`delete o.k` and `delete xs[i]` are rejected with **`NT1606`**, in every spelling (`o.k`,
+`o["k"]`, `xs[i]`, on a `@@mutable` record, on an optional field, inside a nested function).
+This is a *refusal*, not a divergence: nothing is compiled.
+
+The reason is not that `delete` mutates — `@@mutable` already legalizes mutation. It is that
+node's `delete` changes a value's **shape**, and node lets you *observe* the difference between
+a key that is absent and a key that is present holding `undefined`. Measured against node:
+
+```ts
+const o: { a?: number; b: number } = { a: 1, b: 2 };
+delete o.a;                 // → true    (a BOOLEAN; `true` even for a key that was never there)
+"a" in o;                   // → false
+Object.keys(o);             // → ["b"]
+
+const u: { a?: number; b: number } = { a: undefined, b: 2 };
+"a" in u;                   // → TRUE    ← present-undefined is NOT absent
+Object.keys(u);             // → ["a","b"]
+```
+
+nativets has no representation for that distinction. An object is a flat `i64` slot array whose
+field list comes from its **type** (`objectFields`, `src/ast.ts`); an omitted optional field is
+still allocated and holds the same `undefined` an explicit one does; and `Object.keys`/`for-in`
+lower to a **compile-time-constant** string array (`buildStringArray`, `src/codegen.ts`). So
+`delete o.a` compiled as "assign `undefined`" prints `["a","b"]` where node prints `["b"]` —
+exit 0 on both sides, differing stdout, no diagnostic. That is the silent-wrong-answer class the
+prime directive exists to prevent, so `delete` is refused until a per-field **presence bit** and
+a runtime `Object.keys`/`for-in`/`in` exist. This is the same reasoning `docs/decorators.md`
+gives for `@@mutable` legalizing a **slot** but never a **shape**.
+
+The array reading is refused separately and for its own reason, since node's array `delete`
+punches a **hole** rather than removing an element:
+
+```ts
+const xs = [1, 2, 3];
+delete xs[0];               // → true
+xs.length;                  // → 3            ← length UNCHANGED
+Object.keys(xs);            // → ["1","2"]
+JSON.stringify(xs);         // → "[null,2,3]"
+```
+
+A dense slot array cannot hold a hole, and the record hint ("declare the field optional") is
+wrong advice for an array — so `delete xs[i]` gets its own message naming the hole and pointing
+at `xs.filter((_, i) => i !== 0)`. Pinned in `test/delete-refusal.test.ts`.
+
+Not to be confused with `Map#delete` / `Set#delete`, which are supported and return a **new**
+collection (see *Immutable `Map`/`Set`* above) — that is a method, not the `delete` operator.
+
 ### Strings are reference-counted, not linear (memory model)
 
 Heap strings keep JS **value semantics** (free copy/alias) and are reclaimed by **reference

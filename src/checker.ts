@@ -403,8 +403,12 @@ const MAX_INSTANTIATIONS = 200;
 
 /** Clone a generic template into a fully-concrete specialization named `name`. */
 function specializeDecl(tmpl: FuncDecl, name: string, bindings: Map<string, Ty>): FuncDecl {
+  // `typeParams: undefined` is what CLEARS the field — there is deliberately no
+  // `delete spec.typeParams` here. Every reader is `s.typeParams?.length` or
+  // `tmpl.typeParams!` on the template, so undefined and absent are the same thing at
+  // every use site; and `delete` is refused by this very compiler (NT1606), so writing
+  // it would plant a self-hosting blocker in the file that emits the diagnostic.
   const spec = structuredClone({ ...tmpl, name, typeParams: undefined }) as FuncDecl;
-  delete spec.typeParams;
   mapTypesDeep(spec, (t) => substTypeParams(t, bindings));
   return spec;
 }
