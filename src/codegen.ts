@@ -4031,6 +4031,13 @@ class FnGen {
         for (const p of s.params) if (p.default) this.subExpr(p.default, child);
         this.subStmts(s.body, child); break;
       }
+      // A drop set names LOCALS, so it has to be renamed with them. Unreachable today —
+      // ownership walks an arrow body with `seq`, not `scoped`, so no marker is placed
+      // inside one — but the silent `default` below would have kept the pre-rename names
+      // and made `emitDrops` load an `%x.addr` that no longer exists. Renaming here costs
+      // nothing and stops that being a live miscompile the day arrow-body locals become
+      // linear-tracked.
+      case "BlockDrops": s.names = s.names.map((n) => map.get(n) ?? n); break;
       default: break; // BreakStmt / ContinueStmt
     }
   }
