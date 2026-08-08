@@ -1196,6 +1196,31 @@ class Checker {
    * omits and boxing scalar field values into their nullable field type. Only
    * reshapes when the literal is assignable to the target.
    */
+  /**
+   * Can `e` actually BE rewritten into `target`'s slot layout?
+   *
+   * `assignable` decides object compatibility structurally, but structural compatibility
+   * is not layout compatibility: `{a:number}` is one raw double slot and `{a?:number}` is
+   * a pointer to a nullable box. The declaration path checked the predicate and then
+   * called `retypeLiteral`, which silently does NOTHING to anything that is not a literal
+   * — so `const o: {a?:number} = v` was ACCEPTED and compiled a program that `inttoptr`s
+   * a double and dereferences it (exit 255, empty stdout, where node prints the value).
+   *
+   * The argument path (`fitsArg`) has always refused that, for exactly this reason. This
+   * is the same guard, phrased once so both paths agree: a reshape that is NEEDED but
+   * impossible is a refusal, never a silent wrong answer.
+   *
+   * Scalars and nullables are unaffected — codegen boxes those on store from the declared
+   * type, so `const s: string | undefined = someString` needs no literal and keeps working.
+   */
+  private reshapable(e: Expr, target: Ty, source: Ty): boolean {
+    const base = baseTy(target);
+    if (baseTy(source) === base) return true;             // same layout — nothing to rewrite
+    if (isObjectTy(base)) return e.kind === "ObjectLiteral";
+    if (isArrayTy(base) && isObjectTy(elemTy(base))) return e.kind === "ArrayLiteral";
+    return true;
+  }
+
   private retypeLiteral(e: Expr, target: Ty): void {
     const base = baseTy(target);
     if (e.kind === "ObjectLiteral" && isObjectTy(base)) {
@@ -1365,7 +1390,7 @@ class Checker {
             }
           }
           const t = this.type(d.init, scope, d.annot); // annotation is the context (e.g. `const a: T[] = []`)
-          if (d.annot && d.annot !== t && !this.assignable(d.annot, t)) {
+          if (d.annot && d.annot !== t && (!this.assignable(d.annot, t) || !this.reshapable(d.init, d.annot, t))) {
             throw typeError(`'${d.name}' declared ${asWritten(d.annot, d.annotHead)} but initialized with ${t}`,
               undefined, dictHint(d.annot, d.annotHead, t));
           }

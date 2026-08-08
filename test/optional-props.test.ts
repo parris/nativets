@@ -170,4 +170,40 @@ describe("what is deliberately NOT reshaped", () => {
     // node accepts it — recorded so the divergence is deliberate, not forgotten.
     expect(runWithNode(src).stdout).toBe("1\n");
   });
+
+  /*
+   * THE SAME BOUNDARY, IN THE DECLARATION PATH — where it was never enforced.
+   *
+   * The argument path refuses a non-literal because there is nothing to reshape. The
+   * DECLARATION path ran the identical `assignable` predicate and then called
+   * `retypeLiteral`, which is a NO-OP on anything that is not a literal — so it
+   * ACCEPTED the call and emitted the miscompile the test above exists to prevent:
+   *
+   *     type Opts = { a?: number };
+   *     const src = { a: 1 };
+   *     const o: Opts = src;        // accepted
+   *     console.log(o.a ?? 0);      // exit 255, EMPTY stdout; node prints 1
+   *
+   * `src` is one raw double slot; `o` is read as a pointer to a nullable box, so slot 0
+   * is `inttoptr`'d and dereferenced. Measured on main before this change. It is the
+   * worst outcome available — a program that compiles clean and dies — and it was
+   * reachable from ordinary TypeScript with no unsafe construct anywhere.
+   *
+   * Refused now, exactly as the argument path refuses it, and with the same reasoning:
+   * accepting it needs codegen to COPY into the target layout, which is a feature
+   * (structural coercion) rather than a predicate change.
+   */
+  test("a non-literal INITIALIZER of a compatible type is refused, not miscompiled", () => {
+    const src = "type Opts = { a?: number };\n" +
+      "const v = { a: 1 };\nconst o: Opts = v;\nconsole.log(o.a ?? 0);\n";
+    let err: unknown;
+    try { sourceToIR(src, "entry.ts"); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(NTError);
+    expect((err as NTError).diag.code).toBe("NT2001");
+    expect(runWithNode(src).stdout).toBe("1\n");
+  });
+
+  test("...and the literal form of the same declaration still compiles and runs", async () => {
+    await matchesNode("type Opts = { a?: number };\nconst o: Opts = { a: 1 };\nconsole.log(o.a ?? 0);\n");
+  });
 });
