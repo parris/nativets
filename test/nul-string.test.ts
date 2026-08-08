@@ -11,7 +11,7 @@
  *
  * The rule is `NT1705`: a string or template literal whose VALUE contains U+0000 is
  * refused. Every spelling reaches it, because the check is on the decoded value:
- * `\0`, `\x00`, `\\u0000`, `\u{0}`, and a raw NUL byte pasted into the source.
+ * `\0`, `\x00`, `\u0000`, `\u{0}`, and a raw NUL byte pasted into the source.
  *
  * Runtime NULs (`String.fromCharCode(0)`, a byte read from the host FS) are NOT
  * closed by this rule and cannot be — see docs/divergences.md.
