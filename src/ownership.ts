@@ -275,7 +275,9 @@ class Analyzer {
         for (const d of s.decls) {
           // An ALIAS of an `@@mutable` instance (`const b = a`) BORROWS — it does not
           // consume `a`, and it is never an owner, so it is never dropped either.
-          this.expr(d.init, state, !this.aliasOf.has(d.name));
+          // No initializer (`let x: T;`) — nothing is consumed or borrowed at the
+          // declaration; the binding becomes owned at its first ASSIGNMENT.
+          if (d.init) this.expr(d.init, state, !this.aliasOf.has(d.name));
           if (isLinearTy(d.ty ?? "number")) state.set(d.name, { moved: false, must: false });
         }
         return;
@@ -636,6 +638,7 @@ function collectAliases(stmts: Stmt[], isMutableTy: (t: import("./ast.ts").Ty) =
         // hands back the receiver). `new C(…)` — and a factory function's return — are
         // fresh values, so those bindings are real owners and get the usual drop.
         for (const d of s.decls) {
+          if (!d.init) continue; // `let x: T;` — no initializer, so it aliases nothing
           // `const b = a.reverse()` — the call mutates in place and returns its
           // RECEIVER, so `b` names the allocation `a` already owns. Recording it as an
           // alias is what stops the scope freeing that one pointer through BOTH names.

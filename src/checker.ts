@@ -20,10 +20,10 @@ import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagVal
 // The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
 // by `typeof` instead. Distinct from the discriminated-union machinery imported above.
 import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, typeofTagOf } from "./ast.ts";
-import type { ArrowFunction, BinaryExpr } from "./ast.ts";
+import type { ArrowFunction, BinaryExpr, Loc } from "./ast.ts";
 // `unlinkedImportError` says "you did not link" instead of blaming closures, for a call
 // to an imported binding that the standalone (unlinked) check cannot see.
-import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError, unlinkedImportError } from "./diagnostics.ts";
+import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError, unlinkedImportError, useBeforeAssign } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
 
@@ -352,7 +352,11 @@ export function check(program: Program): CheckedProgram {
     if (s.kind !== "VarDecl") continue;
     for (const d of s.decls) {
       try {
-        moduleScope.declare(d.name, d.annot ?? c.type(d.init, moduleScope), s.declKind === "const");
+        // No initializer to infer from: the annotation IS the type (`let x: T;`), and
+        // with no annotation either (`let x;`) the type is `undefined` — the same answer
+        // the synthesized initializer used to give.
+        const t = d.annot ?? (d.init ? c.type(d.init, moduleScope) : "undefined");
+        moduleScope.declare(d.name, t, s.declKind === "const");
       } catch { /* typed for real in checkBlock */ }
     }
   }
@@ -388,6 +392,11 @@ export function check(program: Program): CheckedProgram {
     if (hasTypeParam(t)) throw nyi(NYI.GENERIC, `unresolved generic type parameter '${t}' survived monomorphization`);
     return t;
   });
+  // Definite assignment runs LAST: it reads `Declarator.init`, and `checkStmt` above is
+  // what materializes that initializer for the types which admit `undefined`. Running it
+  // on the final body also covers every generic specialization just spliced in.
+  checkDefiniteAssignment(program.body);
+
   const globals = new Map<string, Ty>();
   for (const name of moduleScope.hits) {
     if (BUILTIN_NUMBERS.includes(name)) continue; // NaN/Infinity are constants, not storage
@@ -1208,6 +1217,32 @@ class Checker {
     switch (s.kind) {
       case "VarDecl":
         for (const d of s.decls) {
+          // A bare `let x;` / `let x: T;` has NO initializer. Two cases, and the
+          // difference is the whole point of making `init` optional:
+          //
+          //  - the binding CAN hold `undefined` — either it is unannotated (`let x;`,
+          //    whose type simply IS `undefined` here) or its annotation admits it
+          //    (`let x: string | undefined;`). Then it really is initialized, to
+          //    `undefined`, exactly as node has it. Materialize that literal so the rest
+          //    of the pipeline sees the value that is genuinely there — a nullable slot
+          //    needs a real [tag,value] box, not a raw zero.
+          //  - it cannot (`let x: string;`) — there is NO value of type `T` to start
+          //    with. The binding is UNINITIALIZED; whether a read is legal is decided by
+          //    definite assignment (checkDefiniteAssignment), not here.
+          if (!d.init) {
+            // A `const` can never be assigned later, so an absent initializer is not a
+            // definite-assignment question at all — it is the same hard error node gives
+            // ("'const' declarations must be initialized"), and it is worth saying so.
+            if (s.declKind === "const") throw typeError(`'${d.name}' is a \`const\` with no initializer`,
+              undefined, `a \`const\` must be initialized where it is declared — use \`let\` if the value is assigned later`);
+            if (!d.annot || this.assignable(d.annot, "undefined")) {
+              d.init = { kind: "UndefinedLiteral" }; // fall through to the normal path
+            } else {
+              d.ty = d.annot;
+              scope.declare(d.name, d.ty, s.declKind === "const");
+              continue;
+            }
+          }
           const t = this.type(d.init, scope, d.annot); // annotation is the context (e.g. `const a: T[] = []`)
           if (d.annot && d.annot !== t && !this.assignable(d.annot, t)) {
             throw typeError(`'${d.name}' declared ${d.annot} but initialized with ${t}`);
@@ -3000,6 +3035,281 @@ function leavesBlock(body: Stmt[]): boolean {
     (last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "BreakStmt" || last.kind === "ContinueStmt");
 }
 
+/* ============================================================
+ * Definite assignment — NT1600, ≈ rustc E0381 "used binding is possibly-uninitialized".
+ *
+ * WHAT IT GUARDS. A bare `let x: T;` whose `T` does not admit `undefined` starts with no
+ * value at all. node prints `undefined` for a read before the first assignment; we have
+ * nothing of type `T` to print and no slot to hold `undefined` in, so codegen would have
+ * to serve the slot's zero — `(null)` for a string, `0` for a number. That is the
+ * silent wrong answer the prime directive forbids, so such a read is REFUSED.
+ *
+ * `let x: T | undefined;` never reaches this pass: it admits `undefined`, so `checkStmt`
+ * has already materialized that initializer and the binding is genuinely initialized.
+ *
+ * SHAPE. Forward, path-sensitive, merge = INTERSECTION (assigned only if assigned on
+ * every incoming path). A path that DIVERGES — `return`/`throw`/`break`/`continue`, or a
+ * `process.exit(…)` call, which codegen already treats as non-falling-through — cannot
+ * reach the merge, so it contributes nothing to the intersection. That is what makes the
+ * guard-clause idiom compile, and it is exactly the shape `src/cli.ts` needs:
+ *
+ *     let source: string;
+ *     try { source = readFileSync(file, "utf8"); }
+ *     catch { console.error(…); process.exit(1); }   // diverges — contributes nothing
+ *     …source…                                        // definitely assigned
+ *
+ * CONSERVATIVE, AND CONSERVATIVE MEANS REFUSE. Unsure is a refusal, never an accept:
+ *   - a loop body may run zero times, so what it assigns is not assigned after it
+ *     (`do…while` is the exception — its body always runs once);
+ *   - a `try` block's assignments are NOT in force in its `catch`: the throw may have
+ *     happened before any of them, so the handler starts from the try's ENTRY state;
+ *   - a `switch` only assigns if it has a `default` AND every case assigns or diverges;
+ *   - an assignment nested inside a call argument or an arrow body is not counted as an
+ *     assignment, while a READ anywhere inside one IS counted as a read.
+ * ============================================================ */
+
+/** The names PROVEN assigned on the path reaching a given program point. */
+type DAFlow = Set<string>;
+
+/** The bindings this pass must prove, mapped to the declared type the hint names. */
+type DATracked = Map<string, Ty>;
+
+/**
+ * Every identifier READ inside `node`, with the location of its first occurrence.
+ *
+ * Shape-blind on purpose — the `hasHostCall` idiom above, for the reason given there:
+ * "the AST is plain data, and a shape-blind walk cannot miss a node kind added later".
+ * A hand-written switch over expression kinds (like `collectIdents`, whose `default`
+ * silently returns) would go stale, and a read missed HERE is a miscompile, not a lost
+ * optimization.
+ *
+ * The two write-only forms carry their target as a bare STRING rather than an
+ * `Identifier` node, so the node walk sees them as non-reads. That is right for `x = v`
+ * and wrong for `x += v` and `x++`, which read `x` before writing it — hence the
+ * explicit cases.
+ */
+function daReads(node: unknown, out: Map<string, Loc | undefined>): void {
+  if (Array.isArray(node)) { for (const x of node) daReads(x, out); return; }
+  if (node === null || typeof node !== "object") return;
+  const n = node as { kind?: string; name?: unknown; op?: unknown; target?: unknown; loc?: Loc };
+  if (n.kind === "Identifier" && typeof n.name === "string") {
+    if (!out.has(n.name)) out.set(n.name, n.loc);
+    return;
+  }
+  if (typeof n.target === "string" &&
+      (n.kind === "UpdateExpr" || (n.kind === "AssignExpr" && n.op !== "="))) {
+    if (!out.has(n.target)) out.set(n.target, n.loc);
+  }
+  for (const v of Object.values(node)) daReads(v, out);
+}
+
+/** Refuse every read in `e` of a tracked binding not yet proven assigned. */
+function daUse(e: unknown, tracked: DATracked, flow: DAFlow): void {
+  if (e === null || e === undefined) return;
+  const reads = new Map<string, Loc | undefined>();
+  daReads(e, reads);
+  for (const [name, loc] of reads) {
+    const ty = tracked.get(name);
+    if (ty === undefined || flow.has(name)) continue;
+    throw useBeforeAssign(
+      `'${name}' is used before being assigned`,
+      loc,
+      `\`let ${name}: ${ty};\` starts with no value. Assign it on every path that reaches this read — ` +
+      `or declare it \`let ${name}: ${ty} | undefined;\`, which starts as \`undefined\` and can be tested for it`);
+  }
+}
+
+/** `process.exit(…)` — the one call that never returns (codegen agrees: see genCall). */
+function daIsExit(e: Expr): boolean {
+  return e.kind === "CallExpr" && e.callee.kind === "MemberExpr" &&
+    e.callee.property === "exit" &&
+    e.callee.object.kind === "Identifier" && e.callee.object.name === "process";
+}
+
+/** Intersect `flow` down to the names assigned on every non-diverging incoming path. */
+function daMerge(paths: { flow: DAFlow; diverged: boolean }[], fallback: DAFlow): DAFlow {
+  const live = paths.filter((p) => !p.diverged);
+  if (live.length === 0) return new Set(fallback); // every path left; nothing merges here
+  const out = new Set(live[0]!.flow);
+  for (const p of live.slice(1)) for (const n of [...out]) if (!p.flow.has(n)) out.delete(n);
+  return out;
+}
+
+/** Analyze a statement list. Returns true if it always DIVERGES (never falls through). */
+function daBlock(body: Stmt[], tracked: DATracked, flow: DAFlow): boolean {
+  for (const s of body) if (daStmt(s, tracked, flow)) return true;
+  return false;
+}
+
+/** Analyze one statement in place, mutating `flow`. Returns true if it DIVERGES. */
+function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
+  switch (s.kind) {
+    case "VarDecl":
+      for (const d of s.decls) {
+        // This analysis is NAME-based, and so is codegen (one slot per name per
+        // function). A redeclaration of a name already being tracked is therefore
+        // indistinguishable from an assignment to the outer binding, and treating it as
+        // one would let a later read of the OUTER binding pass on the INNER one's proof.
+        // We cannot tell them apart, so we refuse rather than guess.
+        if (tracked.has(d.name)) {
+          throw useBeforeAssign(
+            `'${d.name}' is redeclared while an outer '${d.name}' is still unassigned`,
+            undefined,
+            `a nested \`let ${d.name}\` shadows the outer one, and the two are not distinguishable here — rename one of them`);
+        }
+        // An initializer assigns right here. Its ABSENCE is the binding this whole pass
+        // exists for: by now `checkStmt` has filled one in for every type that admits
+        // `undefined`, so what is left has no legal starting value.
+        if (d.init) { daUse(d.init, tracked, flow); flow.add(d.name); }
+        else { tracked.set(d.name, d.ty ?? d.annot ?? "unknown"); flow.delete(d.name); }
+      }
+      return false;
+
+    case "ExprStmt": {
+      const e = s.expr;
+      // The one form that ASSIGNS: `x = v` at statement level. The value is evaluated
+      // first, so its reads are checked against the state BEFORE the write lands.
+      if (e.kind === "AssignExpr" && e.op === "=" && tracked.has(e.target)) {
+        daUse(e.value, tracked, flow);
+        flow.add(e.target);
+        return false;
+      }
+      daUse(e, tracked, flow);
+      return daIsExit(e);
+    }
+
+    case "ReturnStmt": daUse(s.argument, tracked, flow); return true;
+    case "ThrowStmt": daUse(s.argument, tracked, flow); return true;
+    case "BreakStmt": case "ContinueStmt": return true;
+
+    case "IfStmt": {
+      daUse(s.test, tracked, flow);
+      const con = new Set(flow);
+      const conDiv = daBlock(s.consequent, tracked, con);
+      const alt = new Set(flow);
+      const altDiv = s.alternate ? daBlock(s.alternate, tracked, alt) : false;
+      const merged = daMerge([{ flow: con, diverged: conDiv }, { flow: alt, diverged: altDiv }], flow);
+      flow.clear(); for (const n of merged) flow.add(n);
+      return conDiv && altDiv;
+    }
+
+    case "WhileStmt": {
+      daUse(s.test, tracked, flow);
+      daBlock(s.body, tracked, new Set(flow)); // may run zero times — assignments discarded
+      return false;
+    }
+
+    case "DoWhileStmt": {
+      const body = new Set(flow);
+      const div = daBlock(s.body, tracked, body); // always runs once — assignments KEPT
+      flow.clear(); for (const n of body) flow.add(n);
+      daUse(s.test, tracked, flow);
+      return div;
+    }
+
+    case "ForStmt": {
+      if (s.init) { // the init runs exactly once, so its assignments are kept
+        if ((s.init as Stmt).kind === "VarDecl") daStmt(s.init as Stmt, tracked, flow);
+        else daUse(s.init as Expr, tracked, flow);
+      }
+      daUse(s.test, tracked, flow);
+      const body = new Set(flow);
+      daBlock(s.body, tracked, body); // may run zero times — assignments discarded
+      daUse(s.update, tracked, body);
+      return false;
+    }
+
+    case "ForOfStmt": {
+      daUse(s.iterable, tracked, flow);
+      daBlock(s.body, tracked, new Set(flow)); // may run zero times
+      return false;
+    }
+
+    case "ForInStmt": {
+      daUse(s.object, tracked, flow);
+      daBlock(s.body, tracked, new Set(flow)); // may run zero times
+      return false;
+    }
+
+    case "SwitchStmt": {
+      daUse(s.discriminant, tracked, flow);
+      // Without a `default` there is a path that runs NO case at all, so nothing the
+      // cases assign can be relied on afterwards. A case body that falls through into
+      // the next one is handled by analyzing each from the switch's entry state, which
+      // under-approximates what is assigned — the safe direction.
+      const paths = s.cases.map((c) => {
+        const f = new Set(flow);
+        if (c.test) daUse(c.test, tracked, f);
+        return { flow: f, diverged: daBlock(c.body, tracked, f) };
+      });
+      const hasDefault = s.cases.some((c) => c.test === null);
+      const merged = hasDefault ? daMerge(paths, flow) : new Set(flow);
+      flow.clear(); for (const n of merged) flow.add(n);
+      return hasDefault && paths.every((p) => p.diverged);
+    }
+
+    case "TryStmt": {
+      const tryFlow = new Set(flow);
+      const tryDiv = daBlock(s.block, tracked, tryFlow);
+      let after: DAFlow;
+      let diverged: boolean;
+      if (s.handler) {
+        // The handler starts from the try's ENTRY state: the throw may have happened
+        // before any assignment in the block landed, so none of them can be assumed.
+        const catchFlow = new Set(flow);
+        const catchDiv = daBlock(s.handler, tracked, catchFlow);
+        after = daMerge([{ flow: tryFlow, diverged: tryDiv }, { flow: catchFlow, diverged: catchDiv }], flow);
+        diverged = tryDiv && catchDiv;
+      } else {
+        // try/finally with no catch: reaching past it means the block COMPLETED.
+        after = tryFlow;
+        diverged = tryDiv;
+      }
+      flow.clear(); for (const n of after) flow.add(n);
+      if (s.finalizer) { // the finalizer always runs, so its assignments are kept
+        if (daBlock(s.finalizer, tracked, flow)) diverged = true;
+      }
+      return diverged;
+    }
+
+    case "BlockStmt": return daBlock(s.body, tracked, flow);
+    case "MultiStmt": return daBlock(s.stmts, tracked, flow);
+    case "FuncDecl": return false; // its body is analyzed on its own, below
+  }
+}
+
+/**
+ * Run definite assignment over `body` as one control-flow region, then over every
+ * nested function body — each independently, with its own tracked set, because each is
+ * its own control-flow region and its own set of slots.
+ *
+ * Both callable forms must be reached. A `FuncDecl` covers plain functions and class
+ * methods (the parser desugars `class C { m() {} }` into a `FuncDecl` named `C.m`); an
+ * `ArrowFunction` with a statement body is the other, and missing it would leave
+ * `const f = () => { let a: string; return a; };` unanalyzed — a miscompile, since
+ * codegen would hand back the slot's zero.
+ *
+ * A nested body starts with an EMPTY tracked set: an outer binding is not tracked
+ * inside it. That is not a hole — a read of an outer unassigned binding from inside a
+ * nested body is already refused at the point the function VALUE appears, because
+ * `daUse` is shape-blind and descends into it.
+ */
+function checkDefiniteAssignment(body: Stmt[]): void {
+  daBlock(body, new Map<string, Ty>(), new Set<string>());
+  const seen = new Set<unknown>();
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) { for (const x of node) walk(x); return; }
+    if (node === null || typeof node !== "object" || seen.has(node)) return;
+    seen.add(node);
+    const n = node as { kind?: string; body?: unknown };
+    if ((n.kind === "FuncDecl" || n.kind === "ArrowFunction") && Array.isArray(n.body)) {
+      daBlock(n.body as Stmt[], new Map<string, Ty>(), new Set<string>());
+    }
+    for (const v of Object.values(node)) walk(v);
+  };
+  walk(body);
+}
+
 /** A union rendered the way it was written (`A | B`), for diagnostics. */
 function showUnion(t: Ty): string { return unionWidenedMembers(t).join(" | "); }
 
@@ -3054,7 +3364,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
 
 function collectIdentsStmt(s: Stmt, out: Set<string>): void {
   switch (s.kind) {
-    case "VarDecl": for (const d of s.decls) collectIdents(d.init, out); return;
+    case "VarDecl": for (const d of s.decls) if (d.init) collectIdents(d.init, out); return;
     case "ReturnStmt": if (s.argument) collectIdents(s.argument, out); return;
     case "ExprStmt": collectIdents(s.expr, out); return;
     case "IfStmt": collectIdents(s.test, out); s.consequent.forEach((x) => collectIdentsStmt(x, out)); s.alternate?.forEach((x) => collectIdentsStmt(x, out)); return;
@@ -3112,7 +3422,7 @@ function collectAssignedStmts(body: Stmt[], direct: Set<string>, closure: Set<st
   const goS = (b: Stmt[]) => collectAssignedStmts(b, direct, closure, inArrow);
   for (const s of body) {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) goE(d.init); break;
+      case "VarDecl": for (const d of s.decls) if (d.init) goE(d.init); break;
       case "ReturnStmt": if (s.argument) goE(s.argument); break;
       case "ThrowStmt": goE(s.argument); break;
       case "ExprStmt": goE(s.expr); break;

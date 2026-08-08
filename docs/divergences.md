@@ -846,6 +846,57 @@ curl-free. Consequences:
 - A `Response` is a plain heap handle: it is neither linear nor reference-counted yet, so it rides
   the allocate-and-never-free placeholder (safe; may leak for the process lifetime).
 
+### Definite assignment — `let x: T;` read before it is assigned is REFUSED (NT1600)
+
+A bare `let x: T;` whose `T` does not admit `undefined` starts with **no value**. node
+prints `undefined` for a read before the first assignment; we have nothing of type `T` to
+print and no slot to hold `undefined` in, so codegen could only serve the slot's zero —
+`(null)` for a string, `0` for a number. That is a silent wrong answer, so instead the
+read is **refused** with `NT1600` (≈ rustc's `E0381` "used binding is possibly-
+uninitialized", the same rustc numbering `src/ownership.ts` already mirrors).
+
+This is the one divergence in this entry: **node runs some of these programs and we
+reject them.** Nothing is miscompiled.
+
+```ts
+let s: string;  console.log(s);              // node: undefined   — we REFUSE (NT1600)
+let s: string;  s = "hi"; console.log(s);    // node: hi          — we agree ✅
+```
+
+The analysis is forward and path-sensitive; a merge keeps only what is assigned on
+**every** incoming path, and a path that diverges (`return`/`throw`/`break`/`continue`,
+or `process.exit(…)`) contributes nothing — which is what makes the guard-clause and
+`try`/`catch`-and-exit idioms compile:
+
+```ts
+let source: string;
+try { source = readFileSync(file, "utf8"); }
+catch { console.error(`cannot read '${file}'`); process.exit(1); }   // diverges
+console.log(source.length);                                          // ✅ assigned
+```
+
+Unsure is always a refusal, never an accept. These are rejected even though node runs
+them, because the assignment is not provably on every path:
+
+| Program | node | us |
+|---|---|---|
+| `let s: string; if (c) s = "a"; …s…` | prints `a` | **NT1600** — not assigned on all paths |
+| `let n: number; while (c) { n = 1; } …n…` | prints `1` | **NT1600** — a loop body may run zero times |
+| `let s: string; try { s = f(); } catch {} …s…` | prints the value | **NT1600** — the throw may precede the assignment |
+| `let s: string; { let s: string = "in"; } …s…` | prints `undefined` | **NT1600** — shadowing is name-indistinguishable here |
+
+A `switch` only counts if it has a `default` **and** every case assigns or diverges. A
+`do…while` body *does* count — it always runs once.
+
+**The escape hatch is a different type, and it is not a divergence at all.**
+`let x: T \| undefined;` genuinely *is* initialized to `undefined`, exactly as node has
+it, and never reaches this check:
+
+```ts
+let s: string | undefined;   // starts as undefined — matches node ✅
+console.log(s);              // prints "undefined", like node
+```
+
 ## B. Unimplemented features (we refuse to compile — never miscompile)
 
 Everything else we don't support is **rejected with an `NT1xxx` diagnostic**, not silently

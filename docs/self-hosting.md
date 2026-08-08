@@ -395,7 +395,7 @@ standalone column is the one that tells you what to fix:
 | `lexer.ts` | `NT2001` | `ESCAPES` declared `Map<string, string>` but initialized with an **object literal** |
 | `coverage-preprocess.ts` | `NT1606` | array **`.push`** (arrays are immutable) |
 | `diagnostics.ts` | `NT2001` | narrowing does not flow across `\|\|` |
-| `cli.ts` | `NT2001` | `'source' declared string but initialized with undefined` |
+| `cli.ts` | `NT2001` | `process.stdout is not supported` (was `'source' declared string but initialized with undefined` until the definite-assignment lane: `let source: string;` assigned inside a `try` is now compiled, not refused — see docs/divergences.md) |
 | `ownership.ts` | `NT1014` | `new Set(iterable)` — was `NT2001 'NO_MUTABLE' is not defined`, a checker BUG (parameter defaults were typed in a builtins-only scope), now fixed |
 | `coverage.ts` | — | **not a blocker**: its `NT1003` on `parse` is the unlinked-import artifact above, not a gap. Its first real blocker is whatever a LINKED check reports |
 
