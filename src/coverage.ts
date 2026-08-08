@@ -88,7 +88,7 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   const walkStmt = (s: Stmt): void => {
     statements++;
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) walkExpr(d.init); break;
+      case "VarDecl": for (const d of s.decls) if (d.init) walkExpr(d.init); break;
       case "FuncDecl":
         for (const p of s.params) { if (p.default) walkExpr(p.default); }
         s.body.forEach(walkStmt); break;

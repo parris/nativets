@@ -99,9 +99,23 @@ class Parser {
    * Type-level aliases (`type X = …` / `interface X { … }`), recorded at parse time
    * and substituted wherever `X` appears in an annotation. Purely type-level — the
    * declarations themselves are ERASED (no runtime footprint), so this map is their
-   * entire trace. Unknown named types still fall back to `number`, as before.
+   * entire trace. A name declared in this file but not yet parsed is refused (NT1030 —
+   * see `declaredTypeLines`); a name from anywhere else still falls back to `number`.
    */
   private typeAliases = new Map<string, Ty>();
+  /**
+   * Every `interface X` / `type X` name declared ANYWHERE in this file, to the line it is
+   * declared on — collected from the token stream before parsing starts.
+   *
+   * `typeAliases` only knows what has been parsed SO FAR, so it cannot tell "you never
+   * declared this" from "you have not declared it yet"; both used to fall back to
+   * `number`. This map is what separates them, and only the second is refused (NT1030) —
+   * a name absent from this map is an import or a stdlib type and keeps the old fallback.
+   */
+  private declaredTypeLines = new Map<string, number>();
+  /** The `interface`/`type` name whose own body is being parsed — a reference to it from
+   *  in there is RECURSIVE, which reordering cannot fix, so it is reported differently. */
+  private declaringType: string | undefined;
   /** Top-level functions synthesized from class members (ctor + methods), appended to
    *  the program body after parsing so they hoist like ordinary function declarations. */
   private hoistedFns: Stmt[] = [];
@@ -170,6 +184,20 @@ class Parser {
     if (opts.asyncEnv) for (const n of opts.asyncEnv) this.asyncFns.add(n);
     this.file = opts.file;
     this.collectTypes = opts.collectTypes;
+    // Pre-scan for declared type names. Lexical on purpose: `interface`/`type` followed by
+    // an identifier is unambiguous in the token stream, and this has to run BEFORE any
+    // parsing so a name's declaration is known no matter where it sits in the file.
+    for (let i = 0; i + 1 < toks.length; i++) {
+      const t = toks[i]!;
+      const n = toks[i + 1]!;
+      if ((t.value === "interface" || t.value === "type") && t.type === "ident" && n.type === "ident") {
+        // `type X =` only — `type` is not a reserved word, so `const type = 1` must not
+        // register `= 1` as a declaration. `interface` is always a declaration.
+        if (t.value === "interface" || toks[i + 2]?.value === "=" || toks[i + 2]?.value === "<") {
+          if (!this.declaredTypeLines.has(n.value)) this.declaredTypeLines.set(n.value, t.line);
+        }
+      }
+    }
   }
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
@@ -200,6 +228,28 @@ class Parser {
     if (id === "Uint8Array" || id === "TextEncoder" || id === "TextDecoder") return id as Ty; // stdlib batch-2 bytes types
     if (id === "Response" || id === "Headers") return id as Ty; // networking tier: fetch's Response/Headers
     if (id === "Date" || id === "URL" || id === "URLSearchParams") return id as Ty; // stdlib batch-3 web APIs
+    // Declared in this file, but not yet — so `typeAliases` does not have it and the
+    // fallback below would erase it to `number`. That erasure is silent and the failure
+    // it causes surfaces much later, blaming whatever value was annotated with it.
+    const declaredAt = this.declaredTypeLines.get(id);
+    if (declaredAt !== undefined) {
+      const used = this.toks[this.pos - 1]?.line ?? declaredAt;
+      // Two different failures, and the advice differs: one is fixed by moving a line,
+      // the other cannot be fixed by reordering at all. Saying "declare it earlier" for a
+      // recursive type would be the same kind of misdirection this diagnostic exists to
+      // end, so each carries its own hint rather than the catalog's shared one.
+      throw id === this.declaringType
+        ? nyi(
+            NYI.FORWARD_TYPE,
+            `recursive type '${id}' — it refers to itself (declared at line ${declaredAt})`,
+            "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md",
+          )
+        : nyi(
+            NYI.FORWARD_TYPE,
+            `use of type '${id}' before its declaration (used at line ${used}, declared at line ${declaredAt})`,
+            "move the declaration above its first use — type names resolve in source order. If two types refer to EACH OTHER, that is recursion and reordering cannot fix it; see docs/divergences.md",
+          );
+    }
     return (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty;
   }
 
@@ -614,7 +664,10 @@ class Parser {
     this.eat("=");
     // Stored RAW (literal types intact) so `type Square = { kind: "square" }` can later
     // be a union member; every USE goes through `parseType`, which widens.
+    const outer = this.declaringType;
+    this.declaringType = name; // a reference to `name` in here is recursion, not ordering
     const rhs = this.parseTypeInner();
+    this.declaringType = outer;
     if (this.at(";")) this.eat(";");
     this.typeAliases.set(name, this.applyRecordAttrs(dec, name, rhs, "type"));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
@@ -667,7 +720,10 @@ class Parser {
     const name = this.expectIdent();
     if (this.at("<")) this.skipGenerics();
     if (this.at("extends")) { this.eat("extends"); this.parseType(); while (this.at(",")) { this.eat(","); this.parseType(); } }
+    const outer = this.declaringType;
+    this.declaringType = name; // see parseTypeAlias: self-reference here is recursion
     const shape = this.parseObjectType();
+    this.declaringType = outer;
     this.typeAliases.set(name, this.applyRecordAttrs(dec, name, shape, "interface"));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
   }
@@ -960,10 +1016,19 @@ class Parser {
   private parseDeclarator(): Declarator {
     const name = this.expectIdent();
     let annot: Ty | undefined;
-    if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
-    let init: Expr;
+    // Keep the annotation's leading identifier as WRITTEN, before `parseType` erases it.
+    // `Record<K,V>` and `Map<K,V>` erase to the same `Ty`, so a mismatch diagnostic built
+    // from the erasure alone names a `Map` in a program whose author wrote `Record`.
+    let annotHead: string | undefined;
+    if (this.at(":")) {
+      this.eat(":");
+      if (this.peek().type === "ident") annotHead = this.peek().value;
+      annot = this.parseType();
+    }
+    // No `=` means NO initializer — left absent, not synthesized as `undefined`.
+    // See the note on `Declarator` in ast.ts: the two are different programs.
+    let init: Expr | undefined;
     if (this.at("=")) { this.eat("="); init = this.parseAssign(); }
-    else init = { kind: "UndefinedLiteral" };
     // `const f = async () => …` makes `f` an async function under every name the guard
     // cares about, exactly as `async function f` would — and a DIRECT alias (`const g = f`)
     // carries that along, so a chain `const c = b; const b = a` stays guarded.
@@ -971,10 +1036,11 @@ class Parser {
     // BOUNDARY: this is name tracking, not dataflow. An async function that escapes into
     // a PARAMETER (`run(one)` then `f()` inside `run`) is not reached, because the callee
     // is only known interprocedurally. That residual hole is reported, not papered over.
-    if (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name))) {
+    if (init !== undefined &&
+        (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name)))) {
       this.asyncFns.add(name);
     }
-    return { name, annot, init };
+    return { name, annot, annotHead, init };
   }
   private parseVarDecl(): VarDecl {
     const declKind = this.next().value as "let" | "const";
@@ -1211,7 +1277,7 @@ class Parser {
     this.eat("{");
     const fields: { key: string; ty: Ty }[] = [];
     const fieldInits: { field: string; value: Expr }[] = []; // declared-and-initialized fields → ctor prelude
-    const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[]; setter: boolean; wrappers: string[] }[] = [];
+    const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[]; setter: boolean; wrappers: string[]; typeParams?: string[] }[] = [];
     const statics: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[] }[] = []; // `static m(…)`
     const staticFields: Stmt[] = []; // `static f = init` → a module-level `const C.f`
     let ctorParams: Param[] | null = null;
@@ -1263,7 +1329,23 @@ class Parser {
           "a `@wrapper` attaches to a METHOD. Decorate the whole class (`@wrapper class C { … }`) to wrap its constructor; fields cannot be decorated",
         );
       }
+      // A GENERIC METHOD (`m<T>(x: T): T`). Read the type-parameter list HERE, before the
+      // `(` test below: a `<` fails that test, so without this the member falls through to
+      // the FIELD branch and is reported as `class field 'm' needs a type annotation` — a
+      // message naming neither the real construct nor a way forward.
+      //
+      // The names are recorded exactly as for a generic function (`parseFunction`), so the
+      // signature and body see them as `#T` markers and the checker monomorphizes per call
+      // site. A constraint (`<T extends Ty | undefined>`) is ERASED by parseTypeParamList,
+      // which is what generic functions already do — the type argument comes from the
+      // argument at each call site, not from the bound.
+      const memberTypeParams = this.at("<") ? this.parseTypeParamList() : [];
+      if (memberTypeParams.length) this.typeParamScopes.push(new Set(memberTypeParams));
+      try {
       if (member === "constructor" && this.at("(") && !isStatic) {
+        // TS forbids type parameters on a constructor (only `class C<T>` carries them),
+        // so this is a syntax error rather than a deferred feature.
+        if (memberTypeParams.length) throw parseError(`Type parameters on a constructor at ${tok.line}:${tok.col} — put them on the class (\`class ${name}<T>\`)`);
         if (ctorParams) throw parseError(`Duplicate constructor at ${tok.line}:${tok.col}`);
         ctorParams = this.parseParamList(true); // ctor: access-modified params → parameter properties
         const patternPrelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
@@ -1286,6 +1368,12 @@ class Parser {
           // `applyWrappers`); a static has none, so the two do not compose yet. Refuse
           // rather than drop the decorator.
           if (memberWrappers.length) throw nyi(NYI.CLASS_FEATURE, `decorator on static method '${name}.${member}' at ${tok.line}:${tok.col}`);
+          // A generic STATIC is deliberately out of scope for this lane. It would need the
+          // same treatment as an instance method minus the receiver, but a static resolves
+          // through a different call path (`C.m(…)`, no instance), so it is REFUSED rather
+          // than half-supported — an unresolved `#T` reaching codegen is the failure mode
+          // monomorphization exists to prevent.
+          if (memberTypeParams.length) throw nyi(NYI.GENERIC, `generic STATIC method '${name}.${member}' at ${tok.line}:${tok.col} (a generic INSTANCE method is supported)`);
           statics.push({ name: member, params, returnAnnot, body: [...prelude, ...this.parseBlock()] });
           continue;
         }
@@ -1295,9 +1383,11 @@ class Parser {
         const body = [...prelude, ...this.parseBlock()];
         const setter = this.thisAssigned;
         this.thisWritable = false; this.thisAssigned = false;
-        methods.push({ name: member, params, returnAnnot, body, setter, wrappers: memberWrappers });
+        methods.push({ name: member, params, returnAnnot, body, setter, wrappers: memberWrappers, typeParams: memberTypeParams.length ? memberTypeParams : undefined });
         continue;
       }
+      // Past this point the member is a FIELD, which cannot carry type parameters.
+      if (memberTypeParams.length) throw parseError(`Type parameters on class field '${member}' at ${tok.line}:${tok.col}`);
       // field declaration: `name: Type;` / `name = init;` / `name: Type = init;` (optional `?`).
       // A field type comes from its annotation if present, else is inferred from the initializer
       // (`inferFieldTy`). An initializer is desugared into `this.name = init` prepended to the
@@ -1325,6 +1415,11 @@ class Parser {
       }
       fields.push({ key: member, ty });
       if (init !== undefined) fieldInits.push({ field: member, value: init });
+      } finally {
+        // `finally` also runs on the `continue`s above, so the scope is popped on every
+        // path out of a member — matching `parseFunction`'s handling for a generic fn.
+        if (memberTypeParams.length) this.typeParamScopes.pop();
+      }
     }
     this.eat("}");
     const hadExplicitCtor = ctorParams !== null; // captured before any ctor synthesis below
@@ -1400,6 +1495,10 @@ class Parser {
       const fn = {
         kind: "FuncDecl", name: `${name}.${m.name}`,
         params: [thisParam, ...m.params], returnAnnot: m.returnAnnot, body: m.body,
+        // A GENERIC method is the same FuncDecl carrying `typeParams`, so the checker's
+        // existing template registration (`declareGeneric`) picks it up with no special
+        // case: `this` is simply its first parameter, and it is never generic.
+        ...(m.typeParams ? { typeParams: m.typeParams } : {}),
       } as FuncDecl;
       if (m.setter) { fn.setter = true; this.lowerSetter(fn, name, isMutable, selfMarker); }
       if (m.wrappers.length) this.applyWrappers(fn, m.wrappers, emitted, decorators);
@@ -1571,8 +1670,8 @@ class Parser {
       if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
       if (this.at("of")) { this.eat("of"); const iterable = this.parseExpression(); this.eat(")"); return { kind: "ForOfStmt", name, annot, iterable, body: this.parseControlled() }; }
       if (this.at("in")) { this.eat("in"); const object = this.parseExpression(); this.eat(")"); return { kind: "ForInStmt", name, object, body: this.parseControlled() }; }
-      let init: Expr;
-      if (this.at("=")) { this.eat("="); init = this.parseAssign(); } else init = { kind: "UndefinedLiteral" };
+      let init: Expr | undefined; // `for (let i; …)` — absent, not synthesized (see ast.ts)
+      if (this.at("=")) { this.eat("="); init = this.parseAssign(); }
       const decls: Declarator[] = [{ name, annot, init }];
       while (this.at(",")) { this.eat(","); decls.push(this.parseDeclarator()); }
       this.eat(";");

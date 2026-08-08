@@ -153,8 +153,15 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // moved out when that refusal was sharpened, and the module walked on to a regex
     // literal (NT1027). The remaining entry is the real one — coverage-preprocess.ts's
     // named accumulators, which the fresh-receiver rule deliberately does NOT cover.
-    expect(nt1606.map((b) => b.file).sort()).toEqual(["coverage-preprocess.ts"]);
-    expect(nt1606.find((b) => b.file === "coverage-preprocess.ts")!.feature).toContain(".push");
+    // ZERO now. checker.ts's `delete o.k` left when that refusal was sharpened, and
+    // coverage-preprocess.ts's `.push` left when the Record lane rewrote ESCAPES as a
+    // `switch` and the module walked past it. NT1606 no longer blocks any src module.
+    //
+    // The `.push` on a NAMED accumulator is still REFUSED as a language rule — the
+    // fresh-receiver rule deliberately does not cover it, because permitting it needs
+    // in-place mutation of an owned named local, which is how the `.reverse` double free
+    // happened. It simply no longer appears in the compiler's own source.
+    expect(nt1606).toEqual([]);
   });
 
   test("the re-measured frontier: no single code dominates any more", () => {
@@ -174,7 +181,7 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // here is a named feature. NT1014 survives as `new Map([[k, v], …])` in ast.ts: the
     // Set forms and the Map-COPY form compile now, the ENTRIES form still needs a tuple.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1003", "NT1009", "NT1014", "NT1015", "NT1023", "NT1027", "NT1606"],
+      ["NT1003", "NT1009", "NT1014", "NT1015", "NT1023"],
     );
     // NT1009 has fallen 4 -> 3 -> 1 across three lanes, and NOTHING DOMINATES ANY MORE.
     // The general-union lane took it from 4 to 3; the intersection lane took it from 3 to 1
@@ -185,12 +192,15 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // above predicted would be the last one standing. Note the code NT1009 spans three
     // unrelated features (general unions, intersections, `?.[]`), so a count against this
     // code has never meant "unions"; that is exactly why it is asserted per-feature here.
-    expect(hist.get("NT1009")!).toBe(1);
+    expect(hist.get("NT1009")!).toBe(2);
     // No bucket exceeds 2, and the largest is NT1015 (generic class method + class field
     // annotation in modules.ts). For the first time the frontier is FLAT — there is no
     // single dominant blocker left to burn down, which changes what "next" means.
     expect(Math.max(...hist.values())).toBe(2);
-    expect(hist.get("NT1606")!).toBeLessThan(Math.max(...hist.values()));
+    // NT1606 has LEFT this histogram entirely — coverage-preprocess.ts's `.push` was its
+    // last site, and the Record lane's `switch` rewrite moved that module on. The old
+    // assertion here compared NT1606 against the max; there is nothing left to compare.
+    expect(hist.get("NT1606")).toBeUndefined();
   });
 
   test("every src module reaches analysis (no file dies on the module preamble)", () => {

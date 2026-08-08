@@ -797,7 +797,24 @@ export interface ArrowFunction {
 // the parser desugars it into a class field + a `this.x = x` init in the ctor body.
 export interface Param { name: string; annot?: Ty; default?: Expr; rest?: boolean; paramProp?: boolean; }
 
-export interface Declarator { name: string; annot?: Ty; init: Expr; ty?: Ty; }
+/*
+ * `init` is OPTIONAL, and its absence means a bare `let x: T;` — a declaration with no
+ * initializer at all. This used to be non-optional, and the parser synthesized an
+ * `UndefinedLiteral` to fill it, which made `let s: string;` (legal) and
+ * `let s: string = undefined;` (correctly rejected) indistinguishable downstream: both
+ * were NT2001. Keeping the absence REPRESENTABLE is what lets the checker run
+ * definite-assignment analysis on the first and still reject the second.
+ *
+ * A consumer that merely WALKS the initializer should skip an absent one. Codegen, which
+ * needs a VALUE, stores the slot's `defaultZero` instead — the checker has by then proved
+ * the binding is assigned before any read, so that zero is never observed.
+ *
+ * `annotHead` is the annotation's leading identifier AS WRITTEN (`Record`, `Map`, an
+ * alias name). `annot` is the ERASED type, so the two differ wherever a utility type maps
+ * onto a supported shape — and a diagnostic that prints only the erasure names a type the
+ * user never typed. Diagnostics only; nothing lowers from it.
+ */
+export interface Declarator { name: string; annot?: Ty; annotHead?: string; init?: Expr; ty?: Ty; }
 export interface VarDecl {
   kind: "VarDecl";
   declKind: "let" | "const";
@@ -1044,6 +1061,14 @@ export const RETAINS_RECEIVER = new Set(["reverse"]);
  * Conservative and purely SYNTACTIC: an array literal (including a spread copy
  * `[...xs]`, which builds a new array) and the array-returning methods above. A plain
  * function call is NOT fresh — it may hand back an array the callee still owns.
+ *
+ * Freshness justifies `.sort` and NOTHING ELSE among the mutators. It is tempting to
+ * extend it to `.push` — the reasoning does hold, since `e.push(x)` on a fresh `e` is
+ * just `[...e, x].length` — but a fresh receiver is a temporary nothing can name, so
+ * such a push is dead code (`[1,2].push(3)`) and permitting it buys no expressiveness
+ * while adding an in-place path to the method that has already caused a double free and
+ * a leak. The useful shape is `named.push(x)`, which is NOT fresh and must stay refused.
+ * The accumulator `acc = [...acc, x]` covers it — see test/immutable.test.ts.
  *
  * A RETAINS_RECEIVER call PASSES freshness through rather than ending it: it hands back
  * the pointer it was given, so its result is unowned exactly when its receiver was.

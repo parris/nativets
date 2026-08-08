@@ -229,6 +229,21 @@ export const NYI = {
   // is refused instead. Before this code existed the whole construct died on the `[]`
   // array-suffix loop as an ANONYMOUS `NT0001 Expected ']'`, with no hint and no name.
   INDEXED_ACCESS: { code: "NT1029", milestone: "later", hint: "an indexed access type is supported as `T[\"field\"]` where `T` is a record type declared in THIS file and the key is a string literal; write the field's type directly, or add a `type` alias for it, otherwise" },
+  // The parser resolves type names in SOURCE ORDER, so a name used above its declaration
+  // used to fall back to `number` silently — and the program was then rejected downstream
+  // by an NT2001 that blamed the VALUE, naming neither the type nor the cause. Refused
+  // here instead, at the type, saying which of the two shapes it is. Only names declared
+  // in the same file reach this: an imported or stdlib name still falls back.
+  FORWARD_TYPE: { code: "NT1030", milestone: "later", hint: "declare the type above its first use. A type that (directly or mutually) contains itself cannot be reordered into range: types are encoded STRUCTURALLY as a string (`Ty` in src/ast.ts), so a self-containing type has no finite encoding — nominal recursive types are not implemented (docs/divergences.md)" },
+  // A closure that WRITES a binding it captured from an enclosing scope. Our closure
+  // environment is a heap block filled by VALUE when the closure is built, so a write
+  // lands in the closure's own copy and the enclosing binding never changes — while JS
+  // captures by REFERENCE and `let n = 0; const f = () => { n++ }; f(); f()` leaves `n`
+  // at 2. That divergence is silent (right exit code, wrong number), which is the worst
+  // outcome available, so the write is REFUSED until the captured cell is boxed.
+  // READS are unaffected: a by-value snapshot of a binding nobody writes IS the
+  // by-reference answer, which is why the overwhelming majority of closures still compile.
+  CAPTURE_WRITE: { code: "NT1031", milestone: "later", hint: "closures capture by VALUE here, so a write inside one would be lost instead of updating the outer binding. Return the new value and assign it at the call site (`n = bump(n)`), or accumulate with `map`/`filter`/`reduce`, whose callbacks run inline in the enclosing frame" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
@@ -346,6 +361,32 @@ export function boundsError(message: string, hint: string): NTError {
  */
 export function mutationError(message: string, hint: string): NTError {
   return new NTError({ code: "NT1606", message, milestone: "later", hint });
+}
+
+/**
+ * A binding read before it is definitely assigned (NT1600, ≈ rustc E0381 "used binding
+ * is possibly-uninitialized"). Sits at the head of the NT16xx ownership/memory-model
+ * band, one below the move checker's NT1601 (≈ E0382) — the same rustc numbering the
+ * ownership pass mirrors, and the same kind of flow fact.
+ *
+ * `let x: T;` with a `T` that does not admit `undefined` starts with NO value: there is
+ * nothing of type `T` to put there. node would print `undefined` for a read before the
+ * first assignment, but we have no slot to hold `undefined` at that type, so a read on
+ * any path that has not assigned yet is REFUSED rather than served a zero. The two
+ * fixes are always the same, so the hint names both.
+ *
+ * `let x: T | undefined;` is a DIFFERENT program — it admits `undefined`, is genuinely
+ * initialized to it, and never reaches this check.
+ */
+export function useBeforeAssign(message: string, at?: { line: number; col: number }, hint?: string): NTError {
+  if (at === undefined) return new NTError({ code: "NT1600", message, milestone: "later", hint });
+  return new NTError({
+    code: "NT1600",
+    message: `${message} at ${at.line}:${at.col}`,
+    milestone: "later",
+    hint,
+    spans: [{ line: at.line, label: "read here, before any assignment reaches it", primary: true }],
+  });
 }
 
 export function parseError(message: string): NTError {

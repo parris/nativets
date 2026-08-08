@@ -20,10 +20,10 @@ import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagVal
 // The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
 // by `typeof` instead. Distinct from the discriminated-union machinery imported above.
 import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, typeofTagOf } from "./ast.ts";
-import type { ArrowFunction, BinaryExpr } from "./ast.ts";
+import type { ArrowFunction, BinaryExpr, Loc } from "./ast.ts";
 // `unlinkedImportError` says "you did not link" instead of blaming closures, for a call
 // to an imported binding that the standalone (unlinked) check cannot see.
-import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError, unlinkedImportError } from "./diagnostics.ts";
+import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError, unlinkedImportError, useBeforeAssign } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
 
@@ -352,7 +352,11 @@ export function check(program: Program): CheckedProgram {
     if (s.kind !== "VarDecl") continue;
     for (const d of s.decls) {
       try {
-        moduleScope.declare(d.name, d.annot ?? c.type(d.init, moduleScope), s.declKind === "const");
+        // No initializer to infer from: the annotation IS the type (`let x: T;`), and
+        // with no annotation either (`let x;`) the type is `undefined` — the same answer
+        // the synthesized initializer used to give.
+        const t = d.annot ?? (d.init ? c.type(d.init, moduleScope) : "undefined");
+        moduleScope.declare(d.name, t, s.declKind === "const");
       } catch { /* typed for real in checkBlock */ }
     }
   }
@@ -366,6 +370,7 @@ export function check(program: Program): CheckedProgram {
     }
   }
 
+  c.bodyChain = [program.body]; // the outermost enclosing body, for NT1031
   c.checkBlock(program.body, moduleScope);
   // Only reads made from INSIDE a function body promote a module binding to a global,
   // so clear the top level's own hits before checking the functions.
@@ -388,6 +393,11 @@ export function check(program: Program): CheckedProgram {
     if (hasTypeParam(t)) throw nyi(NYI.GENERIC, `unresolved generic type parameter '${t}' survived monomorphization`);
     return t;
   });
+  // Definite assignment runs LAST: it reads `Declarator.init`, and `checkStmt` above is
+  // what materializes that initializer for the types which admit `undefined`. Running it
+  // on the final body also covers every generic specialization just spliced in.
+  checkDefiniteAssignment(program.body);
+
   const globals = new Map<string, Ty>();
   for (const name of moduleScope.hits) {
     if (BUILTIN_NUMBERS.includes(name)) continue; // NaN/Infinity are constants, not storage
@@ -429,6 +439,35 @@ function specializeDecl(tmpl: FuncDecl, name: string, bindings: Map<string, Ty>)
  * Only the `?U` (undefined) arm is refused. A `?N` field (`a: T | null`) always HAS its
  * key in node, so the static answer is already right and stays accepted.
  */
+/**
+ * Render an annotation the way the SOURCE spells it: the erased type's arguments under
+ * the identifier actually written. `Record<K,V>` erases to `Map<K,V>`, so a mismatch
+ * built from the erasure alone reported a `Map` to an author who wrote `Record` and sent
+ * them looking for a type that is nowhere in their file.
+ */
+function asWritten(annot: Ty, head: string | undefined): string {
+  const a = String(annot);
+  if (head === undefined || a.startsWith(head)) return a;
+  const lt = a.indexOf("<");
+  return lt < 0 ? a : `${head}${a.slice(lt)}`; // an alias erasing to a shape keeps the shape
+}
+
+/**
+ * The `Record`-specific half of that diagnostic: say WHY the erasure exists and name the
+ * two real fixes. Only fires for a `Record` annotation initialized with an object
+ * literal, which is the shape TypeScript accepts and this compiler cannot.
+ */
+function dictHint(annot: Ty, head: string | undefined, got: Ty): string | undefined {
+  if (head !== "Record" || !isMapTy(annot) || !isObjectTy(got)) return undefined;
+  const k = mapKeyTy(annot), v = mapValTy(annot);
+  const fs = objectFields(got);
+  const sample = fs.length > 0 ? fs[0]!.key : "k";
+  return `\`Record<${k}, ${v}>\` is compiled as \`Map<${k}, ${v}>\` here — a dictionary with RUNTIME keys — because an object's fields are fixed slots named by its TYPE, ` +
+    `and a \`Record\`'s key set is by definition not statically known. An object literal cannot initialize one. ` +
+    `Build it with \`new Map<${k}, ${v}>().set("${sample}", …)\` and read it with \`.get(k)\`. ` +
+    `Annotating the exact shape instead (\`{ ${sample}: ${v} }\`) also works, but ONLY if every read uses a LITERAL key — an object is indexed by a string literal here, so \`o[someVariable]\` stays refused`;
+}
+
 function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
   const opt = objectFields(ot).find((f) => isNullableTy(f.ty) && nullishKind(f.ty) === "undefined");
   if (opt === undefined) return;
@@ -442,9 +481,42 @@ function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
   );
 }
 
+/**
+ * One type argument, spelled so it is safe inside an LLVM symbol name: every character
+ * outside `[A-Za-z0-9_]` becomes `_`. Was `t.replace(/[^A-Za-z0-9_]/g, "_")` — nativets
+ * refuses `RegExp` on principle (NT1027), so the compiler's own source scans characters.
+ * The rewrite is pinned against the original in `test/no-regex.test.ts`.
+ *
+ * Two things the class must get exactly right, both pinned there:
+ *  - `$` is NOT in it. `$` is the mangler's own separator (`f$number$string`), so a `$`
+ *    inside a type has to collapse to `_` or two instantiations could collide. `\w` and
+ *    `ast.ts`'s `isIdentPart` differ on precisely this character.
+ *  - the scan is by UTF-16 CODE UNIT, like the flagless regex it replaces — so a non-BMP
+ *    character yields TWO underscores and the length is preserved. `for (const c of t)`
+ *    would iterate code points and quietly produce one.
+ */
+function mangleTypeArg(t: string): string {
+  let out = "";
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i]!;
+    const word = (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "_";
+    out += word ? c : "_";
+  }
+  return out;
+}
+
 class Checker {
   private loopDepth = 0;
   private switchDepth = 0;
+  /**
+   * The function-like bodies enclosing the node being checked, outermost first — the
+   * module top level, then each function/method body, then each arrow body. Only
+   * `checkCapturedWrites` (NT1031) reads it: deciding whether a closure's write to a
+   * capture is observable means asking whether anything OUTSIDE the closure still
+   * mentions the binding, and a scope chain records names, not the code that uses them.
+   * Public so `check()` can seed it with the module body.
+   */
+  bodyChain: Stmt[][] = [];
   /**
    * Call nodes allowed to be a Map/Set ITERATOR (`m.keys()/.values()/.entries()`).
    * node returns a lazy Iterator object there; we return a real array, so the two
@@ -800,6 +872,9 @@ class Checker {
   /* ============================================================
    * M3 — monomorphization of generic functions.
    *
+   * (The type-argument spelling used by the mangler is `mangleTypeArg`, just above this
+   * class — nativets has no RegExp, so the compiler's own source scans characters.)
+   *
    * A generic `function f<T>(x: T): T` is a TEMPLATE: it is never checked or emitted as
    * written (its annotations carry `#T` markers, which have no lowering). Instead, every
    * call site resolves a concrete type-argument tuple — from explicit call-site type args
@@ -839,7 +914,7 @@ class Checker {
 
   /** A mangled, LLVM-safe, collision-free name for one instantiation (`first$string__`). */
   private mangle(base: string, args: Ty[]): string {
-    const stem = `${base}$${args.map((t) => t.replace(/[^A-Za-z0-9_]/g, "_")).join("$")}`;
+    const stem = `${base}$${args.map(mangleTypeArg).join("$")}`;
     let name = stem, n = 2;
     while (this.functions.has(name) || this.generics.has(name)) name = `${stem}_${n++}`;
     return name;
@@ -851,23 +926,29 @@ class Checker {
    * The caller then type-checks the arguments against that fully-concrete signature, so
    * an argument mismatch is reported exactly like any ordinary call.
    */
-  private instantiate(name: string, e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope): Sig {
+  private instantiate(name: string, e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope, recvOffset = 0): Sig {
     const tmpl = this.generics.get(name)!;
     const tps = tmpl.typeParams!;
     const bindings = new Map<string, Ty>();
+    // A generic METHOD is the same template with a leading `this` parameter that no
+    // argument corresponds to (`recvOffset` 1). Drop it before matching arguments to
+    // parameters so every index below is a plain positional match, exactly as for a
+    // function. `this` is never generic, so it can never carry a binding.
+    const sigParams = tmpl.params.slice(recvOffset);
+    const what = recvOffset ? "generic method" : "generic function";
 
     if (e.typeArgs?.length) {
       // Explicit call-site type args pin the instantiation positionally.
       if (e.typeArgs.length > tps.length) throw typeError(`'${name}' takes ${tps.length} type argument(s), got ${e.typeArgs.length}`);
       e.typeArgs.forEach((t, i) => bindings.set(tps[i]!, t));
     }
-    const patterns = tmpl.params.map((p) => p.annot ?? "number");
+    const patterns = sigParams.map((p) => p.annot ?? "number");
     // Round 1 — plain arguments. An ARROW argument is deferred: it needs the (possibly
     // still-unbound) parameter pattern as its contextual type before it can be typed.
     e.args.forEach((a, i) => {
       const pat = patterns[Math.min(i, patterns.length - 1)];
       if (!pat || !hasTypeParam(pat) || a.kind === "ArrowFunction") return;
-      unifyTypeParams(tmpl.params[i]?.rest ? elemTy(pat) : pat, this.type(a, scope), bindings);
+      unifyTypeParams(sigParams[i]?.rest ? elemTy(pat) : pat, this.type(a, scope), bindings);
     });
     // Round 2 — arrow arguments, now that the other parameters have bound what they can:
     // `mapAll<T, U>(xs: T[], f: (t: T) => U)` learns T from `xs`, types the arrow with
@@ -882,16 +963,16 @@ class Checker {
 
     const missing = tps.filter((t) => !bindings.has(t));
     if (missing.length) {
-      throw nyi(NYI.GENERIC, `cannot infer type argument${missing.length > 1 ? "s" : ""} ${missing.map((m) => `'${m}'`).join(", ")} for generic function '${name}'; pass them explicitly (\`${name}<${tps.join(", ")}>(…)\`)`);
+      throw nyi(NYI.GENERIC, `cannot infer type argument${missing.length > 1 ? "s" : ""} ${missing.map((m) => `'${m}'`).join(", ")} for ${what} '${name}'; pass them explicitly (\`${name}<${tps.join(", ")}>(…)\`)`);
     }
     const typeArgs = tps.map((t) => bindings.get(t)!);
     for (const t of typeArgs) {
-      if (hasTypeParam(t)) throw nyi(NYI.GENERIC, `generic function '${name}' instantiated with an unresolved type parameter (nested generics are not supported)`);
+      if (hasTypeParam(t)) throw nyi(NYI.GENERIC, `${what} '${name}' instantiated with an unresolved type parameter (nested generics are not supported)`);
     }
 
     const key = `${name}|${typeArgs.join("|")}`;
     const memo = this.instances.get(key);
-    if (memo) { (e.callee as { name: string }).name = memo; return this.functions.get(memo)!; }
+    if (memo) { this.retarget(e, memo, recvOffset); return this.functions.get(memo)!; }
 
     // POLYMORPHIC RECURSION (`f<T>` calling `f<T[]>`) has no finite monomorphization —
     // each level demands a strictly bigger type. Memoization can't see it (every key is
@@ -917,8 +998,23 @@ class Checker {
     this.specialized.push(spec);
     if (!spec.returnAnnot) { sig.ret = this.inferReturnType(spec, this.genericBase!()); spec.returnTy = sig.ret; }
     this.pending.push(spec); // body checked in the drain loop (keeps recursion finite)
-    (e.callee as { name: string }).name = mangled;
+    this.retarget(e, mangled, recvOffset);
     return sig;
+  }
+
+  /**
+   * Point a call at its specialization. A FUNCTION call has an Identifier callee, so the
+   * name is replaced outright. A METHOD call has a MemberExpr callee, and everything
+   * downstream (the checker's own method path, and codegen's `C.m` lookup) rebuilds the
+   * symbol as `${classTag(receiver)}.${property}` — so the specialization is selected by
+   * rewriting the PROPERTY to the mangled tail (`t` → `t$number`). The receiver
+   * expression is left untouched, which is what keeps `this` flowing normally.
+   */
+  private retarget(e: Extract<Expr, { kind: "CallExpr" }>, mangled: string, recvOffset: number): void {
+    if (recvOffset === 0) { (e.callee as { name: string }).name = mangled; return; }
+    // `mangled` is the whole dotted symbol (`C.t$number`); a class name cannot contain a
+    // `.`, so everything after the first one is the property.
+    (e.callee as { property: string }).property = mangled.slice(mangled.indexOf(".") + 1);
   }
 
   /** Whitelist `e` as an iteration position (see `iterOk`). */
@@ -969,7 +1065,8 @@ class Checker {
       if (this.assignable(p.annot, t)) this.retypeLiteral(p.default, p.annot);
     }
     for (const p of fn.params) base.declare(p.name, p.annot ?? "number", false);
-    this.checkBlock(fn.body, base, fn.returnTy ?? "number");
+    this.bodyChain.push(fn.body);
+    try { this.checkBlock(fn.body, base, fn.returnTy ?? "number"); } finally { this.bodyChain.pop(); }
     this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
   }
 
@@ -1241,9 +1338,36 @@ class Checker {
     switch (s.kind) {
       case "VarDecl":
         for (const d of s.decls) {
+          // A bare `let x;` / `let x: T;` has NO initializer. Two cases, and the
+          // difference is the whole point of making `init` optional:
+          //
+          //  - the binding CAN hold `undefined` — either it is unannotated (`let x;`,
+          //    whose type simply IS `undefined` here) or its annotation admits it
+          //    (`let x: string | undefined;`). Then it really is initialized, to
+          //    `undefined`, exactly as node has it. Materialize that literal so the rest
+          //    of the pipeline sees the value that is genuinely there — a nullable slot
+          //    needs a real [tag,value] box, not a raw zero.
+          //  - it cannot (`let x: string;`) — there is NO value of type `T` to start
+          //    with. The binding is UNINITIALIZED; whether a read is legal is decided by
+          //    definite assignment (checkDefiniteAssignment), not here.
+          if (!d.init) {
+            // A `const` can never be assigned later, so an absent initializer is not a
+            // definite-assignment question at all — it is the same hard error node gives
+            // ("'const' declarations must be initialized"), and it is worth saying so.
+            if (s.declKind === "const") throw typeError(`'${d.name}' is a \`const\` with no initializer`,
+              undefined, `a \`const\` must be initialized where it is declared — use \`let\` if the value is assigned later`);
+            if (!d.annot || this.assignable(d.annot, "undefined")) {
+              d.init = { kind: "UndefinedLiteral" }; // fall through to the normal path
+            } else {
+              d.ty = d.annot;
+              scope.declare(d.name, d.ty, s.declKind === "const");
+              continue;
+            }
+          }
           const t = this.type(d.init, scope, d.annot); // annotation is the context (e.g. `const a: T[] = []`)
           if (d.annot && d.annot !== t && !this.assignable(d.annot, t)) {
-            throw typeError(`'${d.name}' declared ${d.annot} but initialized with ${t}`);
+            throw typeError(`'${d.name}' declared ${asWritten(d.annot, d.annotHead)} but initialized with ${t}`,
+              undefined, dictHint(d.annot, d.annotHead, t));
           }
           // Reshape the initializer literal to the declared slot layout (fill omitted
           // optional fields, box scalars into nullable fields) — runs AFTER inference,
@@ -2404,7 +2528,13 @@ class Checker {
         // cannot reach it (node: `p.make is not a function`). Point at the class.
         if (this.statics.has(`${cls}.${e.callee.property}`))
           throw typeError(`'${e.callee.property}' is a static method of ${cls}, not an instance method — call it on the class (\`${cls}.${e.callee.property}(…)\`)`);
-        const msig = this.functions.get(`${cls}.${e.callee.property}`);
+        // A GENERIC method is a TEMPLATE, not a signature: resolve its type arguments
+        // from these arguments and instantiate, then check the call against the
+        // fully-concrete specialization exactly like an ordinary method. `recvOffset` 1
+        // tells `instantiate` that the template's leading `this` has no argument.
+        const msig = this.generics.has(`${cls}.${e.callee.property}`)
+          ? this.instantiate(`${cls}.${e.callee.property}`, e, scope, 1)
+          : this.functions.get(`${cls}.${e.callee.property}`);
         if (!msig) {
           if (fieldType(recv, e.callee.property)) throw typeError(`'${e.callee.property}' is a field of ${cls}, not a method`);
           throw typeError(`Method '${e.callee.property}' does not exist on ${cls}`);
@@ -2758,7 +2888,18 @@ class Checker {
       // Immutable-by-default (Phase B): `.push`/`.pop` mutate in place, which the
       // model forbids. Reject with NT1606 pointing at the non-mutating replacement
       // (rather than silently diverging from node's mutate-and-return semantics).
-      case "push": throw mutationError("arrays are immutable: `.push` would mutate the array in place", "build a new array instead: `[...arr, x]` — the original is unchanged");
+      //
+      // `.push` gets NO fresh-receiver permission, unlike `.sort` just above — see the
+      // note on `freshArray` in ast.ts. The hint names the ACCUMULATOR form as well as
+      // the one-shot spread: `[...arr, x]` answers "append once" but not "build this up
+      // in a loop", which is the shape that actually reaches here. The reassignment form
+      // is not a copy per element — codegen's consuming-append (`consumingSpread`)
+      // lowers it to an in-place append whenever nothing else shares the storage, so it
+      // is O(1) amortized. The hint SAYS so, because otherwise it reads as "rewrite your
+      // loop to be quadratic": under node that spelling really is O(n²) (12.4s for 100k
+      // appends, against 21ms for the same program built here), so the reader's
+      // scepticism is well earned and has to be answered in the hint itself.
+      case "push": throw mutationError("arrays are immutable: `.push` would mutate the array in place", "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage");
       // The rest of node's in-place mutators (stdlib Batch 1): same treatment as
       // .push/.pop — refuse and name the immutable replacement.
       case "fill": throw mutationError("arrays are immutable: `.fill` would overwrite the array in place", "build a new array instead, e.g. `arr.map(() => v)` for a same-length fill, or `arr.with(i, v)` for one slot");
@@ -2869,12 +3010,20 @@ class Checker {
     const inner = scope.child();
     arrow.params.forEach((p, i) => inner.declare(p.name, paramTypes[i]!, false));
     arrow.paramTys = paramTypes;
+    // Inlined or not, a value-arrow nested inside this callback needs this body in its
+    // enclosing chain (NT1031) — the callback's own statements are one of the places an
+    // "is the binding used outside the closure?" question has to look.
+    this.bodyChain.push(arrowBody(arrow));
     let retTy: Ty;
-    if (arrow.exprBody) {
-      retTy = this.type(arrow.body as Expr, inner);
-    } else {
-      retTy = this.inferBlockReturn(arrow.body as Stmt[], inner); // first top-level `return`
-      this.checkBlock(arrow.body as Stmt[], inner.child(), retTy); // validate every return against it
+    try {
+      if (arrow.exprBody) {
+        retTy = this.type(arrow.body as Expr, inner);
+      } else {
+        retTy = this.inferBlockReturn(arrow.body as Stmt[], inner); // first top-level `return`
+        this.checkBlock(arrow.body as Stmt[], inner.child(), retTy); // validate every return against it
+      }
+    } finally {
+      this.bodyChain.pop();
     }
     arrow.retTy = retTy;
     return retTy;
@@ -2901,12 +3050,21 @@ class Checker {
     // cannot be invalidated, so it crosses). TypeScript draws the line in the same
     // place. The INLINED HOF callbacks (`typeArrowBody`) run inside the expression that
     // creates them, so they are not a boundary.
-    const retTy: Ty = this.inArrow(() => {
-      if (arrow.exprBody) return this.type(arrow.body as Expr, inner);
-      const t = this.inferBlockReturn(arrow.body as Stmt[], inner);
-      this.checkBlock(arrow.body as Stmt[], inner.child(), t);
-      return t;
-    });
+    // The arrow's own body joins `bodyChain` while its body is typed, so a NESTED arrow
+    // sees it as one of ITS enclosing bodies (NT1031) — and comes back off before
+    // `computeCaptures`, which asks about the bodies OUTSIDE this arrow.
+    this.bodyChain.push(arrowBody(arrow));
+    let retTy: Ty;
+    try {
+      retTy = this.inArrow(() => {
+        if (arrow.exprBody) return this.type(arrow.body as Expr, inner);
+        const t = this.inferBlockReturn(arrow.body as Stmt[], inner);
+        this.checkBlock(arrow.body as Stmt[], inner.child(), t);
+        return t;
+      });
+    } finally {
+      this.bodyChain.pop();
+    }
     arrow.retTy = retTy;
     arrow.captures = this.computeCaptures(arrow, scope);
     const ty = makeFuncTy(paramTys, retTy);
@@ -2942,7 +3100,66 @@ class Checker {
       const b = scope.lookup(n); // bound in an enclosing scope ⇒ captured
       if (b) caps.push({ name: n, ty: b.ty });
     }
+    this.checkCapturedWrites(arrow, scope);
     return caps;
+  }
+
+  /**
+   * NT1031 — a closure that WRITES a binding it captured, in a shape where the write
+   * would be lost.
+   *
+   * A capture is a by-VALUE snapshot: codegen fills the closure's env block when the
+   * closure is BUILT, and `writeCapture` stores back into that block, never into the
+   * enclosing frame's `%x.addr`. JS captures by REFERENCE, so the two disagree — but
+   * only where the difference is OBSERVABLE, and that carve-out matters, because the
+   * escaping-counter idiom lands squarely in it:
+   *
+   *     function makeCounter() { let count = 0; return () => { count++; return count; }; }
+   *
+   * Here `count` is never touched again in `makeCounter`, whose frame is gone by the
+   * time the closure runs, so the env slot IS the variable and `1 2 3` is correct. That
+   * program is `test/fixtures/stage11/counter.ts`, differential-tested against node, and
+   * a blanket "no writes to captures" rule would have deleted it. The condition for
+   * safety is exactly that nothing outside the closure can observe the stale copy:
+   *
+   *   1. no ENCLOSING body mentions the name anywhere outside this arrow — that covers a
+   *      later read (`return n`), a later write (`n = 10`, which the snapshot predates),
+   *      and a SECOND closure over the same binding (which would get its own env slot and
+   *      diverge from this one); and
+   *   2. the binding is a `number`. Measured, on the pre-refusal compiler and in the
+   *      no-outside-reference shape above: a `number[]` capture written this way died
+   *      with `panic: index out of bounds: the length is 0` where node printed `1 2 3`,
+   *      and a `string` one printed correctly but LEAKS — `writeCapture` emits a bare
+   *      `store i64` with no release of the string it overwrites, which is a red
+   *      LeakSanitizer run on Linux CI. Only `number` needs neither.
+   *
+   * Everything else is refused. The enclosing bodies come from `bodyChain`; when it is
+   * short (the early return-type inference pass runs before it is built) this can only
+   * find FEWER references and so allow more, and every such arrow is typed again from
+   * `checkBlock` with the full chain, which is the run that decides.
+   */
+  private checkCapturedWrites(arrow: ArrowFunction, scope: Scope): void {
+    const writes = new Map<string, string>();
+    collectEscapingWrites(arrow, writes);
+    // No params/locals guard: `collectEscapingWrites` applies exactly that set itself, at
+    // every arrow level rather than only this one — measured, by deleting a second copy
+    // of the guard here and seeing no test change.
+    for (const [name, op] of writes) {
+      const b = scope.lookup(name);
+      if (!b) continue; // not an enclosing binding at all — not this rule's business
+      const observed = this.bodyChain.some((body) => referencesName(body, name, arrow));
+      if (!observed && b.ty === "number") continue; // the escaping-counter shape: safe
+      const why = observed
+        ? `'${name}' is also used outside the closure, so it would be read at its stale value`
+        : `'${name}' is a ${b.ty}, whose captured slot cannot be rewritten safely`;
+      throw nyi(
+        NYI.CAPTURE_WRITE,
+        `a write to a captured binding (\`${op}\`, where '${name}' is bound in an enclosing scope)`,
+        `closures capture by VALUE here, so \`${op}\` updates the closure's own copy rather than the outer binding, and ${why}. node captures by reference, so this is refused rather than miscompiled. ` +
+        `Return the new value and assign it at the call site (\`${name} = step(${name})\`), or accumulate with \`map\`/\`filter\`/\`reduce\`, whose callbacks run inline in the enclosing frame and so may write it. ` +
+        `A counter whose state lives ONLY in the closure — nothing outside it mentions '${name}' — does compile`,
+      );
+    }
   }
 
   /**
@@ -3062,6 +3279,281 @@ function leavesBlock(body: Stmt[]): boolean {
     (last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "BreakStmt" || last.kind === "ContinueStmt");
 }
 
+/* ============================================================
+ * Definite assignment — NT1600, ≈ rustc E0381 "used binding is possibly-uninitialized".
+ *
+ * WHAT IT GUARDS. A bare `let x: T;` whose `T` does not admit `undefined` starts with no
+ * value at all. node prints `undefined` for a read before the first assignment; we have
+ * nothing of type `T` to print and no slot to hold `undefined` in, so codegen would have
+ * to serve the slot's zero — `(null)` for a string, `0` for a number. That is the
+ * silent wrong answer the prime directive forbids, so such a read is REFUSED.
+ *
+ * `let x: T | undefined;` never reaches this pass: it admits `undefined`, so `checkStmt`
+ * has already materialized that initializer and the binding is genuinely initialized.
+ *
+ * SHAPE. Forward, path-sensitive, merge = INTERSECTION (assigned only if assigned on
+ * every incoming path). A path that DIVERGES — `return`/`throw`/`break`/`continue`, or a
+ * `process.exit(…)` call, which codegen already treats as non-falling-through — cannot
+ * reach the merge, so it contributes nothing to the intersection. That is what makes the
+ * guard-clause idiom compile, and it is exactly the shape `src/cli.ts` needs:
+ *
+ *     let source: string;
+ *     try { source = readFileSync(file, "utf8"); }
+ *     catch { console.error(…); process.exit(1); }   // diverges — contributes nothing
+ *     …source…                                        // definitely assigned
+ *
+ * CONSERVATIVE, AND CONSERVATIVE MEANS REFUSE. Unsure is a refusal, never an accept:
+ *   - a loop body may run zero times, so what it assigns is not assigned after it
+ *     (`do…while` is the exception — its body always runs once);
+ *   - a `try` block's assignments are NOT in force in its `catch`: the throw may have
+ *     happened before any of them, so the handler starts from the try's ENTRY state;
+ *   - a `switch` only assigns if it has a `default` AND every case assigns or diverges;
+ *   - an assignment nested inside a call argument or an arrow body is not counted as an
+ *     assignment, while a READ anywhere inside one IS counted as a read.
+ * ============================================================ */
+
+/** The names PROVEN assigned on the path reaching a given program point. */
+type DAFlow = Set<string>;
+
+/** The bindings this pass must prove, mapped to the declared type the hint names. */
+type DATracked = Map<string, Ty>;
+
+/**
+ * Every identifier READ inside `node`, with the location of its first occurrence.
+ *
+ * Shape-blind on purpose — the `hasHostCall` idiom above, for the reason given there:
+ * "the AST is plain data, and a shape-blind walk cannot miss a node kind added later".
+ * A hand-written switch over expression kinds (like `collectIdents`, whose `default`
+ * silently returns) would go stale, and a read missed HERE is a miscompile, not a lost
+ * optimization.
+ *
+ * The two write-only forms carry their target as a bare STRING rather than an
+ * `Identifier` node, so the node walk sees them as non-reads. That is right for `x = v`
+ * and wrong for `x += v` and `x++`, which read `x` before writing it — hence the
+ * explicit cases.
+ */
+function daReads(node: unknown, out: Map<string, Loc | undefined>): void {
+  if (Array.isArray(node)) { for (const x of node) daReads(x, out); return; }
+  if (node === null || typeof node !== "object") return;
+  const n = node as { kind?: string; name?: unknown; op?: unknown; target?: unknown; loc?: Loc };
+  if (n.kind === "Identifier" && typeof n.name === "string") {
+    if (!out.has(n.name)) out.set(n.name, n.loc);
+    return;
+  }
+  if (typeof n.target === "string" &&
+      (n.kind === "UpdateExpr" || (n.kind === "AssignExpr" && n.op !== "="))) {
+    if (!out.has(n.target)) out.set(n.target, n.loc);
+  }
+  for (const v of Object.values(node)) daReads(v, out);
+}
+
+/** Refuse every read in `e` of a tracked binding not yet proven assigned. */
+function daUse(e: unknown, tracked: DATracked, flow: DAFlow): void {
+  if (e === null || e === undefined) return;
+  const reads = new Map<string, Loc | undefined>();
+  daReads(e, reads);
+  for (const [name, loc] of reads) {
+    const ty = tracked.get(name);
+    if (ty === undefined || flow.has(name)) continue;
+    throw useBeforeAssign(
+      `'${name}' is used before being assigned`,
+      loc,
+      `\`let ${name}: ${ty};\` starts with no value. Assign it on every path that reaches this read — ` +
+      `or declare it \`let ${name}: ${ty} | undefined;\`, which starts as \`undefined\` and can be tested for it`);
+  }
+}
+
+/** `process.exit(…)` — the one call that never returns (codegen agrees: see genCall). */
+function daIsExit(e: Expr): boolean {
+  return e.kind === "CallExpr" && e.callee.kind === "MemberExpr" &&
+    e.callee.property === "exit" &&
+    e.callee.object.kind === "Identifier" && e.callee.object.name === "process";
+}
+
+/** Intersect `flow` down to the names assigned on every non-diverging incoming path. */
+function daMerge(paths: { flow: DAFlow; diverged: boolean }[], fallback: DAFlow): DAFlow {
+  const live = paths.filter((p) => !p.diverged);
+  if (live.length === 0) return new Set(fallback); // every path left; nothing merges here
+  const out = new Set(live[0]!.flow);
+  for (const p of live.slice(1)) for (const n of [...out]) if (!p.flow.has(n)) out.delete(n);
+  return out;
+}
+
+/** Analyze a statement list. Returns true if it always DIVERGES (never falls through). */
+function daBlock(body: Stmt[], tracked: DATracked, flow: DAFlow): boolean {
+  for (const s of body) if (daStmt(s, tracked, flow)) return true;
+  return false;
+}
+
+/** Analyze one statement in place, mutating `flow`. Returns true if it DIVERGES. */
+function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
+  switch (s.kind) {
+    case "VarDecl":
+      for (const d of s.decls) {
+        // This analysis is NAME-based, and so is codegen (one slot per name per
+        // function). A redeclaration of a name already being tracked is therefore
+        // indistinguishable from an assignment to the outer binding, and treating it as
+        // one would let a later read of the OUTER binding pass on the INNER one's proof.
+        // We cannot tell them apart, so we refuse rather than guess.
+        if (tracked.has(d.name)) {
+          throw useBeforeAssign(
+            `'${d.name}' is redeclared while an outer '${d.name}' is still unassigned`,
+            undefined,
+            `a nested \`let ${d.name}\` shadows the outer one, and the two are not distinguishable here — rename one of them`);
+        }
+        // An initializer assigns right here. Its ABSENCE is the binding this whole pass
+        // exists for: by now `checkStmt` has filled one in for every type that admits
+        // `undefined`, so what is left has no legal starting value.
+        if (d.init) { daUse(d.init, tracked, flow); flow.add(d.name); }
+        else { tracked.set(d.name, d.ty ?? d.annot ?? "unknown"); flow.delete(d.name); }
+      }
+      return false;
+
+    case "ExprStmt": {
+      const e = s.expr;
+      // The one form that ASSIGNS: `x = v` at statement level. The value is evaluated
+      // first, so its reads are checked against the state BEFORE the write lands.
+      if (e.kind === "AssignExpr" && e.op === "=" && tracked.has(e.target)) {
+        daUse(e.value, tracked, flow);
+        flow.add(e.target);
+        return false;
+      }
+      daUse(e, tracked, flow);
+      return daIsExit(e);
+    }
+
+    case "ReturnStmt": daUse(s.argument, tracked, flow); return true;
+    case "ThrowStmt": daUse(s.argument, tracked, flow); return true;
+    case "BreakStmt": case "ContinueStmt": return true;
+
+    case "IfStmt": {
+      daUse(s.test, tracked, flow);
+      const con = new Set(flow);
+      const conDiv = daBlock(s.consequent, tracked, con);
+      const alt = new Set(flow);
+      const altDiv = s.alternate ? daBlock(s.alternate, tracked, alt) : false;
+      const merged = daMerge([{ flow: con, diverged: conDiv }, { flow: alt, diverged: altDiv }], flow);
+      flow.clear(); for (const n of merged) flow.add(n);
+      return conDiv && altDiv;
+    }
+
+    case "WhileStmt": {
+      daUse(s.test, tracked, flow);
+      daBlock(s.body, tracked, new Set(flow)); // may run zero times — assignments discarded
+      return false;
+    }
+
+    case "DoWhileStmt": {
+      const body = new Set(flow);
+      const div = daBlock(s.body, tracked, body); // always runs once — assignments KEPT
+      flow.clear(); for (const n of body) flow.add(n);
+      daUse(s.test, tracked, flow);
+      return div;
+    }
+
+    case "ForStmt": {
+      if (s.init) { // the init runs exactly once, so its assignments are kept
+        if ((s.init as Stmt).kind === "VarDecl") daStmt(s.init as Stmt, tracked, flow);
+        else daUse(s.init as Expr, tracked, flow);
+      }
+      daUse(s.test, tracked, flow);
+      const body = new Set(flow);
+      daBlock(s.body, tracked, body); // may run zero times — assignments discarded
+      daUse(s.update, tracked, body);
+      return false;
+    }
+
+    case "ForOfStmt": {
+      daUse(s.iterable, tracked, flow);
+      daBlock(s.body, tracked, new Set(flow)); // may run zero times
+      return false;
+    }
+
+    case "ForInStmt": {
+      daUse(s.object, tracked, flow);
+      daBlock(s.body, tracked, new Set(flow)); // may run zero times
+      return false;
+    }
+
+    case "SwitchStmt": {
+      daUse(s.discriminant, tracked, flow);
+      // Without a `default` there is a path that runs NO case at all, so nothing the
+      // cases assign can be relied on afterwards. A case body that falls through into
+      // the next one is handled by analyzing each from the switch's entry state, which
+      // under-approximates what is assigned — the safe direction.
+      const paths = s.cases.map((c) => {
+        const f = new Set(flow);
+        if (c.test) daUse(c.test, tracked, f);
+        return { flow: f, diverged: daBlock(c.body, tracked, f) };
+      });
+      const hasDefault = s.cases.some((c) => c.test === null);
+      const merged = hasDefault ? daMerge(paths, flow) : new Set(flow);
+      flow.clear(); for (const n of merged) flow.add(n);
+      return hasDefault && paths.every((p) => p.diverged);
+    }
+
+    case "TryStmt": {
+      const tryFlow = new Set(flow);
+      const tryDiv = daBlock(s.block, tracked, tryFlow);
+      let after: DAFlow;
+      let diverged: boolean;
+      if (s.handler) {
+        // The handler starts from the try's ENTRY state: the throw may have happened
+        // before any assignment in the block landed, so none of them can be assumed.
+        const catchFlow = new Set(flow);
+        const catchDiv = daBlock(s.handler, tracked, catchFlow);
+        after = daMerge([{ flow: tryFlow, diverged: tryDiv }, { flow: catchFlow, diverged: catchDiv }], flow);
+        diverged = tryDiv && catchDiv;
+      } else {
+        // try/finally with no catch: reaching past it means the block COMPLETED.
+        after = tryFlow;
+        diverged = tryDiv;
+      }
+      flow.clear(); for (const n of after) flow.add(n);
+      if (s.finalizer) { // the finalizer always runs, so its assignments are kept
+        if (daBlock(s.finalizer, tracked, flow)) diverged = true;
+      }
+      return diverged;
+    }
+
+    case "BlockStmt": return daBlock(s.body, tracked, flow);
+    case "MultiStmt": return daBlock(s.stmts, tracked, flow);
+    case "FuncDecl": return false; // its body is analyzed on its own, below
+  }
+}
+
+/**
+ * Run definite assignment over `body` as one control-flow region, then over every
+ * nested function body — each independently, with its own tracked set, because each is
+ * its own control-flow region and its own set of slots.
+ *
+ * Both callable forms must be reached. A `FuncDecl` covers plain functions and class
+ * methods (the parser desugars `class C { m() {} }` into a `FuncDecl` named `C.m`); an
+ * `ArrowFunction` with a statement body is the other, and missing it would leave
+ * `const f = () => { let a: string; return a; };` unanalyzed — a miscompile, since
+ * codegen would hand back the slot's zero.
+ *
+ * A nested body starts with an EMPTY tracked set: an outer binding is not tracked
+ * inside it. That is not a hole — a read of an outer unassigned binding from inside a
+ * nested body is already refused at the point the function VALUE appears, because
+ * `daUse` is shape-blind and descends into it.
+ */
+function checkDefiniteAssignment(body: Stmt[]): void {
+  daBlock(body, new Map<string, Ty>(), new Set<string>());
+  const seen = new Set<unknown>();
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) { for (const x of node) walk(x); return; }
+    if (node === null || typeof node !== "object" || seen.has(node)) return;
+    seen.add(node);
+    const n = node as { kind?: string; body?: unknown };
+    if ((n.kind === "FuncDecl" || n.kind === "ArrowFunction") && Array.isArray(n.body)) {
+      daBlock(n.body as Stmt[], new Map<string, Ty>(), new Set<string>());
+    }
+    for (const v of Object.values(node)) walk(v);
+  };
+  walk(body);
+}
+
 /** A union rendered the way it was written (`A | B`), for diagnostics. */
 function showUnion(t: Ty): string { return unionWidenedMembers(t).join(" | "); }
 
@@ -3116,7 +3608,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
 
 function collectIdentsStmt(s: Stmt, out: Set<string>): void {
   switch (s.kind) {
-    case "VarDecl": for (const d of s.decls) collectIdents(d.init, out); return;
+    case "VarDecl": for (const d of s.decls) if (d.init) collectIdents(d.init, out); return;
     case "ReturnStmt": if (s.argument) collectIdents(s.argument, out); return;
     case "ExprStmt": collectIdents(s.expr, out); return;
     case "IfStmt": collectIdents(s.test, out); s.consequent.forEach((x) => collectIdentsStmt(x, out)); s.alternate?.forEach((x) => collectIdentsStmt(x, out)); return;
@@ -3174,7 +3666,7 @@ function collectAssignedStmts(body: Stmt[], direct: Set<string>, closure: Set<st
   const goS = (b: Stmt[]) => collectAssignedStmts(b, direct, closure, inArrow);
   for (const s of body) {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) goE(d.init); break;
+      case "VarDecl": for (const d of s.decls) if (d.init) goE(d.init); break;
       case "ReturnStmt": if (s.argument) goE(s.argument); break;
       case "ThrowStmt": goE(s.argument); break;
       case "ExprStmt": goE(s.expr); break;
@@ -3212,6 +3704,194 @@ function alwaysExits(body: Stmt[]): boolean {
 function collectBlockLocals(s: Stmt, out: Set<string>): void {
   if (s.kind === "VarDecl") for (const d of s.decls) out.add(d.name);
   else if (s.kind === "ForOfStmt" || s.kind === "ForInStmt") out.add(s.name);
+}
+
+/* ------------------------------------------------------------
+ * ESCAPING WRITES (NT1031) — which names an arrow assigns that it does not itself bind.
+ *
+ * `collectAssigned` above answers a different question (does this REGION assign the
+ * name, at all, anywhere) and deliberately ignores shadowing, because a narrowing has
+ * to be invalidated conservatively. Here the conservative direction is the opposite
+ * one: a name that is bound INSIDE the arrow is not a capture, and refusing a write to
+ * it would reject correct code — `(n: number) => { n = n + 1; return n; }` writes its
+ * own parameter, and a closure-local `let n` shadowing an outer `n` is a different
+ * variable. So this walker carries the bound set down, and a nested arrow contributes
+ * only what escapes IT.
+ *
+ * The shadowing model is deliberately the SAME one `computeCaptures` uses (params plus
+ * the body's top-level `let`/`const`/`for-of` names) so that the set refused here is
+ * exactly the set codegen would treat as a capture — no wider, no narrower.
+ *
+ * The value in the map is the offending write as written, for the diagnostic.
+ * ------------------------------------------------------------ */
+function collectEscapingWrites(arrow: ArrowFunction, out: Map<string, string>): void {
+  const bound = new Set(arrow.params.map((p) => p.name));
+  if (arrow.exprBody) { escapingWritesExpr(arrow.body as Expr, bound, out); return; }
+  const body = arrow.body as Stmt[];
+  for (const s of body) collectBlockLocals(s, bound);
+  escapingWritesStmts(body, bound, out);
+}
+
+/** Record the FIRST write to a name the arrow does not bind (later ones say the same). */
+function noteEscapingWrite(name: string, op: string, bound: Set<string>, out: Map<string, string>): void {
+  if (!bound.has(name) && !out.has(name)) out.set(name, op);
+}
+
+function escapingWritesExpr(e: Expr, bound: Set<string>, out: Map<string, string>): void {
+  const go = (x: Expr) => escapingWritesExpr(x, bound, out);
+  switch (e.kind) {
+    case "AssignExpr": noteEscapingWrite(e.target, `${e.target} ${e.op} …`, bound, out); go(e.value); return;
+    case "UpdateExpr":
+      if (e.targetExpr) go(e.targetExpr);
+      else noteEscapingWrite(e.target, e.prefix ? `${e.op}${e.target}` : `${e.target}${e.op}`, bound, out);
+      return;
+    case "ArrowFunction": {
+      // A nested arrow binds its own params/locals; whatever still escapes IT escapes
+      // this arrow too, unless this one binds the name. This is also what catches a
+      // write from an INLINED `map`/`filter`/`reduce` callback: inlining puts the write
+      // in the enclosing frame, which is the right place only when that frame OWNS the
+      // binding — inside a lifted closure the frame holds a capture, so it is not.
+      const inner = new Map<string, string>();
+      collectEscapingWrites(e, inner);
+      for (const [n, op] of inner) noteEscapingWrite(n, op, bound, out);
+      return;
+    }
+    // `o.f = v` / `xs[i] = v` through a capture mutate the pointed-to heap value, which
+    // IS shared with the enclosing scope — a different question, already answered by the
+    // immutability rule (NT1606) and the ownership checker. Only recurse.
+    case "IndexAssign": go(e.object); go(e.index); go(e.value); return;
+    case "FieldAssign": go(e.object); go(e.value); return;
+    case "MemberExpr": go(e.object); return;
+    case "IndexExpr": go(e.object); go(e.index); return;
+    case "UnaryExpr": go(e.operand); return;
+    case "TypeofExpr": go(e.operand); return;
+    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": go(e.expr); return;
+    case "InstanceOfExpr": go(e.object); return;
+    case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
+    case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;
+    case "SequenceExpr": case "TemplateLiteral": (e.exprs as Expr[]).forEach(go); return;
+    case "CallExpr": go(e.callee); e.args.forEach(go); return;
+    case "NewExpr": e.args.forEach(go); return;
+    case "ArrayLiteral": e.elements.forEach(go); return;
+    case "ObjectLiteral": e.properties.forEach((p) => go(p.value)); return;
+    case "SpreadExpr": go(e.argument); return;
+    default: return; // literals and identifiers hold no assignment
+  }
+}
+
+/** An arrow's body as statements — an expression body as the one statement it is. */
+function arrowBody(arrow: ArrowFunction): Stmt[] {
+  return arrow.exprBody ? exprRegion(arrow.body as Expr) : (arrow.body as Stmt[]);
+}
+
+/**
+ * Is `name` mentioned anywhere in `stmts`, other than inside `skip`?
+ *
+ * The second half of the NT1031 rule: a closure may rewrite its captured slot only when
+ * nothing outside it can observe the enclosing frame's now-stale copy. That question is
+ * about USES, so this walks the enclosing body looking for any occurrence of the name at
+ * all — a read, a write, a call, a mention inside a SECOND closure (which would hold its
+ * own snapshot and diverge from this one). The binding's own declarator is not an
+ * occurrence: only initializers are visited, so `let count = 0` does not count itself.
+ *
+ * Deliberately FLAT — it models no shadowing, so an unrelated binding of the same name
+ * counts as a use. Every imprecision therefore produces MORE refusals, never fewer,
+ * which is the only safe direction for a rule standing between a program and a silently
+ * wrong answer.
+ */
+function referencesName(stmts: Stmt[], name: string, skip: ArrowFunction): boolean {
+  return stmts.some((s) => refsInStmt(s, name, skip));
+}
+
+function refsInExpr(e: Expr, name: string, skip: ArrowFunction): boolean {
+  if (e === skip) return false; // the closure under judgement is not "outside" itself
+  const any = (xs: Expr[]) => xs.some((x) => refsInExpr(x, name, skip));
+  switch (e.kind) {
+    case "Identifier": return e.name === name;
+    case "AssignExpr": return e.target === name || refsInExpr(e.value, name, skip);
+    case "UpdateExpr": return e.targetExpr ? refsInExpr(e.targetExpr, name, skip) : e.target === name;
+    case "MemberExpr": return refsInExpr(e.object, name, skip);
+    case "IndexExpr": return any([e.object, e.index]);
+    case "IndexAssign": return any([e.object, e.index, e.value]);
+    case "FieldAssign": return any([e.object, e.value]);
+    case "UnaryExpr": return refsInExpr(e.operand, name, skip);
+    case "TypeofExpr": return refsInExpr(e.operand, name, skip);
+    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": return refsInExpr(e.expr, name, skip);
+    case "InstanceOfExpr": return refsInExpr(e.object, name, skip);
+    case "BinaryExpr": case "LogicalExpr": return any([e.left, e.right]);
+    case "ConditionalExpr": return any([e.test, e.consequent, e.alternate]);
+    case "SequenceExpr": case "TemplateLiteral": return any(e.exprs as Expr[]);
+    case "CallExpr": return refsInExpr(e.callee, name, skip) || any(e.args);
+    case "NewExpr": return any(e.args);
+    case "ArrayLiteral": return any(e.elements);
+    case "ObjectLiteral": return any(e.properties.map((p) => p.value));
+    case "SpreadExpr": return refsInExpr(e.argument, name, skip);
+    case "ArrowFunction": return referencesName(arrowBody(e), name, skip);
+    default: return false; // literals
+  }
+}
+
+function refsInStmt(s: Stmt, name: string, skip: ArrowFunction): boolean {
+  const goE = (x: Expr) => refsInExpr(x, name, skip);
+  const goS = (b: Stmt[]) => referencesName(b, name, skip);
+  switch (s.kind) {
+    // Same optional-`init` hazard as `escapingWritesStmts` below: an uninitialized
+    // `let a: string;` anywhere in the ENCLOSING body is walked by this pass, and a
+    // declarator with no initializer contributes no occurrence of the name.
+    case "VarDecl": return s.decls.some((d) => (d.init ? goE(d.init) : false));
+    case "ReturnStmt": return s.argument ? goE(s.argument) : false;
+    case "ThrowStmt": return goE(s.argument);
+    case "ExprStmt": return goE(s.expr);
+    case "IfStmt": return goE(s.test) || goS(s.consequent) || (s.alternate ? goS(s.alternate) : false);
+    case "WhileStmt": case "DoWhileStmt": return goE(s.test) || goS(s.body);
+    case "ForStmt":
+      return (s.init ? ((s.init as Stmt).kind === "VarDecl" ? goS([s.init as Stmt]) : goE(s.init as Expr)) : false)
+        || (s.test ? goE(s.test) : false) || (s.update ? goE(s.update) : false) || goS(s.body);
+    case "ForOfStmt": return goE(s.iterable) || goS(s.body);
+    case "ForInStmt": return goE(s.object) || goS(s.body);
+    case "SwitchStmt":
+      return goE(s.discriminant) || s.cases.some((c) => (c.test ? goE(c.test) : false) || goS(c.body));
+    case "TryStmt": return goS(s.block) || (s.handler ? goS(s.handler) : false) || (s.finalizer ? goS(s.finalizer) : false);
+    case "BlockStmt": return goS(s.body);
+    case "MultiStmt": return goS(s.stmts);
+    // A named function CAN read a module-level binding, so its body counts as a use.
+    case "FuncDecl": return goS(s.body);
+    default: return false;
+  }
+}
+
+function escapingWritesStmts(body: Stmt[], bound: Set<string>, out: Map<string, string>): void {
+  const goE = (x: Expr) => escapingWritesExpr(x, bound, out);
+  const goS = (b: Stmt[]) => escapingWritesStmts(b, bound, out);
+  for (const s of body) {
+    switch (s.kind) {
+      // `d.init` is OPTIONAL: `let a: string;` (definite assignment) declares without
+      // initializing, and an uninitialized declarator holds no expression to walk. This
+      // walker used to assume every declarator had one and crashed on `e.kind` of
+      // `undefined` — a compiler crash, not a diagnostic, on correct TypeScript.
+      case "VarDecl": for (const d of s.decls) if (d.init) goE(d.init); break;
+      case "ReturnStmt": if (s.argument) goE(s.argument); break;
+      case "ThrowStmt": goE(s.argument); break;
+      case "ExprStmt": goE(s.expr); break;
+      case "IfStmt": goE(s.test); goS(s.consequent); if (s.alternate) goS(s.alternate); break;
+      case "WhileStmt": case "DoWhileStmt": goE(s.test); goS(s.body); break;
+      case "ForStmt":
+        if (s.init) { if ((s.init as Stmt).kind === "VarDecl") goS([s.init as Stmt]); else goE(s.init as Expr); }
+        if (s.test) goE(s.test);
+        if (s.update) goE(s.update);
+        goS(s.body);
+        break;
+      case "ForOfStmt": goE(s.iterable); goS(s.body); break;
+      case "ForInStmt": goE(s.object); goS(s.body); break;
+      case "SwitchStmt": goE(s.discriminant); for (const c of s.cases) { if (c.test) goE(c.test); goS(c.body); } break;
+      case "TryStmt": goS(s.block); if (s.handler) goS(s.handler); if (s.finalizer) goS(s.finalizer); break;
+      case "BlockStmt": goS(s.body); break;
+      case "MultiStmt": goS(s.stmts); break;
+      // A nested `function` declaration is not a closure here (it does not capture), so
+      // its assignments are its own frame's; nothing escapes to this arrow's captures.
+      default: break;
+    }
+  }
 }
 
 /** True if `e` is a member access that is part of an optional chain (some `?.` to its left). */

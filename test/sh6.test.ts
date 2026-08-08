@@ -235,7 +235,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // each other for NT1017; they now both blame `parser.ts`, whose `?.[]` they inherit
   // through the link. That is not a regression — they cleared their own blocker and the
   // link surfaced the deepest one they share.
-  "ast.ts": { rung: 0, code: "NT1009", blame: "self" },
+  "ast.ts": { rung: 0, code: "NT1030", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile; the module now stops on the ESCAPES object literal.
   "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
@@ -252,21 +252,22 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // lane established must STAY refused — node distinguishes an absent key from a
   // present-undefined one and a flat slot array cannot. Sharpening that refusal moved the
   // module on to NT1027, a regex literal.
-  "checker.ts": { rung: 0, code: "NT1027", blame: "self" },
+  "checker.ts": { rung: 0, code: "NT1009", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   "codegen.ts": { rung: 0, code: "NT1023", blame: "self" },
-  "coverage.ts": { rung: 0, code: "NT1009", blame: "ast.ts" },
+  "coverage.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
   // trap, still visible. MEASURED, not predicted: the lane that moved checker.ts expected
   // this row to land on NT1014, and it did not — it tracks checker.ts exactly, because the
   // two errors are byte-identical. Always re-measure this column rather than inferring it.
-  "ownership.ts": { rung: 0, code: "NT1027", blame: "checker.ts" },
+  "ownership.ts": { rung: 0, code: "NT1009", blame: "checker.ts" },
   "driver.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
   "cli.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
-  "modules.ts": { rung: 0, code: "NT1015", blame: "self" },
-  "coverage-preprocess.ts": { rung: 0, code: "NT1009", blame: "ast.ts" },
+  // Cleared its generic method; now inherits parser.ts's `?.[]` through the link.
+  "modules.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
+  "coverage-preprocess.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
 };
 
 /*
@@ -448,12 +449,13 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     for (const e of MODULES) {
       try { parse(read(e.file)); parseClean.push(e.file); } catch { /* blocked at parse */ }
     }
-    // SEVEN now, not six: `driver.ts` joined when `export async function` landed. The
-    // point of this test is unchanged and is the uncomfortable one — parsing clean has
-    // never once correlated with being closer to compiling.
+    // EIGHT now. `driver.ts` joined when `export async function` landed; `modules.ts` when
+    // generic class methods did. The point of this test is unchanged and is the
+    // uncomfortable one — parsing clean has never ONCE correlated with being closer to
+    // compiling. Eight of twelve modules parse their own source; ZERO produce IR.
     expect(parseClean.sort()).toEqual([
       "cli.ts", "coverage-preprocess.ts", "coverage.ts", "diagnostics.ts", "driver.ts",
-      "lexer.ts", "ownership.ts",
+      "lexer.ts", "modules.ts", "ownership.ts",
     ]);
     // ...and not one of them reaches IR.
     for (const file of parseClean) {

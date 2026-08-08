@@ -1061,6 +1061,15 @@ class FnGen {
       case "VarDecl": {
         for (const d of s.decls) {
           const ty = d.ty ?? "number";
+          // A bare `let x: T;` has no initializer. Store the slot's DEFAULT ZERO — not
+          // the `undefined` literal, whose `0` is ill-typed for a `double` or a `ptr`
+          // slot. The checker has already proved the binding is assigned before any read
+          // (definite assignment), so this zero is never observed; it only keeps the slot
+          // well-defined. Nothing is retained: no value has been bound yet.
+          if (!d.init) {
+            this.emit(`store ${llvmTy(ty)} ${defaultZero(ty)}, ptr ${this.addr(d.name)}`);
+            continue;
+          }
           const val = this.coerce(this.genExpr(d.init), ty);
           // RC: an aliased string (identifier/field/index/literal) gains a new owner
           // → retain. A fresh producer is consumed (its rc=1 transfers to this local).
@@ -4047,7 +4056,7 @@ class FnGen {
 
   private subStmt(s: Stmt, map: Map<string, string>): void {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) { this.subExpr(d.init, map); if (map.has(d.name)) d.name = map.get(d.name)!; } break;
+      case "VarDecl": for (const d of s.decls) { if (d.init) this.subExpr(d.init, map); if (map.has(d.name)) d.name = map.get(d.name)!; } break;
       case "ReturnStmt": if (s.argument) this.subExpr(s.argument, map); break;
       case "IfStmt": this.subExpr(s.test, map); this.subStmts(s.consequent, map); if (s.alternate) this.subStmts(s.alternate, map); break;
       case "WhileStmt": this.subExpr(s.test, map); this.subStmts(s.body, map); break;
