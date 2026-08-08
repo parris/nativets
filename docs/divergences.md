@@ -1009,6 +1009,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
+| NT1030 | a type name used above its declaration, and any **recursive** type | later | type names resolve in SOURCE ORDER; a self-containing type needs a nominal `Ty` — see below |
 
 ### Spreading a value INTO a call — the three cases, and why only two compile
 
@@ -1177,6 +1178,38 @@ yields a Buffer), a computed encoding, `spawnSync` without `{ encoding: "utf8" }
 would silently change what the program does.
 
 | NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`) |
+
+### Type names resolve in SOURCE ORDER, and recursive types are not representable (NT1030)
+
+TypeScript resolves type names anywhere in a file; nativets' parser is single-pass and
+resolves them **in source order**. A name used above its declaration is refused with
+`NT1030`. This is a real divergence — node runs such a program, and TypeScript accepts it —
+and it is a refusal, never a miscompile.
+
+It used to be neither. `resolveNamed` fell back to `number` for any unregistered name, so
+the annotation was silently erased and the program failed later against the *value*:
+`'x' declared number but initialized with {kind:string,a:number}`. That message names
+neither the type nor the cause, and it cost a round of self-hosting work — `ForStmt.init:
+VarDecl | Expr | null` in `src/ast.ts` read as a union-representation bug when in fact
+`Expr` (declared at ast.ts:550, its 29 member interfaces from 621) had already been erased
+to `number` before the union code saw it. Only names declared **in the same file** are
+refused; an imported or stdlib name still falls back, which is what keeps the blast radius
+at one file — measured across all 141 files in `src/` and `test/fixtures/`.
+
+**Recursion is the harder half, and it is not a parser problem.** `interface N { next: N }`
+cannot be fixed by reordering: the reference resolves while `N` itself is still being
+parsed. The real obstacle is the type encoding. `Ty` is a **structural string**
+(`src/ast.ts`) — `{a:number,b:string}`, `number[]` — chosen precisely so `===` is type
+comparison. A type that contains itself has no finite structural string, so no amount of
+two-pass resolution helps; a two-pass parser would replace the silent erasure with infinite
+expansion.
+
+Supporting it honestly requires a **nominal, by-reference form in `Ty`** — a type that names
+a declaration instead of spelling out its shape — plus every structural comparison,
+widening, and layout decision taught to resolve through it. That is a foundational change to
+the type representation, not a union feature and not a small one. Until it exists, the
+compiler's own `Expr`/`Stmt` unions (`src/ast.ts`) are outside the subset nativets compiles,
+and **that, not any single union or intersection, is what gates `src/ast.ts` self-hosting**.
 
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
