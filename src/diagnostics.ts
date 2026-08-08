@@ -327,7 +327,12 @@ export function decoratorError(message: string, hint: string): NTError {
  * the source underlines the line, rustc-style). `hint` is the fix, kept out of the
  * message so `coverage` can show it separately.
  */
-export function typeError(message: string, at?: { line: number; col: number }, hint?: string, label = "here"): NTError {
+// `label: string` is written out rather than inferred from its default. nativets does
+// not yet infer a parameter's type FROM its default (it falls back to `number`), so the
+// bare `label = "here"` made this function's own `spans` literal fail to type-check when
+// src/diagnostics.ts is compiled by nativets — SH6 blocker 3 of 6, docs/self-hosting.md.
+// The annotation is a no-op for TypeScript and can come out once that inference lands.
+export function typeError(message: string, at?: { line: number; col: number }, hint?: string, label: string = "here"): NTError {
   if (at === undefined) return new NTError({ code: "NT2001", message, hint });
   return new NTError({
     code: "NT2001",
