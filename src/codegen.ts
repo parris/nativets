@@ -192,8 +192,9 @@ const DECLARES = [
   "declare double @sqrt(double)",
   "declare double @trunc(double)",
   "declare double @fabs(double)",
-  "declare double @fmax(double, double)",
-  "declare double @fmin(double, double)",
+  "declare double @js_math_max(double, double)",
+  "declare double @js_math_min(double, double)",
+  "declare double @js_math_fold_arr(ptr, double, i32)",
   // string methods
   "declare ptr @js_str_upper(ptr)",
   "declare ptr @js_str_lower(ptr)",
@@ -3470,28 +3471,68 @@ class FnGen {
   }
 
   private genMath(method: string, args: Expr[]): Val {
+    // max/min first: their arguments may include a SPREAD, which has no value of its
+    // own and so must not reach `genExpr` through the map below.
+    if (method === "max" || method === "min") return this.genMathMinMax(method, args);
     const vals = args.map((a) => this.genExpr(a).v);
     if (method === "pow") {
       const t = this.fresh();
       this.emit(`${t} = call double @pow(double ${vals[0]}, double ${vals[1]})`);
       return { v: t, ty: "number" };
     }
-    if (method === "max" || method === "min") {
-      const fn = method === "max" ? "fmax" : "fmin";
-      if (vals.length === 0) return { v: llvmDouble(method === "max" ? -Infinity : Infinity), ty: "number" };
-      let acc = vals[0]!;
-      for (let i = 1; i < vals.length; i++) {
-        const t = this.fresh();
-        this.emit(`${t} = call double @${fn}(double ${acc}, double ${vals[i]})`);
-        acc = t;
-      }
-      return { v: acc, ty: "number" };
-    }
     const fn = MATH_FN1[method];
     if (!fn) throw internalError(`no lowering for Math.${method}, which the checker admitted`);
     const t = this.fresh();
     this.emit(`${t} = call double @${fn}(double ${vals[0]})`);
     return { v: t, ty: "number" };
+  }
+
+  /**
+   * `Math.max` / `Math.min` — a LEFT FOLD with the pairwise step `js_math_max/min`.
+   *
+   * NOT C's fmax/fmin: those answer 1 for `Math.max(NaN, 1)` where JS says NaN, and
+   * IEEE-754 maxNum leaves +0/-0 unspecified where JS orders them. Both were silent
+   * wrong answers here before.
+   *
+   * A SPREAD argument folds in the runtime (`js_math_fold_arr`), so its length is a
+   * runtime property: `Math.max(...xs)` needs no arity, and spreads mix freely with
+   * fixed arguments in any position. Seeding from the identity is what makes an EMPTY
+   * spread come out as -Infinity/+Infinity instead of 0 — but with NO spread present
+   * the seed is the first argument instead, which keeps the emitted IR for the ordinary
+   * `Math.max(a, b)` exactly what it has always been.
+   */
+  private genMathMinMax(method: "max" | "min", args: Expr[]): Val {
+    const isMax = method === "max";
+    const step = isMax ? "js_math_max" : "js_math_min";
+    const identity = llvmDouble(isMax ? -Infinity : Infinity);
+
+    if (!args.some((a) => a.kind === "SpreadExpr")) {
+      const vals = args.map((a) => this.genExpr(a).v);
+      if (vals.length === 0) return { v: identity, ty: "number" };
+      let acc = vals[0]!;
+      for (let i = 1; i < vals.length; i++) {
+        const t = this.fresh();
+        this.emit(`${t} = call double @${step}(double ${acc}, double ${vals[i]})`);
+        acc = t;
+      }
+      return { v: acc, ty: "number" };
+    }
+
+    let acc = identity;
+    for (const a of args) {
+      const t = this.fresh();
+      if (a.kind === "SpreadExpr") {
+        const arr = this.genExpr(a.argument);
+        this.emit(`${t} = call double @js_math_fold_arr(ptr ${arr.v}, double ${acc}, i32 ${isMax ? 1 : 0})`);
+        // `Math.max(...spans.map(f))` builds an array no binding owns, so the drop pass
+        // never sees it. Same syntactic freshness judgment as `freeReceiverTemp`.
+        if (freshArray(a.argument)) this.emit(`call void @nt_arr_free(ptr ${arr.v})`);
+      } else {
+        this.emit(`${t} = call double @${step}(double ${acc}, double ${this.genExpr(a).v})`);
+      }
+      acc = t;
+    }
+    return { v: acc, ty: "number" };
   }
 
   private genStringMethod(method: string, recv: Val, args: Expr[]): Val {

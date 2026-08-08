@@ -908,13 +908,36 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1003 | arrow functions / function values / closures | M2 | captured environments |
 | NT1004 | `try`/`catch`/`throw` | M2 | unwinding |
 | NT1005 | `JSON` | M3 | `JSON.stringify` ✅ and `JSON.parse` + `dyn as T` runtime typecheck ✅ (scalars/objects/arrays, nested); code reused to reject un-validatable narrow targets (functions, unions). A compound `Dyn` now PRINTS node-exactly (util.inspect, see above) |
-| NT1006 | spread | M2 | arrays/objects |
+| NT1006 | spread | M2 | arrays/objects; spreading a VALUE into a call is supported only where the arity is known or the fold has an identity — see below |
 | NT1007 | destructuring | M2 | arrays/objects |
 | NT1008 | rest parameters | M2 | arrays |
 | NT1009 | optional `?.()` call / `?.[]` index / general or >2-arm unions | M2 | `?.` on object fields, `??`, and restricted `T\|undefined`/`T\|null` are ✅ (A2); the reused code now rejects only the out-of-subset forms |
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
+
+### Spreading a value INTO a call — the three cases, and why only two compile
+
+`f(...xs)` needs to know how many arguments it is producing. There are three shapes, and
+only the first two have an answer at compile time:
+
+1. **The length is syntactic** — `f(...[a, b])` inlines to `f(a, b)`. No array is built.
+2. **The arity is fixed** — `f(...xs)` for a declared `f(a, b)` expands to `f(xs[0], xs[1])`.
+   Extra elements are discarded, exactly as in node.
+3. **Neither** — refused with **`NT1006`**, *except* for `Math.max` / `Math.min`, which fold
+   with a well-defined IDENTITY (`-Infinity` / `+Infinity`). Because the identity exists, the
+   length need not be known: `Math.max(...xs)` lowers to a runtime fold over the array, an
+   EMPTY array correctly yields `±Infinity` rather than an arity error, and spreads mix
+   freely with fixed arguments (`Math.max(1, ...xs, 5)`). The spread must be a `number[]`.
+
+The fold step is `js_math_max`/`js_math_min` in `runtime/runtime.c`, **not** C's
+`fmax`/`fmin`: `fmax(NaN, 1)` is `1` where JS says `NaN`, and IEEE-754 `maxNum` leaves the
+`+0`/`-0` case unspecified where JS orders them (`Math.max(-0, 0)` is `+0`, `Math.min(-0, 0)`
+is `-0`). Both were silent wrong answers before `test/variadic-spread.test.ts` pinned them.
+
+Spreading into a **rest parameter** (`function total(...ns: number[])`) falls in case 3 and is
+refused. It previously miscompiled: a rest parameter counts as one entry in the signature, so
+`total(...xs)` expanded as case 2 to `total(xs[0])` and answered `1` where node answers `6`.
 
 ### Generics — what M3 deliberately does NOT do (all rejected, never miscompiled)
 
