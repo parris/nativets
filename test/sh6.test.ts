@@ -239,11 +239,25 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile; the module now stops on the ESCAPES object literal.
   "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
-  // Round the houses: NT1606 (`[...spans].sort()`) -> NT1006 (`Math.max(...spans.map(…))`)
-  // -> back to NT1606, now a `.push` on a NAMED accumulator — a shape the fresh-receiver
-  // rule deliberately does not cover, because permitting it needs in-place mutation of an
-  // owned named local. Same code, a genuinely different blocker each time.
-  "diagnostics.ts": { rung: 0, code: "NT1606", blame: "self" },
+  // WALKED, not nudged. This module's blocker CHAIN was measured end to end — six
+  // distinct blockers between it and rung 1 — and five of them are now cleared:
+  //   1. NT1606  `.push` x4 in formatDiagnostic            -> immutable rebind (src)
+  //   2. NT2001  `} as const` erased the catalog to number -> parser: const assertion
+  //   3. NT2001  `label = "here"` typed number             -> annotated (src)
+  //   4. NT2001  optional field inside an ARRAY element    -> checker: array assignability
+  //   5. NT2001  `this.name` on a class extending Error    -> declared the field (src)
+  //   6. NT1604  `constructor(readonly diag: Diagnostic)`  -> STILL BLOCKED
+  //
+  // Six is the honest number for the rung 0 -> 1 distance of the SHALLOWEST module in the
+  // tree, and it is the first time that distance has been measured for any module at all.
+  //
+  // The last one is not a false positive and not a nudge away. A linear parameter is a
+  // BORROW — the caller owns and drops it — so storing one in a field would leave the
+  // caller freeing a pointer the object still holds. Measured, not assumed: suppressing
+  // the rule and running `function make(): E { const v = {...}; return new E(v); }` gives
+  // exit 255. Clearing it needs CONSUMING PARAMETERS (the callee takes ownership and the
+  // move propagates to every call site), which is a feature.
+  "diagnostics.ts": { rung: 0, code: "NT1604", blame: "self" },
   // Left NT0001 (`satisfies`); the code is unchanged at NT1009 but the FEATURE is not —
   // it is now optional element access `?.[]`, not a union.
   "parser.ts": { rung: 0, code: "NT1009", blame: "self" },

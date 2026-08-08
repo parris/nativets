@@ -295,8 +295,22 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // (`\`${string}[]\`` in ast.ts, which coverage.ts and coverage-preprocess.ts saw
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
+    // NT1606 -> NT1604, and the whole delta is ONE module. `diagnostics.ts` was the only
+    // holder of NT1606 tree-wide (`lines.push(...)` in formatDiagnostic); clearing that
+    // and the four blockers behind it walked the module from blocker 1 of 6 to blocker 6
+    // of 6, which is NT1604 — `constructor(readonly diag: Diagnostic)`, an object-typed
+    // parameter moved into a field.
+    //
+    // That last one is NOT a false positive, and it was measured rather than assumed:
+    // suppressing the rule and running the escaping shape (`function make(): E { const v =
+    // {...}; return new E(v); }`) gives exit 255, because a linear parameter is a BORROW
+    // and the caller still drops it. Clearing it needs consuming parameters (a callee that
+    // takes ownership, with the move propagated to every call site), which is a feature and
+    // not a predicate tweak. See docs/self-hosting.md.
+    //
+    // Every other module is unchanged, byte for byte.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1009", "NT1023", "NT1030", "NT1606", "NT2001"],
+      ["NT1009", "NT1023", "NT1030", "NT1604", "NT2001"],
     );
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
@@ -403,7 +417,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // established why: permitting it needs in-place mutation on an owned named local,
     // which is how the `.reverse` double free happened.
     expect(byCode["NT1006"]).toBeUndefined();
-    expect(byCode["NT1606"]!.sort()).toEqual(["diagnostics.ts"]);
+    // …and NT1606 is now EMPTY tree-wide. `diagnostics.ts` was its only holder, and the
+    // rung-3 lane cleared the `.push` sites (`lines = [...lines, …]`) plus the four
+    // blockers that were queued behind them. A fact about today, not an invariant — this
+    // file has been wrong three times treating an emptied bucket as one.
+    expect(byCode["NT1606"]).toBeUndefined();
+    // NEW BUCKET, and it is the END of that module's chain rather than another step along
+    // it: NT1604, `constructor(readonly diag: Diagnostic)` — an object-typed parameter
+    // moved into a field. A linear parameter is a BORROW (the caller owns and drops it),
+    // so the refusal is SOUND: suppressing it and running the escaping shape gives exit
+    // 255. Clearing it needs consuming parameters, which is a feature, not a predicate.
+    expect(byCode["NT1604"]!.sort()).toEqual(["diagnostics.ts"]);
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not
