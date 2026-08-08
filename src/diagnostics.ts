@@ -212,6 +212,15 @@ export const NYI = {
   // yields a Buffer; a `spawnSync` option changes what the call does), because
   // half-implementing those would be a silent divergence rather than a refusal.
   HOSTMOD: { code: "NT1028", milestone: "later", hint: "the host FFI implements exactly what a self-hosted compiler needs — `node:fs` (readFileSync/writeFileSync/existsSync/mkdtempSync/readdirSync/rmSync), `node:path`, `node:os` (tmpdir/homedir), `node:url` (fileURLToPath), `node:child_process` (spawnSync). See docs/self-hosting.md (SH4)" },
+  // A closure that WRITES a binding it captured from an enclosing scope. Our closure
+  // environment is a heap block filled by VALUE when the closure is built, so a write
+  // lands in the closure's own copy and the enclosing binding never changes — while JS
+  // captures by REFERENCE and `let n = 0; const f = () => { n++ }; f(); f()` leaves `n`
+  // at 2. That divergence is silent (right exit code, wrong number), which is the worst
+  // outcome available, so the write is REFUSED until the captured cell is boxed.
+  // READS are unaffected: a by-value snapshot of a binding nobody writes IS the
+  // by-reference answer, which is why the overwhelming majority of closures still compile.
+  CAPTURE_WRITE: { code: "NT1029", milestone: "later", hint: "closures capture by VALUE here, so a write inside one would be lost instead of updating the outer binding. Return the new value and assign it at the call site (`n = bump(n)`), or accumulate with `map`/`filter`/`reduce`, whose callbacks run inline in the enclosing frame" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
