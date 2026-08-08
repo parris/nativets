@@ -144,6 +144,15 @@ class Parser {
   /** Arrow nodes that were written `async` — the bridge from an erased async ARROW back
    *  to the NAME it gets bound to, which is what `asyncFns` (and the guard) work in. */
   private asyncFnExprs = new Set<Expr>();
+  /** HIGHER-ORDER async. `asyncFns` is name tracking, and a name does not survive a call
+   *  boundary: `run(one)` binds the async arrow to `run`'s parameter, where the guard has
+   *  never heard of it. The declared TYPE is what crosses that boundary — a parameter
+   *  annotated `(…) => Promise<T>` is exactly as promise-returning as an `async function`
+   *  — but `Promise<T>` ERASES to `T` in `parseGenericType`, so the fact has to be caught
+   *  syntactically while the annotation is being read. `parseFuncType` sets this to
+   *  whether the OUTERMOST function type it just parsed returns a written `Promise<…>`;
+   *  every reader resets it to false immediately before parsing the annotation. */
+  private fnTyReturnsPromise = false;
   private identCalls: { node: Expr; name: string; line: number; col: number }[] = [];
   /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
    *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
@@ -605,7 +614,21 @@ class Parser {
     }
     this.eat(")");
     this.eat("=>");
-    return `(${params.join(",")})=>${this.parseType()}` as Ty;
+    // Peek BEFORE parsing: `Promise<T>` erases to `T` (parseGenericType), so the only
+    // place the promise is still visible is the token stream. Assigned (not or-ed) after
+    // the return type is parsed, so the OUTERMOST function type has the last word:
+    // `() => (() => Promise<T>)` returns a function, not a promise.
+    const retPromise = this.peek().value === "Promise" && this.peek(1).value === "<";
+    const ret = this.parseType();
+    this.fnTyReturnsPromise = retPromise;
+    return `(${params.join(",")})=>${ret}` as Ty;
+  }
+  /** Parse a type annotation, reporting whether it is a promise-returning FUNCTION type
+   *  (`(…) => Promise<T>`) — see `fnTyReturnsPromise`. */
+  private parseTypeAsyncAware(): { ty: Ty; asyncFn: boolean } {
+    this.fnTyReturnsPromise = false;
+    const ty = this.parseType();
+    return { ty, asyncFn: this.fnTyReturnsPromise };
   }
   private parseObjectType(): Ty {
     this.eat("{");
@@ -1188,7 +1211,15 @@ class Parser {
         const pname = this.expectIdent();
         const optional = this.at("?"); if (optional) this.eat("?"); // `f(x?: T)`
         let annot: Ty | undefined;
-        if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
+        if (this.at(":")) {
+          this.eat(":");
+          const t = this.parseTypeAsyncAware();
+          annot = t.ty;
+          // A `(…) => Promise<T>` parameter holds an async function, whoever passed it.
+          // Calling it is exactly `one()` on an `async function one`, so it joins the
+          // same name set and the same floating-async guard catches it un-awaited.
+          if (t.asyncFn) this.asyncFns.add(pname);
+        }
         let def: Expr | undefined;
         if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
         if (paramProp && rest) throw nyi(NYI.CLASS_FEATURE, "a rest parameter cannot be a parameter property");

@@ -393,4 +393,18 @@ console.log(two());
   _test("un-awaited immediately-invoked async arrow", () => rejects(`
 console.log((async (): Promise<number> => 1)());
 `));
+
+  // HIGHER-ORDER async. An async function passed AS A VALUE is still promise-returning
+  // when it is finally called — test262 pins that the promise comes from the function,
+  // not the call site (test/language/expressions/async-arrow-function/
+  // returns-async-arrow-returns-newtarget.js and .../statements/async-function/
+  // evaluation-body-that-returns.js both call the function through a binding and assert
+  // the RESULT is a promise). The name-based guard cannot follow a value across a call
+  // boundary, so the declared TYPE carries it: a parameter annotated
+  // `(…) => Promise<T>` is exactly as promise-returning as an `async function`.
+  _test("un-awaited call through a `() => Promise<T>` PARAMETER", () => rejects(`
+const one = async (): Promise<number> => 1;
+function callit(f: () => Promise<number>): number { return f(); }
+console.log(callit(one));
+`));
 });
