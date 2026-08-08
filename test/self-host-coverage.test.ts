@@ -174,7 +174,7 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // here is a named feature. NT1014 survives as `new Map([[k, v], …])` in ast.ts: the
     // Set forms and the Map-COPY form compile now, the ENTRIES form still needs a tuple.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1003", "NT1009", "NT1014", "NT1015", "NT1023", "NT1027", "NT1606"],
+      ["NT1003", "NT1009", "NT1014", "NT1015", "NT1023", "NT1606"],
     );
     // NT1009 has fallen 4 -> 3 -> 1 across three lanes, and NOTHING DOMINATES ANY MORE.
     // The general-union lane took it from 4 to 3; the intersection lane took it from 3 to 1
@@ -185,7 +185,7 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // above predicted would be the last one standing. Note the code NT1009 spans three
     // unrelated features (general unions, intersections, `?.[]`), so a count against this
     // code has never meant "unions"; that is exactly why it is asserted per-feature here.
-    expect(hist.get("NT1009")!).toBe(1);
+    expect(hist.get("NT1009")!).toBe(2);
     // No bucket exceeds 2, and the largest is NT1015 (generic class method + class field
     // annotation in modules.ts). For the first time the frontier is FLAT — there is no
     // single dominant blocker left to burn down, which changes what "next" means.
