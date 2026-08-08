@@ -1960,12 +1960,37 @@ class Checker {
       const b = scope.lookup(callee.name);
       if (b && isFuncTy(b.ty)) return funcParams(b.ty).length;
       const sig = this.functions.get(callee.name);
-      if (sig) return sig.params.length;
+      // A REST parameter has no arity to expand against: `sig.params.length` counts it
+      // as ONE parameter, so `total(...xs)` would expand to `total(xs[0])` and quietly
+      // answer 1 where node answers 6. Report "no known arity" so the caller REFUSES
+      // (NT1006) instead — general variadics are a separate, much larger feature.
+      if (sig) return sig.rest ? undefined : sig.params.length;
     }
     return undefined; // variadic builtin / method
   }
 
   private inferCall(e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope, hint?: Ty): Ty {
+    // `Math.max(...xs)` / `Math.min(...xs)` — the ONE variadic builtin that accepts a
+    // spread of a runtime-length array, because its fold has a well-defined IDENTITY
+    // (-Infinity / +Infinity). So the length need not be known at compile time and an
+    // EMPTY array is meaningful rather than an arity error. Every other variadic still
+    // falls through to the NT1006 refusal below — see docs/divergences.md.
+    if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Math"
+        && (e.callee.property === "max" || e.callee.property === "min")
+        && e.args.some((a) => a.kind === "SpreadExpr")) {
+      const m = e.callee.property;
+      // `...[a, b]` has its length right here — inline it, so no array is ever built.
+      e.args = e.args.flatMap((a) =>
+        a.kind === "SpreadExpr" && a.argument.kind === "ArrayLiteral" ? a.argument.elements : [a]);
+      for (const a of e.args) {
+        if (a.kind === "SpreadExpr") {
+          const t = this.type(a.argument, scope);
+          if (t !== "number[]") throw typeError(`Math.${m} can spread a number[], not ${String(t)}`);
+        } else if (this.type(a, scope) !== "number") throw typeError(`Math.${m} needs numbers`);
+      }
+      return "number";
+    }
+
     // Expand a single spread argument: `f(...[a,b])` inline; `f(...arr)` → f(arr[0]..arr[n-1]).
     if (e.args.length === 1 && e.args[0]!.kind === "SpreadExpr") {
       const arg = (e.args[0] as Extract<Expr, { kind: "SpreadExpr" }>).argument;

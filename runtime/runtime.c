@@ -541,6 +541,28 @@ double js_str_to_num(const char *s) {
 /* Math.round: JS semantics floor(x + 0.5) */
 double js_math_round(double x) { return floor(x + 0.5); }
 
+/* Math.max / Math.min, folded PAIRWISE. C's fmax/fmin are the wrong identity twice
+ * over: fmax(NaN, 1) is 1 (JS propagates the NaN), and IEEE-754 maxNum leaves the
+ * +0/-0 case unspecified (JS orders them, ECMA-262: "+0 is considered larger than
+ * -0"). Both are silent-wrong-answer shaped, so spell the semantics out. */
+double js_math_max(double a, double b) {
+  if (isnan(a) || isnan(b)) return NAN;
+  if (a > b) return a;
+  if (b > a) return b;
+  /* equal, or both zero: prefer +0 over -0 */
+  if (a == 0.0 && signbit(a)) return b;
+  return a;
+}
+
+double js_math_min(double a, double b) {
+  if (isnan(a) || isnan(b)) return NAN;
+  if (a < b) return a;
+  if (b < a) return b;
+  /* equal, or both zero: prefer -0 over +0 */
+  if (a == 0.0 && !signbit(a)) return b;
+  return a;
+}
+
 /* parseInt / parseFloat (prefix parsing, JS-style) */
 double js_parse_int(const char *s, double radixd) {
   while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
@@ -890,6 +912,16 @@ int32_t nt_arr_includes_str(NtArray *a, const char *x) {
 double nt_arr_indexof_num(NtArray *a, double x) {
   for (int64_t i = 0; i < a->len; i++) if (slot_to_num(arr_at(a, i)) == x) return (double)i;
   return -1.0;
+}
+/* Math.max/Math.min over a SPREAD array: fold `acc` over every element with the JS
+ * step above. An EMPTY array returns `acc` untouched, which is how the caller's
+ * -Infinity / +Infinity identity survives `Math.max(...[])`. */
+double js_math_fold_arr(NtArray *a, double acc, int32_t is_max) {
+  for (int64_t i = 0; i < a->len; i++) {
+    double x = slot_to_num(arr_at(a, i));
+    acc = is_max ? js_math_max(acc, x) : js_math_min(acc, x);
+  }
+  return acc;
 }
 double nt_arr_indexof_str(NtArray *a, const char *x) {
   for (int64_t i = 0; i < a->len; i++) if (strcmp((const char *)(intptr_t) arr_at(a, i), x) == 0) return (double)i;
