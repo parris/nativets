@@ -264,8 +264,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // blocker moving with the module's source UNCHANGED is auto-classified as the frontier
     // advancing and stays green). Recorded here as the reason this list keeps churning.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1023", "NT1030", "NT1606", "NT2001"],
+      ["NT1023", "NT1030", "NT1031", "NT1606"],
     );
+    // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
+    // for re-measuring instead of picking one. This lane's list still carried NT1009
+    // (main had emptied it with `?.[]`) and kept NT2001; main's list carried NT2001 (this
+    // lane had emptied it by inferring a parameter's type from its default) and had no
+    // NT1031. The true set is the union of what each branch cleared, minus what the other
+    // cleared, and no reviewer holding two diffs can compute that by reading.
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
     // and NT1017, this lane had cleared NT1014, and neither could see the other.
@@ -391,7 +397,16 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // …and it is REFILLED by the collections lane, with a different module and a real
     // (not false-positive) blocker: lexer.ts now clears `new Set([...])` and stops on
     // `ESCAPES` declared `Map<string, string>` but initialized with an OBJECT LITERAL.
-    expect(byCode["NT2001"]!.sort()).toEqual(["lexer.ts"]);
+    //
+    // …and EMPTY again — and the recorded reason above was WRONG, which is the point of
+    // re-measuring instead of reading the note. lexer.ts's NT2001 was never `ESCAPES`; it
+    // was `cannot infer type of arrow parameter 'n'` at src/lexer.ts:146, `const advance =
+    // (n = 1) => …`. The parameter-default lane taught every parameter position to take its
+    // type from its default, and lexer.ts now walks INTO that arrow's body and stops on
+    // NT1031, `line++` — a write to a binding captured from `lex`'s scope.
+    expect(byCode["NT2001"]).toBeUndefined();
+    // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
+    expect(byCode["NT1031"]!.sort()).toEqual(["lexer.ts"]);
     // NT1606 changed HANDS entirely: diagnostics.ts left it (above), and checker.ts +
     // ownership.ts arrived from NT1009 once general unions landed. Same bucket, none of
     // the same modules — which is why membership, not size, is the thing to assert.

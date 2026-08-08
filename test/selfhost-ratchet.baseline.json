@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-08",
-    "rev": "6a6037b"
+    "rev": "6e83b38"
   },
   "modules": {
     "ast.ts": {
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "37365649c2b7d2d0",
+      "sha256": "c13a0f0540c39e38",
       "standalone": {
         "stage": "parse",
         "code": "NT1023",
@@ -84,7 +84,7 @@
       }
     },
     "diagnostics.ts": {
-      "sha256": "547141beddcb6aeb",
+      "sha256": "d7570aadcc03c315",
       "standalone": {
         "stage": "check",
         "code": "NT1606",
@@ -111,24 +111,24 @@
       }
     },
     "lexer.ts": {
-      "sha256": "1a465c8709ee0fcf",
+      "sha256": "d13e2be48a7713e8",
       "standalone": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
+        "code": "NT1031",
+        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
+        "code": "NT1031",
+        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
       }
     },
     "modules.ts": {
-      "sha256": "ae8302d5047e7f45",
+      "sha256": "95003bb313d69ad1",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] cannot infer type of arrow parameter 'p'"
+        "message": "[NT2001] Property 'kind' does not exist on number"
       },
       "linked": {
         "stage": "link",
@@ -150,7 +150,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "7725813fd8c71b4e",
+      "sha256": "c13a348fd7d748a4",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

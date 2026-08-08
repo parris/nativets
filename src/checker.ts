@@ -1039,6 +1039,39 @@ class Checker {
     return { expr: call, ty: this.type(call, scope) };
   }
 
+  /**
+   * The type an unannotated parameter takes from its DEFAULT — `(n = 1)` is `number`,
+   * `(s = "a")` is `string`, `(b = true)` is `boolean`. This is TypeScript's rule: the
+   * initializer's type, WIDENED (`tests/cases/conformance/es6/defaultParameters/`), which
+   * is what `this.type` already yields — nativets has no literal types on expressions.
+   * `undefined` for a parameter with no default, so callers keep their own fallback.
+   *
+   * The default is typed in `scope`, the function's ENCLOSING scope, with the parameters
+   * NOT yet declared — the same rule (and the same refusal) as an annotated default; see
+   * `checkFunction` below for why a default may not name a parameter to its left.
+   *
+   * Anything whose type we cannot pin down is REFUSED with the parameter named, never
+   * guessed. `(x = undefined)` / `(x = null)` are the concrete ones: TypeScript gives them
+   * `any` (or `undefined`/`null` under `strict`), neither of which is a nativets type a
+   * body could be checked against. `(xs = [])` refuses one layer down, in
+   * `emptyArrayError` — TypeScript's answer there is `any[]`, and guessing an element type
+   * is exactly the silent wrong answer we exist to avoid.
+   */
+  private defaultParamTy(p: { name: string; default?: Expr }, scope: Scope): Ty | undefined {
+    if (!p.default) return undefined;
+    const t = this.type(p.default, scope);
+    if (t === "undefined" || t === "null")
+      throw typeError(`cannot infer type of parameter '${p.name}' from a default of \`${t}\``, undefined,
+        `\`${t}\` carries no type to infer. Annotate the parameter (\`${p.name}: number\`), or default it to a value of the type you mean`);
+    return t;
+  }
+
+  /** A parameter's default does not fit its annotation (tsc's TS2322 on a parameter). */
+  private defaultMismatch(name: string, annot: Ty, got: Ty): never {
+    throw typeError(`parameter '${name}' is declared ${annot} but its default is ${got}`, undefined,
+      `the annotation wins, so the default has to fit it — write a ${annot} default, or drop the annotation and let \`${name}\` take its type from the default`);
+  }
+
   checkFunction(fn: FuncDecl, base: Scope): void {
     // A default is an expression evaluated at CALL time, in the scope that encloses the
     // function — so it can name a module-level binding (`= NO_MUTABLE`) just like the body
@@ -1062,9 +1095,16 @@ class Checker {
       // is. Reading off the end of a 0-slot object: it compiled clean and died at runtime
       // with exit 255 and empty stdout where node printed a value. Guarded by `assignable`
       // so this only ever rewrites a layout, never masks a genuine type mismatch.
-      if (this.assignable(p.annot, t)) this.retypeLiteral(p.default, p.annot);
+      // ...and REFUSE it when it does not fit. This used to fall through silently: the
+      // annotation won (the slot stays `ptr` for a `string`) and the mismatched default was
+      // still handed to codegen as-is, so `function f(n: string = 1)` emitted
+      // `call ptr @f(ptr 0x3FF0000000000000)` and died in clang with "floating point
+      // constant invalid for type". tsc rejects the same program (TS2322), and a checker
+      // escape into raw LLVM is the one failure mode we never want.
+      if (!this.assignable(p.annot, t)) this.defaultMismatch(p.name, p.annot, t);
+      this.retypeLiteral(p.default, p.annot);
     }
-    for (const p of fn.params) base.declare(p.name, p.annot ?? "number", false);
+    this.declareParams(fn, base);
     this.bodyChain.push(fn.body);
     try { this.checkBlock(fn.body, base, fn.returnTy ?? "number"); } finally { this.bodyChain.pop(); }
     this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
@@ -1632,7 +1672,14 @@ class Checker {
         return tagged !== undefined && this.assignable(tagged, lit) ? tagged : lit;
       }
       case "SpreadExpr": throw nyi(NYI.SPREAD, "spread");
-      case "ArrowFunction": return this.typeArrow(e, undefined, scope);
+      // The `hint` is the CONTEXTUAL type — a declaration's annotation (`const f: (x:
+      // string) => number = …`), a return type, an assignment target. `typeArrow` already
+      // consumes it (and ignores it when it is not a function type), and every OTHER call
+      // site already supplied it; this one passed `undefined` and dropped it on the floor,
+      // so a contextually typed CALLBACK compiled and a contextually typed BINDING did not.
+      // That was src/modules.ts's first blocker, at `const defaultRead: ReadModule = (p) =>
+      // readFileSync(p, "utf8")`.
+      case "ArrowFunction": return this.typeArrow(e, hint, scope);
       case "SequenceExpr": {
         let t: Ty = "undefined";
         for (const x of e.exprs) t = this.type(x, scope);
@@ -3065,9 +3112,22 @@ class Checker {
       // contextual type where the arrow is used as an argument, and otherwise erase the
       // marker to `number` (the pre-M3 behavior, kept so generic arrows still compile).
       if (p.annot && hasTypeParam(p.annot)) p.annot = expParams?.[i] ?? eraseTypeParams(p.annot); // resolve the marker IN the AST
-      const t = p.annot ?? expParams?.[i];
-      if (!t) throw typeError(`cannot infer type of arrow parameter '${p.name}'`);
+      // Precedence is TypeScript's: an ANNOTATION wins, then the CONTEXTUAL type this
+      // arrow is being assigned/passed into, and only then the DEFAULT (`(n = 1)`).
+      const t = p.annot ?? expParams?.[i] ?? this.defaultParamTy(p, scope);
+      if (!t) throw typeError(`cannot infer type of arrow parameter '${p.name}'`, undefined,
+        `annotate it (\`(${p.name}: number) => …\`), or give it a default whose type is obvious (\`(${p.name} = 0) => …\`)`);
       return t;
+    });
+    // An ANNOTATED (or contextually typed) default still has to FIT the type that won, and
+    // has to be reshaped to its slot layout — the same two steps `checkFunction` runs for a
+    // named function, for the same reasons. Deliberately in `scope`, with the parameters
+    // not yet declared, so a default may not name a parameter to its left.
+    arrow.params.forEach((p, i) => {
+      if (!p.default) return;
+      const t = this.type(p.default, scope, paramTys[i]!);
+      if (!this.assignable(paramTys[i]!, t)) this.defaultMismatch(p.name, paramTys[i]!, t);
+      this.retypeLiteral(p.default, paramTys[i]!);
     });
     arrow.paramTys = paramTys;
     const inner = scope.child();
@@ -3111,8 +3171,22 @@ class Checker {
 
   /** Return type of an unannotated function, inferred from its first top-level return. */
   inferReturnType(fn: FuncDecl, base: Scope): Ty {
-    for (const p of fn.params) base.declare(p.name, p.annot ?? "number", false);
+    this.declareParams(fn, base);
     return this.inferBlockReturn(fn.body, base);
+  }
+
+  /**
+   * Declare a function's parameters in its body scope, at the SAME types its signature
+   * records: annotation first, then the default's type, then `number`.
+   *
+   * Every type is computed BEFORE the first `declare`, so a default still cannot see a
+   * parameter to its left (`function f(a, b = a)` stays refused — see `checkFunction`).
+   * Interleaving the two would quietly resolve that name and hand codegen a load from an
+   * unstored alloca.
+   */
+  private declareParams(fn: FuncDecl, base: Scope): void {
+    const tys = fn.params.map((p) => p.annot ?? this.defaultParamTy(p, base) ?? "number");
+    fn.params.forEach((p, i) => base.declare(p.name, tys[i]!, false));
   }
 
   private computeCaptures(arrow: ArrowFunction, scope: Scope): { name: string; ty: Ty }[] {

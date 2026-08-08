@@ -390,9 +390,9 @@ standalone column is the one that tells you what to fix:
 | `parser.ts` | `NT1009` 1030:66 | optional element access — **`?.[]`** (was `NT0001` 225:95, `satisfies`, until the satisfies lane) |
 | `checker.ts` | `NT1009` | `Record<string, number \| "var">` — a general union |
 | `codegen.ts` | `NT1015` 475:3 | **`static`** class member |
-| `modules.ts` | `NT1015` | **generic class method** — `private t<T extends Ty \| undefined>` |
+| `modules.ts` | `NT1015` | ~~**generic class method** — `private t<T extends Ty \| undefined>`~~ — also stale: by the time it was next measured this was `(p)` at 41, contextual typing. See below |
 | `driver.ts` | `NT1017` 27:1 | the **text-asset import** (12 of them, 305 KB of C) |
-| `lexer.ts` | `NT2001` | `ESCAPES` declared `Map<string, string>` but initialized with an **object literal** |
+| `lexer.ts` | `NT2001` | ~~`ESCAPES` declared `Map<string, string>` but initialized with an **object literal**~~ — **WRONG, corrected below**: it was `(n = 1)` at 146, a parameter default. Re-measure before you believe a row here |
 | `coverage-preprocess.ts` | `NT1606` | array **`.push`** (arrays are immutable) |
 | `diagnostics.ts` | `NT2001` | narrowing does not flow across `\|\|` |
 | `cli.ts` | `NT2001` | `process.stdout is not supported` (was `'source' declared string but initialized with undefined` until the definite-assignment lane: `let source: string;` assigned inside a `try` is now compiled, not refused — see docs/divergences.md) |
@@ -543,6 +543,52 @@ Because node has no `type: "text"` attribute, this construct cannot be different
 usual way — see `docs/divergences.md`, which records the divergence and how the oracle is split
 (a `main.ts`/`oracle.ts` twin per fixture, identical below the binding).
 
+### Re-measured after PARAMETER-TYPE INFERENCE — and two recorded blockers were WRONG
+
+Two rows of the SH6 table above named the wrong construct. Both were re-measured, not re-read.
+
+- **`lexer.ts` `NT2001` was not "`ESCAPES` declared `Map<string,string>`, initialized with an
+  object literal."** It was `cannot infer type of arrow parameter 'n'` at **src/lexer.ts:146**,
+  `const advance = (n = 1) => { … }` — a parameter with a default and no annotation.
+- **`modules.ts` was not blocked on a parameter default at all**, which a handoff note claimed.
+  Standalone it was `cannot infer type of arrow parameter 'p'` at **src/modules.ts:41**,
+  `const defaultRead: ReadModule = (p) => readFileSync(p, "utf8")` — an arrow whose parameter
+  type comes from the *annotation on the binding*, with no default anywhere in sight. (Its
+  *linked* blocker was, and still is, `parser.ts`'s `?.[]`; the standalone column is the one
+  that says whose blocker it is.)
+
+Two independent gaps, both now closed:
+
+1. **A parameter takes its type from its DEFAULT**, TypeScript's widening rule
+   (`tests/cases/conformance/es6/defaultParameters/`): `(n = 1)` is `number`, `(s = "a")` is
+   `string`, `(b = true)` is `boolean`. Applied in every parameter position at once — arrows,
+   named functions, methods, constructors — the way the Stage-15 binding-pattern desugaring was.
+   A default whose type we cannot pin down (`undefined`, `null`, `[]`) is refused with a hint;
+   TypeScript's answers there are `any` and `any[]`, and guessing is the silent wrong answer.
+2. **An arrow takes its parameter types from the annotation it is assigned to.** The dispatch in
+   `Checker.infer` passed `undefined` where every other call site passed the contextual type, so
+   a contextually typed *callback* compiled and a contextually typed *binding* never did.
+
+| Module | Before | After |
+|---|---|---|
+| `lexer.ts` | `NT2001` — `(n = 1)` at 146 | **`NT1031`** — `line++` inside that same arrow's body, a write to a captured binding |
+| `modules.ts` | `NT2001` — `(p)` at 41 | **`NT2001`** — `Stmt[]` erases to `number[]` at 229, so `s.kind` fails: the general-union alias, not a new gap |
+| `diagnostics.ts` | (unchanged code) | unblocked at `label = "here"`, src/diagnostics.ts:332 — the same default rule |
+| every other module | — | **unchanged** |
+
+Two checker ESCAPES fell out with it, both programs node runs and clang then rejected — the
+diagnostic contract failing outright, which is worse than a refusal:
+
+- `function f(s = "abc") { return s + 1 }` → `'%t0' defined with type 'ptr' but expected 'double'`.
+  The signature table typed the parameter from its default; the *body* scope declared it `number`.
+- `function f(n: string = 1)` → `floating point constant invalid for type`. An annotated default
+  was reshaped when assignable and **silently ignored** when not. tsc rejects it (TS2322); so do we now.
+
+**Still open, and pinned rather than fixed** (`test/param-defaults.test.ts`): a default does not
+make a *value arrow's* parameter optional at the CALL site. A nativets function type is a flat
+`(number)=>number` with no notion of optionality, so `const f = (n = 1) => …; f()` is refused on
+arity while the `function` spelling honours it — a real asymmetry between the two spellings.
+Relatedly, an explicit `undefined` argument is refused rather than triggering the default.
 ### CONSTRUCT CENSUS — counting the construct, not the first blocker
 
 Every table above this one is a **first-blocker** table, and this document already carries a

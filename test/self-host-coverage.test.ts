@@ -203,6 +203,24 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     //   not break this gate, it revealed that the gate had been measuring a compiler
     //   that crashed. A histogram assembled from a pass that dies partway is not a
     //   smaller histogram, it is a wrong one.
+    //
+    //   NT1031's count is ONE, and the parameter-default lane's merge is the reason to
+    //   say so explicitly. That lane predicted a SECOND site: `const advance = (n = 1) =>
+    //   { … line++ … }` at src/lexer.ts:146 used to fail as NT2001 "cannot infer type of
+    //   arrow parameter 'n'" — a type ERROR, which this histogram deliberately does not
+    //   count — and inferring the parameter from its default makes it type-check, so the
+    //   statement should fall one layer deeper onto the NAMED `line++` capture write.
+    //
+    //   It does, and this histogram still does not see it. MEASURED, not assumed:
+    //   `coverage(src/lexer.ts).blockers` is `[]` while the standalone pipeline on the
+    //   same file reports NT1031 on that exact `line++`. The two instruments disagree
+    //   because `coverage` runs a recovery preprocess (src/coverage-preprocess.ts) and
+    //   the real pipeline does not — the same confound that once had cli.ts reported
+    //   `parsed: true` with zero blockers while it did not survive the lexer.
+    //
+    //   So: a clean row here is NOT evidence a module is clean. The standalone column of
+    //   test/selfhost-ratchet.test.ts is the one that answers that question, and for
+    //   lexer.ts the two now say opposite things.
     expect([...hist.keys()].sort()).toEqual(
       ["NT1003", "NT1014", "NT1015", "NT1023", "NT1031"],
     );
