@@ -2334,7 +2334,7 @@ class Parser {
     while (i < raw.length) {
       if (raw[i] === "\\") {
         // The LEXER's decoder, not a second smaller one — see `decodeEscapeAt`.
-        const [text, next] = decodeEscapeAt(raw, i, tok.line, tok.col);
+        const { text, next } = decodeEscapeAt(raw, i, tok.line, tok.col);
         // NT1705, the same rule `tokenize` puts on a quoted string: a template's escapes
         // are decoded here, so this is the only place a `\0`/`\x00` inside one is visible.
         if (text.indexOf(nul) >= 0) throw nulLiteral("this template literal", tok.line, tok.col);

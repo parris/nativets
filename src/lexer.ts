@@ -156,7 +156,20 @@ function escapeChar(e: string): string {
  * maps `'`, `"` and `` ` `` to themselves; `\$` (template-only) falls through to `$` for
  * the same reason node does — an unrecognized escape is the character itself.
  */
-export function decodeEscapeAt(raw: string, i: number, line: number, col: number): [string, number] {
+/**
+ * The result of decoding one escape: the decoded text, and the index just past it.
+ *
+ * A RECORD, not the `[string, number]` tuple this started as. nativets has no tuple
+ * type — a mixed array literal is `NT2001 array elements must share a type (got string,
+ * number)` — so the tuple made `src/lexer.ts` un-self-hostable the moment it landed, and
+ * moved the module's first blocker without changing its NT CODE. That is exactly the
+ * regression `test/selfhost-ratchet.test.ts` was built to catch, and it caught this one:
+ * the lane that introduced the tuple re-checked its work by comparing NT codes, which
+ * were NT2001 before and after, so its own check passed while the gap widened.
+ */
+export interface DecodedEscape { text: string; next: number; }
+
+export function decodeEscapeAt(raw: string, i: number, line: number, col: number): DecodedEscape {
   const e = raw[i + 1] ?? "";
   // LegacyOctalEscapeSequence (ECMAScript Annex B.1.2). `\1`…`\7`, and `\0` when a
   // DECIMAL DIGIT follows it — that combination is octal, not the NUL escape: node reads
@@ -186,7 +199,7 @@ export function decodeEscapeAt(raw: string, i: number, line: number, col: number
     if (h.length !== 2 || !isHexDigit(h[0]!) || !isHexDigit(h[1]!)) {
       throw new LexError(`Invalid \\x escape at ${line}:${col}`);
     }
-    return [String.fromCharCode(parseInt(h, 16)), i + 4];
+    return { text: String.fromCharCode(parseInt(h, 16)), next: i + 4 };
   }
   if (e === "u") {
     // `\uHHHH` and `\u{H+}` (ECMAScript UnicodeEscapeSequence). These were NOT escapes
@@ -207,7 +220,7 @@ export function decodeEscapeAt(raw: string, i: number, line: number, col: number
       const cp = parseInt(hex, 16);
       // > 0x10FFFF is "undefined Unicode code-point" — a SyntaxError, not a clamp.
       if (cp > 0x10ffff) throw new LexError(`Invalid \\u{…} escape at ${line}:${col}: ${hex} is above 10FFFF`);
-      return [String.fromCodePoint(cp), j + 1];
+      return { text: String.fromCodePoint(cp), next: j + 1 };
     }
     const h = (raw[i + 2] ?? "") + (raw[i + 3] ?? "") + (raw[i + 4] ?? "") + (raw[i + 5] ?? "");
     if (h.length !== 4 || !allHexDigits(h)) throw new LexError(`Invalid \\u escape at ${line}:${col}`);
@@ -215,9 +228,9 @@ export function decodeEscapeAt(raw: string, i: number, line: number, col: number
     // pair — a high-surrogate escape followed by a low-surrogate one — has to combine
     // into ONE astral character exactly as it does in node, which it does because both
     // code units land in the same JS string here.
-    return [String.fromCharCode(parseInt(h, 16)), i + 6];
+    return { text: String.fromCharCode(parseInt(h, 16)), next: i + 6 };
   }
-  return [escapeChar(e), i + 2];
+  return { text: escapeChar(e), next: i + 2 };
 }
 
 /** `^[0-9a-fA-F]+$`, and non-empty — nativets has no RegExp (NT1027), so it is a loop. */
@@ -383,7 +396,7 @@ export function lex(source: string): Token[] {
       let s = "";
       while (i < source.length && source[i] !== quote) {
         if (source[i] === "\\") {
-          const [text, next] = decodeEscapeAt(source, i, line, col);
+          const { text, next } = decodeEscapeAt(source, i, line, col);
           s += text;
           advance(next - i);
         } else {
