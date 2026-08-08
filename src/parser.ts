@@ -1834,6 +1834,20 @@ class Parser {
         left = { kind: "InstanceOfExpr", object: left, className: cls.value };
         continue;
       }
+      // `k in o` — the key-presence test, at the same relational precedence. node answers
+      // it per VALUE at runtime; an object's key set is fixed by its TYPE here, so the two
+      // part company on an optional field exactly as `Object.keys` does. Refused with the
+      // reason rather than left to fall out of the expression parser as `Expected ')'`,
+      // which blamed a paren and bucketed a real gap as a syntax error.
+      if (t.type === "ident" && t.value === "in" && BIN["<"]!.prec >= minPrec) {
+        throw nyi(
+          NYI.OBJECT,
+          `\`in\` (the key-presence operator) at ${t.line}:${t.col}`,
+          "an object's key set is fixed at compile time here (it comes from the TYPE), so `in` can only ever restate the declared shape — " +
+          "it could not see a key added or removed at runtime, which is the only reason to ask. " +
+          "Test the field instead (`o.k !== undefined`), or use a `Map` and `m.has(k)` for a key set that varies at runtime",
+        );
+      }
       if (t.type !== "punct") break;
       const info = BIN[t.value];
       if (!info || info.prec < minPrec) break;

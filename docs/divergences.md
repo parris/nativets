@@ -653,6 +653,49 @@ at `xs.filter((_, i) => i !== 0)`. Pinned in `test/delete-refusal.test.ts`.
 Not to be confused with `Map#delete` / `Set#delete`, which are supported and return a **new**
 collection (see *Immutable `Map`/`Set`* above) — that is a method, not the `delete` operator.
 
+### Key ENUMERATION over an optional field is refused (same root cause)
+
+The key set of an object is decided **at compile time**, from its type. node decides it **at
+runtime**, per value. An **optional** field is exactly where those part company, so these five
+constructs are refused when the object type carries one:
+
+| Construct | Code |
+|---|---|
+| `Object.keys` / `Object.values` / `Object.entries` / `Object.getOwnPropertyNames` | `NT1002` |
+| `for (const k in o)` | `NT1010` |
+| `k in o` (the operator) | `NT1002` |
+
+This closed a **silent wrong answer** — it is not a new restriction on working code:
+
+```ts
+type O = { a?: number; b: number };
+const o: O = { b: 2 };
+Object.keys(o);           // node ["b"]   — nativets printed ["a","b"], exit 0, no diagnostic
+for (const k in o) …      // node "b"     — nativets printed "a" then "b"
+```
+
+There is no compile-time answer available: `f({})` and `f({a: 1})` reach the same call site with
+the same static type and different correct key sets. The workaround is to read the field
+(`o.a !== undefined`), or to use a `Map` when the key set genuinely varies at runtime.
+
+Three things to know about the edges:
+
+- **`a: T | undefined` is refused too, and that is over-refusal, not a bug.** nativets encodes
+  `a?: T` and `a: T | undefined` identically (`?U<T>`), so it cannot tell them apart — even
+  though node always has the key present for the second. Refusing both is the reject-don't-
+  miscompile side of the trade; spell the field required if you need it enumerated.
+- **`a: T | null` is NOT refused.** That is the `?N` arm, whose key is always present in node, so
+  the static key list is already correct and stays accepted.
+- **`JSON.stringify` agrees with node here by LUCK, not by design.** It skips slots holding
+  `undefined`, which happens to match node's "absent keys are not serialized" — but it is the
+  *value* being consulted, not a presence bit, so `{a: undefined, b: 2}` serializes as `{"b":2}`
+  in both, while node's `Object.keys` still reports `["a","b"]`. Anyone changing that walk should
+  not assume the agreement is load-bearing.
+
+`in` is refused **unconditionally**, not just over optional fields: over a fixed shape it could
+only restate the declared type, and seeing a key appear or disappear at runtime — the only reason
+to ask — is precisely what this object model cannot do.
+
 ### Strings are reference-counted, not linear (memory model)
 
 Heap strings keep JS **value semantics** (free copy/alias) and are reclaimed by **reference
