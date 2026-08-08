@@ -377,6 +377,28 @@ All now match node. Two consequences worth knowing:
   is omitted, as node does. An `undefined` inside an ARRAY is unaffected — `null` is what node
   writes there.
 
+### Optional element access `a?.[i]` — the guard is on the BASE only
+
+`a?.[i]` short-circuits the whole chain to `undefined` when `a` is `null` or `undefined`, and
+does **not evaluate the index** in that case (observable through a side effect — tested). It is
+the same lowering as `a?.b`: one guarded unit with a shared short-circuit join, so a trailing
+non-optional link (`a?.[0].name`) is skipped too, and the result is an A2 nullable box like every
+other `?.` result. All node-differential.
+
+The one deliberate disagreement is **not** new, and is the reason this entry exists: `?.` guards
+the base being nullish, and changes **nothing** about the index rule. A *present* base indexed out
+of range still faults — `NT2002` when the length and index are both statically known, otherwise
+the Stage 41 runtime panic — where node yields `undefined`. So:
+
+| | node | ours |
+|---|---|---|
+| `a?.[0]`, `a` absent | `undefined` | `undefined` |
+| `a?.[idx()]`, `a` absent | index not evaluated | index not evaluated |
+| `a?.[99]`, `a` present, len 2 | `undefined` | **panics** (Stage 41) |
+
+Reading the guard as "make this read safe" is therefore wrong: it makes the *base* safe. Use
+`.at(i)` for node's out-of-range `undefined`, exactly as with a plain `a[i]`.
+
 ### Actor messages (B3 v5) — structured messages are COPIES, and the shape is checked
 
 node has no actors, so the whole surface (`spawn`/`send`/`receive`) is behavioral, not
@@ -954,7 +976,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1006 | spread | M2 | arrays/objects; spreading a VALUE into a call is supported only where the arity is known or the fold has an identity — see below |
 | NT1007 | destructuring | M2 | arrays/objects |
 | NT1008 | rest parameters | M2 | arrays |
-| NT1009 | optional `?.()` call / `?.[]` index / general or >2-arm unions | M2 | `?.` on object fields, `??`, and restricted `T\|undefined`/`T\|null` are ✅ (A2); the reused code now rejects only the out-of-subset forms |
+| NT1009 | optional `?.()` call / general or >2-arm unions | M2 | `?.` on object fields **and `?.[i]` element access** ✅, `??`, and restricted `T\|undefined`/`T\|null` are ✅ (A2); the reused code now rejects only the out-of-subset forms |
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |

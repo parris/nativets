@@ -2051,10 +2051,20 @@ class Parser {
         expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), loc: { line: dot.line, col: dot.col, file: this.file } };
       } else if (this.at("?.")) {
         const t = this.eat("?.");
-        // Optional call `?.()` and optional index `?.[]` are out of the A2 subset.
+        // Optional CALL `?.()` is still out of the A2 subset — a call has no nullable-box
+        // result shape here. Optional ELEMENT access `?.[i]` is the same guard as `?.b`
+        // with an index in place of a field name, so it reuses the whole opt-chain path.
         if (this.at("(")) throw nyi(NYI.OPTIONAL_CHAIN, `optional call '?.()' at ${t.line}:${t.col}`);
-        if (this.at("[")) throw nyi(NYI.OPTIONAL_CHAIN, `optional element access '?.[]' at ${t.line}:${t.col}`);
-        expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        if (this.at("[")) {
+          this.eat("[");
+          const index = this.parseExpression();
+          this.eat("]");
+          // Carries its location like a written `a[i]`: `?.` guards the BASE, so a present
+          // base out of range still panics and reports here.
+          expr = { kind: "IndexExpr", object: expr, index, optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        } else {
+          expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        }
       } else if (this.at("[")) {
         const br = this.eat("[");
         const index = this.parseExpression();

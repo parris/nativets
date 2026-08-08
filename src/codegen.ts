@@ -1734,54 +1734,11 @@ class FnGen {
         return { v: arr, ty };
       }
 
-      case "IndexExpr": {
-        const obj = this.genExpr(e.object);
-        if (obj.ty === "Dyn") { // dynamic element (numeric) or field (string literal) -> Dyn
-          if (e.index.kind === "StringLiteral") {
-            const t = this.fresh();
-            this.emit(`${t} = call ptr @nt_dyn_get_field(ptr ${obj.v}, ptr ${this.mod.intern(e.index.value)})`);
-            return { v: t, ty: "Dyn" };
-          }
-          const idx = this.genExpr(e.index);
-          const t = this.fresh();
-          this.emit(`${t} = call ptr @nt_dyn_elem(ptr ${obj.v}, double ${idx.v})`);
-          return { v: t, ty: "Dyn" };
-        }
-        if (isObjectTy(obj.ty)) {
-          // object["key"] — string-literal index is a static field (checker-enforced)
-          const key = (e.index as Extract<Expr, { kind: "StringLiteral" }>).value;
-          const ft = fieldType(obj.ty, key)!;
-          const gep = this.fresh();
-          this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, key)}`);
-          const slot = this.fresh();
-          this.emit(`${slot} = load i64, ptr ${gep}`);
-          return { v: this.fromSlot(slot, ft), ty: ft };
-        }
-        const idx = this.genExpr(e.index);
-        // A WRITTEN index (`e.loc` set by the parser) reads through the bounds-PANIC
-        // accessor; a synthesized one (destructuring, spread-call) keeps the plain read.
-        const loc = this.locArg(e.loc);
-        if (obj.ty === "string") {
-          const t = this.fresh();
-          this.emit(loc
-            ? `${t} = call ptr @nt_str_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
-            : `${t} = call ptr @js_str_char_at(ptr ${obj.v}, double ${idx.v})`);
-          return { v: t, ty: "string" };
-        }
-        if (isBytesTy(obj.ty)) {
-          const t = this.fresh();
-          this.emit(loc
-            ? `${t} = call double @nt_bytes_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
-            : `${t} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
-          return { v: t, ty: "number" };
-        }
-        const el = elemTy(obj.ty);
-        const slot = this.fresh();
-        this.emit(loc
-          ? `${slot} = call i64 @nt_arr_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
-          : `${slot} = call i64 @nt_arr_get(ptr ${obj.v}, double ${idx.v})`);
-        return { v: this.fromSlot(slot, el), ty: el };
-      }
+      case "IndexExpr":
+        // `a?.[i]`, or a link trailing one, lowers as ONE guarded unit — same dispatch the
+        // MemberExpr case uses, so a chain mixing `.b` and `[i]` stays a single chain.
+        if (isNullableTy(e.ty ?? "") && isOptChainExpr(e)) return this.genOptChain(e);
+        return this.genElemRead(this.genExpr(e.object), e);
 
       case "ObjectLiteral": {
         const ty = e.ty as Ty;
@@ -3430,16 +3387,76 @@ class FnGen {
   }
 
   /**
+   * Read `[index]` from an ALREADY-LOWERED, non-nullable object value. The sibling of
+   * `genFieldRead`, and the shared tail of the `IndexExpr` case: split out so an optional
+   * element access reaches the identical read after its nullish guard rather than growing
+   * a parallel lowering. The index is lowered HERE, so a caller that has branched first
+   * (see `genOptChain`) never evaluates it on the short-circuit path.
+   */
+  private genElemRead(obj: Val, e: Extract<Expr, { kind: "IndexExpr" }>): Val {
+    if (obj.ty === "Dyn") { // dynamic element (numeric) or field (string literal) -> Dyn
+      if (e.index.kind === "StringLiteral") {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_dyn_get_field(ptr ${obj.v}, ptr ${this.mod.intern(e.index.value)})`);
+        return { v: t, ty: "Dyn" };
+      }
+      const idx = this.genExpr(e.index);
+      const t = this.fresh();
+      this.emit(`${t} = call ptr @nt_dyn_elem(ptr ${obj.v}, double ${idx.v})`);
+      return { v: t, ty: "Dyn" };
+    }
+    if (isObjectTy(obj.ty)) {
+      // object["key"] — string-literal index is a static field (checker-enforced)
+      const key = (e.index as Extract<Expr, { kind: "StringLiteral" }>).value;
+      const ft = fieldType(obj.ty, key)!;
+      const gep = this.fresh();
+      this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, key)}`);
+      const slot = this.fresh();
+      this.emit(`${slot} = load i64, ptr ${gep}`);
+      return { v: this.fromSlot(slot, ft), ty: ft };
+    }
+    const idx = this.genExpr(e.index);
+    // A WRITTEN index (`e.loc` set by the parser) reads through the bounds-PANIC
+    // accessor; a synthesized one (destructuring, spread-call) keeps the plain read.
+    const loc = this.locArg(e.loc);
+    if (obj.ty === "string") {
+      const t = this.fresh();
+      this.emit(loc
+        ? `${t} = call ptr @nt_str_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
+        : `${t} = call ptr @js_str_char_at(ptr ${obj.v}, double ${idx.v})`);
+      return { v: t, ty: "string" };
+    }
+    if (isBytesTy(obj.ty)) {
+      const t = this.fresh();
+      this.emit(loc
+        ? `${t} = call double @nt_bytes_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
+        : `${t} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
+      return { v: t, ty: "number" };
+    }
+    const el = elemTy(obj.ty);
+    const slot = this.fresh();
+    this.emit(loc
+      ? `${slot} = call i64 @nt_arr_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
+      : `${slot} = call i64 @nt_arr_get(ptr ${obj.v}, double ${idx.v})`);
+    return { v: this.fromSlot(slot, el), ty: el };
+  }
+
+  /**
    * Lower an optional chain to a single unit. Flatten `head .m1 .m2 …` into ordered
    * links; walk them, and at every step where the current value is nullable, guard:
    * if nullish, branch to a SHARED `undefined`-result join (short-circuiting the rest
    * of the chain — no trailing member is evaluated); otherwise unbox and read on.
    * The result is always a nullable box (tag 0 on any short-circuit, else present).
    */
-  private genOptChain(e: Extract<Expr, { kind: "MemberExpr" }>): Val {
-    const links: { prop: string }[] = [];
+  private genOptChain(e: Extract<Expr, { kind: "MemberExpr" | "IndexExpr" }>): Val {
+    // A link is either `.prop` or `[index]`, so the LINK NODES THEMSELVES are the list —
+    // no side record, and an index link keeps its own `loc` for the bounds panic. Holding
+    // the node also means the index expression travels UNEVALUATED: it is lowered only
+    // inside the continuation block past the guard, which is what makes
+    // `a?.[sideEffect()]` skip the side effect when `a` is nullish, as node does.
+    const links: Extract<Expr, { kind: "MemberExpr" | "IndexExpr" }>[] = [];
     let node: Expr = e;
-    while (node.kind === "MemberExpr") { links.unshift({ prop: node.property }); node = node.object; }
+    while (node.kind === "MemberExpr" || node.kind === "IndexExpr") { links.unshift(node); node = node.object; }
     const resultSlot = this.slot(e.ty!); // holds the resulting nullable box (ptr)
     const nullJoin = this.label("ocnull");
     const endLbl = this.label("ocend");
@@ -3453,7 +3470,7 @@ class FnGen {
         const base = baseTy(cur.ty);
         cur = { v: this.fromSlot(this.nullVal(cur.v), base), ty: base }; // unbox the present value
       }
-      cur = this.genFieldRead(cur, link.prop);
+      cur = link.kind === "MemberExpr" ? this.genFieldRead(cur, link.property) : this.genElemRead(cur, link);
     }
     // Fall-through: every link read. Box the final value as present (or keep it if
     // the final field type is itself nullable).
