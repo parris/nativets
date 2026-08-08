@@ -169,21 +169,27 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     }
     // NT1027 (a regex literal) is new only as a NAME: it was inside the NT0001 bucket
     // until regex literals started lexing. Naming it is what makes it burnable-down.
-    // RE-MEASURED CENTRALLY after a twelve-lane round. NT0001 is back with ONE entry —
-    // codegen.ts:582, unmasked when static members cleared NT1015 — so the earlier
-    // "NT0001 is gone entirely" reading held only between two merges. NT1014 survives as
-    // `new Map([[k, v], …])` in ast.ts: the Set forms and the Map-COPY form compile now,
-    // but the ENTRIES form still needs a tuple type.
+    // RE-MEASURED CENTRALLY. NT0001 has LEFT this histogram entirely — the indexed-access
+    // lane named codegen.ts's last anonymous parse failure (now NT1023), so every code
+    // here is a named feature. NT1014 survives as `new Map([[k, v], …])` in ast.ts: the
+    // Set forms and the Map-COPY form compile now, the ENTRIES form still needs a tuple.
     expect([...hist.keys()].sort()).toEqual(
       ["NT1003", "NT1009", "NT1014", "NT1015", "NT1023", "NT1027", "NT1606"],
     );
-    // NT1009 FELL from 4 to 3 — the first time the largest bucket has ever shrunk, and the
-    // general-union lane's whole result. It is still the largest, but the code now spans
-    // three DIFFERENT features (general unions are done; what is left is the intersection
-    // `&` in ast.ts and optional element access `?.[]` in parser.ts), so "NT1009 dominates"
-    // no longer means "unions dominate". Asserting the number, not just the ordering,
-    // because the next honest move is for this to keep falling.
-    expect(hist.get("NT1009")!).toBe(3);
+    // NT1009 has fallen 4 -> 3 -> 1 across three lanes, and NOTHING DOMINATES ANY MORE.
+    // The general-union lane took it from 4 to 3; the intersection lane took it from 3 to 1
+    // by retiring `Stmt[] & {…}` from ast.ts (two sites, a setter and a getter, which is
+    // why it fell by two rather than one).
+    //
+    // The single survivor is parser.ts's optional element access `?.[]` — which the note
+    // above predicted would be the last one standing. Note the code NT1009 spans three
+    // unrelated features (general unions, intersections, `?.[]`), so a count against this
+    // code has never meant "unions"; that is exactly why it is asserted per-feature here.
+    expect(hist.get("NT1009")!).toBe(1);
+    // No bucket exceeds 2, and the largest is NT1015 (generic class method + class field
+    // annotation in modules.ts). For the first time the frontier is FLAT — there is no
+    // single dominant blocker left to burn down, which changes what "next" means.
+    expect(Math.max(...hist.values())).toBe(2);
     expect(hist.get("NT1606")!).toBeLessThan(Math.max(...hist.values()));
   });
 
