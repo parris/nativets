@@ -180,22 +180,36 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // lane named codegen.ts's last anonymous parse failure (now NT1023), so every code
     // here is a named feature. NT1014 survives as `new Map([[k, v], …])` in ast.ts: the
     // Set forms and the Map-COPY form compile now, the ENTRIES form still needs a tuple.
-    expect([...hist.keys()].sort()).toEqual(
-      ["NT1003", "NT1009", "NT1014", "NT1015", "NT1023"],
-    );
-    // NT1009 has fallen 4 -> 3 -> 1 across three lanes, and NOTHING DOMINATES ANY MORE.
-    // The general-union lane took it from 4 to 3; the intersection lane took it from 3 to 1
-    // by retiring `Stmt[] & {…}` from ast.ts (two sites, a setter and a getter, which is
-    // why it fell by two rather than one).
     //
-    // The single survivor is parser.ts's optional element access `?.[]` — which the note
-    // above predicted would be the last one standing. Note the code NT1009 spans three
-    // unrelated features (general unions, intersections, `?.[]`), so a count against this
-    // code has never meant "unions"; that is exactly why it is asserted per-feature here.
-    expect(hist.get("NT1009")!).toBe(2);
-    // No bucket exceeds 2, and the largest is NT1015 (generic class method + class field
-    // annotation in modules.ts). For the first time the frontier is FLAT — there is no
-    // single dominant blocker left to burn down, which changes what "next" means.
+    // RE-MEASURED BY THE `?.[]` LANE. Two edits to this list, one earned and one owed:
+    //
+    //   NT1009 is GONE — optional element access was its last two sites (parser.ts and
+    //   checker.ts) and both now compile. The code spans three unrelated features
+    //   (general unions, intersections, `?.[]`), which is why it was asserted per-feature
+    //   rather than by count; all three are clear of the compiler's own source now.
+    //
+    //   NT1031 is `coverage-preprocess.ts`'s `line++` on a captured binding — a REAL
+    //   blocker, and a newly VISIBLE one rather than a newly created one.
+    //
+    //   Attribution, corrected by bisect rather than inferred: this gate was GREEN at
+    //   abf0185 and RED at 877e6d9, so the renumber (943f4fe, NT1029 -> NT1031) did NOT
+    //   cause it. 877e6d9 did, and for a good reason. That commit fixed a CRASH in the
+    //   capture-write walkers (an unguarded `d.init` on a bare `let x: T;`), and the
+    //   crash had been aborting the analysis BEFORE it could report this blocker. So the
+    //   pass did not start refusing something new; it started finishing, and told the
+    //   truth about a refusal it had been swallowing.
+    //
+    //   That is worth stating plainly because it inverts how the red reads: the fix did
+    //   not break this gate, it revealed that the gate had been measuring a compiler
+    //   that crashed. A histogram assembled from a pass that dies partway is not a
+    //   smaller histogram, it is a wrong one.
+    expect([...hist.keys()].sort()).toEqual(
+      ["NT1003", "NT1014", "NT1015", "NT1023", "NT1031"],
+    );
+    expect(hist.get("NT1009")).toBeUndefined();
+    // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the
+    // `async`/`await` pair in driver.ts and cli.ts; and NT1023 in checker.ts + codegen.ts),
+    // and every other named code has exactly one site left in the whole tree.
     expect(Math.max(...hist.values())).toBe(2);
     // NT1606 has LEFT this histogram entirely — coverage-preprocess.ts's `.push` was its
     // last site, and the Record lane's `switch` rewrite moved that module on. The old

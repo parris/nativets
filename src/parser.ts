@@ -86,6 +86,36 @@ function isSimplePath(e: Expr): boolean {
   return e.kind === "MemberExpr" && isSimplePath(e.object);
 }
 
+/**
+ * True if `e` is a member/element access carrying a `?.` anywhere to its left, i.e. an
+ * `OptionalExpression`. Deliberately a SYNTACTIC test on the tree the parser just built,
+ * which is what the spec rule is: `IsValidSimpleAssignmentTarget(OptionalExpression)` is
+ * `false`, so `a?.b = v`, `a?.[i] = v`, `a?.b++` and `a?.[i]++` are all EARLY errors —
+ * node reports a SyntaxError before running a line (test262
+ * `optional-chaining/static-semantics-simple-assignment.js` and
+ * `optional-chaining/update-expression-postfix.js`).
+ *
+ * We refuse here rather than in the checker because it is not a type question: a
+ * genuinely-mutable receiver (`Uint8Array`, a `@@mutable` record) reaches codegen with
+ * every type rule satisfied, and used to COMPILE — accepting a program node rejects
+ * outright. `isOptChainExpr` in checker.ts answers the same question for the type/lowering
+ * side; this is the parse-time half, and the two must agree on what "one chain" means.
+ */
+function isOptChainTarget(e: Expr): boolean {
+  if (e.kind === "MemberExpr") return !!e.optional || isOptChainTarget(e.object);
+  if (e.kind === "IndexExpr") return !!e.optional || isOptChainTarget(e.object);
+  return false;
+}
+
+/** The shared refusal for `?.` in a write position — one message for all four spellings. */
+function optChainWriteError(what: string): never {
+  throw parseError(
+    `'?.' cannot appear in a write position: ${what}`,
+    "an optional chain is not a valid assignment target (node reports a SyntaxError). " +
+    "Guard the base and write through a plain access instead — `if (a) { a[i] = v; }`",
+  );
+}
+
 // A parser is a CURSOR: `this.pos` advances, `this.typeAliases` accumulates. That is real
 // in-place mutation of one owned object, so it is `@@mutable` (docs/decorators.md) — spelled
 // as a PRAGMA comment because this file must satisfy two toolchains at once: bun runs it
@@ -2017,10 +2047,12 @@ class Parser {
       // `Uint8Array` (node allows `u[i] = v`) is accepted. The parser can't know the
       // type, so it emits an IndexAssign and lets type inference decide.
       if (left.kind === "IndexExpr") {
+        if (isOptChainTarget(left)) optChainWriteError("`a?.[i] = v`");
         const op = this.next().value as any;
         return { kind: "IndexAssign", op, object: left.object, index: left.index, value: this.parseAssign(), loc: left.loc };
       }
       if (left.kind === "MemberExpr") {
+        if (isOptChainTarget(left)) optChainWriteError("`a?.b = v`");
         // Field assignment `o.f = v`. The parser can prove only the SYNTACTIC case —
         // `this.f` inside a member body, where the constructor is building the instance
         // or the method is a setter (docs/decorators.md). Whether any OTHER receiver may
@@ -2211,6 +2243,8 @@ class Parser {
    * `Uint8Array` element and rejects an immutable array/object element.
    */
   private updateTarget(target: Expr): Expr {
+    // `++`/`--` is a read AND a write, so the same early error applies as for `=`.
+    if (isOptChainTarget(target)) optChainWriteError("`a?.b++` / `a?.[i]++`");
     if (target.kind === "MemberExpr") {
       // Same split as plain assignment: `this.f` is decided here (syntax), every other
       // receiver is deferred to the checker, which knows whether it is `@@mutable`.
@@ -2268,10 +2302,20 @@ class Parser {
         expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), loc: { line: dot.line, col: dot.col, file: this.file } };
       } else if (this.at("?.")) {
         const t = this.eat("?.");
-        // Optional call `?.()` and optional index `?.[]` are out of the A2 subset.
+        // Optional CALL `?.()` is still out of the A2 subset — a call has no nullable-box
+        // result shape here. Optional ELEMENT access `?.[i]` is the same guard as `?.b`
+        // with an index in place of a field name, so it reuses the whole opt-chain path.
         if (this.at("(")) throw nyi(NYI.OPTIONAL_CHAIN, `optional call '?.()' at ${t.line}:${t.col}`);
-        if (this.at("[")) throw nyi(NYI.OPTIONAL_CHAIN, `optional element access '?.[]' at ${t.line}:${t.col}`);
-        expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        if (this.at("[")) {
+          this.eat("[");
+          const index = this.parseExpression();
+          this.eat("]");
+          // Carries its location like a written `a[i]`: `?.` guards the BASE, so a present
+          // base out of range still panics and reports here.
+          expr = { kind: "IndexExpr", object: expr, index, optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        } else {
+          expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        }
       } else if (this.at("[")) {
         const br = this.eat("[");
         const index = this.parseExpression();
