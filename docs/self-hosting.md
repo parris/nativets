@@ -412,6 +412,66 @@ a hard failure. The remaining hole: a module regressing to a code **already** in
 invisible to both. Closing that means ratcheting per-module blocker codes, not just the
 tree-wide set.
 
+### `test/selfhost-ratchet.test.ts` — the hole, closed and demonstrated
+
+The hole was **wider than the paragraph above says**, and the reason is the confound in the
+table above: every existing instrument measures the whole-program **link**, where most
+modules report a *dependency's* blocker rather than their own. With six modules inheriting
+`parser.ts`'s `?.[]`, a refused construct planted in any one of them changes nothing that
+is measured. Reproduced, not argued — `new Map([[k, v], …])` (the entries form, still
+refused) planted at the top of `src/modules.ts` in a scratch tree:
+
+| Instrument | What it saw |
+|---|---|
+| `bootstrap.test.ts` phase floor | nothing — still `parsed` |
+| `bootstrap.test.ts` tree-wide code set | nothing — `NT1014` was already in it |
+| `sh6.test.ts` rung floor + per-module `code` map | nothing — the LINKED code is still the dependency's |
+| `self-host-coverage.test.ts` histogram | nothing — its checker contributes at most ONE blocker per file |
+| **`selfhost-ratchet.test.ts`** | **red, naming the module, both blockers, and the fix** |
+
+What it records, per `src/*.ts` module (the list is **discovered**, so a thirteenth module
+cannot arrive unmeasured), in `test/selfhost-ratchet.baseline.json`:
+
+- a **standalone** column — the module compiled as its own program, no link. This is the
+  column that says whose gap it is, and the only one in which a planted blocker is visible;
+- a **linked** column — the same pipeline through `linkProgram`, i.e. what stage-1 is;
+- for each: the pipeline **stage** that threw, the NT code, and the **message** with
+  positions normalized out. Identity is the message, not the code: `NT1009` alone spans
+  general unions, intersections and `?.[]`, so a code comparison cannot tell a module
+  regressing to a different `NT1009` from one holding still.
+
+**How it tells progress from regression** — the part a phase floor cannot do, since both
+movements sit inside `parsed`. A blocker is a function of exactly two inputs, so the
+baseline records the module's **source hash** next to the blocker and the causes separate:
+
+| | blocker changed |
+|---|---|
+| source hash **unchanged** | only the compiler can have done it → the frontier moved → **passes** |
+| source hash **changed** | the module's own source changed what stops it first → **fails**, with both blockers named |
+
+So the everyday case — a lane clears a blocker in `checker.ts` and nine modules move — stays
+green, which is the difference between a ratchet people read and one they rubber-stamp.
+Two rules are unconditional: a module that reached IR may never stop reaching IR (this is
+the only ratchet in the tree that protects a module that *already* self-compiles), and a
+blocker may never move to an **earlier** pipeline stage.
+
+`git` is deliberately not an input to any verdict — `actions/checkout` fetches depth 1, so a
+git-informed verdict would differ between a laptop and CI. It is used only to *enrich* a
+failure message with a before/after taken against the recorded revision.
+
+Re-record deliberately, in one command — nine parallel lanes move these numbers:
+
+```sh
+NT_RECORD=1 bun test test/selfhost-ratchet.test.ts   # rewrites the baseline, prints the diff
+```
+
+**What it still cannot see**, stated because an instrument that overstates is worse than
+none: it is a **first**-blocker measurement, so a construct planted *behind* a module's
+existing blocker is invisible until that one clears (the same plant placed one line *below*
+`modules.ts`'s arrow-parameter blocker is not caught). And the standalone column is blind
+for a module whose first standalone error is the unlinked-import artifact — `driver.ts` and
+`coverage.ts` — whose rows are marked `artifact` for that reason.
+
 ### Re-measured after SHORT-CIRCUIT NARROWING — the `NT2001` bucket is empty
 
 The one `NT2001` on the frontier was a **false positive**: `src/diagnostics.ts:74`

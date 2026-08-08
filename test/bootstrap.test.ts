@@ -25,6 +25,21 @@
  * shows up as a deliberate baseline update, and a new blocker introduced by new
  * compiler code is caught immediately — the "keeping the gap from growing" lint
  * that docs/self-hosting.md asks for.
+ *
+ * ---- WHAT THIS FILE DOES NOT CATCH (and what does) ----
+ * Two ratchets live here: the per-module phase floor above, and the set of NT codes
+ * present TREE-WIDE (the "blocker tiers behind the wall" test), so a NEW code is a hard
+ * failure. Neither sees a module regressing to a code ALREADY in the set — and worse,
+ * both measure the whole-program LINK, where most modules report a DEPENDENCY's blocker
+ * rather than their own, so a refused construct planted in such a module moves nothing
+ * here at all. Reproduced: `new Map([[k, v], …])` at the top of `src/modules.ts` leaves
+ * every assertion in this file green.
+ *
+ * `test/selfhost-ratchet.test.ts` closes that: per module, the blocker's STAGE + CODE +
+ * MESSAGE in a STANDALONE column (no link — the only column that says whose gap it is),
+ * ratcheted against the module's source hash so the frontier moving stays green and a
+ * planted blocker reds. Neither file subsumes the other: this one owns the phase scale
+ * and the tree-wide picture, that one owns per-module blocker identity.
  */
 
 import { test, expect, describe } from "bun:test";
