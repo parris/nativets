@@ -514,16 +514,57 @@ variable-key index would answer `undefined` where node answers a function. Index
 a non-literal key therefore stays refused, and a `Map` is the sound alternative: node's own
 `m.get("toString")` is `undefined`, which we match exactly.
 
-**What to write instead:** build the dictionary with `new Map<K, V>()` and `.set(k, v)`, reading
-it with `.get(k)`. If the key set really is fixed, annotate the exact object shape
-(`{ n: string, t: string }`) — but only where every read uses a **literal** key. The compiler's
-own lexer took a third option for its escape table: a `switch`, which is what a hand-written
-lexer would reach for anyway (`escapeChar`, `src/lexer.ts`).
+**What to write instead:** build the dictionary with `new Map<K, V>()` and a `.set(k, v)` chain,
+reading it with `.get(k)`. Note that the **entries-array constructor is not available** —
+`new Map([["n","\n"]])` is `NT1014` ("the entries form needs a `[key, value]` tuple type we do not
+have yet; use `.set`"), so a table of any size becomes a `.set` chain. If the key set really is
+fixed, annotating the exact object shape (`{ n: string, t: string }`) also works — but only where
+every read uses a **literal** key. The compiler's own lexer took a third option for its escape
+table: a `switch`, which is what a hand-written lexer would reach for anyway and which reads
+better than eight chained `.set`s (`escapeChar`, `src/lexer.ts`).
 
 **Known imprecision:** `Record` and `Map` erase to the same `Ty`, so the two are the same type to
 the checker; only the diagnostic distinguishes them, by keeping the annotation's leading
 identifier as written (`annotHead`, `src/ast.ts`). A `Record`-annotated **parameter** is simply a
 `Map` parameter, with no trace of the spelling.
+
+#### STANDING CONCLUSION — variable-key indexing cannot match node under ANY representation
+
+> Stated as a conclusion, not a status, because it does not depend on what we implement next.
+
+**`o[k]` with a non-literal `k` cannot be made node-exact by any representation available to
+us**, because node resolves it through `Object.prototype` and nativets has no prototype chain.
+Whatever the value is backed by — a slot array, a HAMT, a comparison chain — `o["toString"]` is a
+function in node and is not one here. Only a real prototype chain closes it, which this language
+should not have.
+
+Two corollaries worth having in writing, because each looks like a fix until you check it:
+
+- **"Compile a literal-initialized `Record` to a real object and lower `rec[e]` to a comparison
+  chain over its own keys."** Tempting, and the reasoning that gets you there is sound as far as
+  it goes: objects are immutable (Stage 29), so a literal's key set is fixed *forever* — there is
+  no `o[k] = v` that could add one — which means the key set is static and only the QUERY is
+  dynamic. It still ships a silent wrong answer: the chain answers `undefined` for `toString` /
+  `constructor` / `hasOwnProperty` / `__proto__`, and `ESCAPES[e] ?? e` would take the fallback
+  where node takes the inherited function. That is exactly the expression that motivates the idea.
+- **"Accept an object literal where a `Map` is expected, so `Record` values can be built."** This
+  makes `Record` values *constructible* and thereby REACHES divergences that are unreachable
+  today: `console.log(rec)` prints `Map(1) {…}` where node prints `{ n: '\n' }`, and
+  `JSON.stringify` differs too. It would add two silent wrong answers to remove one refusal.
+
+**Why today's behaviour is already safe**, which is the justification the mapping never had
+written down: nativets objects have no prototype chain *and* the literal-key path refuses
+inherited names outright ("Property 'toString' does not exist on `{n:string}`"), so the question
+never gets asked. A `Map` is sound on the same axis — node's own `m.get("toString")` is
+`undefined`, matching us exactly.
+
+**The design that would actually work, sketched and NOT taken.** A comparison chain over the
+object's own keys, and *on a miss* a check against the ~12 `Object.prototype` names that
+**panics** rather than returning `undefined` — reusing the Stage 41 out-of-bounds panic mechanism
+(the headline divergence at the top of this file). It is sound because it never answers where it
+would be wrong, and cheap because only misses pay for the extra comparisons. It is a **stage, not
+a lane**: it needs the chain in codegen, the name table in the runtime, and the panic path. Do not
+implement the chain without the miss guard — the guard is the entire reason the chain is legal.
 
 ### Map/Set iteration: insertion-ordered (node-matched), but the iterators are arrays
 
