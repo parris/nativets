@@ -348,6 +348,32 @@ export function mutationError(message: string, hint: string): NTError {
   return new NTError({ code: "NT1606", message, milestone: "later", hint });
 }
 
+/**
+ * A binding read before it is definitely assigned (NT1600, ≈ rustc E0381 "used binding
+ * is possibly-uninitialized"). Sits at the head of the NT16xx ownership/memory-model
+ * band, one below the move checker's NT1601 (≈ E0382) — the same rustc numbering the
+ * ownership pass mirrors, and the same kind of flow fact.
+ *
+ * `let x: T;` with a `T` that does not admit `undefined` starts with NO value: there is
+ * nothing of type `T` to put there. node would print `undefined` for a read before the
+ * first assignment, but we have no slot to hold `undefined` at that type, so a read on
+ * any path that has not assigned yet is REFUSED rather than served a zero. The two
+ * fixes are always the same, so the hint names both.
+ *
+ * `let x: T | undefined;` is a DIFFERENT program — it admits `undefined`, is genuinely
+ * initialized to it, and never reaches this check.
+ */
+export function useBeforeAssign(message: string, at?: { line: number; col: number }, hint?: string): NTError {
+  if (at === undefined) return new NTError({ code: "NT1600", message, milestone: "later", hint });
+  return new NTError({
+    code: "NT1600",
+    message: `${message} at ${at.line}:${at.col}`,
+    milestone: "later",
+    hint,
+    spans: [{ line: at.line, label: "read here, before any assignment reaches it", primary: true }],
+  });
+}
+
 export function parseError(message: string): NTError {
   return new NTError({ code: "NT0001", message });
 }
