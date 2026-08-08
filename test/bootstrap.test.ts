@@ -243,7 +243,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1009", "NT1015", "NT1023", "NT1606", "NT2001"],
+      ["NT1009", "NT1023", "NT1606", "NT2001"],
     );
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
@@ -318,10 +318,21 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // reaching parser.ts's `?.[]`, and the other four inherit through the link. Clearing
     // `?.[]` should collapse most of this bucket at once, which is why it is the single
     // highest-leverage blocker on the board.
+    // NINE of twelve, and this is CONSOLIDATION rather than regression — read the blame
+    // column. Only ast.ts and parser.ts OWN an NT1009. checker.ts arrived by clearing its
+    // regex; modules.ts by clearing its generic method; the rest inherit through the link,
+    // and SIX of them trace to parser.ts's `?.[]` directly or transitively.
+    //
+    // Which makes `?.[]` the highest-leverage blocker on the board by a wide margin:
+    // nothing else on this list moves more than one module.
     expect(byCode["NT1009"]!.sort()).toEqual(
       ["ast.ts", "checker.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts",
-       "driver.ts", "ownership.ts", "parser.ts"],
+       "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
+    // NT1015 is empty — the generic-method lane cleared modules.ts's, and codegen.ts's
+    // static-member site was cleared earlier. (A fact about today; this file has been
+    // wrong three times treating an emptied bucket as an invariant.)
+    expect(byCode["NT1015"]).toBeUndefined();
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
     // the fresh-receiver lane) -> NT1006 (`Math.max(...)`, cleared by the variadic lane) ->
     // back to NT1606, this time a `.push` on a NAMED accumulator. That last shape is

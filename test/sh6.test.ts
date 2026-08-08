@@ -265,7 +265,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   "ownership.ts": { rung: 0, code: "NT1009", blame: "checker.ts" },
   "driver.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
   "cli.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
-  "modules.ts": { rung: 0, code: "NT1015", blame: "self" },
+  // Cleared its generic method; now inherits parser.ts's `?.[]` through the link.
+  "modules.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
   "coverage-preprocess.ts": { rung: 0, code: "NT1009", blame: "ast.ts" },
 };
 
@@ -448,12 +449,13 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     for (const e of MODULES) {
       try { parse(read(e.file)); parseClean.push(e.file); } catch { /* blocked at parse */ }
     }
-    // SEVEN now, not six: `driver.ts` joined when `export async function` landed. The
-    // point of this test is unchanged and is the uncomfortable one — parsing clean has
-    // never once correlated with being closer to compiling.
+    // EIGHT now. `driver.ts` joined when `export async function` landed; `modules.ts` when
+    // generic class methods did. The point of this test is unchanged and is the
+    // uncomfortable one — parsing clean has never ONCE correlated with being closer to
+    // compiling. Eight of twelve modules parse their own source; ZERO produce IR.
     expect(parseClean.sort()).toEqual([
       "cli.ts", "coverage-preprocess.ts", "coverage.ts", "diagnostics.ts", "driver.ts",
-      "lexer.ts", "ownership.ts",
+      "lexer.ts", "modules.ts", "ownership.ts",
     ]);
     // ...and not one of them reaches IR.
     for (const file of parseClean) {
