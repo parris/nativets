@@ -543,7 +543,6 @@ Because node has no `type: "text"` attribute, this construct cannot be different
 usual way — see `docs/divergences.md`, which records the divergence and how the oracle is split
 (a `main.ts`/`oracle.ts` twin per fixture, identical below the binding).
 
-<<<<<<< HEAD
 ### Re-measured after PARAMETER-TYPE INFERENCE — and two recorded blockers were WRONG
 
 Two rows of the SH6 table above named the wrong construct. Both were re-measured, not re-read.
@@ -590,7 +589,6 @@ make a *value arrow's* parameter optional at the CALL site. A nativets function 
 `(number)=>number` with no notion of optionality, so `const f = (n = 1) => …; f()` is refused on
 arity while the `function` spelling honours it — a real asymmetry between the two spellings.
 Relatedly, an explicit `undefined` argument is refused rather than triggering the default.
-=======
 ### CONSTRUCT CENSUS — counting the construct, not the first blocker
 
 Every table above this one is a **first-blocker** table, and this document already carries a
@@ -664,7 +662,6 @@ setups silently misses matches, which would make every number above too small.
 array `.push` from a same-named method on a user object, and it cannot see a call reached
 through an alias. The numbers are an upper bound on sites and a *lower* bound on effort. They
 are still the right order of magnitude, and an order of magnitude was exactly what was missing.
->>>>>>> main
 
 ---
 

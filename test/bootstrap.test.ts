@@ -264,12 +264,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // blocker moving with the module's source UNCHANGED is auto-classified as the frontier
     // advancing and stays green). Recorded here as the reason this list keeps churning.
     expect(Object.keys(byCode).sort()).toEqual(
-<<<<<<< HEAD
-      ["NT1009", "NT1023", "NT1030", "NT1031", "NT1606"],
-=======
-      ["NT1023", "NT1030", "NT1606", "NT2001"],
->>>>>>> main
+      ["NT1023", "NT1030", "NT1031", "NT1606"],
     );
+    // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
+    // for re-measuring instead of picking one. This lane's list still carried NT1009
+    // (main had emptied it with `?.[]`) and kept NT2001; main's list carried NT2001 (this
+    // lane had emptied it by inferring a parameter's type from its default) and had no
+    // NT1031. The true set is the union of what each branch cleared, minus what the other
+    // cleared, and no reviewer holding two diffs can compute that by reading.
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
     // and NT1017, this lane had cleared NT1014, and neither could see the other.
