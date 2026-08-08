@@ -237,8 +237,12 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // link surfaced the deepest one they share.
   "ast.ts": { rung: 0, code: "NT1030", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
-  // `new Set(iterable)` compile; the module now stops on the ESCAPES object literal.
-  "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
+  // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
+  // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
+  // `cannot infer type of arrow parameter 'n'` at src/lexer.ts:146, `const advance = (n = 1)
+  // => …`. Inferring a parameter's type from its default cleared it; the module now walks
+  // into `advance`'s BODY and stops on `line++`, a write to a captured binding.
+  "lexer.ts": { rung: 0, code: "NT1031", blame: "self" },
   // Round the houses: NT1606 (`[...spans].sort()`) -> NT1006 (`Math.max(...spans.map(…))`)
   // -> back to NT1606, now a `.push` on a NAMED accumulator — a shape the fresh-receiver
   // rule deliberately does not cover, because permitting it needs in-place mutation of an
@@ -553,9 +557,19 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // forward TYPE reference (NT1030), inherited by every module that imports ast.ts,
       // which is all of them. The construct string is updated, not dropped; naming it is
       // the whole point of the assertion.
+      //
+      // RE-MEASURED AGAIN by the type-hoisting lane, and this is the interesting part: the
+      // forward reference was MASKING the real blocker. Top-level type declarations hoist
+      // now, so ast.ts:521's `as Identifier` resolves and 19 of ast.ts's 64 type
+      // declarations along with it — but the other 45 (`Expr`, `Stmt` and their members)
+      // are one mutually-recursive cluster, which hoisting cannot touch and no reordering
+      // can fix. Same code, same rung, DIFFERENT construct: still NT1030, now for the
+      // reason that actually gates self-hosting. Lifting it means a nominal, by-reference
+      // form in `Ty` (docs/divergences.md), not a parser change.
       expect(`stage-1 rung ${m.rung}, ${m.code}`)
         .toBe(`stage-1 rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}`);
-      expect(m.error).toContain("before its declaration");
+      expect(m.error).toContain("recursive type");
+      expect(m.error).toContain("contains itself through 'Expr'");
       return;
     }
 

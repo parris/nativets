@@ -1,4 +1,4 @@
-# Divergences & unsupported features
+> §A.2), unchanged.
 
 ### THE HEADLINE DIVERGENCE — an out-of-bounds index PANICS
 
@@ -490,6 +490,69 @@ Two refusals, both of the reject-don't-miscompile kind:
 - **A NUL byte in the file is `NT1704`.** nativets strings are NUL-terminated (`js_str_len` is
   `strlen`), so an inlined NUL would truncate the constant at run time while the `.ll` still
   carried every byte. Text imports are for text; refuse rather than truncate.
+
+### A NUL in a string LITERAL is `NT1705` — the same rule, on the other doors
+
+`NT1704` guarded exactly one way for a NUL to enter a string: a text import's bytes. Every
+other way in was a **silent wrong answer**, the worst outcome the prime directive names:
+
+```ts
+const s = "a\0b";
+console.log(s.length);   // node: 3     nativets, before NT1705: 1
+```
+
+A nativets string is a NUL-terminated UTF-8 `const char *` (`runtime.c`: `js_str_len` **is**
+`strlen`), so a NUL inside a value ends it. Nothing warned; the `.ll` carried all three bytes
+and the program answered `1`.
+
+**The rule.** A string or template literal whose **decoded value** contains U+0000 is refused
+with `NT1705`. The check is on the value, not on the syntax, so every spelling lands on it at
+once — `\0`, `\x00`, `\u0000`, `\u{0}`, and a raw NUL byte pasted into the source, in both
+quoted strings and templates (including the quasis around a `${…}`). It is checked over the
+token stream, so an object key, an import specifier and a string literal *type* are covered
+too, not just expressions.
+
+**This refuses programs node accepts** — hence its place here. node prints `3`; we refuse.
+The alternative was to keep printing `1`.
+
+**What it does NOT cover, and cannot.** A compile-time rule only sees compile-time values. A
+NUL computed at RUN time still truncates silently, and these all remain open:
+
+| runtime door | node | nativets |
+|---|---|---|
+| `String.fromCharCode(0).length` | `1` | `0` |
+| `("a" + String.fromCharCode(0) + "b").length` | `3` | `2` |
+| `readFileSync(binaryFile, "utf8").length` (NUL inside) | full length | truncated at the NUL |
+| `JSON.parse` of JSON text holding a `\u0000`, then `.length` | `3` | `1` |
+
+`String.fromCharCode(0)` in particular **must not** be refused: `src/lexer.ts` and
+`src/modules.ts` both call it deliberately (it is how the compiler spells a NUL now that a
+`"\0"` literal is `NT1705`), so refusing it would widen the self-hosting gap. Closing the
+runtime doors needs a length-carrying string representation, or a runtime panic at each
+producer — neither is in this change. Until then a self-compiled nativets cannot detect its
+own NULs, the same caveat `src/modules.ts` already carries for `NT1704`.
+
+### Octal escapes (`\1`…`\7`, and `\0` followed by a digit) are `NT0001`
+
+Establishing what `\0` means turned up a neighbouring silent wrong answer: `"a\1b"` decoded
+to the character `"1"` (`charCodeAt` 49) where node says 1. `\1`…`\7` are ECMAScript Annex
+B.1.2 **LegacyOctalEscapeSequence**, and so is `\0` when a decimal digit follows it —
+`"\01"` is U+0001, *not* a NUL then `"1"`.
+
+These are **not** a divergence: they are SyntaxErrors in strict mode, and a TypeScript module
+is strict, so node refuses them too (`SyntaxError: Octal escape sequences are not allowed in
+strict mode`). They are `NT0001`, the ordinary syntax band. A bare `\0` is untouched — it is
+the NUL escape, legal in strict mode, and refused as `NT1705` for its own reason.
+
+`\8` and `\9` are **NonOctalDecimalEscapeSequence**, decode to `"8"`/`"9"` exactly as node
+does, and stay accepted (test262 `legacy-non-octal-escape-sequence-8-non-strict.js`).
+
+> Fixing this needed `\uHHHH` / `\u{H+}` to exist at all: `\u` was not an escape the lexer
+> knew, so it fell through to "an unknown escape is the character itself", and `"a\u0041b"`
+> compiled to the seven characters `au0041b` where node gives `aAb`. That is now implemented
+> and node-differentially tested (`test/nul-string.test.ts`), and it is also what routes a
+> `\u0000` into `NT1705`. `String#length` over the result is still UTF-8 byte-oriented —
+> §A.2, unchanged.
 
 `node` is our oracle. Two kinds of "we differ from node" exist, tracked separately.
 
@@ -1198,7 +1261,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
-| NT1030 | a type name used above its declaration, and any **recursive** type | later | type names resolve in SOURCE ORDER; a self-containing type needs a nominal `Ty` — see below |
+| NT1030 | a **recursive** type — one that contains itself, directly or mutually | later | top-level type declarations now HOIST, so ordering is no longer a refusal; a self-containing type needs a nominal `Ty` — see below |
 
 ### Spreading a value INTO a call — the three cases, and why only two compile
 
@@ -1368,14 +1431,27 @@ would silently change what the program does.
 
 | NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`) |
 
-### Type names resolve in SOURCE ORDER, and recursive types are not representable (NT1030)
+### Type declarations HOIST; recursive types are still not representable (NT1030)
 
-TypeScript resolves type names anywhere in a file; nativets' parser is single-pass and
-resolves them **in source order**. A name used above its declaration is refused with
-`NT1030`. This is a real divergence — node runs such a program, and TypeScript accepts it —
-and it is a refusal, never a miscompile.
+TypeScript hoists every type declaration in a scope — a type may be used above the line
+that declares it, and order is irrelevant. nativets now matches that for **top-level**
+`type`/`interface` declarations: `hoistTypeDecls` (`src/parser.ts`) resolves them to a
+fixpoint before the file proper is parsed, so each round resolves whatever its dependencies
+allow and the declarations settle in dependency order regardless of how they are written.
 
-It used to be neither. `resolveNamed` fell back to `number` for any unregistered name, so
+Two things stay outside it, both refusals rather than miscompiles:
+
+- **A type declared inside a function or block** stays in source order. Its meaning can
+  depend on where it sits — a type PARAMETER in scope resolves to a `#T` marker, not to a
+  shape — so hoisting it to file scope could change what it resolves to. `NT1030` says so,
+  and the hint names the fix (move it to the top level).
+- **A cycle.** The fixpoint identifies these exactly: what is still unresolved when a round
+  makes no progress, and is blocked on something else that is also unresolved, contains
+  itself. Those get the *recursion* wording, naming the type the cycle closes through
+  (`recursive type 'TemplateLiteral' — it contains itself through 'Expr'`), and explicitly
+  do **not** get told to reorder.
+
+Before hoisting, this was neither. `resolveNamed` fell back to `number` for any unregistered name, so
 the annotation was silently erased and the program failed later against the *value*:
 `'x' declared number but initialized with {kind:string,a:number}`. That message names
 neither the type nor the cause, and it cost a round of self-hosting work — `ForStmt.init:
@@ -1386,12 +1462,11 @@ refused; an imported or stdlib name still falls back, which is what keeps the bl
 at one file — measured across all 141 files in `src/` and `test/fixtures/`.
 
 **Recursion is the harder half, and it is not a parser problem.** `interface N { next: N }`
-cannot be fixed by reordering: the reference resolves while `N` itself is still being
-parsed. The real obstacle is the type encoding. `Ty` is a **structural string**
-(`src/ast.ts`) — `{a:number,b:string}`, `number[]` — chosen precisely so `===` is type
-comparison. A type that contains itself has no finite structural string, so no amount of
-two-pass resolution helps; a two-pass parser would replace the silent erasure with infinite
-expansion.
+cannot be fixed by reordering, and hoisting does not touch it either. The real obstacle is
+the type encoding. `Ty` is a **structural string** (`src/ast.ts`) — `{a:number,b:string}`,
+`number[]` — chosen precisely so `===` is type comparison. A type that contains itself has
+no finite structural string, so no amount of multi-pass resolution helps; a resolver that
+did not stop would replace the silent erasure with infinite expansion.
 
 Supporting it honestly requires a **nominal, by-reference form in `Ty`** — a type that names
 a declaration instead of spelling out its shape — plus every structural comparison,
@@ -1399,6 +1474,42 @@ widening, and layout decision taught to resolve through it. That is a foundation
 the type representation, not a union feature and not a small one. Until it exists, the
 compiler's own `Expr`/`Stmt` unions (`src/ast.ts`) are outside the subset nativets compiles,
 and **that, not any single union or intersection, is what gates `src/ast.ts` self-hosting**.
+
+### A parameter default makes a `function` parameter optional — but not a value ARROW's
+
+A parameter's **type** now comes from its default in every parameter position — `(n = 1)` is
+`number`, `(s = "a")` is `string`, `(b = true)` is `boolean`, TypeScript's widening rule. What
+does **not** hold uniformly is the *arity* half:
+
+```ts
+function f(n = 1) { return n + 1; }
+f();                        // 2 — the default fires, node-exact
+
+const g = (n = 1) => n + 1;
+g();                        // node: 2      nativets: [NT2001] 'g' expects 1 arguments, got 0
+```
+
+A named function has a real signature (`Sig.required` / `Sig.defaults`, `src/checker.ts`) and
+codegen materializes the missing arguments at the call site. A **value arrow** is a closure, and a
+nativets function type is the flat string `(number)=>number` — it has no notion of an optional
+parameter, so a short call has nothing to consult. It is a refusal, not a wrong answer, and it is
+an asymmetry between two spellings of the same thing rather than a considered rule.
+
+Two related refusals of node-correct programs, from the same missing notion of optionality:
+
+- **An explicit `undefined` argument does not trigger the default.** `f(undefined)` prints `2` in
+  node (`undefined` is exactly what "argument absent" means in JS); we refuse the argument —
+  `'f' arg 0 expects number, got undefined` — so the rule is unreachable rather than wrong.
+- **A default may not name a parameter to its left.** `function f(a, b = a)` is ordinary
+  JavaScript; codegen materializes defaults before the parameter allocas are stored, so accepting
+  it would emit a load from an undefined `%a.addr`. Refused with `'a' is not defined`.
+
+What a default **may not be**: `undefined`, `null`, or `[]`. TypeScript answers those with `any`,
+`null`/`undefined` and `any[]`; none is a nativets type, so each is refused with a hint naming the
+two ways out rather than guessed. Pinned in `test/param-defaults.test.ts`.
+
+Lifting the arrow case means giving function types a required-arity — every `funcParams` consumer,
+assignability, and a call-site pad in codegen. A real feature, not a patch.
 
 ### Closures capture by VALUE — a write to a capture is refused (`NT1029`)
 
