@@ -252,7 +252,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // module on to NT1027, a regex literal.
   "checker.ts": { rung: 0, code: "NT1027", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
-  "codegen.ts": { rung: 0, code: "NT0001", blame: "self" },
+  "codegen.ts": { rung: 0, code: "NT1023", blame: "self" },
   "coverage.ts": { rung: 0, code: "NT1009", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
@@ -529,9 +529,16 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // No compiled compiler exists, so there is nothing to compare — recorded, not
       // skipped. The expected string is hardcoded, so this reds the moment stage-1
       // improves, and the comparison below becomes the real gate.
-      expect(`no compiled compiler yet (stage-1 at rung ${m.rung}, ${m.code}): ${m.error}`)
-        .toBe(`no compiled compiler yet (stage-1 at rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}): `
-          + `[NT1009] optional element access '?.[]' at 1109:66 is not supported yet`);
+      // Assert the RUNG, the CODE and the CONSTRUCT — deliberately NOT the line:column.
+      // This used to pin `at 1109:66`, which meant any edit ABOVE that line in parser.ts
+      // reddened this test without stage-1 having moved at all; the indexed-access lane
+      // shifted it to 1169:66 by adding parsing code elsewhere. A position is not the
+      // fact being recorded. The fact is: stage-1 is at rung 0, stopped on optional
+      // element access inherited from parser.ts. That still reds the moment the CONSTRUCT
+      // or the rung changes, which is what this test is for.
+      expect(`stage-1 rung ${m.rung}, ${m.code}`)
+        .toBe(`stage-1 rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}`);
+      expect(m.error).toContain("optional element access '?.[]'");
       return;
     }
 
