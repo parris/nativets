@@ -1066,10 +1066,34 @@ What this buys and what it costs:
     `const f = async () => …` is guarded exactly as `async function f` is, and so are a direct
     alias chain (`const g = f; g()`), an immediately-invoked `(async () => …)()`, and an
     `export const f = async () => …` seen from an importing module.
-    **Known boundary:** the guard is NAME tracking in the parser, not dataflow, so an async
-    function that escapes into a *function parameter* (`run(f)`, then `f()` inside `run`) or is
-    returned as a value and called through the result is **not** reached today. Closing it needs
-    the async-ness to survive on the TYPE, which `Promise<T>` erasure currently discards.
+    It holds for a **higher-order** async function too — one passed as a VALUE and called
+    through a parameter, or handed back as a return value. That was the last silent wrong
+    answer in this area: `callit(one)` where `function callit(f: () => Promise<number>)
+    { return f(); }` printed `1` where node prints `Promise { 1 }`. The guard is NAME
+    tracking and a name does not survive a call, so what carries the fact across the
+    boundary is the **declared type**: a parameter or return type written
+    `(…) => Promise<T>` is exactly as promise-returning as an `async function`, and a call
+    through it needs `await` like any other. `Promise<T>` erases to `T` in type position
+    (below), so this is read syntactically while the annotation is still tokens.
+    A parameter is scoped to its own body, so two unrelated functions each taking an `f`
+    do not contaminate each other.
+    **The escape itself is checked**, because the type is only load-bearing if it is true:
+    handing an async value to a parameter (or returning it where the return type says)
+    *not* `(…) => Promise<T>` is `NT1020`. `function twice(f: () => number)` given an async
+    arrow used to compute `1 + 1` = `2`; node concatenates two pending promises
+    (`[object Promise][object Promise]`), and tsc rejects the assignment outright — we
+    answered something neither of them says. An **unknown** callee (a method, a builtin, a
+    value) counts as an escape too, since it declares no parameter to carry the fact.
+    **Deliberate over-rejection.** A promise that is threaded through un-awaited and only
+    awaited further up (`function callit(f: () => Promise<number>) { return f(); }` with
+    `await callit(one)` at the top) produces node's answer here, but is still refused —
+    exactly as the pre-existing guard already refuses the same shape for a *named* async
+    function (`function callit() { return one(); }`). Knowing which of these is safe is a
+    taint analysis over promise values; refusing the un-awaited call is the same rule
+    everywhere, and `await` at the inner call site is always the fix.
+    **Still out of reach:** an async function stored in an array or an object field — those
+    are `NT1001`/`NT1002` (no heap function values yet), so they are refused before the
+    async question arises rather than by this rule.
   - The diagnostic points at the **actor model** (`spawn`/`send`/`receive`, Stage 22/27/31), which
     is nativets' concurrency primitive. Promises may simply be the wrong abstraction here.
 - `Promise<T>` in **type position** is erased to `T` (as are `Awaited<T>` and friends), so
