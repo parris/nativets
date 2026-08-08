@@ -109,6 +109,10 @@ describe("immutable-by-default: in-place mutation is rejected (NT1606)", () => {
     const hint = rejectHint(`const a: number[] = [1, 2]; a.push(3); console.log(a.length);`);
     expect(hint).toContain("[...arr, x]");
     expect(hint).toContain("acc = [...acc, x]");
+    // …and says it does not copy. Without this the hint reads as "rewrite your loop to
+    // be quadratic" and nobody believes it — node's `[...out, x]` accumulator really IS
+    // O(n²) (12.4s at 100k appends, vs 21ms for the same program built here).
+    expect(hint).toContain("not a copy per element");
   });
 
   test("immutable replacements still compile (spread append, .with, object spread)", () => {
@@ -169,6 +173,32 @@ console.log(__arrLive());`;
     const r = await compileAndRun(src);
     expect(r.stdout).toBe("x,x,x\n1\n"); // `out` is still in scope: exactly one live
     expect(r.exitCode).toBe(0);
+  });
+
+  /*
+   * The hint promises the accumulator is O(1) amortized, so pin the MECHANISM that makes
+   * it so. A timing assertion would be flaky under a loaded runner; the lowering is
+   * deterministic. `nt_arr_extend_own` is the consuming-append — it MOVES the old block
+   * into the new header instead of copying element by element. If a change makes the
+   * consuming-append stop firing here, this fails and the hint has become a lie.
+   *
+   * (Measured, for the record: node's own `[...out, x]` accumulator really is O(n²) —
+   * 12.4s for 100k appends, against 21ms for this program built here, scaling linearly
+   * at 100k/200k/400k. So the hint's claim is the surprising direction, and worth pinning.)
+   */
+  test("the accumulator lowers to a consuming append, not a copy per element", () => {
+    const ir = sourceToIR(`
+function build(n: number): number {
+  let out: number[] = [];
+  for (let i = 0; i < n; i++) out = [...out, i];
+  return out.length;
+}
+console.log(build(3));`);
+    const body = ir.split("\n").filter((l) => !l.startsWith("declare"));
+    expect(body.some((l) => l.includes("call void @nt_arr_extend_own"))).toBe(true);
+    // …and exactly one free for the superseded array: not zero (a leak), not two (a
+    // double free). This is the assertion the .push double-free would have tripped.
+    expect(body.filter((l) => l.includes("call void @nt_arr_free")).length).toBe(1);
   });
 
   const NODE_CASES: { name: string; code: string }[] = [

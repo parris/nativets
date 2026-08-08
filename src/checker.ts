@@ -2702,8 +2702,12 @@ class Checker {
       // the one-shot spread: `[...arr, x]` answers "append once" but not "build this up
       // in a loop", which is the shape that actually reaches here. The reassignment form
       // is not a copy per element — codegen's consuming-append (`consumingSpread`)
-      // lowers it to an in-place append whenever nothing else shares the storage.
-      case "push": throw mutationError("arrays are immutable: `.push` would mutate the array in place", "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign: `let acc: T[] = []; acc = [...acc, x]` — that appends in place when nothing else shares it");
+      // lowers it to an in-place append whenever nothing else shares the storage, so it
+      // is O(1) amortized. The hint SAYS so, because otherwise it reads as "rewrite your
+      // loop to be quadratic": under node that spelling really is O(n²) (12.4s for 100k
+      // appends, against 21ms for the same program built here), so the reader's
+      // scepticism is well earned and has to be answered in the hint itself.
+      case "push": throw mutationError("arrays are immutable: `.push` would mutate the array in place", "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage");
       // The rest of node's in-place mutators (stdlib Batch 1): same treatment as
       // .push/.pop — refuse and name the immutable replacement.
       case "fill": throw mutationError("arrays are immutable: `.fill` would overwrite the array in place", "build a new array instead, e.g. `arr.map(() => v)` for a same-length fill, or `arr.with(i, v)` for one slot");
