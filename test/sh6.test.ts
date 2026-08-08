@@ -235,7 +235,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // each other for NT1017; they now both blame `parser.ts`, whose `?.[]` they inherit
   // through the link. That is not a regression — they cleared their own blocker and the
   // link surfaced the deepest one they share.
-  "ast.ts": { rung: 0, code: "NT1009", blame: "self" },
+  "ast.ts": { rung: 0, code: "NT1030", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile; the module now stops on the ESCAPES object literal.
   "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
@@ -255,7 +255,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   "checker.ts": { rung: 0, code: "NT1009", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   "codegen.ts": { rung: 0, code: "NT1023", blame: "self" },
-  "coverage.ts": { rung: 0, code: "NT1009", blame: "ast.ts" },
+  "coverage.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -267,7 +267,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   "cli.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
   // Cleared its generic method; now inherits parser.ts's `?.[]` through the link.
   "modules.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
-  "coverage-preprocess.ts": { rung: 0, code: "NT1009", blame: "ast.ts" },
+  "coverage-preprocess.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
 };
 
 /*
