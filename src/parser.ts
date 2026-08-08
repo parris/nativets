@@ -7,8 +7,8 @@
  * them with a precise NT-coded diagnostic that `coverage` can report.
  */
 
-import { lex, LexError, type Token } from "./lexer.ts";
-import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnostics.ts";
+import { lex, LexError, decodeEscapeAt, type Token } from "./lexer.ts";
+import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral, NTError } from "./diagnostics.ts";
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
   isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
@@ -86,6 +86,36 @@ function isSimplePath(e: Expr): boolean {
   return e.kind === "MemberExpr" && isSimplePath(e.object);
 }
 
+/**
+ * True if `e` is a member/element access carrying a `?.` anywhere to its left, i.e. an
+ * `OptionalExpression`. Deliberately a SYNTACTIC test on the tree the parser just built,
+ * which is what the spec rule is: `IsValidSimpleAssignmentTarget(OptionalExpression)` is
+ * `false`, so `a?.b = v`, `a?.[i] = v`, `a?.b++` and `a?.[i]++` are all EARLY errors —
+ * node reports a SyntaxError before running a line (test262
+ * `optional-chaining/static-semantics-simple-assignment.js` and
+ * `optional-chaining/update-expression-postfix.js`).
+ *
+ * We refuse here rather than in the checker because it is not a type question: a
+ * genuinely-mutable receiver (`Uint8Array`, a `@@mutable` record) reaches codegen with
+ * every type rule satisfied, and used to COMPILE — accepting a program node rejects
+ * outright. `isOptChainExpr` in checker.ts answers the same question for the type/lowering
+ * side; this is the parse-time half, and the two must agree on what "one chain" means.
+ */
+function isOptChainTarget(e: Expr): boolean {
+  if (e.kind === "MemberExpr") return !!e.optional || isOptChainTarget(e.object);
+  if (e.kind === "IndexExpr") return !!e.optional || isOptChainTarget(e.object);
+  return false;
+}
+
+/** The shared refusal for `?.` in a write position — one message for all four spellings. */
+function optChainWriteError(what: string): never {
+  throw parseError(
+    `'?.' cannot appear in a write position: ${what}`,
+    "an optional chain is not a valid assignment target (node reports a SyntaxError). " +
+    "Guard the base and write through a plain access instead — `if (a) { a[i] = v; }`",
+  );
+}
+
 // A parser is a CURSOR: `this.pos` advances, `this.typeAliases` accumulates. That is real
 // in-place mutation of one owned object, so it is `@@mutable` (docs/decorators.md) — spelled
 // as a PRAGMA comment because this file must satisfy two toolchains at once: bun runs it
@@ -113,9 +143,39 @@ class Parser {
    * a name absent from this map is an import or a stdlib type and keeps the old fallback.
    */
   private declaredTypeLines = new Map<string, number>();
+  /**
+   * Where each TOP-LEVEL `type`/`interface` declaration starts, as a token index — the
+   * first token of the whole declaration, so any `export` or `@@`/`@` decorator prefix is
+   * included. This is the input to `hoistTypeDecls`, which re-parses each declaration on
+   * its own before the file proper.
+   *
+   * Top-level ONLY (brace depth 0). A `type` declared inside a function body or a generic
+   * function's scope can mean something different there (a type PARAMETER in scope resolves
+   * to a `#T` marker, not to a shape), so hoisting it to file scope could change what it
+   * resolves to. Those keep the old source-order behavior.
+   */
+  private typeDeclStarts = new Map<string, number>();
   /** The `interface`/`type` name whose own body is being parsed — a reference to it from
    *  in there is RECURSIVE, which reordering cannot fix, so it is reported differently. */
   private declaringType: string | undefined;
+  /**
+   * Type names `hoistTypeDecls` proved to be in a CYCLE, each mapped to the name it is
+   * blocked on (itself, for a directly self-recursive type). Hoisting resolves a forward
+   * reference; what it cannot resolve, however it is reordered, is a type that contains
+   * itself. Naming those as an ordering problem would be the exact misdirection NT1030
+   * exists to end, so `resolveNamed` reports them as recursion instead.
+   */
+  private cyclicTypes = new Map<string, string>();
+  /** The type name `resolveNamed` last refused on. Read by `hoistTypeDecls` off a
+   *  sub-parser to build the dependency edge it needs to tell a cycle from a chain. */
+  private blockedOn: string | undefined;
+  /** Every `class X` declared in this file. A class declares a TYPE too (`parseClass`
+   *  registers its instance shape), and classes are NOT hoisted — so the hoisting
+   *  fixpoint has to know to keep its hands off a declaration that names one. */
+  private declaredClassNames = new Set<string>();
+  /** True on a sub-parser built by `hoistTypeDecls` — i.e. this parse is resolving ONE
+   *  declaration ahead of the file, and may only use what hoisting can actually see. */
+  private hoisting = false;
   /** Top-level functions synthesized from class members (ctor + methods), appended to
    *  the program body after parsing so they hoist like ordinary function declarations. */
   private hoistedFns: Stmt[] = [];
@@ -144,7 +204,48 @@ class Parser {
   /** Arrow nodes that were written `async` — the bridge from an erased async ARROW back
    *  to the NAME it gets bound to, which is what `asyncFns` (and the guard) work in. */
   private asyncFnExprs = new Set<Expr>();
-  private identCalls: { node: Expr; name: string; line: number; col: number }[] = [];
+  /** HIGHER-ORDER async. `asyncFns` is name tracking, and a name does not survive a call
+   *  boundary: `run(one)` binds the async arrow to `run`'s parameter, where the guard has
+   *  never heard of it. The declared TYPE is what crosses that boundary — a parameter
+   *  annotated `(…) => Promise<T>` is exactly as promise-returning as an `async function`
+   *  — but `Promise<T>` ERASES to `T` in `parseGenericType`, so the fact has to be caught
+   *  syntactically while the annotation is being read. `parseFuncType` sets this to
+   *  whether the OUTERMOST function type it just parsed returns a written `Promise<…>`;
+   *  every reader resets it to false immediately before parsing the annotation. */
+  private fnTyReturnsPromise = false;
+  /** Parameter INDICES annotated `(…) => Promise<T>`, per callable — by function name for a
+   *  `function f(…)`, by arrow NODE for `const f = (…) => …` (bound to its name in
+   *  parseDeclarator). This is the only place the async-ness of an argument can be
+   *  RE-ESTABLISHED after it crosses a call, so it is also what says whether an escape is
+   *  safe: handing an async value to a parameter NOT in this set loses it silently. */
+  private promiseParamsByFn = new Map<string, Set<number>>();
+  private promiseParamsByArrow = new Map<Expr, Set<number>>();
+  /** Filled by whichever parameter list was parsed last; read immediately after. */
+  private lastPromiseParams = new Set<number>();
+  private lastPromiseParamNames = new Set<string>();
+  /** SCOPED, unlike `asyncFns`. A parameter name is not a module-level fact: two unrelated
+   *  functions both taking an `f` — one `() => Promise<number>`, one `() => number` — must
+   *  not contaminate each other, and putting parameters in the flat set did exactly that
+   *  (`twice(f: () => number) { return f() + f(); }` was rejected because a DIFFERENT
+   *  function's `f` was promise-typed). One frame per function/arrow body being parsed. */
+  private asyncParamScopes: Set<string>[] = [];
+  /** Every argument position that hands a function value to a call, checked once the whole
+   *  file is parsed — declarations hoist, so neither the callee nor an `async function`
+   *  argument is necessarily known yet at the call site. `scopedAsync` is the part that
+   *  CANNOT be re-derived later: it is the enclosing parameter scope at the call. */
+  private asyncEscapes: {
+    callee: string | null; index: number; argName: string | null;
+    asyncArrow: boolean; scopedAsync: boolean; line: number; col: number;
+  }[] = [];
+  /** `return <a function value>`, checked post-parse for the same hoisting reason. */
+  private returnEscapes: { argName: string | null; asyncArrow: boolean; scopedAsync: boolean; declared: boolean; line: number; col: number }[] = [];
+  /** Functions whose RETURN type is written `(…) => Promise<T>` — they hand an async
+   *  function back, so `pick()()` is a call to an async function. */
+  private returnsAsyncFn = new Set<string>();
+  /** Whether the function body currently being parsed declares such a return type — the
+   *  one thing that makes `return <an async function>` legal (see parseReturn). */
+  private returnsAsyncFnStack: boolean[] = [];
+  private identCalls: { node: Expr; name: string; line: number; col: number; scopedAsync?: boolean }[] = [];
   /** True while parsing the ctor body of a class that `extends Error` — enables `super(msg)`
    *  (desugared to `this.message = msg`, since nativets models Error as `{message:string}`). */
   private inErrorCtor = false;
@@ -187,16 +288,85 @@ class Parser {
     // Pre-scan for declared type names. Lexical on purpose: `interface`/`type` followed by
     // an identifier is unambiguous in the token stream, and this has to run BEFORE any
     // parsing so a name's declaration is known no matter where it sits in the file.
+    let depth = 0; // brace depth, so `typeDeclStarts` can keep to top-level declarations
     for (let i = 0; i + 1 < toks.length; i++) {
       const t = toks[i]!;
       const n = toks[i + 1]!;
-      if ((t.value === "interface" || t.value === "type") && t.type === "ident" && n.type === "ident") {
+      if (t.type === "punct" && t.value === "{") depth++;
+      else if (t.type === "punct" && t.value === "}") depth--;
+      else if (t.type === "ident" && t.value === "class" && n.type === "ident") this.declaredClassNames.add(n.value);
+      else if ((t.value === "interface" || t.value === "type") && t.type === "ident" && n.type === "ident") {
         // `type X =` only — `type` is not a reserved word, so `const type = 1` must not
         // register `= 1` as a declaration. `interface` is always a declaration.
         if (t.value === "interface" || toks[i + 2]?.value === "=" || toks[i + 2]?.value === "<") {
           if (!this.declaredTypeLines.has(n.value)) this.declaredTypeLines.set(n.value, t.line);
+          if (depth === 0 && !this.typeDeclStarts.has(n.value)) {
+            // Walk back over the declaration's prefix so a re-parse from here sees the
+            // whole thing: `export`, then any `@@attr` / `@wrapper` pair before it.
+            let s = i;
+            if (s > 0 && toks[s - 1]!.value === "export") s--;
+            while (s >= 2 && toks[s - 1]!.type === "ident" && (toks[s - 2]!.value === "@@" || toks[s - 2]!.value === "@")) s -= 2;
+            this.typeDeclStarts.set(n.value, s);
+          }
         }
       }
+    }
+  }
+
+  /**
+   * TYPE HOISTING. In TypeScript every type declaration in a scope is hoisted: a type may
+   * be used above the line that declares it, and source order is irrelevant (types are
+   * erased, so there is nothing to order). This parser, though, SUBSTITUTES a named type
+   * for its shape as it goes — `typeAliases` only holds what has been parsed so far — so a
+   * use above the declaration had no shape to substitute.
+   *
+   * Fix it by resolving the top-level type declarations FIRST, to a fixpoint. Each round
+   * re-parses every still-unresolved declaration on its own (a sub-parser over the same
+   * tokens, positioned at the declaration's first token, seeded with what is known so far);
+   * one that still names an unresolved type is deferred to the next round. A round that
+   * resolves nothing means the remainder is a CYCLE.
+   *
+   * A cycle is a DIFFERENT, unsolved problem — `Ty` is a flat string (src/ast.ts), so a
+   * type that contains itself has no finite encoding. Those names are simply left out of
+   * `typeAliases`, and the main parse below refuses them exactly as it always did. Forward
+   * reference and recursion stay two diagnostics, and the one that can be fixed is fixed.
+   *
+   * Nothing here reports errors. A declaration that fails for any OTHER reason (a general
+   * union, a bad decorator) is dropped from the fixpoint so the main parse reports it at
+   * its real position, with its own message — this pass never becomes the blamed frame.
+   */
+  private hoistTypeDecls(): void {
+    let pending = [...this.typeDeclStarts.keys()];
+    const blocker = new Map<string, string>(); // name -> the unresolved type it stopped on
+    while (pending.length) {
+      const deferred: string[] = [];
+      for (const name of pending) {
+        const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
+        sub.pos = this.typeDeclStarts.get(name)!;
+        sub.hoisting = true;
+        try {
+          sub.parseStatement();
+        } catch (e) {
+          if (e instanceof NTError && e.diag.code === NYI.FORWARD_TYPE.code) {
+            deferred.push(name);
+            if (sub.blockedOn !== undefined) blocker.set(name, sub.blockedOn);
+            continue;
+          }
+          continue; // a real refusal — leave it to the main parse, where it belongs
+        }
+        const ty = sub.typeAliases.get(name);
+        if (ty !== undefined) this.typeAliases.set(name, ty);
+      }
+      if (deferred.length < pending.length) { pending = deferred; continue; }
+      // No progress. Everything left is stuck — but on WHAT matters: stuck on another
+      // stuck name is a cycle (unfixable), stuck on a name that failed for its own reason
+      // is not, and must not be reported as recursion.
+      const stuck = new Set(deferred);
+      for (const name of deferred) {
+        const b = blocker.get(name);
+        if (b !== undefined && stuck.has(b)) this.cyclicTypes.set(name, b);
+      }
+      return;
     }
   }
 
@@ -231,24 +401,42 @@ class Parser {
     // Declared in this file, but not yet — so `typeAliases` does not have it and the
     // fallback below would erase it to `number`. That erasure is silent and the failure
     // it causes surfaces much later, blaming whatever value was annotated with it.
+    // HOIST MODE ONLY. A class declares a type as well, and classes are not part of the
+    // hoisting fixpoint (their instance shape is only known once `parseClass` runs). If a
+    // declaration names one, resolving it HERE would erase the class to `number` for every
+    // use above it — a silent erasure whose failure surfaces later, blaming the value. So
+    // the declaration is left unresolved and the main parse reports it on the TYPE, exactly
+    // as it did before hoisting existed. Never reaches the user: `hoistTypeDecls` catches it.
+    if (this.hoisting && this.declaredClassNames.has(id)) {
+      this.blockedOn = id;
+      throw nyi(NYI.FORWARD_TYPE, `type '${id}' names a class, which type hoisting does not resolve`);
+    }
     const declaredAt = this.declaredTypeLines.get(id);
     if (declaredAt !== undefined) {
       const used = this.toks[this.pos - 1]?.line ?? declaredAt;
+      this.blockedOn = id;
       // Two different failures, and the advice differs: one is fixed by moving a line,
       // the other cannot be fixed by reordering at all. Saying "declare it earlier" for a
       // recursive type would be the same kind of misdirection this diagnostic exists to
       // end, so each carries its own hint rather than the catalog's shared one.
-      throw id === this.declaringType
-        ? nyi(
-            NYI.FORWARD_TYPE,
-            `recursive type '${id}' — it refers to itself (declared at line ${declaredAt})`,
-            "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md",
-          )
-        : nyi(
-            NYI.FORWARD_TYPE,
-            `use of type '${id}' before its declaration (used at line ${used}, declared at line ${declaredAt})`,
-            "move the declaration above its first use — type names resolve in source order. If two types refer to EACH OTHER, that is recursion and reordering cannot fix it; see docs/divergences.md",
-          );
+      const through = id === this.declaringType ? id : this.cyclicTypes.get(id);
+      if (through !== undefined) {
+        throw nyi(
+          NYI.FORWARD_TYPE,
+          through === id
+            ? `recursive type '${id}' — it refers to itself (declared at line ${declaredAt})`
+            : `recursive type '${id}' — it contains itself through '${through}' (declared at line ${declaredAt})`,
+          "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md",
+        );
+      }
+      // Not a cycle, so it is genuinely unresolved: either a declaration this file rejects
+      // for its own reason (reported where it is declared), or a nested `type` that type
+      // hoisting deliberately leaves in source order (see `typeDeclStarts`).
+      throw nyi(
+        NYI.FORWARD_TYPE,
+        `use of type '${id}' before its declaration (used at line ${used}, declared at line ${declaredAt})`,
+        "top-level `type`/`interface` declarations are hoisted, so this one is not top-level (a type declared inside a function or block stays in source order) or its own declaration was rejected — move it to the top level, above its first use; see docs/divergences.md",
+      );
     }
     return (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty;
   }
@@ -279,9 +467,11 @@ class Parser {
   }
 
   parseProgram(): Program {
+    this.hoistTypeDecls();
     const body: Stmt[] = [];
     while (this.peek().type !== "eof") body.push(this.parseStatement());
     this.checkFloatingAsyncCalls(body);
+    this.checkAsyncEscapes();
     // Class members lower to top-level functions (`C.constructor`, `C.method`) so they
     // register + hoist alongside ordinary functions for the checker/codegen.
     body.push(...this.hoistedFns);
@@ -337,12 +527,59 @@ class Parser {
     const last = body[body.length - 1];
     const entrypoint = last && last.kind === "ExprStmt" ? last.expr : null;
     for (const c of this.identCalls) {
-      if (!this.asyncFns.has(c.name) || this.awaitedCalls.has(c.node) || c.node === entrypoint) continue;
+      if (!(c.scopedAsync || this.asyncFns.has(c.name))) continue;
+      if (this.awaitedCalls.has(c.node) || c.node === entrypoint) continue;
       throw nyi(
         NYI.ASYNC,
         `calling async function '${c.name}' without 'await' at ${c.line}:${c.col} (its value is a Promise under node; nativets runs it to completion immediately)`,
       );
     }
+  }
+
+  /**
+   * Reject handing an async function VALUE to a parameter that is not declared to receive
+   * one. `checkFloatingAsyncCalls` re-establishes async-ness on the far side of a call from
+   * the parameter's declared type (`(…) => Promise<T>`) — so an escape is safe exactly when
+   * the callee declares that type at that position. Everything else drops the promise on
+   * the floor: `twice(f: () => number)` given an async arrow computes `1 + 1` where node
+   * concatenates two pending promises. An unknown callee (a method, a builtin, a value) is
+   * also an escape, because there is no declared parameter to carry the fact.
+   */
+  private checkAsyncEscapes(): void {
+    const why = "(under node the value it returns is a Promise, so the promise would be dropped)";
+    for (const e of this.asyncEscapes) {
+      if (!this.isAsyncValue(e.asyncArrow, e.argName, e.scopedAsync)) continue;
+      if (e.callee !== null && this.promiseParamsByFn.get(e.callee)?.has(e.index)) continue;
+      const shown = e.argName !== null ? `'${e.argName}'` : "an async arrow";
+      const where = e.callee !== null ? `to '${e.callee}'` : "to a call";
+      throw nyi(
+        NYI.ASYNC,
+        `passing async function ${shown} as argument ${e.index + 1} ${where} at ${e.line}:${e.col} ` +
+        `— that parameter is not declared '(…) => Promise<T>' ${why}`,
+      );
+    }
+    for (const r of this.returnEscapes) {
+      if (r.declared || !this.isAsyncValue(r.asyncArrow, r.argName, r.scopedAsync)) continue;
+      const shown = r.argName !== null ? `'${r.argName}'` : "an async arrow";
+      throw nyi(
+        NYI.ASYNC,
+        `returning async function ${shown} at ${r.line}:${r.col} from a function whose return type ` +
+        `is not declared '(…) => Promise<T>' ${why}`,
+      );
+    }
+  }
+
+  /** Is this escaped value an async function? `scopedAsync` was decided at the escape (it
+   *  depends on the parameter scope there); a NAME is resolved now, so a hoisted
+   *  `async function` declared later than the escape still counts. */
+  private isAsyncValue(asyncArrow: boolean, name: string | null, scopedAsync: boolean): boolean {
+    return asyncArrow || scopedAsync || (name !== null && this.asyncFns.has(name));
+  }
+
+  /** Is `n` a `(…) => Promise<T>` parameter of some enclosing body being parsed? */
+  private inAsyncParamScope(n: string): boolean {
+    for (const s of this.asyncParamScopes) if (s.has(n)) return true;
+    return false;
   }
 
   // ---- types (permissive; we only need scalars precisely) ----
@@ -605,7 +842,21 @@ class Parser {
     }
     this.eat(")");
     this.eat("=>");
-    return `(${params.join(",")})=>${this.parseType()}` as Ty;
+    // Peek BEFORE parsing: `Promise<T>` erases to `T` (parseGenericType), so the only
+    // place the promise is still visible is the token stream. Assigned (not or-ed) after
+    // the return type is parsed, so the OUTERMOST function type has the last word:
+    // `() => (() => Promise<T>)` returns a function, not a promise.
+    const retPromise = this.peek().value === "Promise" && this.peek(1).value === "<";
+    const ret = this.parseType();
+    this.fnTyReturnsPromise = retPromise;
+    return `(${params.join(",")})=>${ret}` as Ty;
+  }
+  /** Parse a type annotation, reporting whether it is a promise-returning FUNCTION type
+   *  (`(…) => Promise<T>`) — see `fnTyReturnsPromise`. */
+  private parseTypeAsyncAware(): { ty: Ty; asyncFn: boolean } {
+    this.fnTyReturnsPromise = false;
+    const ty = this.parseType();
+    return { ty, asyncFn: this.fnTyReturnsPromise };
   }
   private parseObjectType(): Ty {
     this.eat("{");
@@ -1033,12 +1284,17 @@ class Parser {
     // cares about, exactly as `async function f` would — and a DIRECT alias (`const g = f`)
     // carries that along, so a chain `const c = b; const b = a` stays guarded.
     //
-    // BOUNDARY: this is name tracking, not dataflow. An async function that escapes into
-    // a PARAMETER (`run(one)` then `f()` inside `run`) is not reached, because the callee
-    // is only known interprocedurally. That residual hole is reported, not papered over.
+    // The escape into a PARAMETER (`run(one)` then `f()` inside `run`) is no longer a hole:
+    // it is carried by the declared TYPE instead of the name (see fnTyReturnsPromise) and,
+    // where the type does not carry it, refused at the argument (see checkAsyncEscapes).
     if (init !== undefined &&
         (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name)))) {
       this.asyncFns.add(name);
+    }
+    // `const run = (f: () => Promise<T>) => …` — bind the arrow's promise-typed parameters
+    // to the name calls will actually use, so `run(one)` is a legal escape.
+    if (init !== undefined && this.promiseParamsByArrow.has(init)) {
+      this.promiseParamsByFn.set(name, this.promiseParamsByArrow.get(init)!);
     }
     return { name, annot, annotHead, init };
   }
@@ -1170,6 +1426,8 @@ class Parser {
   private parseParamList(ctor = false): Param[] {
     this.eat("(");
     const params: Param[] = [];
+    const promiseIdx = new Set<number>();
+    const promiseNames = new Set<string>();
     if (!this.at(")")) {
       do {
         if (this.at(")")) break; // trailing comma in the param list
@@ -1188,7 +1446,15 @@ class Parser {
         const pname = this.expectIdent();
         const optional = this.at("?"); if (optional) this.eat("?"); // `f(x?: T)`
         let annot: Ty | undefined;
-        if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
+        if (this.at(":")) {
+          this.eat(":");
+          const t = this.parseTypeAsyncAware();
+          annot = t.ty;
+          // A `(…) => Promise<T>` parameter holds an async function, whoever passed it.
+          // Calling it is exactly `one()` on an `async function one`, so it gets the same
+          // floating-async guard — scoped to this body (see asyncParamScopes).
+          if (t.asyncFn) { promiseNames.add(pname); promiseIdx.add(params.length); }
+        }
         let def: Expr | undefined;
         if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
         if (paramProp && rest) throw nyi(NYI.CLASS_FEATURE, "a rest parameter cannot be a parameter property");
@@ -1198,6 +1464,8 @@ class Parser {
       } while (this.at(",") && (this.eat(","), true));
     }
     this.eat(")");
+    this.lastPromiseParams = promiseIdx;
+    this.lastPromiseParamNames = promiseNames;
     return params;
   }
 
@@ -1211,10 +1479,25 @@ class Parser {
     if (typeParams.length) this.typeParamScopes.push(new Set(typeParams));
     try {
       const params = this.parseParamList();
+      if (this.lastPromiseParams.size) this.promiseParamsByFn.set(name, this.lastPromiseParams);
+      const promiseNames = this.lastPromiseParamNames;
       const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
       let returnAnnot: Ty | undefined;
-      if (this.at(":")) { this.eat(":"); returnAnnot = this.parseType(); }
-      const body = [...prelude, ...this.parseBlock()];
+      let retAsyncFn = false;
+      if (this.at(":")) {
+        this.eat(":");
+        const t = this.parseTypeAsyncAware();
+        returnAnnot = t.ty;
+        // `function pick(): () => Promise<T>` hands an async function BACK: `pick()()` is
+        // then a call to an async function, and gets the same floating-async guard.
+        retAsyncFn = t.asyncFn;
+        if (retAsyncFn) this.returnsAsyncFn.add(name);
+      }
+      this.returnsAsyncFnStack.push(retAsyncFn);
+      this.asyncParamScopes.push(promiseNames);
+      let body: Stmt[];
+      try { body = [...prelude, ...this.parseBlock()]; }
+      finally { this.returnsAsyncFnStack.pop(); this.asyncParamScopes.pop(); }
       return typeParams.length
         ? { kind: "FuncDecl", name, params, returnAnnot, body, typeParams }
         : { kind: "FuncDecl", name, params, returnAnnot, body };
@@ -1614,9 +1897,23 @@ class Parser {
   }
 
   private parseReturn(): Stmt {
-    this.eat("return");
+    const kw = this.eat("return");
     if (this.at(";")) { this.eat(";"); return { kind: "ReturnStmt", argument: null }; }
     const argument = this.parseExpression();
+    // Returning an async function VALUE is the same escape as passing one (see
+    // checkAsyncEscapes), and the same declaration carries it back: only a return type
+    // written `(…) => Promise<T>` says the caller is getting an async function. Recorded,
+    // not thrown, because an `async function` returned before its declaration hoists.
+    const asyncArrow = this.asyncFnExprs.has(argument);
+    if (asyncArrow || argument.kind === "Identifier") {
+      const argName = argument.kind === "Identifier" ? argument.name : null;
+      this.returnEscapes.push({
+        argName, asyncArrow,
+        scopedAsync: argName !== null && this.inAsyncParamScope(argName),
+        declared: this.returnsAsyncFnStack[this.returnsAsyncFnStack.length - 1] === true,
+        line: kw.line, col: kw.col,
+      });
+    }
     this.eat(";");
     return { kind: "ReturnStmt", argument };
   }
@@ -1825,6 +2122,8 @@ class Parser {
 
   private parseArrow(): Expr {
     const params: Param[] = [];
+    const arrowPromiseIdx = new Set<number>();
+    const arrowPromiseNames = new Set<string>();
     if (this.at("(")) {
       this.eat("(");
       if (!this.at(")")) {
@@ -1835,7 +2134,13 @@ class Parser {
           const name = this.expectIdent();
           const optional = this.at("?"); if (optional) this.eat("?"); // `(x?: T) =>`
           let annot: Ty | undefined;
-          if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
+          if (this.at(":")) {
+            this.eat(":");
+            const t = this.parseTypeAsyncAware();
+            annot = t.ty;
+            // see parseParamList — same rule, arrow syntax
+            if (t.asyncFn) { arrowPromiseNames.add(name); arrowPromiseIdx.add(params.length); }
+          }
           let def: Expr | undefined;
           if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
           params.push(this.mkParam(name, annot, def, rest, optional));
@@ -1846,14 +2151,24 @@ class Parser {
       params.push({ name: this.expectIdent() });
     }
     const prelude = this.takeParamPrelude();
-    if (this.at(":")) { this.eat(":"); this.parseType(); }
+    // Which parameters are `(…) => Promise<T>` — recorded against the arrow NODE, since an
+    // arrow has no name of its own until parseDeclarator binds it (see promiseParamsByFn).
+    const promiseIdx = arrowPromiseIdx;
+    const mk = (a: Expr): Expr => { if (promiseIdx.size) this.promiseParamsByArrow.set(a, promiseIdx); return a; };
+    let retAsyncFn = false;
+    if (this.at(":")) { this.eat(":"); retAsyncFn = this.parseTypeAsyncAware().asyncFn; }
     this.eat("=>");
-    if (this.at("{")) return { kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false };
-    const body = this.parseAssign();
-    // A pattern parameter needs statements to bind its names, so an expression body
-    // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
-    if (prelude.length) return { kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false };
-    return { kind: "ArrowFunction", params, body, exprBody: true };
+    // An arrow's body is a function body for the return-escape rule too (see parseReturn).
+    this.returnsAsyncFnStack.push(retAsyncFn);
+    this.asyncParamScopes.push(arrowPromiseNames);
+    try {
+      if (this.at("{")) return mk({ kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false });
+      const body = this.parseAssign();
+      // A pattern parameter needs statements to bind its names, so an expression body
+      // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
+      if (prelude.length) return mk({ kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false });
+      return mk({ kind: "ArrowFunction", params, body, exprBody: true });
+    } finally { this.returnsAsyncFnStack.pop(); this.asyncParamScopes.pop(); }
   }
 
   private parseAssign(): Expr {
@@ -1899,10 +2214,12 @@ class Parser {
       // `Uint8Array` (node allows `u[i] = v`) is accepted. The parser can't know the
       // type, so it emits an IndexAssign and lets type inference decide.
       if (left.kind === "IndexExpr") {
+        if (isOptChainTarget(left)) optChainWriteError("`a?.[i] = v`");
         const op = this.next().value as any;
         return { kind: "IndexAssign", op, object: left.object, index: left.index, value: this.parseAssign(), loc: left.loc };
       }
       if (left.kind === "MemberExpr") {
+        if (isOptChainTarget(left)) optChainWriteError("`a?.b = v`");
         // Field assignment `o.f = v`. The parser can prove only the SYNTACTIC case —
         // `this.f` inside a member body, where the constructor is building the instance
         // or the method is a setter (docs/decorators.md). Whether any OTHER receiver may
@@ -2093,6 +2410,8 @@ class Parser {
    * `Uint8Array` element and rejects an immutable array/object element.
    */
   private updateTarget(target: Expr): Expr {
+    // `++`/`--` is a read AND a write, so the same early error applies as for `=`.
+    if (isOptChainTarget(target)) optChainWriteError("`a?.b++` / `a?.[i]++`");
     if (target.kind === "MemberExpr") {
       // Same split as plain assignment: `this.f` is decided here (syntax), every other
       // receiver is deferred to the checker, which knows whether it is `@@mutable`.
@@ -2150,10 +2469,20 @@ class Parser {
         expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), loc: { line: dot.line, col: dot.col, file: this.file } };
       } else if (this.at("?.")) {
         const t = this.eat("?.");
-        // Optional call `?.()` and optional index `?.[]` are out of the A2 subset.
+        // Optional CALL `?.()` is still out of the A2 subset — a call has no nullable-box
+        // result shape here. Optional ELEMENT access `?.[i]` is the same guard as `?.b`
+        // with an index in place of a field name, so it reuses the whole opt-chain path.
         if (this.at("(")) throw nyi(NYI.OPTIONAL_CHAIN, `optional call '?.()' at ${t.line}:${t.col}`);
-        if (this.at("[")) throw nyi(NYI.OPTIONAL_CHAIN, `optional element access '?.[]' at ${t.line}:${t.col}`);
-        expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        if (this.at("[")) {
+          this.eat("[");
+          const index = this.parseExpression();
+          this.eat("]");
+          // Carries its location like a written `a[i]`: `?.` guards the BASE, so a present
+          // base out of range still panics and reports here.
+          expr = { kind: "IndexExpr", object: expr, index, optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        } else {
+          expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        }
       } else if (this.at("[")) {
         const br = this.eat("[");
         const index = this.parseExpression();
@@ -2180,14 +2509,36 @@ class Parser {
         // can be rejected after the whole program is parsed (see checkFloatingAsyncCalls).
         if (expr.callee.kind === "Identifier") {
           const loc = expr.callee.loc ?? { line: 0, col: 0 };
-          this.identCalls.push({ node: expr, name: expr.callee.name, line: loc.line, col: loc.col });
+          const scopedAsync = this.inAsyncParamScope(expr.callee.name);
+          this.identCalls.push({ node: expr, name: expr.callee.name, line: loc.line, col: loc.col, scopedAsync });
         } else if (this.asyncFnExprs.has(expr.callee)) {
           // An immediately-invoked async arrow, `(async () => …)()`. It never binds a
           // name, so the name-based path above cannot see it; the callee NODE is the
           // identity. Recorded under a descriptive name so the guard reads the same.
           this.identCalls.push({ node: expr, name: "(async arrow)", line: callLoc.line, col: callLoc.col });
           this.asyncFns.add("(async arrow)"); // not a legal identifier, so it collides with nothing
+        } else if (expr.callee.kind === "CallExpr" && expr.callee.callee.kind === "Identifier" &&
+                   this.returnsAsyncFn.has(expr.callee.callee.name)) {
+          // `pick()()`, where `pick(): () => Promise<T>` — the callee is the RESULT of a
+          // call, so there is no name; the declared return type is the identity.
+          const label = `${expr.callee.callee.name}()`;
+          this.identCalls.push({ node: expr, name: label, line: callLoc.line, col: callLoc.col });
+          this.asyncFns.add(label); // `pick()` is not an identifier, so it collides with nothing
         }
+        // Record every argument that could hand an ASYNC function VALUE across this call —
+        // the one place the guard's name tracking ends. Resolved after the file is parsed
+        // (see checkAsyncEscapes): both the callee and an `async function` argument hoist.
+        const calleeName = expr.callee.kind === "Identifier" ? expr.callee.name : null;
+        args.forEach((a, i) => {
+          const asyncArrow = this.asyncFnExprs.has(a);
+          if (!asyncArrow && a.kind !== "Identifier") return;
+          const argName = a.kind === "Identifier" ? a.name : null;
+          this.asyncEscapes.push({
+            callee: calleeName, index: i, argName, asyncArrow,
+            scopedAsync: argName !== null && this.inAsyncParamScope(argName),
+            line: callLoc.line, col: callLoc.col,
+          });
+        });
       } else if (this.at("<") && (pendingTypeArgs = this.tryCallTypeArgs())) {
         // Call-site type arguments `f<T>(x)` / `foo<string>()` — RECORDED on the call so
         // M3 can pin the instantiation explicitly (they were previously erased). Only
@@ -2209,7 +2560,14 @@ class Parser {
     const t = this.peek();
     if (t.type === "num") { this.next(); return { kind: "NumberLiteral", value: Number(t.value) }; }
     if (t.type === "str") { this.next(); return { kind: "StringLiteral", value: t.value }; }
-    if (t.type === "template") { this.next(); return this.buildTemplate(t.value); }
+    if (t.type === "template") {
+      this.next();
+      // The shared escape decoder can fail (a malformed `\xHH`), and a template is split
+      // HERE rather than in `lex`, so its LexError has to reach the same NT0001 that
+      // `tokenize` gives the identical escape inside a quoted string.
+      try { return this.buildTemplate(t.value, t); }
+      catch (e) { if (e instanceof LexError) throw parseError(e.message); throw e; }
+    }
     // A regex literal LEXES (so the file survives) but has no representation: nativets
     // has no RegExp by design (Tier C). Refused here, located, instead of miscompiled.
     if (t.type === "regex") throw nyi(NYI.REGEX, `regular expression literal ${t.value} at ${t.line}:${t.col}`);
@@ -2274,13 +2632,23 @@ class Parser {
     return { kind: "ObjectLiteral", properties };
   }
 
-  private buildTemplate(raw: string): Expr {
+  private buildTemplate(raw: string, tok: Token): Expr {
     const quasis: string[] = [];
     const exprs: Expr[] = [];
+    const nul = String.fromCharCode(0);
     let cur = "";
     let i = 0;
     while (i < raw.length) {
-      if (raw[i] === "\\") { cur += decodeEscape(raw[i + 1]!); i += 2; continue; }
+      if (raw[i] === "\\") {
+        // The LEXER's decoder, not a second smaller one — see `decodeEscapeAt`.
+        const { text, next } = decodeEscapeAt(raw, i, tok.line, tok.col);
+        // NT1705, the same rule `tokenize` puts on a quoted string: a template's escapes
+        // are decoded here, so this is the only place a `\0`/`\x00` inside one is visible.
+        if (text.indexOf(nul) >= 0) throw nulLiteral("this template literal", tok.line, tok.col);
+        cur += text;
+        i = next;
+        continue;
+      }
       if (raw[i] === "$" && raw[i + 1] === "{") {
         quasis.push(cur); cur = "";
         i += 2;
@@ -2360,11 +2728,6 @@ function valueReturns(list: Stmt[]): Expr[] {
   return out;
 }
 
-function decodeEscape(ch: string): string {
-  const map: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", "`": "`", "$": "$" };
-  return map[ch] ?? ch;
-}
-
 /**
  * Tokenize, turning a lexical failure into the ordinary NT0001 syntax error.
  *
@@ -2377,12 +2740,35 @@ function decodeEscape(ch: string): string {
  * uses — not deferred features. The message already carries `at line:col`.
  */
 function tokenize(source: string): Token[] {
+  let tokens: Token[];
   try {
-    return lex(source);
+    tokens = lex(source);
   } catch (e) {
     if (e instanceof LexError) throw parseError(e.message);
     throw e;
   }
+  return checkNoNul(tokens);
+}
+
+/**
+ * NT1705 — refuse a string literal whose decoded value contains a NUL (U+0000).
+ *
+ * Here, over the TOKEN stream, rather than at the one `parsePrimary` site that builds a
+ * `StringLiteral`: a `str` token is also an object key, an import specifier and a string
+ * LITERAL TYPE, and every one of those becomes a runtime string. One pass over the tokens
+ * covers all of them and cannot be forgotten when a new consumer of `str` is added.
+ *
+ * Template literals are not decoded yet at this point (the token holds RAW inner text, and
+ * `buildTemplate` splits it), so a template's own escapes are checked there. A raw NUL
+ * BYTE pasted into a template's text is visible here and is caught here.
+ */
+function checkNoNul(tokens: Token[]): Token[] {
+  const nul = String.fromCharCode(0);
+  for (const t of tokens) {
+    if (t.type === "str" && t.value.indexOf(nul) >= 0) throw nulLiteral("this string literal", t.line, t.col);
+    if (t.type === "template" && t.value.indexOf(nul) >= 0) throw nulLiteral("this template literal", t.line, t.col);
+  }
+  return tokens;
 }
 
 export function parse(source: string, opts: ParseOpts = {}): Program {

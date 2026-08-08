@@ -1,4 +1,4 @@
-# Divergences & unsupported features
+> §A.2), unchanged.
 
 ### THE HEADLINE DIVERGENCE — an out-of-bounds index PANICS
 
@@ -473,6 +473,39 @@ not survive its own `JSON.parse`:
   `js_json_quote` escaped only `" \ \n \t \r` and passed the other 27 through; it now takes
   the short form for `\b \f \n \r \t` and `\u00XX` for the rest, as node's QuoteJSONString
   does. U+007F is not a JSON control character and stays literal, as in node.
+### Optional element access `a?.[i]` — the guard is on the BASE only
+
+`a?.[i]` short-circuits the whole chain to `undefined` when `a` is `null` or `undefined`, and
+does **not evaluate the index** in that case (observable through a side effect — tested). It is
+the same lowering as `a?.b`: one guarded unit with a shared short-circuit join, so a trailing
+non-optional link (`a?.[0].name`) is skipped too, and the result is an A2 nullable box like every
+other `?.` result. All node-differential.
+
+The one deliberate disagreement is **not** new, and is the reason this entry exists: `?.` guards
+the base being nullish, and changes **nothing** about the index rule. A *present* base indexed out
+of range still faults — `NT2002` when the length and index are both statically known, otherwise
+the Stage 41 runtime panic — where node yields `undefined`. So:
+
+| | node | ours |
+|---|---|---|
+| `a?.[0]`, `a` absent | `undefined` | `undefined` |
+| `a?.[idx()]`, `a` absent | index not evaluated | index not evaluated |
+| `a?.[99]`, `a` present, len 2 | `undefined` | **panics** (Stage 41) |
+
+Reading the guard as "make this read safe" is therefore wrong: it makes the *base* safe. Use
+`.at(i)` for node's out-of-range `undefined`, exactly as with a plain `a[i]`.
+
+**`?.` in a write position is refused (`NT0001`) — this is agreement with node, not a
+divergence.** ECMAScript's `IsValidSimpleAssignmentTarget` returns `false` for an
+`OptionalExpression`, so `a?.b = v`, `a?.[i] = v`, `a?.b++` and `a?.[i]++` are all *early*
+errors: node reports a `SyntaxError` before running a line (test262
+`optional-chaining/static-semantics-simple-assignment.js`, `…/update-expression-postfix.js`).
+
+We used to **accept** these. The refusal is in the parser, because it is a syntax rule rather
+than a type rule: with a genuinely mutable receiver (`Uint8Array`, a `@@mutable` record) every
+type rule was satisfied and `b?.[0] = 7` lowered to a real store — a program node rejects
+outright, silently compiled. A nullable receiver happened to be caught, but only by an
+unrelated `NT1606` about array immutability, which was the wrong reason and the wrong message.
 
 ### Actor messages (B3 v5) — structured messages are COPIES, and the shape is checked
 
@@ -553,6 +586,69 @@ Two refusals, both of the reject-don't-miscompile kind:
 - **A NUL byte in the file is `NT1704`.** nativets strings are NUL-terminated (`js_str_len` is
   `strlen`), so an inlined NUL would truncate the constant at run time while the `.ll` still
   carried every byte. Text imports are for text; refuse rather than truncate.
+
+### A NUL in a string LITERAL is `NT1705` — the same rule, on the other doors
+
+`NT1704` guarded exactly one way for a NUL to enter a string: a text import's bytes. Every
+other way in was a **silent wrong answer**, the worst outcome the prime directive names:
+
+```ts
+const s = "a\0b";
+console.log(s.length);   // node: 3     nativets, before NT1705: 1
+```
+
+A nativets string is a NUL-terminated UTF-8 `const char *` (`runtime.c`: `js_str_len` **is**
+`strlen`), so a NUL inside a value ends it. Nothing warned; the `.ll` carried all three bytes
+and the program answered `1`.
+
+**The rule.** A string or template literal whose **decoded value** contains U+0000 is refused
+with `NT1705`. The check is on the value, not on the syntax, so every spelling lands on it at
+once — `\0`, `\x00`, `\u0000`, `\u{0}`, and a raw NUL byte pasted into the source, in both
+quoted strings and templates (including the quasis around a `${…}`). It is checked over the
+token stream, so an object key, an import specifier and a string literal *type* are covered
+too, not just expressions.
+
+**This refuses programs node accepts** — hence its place here. node prints `3`; we refuse.
+The alternative was to keep printing `1`.
+
+**What it does NOT cover, and cannot.** A compile-time rule only sees compile-time values. A
+NUL computed at RUN time still truncates silently, and these all remain open:
+
+| runtime door | node | nativets |
+|---|---|---|
+| `String.fromCharCode(0).length` | `1` | `0` |
+| `("a" + String.fromCharCode(0) + "b").length` | `3` | `2` |
+| `readFileSync(binaryFile, "utf8").length` (NUL inside) | full length | truncated at the NUL |
+| `JSON.parse` of JSON text holding a `\u0000`, then `.length` | `3` | `1` |
+
+`String.fromCharCode(0)` in particular **must not** be refused: `src/lexer.ts` and
+`src/modules.ts` both call it deliberately (it is how the compiler spells a NUL now that a
+`"\0"` literal is `NT1705`), so refusing it would widen the self-hosting gap. Closing the
+runtime doors needs a length-carrying string representation, or a runtime panic at each
+producer — neither is in this change. Until then a self-compiled nativets cannot detect its
+own NULs, the same caveat `src/modules.ts` already carries for `NT1704`.
+
+### Octal escapes (`\1`…`\7`, and `\0` followed by a digit) are `NT0001`
+
+Establishing what `\0` means turned up a neighbouring silent wrong answer: `"a\1b"` decoded
+to the character `"1"` (`charCodeAt` 49) where node says 1. `\1`…`\7` are ECMAScript Annex
+B.1.2 **LegacyOctalEscapeSequence**, and so is `\0` when a decimal digit follows it —
+`"\01"` is U+0001, *not* a NUL then `"1"`.
+
+These are **not** a divergence: they are SyntaxErrors in strict mode, and a TypeScript module
+is strict, so node refuses them too (`SyntaxError: Octal escape sequences are not allowed in
+strict mode`). They are `NT0001`, the ordinary syntax band. A bare `\0` is untouched — it is
+the NUL escape, legal in strict mode, and refused as `NT1705` for its own reason.
+
+`\8` and `\9` are **NonOctalDecimalEscapeSequence**, decode to `"8"`/`"9"` exactly as node
+does, and stay accepted (test262 `legacy-non-octal-escape-sequence-8-non-strict.js`).
+
+> Fixing this needed `\uHHHH` / `\u{H+}` to exist at all: `\u` was not an escape the lexer
+> knew, so it fell through to "an unknown escape is the character itself", and `"a\u0041b"`
+> compiled to the seven characters `au0041b` where node gives `aAb`. That is now implemented
+> and node-differentially tested (`test/nul-string.test.ts`), and it is also what routes a
+> `\u0000` into `NT1705`. `String#length` over the result is still UTF-8 byte-oriented —
+> §A.2, unchanged.
 
 `node` is our oracle. Two kinds of "we differ from node" exist, tracked separately.
 
@@ -1129,10 +1225,34 @@ What this buys and what it costs:
     `const f = async () => …` is guarded exactly as `async function f` is, and so are a direct
     alias chain (`const g = f; g()`), an immediately-invoked `(async () => …)()`, and an
     `export const f = async () => …` seen from an importing module.
-    **Known boundary:** the guard is NAME tracking in the parser, not dataflow, so an async
-    function that escapes into a *function parameter* (`run(f)`, then `f()` inside `run`) or is
-    returned as a value and called through the result is **not** reached today. Closing it needs
-    the async-ness to survive on the TYPE, which `Promise<T>` erasure currently discards.
+    It holds for a **higher-order** async function too — one passed as a VALUE and called
+    through a parameter, or handed back as a return value. That was the last silent wrong
+    answer in this area: `callit(one)` where `function callit(f: () => Promise<number>)
+    { return f(); }` printed `1` where node prints `Promise { 1 }`. The guard is NAME
+    tracking and a name does not survive a call, so what carries the fact across the
+    boundary is the **declared type**: a parameter or return type written
+    `(…) => Promise<T>` is exactly as promise-returning as an `async function`, and a call
+    through it needs `await` like any other. `Promise<T>` erases to `T` in type position
+    (below), so this is read syntactically while the annotation is still tokens.
+    A parameter is scoped to its own body, so two unrelated functions each taking an `f`
+    do not contaminate each other.
+    **The escape itself is checked**, because the type is only load-bearing if it is true:
+    handing an async value to a parameter (or returning it where the return type says)
+    *not* `(…) => Promise<T>` is `NT1020`. `function twice(f: () => number)` given an async
+    arrow used to compute `1 + 1` = `2`; node concatenates two pending promises
+    (`[object Promise][object Promise]`), and tsc rejects the assignment outright — we
+    answered something neither of them says. An **unknown** callee (a method, a builtin, a
+    value) counts as an escape too, since it declares no parameter to carry the fact.
+    **Deliberate over-rejection.** A promise that is threaded through un-awaited and only
+    awaited further up (`function callit(f: () => Promise<number>) { return f(); }` with
+    `await callit(one)` at the top) produces node's answer here, but is still refused —
+    exactly as the pre-existing guard already refuses the same shape for a *named* async
+    function (`function callit() { return one(); }`). Knowing which of these is safe is a
+    taint analysis over promise values; refusing the un-awaited call is the same rule
+    everywhere, and `await` at the inner call site is always the fix.
+    **Still out of reach:** an async function stored in an array or an object field — those
+    are `NT1001`/`NT1002` (no heap function values yet), so they are refused before the
+    async question arises rather than by this rule.
   - The diagnostic points at the **actor model** (`spawn`/`send`/`receive`, Stage 22/27/31), which
     is nativets' concurrency primitive. Promises may simply be the wrong abstraction here.
 - `Promise<T>` in **type position** is erased to `T` (as are `Awaited<T>` and friends), so
@@ -1233,11 +1353,11 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1006 | spread | M2 | arrays/objects; spreading a VALUE into a call is supported only where the arity is known or the fold has an identity — see below |
 | NT1007 | destructuring | M2 | arrays/objects |
 | NT1008 | rest parameters | M2 | arrays |
-| NT1009 | optional `?.()` call / `?.[]` index / general or >2-arm unions | M2 | `?.` on object fields, `??`, and restricted `T\|undefined`/`T\|null` are ✅ (A2); the reused code now rejects only the out-of-subset forms |
+| NT1009 | optional `?.()` call / general or >2-arm unions | M2 | `?.` on object fields **and `?.[i]` element access** ✅, `??`, and restricted `T\|undefined`/`T\|null` are ✅ (A2); the reused code now rejects only the out-of-subset forms |
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
-| NT1030 | a type name used above its declaration, and any **recursive** type | later | type names resolve in SOURCE ORDER; a self-containing type needs a nominal `Ty` — see below |
+| NT1030 | a **recursive** type — one that contains itself, directly or mutually | later | top-level type declarations now HOIST, so ordering is no longer a refusal; a self-containing type needs a nominal `Ty` — see below |
 
 ### Spreading a value INTO a call — the three cases, and why only two compile
 
@@ -1407,14 +1527,27 @@ would silently change what the program does.
 
 | NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`) |
 
-### Type names resolve in SOURCE ORDER, and recursive types are not representable (NT1030)
+### Type declarations HOIST; recursive types are still not representable (NT1030)
 
-TypeScript resolves type names anywhere in a file; nativets' parser is single-pass and
-resolves them **in source order**. A name used above its declaration is refused with
-`NT1030`. This is a real divergence — node runs such a program, and TypeScript accepts it —
-and it is a refusal, never a miscompile.
+TypeScript hoists every type declaration in a scope — a type may be used above the line
+that declares it, and order is irrelevant. nativets now matches that for **top-level**
+`type`/`interface` declarations: `hoistTypeDecls` (`src/parser.ts`) resolves them to a
+fixpoint before the file proper is parsed, so each round resolves whatever its dependencies
+allow and the declarations settle in dependency order regardless of how they are written.
 
-It used to be neither. `resolveNamed` fell back to `number` for any unregistered name, so
+Two things stay outside it, both refusals rather than miscompiles:
+
+- **A type declared inside a function or block** stays in source order. Its meaning can
+  depend on where it sits — a type PARAMETER in scope resolves to a `#T` marker, not to a
+  shape — so hoisting it to file scope could change what it resolves to. `NT1030` says so,
+  and the hint names the fix (move it to the top level).
+- **A cycle.** The fixpoint identifies these exactly: what is still unresolved when a round
+  makes no progress, and is blocked on something else that is also unresolved, contains
+  itself. Those get the *recursion* wording, naming the type the cycle closes through
+  (`recursive type 'TemplateLiteral' — it contains itself through 'Expr'`), and explicitly
+  do **not** get told to reorder.
+
+Before hoisting, this was neither. `resolveNamed` fell back to `number` for any unregistered name, so
 the annotation was silently erased and the program failed later against the *value*:
 `'x' declared number but initialized with {kind:string,a:number}`. That message names
 neither the type nor the cause, and it cost a round of self-hosting work — `ForStmt.init:
@@ -1425,12 +1558,11 @@ refused; an imported or stdlib name still falls back, which is what keeps the bl
 at one file — measured across all 141 files in `src/` and `test/fixtures/`.
 
 **Recursion is the harder half, and it is not a parser problem.** `interface N { next: N }`
-cannot be fixed by reordering: the reference resolves while `N` itself is still being
-parsed. The real obstacle is the type encoding. `Ty` is a **structural string**
-(`src/ast.ts`) — `{a:number,b:string}`, `number[]` — chosen precisely so `===` is type
-comparison. A type that contains itself has no finite structural string, so no amount of
-two-pass resolution helps; a two-pass parser would replace the silent erasure with infinite
-expansion.
+cannot be fixed by reordering, and hoisting does not touch it either. The real obstacle is
+the type encoding. `Ty` is a **structural string** (`src/ast.ts`) — `{a:number,b:string}`,
+`number[]` — chosen precisely so `===` is type comparison. A type that contains itself has
+no finite structural string, so no amount of multi-pass resolution helps; a resolver that
+did not stop would replace the silent erasure with infinite expansion.
 
 Supporting it honestly requires a **nominal, by-reference form in `Ty`** — a type that names
 a declaration instead of spelling out its shape — plus every structural comparison,
@@ -1438,6 +1570,42 @@ widening, and layout decision taught to resolve through it. That is a foundation
 the type representation, not a union feature and not a small one. Until it exists, the
 compiler's own `Expr`/`Stmt` unions (`src/ast.ts`) are outside the subset nativets compiles,
 and **that, not any single union or intersection, is what gates `src/ast.ts` self-hosting**.
+
+### A parameter default makes a `function` parameter optional — but not a value ARROW's
+
+A parameter's **type** now comes from its default in every parameter position — `(n = 1)` is
+`number`, `(s = "a")` is `string`, `(b = true)` is `boolean`, TypeScript's widening rule. What
+does **not** hold uniformly is the *arity* half:
+
+```ts
+function f(n = 1) { return n + 1; }
+f();                        // 2 — the default fires, node-exact
+
+const g = (n = 1) => n + 1;
+g();                        // node: 2      nativets: [NT2001] 'g' expects 1 arguments, got 0
+```
+
+A named function has a real signature (`Sig.required` / `Sig.defaults`, `src/checker.ts`) and
+codegen materializes the missing arguments at the call site. A **value arrow** is a closure, and a
+nativets function type is the flat string `(number)=>number` — it has no notion of an optional
+parameter, so a short call has nothing to consult. It is a refusal, not a wrong answer, and it is
+an asymmetry between two spellings of the same thing rather than a considered rule.
+
+Two related refusals of node-correct programs, from the same missing notion of optionality:
+
+- **An explicit `undefined` argument does not trigger the default.** `f(undefined)` prints `2` in
+  node (`undefined` is exactly what "argument absent" means in JS); we refuse the argument —
+  `'f' arg 0 expects number, got undefined` — so the rule is unreachable rather than wrong.
+- **A default may not name a parameter to its left.** `function f(a, b = a)` is ordinary
+  JavaScript; codegen materializes defaults before the parameter allocas are stored, so accepting
+  it would emit a load from an undefined `%a.addr`. Refused with `'a' is not defined`.
+
+What a default **may not be**: `undefined`, `null`, or `[]`. TypeScript answers those with `any`,
+`null`/`undefined` and `any[]`; none is a nativets type, so each is refused with a hint naming the
+two ways out rather than guessed. Pinned in `test/param-defaults.test.ts`.
+
+Lifting the arrow case means giving function types a required-arity — every `funcParams` consumer,
+assignability, and a call-site pad in codegen. A real feature, not a patch.
 
 ### Closures capture by VALUE — a write to a capture is refused (`NT1029`)
 

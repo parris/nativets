@@ -655,7 +655,11 @@ export interface MemberExpr {
  * the panic reports). Desugarings that synthesize an IndexExpr (destructuring, spread-call
  * expansion) leave it undefined and keep the internal, non-panicking accessor.
  */
-export interface IndexExpr { kind: "IndexExpr"; object: Expr; index: Expr; ty?: Ty; loc?: Loc; }
+/** `optional` marks the `?.[i]` spelling: the BASE is guarded, so a nullish base
+ *  short-circuits the whole chain to `undefined` WITHOUT evaluating `index`. It says
+ *  nothing about the index rule — a present base out of range panics exactly as `a[i]`
+ *  does (Stage 41). */
+export interface IndexExpr { kind: "IndexExpr"; object: Expr; index: Expr; optional?: boolean; ty?: Ty; loc?: Loc; }
 
 export type UnaryOp = "-" | "+" | "!" | "~" | "void";
 export interface UnaryExpr { kind: "UnaryExpr"; op: UnaryOp; operand: Expr; ty?: Ty; }
