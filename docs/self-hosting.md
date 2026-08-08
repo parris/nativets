@@ -483,6 +483,80 @@ Because node has no `type: "text"` attribute, this construct cannot be different
 usual way — see `docs/divergences.md`, which records the divergence and how the oracle is split
 (a `main.ts`/`oracle.ts` twin per fixture, identical below the binding).
 
+### CONSTRUCT CENSUS — counting the construct, not the first blocker
+
+Every table above this one is a **first-blocker** table, and this document already carries a
+standing correction about what those can and cannot tell you: *"A first-blocker histogram
+measures what to fix NEXT; it never measures how much of a construct is in the tree. For that,
+count the construct."* That correction was written after "only two modules genuinely need regex
+removed" turned into a rewrite of **29 literals across 8 modules**.
+
+The census was never actually run. It is run here, over all twelve `src/*.ts`:
+
+| Construct | Sites | Modules | Reading |
+|---|---|---|---|
+| **`.push`** | **185** | **11 of 12** | the elephant, and it is invisible to every table above |
+| `new X` | 285 | 12 | mostly `Map`/`Set`/node types, not user classes |
+| `?.` (all forms) | 97 | 9 | |
+| `class` | 12 | 8 | no inheritance anywhere — SH3's premise holds |
+| **`?.[]`** | **10** | **2** | checker ×5, parser ×5 |
+
+**The two headline numbers invert the apparent priority.**
+
+`?.[]` is the first blocker for **six** of the twelve modules — parser, checker, ownership,
+driver, cli, modules — which reads like the highest-leverage item on the board. It is **ten
+source sites in two files**. It is cheap, and it is worth doing precisely because it unmasks
+six modules at once, but it is not big work and it was never the thing standing in the way.
+
+`.push` is the first blocker for **one** module (`diagnostics.ts`) and appears **185 times in
+eleven**. Receiver shapes: 145 a plain local, 38 `this.<field>`, 1 dotted. Nothing in the
+first-blocker tables suggests this, because a module only reports `.push` once every blocker
+NEARER to it has been cleared — so `.push` will surface as the next blocker for module after
+module as the current round's lanes land, and each will look like a fresh discovery.
+
+**`.push` is refused by DECISION, not by omission** — commit `1ea7fa2`. A lane sent to legalize
+it on a syntactically-fresh receiver came back with evidence the premise was wrong, and that was
+accepted: a fresh receiver is a temporary nothing can name, so mutating it is unobservable *by
+construction*, which is the same as saying no real program writes that shape. It would have
+cleared none of the 185. The sanctioned idiom is `xs = [...xs, v]`, claimed O(1) amortized via
+the transient path with a 200-append measurement pinned.
+
+So the honest sizing of the remaining self-hosting work is **not** a list of missing features. It
+is a ~185-site mechanical rewrite of the compiler's own accumulator idiom, which is Path B /
+the recommended HYBRID ("refactor the compiler toward the supported subset where it's cheap")
+applied at a scale nobody had measured. Two things make it less alarming than the raw number:
+
+- the 145 plain-local sites are the mechanical ones (`let xs = []` … `xs = [...xs, v]`), and
+  the idiom is valid TypeScript, so **bun keeps running `src/` unchanged** — the two-toolchain
+  constraint is satisfied for free;
+- the 38 `this.<field>` sites are not mechanical and interact with `@@mutable class` (Stage 45),
+  so they need a decision rather than a rewrite.
+
+**What this means for the rung-3 goal.** `diagnostics.ts` — the shallowest module and the
+standing rung-3 candidate — holds **4** of the 185, all one local `lines` accumulator in a
+single function (`src/diagnostics.ts` lines 119–121 and 123). Its blocker is four mechanical rewrites,
+not a design problem. That is the argument for walking it first.
+
+Reproduce the two headline counts with:
+
+```sh
+cat src/*.ts | grep -o '\.push(' | wc -l          # 185
+cat src/*.ts | grep -o '?\.\[' | wc -l            # 10
+# receiver shapes of the .push sites
+grep -ohE '[A-Za-z_$][A-Za-z0-9_$.]*\.push\(' src/*.ts | sed 's/\.push(//' \
+  | awk '{ print ($0 ~ /^this\./) ? "this.FIELD" : ($0 ~ /\./ ? "DOTTED" : "PLAIN") }' \
+  | sort | uniq -c
+```
+
+Note that `grep` here is the real one; project memory records that a shimmed `grep` on some
+setups silently misses matches, which would make every number above too small.
+
+**Method note, since this document is partly a record of measurement mistakes:** a census is a
+`grep` and inherits a grep's blind spots — it counts `.push(` textually, so it cannot tell an
+array `.push` from a same-named method on a user object, and it cannot see a call reached
+through an alias. The numbers are an upper bound on sites and a *lower* bound on effort. They
+are still the right order of magnitude, and an order of magnitude was exactly what was missing.
+
 ---
 
 ## Milestones
