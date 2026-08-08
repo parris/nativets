@@ -237,8 +237,12 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // link surfaced the deepest one they share.
   "ast.ts": { rung: 0, code: "NT1030", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
-  // `new Set(iterable)` compile; the module now stops on the ESCAPES object literal.
-  "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
+  // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
+  // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
+  // `cannot infer type of arrow parameter 'n'` at src/lexer.ts:146, `const advance = (n = 1)
+  // => …`. Inferring a parameter's type from its default cleared it; the module now walks
+  // into `advance`'s BODY and stops on `line++`, a write to a captured binding.
+  "lexer.ts": { rung: 0, code: "NT1031", blame: "self" },
   // WALKED, not nudged. This module's blocker CHAIN was measured end to end — six
   // distinct blockers between it and rung 1 — and five of them are now cleared:
   //   1. NT1606  `.push` x4 in formatDiagnostic            -> immutable rebind (src)
@@ -258,15 +262,19 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // exit 255. Clearing it needs CONSUMING PARAMETERS (the callee takes ownership and the
   // move propagates to every call site), which is a feature.
   "diagnostics.ts": { rung: 0, code: "NT1604", blame: "self" },
-  // Left NT0001 (`satisfies`); the code is unchanged at NT1009 but the FEATURE is not —
-  // it is now optional element access `?.[]`, not a union.
-  "parser.ts": { rung: 0, code: "NT1009", blame: "self" },
+  // RE-MEASURED by the `?.[]` lane. parser.ts had been the ONLY module blocking on a
+  // problem of its own for several rounds; clearing `?.[]` took its last self-blocker
+  // away, and it now inherits ast.ts's forward type reference through the link. The blame
+  // column flipping "self" -> "ast.ts" is the real news in this row.
+  "parser.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
   // present-undefined one and a flat slot array cannot. Sharpening that refusal moved the
   // module on to NT1027, a regex literal.
-  "checker.ts": { rung: 0, code: "NT1009", blame: "self" },
+  // `?.[]` cleared; walked on to `Checker.inArrow`, a method that assigns a field and
+  // does not return the receiver (NT1023) — the same shape codegen.ts stops on.
+  "checker.ts": { rung: 0, code: "NT1023", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   "codegen.ts": { rung: 0, code: "NT1023", blame: "self" },
   "coverage.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
@@ -276,11 +284,12 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // trap, still visible. MEASURED, not predicted: the lane that moved checker.ts expected
   // this row to land on NT1014, and it did not — it tracks checker.ts exactly, because the
   // two errors are byte-identical. Always re-measure this column rather than inferring it.
-  "ownership.ts": { rung: 0, code: "NT1009", blame: "checker.ts" },
-  "driver.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
-  "cli.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
-  // Cleared its generic method; now inherits parser.ts's `?.[]` through the link.
-  "modules.ts": { rung: 0, code: "NT1009", blame: "parser.ts" },
+  "ownership.ts": { rung: 0, code: "NT1023", blame: "checker.ts" },
+  "driver.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
+  "cli.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
+  // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
+  // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
+  "modules.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   "coverage-preprocess.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
 };
 
@@ -350,7 +359,7 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // Stage-1 (cli.ts, the whole compiler through its real entry point) left NT1017 when
 // `export async function` landed and now stops on parser.ts's `?.[]` at 1109:66 —
 // inherited through the link, not cli.ts's own code. Still rung 0.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1009" };
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1030" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -457,19 +466,21 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * CHECKER, after parse is over. A parse-clean module is not an unblocked module, so
    * attribution has to compare what the whole pipeline actually reports.
    */
-  test("parsing clean is not being unblocked — six parse, none compiles", async () => {
+  test("parsing clean is not being unblocked — nine parse, none compiles", async () => {
     const { parse } = await import("../src/parser.ts");
     const parseClean: string[] = [];
     for (const e of MODULES) {
       try { parse(read(e.file)); parseClean.push(e.file); } catch { /* blocked at parse */ }
     }
-    // EIGHT now. `driver.ts` joined when `export async function` landed; `modules.ts` when
-    // generic class methods did. The point of this test is unchanged and is the
-    // uncomfortable one — parsing clean has never ONCE correlated with being closer to
-    // compiling. Eight of twelve modules parse their own source; ZERO produce IR.
+    // NINE now. `driver.ts` joined when `export async function` landed; `modules.ts` when
+    // generic class methods did; `parser.ts` when optional element access `?.[]` did —
+    // `?.[]` was the last construct in the parser's own source that the parser could not
+    // read. The point of this test is unchanged and is the uncomfortable one — parsing
+    // clean has never ONCE correlated with being closer to compiling. Nine of twelve
+    // modules parse their own source; ZERO produce IR.
     expect(parseClean.sort()).toEqual([
       "cli.ts", "coverage-preprocess.ts", "coverage.ts", "diagnostics.ts", "driver.ts",
-      "lexer.ts", "modules.ts", "ownership.ts",
+      "lexer.ts", "modules.ts", "ownership.ts", "parser.ts",
     ]);
     // ...and not one of them reaches IR.
     for (const file of parseClean) {
@@ -551,12 +562,28 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // This used to pin `at 1109:66`, which meant any edit ABOVE that line in parser.ts
       // reddened this test without stage-1 having moved at all; the indexed-access lane
       // shifted it to 1169:66 by adding parsing code elsewhere. A position is not the
-      // fact being recorded. The fact is: stage-1 is at rung 0, stopped on optional
-      // element access inherited from parser.ts. That still reds the moment the CONSTRUCT
+      // fact being recorded. The fact is: stage-1 is at rung 0, stopped on a forward type
+      // reference inherited from ast.ts. That still reds the moment the CONSTRUCT
       // or the rung changes, which is what this test is for.
+      //
+      // RE-MEASURED by the `?.[]` lane: stage-1 is still at rung 0, but the construct it
+      // stops on is no longer parser.ts's `?.[]` — that compiles now. It is ast.ts's
+      // forward TYPE reference (NT1030), inherited by every module that imports ast.ts,
+      // which is all of them. The construct string is updated, not dropped; naming it is
+      // the whole point of the assertion.
+      //
+      // RE-MEASURED AGAIN by the type-hoisting lane, and this is the interesting part: the
+      // forward reference was MASKING the real blocker. Top-level type declarations hoist
+      // now, so ast.ts:521's `as Identifier` resolves and 19 of ast.ts's 64 type
+      // declarations along with it — but the other 45 (`Expr`, `Stmt` and their members)
+      // are one mutually-recursive cluster, which hoisting cannot touch and no reordering
+      // can fix. Same code, same rung, DIFFERENT construct: still NT1030, now for the
+      // reason that actually gates self-hosting. Lifting it means a nominal, by-reference
+      // form in `Ty` (docs/divergences.md), not a parser change.
       expect(`stage-1 rung ${m.rung}, ${m.code}`)
         .toBe(`stage-1 rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}`);
-      expect(m.error).toContain("optional element access '?.[]'");
+      expect(m.error).toContain("recursive type");
+      expect(m.error).toContain("contains itself through 'Expr'");
       return;
     }
 
