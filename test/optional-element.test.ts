@@ -6,12 +6,23 @@
  * below was reasoned out; each expected value was read off `node` first (scratch probe,
  * this lane) and is then re-asserted differentially by `expectNode`.
  *
- * test262 is NOT vendored into this repo and no network was available, so the behavior
- * list is DERIVED from the operator's specification rather than mined. The shapes chosen
- * mirror what test262's `optional-chaining/` directory is known to cover: nullish base
- * (both `null` and `undefined`), NON-EVALUATION of the index on short-circuit, the
- * whole-chain short-circuit past trailing links, `??` interaction, and a falsy present
- * element (the case a naive `|| default` gets wrong).
+ * The behavior list was MINED from test262 `test/language/expressions/optional-chaining/`
+ * (tc39/test262 @ main), not invented. Each borrowed case cites its source file below.
+ * The files drawn on:
+ *
+ *   short-circuiting.js                  — `a?.[++x]` leaves `x` alone
+ *   member-expression.js                 — `[1,2]?.[1]`, `` `hello`?.[0] ``, `arr[i]?.a`
+ *   optional-expression.js               — recursive `obj?.a?.b`
+ *   static-semantics-simple-assignment.js— an optional chain is not an assignment target
+ *   update-expression-postfix.js         — nor a `++`/`--` target
+ *
+ * Mining paid for itself: the last two are EARLY errors in node (SyntaxError, before a
+ * line runs) and nativets ACCEPTED both, compiling `b?.[0] = 7` on a mutable `Uint8Array`
+ * into a real store. No hand-written list would have contained them.
+ *
+ * The remaining shapes — nullish base as both `null` and `undefined`, whole-chain
+ * short-circuit past trailing links, `??` interaction, and a falsy present element (the
+ * case a naive `|| default` gets wrong) — round out the operator's surface.
  *
  * The one thing `?.` does NOT change is the INDEX rule: it guards the BASE being nullish,
  * nothing else. A present base indexed out of range behaves exactly as `a[i]` does —
@@ -192,6 +203,128 @@ console.log(a[0]);
 `,
       "NT2001",
       "possibly undefined",
+    );
+  });
+
+  /* ================================================================
+   * Mined from test262 `test/language/expressions/optional-chaining/`.
+   * ================================================================ */
+
+  /*
+   * test262 `short-circuiting.js`, first assertion, transcribed:
+   *
+   *     const a = undefined; let x = 1;
+   *     a?.[++x]            // short-circuiting.
+   *     assert.sameValue(1, x);
+   *
+   * The same property as the `idx()` test above, but in test262's own spelling — the
+   * index is an INCREMENT, so "evaluated and discarded" and "not evaluated" differ by
+   * exactly the value of `x`, with no I/O involved.
+   */
+  test("test262 short-circuiting.js — `a?.[++x]` does not evaluate the index", async () => {
+    await expectNode(`
+const a: number[] | undefined = undefined;
+let x = 1;
+a?.[++x];
+console.log(x);
+`);
+  });
+
+  /*
+   * test262 `member-expression.js`:
+   *     assert.sameValue(2, [1, 2]?.[1]);          //   ArrayLiteral base
+   *     assert.sameValue('h', \`hello\`?.[0]);       //   TemplateLiteral base
+   *
+   * A base that is statically NON-nullable still has to read through the `?.` link
+   * rather than being rejected or short-circuited. This is the case a lowering that
+   * assumes "optional implies nullable box" gets wrong.
+   */
+  test("test262 member-expression.js — `?.[i]` on a non-nullable literal base reads through", async () => {
+    await expectNode(`
+console.log([1, 2]?.[1]);
+console.log(\`hello\`?.[0]);
+`);
+  });
+
+  /*
+   * test262 `member-expression.js`, the `MemberExpression [ Expression ]` block:
+   *     const arr = [{a: 33}];
+   *     assert.sameValue(33, arr[0]?.a);
+   * A plain index feeding an optional MEMBER — the reverse nesting from `b?.xs[0]`.
+   */
+  test("test262 member-expression.js — a plain index feeding an optional member", async () => {
+    await expectNode(`
+type A = { a: number };
+const arr: A[] = [{ a: 33 }];
+console.log(arr[0]?.a);
+`);
+  });
+
+  /*
+   * test262 `optional-expression.js` — `OptionalExpression OptionalChain`, i.e. a chain
+   * whose head is itself a chain. Spelled here with two INDEX links, the element-access
+   * analogue of that file's `obj?.a?.b`.
+   */
+  test("test262 optional-expression.js — a chain whose head is itself an optional chain", async () => {
+    await expectNode(`
+const rows: number[][] | undefined = [[1, 2], [3, 4]];
+console.log(rows?.[1]?.[0]);
+`);
+  });
+
+  /*
+   * test262 `static-semantics-simple-assignment.js` (negative, phase: parse, SyntaxError):
+   *
+   *     Static Semantics: IsValidSimpleAssignmentTarget
+   *       LeftHandSideExpression: OptionalExpression   ->   Return false.
+   *
+   * node refuses `obj?.a = 33` before executing a line. nativets USED TO COMPILE the
+   * element form: `Uint8Array` is genuinely mutable here, so `b?.[0] = 7` satisfied every
+   * type rule and lowered to a real store — a program node rejects, silently accepted.
+   * A nullable base merely masked it behind an unrelated NT1606 about array immutability.
+   *
+   * The refusal is in the PARSER, because this is syntax, not typing: no receiver type
+   * makes it legal.
+   */
+  test("test262 static-semantics-simple-assignment.js — `a?.[i] = v` is refused", () => {
+    expectRejected(
+      `
+const b: Uint8Array = new Uint8Array(3);
+b?.[0] = 7;
+`,
+      "NT0001",
+      "write position",
+    );
+  });
+
+  // The member spelling of the same rule — `obj?.a = 33` verbatim from that file's body.
+  // It was accepted on main too, so this pins the pre-existing half of the hole.
+  test("test262 static-semantics-simple-assignment.js — `a?.b = v` is refused", () => {
+    expectRejected(
+      `
+// @@mutable
+type O = { a: number };
+const o: O = { a: 1 };
+o?.a = 33;
+`,
+      "NT0001",
+      "write position",
+    );
+  });
+
+  /*
+   * test262 `update-expression-postfix.js` (negative, phase: parse, SyntaxError):
+   * "optional chaining is forbidden in write contexts" — `a?.b++`. `++` is a read AND a
+   * write, so it falls under the same IsValidSimpleAssignmentTarget rule.
+   */
+  test("test262 update-expression-postfix.js — `a?.[i]++` is refused", () => {
+    expectRejected(
+      `
+const b: Uint8Array = new Uint8Array(3);
+b?.[0]++;
+`,
+      "NT0001",
+      "write position",
     );
   });
 });

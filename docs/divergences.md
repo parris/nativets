@@ -399,6 +399,18 @@ the Stage 41 runtime panic — where node yields `undefined`. So:
 Reading the guard as "make this read safe" is therefore wrong: it makes the *base* safe. Use
 `.at(i)` for node's out-of-range `undefined`, exactly as with a plain `a[i]`.
 
+**`?.` in a write position is refused (`NT0001`) — this is agreement with node, not a
+divergence.** ECMAScript's `IsValidSimpleAssignmentTarget` returns `false` for an
+`OptionalExpression`, so `a?.b = v`, `a?.[i] = v`, `a?.b++` and `a?.[i]++` are all *early*
+errors: node reports a `SyntaxError` before running a line (test262
+`optional-chaining/static-semantics-simple-assignment.js`, `…/update-expression-postfix.js`).
+
+We used to **accept** these. The refusal is in the parser, because it is a syntax rule rather
+than a type rule: with a genuinely mutable receiver (`Uint8Array`, a `@@mutable` record) every
+type rule was satisfied and `b?.[0] = 7` lowered to a real store — a program node rejects
+outright, silently compiled. A nullable receiver happened to be caught, but only by an
+unrelated `NT1606` about array immutability, which was the wrong reason and the wrong message.
+
 ### Actor messages (B3 v5) — structured messages are COPIES, and the shape is checked
 
 node has no actors, so the whole surface (`spawn`/`send`/`receive`) is behavioral, not
