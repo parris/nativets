@@ -1062,6 +1062,14 @@ export const RETAINS_RECEIVER = new Set(["reverse"]);
  * `[...xs]`, which builds a new array) and the array-returning methods above. A plain
  * function call is NOT fresh — it may hand back an array the callee still owns.
  *
+ * Freshness justifies `.sort` and NOTHING ELSE among the mutators. It is tempting to
+ * extend it to `.push` — the reasoning does hold, since `e.push(x)` on a fresh `e` is
+ * just `[...e, x].length` — but a fresh receiver is a temporary nothing can name, so
+ * such a push is dead code (`[1,2].push(3)`) and permitting it buys no expressiveness
+ * while adding an in-place path to the method that has already caused a double free and
+ * a leak. The useful shape is `named.push(x)`, which is NOT fresh and must stay refused.
+ * The accumulator `acc = [...acc, x]` covers it — see test/immutable.test.ts.
+ *
  * A RETAINS_RECEIVER call PASSES freshness through rather than ending it: it hands back
  * the pointer it was given, so its result is unowned exactly when its receiver was.
  * `[1,2].reverse()` is still a temporary (codegen must free it; `.sort()` on it is still
