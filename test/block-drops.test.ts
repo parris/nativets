@@ -18,6 +18,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { compileAndRun, expectMatchesNode } from "./harness.ts";
 import { parse } from "../src/parser.ts";
+import { setBlockDrops } from "../src/ast.ts";
+import type { Stmt } from "../src/ast.ts";
 
 describe("block-scoped drops", () => {
   // The self-host site. `src/ast.ts` is part of the compiler's own source, so the
@@ -72,5 +74,32 @@ console.log(f());`;
     const r = await compileAndRun(`${src}\nconsole.log(__arrLive());`);
     expect(r.stdout).toBe("9\n0\n");
     expect(r.exitCode).toBe(0);
+  });
+
+  // The setter's invariant, tested at the accessor rather than through a program,
+  // because the interesting orderings are not all reachable from source today.
+  //
+  // Insertion ALWAYS happens on the first walk: `scoped()` decides whether to set drops
+  // at all from `declaredLinear(list) ∩ this.linear`, and neither `this.linear` nor
+  // `aliasOf` is mutated during the walk (both are read-only constructor state —
+  // `this.linear` is only ever `.has`), so the early return is walk-invariant. A first
+  // walk that computes an EMPTY set still inserts a marker, and a later walk replaces
+  // its contents in place. Asserted anyway: it is the invariant the representation
+  // depends on, and it would silently become false if `linear` ever grew mid-walk.
+  test("setBlockDrops inserts once and then replaces, whatever the order", () => {
+    const stmt = (): Stmt => ({ kind: "ExprStmt", expr: { kind: "NumberLiteral", value: 1 } });
+    const list: Stmt[] = [stmt(), stmt()];
+
+    setBlockDrops(list, []); // first walk: nothing droppable yet — still a marker
+    expect(list.length).toBe(3);
+    expect(list[2]).toEqual({ kind: "BlockDrops", names: [] });
+
+    setBlockDrops(list, ["a"]); // a later walk ACQUIRES a drop
+    setBlockDrops(list, ["a", "b"]);
+    setBlockDrops(list, ["b"]); // ...and can lose one again (moved out)
+
+    expect(list.length).toBe(3); // still exactly one marker, never appended
+    expect(list.filter((s) => s.kind === "BlockDrops").length).toBe(1);
+    expect(list[list.length - 1]).toEqual({ kind: "BlockDrops", names: ["b"] }); // last write wins, and it stays LAST
   });
 });
