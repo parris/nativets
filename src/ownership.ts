@@ -269,6 +269,54 @@ class Analyzer {
     setBlockDrops(list, declared.filter((n) => this.droppable(n, state)));
   }
 
+  /**
+   * An arrow BODY is a scope of its own. `runScope` builds `linear` with
+   * `collectLinear`, which walks statements and never descends into an expression — so
+   * a linear local an arrow body declared was invisible to it, `scoped()` intersected
+   * the block's declarations with an empty `linear`, and every nested block inside a
+   * callback got an empty drop set. The array was allocated once per element and never
+   * freed. (A `.map` callback is INLINED, so those statements really do run in the
+   * enclosing function; the same body in a plain function frees correctly.)
+   *
+   * The body's own names are added to `linear` only for the duration of the walk, so
+   * they are linear exactly where they are in scope — and only the ones NOT already
+   * there are removed afterwards, or an arrow local shadowing an enclosing linear name
+   * would un-track the enclosing one for the rest of the function.
+   *
+   * `linear` is otherwise read-only during a walk, which the fixpoint in `loop()` leans
+   * on (test/block-drops.test.ts): a body is re-walked up to five times and `scoped()`'s
+   * "no linear locals ⇒ no marker" decision has to come out the same every time. It
+   * still does — what is added here is a pure function of the arrow's AST, and it is
+   * added on every walk before any nested `scoped()` inside the arrow runs.
+   *
+   * ALIASES are excluded, and that exclusion is the double-free guard. `collectAliases`
+   * does not descend into arrows either, so `const b = a.reverse()` inside a callback
+   * body leaves `b` unrecorded; making it linear would put BOTH names in the block's
+   * drop set and free the one allocation twice. Not linear ⇒ not droppable, which is
+   * exactly the treatment the enclosing scope gives an alias.
+   *
+   * And the body runs through `loop()`, because a `.map`/`.filter`/… callback IS a loop
+   * body — it is inlined into a loop over the receiver, which nothing else in this pass
+   * can see. Walking it once was what made the drops unsafe to add: `const a: number[] =
+   * base` MOVES a captured array into a body-local, and dropping that local at the
+   * block's exit frees `base` on the first element and again on every element after —
+   * a double free (observed: exit 255, no output, against 11,12,13). The fixpoint
+   * catches the re-move on walk two and refuses it as NT1601, exactly as the same body
+   * written as a `for-of` already does. `setBlockDrops` replacing rather than appending
+   * is what makes the re-walk safe (test/block-drops.test.ts).
+   */
+  private arrowScope(list: Stmt[], state: State): void {
+    const own = new Set<string>();
+    collectLinear(list, own);
+    const aliases = new Map<string, string>();
+    collectAliases(list, (t) => this.isMutableInstance(t), aliases);
+    for (const a of aliases.keys()) own.delete(a); // an alias owns nothing, so it is never dropped
+    const added: string[] = [];
+    for (const n of own) if (!this.linear.has(n)) { this.linear.add(n); added.push(n); }
+    this.loop(state, (st) => { this.scoped(list, st); });
+    for (const n of added) this.linear.delete(n);
+  }
+
   private stmt(s: Stmt, state: State): void {
     switch (s.kind) {
       case "VarDecl":
@@ -588,10 +636,10 @@ class Analyzer {
       case "NonNullExpr": this.expr(e.expr, state, consume); return;
       case "InstanceOfExpr": this.expr(e.object, state, false); return; // a type TEST only borrows
       case "ObjectLiteral": for (const p of e.properties) this.expr(p.value, state, !p.spread); return; // fields move into the object; a `...spread` source is COPIED (borrow), so it stays usable + owned
-      case "ArrowFunction": // analyze body in the enclosing scope (captures/params aren't linear here)
+      case "ArrowFunction": // captures/params aren't linear here; the BODY is its own scope
         this.arrowDepth++;
         if (e.exprBody) this.expr(e.body as Expr, state, false);
-        else this.seq(e.body as Stmt[], state);
+        else this.arrowScope(e.body as Stmt[], state);
         this.arrowDepth--;
         return;
       case "SequenceExpr": for (const x of e.exprs) this.expr(x, state, false); return;
