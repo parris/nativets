@@ -1090,6 +1090,35 @@ export function freshArray(e: Expr): boolean {
 }
 
 /**
+ * The nearest source location an expression can offer, for a diagnostic that would
+ * otherwise have none.
+ *
+ * Only SOME node kinds carry a `loc` (Identifier, MemberExpr, IndexExpr, CallExpr, …) —
+ * a literal or a binary operator does not — so `e.loc` alone is `undefined` for most
+ * expressions and the diagnostics built from them came out unlocatable. That is not a
+ * cosmetic problem: `[NT2001] return type string does not match declared number` with no
+ * span, on a 4000-line file, cost a lane an instrumented build of the compiler to find
+ * the line. Descending to the first child that DOES carry one is exact enough to jump to
+ * (it is inside the offending expression) and always better than nothing.
+ */
+export function exprLoc(e: Expr | undefined): Loc | undefined {
+  if (!e) return undefined;
+  const own = (e as { loc?: Loc }).loc;
+  if (own) return own;
+  switch (e.kind) {
+    case "BinaryExpr": case "LogicalExpr": return exprLoc(e.left) ?? exprLoc(e.right);
+    case "UnaryExpr": return exprLoc(e.argument);
+    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": return exprLoc(e.expr);
+    case "ConditionalExpr": return exprLoc(e.test) ?? exprLoc(e.consequent) ?? exprLoc(e.alternate);
+    case "TemplateLiteral": return e.exprs.map((x) => exprLoc(x)).find((l) => l !== undefined);
+    case "ArrayLiteral": return e.elements.map((x) => exprLoc(x)).find((l) => l !== undefined);
+    case "ObjectLiteral":
+      return e.properties.map((p) => exprLoc(p.value)).find((l) => l !== undefined);
+    default: return undefined;
+  }
+}
+
+/**
  * The source text of an expression, for a diagnostic that has to NAME the thing it is
  * about. Deliberately partial: names, field reads, element reads and calls over those —
  * the shapes a "this value needs handling" message points at. Anything else returns

@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-08",
-    "rev": "76307ea"
+    "rev": "11adcb6"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "f5e9a67c6ae168f1",
+      "sha256": "2c8f889e21598c56",
       "standalone": {
         "stage": "parse",
         "code": "NT1030",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "c13a0f0540c39e38",
+      "sha256": "d23aa7eeb1418c43",
       "standalone": {
         "stage": "parse",
         "code": "NT1023",
@@ -84,16 +84,16 @@
       }
     },
     "diagnostics.ts": {
-      "sha256": "d7570aadcc03c315",
+      "sha256": "ef42e1d4a8a583ad",
       "standalone": {
-        "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "stage": "ownership",
+        "code": "NT1604",
+        "message": "[NT1604] cannot move out of `diag`: it is borrowed (the owner is elsewhere)"
       },
       "linked": {
-        "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "stage": "ownership",
+        "code": "NT1604",
+        "message": "[NT1604] cannot move out of `diag`: it is borrowed (the owner is elsewhere)"
       }
     },
     "driver.ts": {
@@ -150,7 +150,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "0aa58b702350ad9c",
+      "sha256": "7fdd480b6171ac7c",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

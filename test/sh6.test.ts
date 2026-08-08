@@ -243,11 +243,25 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // => …`. Inferring a parameter's type from its default cleared it; the module now walks
   // into `advance`'s BODY and stops on `line++`, a write to a captured binding.
   "lexer.ts": { rung: 0, code: "NT1031", blame: "self" },
-  // Round the houses: NT1606 (`[...spans].sort()`) -> NT1006 (`Math.max(...spans.map(…))`)
-  // -> back to NT1606, now a `.push` on a NAMED accumulator — a shape the fresh-receiver
-  // rule deliberately does not cover, because permitting it needs in-place mutation of an
-  // owned named local. Same code, a genuinely different blocker each time.
-  "diagnostics.ts": { rung: 0, code: "NT1606", blame: "self" },
+  // WALKED, not nudged. This module's blocker CHAIN was measured end to end — six
+  // distinct blockers between it and rung 1 — and five of them are now cleared:
+  //   1. NT1606  `.push` x4 in formatDiagnostic            -> immutable rebind (src)
+  //   2. NT2001  `} as const` erased the catalog to number -> parser: const assertion
+  //   3. NT2001  `label = "here"` typed number             -> annotated (src)
+  //   4. NT2001  optional field inside an ARRAY element    -> checker: array assignability
+  //   5. NT2001  `this.name` on a class extending Error    -> declared the field (src)
+  //   6. NT1604  `constructor(readonly diag: Diagnostic)`  -> STILL BLOCKED
+  //
+  // Six is the honest number for the rung 0 -> 1 distance of the SHALLOWEST module in the
+  // tree, and it is the first time that distance has been measured for any module at all.
+  //
+  // The last one is not a false positive and not a nudge away. A linear parameter is a
+  // BORROW — the caller owns and drops it — so storing one in a field would leave the
+  // caller freeing a pointer the object still holds. Measured, not assumed: suppressing
+  // the rule and running `function make(): E { const v = {...}; return new E(v); }` gives
+  // exit 255. Clearing it needs CONSUMING PARAMETERS (the callee takes ownership and the
+  // move propagates to every call site), which is a feature.
+  "diagnostics.ts": { rung: 0, code: "NT1604", blame: "self" },
   // RE-MEASURED by the `?.[]` lane. parser.ts had been the ONLY module blocking on a
   // problem of its own for several rounds; clearing `?.[]` took its last self-blocker
   // away, and it now inherits ast.ts's forward type reference through the link. The blame

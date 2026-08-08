@@ -145,6 +145,105 @@ describe("`new C(...)` reshapes its object-literal arguments too", () => {
 });
 
 /*
+ * OPTIONAL FIELDS INSIDE AN ARRAY ELEMENT.
+ *
+ * `assignable` handled objects structurally and had no ARRAY arm at all, so two array
+ * types were compatible only by IDENTITY. An element type that differed by nothing more
+ * than an optional field therefore failed:
+ *
+ *     [NT2001] 'f' arg 0 expects {spans:?U{line:number,primary:?Uboolean}[]},
+ *                          got  {spans:{line:number,primary:boolean}[]}
+ *
+ * and `retypeLiteral`'s own doc comment claimed it reshaped "object/ARRAY literal
+ * (recursively)" while its body only ever matched `ObjectLiteral` — so even had the
+ * predicate passed, the elements would have kept the wrong layout.
+ *
+ * This is SH6 blocker 4 of 6 for src/diagnostics.ts, whose `DiagSpan` is
+ * `{ line: number; label: string; primary?: boolean }` and which builds `spans: [{ line,
+ * label, primary: true }]` at two sites.
+ *
+ * Same discipline as the rest of this file: stdout AND exit code against node, because
+ * widening the predicate without the recursive reshape is the exit-255 miscompile.
+ */
+describe("optional fields inside an ARRAY element type", () => {
+  // ADJACENT GAP, deliberately not exercised here: `xs[0]!.primary === true` is refused
+  // with "Cannot compare ?Uboolean with boolean" — comparing a nullable against a
+  // non-nullable literal, which node answers `false` for an absent field. That is
+  // unrelated to reshaping (it reproduces on a plain `{p?: boolean}` with no array in
+  // sight) and is not this change's to fix, so the cases below read the field through
+  // `=== undefined`, which is supported.
+  test("an array literal of records reshapes element by element", async () => {
+    await matchesNode(`
+type Span = { line: number; primary?: boolean };
+function first(xs: Span[]): number { return xs[0]!.line + (xs[1]!.primary === undefined ? 100 : 0); }
+console.log(first([{ line: 1, primary: true }, { line: 2 }]));
+`);
+  });
+
+  test("the array sits in an optional FIELD of the argument (the diagnostics.ts shape)", async () => {
+    await matchesNode(`
+type Span = { line: number; label: string; primary?: boolean };
+type Diag = { code: string; message: string; hint?: string; spans?: Span[] };
+function render(d: Diag): string {
+  const spans = d.spans ?? [];
+  return d.code + " " + String(spans.length) + " " + (spans.length > 0 ? spans[0]!.label : "-");
+}
+console.log(render({ code: "NT2001", message: "m", spans: [{ line: 7, label: "here", primary: true }] }));
+`);
+  });
+
+  test("an element that OMITS the optional field still fits", async () => {
+    await matchesNode(`
+type Span = { line: number; primary?: boolean };
+function n(xs: Span[]): number { return xs.length + xs[1]!.line; }
+console.log(n([{ line: 1, primary: true }, { line: 5 }]));
+`);
+  });
+
+  test("a DECLARATION of the same array type reshapes too", async () => {
+    await matchesNode(`
+type Span = { line: number; primary?: boolean };
+const xs: Span[] = [{ line: 3, primary: true }, { line: 4 }];
+console.log(xs.length, xs[0]!.line, xs[1]!.primary === undefined ? "none" : "set");
+`);
+  });
+
+  test("nested one deeper: an array of records holding an array of records", async () => {
+    await matchesNode(`
+type Leaf = { v: number; tag?: string };
+type Node = { leaves: Leaf[]; name?: string };
+function total(ns: Node[]): number {
+  let t = 0;
+  for (const n of ns) { for (const l of n.leaves) { t = t + l.v; } }
+  return t;
+}
+console.log(total([{ leaves: [{ v: 1, tag: "a" }, { v: 2 }] }, { leaves: [{ v: 3 }], name: "n" }]));
+`);
+  });
+
+  test("an element type that is genuinely incompatible is still refused", () => {
+    const src = "type Span = { line: number };\n" +
+      "function f(xs: Span[]): number { return xs.length; }\n" +
+      "console.log(f([{ nope: 1 }]));\n";
+    let err: unknown;
+    try { sourceToIR(src, "entry.ts"); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(NTError);
+    expect((err as NTError).diag.code).toBe("NT2001");
+  });
+
+  test("a non-literal array of a compatible element type stays refused", () => {
+    const src = "type Span = { line: number; primary?: boolean };\n" +
+      "function f(xs: Span[]): number { return xs.length; }\n" +
+      "const v = [{ line: 1, primary: true }];\nconsole.log(f(v));\n";
+    let err: unknown;
+    try { sourceToIR(src, "entry.ts"); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(NTError);
+    expect((err as NTError).diag.code).toBe("NT2001");
+    expect(runWithNode(src).stdout).toBe("1\n");
+  });
+});
+
+/*
  * THE BOUNDARY, pinned deliberately.
  *
  * Only an object LITERAL is reshaped, so only an object literal is accepted. A variable
@@ -169,5 +268,48 @@ describe("what is deliberately NOT reshaped", () => {
     expect((err as NTError).diag.code).toBe("NT2001");
     // node accepts it — recorded so the divergence is deliberate, not forgotten.
     expect(runWithNode(src).stdout).toBe("1\n");
+  });
+
+  /*
+   * THE SAME BOUNDARY, IN THE DECLARATION PATH — where it was never enforced.
+   *
+   * The argument path refuses a non-literal because there is nothing to reshape. The
+   * DECLARATION path ran the identical `assignable` predicate and then called
+   * `retypeLiteral`, which is a NO-OP on anything that is not a literal — so it
+   * ACCEPTED the call and emitted the miscompile the test above exists to prevent:
+   *
+   *     type Opts = { a?: number };
+   *     const src = { a: 1 };
+   *     const o: Opts = src;        // accepted
+   *     console.log(o.a ?? 0);      // exit 255, EMPTY stdout; node prints 1
+   *
+   * `src` is one raw double slot; `o` is read as a pointer to a nullable box, so slot 0
+   * is `inttoptr`'d and dereferenced. Measured on main before this change. It is the
+   * worst outcome available — a program that compiles clean and dies — and it was
+   * reachable from ordinary TypeScript with no unsafe construct anywhere.
+   *
+   * Refused now, exactly as the argument path refuses it, and with the same reasoning:
+   * accepting it needs codegen to COPY into the target layout, which is a feature
+   * (structural coercion) rather than a predicate change.
+   */
+  test("a NULLISH initializer needs no reshape and is unaffected", async () => {
+    // The guard's first spelling refused `const a: {b:C} | null = null` — there is no
+    // literal to rebuild, and none is needed. Caught by
+    // test/fixtures/stage21-a2/{10_short_circuit_rest,17_null_undefined_flow}.ts.
+    await matchesNode("type C = { c: number };\ntype B = { b: C } | null;\nconst a: B = null;\nconsole.log(a === null ? \"null\" : \"set\");\n");
+  });
+
+  test("a non-literal INITIALIZER of a compatible type is refused, not miscompiled", () => {
+    const src = "type Opts = { a?: number };\n" +
+      "const v = { a: 1 };\nconst o: Opts = v;\nconsole.log(o.a ?? 0);\n";
+    let err: unknown;
+    try { sourceToIR(src, "entry.ts"); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(NTError);
+    expect((err as NTError).diag.code).toBe("NT2001");
+    expect(runWithNode(src).stdout).toBe("1\n");
+  });
+
+  test("...and the literal form of the same declaration still compiles and runs", async () => {
+    await matchesNode("type Opts = { a?: number };\nconst o: Opts = { a: 1 };\nconsole.log(o.a ?? 0);\n");
   });
 });

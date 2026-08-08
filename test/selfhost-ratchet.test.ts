@@ -185,7 +185,14 @@ function measureStandalone(source: string): Blocker {
   try { checked = check(program); } catch (e) { return blockerFrom("check", e); }
   try {
     const own = analyzeOwnership(checked);
-    if (own.length) return { stage: "ownership", code: own[0]!.code, message: normalize(own[0]!.message) };
+    // `[CODE] ` prefix included, because EVERY other stage has it: the other arms build
+    // their message from an NTError, whose `.message` is `[CODE] text`, while the
+    // ownership pass RETURNS raw diagnostics rather than throwing. Without this the two
+    // columns disagree for an ownership blocker ONLY — which nothing exercised until
+    // src/diagnostics.ts became the first module ever stopped at that stage (NT1604),
+    // and then "the linked column agrees with sourceToIR itself" reds on a difference
+    // that is pure formatting rather than a real disagreement.
+    if (own.length) return { stage: "ownership", code: own[0]!.code, message: normalize(`[${own[0]!.code}] ${own[0]!.message}`) };
   } catch (e) { return blockerFrom("ownership", e); }
   try { codegen(checked); } catch (e) { return blockerFrom("codegen", e); }
   return CLEAR;
@@ -210,7 +217,14 @@ function measureLinked(source: string, entryPath: string): Blocker {
   try { checked = check(linkedProgram); } catch (e) { return blockerFrom("check", e); }
   try {
     const own = analyzeOwnership(checked);
-    if (own.length) return { stage: "ownership", code: own[0]!.code, message: normalize(own[0]!.message) };
+    // `[CODE] ` prefix included, because EVERY other stage has it: the other arms build
+    // their message from an NTError, whose `.message` is `[CODE] text`, while the
+    // ownership pass RETURNS raw diagnostics rather than throwing. Without this the two
+    // columns disagree for an ownership blocker ONLY — which nothing exercised until
+    // src/diagnostics.ts became the first module ever stopped at that stage (NT1604),
+    // and then "the linked column agrees with sourceToIR itself" reds on a difference
+    // that is pure formatting rather than a real disagreement.
+    if (own.length) return { stage: "ownership", code: own[0]!.code, message: normalize(`[${own[0]!.code}] ${own[0]!.message}`) };
   } catch (e) { return blockerFrom("ownership", e); }
   try { codegen(checked); } catch (e) { return blockerFrom("codegen", e); }
   return CLEAR;

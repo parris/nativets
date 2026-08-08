@@ -34,6 +34,12 @@ export interface Diagnostic {
 }
 
 export class NTError extends Error {
+  // `name` is DECLARED, not just assigned. nativets models `extends Error` as an
+  // inherited `message: string` and nothing else, so a bare `this.name = ...` is a write
+  // to a field the class does not have. Declaring it makes the slot real, keeps
+  // `e.name === "NTError"` true under bun exactly as before, and is a no-op for
+  // TypeScript. SH6 blocker 5 of 6 for this module (docs/self-hosting.md).
+  name: string;
   constructor(readonly diag: Diagnostic) {
     super(`[${diag.code}] ${diag.message}`);
     this.name = "NTError";
@@ -53,6 +59,7 @@ export class NTError extends Error {
  * in a bug report. What changes is that the message says whose fault it is.
  */
 export class InternalError extends Error {
+  name: string;
   constructor(detail: string) {
     super(
       `internal compiler error: ${detail}\n` +
@@ -99,16 +106,36 @@ function leadingWhitespace(s: string): number {
  */
 export function formatDiagnostic(diag: Diagnostic, source?: string): string {
   const head = `error[${diag.code}]: ${diag.message}`;
+  // A span with no real line is worse than no span. Not every AST node carries a `loc`,
+  // so a producer that writes `line: e.loc?.line ?? 0` emits line 0 — which rendered as a
+  // blank gutter row and a caret under nothing:
+  //
+  //     error[NT1604]: cannot move out of `d`: it is borrowed
+  //         |
+  //       0 |
+  //         | ^ occurs here
+  //
+  // pointing the reader at a line that does not exist. Dropping those falls back to the
+  // compact one-line form, which at least does not lie about a location.
+  //
+  // Written as a guard-then-filter rather than `diag.spans?.filter(...)` because a method
+  // call on a nullable is NT1002 — and this file has to stay inside the subset it
+  // compiles (docs/self-hosting.md). The optional-chained spelling silently moved this
+  // module's SH6 blocker backwards; the shape below does not.
   if (!diag.spans || diag.spans.length === 0 || !source) {
+    return diag.hint ? `${head}\n  = help: ${diag.hint}` : head;
+  }
+  const located = diag.spans.filter((s) => s.line > 0);
+  if (located.length === 0) {
     return diag.hint ? `${head}\n  = help: ${diag.hint}` : head;
   }
   const srcLines = source.split("\n");
   // Primary span(s) first, then secondaries, but keep source order within each group.
-  const spans = [...diag.spans].sort(
+  const spans = [...located].sort(
     (a, b) => Number(!!b.primary) - Number(!!a.primary) || a.line - b.line,
   );
   const gutter = Math.max(...spans.map((s) => String(s.line).length));
-  const lines = [head];
+  let lines = [head];
   for (const s of spans) {
     const text = srcLines[s.line - 1] ?? "";
     const num = String(s.line).padStart(gutter);
@@ -116,11 +143,9 @@ export function formatDiagnostic(diag: Diagnostic, source?: string): string {
     const trimmed = text.slice(leadingWhitespace(text));
     const indent = text.length - trimmed.length;
     const caret = (s.primary ? "^" : "-").repeat(Math.max(1, trimmed.length || 1));
-    lines.push(`  ${pad} |`);
-    lines.push(`  ${num} | ${text}`);
-    lines.push(`  ${pad} | ${" ".repeat(indent)}${caret} ${s.label}`);
+    lines = [...lines, `  ${pad} |`, `  ${num} | ${text}`, `  ${pad} | ${" ".repeat(indent)}${caret} ${s.label}`];
   }
-  if (diag.hint) lines.push(`  ${" ".repeat(gutter)} = help: ${diag.hint}`);
+  if (diag.hint) lines = [...lines, `  ${" ".repeat(gutter)} = help: ${diag.hint}`];
   return lines.join("\n");
 }
 
@@ -329,7 +354,12 @@ export function decoratorError(message: string, hint: string): NTError {
  * the source underlines the line, rustc-style). `hint` is the fix, kept out of the
  * message so `coverage` can show it separately.
  */
-export function typeError(message: string, at?: { line: number; col: number }, hint?: string, label = "here"): NTError {
+// `label: string` is written out rather than inferred from its default. nativets does
+// not yet infer a parameter's type FROM its default (it falls back to `number`), so the
+// bare `label = "here"` made this function's own `spans` literal fail to type-check when
+// src/diagnostics.ts is compiled by nativets — SH6 blocker 3 of 6, docs/self-hosting.md.
+// The annotation is a no-op for TypeScript and can come out once that inference lands.
+export function typeError(message: string, at?: { line: number; col: number }, hint?: string, label: string = "here"): NTError {
   if (at === undefined) return new NTError({ code: "NT2001", message, hint });
   return new NTError({
     code: "NT2001",

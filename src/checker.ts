@@ -9,7 +9,7 @@
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
-import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText, freshArray } from "./ast.ts";
+import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText, exprLoc, freshArray } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
 // Stage 47 (console.log of compound values): the handle-type predicates the
@@ -1235,6 +1235,12 @@ class Checker {
       }
       return true;
     }
+    // An ARRAY is compatible when its ELEMENTS are. Without this arm two array types were
+    // compatible only by identity, so an element type differing by nothing more than an
+    // optional field was refused — while the identical shape at the top level was fine.
+    // Sound for the same reason the object arm is: acceptance is gated by `reshapable`,
+    // so only a literal whose elements can be rebuilt in the target layout gets through.
+    if (isArrayTy(target) && isArrayTy(source)) return this.assignable(elemTy(target), elemTy(source));
     return false;
   }
 
@@ -1244,6 +1250,36 @@ class Checker {
    * omits and boxing scalar field values into their nullable field type. Only
    * reshapes when the literal is assignable to the target.
    */
+  /**
+   * Can `e` actually BE rewritten into `target`'s slot layout?
+   *
+   * `assignable` decides object compatibility structurally, but structural compatibility
+   * is not layout compatibility: `{a:number}` is one raw double slot and `{a?:number}` is
+   * a pointer to a nullable box. The declaration path checked the predicate and then
+   * called `retypeLiteral`, which silently does NOTHING to anything that is not a literal
+   * — so `const o: {a?:number} = v` was ACCEPTED and compiled a program that `inttoptr`s
+   * a double and dereferences it (exit 255, empty stdout, where node prints the value).
+   *
+   * The argument path (`fitsArg`) has always refused that, for exactly this reason. This
+   * is the same guard, phrased once so both paths agree: a reshape that is NEEDED but
+   * impossible is a refusal, never a silent wrong answer.
+   *
+   * Scalars and nullables are unaffected — codegen boxes those on store from the declared
+   * type, so `const s: string | undefined = someString` needs no literal and keeps working.
+   */
+  private reshapable(e: Expr, target: Ty, source: Ty): boolean {
+    const base = baseTy(target);
+    const src = baseTy(source);
+    if (src === base) return true;                        // same layout — nothing to rewrite
+    // A nullish initializer has no layout to rewrite: `const a: {b:C} | null = null` stores
+    // the null, and there is no literal to rebuild. Without this the guard refused it —
+    // caught by test/fixtures/stage21-a2/{10_short_circuit_rest,17_null_undefined_flow}.ts.
+    if (src === "null" || src === "undefined") return true;
+    if (isObjectTy(base)) return e.kind === "ObjectLiteral";
+    if (isArrayTy(base) && isObjectTy(elemTy(base))) return e.kind === "ArrayLiteral";
+    return true;
+  }
+
   private retypeLiteral(e: Expr, target: Ty): void {
     const base = baseTy(target);
     if (e.kind === "ObjectLiteral" && isObjectTy(base)) {
@@ -1253,6 +1289,17 @@ class Checker {
         const ft = fieldType(base, p.key);
         if (ft) this.retypeLiteral(p.value, ft);
       }
+      return;
+    }
+    // ...and into an ARRAY literal's elements. This comment's promise of "object/array
+    // literal (recursively)" was true of the doc and not of the body: only `ObjectLiteral`
+    // was ever matched, so `[{line:1,primary:true}]` against `{line:number,primary?:boolean}[]`
+    // kept the literal's own layout even where the predicate accepted it — the exit-255
+    // shape this file is about.
+    if (e.kind === "ArrayLiteral" && isArrayTy(base)) {
+      e.ty = base;
+      const et = elemTy(base);
+      for (const el of e.elements) this.retypeLiteral(el, et);
     }
   }
 
@@ -1442,7 +1489,7 @@ class Checker {
             }
           }
           const t = this.type(d.init, scope, d.annot); // annotation is the context (e.g. `const a: T[] = []`)
-          if (d.annot && d.annot !== t && !this.assignable(d.annot, t)) {
+          if (d.annot && d.annot !== t && (!this.assignable(d.annot, t) || !this.reshapable(d.init, d.annot, t))) {
             throw typeError(`'${d.name}' declared ${asWritten(d.annot, d.annotHead)} but initialized with ${t}`,
               undefined, dictHint(d.annot, d.annotHead, t));
           }
@@ -1459,7 +1506,7 @@ class Checker {
       case "ReturnStmt":
         if (s.argument) {
           const t = this.type(s.argument, scope, ret === "void" ? undefined : ret); // return type is the context (e.g. `return []`)
-          if (ret !== "void" && !this.fitsParam(ret, t)) throw typeError(`return type ${t} does not match declared ${ret}`);
+          if (ret !== "void" && !this.fitsParam(ret, t)) throw typeError(`return type ${t} does not match declared ${ret}`, exprLoc(s.argument), undefined, "returned here");
         }
         return;
       case "IfStmt": {
@@ -1637,8 +1684,19 @@ class Checker {
         // SH2: the elements of a `Shape[]` have DIFFERENT types by design — they share
         // the union, not one object shape. Accept exactly when every element is one of
         // its members (the same identity rule `assignable` uses for a union target).
-        const want = hint !== undefined && isArrayTy(hint) && isUnionTy(elemTy(hint)) ? elemTy(hint) : undefined;
-        if (want !== undefined && tys.every((t) => this.assignable(want, t))) return hint as Ty;
+        // The annotated ELEMENT type wins whenever every element fits it AND can be
+        // rebuilt in its layout. This started as a union-only rule (a `Shape[]`'s elements
+        // have different types by design), but the same thing is true of records that
+        // differ only in an OPTIONAL field: `const xs: Span[] = [{line:1,primary:true},
+        // {line:4}]` has two element types, neither of which is `Span`, and inferring
+        // bottom-up could only report "array elements must share a type". `reshapable`
+        // keeps it honest — an element that cannot be rewritten falls through to the
+        // identity rule below rather than being accepted with the wrong layout.
+        const want = hint !== undefined && isArrayTy(hint) ? elemTy(hint) : undefined;
+        if (want !== undefined && tys.every((t, i) => this.assignable(want, t) && this.reshapable(e.elements[i]!, want, t))) {
+          e.elements.forEach((el) => this.retypeLiteral(el, want));
+          return hint as Ty;
+        }
         const first = tys[0]!;
         if (!tys.every((t) => t === first)) throw typeError(`array elements must share a type (got ${[...new Set(tys)].join(", ")})`);
         // A `Date` is represented AS a double (stdlib batch 3), so `Date[]` is a
@@ -2122,7 +2180,7 @@ class Checker {
           e.args.forEach((a, i) => {
             const exp = ctor.params[i + 1]!;
             const at = this.typeArg(a, exp, scope);
-            if (!this.fitsArg(exp, at, a)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`);
+            if (!this.fitsArg(exp, at, a)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument");
           });
           return objTy;
         }
@@ -2628,7 +2686,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = msig.params[i + 1]!;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${e.callee.property}' arg ${i} expects ${exp}, got ${at}`);
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${e.callee.property}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument");
         });
         return msig.ret;
       }
@@ -2746,7 +2804,7 @@ class Checker {
         if (e.args.length !== ps.length) throw typeError(`'${e.callee.name}' expects ${ps.length} arguments, got ${e.args.length}`);
         e.args.forEach((a, i) => {
           const at = this.typeArg(a, ps[i]!, scope);
-          if (at !== ps[i]) throw typeError(`'${e.callee.name}' arg ${i} expects ${ps[i]}, got ${at}`);
+          if (at !== ps[i]) throw typeError(`'${e.callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
         });
         return funcRet(bound.ty);
       }
@@ -2771,7 +2829,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = i < fixed ? sig.params[i]! : restElem;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsArg(exp, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`);
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument");
         });
         return sig.ret;
       }
@@ -2780,7 +2838,7 @@ class Checker {
       }
       e.args.forEach((a, i) => {
         const at = this.typeArg(a, sig.params[i]!, scope); // contextual: function-typed params type their arrow args
-        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`);
+        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
       });
       return sig.ret;
     }
@@ -2789,7 +2847,7 @@ class Checker {
     if (isFuncTy(ct)) {
       const ps = funcParams(ct);
       if (e.args.length !== ps.length) throw typeError(`call expects ${ps.length} arguments, got ${e.args.length}`);
-      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`); });
+      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument"); });
       return funcRet(ct);
     }
     throw nyi(NYI.CLOSURE, "unsupported call target");
@@ -3305,8 +3363,14 @@ class Checker {
    */
   private fitsArg(expected: Ty, actual: Ty, arg: Expr): boolean {
     if (this.fitsParam(expected, actual)) return true;
-    if (arg.kind !== "ObjectLiteral") return false;
-    if (!isObjectTy(baseTy(expected)) || !this.assignable(expected, actual)) return false;
+    // An ARRAY literal is reshapable for exactly the same reason an object literal is —
+    // its elements are literals the checker can rebuild — so `f([{line:1,primary:true}])`
+    // against `Span[]` is a legal call. Anything that is not a literal keeps being
+    // refused: its layout is already fixed by its own declaration.
+    if (arg.kind !== "ObjectLiteral" && arg.kind !== "ArrayLiteral") return false;
+    const base = baseTy(expected);
+    if (!isObjectTy(base) && !isArrayTy(base)) return false;
+    if (!this.assignable(expected, actual) || !this.reshapable(arg, expected, actual)) return false;
     this.retypeLiteral(arg, expected);
     return true;
   }
@@ -3364,7 +3428,7 @@ class Checker {
       // forcing case. `null` in argTys means "any type", hence no hint.
       const want = sig.argTys[i];
       const at = want ? this.type(a, scope, want) : this.type(a, scope);
-      if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`);
+      if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`, exprLoc(a), undefined, "this argument");
     });
   }
 }

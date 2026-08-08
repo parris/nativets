@@ -65,9 +65,13 @@ const PHASES = ["none", "lexed", "parsed", "ir"] as const;
 type Phase = (typeof PHASES)[number];
 const rank = (p: Phase) => PHASES.indexOf(p);
 
-/** The furthest phase `module` completes, plus the first error that stopped it. */
-function phaseOf(module: string): { phase: Phase; error: string } {
-  const source = read(module);
+/**
+ * The furthest phase a SOURCE completes, plus the first error that stopped it.
+ *
+ * Split out from `phaseOf` so the scale's own self-tests can run on a synthetic
+ * specimen instead of a real module — see "the phase scale itself is honest" below.
+ */
+function phaseAt(source: string, path: string): { phase: Phase; error: string } {
   try {
     lex(source);
   } catch (e) {
@@ -80,11 +84,16 @@ function phaseOf(module: string): { phase: Phase; error: string } {
   }
   try {
     // The whole-program link + check + ownership + codegen, entered at this module.
-    sourceToIR(source, new URL(module, SRC).pathname);
+    sourceToIR(source, path);
   } catch (e) {
     return { phase: "parsed", error: msg(e) };
   }
   return { phase: "ir", error: "" };
+}
+
+/** The furthest phase `module` completes, plus the first error that stopped it. */
+function phaseOf(module: string): { phase: Phase; error: string } {
+  return phaseAt(read(module), new URL(module, SRC).pathname);
 }
 
 const msg = (e: unknown) => String((e as Error)?.message ?? e).split("\n")[0]!.trim();
@@ -160,12 +169,56 @@ describe("the phase scale itself is honest", () => {
     }
   });
 
-  test("a module that throws inside sourceToIR does not score `ir`", () => {
-    // diagnostics.ts lexes and parses, then dies in the checker. Under the old scale
-    // it scored `ir`; the honest answer is `parsed`.
-    const { phase, error } = phaseOf("diagnostics.ts");
+  /*
+   * SYNTHETIC SPECIMENS, and the reason they are synthetic.
+   *
+   * This self-test used to name a REAL module — `diagnostics.ts` — as its
+   * known-to-fail specimen, asserting `phase === "parsed"` exactly. That is a
+   * measurement pointed at a moving target: a real module's whole purpose is to stop
+   * failing, so the day one finally reaches IR this test reds and reads as "you broke
+   * the bootstrap ratchet" when what actually happened is the ratchet succeeded. The
+   * same mistake `test/sh6.test.ts` deliberately avoids by walking a control specimen
+   * it owns.
+   *
+   * So the specimens below are sources this FILE controls, each chosen because it is
+   * refused for a reason that cannot be "fixed" later:
+   *
+   *   - a regex literal — nativets has no `RegExp` and never will (Tier C,
+   *     docs/divergences.md). It LEXES (that was the SH0 move) and the PARSER refuses
+   *     it, so it scores `lexed` and pins the lex -> parse boundary.
+   *   - `x instanceof Error` — refused because `Error` is modelled STRUCTURALLY as
+   *     `{message:string}`, so an Error and a plain record carrying a `message` have
+   *     the same static type and class membership is undecidable. That is a
+   *     consequence of the type model, not a gap, so it survives parse and dies inside
+   *     `sourceToIR` — which is the boundary the regression below was actually about.
+   *
+   * MEASURED, not assumed: a regex literal scores `lexed`, NOT `parsed`. Picking one
+   * for the `parsed` case would have moved this test off the very boundary it guards.
+   */
+  const SPECIMENS = {
+    /** Lexes, then the parser refuses it — the lex -> parse boundary. */
+    lexedOnly: 'const r = /abc/;\nconsole.log(r);\n',
+    /** Lexes and parses, then throws INSIDE sourceToIR — the boundary that regressed. */
+    parsedOnly: 'const e = new Error("x");\nconsole.log(e instanceof Error);\n',
+    /** Completes every phase — proves `ir` is reachable at all, so the scale has a top. */
+    reachesIR: 'console.log(1 + 1);\n',
+  };
+  const specimenPath = new URL("specimen.ts", SRC).pathname;
+
+  test("a source that throws inside sourceToIR scores `parsed`, never `ir`", () => {
+    const { phase, error } = phaseAt(SPECIMENS.parsedOnly, specimenPath);
     expect(phase).toBe("parsed");
     expect(error).toContain("NT");
+  });
+
+  test("a source the parser refuses scores `lexed`", () => {
+    const { phase, error } = phaseAt(SPECIMENS.lexedOnly, specimenPath);
+    expect(phase).toBe("lexed");
+    expect(error).toContain("NT");
+  });
+
+  test("a source that compiles scores `ir` — the top of the scale is reachable", () => {
+    expect(phaseAt(SPECIMENS.reachesIR, specimenPath)).toEqual({ phase: "ir", error: "" });
   });
 });
 
@@ -257,14 +310,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // (`\`${string}[]\`` in ast.ts, which coverage.ts and coverage-preprocess.ts saw
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
-    // RE-MEASURED after the optional-element lane landed `?.[]`. NT1009 is EMPTY tree-wide
-    // — it held NINE of the twelve, and `?.[]` was the whole of it. This assertion was RED
-    // on main (90abc55) when that lane merged: an exact tree-wide set reds on PROGRESS,
-    // which is the failure mode `test/selfhost-ratchet.test.ts` exists to avoid (there, a
-    // blocker moving with the module's source UNCHANGED is auto-classified as the frontier
-    // advancing and stays green). Recorded here as the reason this list keeps churning.
+    // RE-MEASURED AT THE MERGE — both sides of this hunk were stale, which is exactly why
+    // an exact tree-wide set keeps churning. Main had emptied NT1009 (the `?.[]` lane, nine
+    // of twelve modules) and NT2001 (parameter-default inference); this lane had emptied
+    // NT1606 (diagnostics.ts was its only holder) and added NT1604. The union of those four
+    // moves is the list below, measured on the merged tree, not inferred from either side.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1023", "NT1030", "NT1031", "NT1606"],
+      ["NT1023", "NT1030", "NT1031", "NT1604"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -387,7 +439,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // established why: permitting it needs in-place mutation on an owned named local,
     // which is how the `.reverse` double free happened.
     expect(byCode["NT1006"]).toBeUndefined();
-    expect(byCode["NT1606"]!.sort()).toEqual(["diagnostics.ts"]);
+    // …and NT1606 is now EMPTY tree-wide. `diagnostics.ts` was its only holder, and the
+    // rung-3 lane cleared the `.push` sites (`lines = [...lines, …]`) plus the four
+    // blockers that were queued behind them. A fact about today, not an invariant — this
+    // file has been wrong three times treating an emptied bucket as one.
+    expect(byCode["NT1606"]).toBeUndefined();
+    // NEW BUCKET, and it is the END of that module's chain rather than another step along
+    // it: NT1604, `constructor(readonly diag: Diagnostic)` — an object-typed parameter
+    // moved into a field. A linear parameter is a BORROW (the caller owns and drops it),
+    // so the refusal is SOUND: suppressing it and running the escaping shape gives exit
+    // 255. Clearing it needs consuming parameters, which is a feature, not a predicate.
+    expect(byCode["NT1604"]!.sort()).toEqual(["diagnostics.ts"]);
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not
