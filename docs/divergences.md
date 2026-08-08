@@ -892,6 +892,28 @@ supported case is node-differential — there is **no runtime divergence**. The 
   is also **not enforced** (a bound violation surfaces as an ordinary error inside the
   specialization, not as a constraint violation at the call site).
 
+### Indexed access types (`T["field"]`) — resolved exactly, or refused (`NT1029`)
+
+An indexed access type (TypeScript's "lookup type") is a pure type-layer construct: node strips
+it, so every supported case is node-differential and there is **no runtime divergence**. It is
+resolved **precisely or not at all** — when the base is a record whose fields are known in *this
+file* and the key is a string **literal**, the lookup becomes that field's type exactly. The
+refusals, all `NT1029`:
+
+- **A non-literal index** — `T[number]` (array element), `T[K]`, `T[keyof T]`. Each would have to
+  stand for several types at once, which this subset cannot represent. The hint names the
+  supported spelling.
+- **A base whose fields this file does not know.** An unknown named type erases to `number` in the
+  parser (`resolveNamed`), so a *cross-module* `Mod["field"]` has no fields to look up. This is
+  the common case, and the hint says to declare the type here or write the field's type directly.
+- **A key the record does not have** — the hint lists the fields it does have.
+
+Why refuse rather than erase: a lookup carries no runtime of its own, but its **result** decides
+how the annotated value is stored, compared and printed. Erasing an unresolved lookup to a guess
+would be a silent wrong answer — the worst outcome available. Before `NT1029` the whole construct
+died in the `[]` array-suffix loop as an **anonymous `NT0001 Expected ']'`**, with no code and no
+hint; it was the last unnamed refusal in the tree.
+
 ### `static` class members — supported, and the four refusals
 
 A static member has no receiver, so it is a **namespaced top-level definition**: `static m(…)`
