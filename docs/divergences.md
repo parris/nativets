@@ -1140,7 +1140,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
-| NT1030 | a type name used above its declaration, and any **recursive** type | later | type names resolve in SOURCE ORDER; a self-containing type needs a nominal `Ty` — see below |
+| NT1030 | a **recursive** type — one that contains itself, directly or mutually | later | top-level type declarations now HOIST, so ordering is no longer a refusal; a self-containing type needs a nominal `Ty` — see below |
 
 ### Spreading a value INTO a call — the three cases, and why only two compile
 
@@ -1310,14 +1310,27 @@ would silently change what the program does.
 
 | NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`) |
 
-### Type names resolve in SOURCE ORDER, and recursive types are not representable (NT1030)
+### Type declarations HOIST; recursive types are still not representable (NT1030)
 
-TypeScript resolves type names anywhere in a file; nativets' parser is single-pass and
-resolves them **in source order**. A name used above its declaration is refused with
-`NT1030`. This is a real divergence — node runs such a program, and TypeScript accepts it —
-and it is a refusal, never a miscompile.
+TypeScript hoists every type declaration in a scope — a type may be used above the line
+that declares it, and order is irrelevant. nativets now matches that for **top-level**
+`type`/`interface` declarations: `hoistTypeDecls` (`src/parser.ts`) resolves them to a
+fixpoint before the file proper is parsed, so each round resolves whatever its dependencies
+allow and the declarations settle in dependency order regardless of how they are written.
 
-It used to be neither. `resolveNamed` fell back to `number` for any unregistered name, so
+Two things stay outside it, both refusals rather than miscompiles:
+
+- **A type declared inside a function or block** stays in source order. Its meaning can
+  depend on where it sits — a type PARAMETER in scope resolves to a `#T` marker, not to a
+  shape — so hoisting it to file scope could change what it resolves to. `NT1030` says so,
+  and the hint names the fix (move it to the top level).
+- **A cycle.** The fixpoint identifies these exactly: what is still unresolved when a round
+  makes no progress, and is blocked on something else that is also unresolved, contains
+  itself. Those get the *recursion* wording, naming the type the cycle closes through
+  (`recursive type 'TemplateLiteral' — it contains itself through 'Expr'`), and explicitly
+  do **not** get told to reorder.
+
+Before hoisting, this was neither. `resolveNamed` fell back to `number` for any unregistered name, so
 the annotation was silently erased and the program failed later against the *value*:
 `'x' declared number but initialized with {kind:string,a:number}`. That message names
 neither the type nor the cause, and it cost a round of self-hosting work — `ForStmt.init:
@@ -1328,12 +1341,11 @@ refused; an imported or stdlib name still falls back, which is what keeps the bl
 at one file — measured across all 141 files in `src/` and `test/fixtures/`.
 
 **Recursion is the harder half, and it is not a parser problem.** `interface N { next: N }`
-cannot be fixed by reordering: the reference resolves while `N` itself is still being
-parsed. The real obstacle is the type encoding. `Ty` is a **structural string**
-(`src/ast.ts`) — `{a:number,b:string}`, `number[]` — chosen precisely so `===` is type
-comparison. A type that contains itself has no finite structural string, so no amount of
-two-pass resolution helps; a two-pass parser would replace the silent erasure with infinite
-expansion.
+cannot be fixed by reordering, and hoisting does not touch it either. The real obstacle is
+the type encoding. `Ty` is a **structural string** (`src/ast.ts`) — `{a:number,b:string}`,
+`number[]` — chosen precisely so `===` is type comparison. A type that contains itself has
+no finite structural string, so no amount of multi-pass resolution helps; a resolver that
+did not stop would replace the silent erasure with infinite expansion.
 
 Supporting it honestly requires a **nominal, by-reference form in `Ty`** — a type that names
 a declaration instead of spelling out its shape — plus every structural comparison,

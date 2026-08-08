@@ -8,7 +8,7 @@
  */
 
 import { lex, LexError, type Token } from "./lexer.ts";
-import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnostics.ts";
+import { parseError, nyi, NYI, mutationError, decoratorError, NTError } from "./diagnostics.ts";
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
   isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
@@ -113,9 +113,32 @@ class Parser {
    * a name absent from this map is an import or a stdlib type and keeps the old fallback.
    */
   private declaredTypeLines = new Map<string, number>();
+  /**
+   * Where each TOP-LEVEL `type`/`interface` declaration starts, as a token index — the
+   * first token of the whole declaration, so any `export` or `@@`/`@` decorator prefix is
+   * included. This is the input to `hoistTypeDecls`, which re-parses each declaration on
+   * its own before the file proper.
+   *
+   * Top-level ONLY (brace depth 0). A `type` declared inside a function body or a generic
+   * function's scope can mean something different there (a type PARAMETER in scope resolves
+   * to a `#T` marker, not to a shape), so hoisting it to file scope could change what it
+   * resolves to. Those keep the old source-order behavior.
+   */
+  private typeDeclStarts = new Map<string, number>();
   /** The `interface`/`type` name whose own body is being parsed — a reference to it from
    *  in there is RECURSIVE, which reordering cannot fix, so it is reported differently. */
   private declaringType: string | undefined;
+  /**
+   * Type names `hoistTypeDecls` proved to be in a CYCLE, each mapped to the name it is
+   * blocked on (itself, for a directly self-recursive type). Hoisting resolves a forward
+   * reference; what it cannot resolve, however it is reordered, is a type that contains
+   * itself. Naming those as an ordering problem would be the exact misdirection NT1030
+   * exists to end, so `resolveNamed` reports them as recursion instead.
+   */
+  private cyclicTypes = new Map<string, string>();
+  /** The type name `resolveNamed` last refused on. Read by `hoistTypeDecls` off a
+   *  sub-parser to build the dependency edge it needs to tell a cycle from a chain. */
+  private blockedOn: string | undefined;
   /** Top-level functions synthesized from class members (ctor + methods), appended to
    *  the program body after parsing so they hoist like ordinary function declarations. */
   private hoistedFns: Stmt[] = [];
@@ -187,16 +210,83 @@ class Parser {
     // Pre-scan for declared type names. Lexical on purpose: `interface`/`type` followed by
     // an identifier is unambiguous in the token stream, and this has to run BEFORE any
     // parsing so a name's declaration is known no matter where it sits in the file.
+    let depth = 0; // brace depth, so `typeDeclStarts` can keep to top-level declarations
     for (let i = 0; i + 1 < toks.length; i++) {
       const t = toks[i]!;
       const n = toks[i + 1]!;
-      if ((t.value === "interface" || t.value === "type") && t.type === "ident" && n.type === "ident") {
+      if (t.type === "punct" && t.value === "{") depth++;
+      else if (t.type === "punct" && t.value === "}") depth--;
+      else if ((t.value === "interface" || t.value === "type") && t.type === "ident" && n.type === "ident") {
         // `type X =` only — `type` is not a reserved word, so `const type = 1` must not
         // register `= 1` as a declaration. `interface` is always a declaration.
         if (t.value === "interface" || toks[i + 2]?.value === "=" || toks[i + 2]?.value === "<") {
           if (!this.declaredTypeLines.has(n.value)) this.declaredTypeLines.set(n.value, t.line);
+          if (depth === 0 && !this.typeDeclStarts.has(n.value)) {
+            // Walk back over the declaration's prefix so a re-parse from here sees the
+            // whole thing: `export`, then any `@@attr` / `@wrapper` pair before it.
+            let s = i;
+            if (s > 0 && toks[s - 1]!.value === "export") s--;
+            while (s >= 2 && toks[s - 1]!.type === "ident" && (toks[s - 2]!.value === "@@" || toks[s - 2]!.value === "@")) s -= 2;
+            this.typeDeclStarts.set(n.value, s);
+          }
         }
       }
+    }
+  }
+
+  /**
+   * TYPE HOISTING. In TypeScript every type declaration in a scope is hoisted: a type may
+   * be used above the line that declares it, and source order is irrelevant (types are
+   * erased, so there is nothing to order). This parser, though, SUBSTITUTES a named type
+   * for its shape as it goes — `typeAliases` only holds what has been parsed so far — so a
+   * use above the declaration had no shape to substitute.
+   *
+   * Fix it by resolving the top-level type declarations FIRST, to a fixpoint. Each round
+   * re-parses every still-unresolved declaration on its own (a sub-parser over the same
+   * tokens, positioned at the declaration's first token, seeded with what is known so far);
+   * one that still names an unresolved type is deferred to the next round. A round that
+   * resolves nothing means the remainder is a CYCLE.
+   *
+   * A cycle is a DIFFERENT, unsolved problem — `Ty` is a flat string (src/ast.ts), so a
+   * type that contains itself has no finite encoding. Those names are simply left out of
+   * `typeAliases`, and the main parse below refuses them exactly as it always did. Forward
+   * reference and recursion stay two diagnostics, and the one that can be fixed is fixed.
+   *
+   * Nothing here reports errors. A declaration that fails for any OTHER reason (a general
+   * union, a bad decorator) is dropped from the fixpoint so the main parse reports it at
+   * its real position, with its own message — this pass never becomes the blamed frame.
+   */
+  private hoistTypeDecls(): void {
+    let pending = [...this.typeDeclStarts.keys()];
+    const blocker = new Map<string, string>(); // name -> the unresolved type it stopped on
+    while (pending.length) {
+      const deferred: string[] = [];
+      for (const name of pending) {
+        const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
+        sub.pos = this.typeDeclStarts.get(name)!;
+        try {
+          sub.parseStatement();
+        } catch (e) {
+          if (e instanceof NTError && e.diag.code === NYI.FORWARD_TYPE.code) {
+            deferred.push(name);
+            if (sub.blockedOn !== undefined) blocker.set(name, sub.blockedOn);
+            continue;
+          }
+          continue; // a real refusal — leave it to the main parse, where it belongs
+        }
+        const ty = sub.typeAliases.get(name);
+        if (ty !== undefined) this.typeAliases.set(name, ty);
+      }
+      if (deferred.length < pending.length) { pending = deferred; continue; }
+      // No progress. Everything left is stuck — but on WHAT matters: stuck on another
+      // stuck name is a cycle (unfixable), stuck on a name that failed for its own reason
+      // is not, and must not be reported as recursion.
+      const stuck = new Set(deferred);
+      for (const name of deferred) {
+        const b = blocker.get(name);
+        if (b !== undefined && stuck.has(b)) this.cyclicTypes.set(name, b);
+      }
+      return;
     }
   }
 
@@ -234,21 +324,29 @@ class Parser {
     const declaredAt = this.declaredTypeLines.get(id);
     if (declaredAt !== undefined) {
       const used = this.toks[this.pos - 1]?.line ?? declaredAt;
+      this.blockedOn = id;
       // Two different failures, and the advice differs: one is fixed by moving a line,
       // the other cannot be fixed by reordering at all. Saying "declare it earlier" for a
       // recursive type would be the same kind of misdirection this diagnostic exists to
       // end, so each carries its own hint rather than the catalog's shared one.
-      throw id === this.declaringType
-        ? nyi(
-            NYI.FORWARD_TYPE,
-            `recursive type '${id}' — it refers to itself (declared at line ${declaredAt})`,
-            "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md",
-          )
-        : nyi(
-            NYI.FORWARD_TYPE,
-            `use of type '${id}' before its declaration (used at line ${used}, declared at line ${declaredAt})`,
-            "move the declaration above its first use — type names resolve in source order. If two types refer to EACH OTHER, that is recursion and reordering cannot fix it; see docs/divergences.md",
-          );
+      const through = id === this.declaringType ? id : this.cyclicTypes.get(id);
+      if (through !== undefined) {
+        throw nyi(
+          NYI.FORWARD_TYPE,
+          through === id
+            ? `recursive type '${id}' — it refers to itself (declared at line ${declaredAt})`
+            : `recursive type '${id}' — it contains itself through '${through}' (declared at line ${declaredAt})`,
+          "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md",
+        );
+      }
+      // Not a cycle, so it is genuinely unresolved: either a declaration this file rejects
+      // for its own reason (reported where it is declared), or a nested `type` that type
+      // hoisting deliberately leaves in source order (see `typeDeclStarts`).
+      throw nyi(
+        NYI.FORWARD_TYPE,
+        `use of type '${id}' before its declaration (used at line ${used}, declared at line ${declaredAt})`,
+        "top-level `type`/`interface` declarations are hoisted, so this one is not top-level (a type declared inside a function or block stays in source order) or its own declaration was rejected — move it to the top level, above its first use; see docs/divergences.md",
+      );
     }
     return (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty;
   }
@@ -279,6 +377,7 @@ class Parser {
   }
 
   parseProgram(): Program {
+    this.hoistTypeDecls();
     const body: Stmt[] = [];
     while (this.peek().type !== "eof") body.push(this.parseStatement());
     this.checkFloatingAsyncCalls(body);
