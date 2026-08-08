@@ -108,7 +108,7 @@ export function formatDiagnostic(diag: Diagnostic, source?: string): string {
     (a, b) => Number(!!b.primary) - Number(!!a.primary) || a.line - b.line,
   );
   const gutter = Math.max(...spans.map((s) => String(s.line).length));
-  const lines = [head];
+  let lines = [head];
   for (const s of spans) {
     const text = srcLines[s.line - 1] ?? "";
     const num = String(s.line).padStart(gutter);
@@ -116,11 +116,9 @@ export function formatDiagnostic(diag: Diagnostic, source?: string): string {
     const trimmed = text.slice(leadingWhitespace(text));
     const indent = text.length - trimmed.length;
     const caret = (s.primary ? "^" : "-").repeat(Math.max(1, trimmed.length || 1));
-    lines.push(`  ${pad} |`);
-    lines.push(`  ${num} | ${text}`);
-    lines.push(`  ${pad} | ${" ".repeat(indent)}${caret} ${s.label}`);
+    lines = [...lines, `  ${pad} |`, `  ${num} | ${text}`, `  ${pad} | ${" ".repeat(indent)}${caret} ${s.label}`];
   }
-  if (diag.hint) lines.push(`  ${" ".repeat(gutter)} = help: ${diag.hint}`);
+  if (diag.hint) lines = [...lines, `  ${" ".repeat(gutter)} = help: ${diag.hint}`];
   return lines.join("\n");
 }
 
