@@ -188,11 +188,21 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     //   (general unions, intersections, `?.[]`), which is why it was asserted per-feature
     //   rather than by count; all three are clear of the compiler's own source now.
     //
-    //   NT1031 was ALREADY here and this list did not say so — the gate was RED on main
-    //   before this lane touched it. Commit 943f4fe renumbered the capture-write refusal
-    //   NT1029 -> NT1031 and 877e6d9 fixed the crash beside it, but neither updated this
-    //   central histogram, so `coverage-preprocess.ts`'s NT1031 has been unlisted since.
-    //   It is a real blocker, not a new one, and it is named here now.
+    //   NT1031 is `coverage-preprocess.ts`'s `line++` on a captured binding — a REAL
+    //   blocker, and a newly VISIBLE one rather than a newly created one.
+    //
+    //   Attribution, corrected by bisect rather than inferred: this gate was GREEN at
+    //   abf0185 and RED at 877e6d9, so the renumber (943f4fe, NT1029 -> NT1031) did NOT
+    //   cause it. 877e6d9 did, and for a good reason. That commit fixed a CRASH in the
+    //   capture-write walkers (an unguarded `d.init` on a bare `let x: T;`), and the
+    //   crash had been aborting the analysis BEFORE it could report this blocker. So the
+    //   pass did not start refusing something new; it started finishing, and told the
+    //   truth about a refusal it had been swallowing.
+    //
+    //   That is worth stating plainly because it inverts how the red reads: the fix did
+    //   not break this gate, it revealed that the gate had been measuring a compiler
+    //   that crashed. A histogram assembled from a pass that dies partway is not a
+    //   smaller histogram, it is a wrong one.
     expect([...hist.keys()].sort()).toEqual(
       ["NT1003", "NT1014", "NT1015", "NT1023", "NT1031"],
     );
