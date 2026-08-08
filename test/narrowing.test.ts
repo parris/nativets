@@ -315,7 +315,24 @@ if (m !== undefined) {
 `, "NT2001", "?Unumber");
   });
 
-  test("a name assigned inside ANY arrow is never narrowed", () => {
+  // The original of this case wrote `x` from an ARROW. That program is now refused
+  // EARLIER, by NT1029: a closure cannot write a binding anything outside it still uses,
+  // because our captures are by value (test/capture-write.test.ts). The narrowing rule
+  // it was written for is unchanged and still live for a named `function`, which is not
+  // a closure and gets no capture analysis — so the case is carried over in that form,
+  // and the arrow spelling is kept below as the interaction it now is.
+  test("a name assigned inside a FUNCTION called in between is never narrowed", () => {
+    expectRejected(`
+let x: number | undefined = 1;
+function clear(): void { x = undefined; }
+if (x !== undefined) {
+  clear();
+  console.log(x + 1);
+}
+`, "NT2001", "?Unumber");
+  });
+
+  test("the arrow spelling of the same program is refused first, by NT1029", () => {
     expectRejected(`
 let x: number | undefined = 1;
 const clear = () => { x = undefined; };
@@ -323,7 +340,7 @@ if (x !== undefined) {
   clear();
   console.log(x + 1);
 }
-`, "NT2001", "?Unumber");
+`, "NT1029", "captured binding");
   });
 
   test("`??` does NOT carry a guard fact to its right operand", () => {
