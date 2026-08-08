@@ -595,7 +595,8 @@ export type Stmt =
   | BlockStmt
   | MultiStmt
   | BreakStmt
-  | ContinueStmt;
+  | ContinueStmt
+  | BlockDropsStmt;
 
 export interface NumberLiteral { kind: "NumberLiteral"; value: number; ty?: Ty; }
 export interface BooleanLiteral { kind: "BooleanLiteral"; value: boolean; ty?: Ty; }
@@ -843,14 +844,33 @@ export interface ReturnStmt { kind: "ReturnStmt"; argument: Expr | null; drops?:
  * `switch` case, a `try` block) owns the linear locals it declares directly, and frees
  * them at its own fall-through exit — the RAII scope exit, one level down from
  * `FuncDecl.endDrops`. Every block-owning statement already holds a plain `Stmt[]`, so
- * the set is attached to the LIST rather than adding a field to a dozen statement kinds.
- * `structuredClone` (generic specialization) runs BEFORE ownership, so nothing is lost.
+ * the set belongs to the LIST, not to a field on each of a dozen statement kinds.
+ *
+ * SYNTHESIZED, never parsed: the ownership pass appends one of these to the block whose
+ * exit it describes, and codegen frees the names when it reaches it. Putting the drop
+ * point IN the list makes it an ordinary node — it shows up in an AST dump, and a block
+ * that already terminated (`return`/`break`/`continue`) skips it by the same rule that
+ * skips any later statement, rather than by a second check spelled out in codegen.
+ *
+ * It used to be an expando property on the array, typed `Stmt[] & { blockDrops?… }`.
+ * That was the only intersection type in the compiler's own source, and an array with
+ * extra properties has no representation here (`NtArray` is a fixed 4-field struct), so
+ * this file could not compile itself — the same constraint the note at `Partial<…> & {…}`
+ * above records. `structuredClone` (generic specialization) runs BEFORE ownership, so
+ * the marker is appended after the last clone and nothing is lost.
+ */
+export interface BlockDropsStmt { kind: "BlockDrops"; names: string[]; }
+
+/**
+ * Attach `names` as the block's fall-through drop set. IDEMPOTENT — it replaces an
+ * existing marker rather than appending a second one, because `loop()` re-walks a loop
+ * body up to five times to reach its fixpoint and each walk sets the set again. Five
+ * appended markers would be five frees of the same value: a double free, not a leak.
  */
 export function setBlockDrops(list: Stmt[], names: string[]): void {
-  (list as Stmt[] & { blockDrops?: string[] }).blockDrops = names;
-}
-export function blockDrops(list: Stmt[]): string[] {
-  return (list as Stmt[] & { blockDrops?: string[] }).blockDrops ?? [];
+  const last = list[list.length - 1];
+  if (last !== undefined && last.kind === "BlockDrops") { last.names = names; return; }
+  list.push({ kind: "BlockDrops", names });
 }
 export interface IfStmt { kind: "IfStmt"; test: Expr; consequent: Stmt[]; alternate: Stmt[] | null; }
 export interface WhileStmt { kind: "WhileStmt"; test: Expr; body: Stmt[]; }
