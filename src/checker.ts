@@ -3008,7 +3008,7 @@ class Checker {
     // place. The INLINED HOF callbacks (`typeArrowBody`) run inside the expression that
     // creates them, so they are not a boundary.
     // The arrow's own body joins `bodyChain` while its body is typed, so a NESTED arrow
-    // sees it as one of ITS enclosing bodies (NT1029) — and comes back off before
+    // sees it as one of ITS enclosing bodies (NT1031) — and comes back off before
     // `computeCaptures`, which asks about the bodies OUTSIDE this arrow.
     this.bodyChain.push(arrowBody(arrow));
     let retTy: Ty;
@@ -3062,7 +3062,7 @@ class Checker {
   }
 
   /**
-   * NT1029 — a closure that WRITES a binding it captured, in a shape where the write
+   * NT1031 — a closure that WRITES a binding it captured, in a shape where the write
    * would be lost.
    *
    * A capture is a by-VALUE snapshot: codegen fills the closure's env block when the
@@ -3664,7 +3664,7 @@ function collectBlockLocals(s: Stmt, out: Set<string>): void {
 }
 
 /* ------------------------------------------------------------
- * ESCAPING WRITES (NT1029) — which names an arrow assigns that it does not itself bind.
+ * ESCAPING WRITES (NT1031) — which names an arrow assigns that it does not itself bind.
  *
  * `collectAssigned` above answers a different question (does this REGION assign the
  * name, at all, anywhere) and deliberately ignores shadowing, because a narrowing has
@@ -3744,7 +3744,7 @@ function arrowBody(arrow: ArrowFunction): Stmt[] {
 /**
  * Is `name` mentioned anywhere in `stmts`, other than inside `skip`?
  *
- * The second half of the NT1029 rule: a closure may rewrite its captured slot only when
+ * The second half of the NT1031 rule: a closure may rewrite its captured slot only when
  * nothing outside it can observe the enclosing frame's now-stale copy. That question is
  * about USES, so this walks the enclosing body looking for any occurrence of the name at
  * all — a read, a write, a call, a mention inside a SECOND closure (which would hold its
