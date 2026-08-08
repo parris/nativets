@@ -370,8 +370,10 @@ function materializeTextImports(program: Program, path: string, read: ReadModule
       throw moduleError("NT1701", `cannot read the text import '${show(target)}' ${where}`,
         "a `with { type: \"text\" }` specifier is a path relative to the importing file, like an import specifier — check the path and the extension");
     }
-    // `String.fromCharCode(0)`, not `"\0"`: that escape is not in nativets' lexer, so the
-    // literal form would decode to the character `0` once this file compiles itself.
+    // `String.fromCharCode(0)`, not a `"\0"` literal. The reason changed but the spelling
+    // did not: the escape IS in nativets' lexer now, and a literal holding a NUL is
+    // exactly what NT1705 refuses — so writing one here would make this file
+    // un-self-hostable. Same spelling in `src/lexer.ts`'s `escapeChar`.
     const nul = text.indexOf(String.fromCharCode(0));
     if (nul >= 0) {
       throw moduleError("NT1704", `the text import '${show(target)}' ${where} contains a NUL byte at offset ${nul}`,

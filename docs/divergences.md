@@ -1,4 +1,4 @@
-# Divergences & unsupported features
+> §A.2), unchanged.
 
 ### THE HEADLINE DIVERGENCE — an out-of-bounds index PANICS
 
@@ -490,6 +490,69 @@ Two refusals, both of the reject-don't-miscompile kind:
 - **A NUL byte in the file is `NT1704`.** nativets strings are NUL-terminated (`js_str_len` is
   `strlen`), so an inlined NUL would truncate the constant at run time while the `.ll` still
   carried every byte. Text imports are for text; refuse rather than truncate.
+
+### A NUL in a string LITERAL is `NT1705` — the same rule, on the other doors
+
+`NT1704` guarded exactly one way for a NUL to enter a string: a text import's bytes. Every
+other way in was a **silent wrong answer**, the worst outcome the prime directive names:
+
+```ts
+const s = "a\0b";
+console.log(s.length);   // node: 3     nativets, before NT1705: 1
+```
+
+A nativets string is a NUL-terminated UTF-8 `const char *` (`runtime.c`: `js_str_len` **is**
+`strlen`), so a NUL inside a value ends it. Nothing warned; the `.ll` carried all three bytes
+and the program answered `1`.
+
+**The rule.** A string or template literal whose **decoded value** contains U+0000 is refused
+with `NT1705`. The check is on the value, not on the syntax, so every spelling lands on it at
+once — `\0`, `\x00`, `\u0000`, `\u{0}`, and a raw NUL byte pasted into the source, in both
+quoted strings and templates (including the quasis around a `${…}`). It is checked over the
+token stream, so an object key, an import specifier and a string literal *type* are covered
+too, not just expressions.
+
+**This refuses programs node accepts** — hence its place here. node prints `3`; we refuse.
+The alternative was to keep printing `1`.
+
+**What it does NOT cover, and cannot.** A compile-time rule only sees compile-time values. A
+NUL computed at RUN time still truncates silently, and these all remain open:
+
+| runtime door | node | nativets |
+|---|---|---|
+| `String.fromCharCode(0).length` | `1` | `0` |
+| `("a" + String.fromCharCode(0) + "b").length` | `3` | `2` |
+| `readFileSync(binaryFile, "utf8").length` (NUL inside) | full length | truncated at the NUL |
+| `JSON.parse` of JSON text holding a `\u0000`, then `.length` | `3` | `1` |
+
+`String.fromCharCode(0)` in particular **must not** be refused: `src/lexer.ts` and
+`src/modules.ts` both call it deliberately (it is how the compiler spells a NUL now that a
+`"\0"` literal is `NT1705`), so refusing it would widen the self-hosting gap. Closing the
+runtime doors needs a length-carrying string representation, or a runtime panic at each
+producer — neither is in this change. Until then a self-compiled nativets cannot detect its
+own NULs, the same caveat `src/modules.ts` already carries for `NT1704`.
+
+### Octal escapes (`\1`…`\7`, and `\0` followed by a digit) are `NT0001`
+
+Establishing what `\0` means turned up a neighbouring silent wrong answer: `"a\1b"` decoded
+to the character `"1"` (`charCodeAt` 49) where node says 1. `\1`…`\7` are ECMAScript Annex
+B.1.2 **LegacyOctalEscapeSequence**, and so is `\0` when a decimal digit follows it —
+`"\01"` is U+0001, *not* a NUL then `"1"`.
+
+These are **not** a divergence: they are SyntaxErrors in strict mode, and a TypeScript module
+is strict, so node refuses them too (`SyntaxError: Octal escape sequences are not allowed in
+strict mode`). They are `NT0001`, the ordinary syntax band. A bare `\0` is untouched — it is
+the NUL escape, legal in strict mode, and refused as `NT1705` for its own reason.
+
+`\8` and `\9` are **NonOctalDecimalEscapeSequence**, decode to `"8"`/`"9"` exactly as node
+does, and stay accepted (test262 `legacy-non-octal-escape-sequence-8-non-strict.js`).
+
+> Fixing this needed `\uHHHH` / `\u{H+}` to exist at all: `\u` was not an escape the lexer
+> knew, so it fell through to "an unknown escape is the character itself", and `"a\u0041b"`
+> compiled to the seven characters `au0041b` where node gives `aAb`. That is now implemented
+> and node-differentially tested (`test/nul-string.test.ts`), and it is also what routes a
+> `\u0000` into `NT1705`. `String#length` over the result is still UTF-8 byte-oriented —
+> §A.2, unchanged.
 
 `node` is our oracle. Two kinds of "we differ from node" exist, tracked separately.
 
