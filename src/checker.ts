@@ -1643,7 +1643,14 @@ class Checker {
         return tagged !== undefined && this.assignable(tagged, lit) ? tagged : lit;
       }
       case "SpreadExpr": throw nyi(NYI.SPREAD, "spread");
-      case "ArrowFunction": return this.typeArrow(e, undefined, scope);
+      // The `hint` is the CONTEXTUAL type — a declaration's annotation (`const f: (x:
+      // string) => number = …`), a return type, an assignment target. `typeArrow` already
+      // consumes it (and ignores it when it is not a function type), and every OTHER call
+      // site already supplied it; this one passed `undefined` and dropped it on the floor,
+      // so a contextually typed CALLBACK compiled and a contextually typed BINDING did not.
+      // That was src/modules.ts's first blocker, at `const defaultRead: ReadModule = (p) =>
+      // readFileSync(p, "utf8")`.
+      case "ArrowFunction": return this.typeArrow(e, hint, scope);
       case "SequenceExpr": {
         let t: Ty = "undefined";
         for (const x of e.exprs) t = this.type(x, scope);
