@@ -243,7 +243,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT0001", "NT1006", "NT1009", "NT1015", "NT1027", "NT2001"],
+      ["NT1006", "NT1009", "NT1015", "NT1023", "NT1027", "NT2001"],
     );
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
@@ -259,7 +259,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // cleared NT1015 (static members) and the module then got FURTHER and stopped on a
     // different parse error at 582:33 — the bucket refilled because the frontier ADVANCED.
     // Assert membership, which says which construct, not emptiness, which says nothing.
-    expect(byCode["NT0001"]!.sort()).toEqual(["codegen.ts"]);
+    // NT0001 is empty AS OF TODAY — the indexed-access lane named codegen.ts's blocker,
+    // and that was the last anonymous parse failure in the tree. Every remaining blocker
+    // carries a code and a hint, which is what CLAUDE.md promises.
+    //
+    // Stated as a fact, not an invariant. This file has twice pinned an emptied bucket as
+    // permanent (NT0001 itself, then NT1027) and been wrong both times, because clearing a
+    // NAMED blocker lets a module reach further and hit an unnamed one behind it.
+    expect(byCode["NT0001"]).toBeUndefined();
+    // NEW BUCKET: codegen.ts left NT0001 for a NAMED code — a method that assigns a field
+    // and so produces a new module value.
+    expect(byCode["NT1023"]!.sort()).toEqual(["codegen.ts"]);
     // RATCHET MOVE (collections): NT1014 is now EMPTY. It held lexer.ts on
     // `new Set([...])` for REGEX_AFTER_KEYWORD; `new Set(iterable)` compiles now, so the
     // module walks on to what sat behind it — NT2001, an object literal where a Map is

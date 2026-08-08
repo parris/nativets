@@ -366,9 +366,10 @@ class Parser {
     throw nyi(NYI.OPTIONAL_CHAIN, `union of object types '${shown}' without a usable discriminant — ${why}`);
   }
   // A single type atom: literal / function / object / tuple / import-type /
-  // scalar-or-named, plus `[]` suffixes.
+  // scalar-or-named, plus `[]` suffixes and `["key"]` lookups.
   private parseTypeAtom(): Ty {
     let base: Ty;
+    let baseName: string | undefined; // source spelling of `base`, for the lookup diagnostic
     const t = this.peek();
     // A string-literal type is KEPT as `"a"` here; `parseType` widens it back to
     // `string` unless it ends up as a union member's discriminant (see above).
@@ -389,13 +390,72 @@ class Parser {
     else if (this.at("import")) base = this.parseImportType();    // inline import type: import("m").T
     else {
       const id = this.expectIdent();
+      baseName = id;
       if (id === "true" || id === "false") base = "boolean";       // boolean-literal type
       else if (this.at("<")) base = this.parseGenericType(id);      // `Name<...>` — erase the args
       else base = this.resolveNamed(id);
     }
+    // `[` after a type atom is one of TWO constructs, told apart by what follows it: an
+    // empty `[]` is the array suffix, anything else is an indexed access (lookup) type.
+    // Before this split the loop ate both brackets unconditionally, so every `T["k"]`
+    // died here as an anonymous `Expected ']'`.
     let suffix = "";
-    while (this.at("[")) { this.eat("["); this.eat("]"); suffix += "[]"; } // T[], T[][]
+    while (this.at("[")) {
+      this.eat("[");
+      if (this.at("]")) { this.eat("]"); suffix += "[]"; continue; } // T[], T[][]
+      base = this.parseIndexedAccessTy((base + suffix) as Ty, (baseName ?? base) + suffix);
+      suffix = "";
+      baseName = undefined;
+    }
     return (base + suffix) as Ty;
+  }
+
+  /**
+   * An indexed access type `T["key"]` (TypeScript's "lookup type"), the `[` already eaten.
+   *
+   * Resolved PRECISELY or not at all. When `base` is a record whose fields are known here
+   * and `key` is a string literal naming one of them, the lookup BECOMES that field's
+   * type — exact, no erasure. Every other shape is refused as NT1029, saying which way it
+   * failed, because a lookup's result decides how the annotated value is stored and
+   * printed: guessing it would be a silent wrong answer, not a lost type-level nicety.
+   *
+   * `display` is the SOURCE spelling of the base (`resolveNamed` has usually erased the
+   * name away by now), so the message names what was actually written.
+   */
+  private parseIndexedAccessTy(base: Ty, display: string): Ty {
+    const t = this.peek();
+    if (t.type !== "str") {
+      // `T[number]`, `T[K]`, `T[keyof T]` — an index that is not one named field.
+      throw nyi(
+        NYI.INDEXED_ACCESS,
+        `indexed access type '${display}[${t.value || t.type}]' — the index is not a string literal`,
+        `only a single named field can be looked up: \`${display}["someField"]\`. \`T[number]\` (array element), \`T[K]\` and \`T[keyof T]\` would each have to stand for several types at once, which this subset has no way to represent — name the field, or write its type directly`,
+      );
+    }
+    this.next();
+    this.eat("]");
+    const key = t.value;
+    if (!isObjectTy(base)) {
+      // Includes the common cross-module case: an unknown named type erases to `number`
+      // in `resolveNamed`, so its fields never reach this file at all.
+      throw nyi(
+        NYI.INDEXED_ACCESS,
+        `indexed access type '${display}["${key}"]' — '${display}' is not a record type whose fields are known in this file`,
+        `a lookup needs the base's fields at hand: declare '${display}' as a \`type\`/\`interface\` in THIS file, or write the field's type directly instead of looking it up`,
+      );
+    }
+    const f = objectFields(base).find((x) => x.key === key);
+    if (!f) {
+      const have = objectFields(base).map((x) => x.key);
+      throw nyi(
+        NYI.INDEXED_ACCESS,
+        `indexed access type '${display}["${key}"]' — '${display}' has no field '${key}'`,
+        have.length === 0
+          ? `'${display}' has no fields to look up`
+          : `'${display}' has: ${have.join(", ")}`,
+      );
+    }
+    return f.ty;
   }
   // Inline import type `import("./mod").Name` (optionally qualified) — erased to the
   // referenced named type (an alias if known, else `number`). The module path is dropped.

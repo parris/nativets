@@ -115,10 +115,16 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // refill it — the bucket growing means the frontier moved, not that anything regressed.
     // What this table is for is naming each survivor explicitly, so a NEW one is a
     // deliberate entry rather than a silent arrival.
-    const UNMASKED: Record<string, number> = {
-      // codegen.ts:582 — `Expected ']' but found 'program'`, unmasked by static members.
-      "codegen.ts": 1,
-    };
+    // EMPTY AGAIN — and this time every remaining blocker in the tree carries a NAMED
+    // code, which is the property actually worth having. codegen.ts's entry was
+    // `Expected ']' but found 'program'`, which the indexed-access lane identified as
+    // `T["field"]` and gave a real diagnostic.
+    //
+    // Kept as a table rather than a bare assertion so a NEW anonymous parse failure has to
+    // be added here deliberately. Do NOT read an empty table as an invariant: this bucket
+    // has emptied and refilled twice, because clearing a named blocker lets a module reach
+    // further and hit an unnamed one behind it.
+    const UNMASKED: Record<string, number> = {};
     for (const f of SRC_MODULES) {
       const r = coverage(src(f));
       const nt0001 = r.blockers.filter((b) => b.code === "NT0001").length;
@@ -169,7 +175,7 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // `new Map([[k, v], …])` in ast.ts: the Set forms and the Map-COPY form compile now,
     // but the ENTRIES form still needs a tuple type.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT0001", "NT1003", "NT1009", "NT1014", "NT1015", "NT1027", "NT1606"],
+      ["NT1003", "NT1009", "NT1014", "NT1015", "NT1023", "NT1027", "NT1606"],
     );
     // NT1009 FELL from 4 to 3 — the first time the largest bucket has ever shrunk, and the
     // general-union lane's whole result. It is still the largest, but the code now spans

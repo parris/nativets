@@ -13,7 +13,7 @@
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, type FmtSpec } from "./checker.ts";
 import { blockDrops, freshArray, RETAINS_RECEIVER } from "./ast.ts";
-import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc } from "./ast.ts";
+import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
@@ -584,7 +584,7 @@ class ModuleGen {
    *  lower to a host call; every other program's IR is unchanged. */
   hostImports = new Set<string>();
 
-  build(program: CheckedProgram["program"]): string {
+  build(program: Program): string {
     this.usesActors = scanUsesActors(program);
     this.hostImports = new Set(program.hostImports ?? []);
     const fns: string[] = [];
