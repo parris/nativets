@@ -13,6 +13,7 @@
 #include "nt_bytes.h"
 #include <string.h>
 #include <math.h>
+#include <stdio.h>  /* snprintf, for nt_bytes_json */
 
 /* From runtime.c: the shared bump/GC allocator + the RC string side-table register
  * (a decoded string must join the RC table so scope-exit release balances it). */
@@ -93,6 +94,47 @@ void nt_bytes_index_set(NtBytes *b, double id, double v, const char *loc) {
 }
 
 double nt_bytes_len(NtBytes *b) { return (double)b->len; }
+
+/* JSON for a Uint8Array (codegen `genJsonStringify`).
+ *
+ * `JSON.stringify` walks a value's own ENUMERABLE properties, and a typed array's
+ * are its INDICES — so node writes an index-keyed OBJECT, `{"0":1,"1":255}`, not
+ * the array form `[1,255]`. An empty buffer is `{}`, inline even under an indent,
+ * exactly as node prints an empty object. This used to fall through to the literal
+ * `null`.
+ *
+ * `unit` is the compile-time indent unit ("" = compact) and `depth` the nesting
+ * level, so entries sit at depth+1 and the closing brace at the parent's depth —
+ * the same contract `genJsonObject` follows. */
+const char *nt_bytes_json(NtBytes *b, const char *unit, double depth) {
+  int64_t n = b->len;
+  if (n == 0) return "{}";
+  size_t ulen = strlen(unit);
+  int64_t d = (int64_t)depth;
+  /* Per entry: `"<index>": <0..255>,` plus a newline and the inner indent. 32 covers
+   * the punctuation and the widest index/value an int64 length can produce. */
+  size_t cap = (size_t)n * (32 + ulen * (size_t)(d + 1) + 1) + ulen * (size_t)d + 8;
+  char *out = (char *)nativets_alloc(cap);
+  size_t k = 0;
+  out[k++] = '{';
+  for (int64_t i = 0; i < n; i++) {
+    if (i > 0) out[k++] = ',';
+    if (ulen > 0) {
+      out[k++] = '\n';
+      for (int64_t j = 0; j <= d; j++) { memcpy(out + k, unit, ulen); k += ulen; }
+    }
+    k += (size_t)snprintf(out + k, cap - k, ulen > 0 ? "\"%lld\": %u" : "\"%lld\":%u",
+                          (long long)i, (unsigned)b->data[i]);
+  }
+  if (ulen > 0) {
+    out[k++] = '\n';
+    for (int64_t j = 0; j < d; j++) { memcpy(out + k, unit, ulen); k += ulen; }
+  }
+  out[k++] = '}';
+  out[k] = 0;
+  nt_str_register(out);                    /* join the RC table like any heap string */
+  return out;
+}
 
 NtBytes *nt_bytes_encode(const char *s) {
   size_t n = strlen(s);                    /* nativets strings are UTF-8 already */

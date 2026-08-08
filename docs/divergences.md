@@ -175,7 +175,23 @@ have scanned.
 approximation:
 
 - **`%o`** of a compound (node adds `showHidden`: `[ 1, 2, 3, [length]: 3 ]`) — use `%O`;
-- **`%j`** of a `Map`/`Set`/`Dyn`/handle (`JSON.stringify` has no meaning for them here);
+- **`%j`** of whatever `JSON.stringify` itself refuses — a `Dyn`, a `URL`/`Response` handle,
+  a value with a `toJSON` — and **nothing else**. `%j` IS `JSON.stringify`, so it routes
+  through the one predicate (`checkJsonStringifyArg`) rather than keeping a second list in
+  step. It previously refused a `Map`/`Set` outright while the direct call rendered the
+  literal `null` for one; both now render `{}`, which is what node prints for every Map and
+  every Set.
+
+  `%j` accepts strictly MORE in exactly one place, and node is the reason: `%j` does not
+  RETURN the stringify result, it CONCATENATES it (`formatWithOptions` does
+  `tempStr = tryStringify(arg)` and joins), so a value stringify DROPS prints the literal
+  `undefined` instead of having no answer. `console.log("%j", undefined)` is `undefined` in
+  node and in nativets; the direct `JSON.stringify(undefined)` stays refused, because its
+  result type is `string` here and the undefined VALUE does not fit in one. The same holds
+  for a `T | undefined`. Routing `%j` through the direct call's predicate without that
+  carve-out is a REGRESSION — a node-correct answer traded for a wrong rejection — and
+  `test/json-fallthrough.test.ts` pins both directions;
+
 - **`%d`/`%i`/`%f`** of an array or `Dyn`, which node coerces through `ToPrimitive`
   (`String([1,2,3])` is `"1,2,3"`, so `%f` of it is `1`);
 - **`%s`** of a `Uint8Array`: node inspects an object only when it has no custom
@@ -377,6 +393,86 @@ All now match node. Two consequences worth knowing:
   is omitted, as node does. An `undefined` inside an ARRAY is unaffected — `null` is what node
   writes there.
 
+### `JSON.stringify` — the default-to-`null` fall-through (closed)
+
+`genJsonStringify` handled number/boolean/string/`Date`/nullable/array/object and then
+ended with `return { v: this.mod.intern("null"), ty: "string" }`. **Every type nobody had
+written a rule for serialized as the literal `null`** — the same shape as the `truthyOf`
+fall-through above, and with the same property: it absorbed each new box type as it was
+added, silently. Six were already wrong, measured against node (stdout and exit code, all
+exit 0):
+
+| Was | node | ours, before |
+|---|---|---|
+| `JSON.stringify(new Set().add("a"))` | `{}` | `null` |
+| `JSON.stringify(new Map().set("a","1"))` | `{}` | `null` |
+| `JSON.stringify({m: aMap, ok: 1})` | `{"m":{},"ok":1}` | `{"m":null,"ok":1}` |
+| `JSON.stringify(new Uint8Array(2))` | `{"0":0,"1":0}` | `null` |
+| `JSON.stringify({f: aFunction, ok: 1})` | `{"ok":1}` — key omitted | `{"f":null,"ok":1}` |
+| `JSON.stringify(JSON.parse(s))` | the JSON back | `null` |
+| `JSON.stringify(undefined)` | the undefined VALUE | `null` |
+
+The **nested** rows are the dangerous ones: they sit inside an otherwise-correct object, so
+nothing about the output looks wrong.
+
+**The fix is the fall-through, not the six rows.** `genJsonStringify` is exhaustive now and
+`internalError`s on a type with no rule, and `checkJsonStringifyArg` in the checker walks
+the SAME shape first, so anything with no node-exact rendering is refused with `NT1005`
+before codegen sees it. A seventh box type is a compile error, not a seventh wrong answer.
+
+What is now RENDERED, and why it is exact rather than approximate:
+
+- **`Map` / `Set` → `{}`.** Neither has any own ENUMERABLE property — the contents live in
+  internal slots `JSON.stringify` never walks — so `{}` is what node prints for every Map
+  and every Set, whatever they hold. A constant, not a guess.
+- **`Uint8Array` → `{"0":1,"1":255}`.** A typed array's own enumerable properties ARE its
+  indices, so node writes an index-keyed OBJECT, not the array form. Empty is `{}`, inline
+  even under an indent. Pretty-printing is supported (`runtime/nt_bytes.c`, `nt_bytes_json`).
+- **a FUNCTION-typed object field → the key is omitted**, as node does. Unlike a
+  `T | undefined` field this is a COMPILE-TIME decision, so an object of only function
+  fields is `{}`.
+
+What is REFUSED (`NT1005`), each with the fix named:
+
+- **a function at the ROOT**, and the bare **`undefined`** — node returns the undefined
+  VALUE, which a `string`-typed `JSON.stringify` cannot; the `T | undefined` precedent above.
+- **a `Dyn`** — `JSON.stringify(JSON.parse(s))`. node round-trips it; nativets has no
+  `Dyn`→JSON walk in the runtime, so it is refused rather than rendered `null`. Keep the
+  original string, or narrow (`d as T`) and stringify the `T`. A `Dyn`→JSON runtime
+  function is the obvious follow-up.
+- **`URL` / `URLSearchParams` / `Response` / `Headers` / `TextEncoder` / `TextDecoder`** —
+  no renderer here. (node's answers are known — `u.href` for a URL, `{}` for the rest — so
+  these are addable; they are refused rather than guessed until measured case by case.)
+- **anything with a `toJSON`** — a class declaring a `toJSON()` method, or an object literal
+  with a callable `toJSON` field. `toJSON` REPLACES the value: node calls it and serializes
+  what it RETURNS, at every position (test262
+  `built-ins/JSON/stringify/value-tojson-result.js`; `JSON.stringify([q])` is `[{"y":2}]`).
+  nativets builds the serializer from the STATIC FIELDS, so it ignored the method and
+  emitted the raw shape — `{"x":1}` where node gives `"P!"`. Call it yourself:
+  `JSON.stringify(x.toJSON())`. Only a CALLABLE `toJSON` is refused — node ignores a
+  non-callable one (`value-tojson-not-function.js`), so `{toJSON: 1, a: 2}` still
+  serializes as `{"toJSON":1,"a":2}` exactly as node does.
+
+  This one is worth calling out as the pattern: a class instance is STRUCTURALLY an object
+  here, so it fell into the object arm and was "handled". Making a fall-through exhaustive
+  closes the types with no arm; it does not close the types that reach the WRONG arm.
+
+The ARRAY-element position is unreachable for all of these: `Map<…>[]`, `Uint8Array[]` and
+an array of functions are `NT1001` ("arrays of X is not supported yet"), which predates
+this. `checkJsonStringifyArg` still carries the `"element"` case, so lifting NT1001 yields a
+refusal rather than a fresh wrong answer.
+
+**Two more found while pinning, both emitting output that was not JSON at all** — it did
+not survive its own `JSON.parse`:
+
+- **a non-finite number**: `JSON.stringify(NaN)` was the token `NaN` (node: `null`), and
+  `{"n":NaN}` is not parseable JSON. JSON has no non-finite number (RFC 8259 §6). Cause:
+  JSON reused `js_num_to_str`, which is `String(x)`, where `NaN` is right. Now `nt_json_num`.
+- **a control character**: `JSON.stringify("ab")` embedded a RAW `0x01` byte (node:
+  `"ab"`). RFC 8259 §7 forbids a literal character below U+0020 in a string.
+  `js_json_quote` escaped only `" \ \n \t \r` and passed the other 27 through; it now takes
+  the short form for `\b \f \n \r \t` and `\u00XX` for the rest, as node's QuoteJSONString
+  does. U+007F is not a JSON control character and stays literal, as in node.
 ### Optional element access `a?.[i]` — the guard is on the BASE only
 
 `a?.[i]` short-circuits the whole chain to `undefined` when `a` is `null` or `undefined`, and

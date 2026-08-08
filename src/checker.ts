@@ -553,6 +553,14 @@ class Checker {
     private importedFrom: Map<string, string> = new Map(),
   ) {}
 
+  /**
+   * Does class `tag` declare a `toJSON` METHOD? The parser desugars `class C { toJSON() {} }`
+   * into a `FuncDecl` named `C.toJSON`, so a class's methods live in the function table and
+   * NOT in its instance type's field list — which is why `checkJsonStringifyArg` cannot ask
+   * this of the type string and takes the answer as a parameter instead.
+   */
+  hasToJson(tag: string): boolean { return this.functions.has(`${tag}.toJSON`); }
+
   /** The tagged record type a literal should take from its context, if any. */
   private contextualRecordTy(hint: Ty | undefined): Ty | undefined {
     if (hint === undefined || !this.recordTags.size) return undefined;
@@ -2252,7 +2260,7 @@ class Checker {
         const at = this.type(a, scope);
         if (plan && i === 0) continue; // the format string itself, consumed
         const spec = bySpec?.get(i);
-        if (spec !== undefined) { checkFormatArg(spec, at); continue; }
+        if (spec !== undefined) { checkFormatArg(spec, at, (t) => this.hasToJson(t)); continue; }
         checkConsoleArg(at);
       }
       return "void";
@@ -2421,7 +2429,9 @@ class Checker {
       const jt = this.type(e.args[0]!, scope);
       checkUnionRenderable(jt, "JSON.stringify");
       refuseUnboxedUnion(jt, "JSON.stringify"); // rendered the box as the literal `null`
-      refuseUndefinedStringify(jt); // at the ROOT node returns the undefined VALUE — no string is right
+      // Exhaustive: everything the serializer has no node-exact rule for is refused
+      // here, including the `undefined` at the ROOT that used to render `null`.
+      checkJsonStringifyArg(jt, "root", (t) => this.hasToJson(t));
       // arg2 (replacer) — only `null`/`undefined` supported (no array/function replacer).
       if (e.args.length >= 2) {
         const r = e.args[1]!;
@@ -4187,6 +4197,113 @@ function refuseUndefinedStringify(ty: Ty): void {
   );
 }
 
+/**
+ * Where a value sits in the JSON being built. node treats the positions
+ * differently for anything it DROPS — at the ROOT `JSON.stringify` returns the
+ * undefined VALUE, in an object the KEY IS OMITTED, and in an array it writes
+ * `null` — so the three are decided separately rather than one standing in for
+ * the others. (Today no droppable type can actually reach `"element"`: an array
+ * OF a function/Map/Set/Uint8Array is `NT1001`. The case is kept anyway, so that
+ * lifting NT1001 produces a refusal here rather than a fresh wrong answer.)
+ */
+type JsonPos = "root" | "field" | "element";
+
+/**
+ * Can `JSON.stringify` render `ty` EXACTLY as node does, in position `pos`?
+ * Throws the refusal naming the type and the fix if not.
+ *
+ * This is the checker half of removing `genJsonStringify`'s default-to-`null`.
+ * That function used to end in `return this.mod.intern("null")`, so every type
+ * nobody had written a rule for silently serialized as the literal `null` —
+ * `Map`, `Set`, `Uint8Array`, a function, a `JSON.parse` result and the
+ * `undefined` VALUE were all already wrong against node, and the nested ones were
+ * invisible because they sat inside an otherwise-correct object
+ * (`{"m":null,"ok":1}`). Same shape as the `truthyOf` fall-through in
+ * `docs/divergences.md`, and the same fix: be exhaustive on both sides.
+ *
+ * The walk MIRRORS `genJsonStringify`'s, case for case, so the two are one
+ * decision written twice — a type admitted here has a rule there, and a type with
+ * no rule there is refused here. Codegen's tail is an `internalError`, i.e. a
+ * broken invariant between the pair, never a user-facing path.
+ *
+ * `%j` IS `JSON.stringify`, so `checkFormatArg` routes through this too and the
+ * two accept the same set by construction rather than by being kept in step.
+ *
+ * `hasToJson(tag)` answers "does class `tag` declare a `toJSON` METHOD?" — the one
+ * question the type string cannot answer on its own, since a class's methods live
+ * in the function table and not in its field list. It is REQUIRED rather than
+ * defaulted, so a future caller cannot re-open the hole by omitting it.
+ */
+export function checkJsonStringifyArg(ty: Ty, pos: JsonPos, hasToJson: (tag: string) => boolean): void {
+  if (ty === "number" || ty === "boolean" || ty === "string" || ty === "null") return;
+  if (isDateTy(ty)) return; // Date.prototype.toJSON — the quoted ISO string
+  // A Map/Set has no own ENUMERABLE property, so node serializes EVERY one of them
+  // as `{}` whatever it holds. A constant, not an approximation, so it is rendered.
+  if (isMapTy(ty) || isSetTy(ty)) return;
+  // A typed array's own enumerable properties are its INDICES: `{"0":1,"1":255}`.
+  if (isBytesTy(ty)) return;
+  // A function serializes as `undefined`, so it follows the positional rule below.
+  if (isFuncTy(ty)) {
+    if (pos === "field") return; // node omits the key; genJsonObject drops the field
+    throw nyi(
+      NYI.JSON,
+      `JSON.stringify of a function at the ${pos === "root" ? "ROOT" : "position of an ARRAY element"} — node ` +
+        (pos === "root"
+          ? `returns the undefined VALUE there, not a string, so the literal \`null\` this used to render was wrong and no string is right either. `
+          : `writes \`null\` there, which nativets does not generate for a function element. `) +
+        `Serialize the data instead of the callback. (As an object FIELD it is fine — the key is omitted, as node does.)`,
+    );
+  }
+  // The bare nullish VALUES. `undefined` at the root is the same shape as
+  // `T | undefined` at the root, and gets the same answer: there is no right string.
+  if (ty === "undefined" || ty === "void") {
+    if (pos === "element") return; // node writes `null`, which genJsonNullable emits
+    throw nyi(
+      NYI.JSON,
+      `JSON.stringify of \`${ty}\` — node returns the undefined VALUE, not a string, so the literal \`null\` ` +
+        `this used to render was wrong and no string is right either. Pass \`null\`, which serializes as \`null\` exactly like node.`,
+    );
+  }
+  if (isNullableTy(ty)) {
+    if (pos === "root") refuseUndefinedStringify(ty); // a `?U` box: no right string here
+    return checkJsonStringifyArg(baseTy(ty), pos, hasToJson); // a `?N` box renders `null`; check what it carries
+  }
+  if (isArrayTy(ty)) return checkJsonStringifyArg(elemTy(ty), "element", hasToJson);
+  if (isObjectTy(ty)) {
+    // `toJSON` REPLACES the value: node calls it and serializes the RESULT, at every
+    // position (`JSON.stringify([q])` is `[{"y":2}]`, not `[{"x":1}]` — test262
+    // `built-ins/JSON/stringify/value-tojson-result.js`). nativets walks the FIELDS,
+    // so it silently ignored the method and emitted the raw shape — `{"x":1}` for a
+    // class whose `toJSON` returns `"P!"`. Only a CALLABLE `toJSON` counts: node
+    // ignores a non-callable one (`value-tojson-not-function.js`), so `{toJSON: 1}`
+    // still serializes as `{"toJSON":1}`, exactly as it did.
+    const tag = classTag(ty);
+    const own = fieldType(ty, "toJSON");
+    if ((tag !== undefined && hasToJson(tag)) || (own !== undefined && isFuncTy(own)))
+      throw nyi(NYI.JSON, `JSON.stringify of ${tag !== undefined ? `\`${tag}\`` : "an object"}, which has a \`toJSON\` — node CALLS it and ` +
+        `serializes what it RETURNS, where nativets generates the serializer from the static FIELDS and would emit the raw shape instead. ` +
+        `Call it yourself: \`JSON.stringify(x.toJSON())\`.`);
+    for (const f of objectFields(ty)) checkJsonStringifyArg(f.ty, "field", hasToJson);
+    return;
+  }
+  throw nyi(NYI.JSON, `JSON.stringify of a ${ty} — nativets generates the serializer from the STATIC type and has ` +
+    `no node-exact rendering for this one, and the literal \`null\` it used to emit was a silent wrong answer. ` +
+    jsonStringifyFix(ty));
+}
+
+/** The nearest thing that DOES serialize, per refused type — a refusal is only
+ *  useful with the fix attached (`src/diagnostics.ts`, the `NT****` contract). */
+function jsonStringifyFix(ty: Ty): string {
+  if (ty === "Dyn")
+    return "A `JSON.parse` result is already JSON — keep the original string rather than re-stringifying it, " +
+      "or narrow it (`d as T`) and stringify the `T`.";
+  if (isUrlTy(ty)) return "node serializes a URL through `URL.prototype.toJSON`, i.e. `u.href` — stringify that string.";
+  if (isSearchParamsTy(ty)) return "node writes `{}` for it (no own enumerable property); write `p.toString()` if you want the query.";
+  if (isBytesRefTy(ty)) return "a TextEncoder/TextDecoder carries no data; stringify the `Uint8Array` or the string instead.";
+  if (isResponseTy(ty) || isHeadersTy(ty)) return "stringify the parts you want (e.g. `r.status`, or the parsed body).";
+  return "Build the JSON from values that do have one.";
+}
+
 export function checkUnionRenderable(ty: Ty, what: string): void {
   const u = findUnionIn(ty);
   if (u === undefined) return;
@@ -4226,7 +4343,7 @@ function findUnionIn(ty: Ty): Ty | undefined {
  *        through `ToPrimitive` (`String([1,2,3])` is `"1,2,3"`, so `%f` of it is 1) —
  *        a coercion nativets does not implement for arrays.
  */
-export function checkFormatArg(spec: FmtSpec, at: Ty): void {
+export function checkFormatArg(spec: FmtSpec, at: Ty, hasToJson: (tag: string) => boolean): void {
   if (spec === "c") return; // consumed and ignored
   if (spec === "s") {
     // node's `%s` inspects an object only when it has no custom `toString`; a typed
@@ -4238,14 +4355,29 @@ export function checkFormatArg(spec: FmtSpec, at: Ty): void {
   if (spec === "O") return checkConsoleArg(at);
   const scalar = at === "number" || at === "boolean" || at === "string" || at === "undefined" ||
     at === "void" || at === "null" || isDateTy(at);
-  if (isNullableTy(at)) return checkFormatArg(spec, baseTy(at));
+  if (isNullableTy(at)) return checkFormatArg(spec, baseTy(at), hasToJson);
   if (spec === "o") {
     if (!scalar) throw nyi(NYI.CONSOLE, `\`%o\` of a ${at} (node's \`showHidden\` inspect, e.g. \`[ 1, 2, 3, [length]: 3 ]\`) — use \`%O\``);
     return;
   }
   if (spec === "j") {
-    if (!scalar && !isObjectTy(at) && !isArrayTy(at)) throw nyi(NYI.CONSOLE, `\`%j\` of a ${at} (JSON.stringify has no faithful form for it here) — use \`%O\``);
-    return;
+    // `%j` IS `JSON.stringify`, so it accepts everything the direct call accepts —
+    // ONE predicate, not two lists kept in step. They used to disagree: `%j` refused
+    // a Map/Set outright while the direct call rendered the literal `null` for one.
+    // Now both render `{}`, as node does.
+    //
+    // It accepts strictly MORE, in exactly one place, and node is why. `%j` does not
+    // RETURN the stringify result, it CONCATENATES it — node's `formatWithOptions`
+    // does `tempStr = tryStringify(arg)` and joins — so a value stringify DROPS
+    // prints the literal `undefined` rather than having no answer. `console.log("%j",
+    // undefined)` is `undefined` in node, and `genFormatArg`'s `%j` arm emits exactly
+    // that. Routing `%j` through the direct call's predicate WITHOUT this carve-out
+    // turned that into an NT1005 refusal — trading a node-correct answer for a wrong
+    // rejection, which is a regression like any other. The direct
+    // `JSON.stringify(undefined)` is still refused: its result type is `string` here
+    // and the undefined VALUE does not fit in one.
+    if (at === "undefined" || at === "void") return;
+    return checkJsonStringifyArg(at, "root", hasToJson);
   }
   // %d / %i / %f
   if (!scalar && !isObjectTy(at) && !isMapTy(at) && !isSetTy(at))

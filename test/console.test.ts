@@ -236,6 +236,11 @@ differential("specifiers over compound types", [
   { name: "%O of a JSON.parse object", code: `console.log("%O", JSON.parse('{"a":{"b":1}}'));` },
   { name: "%s of a Date", code: `console.log("%s", new Date(0));` },
   { name: "%j of a Date", code: `console.log("%j", new Date(0));` },
+  // `%j` of a Map/Set USED to be refused (NT1026) on the grounds that JSON.stringify
+  // "has no meaning" for one. It does: neither has an own ENUMERABLE property, so node
+  // prints `{}` for every Map and every Set whatever they hold. Now measured, not refused.
+  { name: "%j of a Map", code: `const m = new Map<string, number>().set("a", 1);\nconsole.log("%j", m);` },
+  { name: "%j of a Set", code: `const s = new Set<number>().add(1);\nconsole.log("%j", s);` },
   { name: "%s of an array of objects", code: `console.log("%s", [{ a: 1 }, { a: 2 }]);` },
 ]);
 
@@ -244,8 +249,10 @@ describe("a conversion with no faithful form is refused, never approximated", ()
   test("%o of a compound (node's showHidden)", () => {
     expect(rejectCode(`console.log("%o", [1, 2, 3]);`)).toBe("NT1026");
   });
-  test("%j of a Map", () => {
-    expect(rejectCode(M + `console.log("%j", m);`)).toBe("NT1026");
+  // (`%j` of a Map is no longer here: node prints `{}` for one and so do we now. The
+  //  differential is in "specifiers over compound types" above.)
+  test("%j of a Dyn is still refused — JSON.stringify has no Dyn walk", () => {
+    expect(rejectCode(`const d = JSON.parse("1");\nconsole.log("%j", d);`)).toBe("NT1005");
   });
   test("%d of an array (ToPrimitive)", () => {
     expect(rejectCode(`console.log("%d", [1, 2]);`)).toBe("NT1026");
