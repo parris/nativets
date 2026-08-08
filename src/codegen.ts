@@ -12,7 +12,7 @@
 
 import type { CheckedProgram, Sig } from "./checker.ts";
 import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, type FmtSpec } from "./checker.ts";
-import { blockDrops, freshArray, RETAINS_RECEIVER } from "./ast.ts";
+import { freshArray, RETAINS_RECEIVER } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
@@ -789,10 +789,6 @@ class FnGen {
       if (this.terminated) break;
       this.genStmt(s);
     }
-    // Block-scoped RAII: free the linear locals this NESTED list declared (empty for a
-    // function/module body — those use endDrops). Skipped when the block already
-    // terminated (return/break/continue), which is a leak, never a double free.
-    if (!this.terminated) this.emitDrops(blockDrops(list));
   }
 
   /** Emit deterministic drops (RAII frees) for owned linear locals. */
@@ -1400,6 +1396,13 @@ class FnGen {
         return;
       case "MultiStmt":
         this.genStmts(s.stmts);
+        return;
+      // Block-scoped RAII: free the linear locals this NESTED block declared (a
+      // function/module body has none — those use endDrops). The marker is last in the
+      // list, so a block that terminated early (return/break/continue) never reaches it
+      // — a leak, never a double free.
+      case "BlockDrops":
+        this.emitDrops(s.names);
         return;
       case "BreakStmt":
         this.terminate(`br label %${this.loops[this.loops.length - 1]!.brk}`);

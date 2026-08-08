@@ -340,7 +340,10 @@ class Analyzer {
         if (s.handler) this.scoped(s.handler, state);
         if (s.finalizer) this.scoped(s.finalizer, state);
         return;
-      case "BreakStmt": case "ContinueStmt": case "FuncDecl":
+      // `BlockDrops` is this pass's OWN output. A loop body is walked up to five times
+      // for the fixpoint, so every walk after the first sees the marker the last one
+      // left; it declares and moves nothing, so there is nothing to do with it.
+      case "BreakStmt": case "ContinueStmt": case "FuncDecl": case "BlockDrops":
         return;
     }
   }
