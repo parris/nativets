@@ -25,6 +25,21 @@
  * shows up as a deliberate baseline update, and a new blocker introduced by new
  * compiler code is caught immediately — the "keeping the gap from growing" lint
  * that docs/self-hosting.md asks for.
+ *
+ * ---- WHAT THIS FILE DOES NOT CATCH (and what does) ----
+ * Two ratchets live here: the per-module phase floor above, and the set of NT codes
+ * present TREE-WIDE (the "blocker tiers behind the wall" test), so a NEW code is a hard
+ * failure. Neither sees a module regressing to a code ALREADY in the set — and worse,
+ * both measure the whole-program LINK, where most modules report a DEPENDENCY's blocker
+ * rather than their own, so a refused construct planted in such a module moves nothing
+ * here at all. Reproduced: `new Map([[k, v], …])` at the top of `src/modules.ts` leaves
+ * every assertion in this file green.
+ *
+ * `test/selfhost-ratchet.test.ts` closes that: per module, the blocker's STAGE + CODE +
+ * MESSAGE in a STANDALONE column (no link — the only column that says whose gap it is),
+ * ratcheted against the module's source hash so the frontier moving stays green and a
+ * planted blocker reds. Neither file subsumes the other: this one owns the phase scale
+ * and the tree-wide picture, that one owns per-module blocker identity.
  */
 
 import { test, expect, describe } from "bun:test";
@@ -242,8 +257,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // (`\`${string}[]\`` in ast.ts, which coverage.ts and coverage-preprocess.ts saw
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
+    // RE-MEASURED after the optional-element lane landed `?.[]`. NT1009 is EMPTY tree-wide
+    // — it held NINE of the twelve, and `?.[]` was the whole of it. This assertion was RED
+    // on main (90abc55) when that lane merged: an exact tree-wide set reds on PROGRESS,
+    // which is the failure mode `test/selfhost-ratchet.test.ts` exists to avoid (there, a
+    // blocker moving with the module's source UNCHANGED is auto-classified as the frontier
+    // advancing and stays green). Recorded here as the reason this list keeps churning.
     expect(Object.keys(byCode).sort()).toEqual(
+<<<<<<< HEAD
       ["NT1009", "NT1023", "NT1030", "NT1031", "NT1606"],
+=======
+      ["NT1023", "NT1030", "NT1606", "NT2001"],
+>>>>>>> main
     );
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
@@ -269,7 +294,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     expect(byCode["NT0001"]).toBeUndefined();
     // NEW BUCKET: codegen.ts left NT0001 for a NAMED code — a method that assigns a field
     // and so produces a new module value.
-    expect(byCode["NT1023"]!.sort()).toEqual(["codegen.ts"]);
+    // ...and it has since GROWN to three, all of it forward movement: the optional-element
+    // lane cleared `?.[]`, so `checker.ts` walked on to `Checker.inArrow` (a method that
+    // assigns a field), and `ownership.ts` inherits that identical error through the link.
+    expect(byCode["NT1023"]!.sort()).toEqual(["checker.ts", "codegen.ts", "ownership.ts"]);
     // RATCHET MOVE (collections): NT1014 is now EMPTY. It held lexer.ts on
     // `new Set([...])` for REGEX_AFTER_KEYWORD; `new Set(iterable)` compiles now, so the
     // module walks on to what sat behind it — NT2001, an object literal where a Map is
@@ -325,9 +353,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     //
     // Which makes `?.[]` the highest-leverage blocker on the board by a wide margin:
     // nothing else on this list moves more than one module.
-    expect(byCode["NT1009"]!.sort()).toEqual(
-      ["checker.ts", "cli.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    // ...and NT1009 is now EMPTY, for the first time since it was named. The
+    // optional-element lane landed `?.[]`, and `?.[]` was the whole bucket — nine of the
+    // twelve rows left it at once, exactly as the note above predicted. Recorded as a fact
+    // about today, in the spelling this file has had to learn three times: an empty bucket
+    // is never an invariant, because clearing a named blocker lets a module reach further.
+    expect(byCode["NT1009"]).toBeUndefined();
     // NEW CODE, and it SPLIT the NT1009 bucket rather than adding to it. NT1030 is the
     // forward-reference / recursive-type refusal: `resolveNamed` used to return `number`
     // for a type name declared later in the same file, silently. ast.ts owns it (all 29
@@ -336,8 +367,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // This is the most honest the table has ever been about ast.ts. Its recorded blocker
     // was a general union at line 880 — the one place the erasure happened to collide with
     // something that complained. It is now the FIRST erasure, at line 521.
+    // It is now SEVEN of the twelve, and every arrival came from the emptied NT1009 bucket
+    // — `ast.ts`'s forward type reference is what the link reaches once `?.[]` is gone. It
+    // is the single highest-leverage blocker on the board now, on the same reasoning that
+    // made `?.[]` the last one: nothing else here moves more than one module.
     expect(byCode["NT1030"]!.sort()).toEqual(
-      ["ast.ts", "coverage-preprocess.ts", "coverage.ts"],
+      ["ast.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
     );
     // NT1015 is empty — the generic-method lane cleared modules.ts's, and codegen.ts's
     // static-member site was cleared earlier. (A fact about today; this file has been

@@ -1,0 +1,166 @@
+{
+  "recordedAt": {
+    "date": "2026-08-08",
+    "rev": "6a6037b"
+  },
+  "modules": {
+    "ast.ts": {
+      "sha256": "f5e9a67c6ae168f1",
+      "standalone": {
+        "stage": "parse",
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+      },
+      "linked": {
+        "stage": "parse",
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+      }
+    },
+    "checker.ts": {
+      "sha256": "37365649c2b7d2d0",
+      "standalone": {
+        "stage": "parse",
+        "code": "NT1023",
+        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
+      },
+      "linked": {
+        "stage": "parse",
+        "code": "NT1023",
+        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
+      }
+    },
+    "cli.ts": {
+      "sha256": "d43a56e762a1302a",
+      "standalone": {
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] process.stdout is not supported"
+      },
+      "linked": {
+        "stage": "link",
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+      }
+    },
+    "codegen.ts": {
+      "sha256": "969bab8002647ead",
+      "standalone": {
+        "stage": "parse",
+        "code": "NT1023",
+        "message": "[NT1023] method 'ModuleGen.build' assigns a field, so it produces a NEW ModuleGen, but it does not return one"
+      },
+      "linked": {
+        "stage": "parse",
+        "code": "NT1023",
+        "message": "[NT1023] method 'ModuleGen.build' assigns a field, so it produces a NEW ModuleGen, but it does not return one"
+      }
+    },
+    "coverage-preprocess.ts": {
+      "sha256": "6db75ce346cfc83a",
+      "standalone": {
+        "stage": "check",
+        "code": "NT1031",
+        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
+      },
+      "linked": {
+        "stage": "link",
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+      }
+    },
+    "coverage.ts": {
+      "sha256": "0a25e1c846d44da5",
+      "standalone": {
+        "stage": "check",
+        "code": "NT1003",
+        "message": "unlinked-import artifact (standalone view is blind past this point)",
+        "artifact": true
+      },
+      "linked": {
+        "stage": "link",
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+      }
+    },
+    "diagnostics.ts": {
+      "sha256": "547141beddcb6aeb",
+      "standalone": {
+        "stage": "check",
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+      },
+      "linked": {
+        "stage": "check",
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+      }
+    },
+    "driver.ts": {
+      "sha256": "06caa259dbcda281",
+      "standalone": {
+        "stage": "check",
+        "code": "NT1003",
+        "message": "unlinked-import artifact (standalone view is blind past this point)",
+        "artifact": true
+      },
+      "linked": {
+        "stage": "link",
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+      }
+    },
+    "lexer.ts": {
+      "sha256": "1a465c8709ee0fcf",
+      "standalone": {
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
+      },
+      "linked": {
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] cannot infer type of arrow parameter 'n'"
+      }
+    },
+    "modules.ts": {
+      "sha256": "ae8302d5047e7f45",
+      "standalone": {
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] cannot infer type of arrow parameter 'p'"
+      },
+      "linked": {
+        "stage": "link",
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+      }
+    },
+    "ownership.ts": {
+      "sha256": "cf62394df4aaea18",
+      "standalone": {
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] spread over a Map (node yields [key, value] pairs — use `for (const [k, v] of m)`, `m.keys()` or `m.values()`) is not supported yet"
+      },
+      "linked": {
+        "stage": "link",
+        "code": "NT1023",
+        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
+      }
+    },
+    "parser.ts": {
+      "sha256": "7725813fd8c71b4e",
+      "standalone": {
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] 'BIN' declared Record<string,{prec:number,right:?Uboolean,logical:?Uboolean}> but initialized with {**:{prec:number,right:boolean},*:{prec:number},/:{prec:number},%:{prec:number},+:{prec:numb…"
+      },
+      "linked": {
+        "stage": "link",
+        "code": "NT1030",
+        "message": "[NT1030] use of type 'Identifier' before its declaration (used at line N, declared at line N) is not supported yet"
+      }
+    }
+  }
+}

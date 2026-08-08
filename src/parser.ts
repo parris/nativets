@@ -7,8 +7,8 @@
  * them with a precise NT-coded diagnostic that `coverage` can report.
  */
 
-import { lex, LexError, type Token } from "./lexer.ts";
-import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnostics.ts";
+import { lex, LexError, decodeEscapeAt, type Token } from "./lexer.ts";
+import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral } from "./diagnostics.ts";
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
   isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
@@ -84,6 +84,36 @@ const KNOWN_ATTRS = new Set(["mutable"]);
 function isSimplePath(e: Expr): boolean {
   if (e.kind === "Identifier") return true;
   return e.kind === "MemberExpr" && isSimplePath(e.object);
+}
+
+/**
+ * True if `e` is a member/element access carrying a `?.` anywhere to its left, i.e. an
+ * `OptionalExpression`. Deliberately a SYNTACTIC test on the tree the parser just built,
+ * which is what the spec rule is: `IsValidSimpleAssignmentTarget(OptionalExpression)` is
+ * `false`, so `a?.b = v`, `a?.[i] = v`, `a?.b++` and `a?.[i]++` are all EARLY errors —
+ * node reports a SyntaxError before running a line (test262
+ * `optional-chaining/static-semantics-simple-assignment.js` and
+ * `optional-chaining/update-expression-postfix.js`).
+ *
+ * We refuse here rather than in the checker because it is not a type question: a
+ * genuinely-mutable receiver (`Uint8Array`, a `@@mutable` record) reaches codegen with
+ * every type rule satisfied, and used to COMPILE — accepting a program node rejects
+ * outright. `isOptChainExpr` in checker.ts answers the same question for the type/lowering
+ * side; this is the parse-time half, and the two must agree on what "one chain" means.
+ */
+function isOptChainTarget(e: Expr): boolean {
+  if (e.kind === "MemberExpr") return !!e.optional || isOptChainTarget(e.object);
+  if (e.kind === "IndexExpr") return !!e.optional || isOptChainTarget(e.object);
+  return false;
+}
+
+/** The shared refusal for `?.` in a write position — one message for all four spellings. */
+function optChainWriteError(what: string): never {
+  throw parseError(
+    `'?.' cannot appear in a write position: ${what}`,
+    "an optional chain is not a valid assignment target (node reports a SyntaxError). " +
+    "Guard the base and write through a plain access instead — `if (a) { a[i] = v; }`",
+  );
 }
 
 // A parser is a CURSOR: `this.pos` advances, `this.typeAliases` accumulates. That is real
@@ -1899,10 +1929,12 @@ class Parser {
       // `Uint8Array` (node allows `u[i] = v`) is accepted. The parser can't know the
       // type, so it emits an IndexAssign and lets type inference decide.
       if (left.kind === "IndexExpr") {
+        if (isOptChainTarget(left)) optChainWriteError("`a?.[i] = v`");
         const op = this.next().value as any;
         return { kind: "IndexAssign", op, object: left.object, index: left.index, value: this.parseAssign(), loc: left.loc };
       }
       if (left.kind === "MemberExpr") {
+        if (isOptChainTarget(left)) optChainWriteError("`a?.b = v`");
         // Field assignment `o.f = v`. The parser can prove only the SYNTACTIC case —
         // `this.f` inside a member body, where the constructor is building the instance
         // or the method is a setter (docs/decorators.md). Whether any OTHER receiver may
@@ -2093,6 +2125,8 @@ class Parser {
    * `Uint8Array` element and rejects an immutable array/object element.
    */
   private updateTarget(target: Expr): Expr {
+    // `++`/`--` is a read AND a write, so the same early error applies as for `=`.
+    if (isOptChainTarget(target)) optChainWriteError("`a?.b++` / `a?.[i]++`");
     if (target.kind === "MemberExpr") {
       // Same split as plain assignment: `this.f` is decided here (syntax), every other
       // receiver is deferred to the checker, which knows whether it is `@@mutable`.
@@ -2150,10 +2184,20 @@ class Parser {
         expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), loc: { line: dot.line, col: dot.col, file: this.file } };
       } else if (this.at("?.")) {
         const t = this.eat("?.");
-        // Optional call `?.()` and optional index `?.[]` are out of the A2 subset.
+        // Optional CALL `?.()` is still out of the A2 subset — a call has no nullable-box
+        // result shape here. Optional ELEMENT access `?.[i]` is the same guard as `?.b`
+        // with an index in place of a field name, so it reuses the whole opt-chain path.
         if (this.at("(")) throw nyi(NYI.OPTIONAL_CHAIN, `optional call '?.()' at ${t.line}:${t.col}`);
-        if (this.at("[")) throw nyi(NYI.OPTIONAL_CHAIN, `optional element access '?.[]' at ${t.line}:${t.col}`);
-        expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        if (this.at("[")) {
+          this.eat("[");
+          const index = this.parseExpression();
+          this.eat("]");
+          // Carries its location like a written `a[i]`: `?.` guards the BASE, so a present
+          // base out of range still panics and reports here.
+          expr = { kind: "IndexExpr", object: expr, index, optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        } else {
+          expr = { kind: "MemberExpr", object: expr, property: this.expectIdent(), optional: true, loc: { line: t.line, col: t.col, file: this.file } };
+        }
       } else if (this.at("[")) {
         const br = this.eat("[");
         const index = this.parseExpression();
@@ -2209,7 +2253,14 @@ class Parser {
     const t = this.peek();
     if (t.type === "num") { this.next(); return { kind: "NumberLiteral", value: Number(t.value) }; }
     if (t.type === "str") { this.next(); return { kind: "StringLiteral", value: t.value }; }
-    if (t.type === "template") { this.next(); return this.buildTemplate(t.value); }
+    if (t.type === "template") {
+      this.next();
+      // The shared escape decoder can fail (a malformed `\xHH`), and a template is split
+      // HERE rather than in `lex`, so its LexError has to reach the same NT0001 that
+      // `tokenize` gives the identical escape inside a quoted string.
+      try { return this.buildTemplate(t.value, t); }
+      catch (e) { if (e instanceof LexError) throw parseError(e.message); throw e; }
+    }
     // A regex literal LEXES (so the file survives) but has no representation: nativets
     // has no RegExp by design (Tier C). Refused here, located, instead of miscompiled.
     if (t.type === "regex") throw nyi(NYI.REGEX, `regular expression literal ${t.value} at ${t.line}:${t.col}`);
@@ -2274,13 +2325,23 @@ class Parser {
     return { kind: "ObjectLiteral", properties };
   }
 
-  private buildTemplate(raw: string): Expr {
+  private buildTemplate(raw: string, tok: Token): Expr {
     const quasis: string[] = [];
     const exprs: Expr[] = [];
+    const nul = String.fromCharCode(0);
     let cur = "";
     let i = 0;
     while (i < raw.length) {
-      if (raw[i] === "\\") { cur += decodeEscape(raw[i + 1]!); i += 2; continue; }
+      if (raw[i] === "\\") {
+        // The LEXER's decoder, not a second smaller one — see `decodeEscapeAt`.
+        const { text, next } = decodeEscapeAt(raw, i, tok.line, tok.col);
+        // NT1705, the same rule `tokenize` puts on a quoted string: a template's escapes
+        // are decoded here, so this is the only place a `\0`/`\x00` inside one is visible.
+        if (text.indexOf(nul) >= 0) throw nulLiteral("this template literal", tok.line, tok.col);
+        cur += text;
+        i = next;
+        continue;
+      }
       if (raw[i] === "$" && raw[i + 1] === "{") {
         quasis.push(cur); cur = "";
         i += 2;
@@ -2360,11 +2421,6 @@ function valueReturns(list: Stmt[]): Expr[] {
   return out;
 }
 
-function decodeEscape(ch: string): string {
-  const map: Record<string, string> = { n: "\n", t: "\t", r: "\r", "\\": "\\", "`": "`", "$": "$" };
-  return map[ch] ?? ch;
-}
-
 /**
  * Tokenize, turning a lexical failure into the ordinary NT0001 syntax error.
  *
@@ -2377,12 +2433,35 @@ function decodeEscape(ch: string): string {
  * uses — not deferred features. The message already carries `at line:col`.
  */
 function tokenize(source: string): Token[] {
+  let tokens: Token[];
   try {
-    return lex(source);
+    tokens = lex(source);
   } catch (e) {
     if (e instanceof LexError) throw parseError(e.message);
     throw e;
   }
+  return checkNoNul(tokens);
+}
+
+/**
+ * NT1705 — refuse a string literal whose decoded value contains a NUL (U+0000).
+ *
+ * Here, over the TOKEN stream, rather than at the one `parsePrimary` site that builds a
+ * `StringLiteral`: a `str` token is also an object key, an import specifier and a string
+ * LITERAL TYPE, and every one of those becomes a runtime string. One pass over the tokens
+ * covers all of them and cannot be forgotten when a new consumer of `str` is added.
+ *
+ * Template literals are not decoded yet at this point (the token holds RAW inner text, and
+ * `buildTemplate` splits it), so a template's own escapes are checked there. A raw NUL
+ * BYTE pasted into a template's text is visible here and is caught here.
+ */
+function checkNoNul(tokens: Token[]): Token[] {
+  const nul = String.fromCharCode(0);
+  for (const t of tokens) {
+    if (t.type === "str" && t.value.indexOf(nul) >= 0) throw nulLiteral("this string literal", t.line, t.col);
+    if (t.type === "template" && t.value.indexOf(nul) >= 0) throw nulLiteral("this template literal", t.line, t.col);
+  }
+  return tokens;
 }
 
 export function parse(source: string, opts: ParseOpts = {}): Program {

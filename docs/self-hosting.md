@@ -412,6 +412,66 @@ a hard failure. The remaining hole: a module regressing to a code **already** in
 invisible to both. Closing that means ratcheting per-module blocker codes, not just the
 tree-wide set.
 
+### `test/selfhost-ratchet.test.ts` — the hole, closed and demonstrated
+
+The hole was **wider than the paragraph above says**, and the reason is the confound in the
+table above: every existing instrument measures the whole-program **link**, where most
+modules report a *dependency's* blocker rather than their own. With six modules inheriting
+`parser.ts`'s `?.[]`, a refused construct planted in any one of them changes nothing that
+is measured. Reproduced, not argued — `new Map([[k, v], …])` (the entries form, still
+refused) planted at the top of `src/modules.ts` in a scratch tree:
+
+| Instrument | What it saw |
+|---|---|
+| `bootstrap.test.ts` phase floor | nothing — still `parsed` |
+| `bootstrap.test.ts` tree-wide code set | nothing — `NT1014` was already in it |
+| `sh6.test.ts` rung floor + per-module `code` map | nothing — the LINKED code is still the dependency's |
+| `self-host-coverage.test.ts` histogram | nothing — its checker contributes at most ONE blocker per file |
+| **`selfhost-ratchet.test.ts`** | **red, naming the module, both blockers, and the fix** |
+
+What it records, per `src/*.ts` module (the list is **discovered**, so a thirteenth module
+cannot arrive unmeasured), in `test/selfhost-ratchet.baseline.json`:
+
+- a **standalone** column — the module compiled as its own program, no link. This is the
+  column that says whose gap it is, and the only one in which a planted blocker is visible;
+- a **linked** column — the same pipeline through `linkProgram`, i.e. what stage-1 is;
+- for each: the pipeline **stage** that threw, the NT code, and the **message** with
+  positions normalized out. Identity is the message, not the code: `NT1009` alone spans
+  general unions, intersections and `?.[]`, so a code comparison cannot tell a module
+  regressing to a different `NT1009` from one holding still.
+
+**How it tells progress from regression** — the part a phase floor cannot do, since both
+movements sit inside `parsed`. A blocker is a function of exactly two inputs, so the
+baseline records the module's **source hash** next to the blocker and the causes separate:
+
+| | blocker changed |
+|---|---|
+| source hash **unchanged** | only the compiler can have done it → the frontier moved → **passes** |
+| source hash **changed** | the module's own source changed what stops it first → **fails**, with both blockers named |
+
+So the everyday case — a lane clears a blocker in `checker.ts` and nine modules move — stays
+green, which is the difference between a ratchet people read and one they rubber-stamp.
+Two rules are unconditional: a module that reached IR may never stop reaching IR (this is
+the only ratchet in the tree that protects a module that *already* self-compiles), and a
+blocker may never move to an **earlier** pipeline stage.
+
+`git` is deliberately not an input to any verdict — `actions/checkout` fetches depth 1, so a
+git-informed verdict would differ between a laptop and CI. It is used only to *enrich* a
+failure message with a before/after taken against the recorded revision.
+
+Re-record deliberately, in one command — nine parallel lanes move these numbers:
+
+```sh
+NT_RECORD=1 bun test test/selfhost-ratchet.test.ts   # rewrites the baseline, prints the diff
+```
+
+**What it still cannot see**, stated because an instrument that overstates is worse than
+none: it is a **first**-blocker measurement, so a construct planted *behind* a module's
+existing blocker is invisible until that one clears (the same plant placed one line *below*
+`modules.ts`'s arrow-parameter blocker is not caught). And the standalone column is blind
+for a module whose first standalone error is the unlinked-import artifact — `driver.ts` and
+`coverage.ts` — whose rows are marked `artifact` for that reason.
+
 ### Re-measured after SHORT-CIRCUIT NARROWING — the `NT2001` bucket is empty
 
 The one `NT2001` on the frontier was a **false positive**: `src/diagnostics.ts:74`
@@ -483,6 +543,7 @@ Because node has no `type: "text"` attribute, this construct cannot be different
 usual way — see `docs/divergences.md`, which records the divergence and how the oracle is split
 (a `main.ts`/`oracle.ts` twin per fixture, identical below the binding).
 
+<<<<<<< HEAD
 ### Re-measured after PARAMETER-TYPE INFERENCE — and two recorded blockers were WRONG
 
 Two rows of the SH6 table above named the wrong construct. Both were re-measured, not re-read.
@@ -529,6 +590,81 @@ make a *value arrow's* parameter optional at the CALL site. A nativets function 
 `(number)=>number` with no notion of optionality, so `const f = (n = 1) => …; f()` is refused on
 arity while the `function` spelling honours it — a real asymmetry between the two spellings.
 Relatedly, an explicit `undefined` argument is refused rather than triggering the default.
+=======
+### CONSTRUCT CENSUS — counting the construct, not the first blocker
+
+Every table above this one is a **first-blocker** table, and this document already carries a
+standing correction about what those can and cannot tell you: *"A first-blocker histogram
+measures what to fix NEXT; it never measures how much of a construct is in the tree. For that,
+count the construct."* That correction was written after "only two modules genuinely need regex
+removed" turned into a rewrite of **29 literals across 8 modules**.
+
+The census was never actually run. It is run here, over all twelve `src/*.ts`:
+
+| Construct | Sites | Modules | Reading |
+|---|---|---|---|
+| **`.push`** | **185** | **11 of 12** | the elephant, and it is invisible to every table above |
+| `new X` | 285 | 12 | mostly `Map`/`Set`/node types, not user classes |
+| `?.` (all forms) | 97 | 9 | |
+| `class` | 12 | 8 | no inheritance anywhere — SH3's premise holds |
+| **`?.[]`** | **10** | **2** | checker ×5, parser ×5 |
+
+**The two headline numbers invert the apparent priority.**
+
+`?.[]` is the first blocker for **six** of the twelve modules — parser, checker, ownership,
+driver, cli, modules — which reads like the highest-leverage item on the board. It is **ten
+source sites in two files**. It is cheap, and it is worth doing precisely because it unmasks
+six modules at once, but it is not big work and it was never the thing standing in the way.
+
+`.push` is the first blocker for **one** module (`diagnostics.ts`) and appears **185 times in
+eleven**. Receiver shapes: 145 a plain local, 38 `this.<field>`, 1 dotted. Nothing in the
+first-blocker tables suggests this, because a module only reports `.push` once every blocker
+NEARER to it has been cleared — so `.push` will surface as the next blocker for module after
+module as the current round's lanes land, and each will look like a fresh discovery.
+
+**`.push` is refused by DECISION, not by omission** — commit `1ea7fa2`. A lane sent to legalize
+it on a syntactically-fresh receiver came back with evidence the premise was wrong, and that was
+accepted: a fresh receiver is a temporary nothing can name, so mutating it is unobservable *by
+construction*, which is the same as saying no real program writes that shape. It would have
+cleared none of the 185. The sanctioned idiom is `xs = [...xs, v]`, claimed O(1) amortized via
+the transient path with a 200-append measurement pinned.
+
+So the honest sizing of the remaining self-hosting work is **not** a list of missing features. It
+is a ~185-site mechanical rewrite of the compiler's own accumulator idiom, which is Path B /
+the recommended HYBRID ("refactor the compiler toward the supported subset where it's cheap")
+applied at a scale nobody had measured. Two things make it less alarming than the raw number:
+
+- the 145 plain-local sites are the mechanical ones (`let xs = []` … `xs = [...xs, v]`), and
+  the idiom is valid TypeScript, so **bun keeps running `src/` unchanged** — the two-toolchain
+  constraint is satisfied for free;
+- the 38 `this.<field>` sites are not mechanical and interact with `@@mutable class` (Stage 45),
+  so they need a decision rather than a rewrite.
+
+**What this means for the rung-3 goal.** `diagnostics.ts` — the shallowest module and the
+standing rung-3 candidate — holds **4** of the 185, all one local `lines` accumulator in a
+single function (`src/diagnostics.ts` lines 119–121 and 123). Its blocker is four mechanical rewrites,
+not a design problem. That is the argument for walking it first.
+
+Reproduce the two headline counts with:
+
+```sh
+cat src/*.ts | grep -o '\.push(' | wc -l          # 185
+cat src/*.ts | grep -o '?\.\[' | wc -l            # 10
+# receiver shapes of the .push sites
+grep -ohE '[A-Za-z_$][A-Za-z0-9_$.]*\.push\(' src/*.ts | sed 's/\.push(//' \
+  | awk '{ print ($0 ~ /^this\./) ? "this.FIELD" : ($0 ~ /\./ ? "DOTTED" : "PLAIN") }' \
+  | sort | uniq -c
+```
+
+Note that `grep` here is the real one; project memory records that a shimmed `grep` on some
+setups silently misses matches, which would make every number above too small.
+
+**Method note, since this document is partly a record of measurement mistakes:** a census is a
+`grep` and inherits a grep's blind spots — it counts `.push(` textually, so it cannot tell an
+array `.push` from a same-named method on a user object, and it cannot see a call reached
+through an alias. The numbers are an upper bound on sites and a *lower* bound on effort. They
+are still the right order of magnitude, and an order of magnitude was exactly what was missing.
+>>>>>>> main
 
 ---
 
