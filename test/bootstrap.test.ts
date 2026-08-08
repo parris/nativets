@@ -243,7 +243,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // through the link) and `satisfies` in parser.ts. Separate lanes cleared each.
     // Every remaining stage-1 blocker now has a named NT code and a hint.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1009", "NT1023", "NT1030", "NT1606", "NT2001"],
+      ["NT1009", "NT1023", "NT1030", "NT1031", "NT1606"],
     );
     // CONFLICT RESOLVED BY RE-MEASURING, not by choosing a side. Both branches were
     // right about their own change and wrong about the other's: main had cleared NT0001
@@ -360,7 +360,16 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // …and it is REFILLED by the collections lane, with a different module and a real
     // (not false-positive) blocker: lexer.ts now clears `new Set([...])` and stops on
     // `ESCAPES` declared `Map<string, string>` but initialized with an OBJECT LITERAL.
-    expect(byCode["NT2001"]!.sort()).toEqual(["lexer.ts"]);
+    //
+    // …and EMPTY again — and the recorded reason above was WRONG, which is the point of
+    // re-measuring instead of reading the note. lexer.ts's NT2001 was never `ESCAPES`; it
+    // was `cannot infer type of arrow parameter 'n'` at src/lexer.ts:146, `const advance =
+    // (n = 1) => …`. The parameter-default lane taught every parameter position to take its
+    // type from its default, and lexer.ts now walks INTO that arrow's body and stops on
+    // NT1031, `line++` — a write to a binding captured from `lex`'s scope.
+    expect(byCode["NT2001"]).toBeUndefined();
+    // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
+    expect(byCode["NT1031"]!.sort()).toEqual(["lexer.ts"]);
     // NT1606 changed HANDS entirely: diagnostics.ts left it (above), and checker.ts +
     // ownership.ts arrived from NT1009 once general unions landed. Same bucket, none of
     // the same modules — which is why membership, not size, is the thing to assert.

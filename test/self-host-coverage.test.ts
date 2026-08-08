@@ -180,8 +180,15 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // lane named codegen.ts's last anonymous parse failure (now NT1023), so every code
     // here is a named feature. NT1014 survives as `new Map([[k, v], …])` in ast.ts: the
     // Set forms and the Map-COPY form compile now, the ENTRIES form still needs a tuple.
+    // NT1031 is NEW HERE, and it is the frontier advancing rather than a regression. The
+    // statement it counts — `const advance = (n = 1) => { … line++ … }` at src/lexer.ts:146
+    // — used to fail as NT2001 ("cannot infer type of arrow parameter 'n'"), and NT2001 is
+    // a type ERROR, not a coverage gap, so this histogram never saw it. The
+    // parameter-default lane made that parameter type-check; the statement now fails one
+    // layer deeper on a NAMED gap, `line++` writing a captured binding, and a named gap is
+    // exactly what this histogram is for.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1003", "NT1009", "NT1014", "NT1015", "NT1023"],
+      ["NT1003", "NT1009", "NT1014", "NT1015", "NT1023", "NT1031"],
     );
     // NT1009 has fallen 4 -> 3 -> 1 across three lanes, and NOTHING DOMINATES ANY MORE.
     // The general-union lane took it from 4 to 3; the intersection lane took it from 3 to 1
