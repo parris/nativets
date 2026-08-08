@@ -451,6 +451,30 @@ function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
   );
 }
 
+/**
+ * One type argument, spelled so it is safe inside an LLVM symbol name: every character
+ * outside `[A-Za-z0-9_]` becomes `_`. Was `t.replace(/[^A-Za-z0-9_]/g, "_")` — nativets
+ * refuses `RegExp` on principle (NT1027), so the compiler's own source scans characters.
+ * The rewrite is pinned against the original in `test/no-regex.test.ts`.
+ *
+ * Two things the class must get exactly right, both pinned there:
+ *  - `$` is NOT in it. `$` is the mangler's own separator (`f$number$string`), so a `$`
+ *    inside a type has to collapse to `_` or two instantiations could collide. `\w` and
+ *    `ast.ts`'s `isIdentPart` differ on precisely this character.
+ *  - the scan is by UTF-16 CODE UNIT, like the flagless regex it replaces — so a non-BMP
+ *    character yields TWO underscores and the length is preserved. `for (const c of t)`
+ *    would iterate code points and quietly produce one.
+ */
+function mangleTypeArg(t: string): string {
+  let out = "";
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i]!;
+    const word = (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c === "_";
+    out += word ? c : "_";
+  }
+  return out;
+}
+
 class Checker {
   private loopDepth = 0;
   private switchDepth = 0;
@@ -809,6 +833,9 @@ class Checker {
   /* ============================================================
    * M3 — monomorphization of generic functions.
    *
+   * (The type-argument spelling used by the mangler is `mangleTypeArg`, just above this
+   * class — nativets has no RegExp, so the compiler's own source scans characters.)
+   *
    * A generic `function f<T>(x: T): T` is a TEMPLATE: it is never checked or emitted as
    * written (its annotations carry `#T` markers, which have no lowering). Instead, every
    * call site resolves a concrete type-argument tuple — from explicit call-site type args
@@ -848,7 +875,7 @@ class Checker {
 
   /** A mangled, LLVM-safe, collision-free name for one instantiation (`first$string__`). */
   private mangle(base: string, args: Ty[]): string {
-    const stem = `${base}$${args.map((t) => t.replace(/[^A-Za-z0-9_]/g, "_")).join("$")}`;
+    const stem = `${base}$${args.map(mangleTypeArg).join("$")}`;
     let name = stem, n = 2;
     while (this.functions.has(name) || this.generics.has(name)) name = `${stem}_${n++}`;
     return name;
