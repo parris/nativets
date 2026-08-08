@@ -235,6 +235,15 @@ export const NYI = {
   // here instead, at the type, saying which of the two shapes it is. Only names declared
   // in the same file reach this: an imported or stdlib name still falls back.
   FORWARD_TYPE: { code: "NT1030", milestone: "later", hint: "declare the type above its first use. A type that (directly or mutually) contains itself cannot be reordered into range: types are encoded STRUCTURALLY as a string (`Ty` in src/ast.ts), so a self-containing type has no finite encoding — nominal recursive types are not implemented (docs/divergences.md)" },
+  // A closure that WRITES a binding it captured from an enclosing scope. Our closure
+  // environment is a heap block filled by VALUE when the closure is built, so a write
+  // lands in the closure's own copy and the enclosing binding never changes — while JS
+  // captures by REFERENCE and `let n = 0; const f = () => { n++ }; f(); f()` leaves `n`
+  // at 2. That divergence is silent (right exit code, wrong number), which is the worst
+  // outcome available, so the write is REFUSED until the captured cell is boxed.
+  // READS are unaffected: a by-value snapshot of a binding nobody writes IS the
+  // by-reference answer, which is why the overwhelming majority of closures still compile.
+  CAPTURE_WRITE: { code: "NT1031", milestone: "later", hint: "closures capture by VALUE here, so a write inside one would be lost instead of updating the outer binding. Return the new value and assign it at the call site (`n = bump(n)`), or accumulate with `map`/`filter`/`reduce`, whose callbacks run inline in the enclosing frame" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

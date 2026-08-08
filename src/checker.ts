@@ -370,6 +370,7 @@ export function check(program: Program): CheckedProgram {
     }
   }
 
+  c.bodyChain = [program.body]; // the outermost enclosing body, for NT1031
   c.checkBlock(program.body, moduleScope);
   // Only reads made from INSIDE a function body promote a module binding to a global,
   // so clear the top level's own hits before checking the functions.
@@ -478,6 +479,15 @@ function mangleTypeArg(t: string): string {
 class Checker {
   private loopDepth = 0;
   private switchDepth = 0;
+  /**
+   * The function-like bodies enclosing the node being checked, outermost first — the
+   * module top level, then each function/method body, then each arrow body. Only
+   * `checkCapturedWrites` (NT1031) reads it: deciding whether a closure's write to a
+   * capture is observable means asking whether anything OUTSIDE the closure still
+   * mentions the binding, and a scope chain records names, not the code that uses them.
+   * Public so `check()` can seed it with the module body.
+   */
+  bodyChain: Stmt[][] = [];
   /**
    * Call nodes allowed to be a Map/Set ITERATOR (`m.keys()/.values()/.entries()`).
    * node returns a lazy Iterator object there; we return a real array, so the two
@@ -1026,7 +1036,8 @@ class Checker {
       if (this.assignable(p.annot, t)) this.retypeLiteral(p.default, p.annot);
     }
     for (const p of fn.params) base.declare(p.name, p.annot ?? "number", false);
-    this.checkBlock(fn.body, base, fn.returnTy ?? "number");
+    this.bodyChain.push(fn.body);
+    try { this.checkBlock(fn.body, base, fn.returnTy ?? "number"); } finally { this.bodyChain.pop(); }
     this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
   }
 
@@ -2956,12 +2967,20 @@ class Checker {
     const inner = scope.child();
     arrow.params.forEach((p, i) => inner.declare(p.name, paramTypes[i]!, false));
     arrow.paramTys = paramTypes;
+    // Inlined or not, a value-arrow nested inside this callback needs this body in its
+    // enclosing chain (NT1031) — the callback's own statements are one of the places an
+    // "is the binding used outside the closure?" question has to look.
+    this.bodyChain.push(arrowBody(arrow));
     let retTy: Ty;
-    if (arrow.exprBody) {
-      retTy = this.type(arrow.body as Expr, inner);
-    } else {
-      retTy = this.inferBlockReturn(arrow.body as Stmt[], inner); // first top-level `return`
-      this.checkBlock(arrow.body as Stmt[], inner.child(), retTy); // validate every return against it
+    try {
+      if (arrow.exprBody) {
+        retTy = this.type(arrow.body as Expr, inner);
+      } else {
+        retTy = this.inferBlockReturn(arrow.body as Stmt[], inner); // first top-level `return`
+        this.checkBlock(arrow.body as Stmt[], inner.child(), retTy); // validate every return against it
+      }
+    } finally {
+      this.bodyChain.pop();
     }
     arrow.retTy = retTy;
     return retTy;
@@ -2988,12 +3007,21 @@ class Checker {
     // cannot be invalidated, so it crosses). TypeScript draws the line in the same
     // place. The INLINED HOF callbacks (`typeArrowBody`) run inside the expression that
     // creates them, so they are not a boundary.
-    const retTy: Ty = this.inArrow(() => {
-      if (arrow.exprBody) return this.type(arrow.body as Expr, inner);
-      const t = this.inferBlockReturn(arrow.body as Stmt[], inner);
-      this.checkBlock(arrow.body as Stmt[], inner.child(), t);
-      return t;
-    });
+    // The arrow's own body joins `bodyChain` while its body is typed, so a NESTED arrow
+    // sees it as one of ITS enclosing bodies (NT1029) — and comes back off before
+    // `computeCaptures`, which asks about the bodies OUTSIDE this arrow.
+    this.bodyChain.push(arrowBody(arrow));
+    let retTy: Ty;
+    try {
+      retTy = this.inArrow(() => {
+        if (arrow.exprBody) return this.type(arrow.body as Expr, inner);
+        const t = this.inferBlockReturn(arrow.body as Stmt[], inner);
+        this.checkBlock(arrow.body as Stmt[], inner.child(), t);
+        return t;
+      });
+    } finally {
+      this.bodyChain.pop();
+    }
     arrow.retTy = retTy;
     arrow.captures = this.computeCaptures(arrow, scope);
     const ty = makeFuncTy(paramTys, retTy);
@@ -3029,7 +3057,66 @@ class Checker {
       const b = scope.lookup(n); // bound in an enclosing scope ⇒ captured
       if (b) caps.push({ name: n, ty: b.ty });
     }
+    this.checkCapturedWrites(arrow, scope);
     return caps;
+  }
+
+  /**
+   * NT1029 — a closure that WRITES a binding it captured, in a shape where the write
+   * would be lost.
+   *
+   * A capture is a by-VALUE snapshot: codegen fills the closure's env block when the
+   * closure is BUILT, and `writeCapture` stores back into that block, never into the
+   * enclosing frame's `%x.addr`. JS captures by REFERENCE, so the two disagree — but
+   * only where the difference is OBSERVABLE, and that carve-out matters, because the
+   * escaping-counter idiom lands squarely in it:
+   *
+   *     function makeCounter() { let count = 0; return () => { count++; return count; }; }
+   *
+   * Here `count` is never touched again in `makeCounter`, whose frame is gone by the
+   * time the closure runs, so the env slot IS the variable and `1 2 3` is correct. That
+   * program is `test/fixtures/stage11/counter.ts`, differential-tested against node, and
+   * a blanket "no writes to captures" rule would have deleted it. The condition for
+   * safety is exactly that nothing outside the closure can observe the stale copy:
+   *
+   *   1. no ENCLOSING body mentions the name anywhere outside this arrow — that covers a
+   *      later read (`return n`), a later write (`n = 10`, which the snapshot predates),
+   *      and a SECOND closure over the same binding (which would get its own env slot and
+   *      diverge from this one); and
+   *   2. the binding is a `number`. Measured, on the pre-refusal compiler and in the
+   *      no-outside-reference shape above: a `number[]` capture written this way died
+   *      with `panic: index out of bounds: the length is 0` where node printed `1 2 3`,
+   *      and a `string` one printed correctly but LEAKS — `writeCapture` emits a bare
+   *      `store i64` with no release of the string it overwrites, which is a red
+   *      LeakSanitizer run on Linux CI. Only `number` needs neither.
+   *
+   * Everything else is refused. The enclosing bodies come from `bodyChain`; when it is
+   * short (the early return-type inference pass runs before it is built) this can only
+   * find FEWER references and so allow more, and every such arrow is typed again from
+   * `checkBlock` with the full chain, which is the run that decides.
+   */
+  private checkCapturedWrites(arrow: ArrowFunction, scope: Scope): void {
+    const writes = new Map<string, string>();
+    collectEscapingWrites(arrow, writes);
+    // No params/locals guard: `collectEscapingWrites` applies exactly that set itself, at
+    // every arrow level rather than only this one — measured, by deleting a second copy
+    // of the guard here and seeing no test change.
+    for (const [name, op] of writes) {
+      const b = scope.lookup(name);
+      if (!b) continue; // not an enclosing binding at all — not this rule's business
+      const observed = this.bodyChain.some((body) => referencesName(body, name, arrow));
+      if (!observed && b.ty === "number") continue; // the escaping-counter shape: safe
+      const why = observed
+        ? `'${name}' is also used outside the closure, so it would be read at its stale value`
+        : `'${name}' is a ${b.ty}, whose captured slot cannot be rewritten safely`;
+      throw nyi(
+        NYI.CAPTURE_WRITE,
+        `a write to a captured binding (\`${op}\`, where '${name}' is bound in an enclosing scope)`,
+        `closures capture by VALUE here, so \`${op}\` updates the closure's own copy rather than the outer binding, and ${why}. node captures by reference, so this is refused rather than miscompiled. ` +
+        `Return the new value and assign it at the call site (\`${name} = step(${name})\`), or accumulate with \`map\`/\`filter\`/\`reduce\`, whose callbacks run inline in the enclosing frame and so may write it. ` +
+        `A counter whose state lives ONLY in the closure — nothing outside it mentions '${name}' — does compile`,
+      );
+    }
   }
 
   /**
@@ -3574,6 +3661,187 @@ function alwaysExits(body: Stmt[]): boolean {
 function collectBlockLocals(s: Stmt, out: Set<string>): void {
   if (s.kind === "VarDecl") for (const d of s.decls) out.add(d.name);
   else if (s.kind === "ForOfStmt" || s.kind === "ForInStmt") out.add(s.name);
+}
+
+/* ------------------------------------------------------------
+ * ESCAPING WRITES (NT1029) — which names an arrow assigns that it does not itself bind.
+ *
+ * `collectAssigned` above answers a different question (does this REGION assign the
+ * name, at all, anywhere) and deliberately ignores shadowing, because a narrowing has
+ * to be invalidated conservatively. Here the conservative direction is the opposite
+ * one: a name that is bound INSIDE the arrow is not a capture, and refusing a write to
+ * it would reject correct code — `(n: number) => { n = n + 1; return n; }` writes its
+ * own parameter, and a closure-local `let n` shadowing an outer `n` is a different
+ * variable. So this walker carries the bound set down, and a nested arrow contributes
+ * only what escapes IT.
+ *
+ * The shadowing model is deliberately the SAME one `computeCaptures` uses (params plus
+ * the body's top-level `let`/`const`/`for-of` names) so that the set refused here is
+ * exactly the set codegen would treat as a capture — no wider, no narrower.
+ *
+ * The value in the map is the offending write as written, for the diagnostic.
+ * ------------------------------------------------------------ */
+function collectEscapingWrites(arrow: ArrowFunction, out: Map<string, string>): void {
+  const bound = new Set(arrow.params.map((p) => p.name));
+  if (arrow.exprBody) { escapingWritesExpr(arrow.body as Expr, bound, out); return; }
+  const body = arrow.body as Stmt[];
+  for (const s of body) collectBlockLocals(s, bound);
+  escapingWritesStmts(body, bound, out);
+}
+
+/** Record the FIRST write to a name the arrow does not bind (later ones say the same). */
+function noteEscapingWrite(name: string, op: string, bound: Set<string>, out: Map<string, string>): void {
+  if (!bound.has(name) && !out.has(name)) out.set(name, op);
+}
+
+function escapingWritesExpr(e: Expr, bound: Set<string>, out: Map<string, string>): void {
+  const go = (x: Expr) => escapingWritesExpr(x, bound, out);
+  switch (e.kind) {
+    case "AssignExpr": noteEscapingWrite(e.target, `${e.target} ${e.op} …`, bound, out); go(e.value); return;
+    case "UpdateExpr":
+      if (e.targetExpr) go(e.targetExpr);
+      else noteEscapingWrite(e.target, e.prefix ? `${e.op}${e.target}` : `${e.target}${e.op}`, bound, out);
+      return;
+    case "ArrowFunction": {
+      // A nested arrow binds its own params/locals; whatever still escapes IT escapes
+      // this arrow too, unless this one binds the name. This is also what catches a
+      // write from an INLINED `map`/`filter`/`reduce` callback: inlining puts the write
+      // in the enclosing frame, which is the right place only when that frame OWNS the
+      // binding — inside a lifted closure the frame holds a capture, so it is not.
+      const inner = new Map<string, string>();
+      collectEscapingWrites(e, inner);
+      for (const [n, op] of inner) noteEscapingWrite(n, op, bound, out);
+      return;
+    }
+    // `o.f = v` / `xs[i] = v` through a capture mutate the pointed-to heap value, which
+    // IS shared with the enclosing scope — a different question, already answered by the
+    // immutability rule (NT1606) and the ownership checker. Only recurse.
+    case "IndexAssign": go(e.object); go(e.index); go(e.value); return;
+    case "FieldAssign": go(e.object); go(e.value); return;
+    case "MemberExpr": go(e.object); return;
+    case "IndexExpr": go(e.object); go(e.index); return;
+    case "UnaryExpr": go(e.operand); return;
+    case "TypeofExpr": go(e.operand); return;
+    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": go(e.expr); return;
+    case "InstanceOfExpr": go(e.object); return;
+    case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
+    case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;
+    case "SequenceExpr": case "TemplateLiteral": (e.exprs as Expr[]).forEach(go); return;
+    case "CallExpr": go(e.callee); e.args.forEach(go); return;
+    case "NewExpr": e.args.forEach(go); return;
+    case "ArrayLiteral": e.elements.forEach(go); return;
+    case "ObjectLiteral": e.properties.forEach((p) => go(p.value)); return;
+    case "SpreadExpr": go(e.argument); return;
+    default: return; // literals and identifiers hold no assignment
+  }
+}
+
+/** An arrow's body as statements — an expression body as the one statement it is. */
+function arrowBody(arrow: ArrowFunction): Stmt[] {
+  return arrow.exprBody ? exprRegion(arrow.body as Expr) : (arrow.body as Stmt[]);
+}
+
+/**
+ * Is `name` mentioned anywhere in `stmts`, other than inside `skip`?
+ *
+ * The second half of the NT1029 rule: a closure may rewrite its captured slot only when
+ * nothing outside it can observe the enclosing frame's now-stale copy. That question is
+ * about USES, so this walks the enclosing body looking for any occurrence of the name at
+ * all — a read, a write, a call, a mention inside a SECOND closure (which would hold its
+ * own snapshot and diverge from this one). The binding's own declarator is not an
+ * occurrence: only initializers are visited, so `let count = 0` does not count itself.
+ *
+ * Deliberately FLAT — it models no shadowing, so an unrelated binding of the same name
+ * counts as a use. Every imprecision therefore produces MORE refusals, never fewer,
+ * which is the only safe direction for a rule standing between a program and a silently
+ * wrong answer.
+ */
+function referencesName(stmts: Stmt[], name: string, skip: ArrowFunction): boolean {
+  return stmts.some((s) => refsInStmt(s, name, skip));
+}
+
+function refsInExpr(e: Expr, name: string, skip: ArrowFunction): boolean {
+  if (e === skip) return false; // the closure under judgement is not "outside" itself
+  const any = (xs: Expr[]) => xs.some((x) => refsInExpr(x, name, skip));
+  switch (e.kind) {
+    case "Identifier": return e.name === name;
+    case "AssignExpr": return e.target === name || refsInExpr(e.value, name, skip);
+    case "UpdateExpr": return e.targetExpr ? refsInExpr(e.targetExpr, name, skip) : e.target === name;
+    case "MemberExpr": return refsInExpr(e.object, name, skip);
+    case "IndexExpr": return any([e.object, e.index]);
+    case "IndexAssign": return any([e.object, e.index, e.value]);
+    case "FieldAssign": return any([e.object, e.value]);
+    case "UnaryExpr": return refsInExpr(e.operand, name, skip);
+    case "TypeofExpr": return refsInExpr(e.operand, name, skip);
+    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": return refsInExpr(e.expr, name, skip);
+    case "InstanceOfExpr": return refsInExpr(e.object, name, skip);
+    case "BinaryExpr": case "LogicalExpr": return any([e.left, e.right]);
+    case "ConditionalExpr": return any([e.test, e.consequent, e.alternate]);
+    case "SequenceExpr": case "TemplateLiteral": return any(e.exprs as Expr[]);
+    case "CallExpr": return refsInExpr(e.callee, name, skip) || any(e.args);
+    case "NewExpr": return any(e.args);
+    case "ArrayLiteral": return any(e.elements);
+    case "ObjectLiteral": return any(e.properties.map((p) => p.value));
+    case "SpreadExpr": return refsInExpr(e.argument, name, skip);
+    case "ArrowFunction": return referencesName(arrowBody(e), name, skip);
+    default: return false; // literals
+  }
+}
+
+function refsInStmt(s: Stmt, name: string, skip: ArrowFunction): boolean {
+  const goE = (x: Expr) => refsInExpr(x, name, skip);
+  const goS = (b: Stmt[]) => referencesName(b, name, skip);
+  switch (s.kind) {
+    case "VarDecl": return s.decls.some((d) => goE(d.init));
+    case "ReturnStmt": return s.argument ? goE(s.argument) : false;
+    case "ThrowStmt": return goE(s.argument);
+    case "ExprStmt": return goE(s.expr);
+    case "IfStmt": return goE(s.test) || goS(s.consequent) || (s.alternate ? goS(s.alternate) : false);
+    case "WhileStmt": case "DoWhileStmt": return goE(s.test) || goS(s.body);
+    case "ForStmt":
+      return (s.init ? ((s.init as Stmt).kind === "VarDecl" ? goS([s.init as Stmt]) : goE(s.init as Expr)) : false)
+        || (s.test ? goE(s.test) : false) || (s.update ? goE(s.update) : false) || goS(s.body);
+    case "ForOfStmt": return goE(s.iterable) || goS(s.body);
+    case "ForInStmt": return goE(s.object) || goS(s.body);
+    case "SwitchStmt":
+      return goE(s.discriminant) || s.cases.some((c) => (c.test ? goE(c.test) : false) || goS(c.body));
+    case "TryStmt": return goS(s.block) || (s.handler ? goS(s.handler) : false) || (s.finalizer ? goS(s.finalizer) : false);
+    case "BlockStmt": return goS(s.body);
+    case "MultiStmt": return goS(s.stmts);
+    // A named function CAN read a module-level binding, so its body counts as a use.
+    case "FuncDecl": return goS(s.body);
+    default: return false;
+  }
+}
+
+function escapingWritesStmts(body: Stmt[], bound: Set<string>, out: Map<string, string>): void {
+  const goE = (x: Expr) => escapingWritesExpr(x, bound, out);
+  const goS = (b: Stmt[]) => escapingWritesStmts(b, bound, out);
+  for (const s of body) {
+    switch (s.kind) {
+      case "VarDecl": for (const d of s.decls) goE(d.init); break;
+      case "ReturnStmt": if (s.argument) goE(s.argument); break;
+      case "ThrowStmt": goE(s.argument); break;
+      case "ExprStmt": goE(s.expr); break;
+      case "IfStmt": goE(s.test); goS(s.consequent); if (s.alternate) goS(s.alternate); break;
+      case "WhileStmt": case "DoWhileStmt": goE(s.test); goS(s.body); break;
+      case "ForStmt":
+        if (s.init) { if ((s.init as Stmt).kind === "VarDecl") goS([s.init as Stmt]); else goE(s.init as Expr); }
+        if (s.test) goE(s.test);
+        if (s.update) goE(s.update);
+        goS(s.body);
+        break;
+      case "ForOfStmt": goE(s.iterable); goS(s.body); break;
+      case "ForInStmt": goE(s.object); goS(s.body); break;
+      case "SwitchStmt": goE(s.discriminant); for (const c of s.cases) { if (c.test) goE(c.test); goS(c.body); } break;
+      case "TryStmt": goS(s.block); if (s.handler) goS(s.handler); if (s.finalizer) goS(s.finalizer); break;
+      case "BlockStmt": goS(s.body); break;
+      case "MultiStmt": goS(s.stmts); break;
+      // A nested `function` declaration is not a closure here (it does not capture), so
+      // its assignments are its own frame's; nothing escapes to this arrow's captures.
+      default: break;
+    }
+  }
 }
 
 /** True if `e` is a member access that is part of an optional chain (some `?.` to its left). */

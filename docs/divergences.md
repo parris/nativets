@@ -1211,6 +1211,56 @@ the type representation, not a union feature and not a small one. Until it exist
 compiler's own `Expr`/`Stmt` unions (`src/ast.ts`) are outside the subset nativets compiles,
 and **that, not any single union or intersection, is what gates `src/ast.ts` self-hosting**.
 
+### Closures capture by VALUE — a write to a capture is refused (`NT1029`)
+
+A closure's environment is a heap block `[fn_ptr, cap0, cap1, …]`, and codegen fills the capture
+slots **when the closure is built**. Reading one loads its slot; that is a snapshot, and for a
+binding nobody writes a snapshot IS the by-reference answer, so the overwhelming majority of
+closures — every read of a capture — compile and match node exactly.
+
+Writing one does not. `writeCapture` stores back into the closure's own slot and never into the
+enclosing frame's `%x.addr`, while **JS closures capture by reference**. Until this refusal, the
+difference was silent — right exit code, wrong number:
+
+```ts
+let n: number = 0;
+const add = () => { n = n + 1; };
+add(); add();
+console.log(n);            // node: 2      nativets, before NT1029: 0   (both exit 0)
+```
+
+So a captured write is **refused**, except in the one shape where the by-value slot *is* the whole
+variable. Both conditions must hold:
+
+1. **Nothing outside the closure mentions the binding.** That covers a later read (`return n`), a
+   later write (`n = 10`, which the snapshot predates), and a *second* closure over the same
+   binding — which would get its own slot and drift away from the first.
+2. **The binding is a `number`.** The other types were measured in exactly the safe shape and are
+   not safe: a captured `number[]` rewritten this way died with `panic: index out of bounds: the
+   length is 0` where node printed `1 2 3`, and a captured `string` printed correctly but **leaks**
+   — `writeCapture` emits a bare `store i64` and never releases the string it overwrites.
+
+What that carve-out buys is the escaping-counter idiom, which is common, correct today, and
+differential-tested (`test/fixtures/stage11/counter.ts`):
+
+```ts
+function makeCounter() { let count = 0; return () => { count++; return count; }; }
+```
+
+`makeCounter`'s frame is gone before the closure ever runs and never names `count` again, so
+nothing can observe the stale copy. Accumulating in an **inlined** `map`/`filter`/`reduce`
+callback is likewise unaffected: those run in the enclosing frame, so they write the real
+binding, and the `NT1029` hint points at them.
+
+The rule is decided in `computeCaptures` (`src/checker.ts`) and pinned in
+`test/capture-write.test.ts`, whose false-positive wall — a closure-local shadowing an outer
+name, an arrow parameter, a nested arrow writing its own parameter — is the part most worth
+keeping green. Lifting the refusal means **boxing** the captured cell: allocate the variable on
+the heap and store the box pointer in the env slot, so every closure and the enclosing frame
+share one cell. That is a real feature, not a patch, and it is what would let condition 2 go away.
+
+| NT1029 | a closure writing a binding it captured, where the write would be observable (or the binding is not a `number`) | later | by-reference capture: box the captured cell so every closure and the declaring frame share one |
+
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
 
