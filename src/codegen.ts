@@ -1464,7 +1464,7 @@ class FnGen {
       isBytesTy(val.ty) || isBytesRefTy(val.ty) || isFetchRefTy(val.ty) || isUrlRefTy(val.ty) ||
       isDateTy(val.ty) || isResponseTy(val.ty) || isHeadersTy(val.ty) || isTextEncoderTy(val.ty) || isTextDecoderTy(val.ty)
     ) return "true";
-    throw new Error(`internal: no truthiness rule for ${val.ty} — add one rather than defaulting`);
+    throw internalError(`no truthiness rule for ${val.ty} — add one rather than defaulting`);
   }
 
   /**
