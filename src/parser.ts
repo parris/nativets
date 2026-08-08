@@ -961,9 +961,10 @@ class Parser {
     const name = this.expectIdent();
     let annot: Ty | undefined;
     if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
-    let init: Expr;
+    // No `=` means NO initializer — left absent, not synthesized as `undefined`.
+    // See the note on `Declarator` in ast.ts: the two are different programs.
+    let init: Expr | undefined;
     if (this.at("=")) { this.eat("="); init = this.parseAssign(); }
-    else init = { kind: "UndefinedLiteral" };
     // `const f = async () => …` makes `f` an async function under every name the guard
     // cares about, exactly as `async function f` would — and a DIRECT alias (`const g = f`)
     // carries that along, so a chain `const c = b; const b = a` stays guarded.
@@ -971,7 +972,8 @@ class Parser {
     // BOUNDARY: this is name tracking, not dataflow. An async function that escapes into
     // a PARAMETER (`run(one)` then `f()` inside `run`) is not reached, because the callee
     // is only known interprocedurally. That residual hole is reported, not papered over.
-    if (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name))) {
+    if (init !== undefined &&
+        (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name)))) {
       this.asyncFns.add(name);
     }
     return { name, annot, init };
@@ -1571,8 +1573,8 @@ class Parser {
       if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
       if (this.at("of")) { this.eat("of"); const iterable = this.parseExpression(); this.eat(")"); return { kind: "ForOfStmt", name, annot, iterable, body: this.parseControlled() }; }
       if (this.at("in")) { this.eat("in"); const object = this.parseExpression(); this.eat(")"); return { kind: "ForInStmt", name, object, body: this.parseControlled() }; }
-      let init: Expr;
-      if (this.at("=")) { this.eat("="); init = this.parseAssign(); } else init = { kind: "UndefinedLiteral" };
+      let init: Expr | undefined; // `for (let i; …)` — absent, not synthesized (see ast.ts)
+      if (this.at("=")) { this.eat("="); init = this.parseAssign(); }
       const decls: Declarator[] = [{ name, annot, init }];
       while (this.at(",")) { this.eat(","); decls.push(this.parseDeclarator()); }
       this.eat(";");

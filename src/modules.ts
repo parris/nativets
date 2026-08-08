@@ -132,7 +132,7 @@ class Renamer {
     d.name = this.n(d.name);
     d.annot = this.t(d.annot);
     d.ty = this.t(d.ty);
-    this.expr(d.init);
+    if (d.init) this.expr(d.init);
   }
 
   stmt(s: Stmt): void {
