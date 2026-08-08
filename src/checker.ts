@@ -553,6 +553,14 @@ class Checker {
     private importedFrom: Map<string, string> = new Map(),
   ) {}
 
+  /**
+   * Does class `tag` declare a `toJSON` METHOD? The parser desugars `class C { toJSON() {} }`
+   * into a `FuncDecl` named `C.toJSON`, so a class's methods live in the function table and
+   * NOT in its instance type's field list — which is why `checkJsonStringifyArg` cannot ask
+   * this of the type string and takes the answer as a parameter instead.
+   */
+  hasToJson(tag: string): boolean { return this.functions.has(`${tag}.toJSON`); }
+
   /** The tagged record type a literal should take from its context, if any. */
   private contextualRecordTy(hint: Ty | undefined): Ty | undefined {
     if (hint === undefined || !this.recordTags.size) return undefined;
@@ -2176,7 +2184,7 @@ class Checker {
         const at = this.type(a, scope);
         if (plan && i === 0) continue; // the format string itself, consumed
         const spec = bySpec?.get(i);
-        if (spec !== undefined) { checkFormatArg(spec, at); continue; }
+        if (spec !== undefined) { checkFormatArg(spec, at, (t) => this.hasToJson(t)); continue; }
         checkConsoleArg(at);
       }
       return "void";
@@ -2347,7 +2355,7 @@ class Checker {
       refuseUnboxedUnion(jt, "JSON.stringify"); // rendered the box as the literal `null`
       // Exhaustive: everything the serializer has no node-exact rule for is refused
       // here, including the `undefined` at the ROOT that used to render `null`.
-      checkJsonStringifyArg(jt, "root");
+      checkJsonStringifyArg(jt, "root", (t) => this.hasToJson(t));
       // arg2 (replacer) — only `null`/`undefined` supported (no array/function replacer).
       if (e.args.length >= 2) {
         const r = e.args[1]!;
@@ -4110,8 +4118,13 @@ type JsonPos = "root" | "field" | "element";
  *
  * `%j` IS `JSON.stringify`, so `checkFormatArg` routes through this too and the
  * two accept the same set by construction rather than by being kept in step.
+ *
+ * `hasToJson(tag)` answers "does class `tag` declare a `toJSON` METHOD?" — the one
+ * question the type string cannot answer on its own, since a class's methods live
+ * in the function table and not in its field list. It is REQUIRED rather than
+ * defaulted, so a future caller cannot re-open the hole by omitting it.
  */
-export function checkJsonStringifyArg(ty: Ty, pos: JsonPos): void {
+export function checkJsonStringifyArg(ty: Ty, pos: JsonPos, hasToJson: (tag: string) => boolean): void {
   if (ty === "number" || ty === "boolean" || ty === "string" || ty === "null") return;
   if (isDateTy(ty)) return; // Date.prototype.toJSON — the quoted ISO string
   // A Map/Set has no own ENUMERABLE property, so node serializes EVERY one of them
@@ -4143,10 +4156,26 @@ export function checkJsonStringifyArg(ty: Ty, pos: JsonPos): void {
   }
   if (isNullableTy(ty)) {
     if (pos === "root") refuseUndefinedStringify(ty); // a `?U` box: no right string here
-    return checkJsonStringifyArg(baseTy(ty), pos);    // a `?N` box renders `null`; check what it carries
+    return checkJsonStringifyArg(baseTy(ty), pos, hasToJson); // a `?N` box renders `null`; check what it carries
   }
-  if (isArrayTy(ty)) return checkJsonStringifyArg(elemTy(ty), "element");
-  if (isObjectTy(ty)) { for (const f of objectFields(ty)) checkJsonStringifyArg(f.ty, "field"); return; }
+  if (isArrayTy(ty)) return checkJsonStringifyArg(elemTy(ty), "element", hasToJson);
+  if (isObjectTy(ty)) {
+    // `toJSON` REPLACES the value: node calls it and serializes the RESULT, at every
+    // position (`JSON.stringify([q])` is `[{"y":2}]`, not `[{"x":1}]` — test262
+    // `built-ins/JSON/stringify/value-tojson-result.js`). nativets walks the FIELDS,
+    // so it silently ignored the method and emitted the raw shape — `{"x":1}` for a
+    // class whose `toJSON` returns `"P!"`. Only a CALLABLE `toJSON` counts: node
+    // ignores a non-callable one (`value-tojson-not-function.js`), so `{toJSON: 1}`
+    // still serializes as `{"toJSON":1}`, exactly as it did.
+    const tag = classTag(ty);
+    const own = fieldType(ty, "toJSON");
+    if ((tag !== undefined && hasToJson(tag)) || (own !== undefined && isFuncTy(own)))
+      throw nyi(NYI.JSON, `JSON.stringify of ${tag !== undefined ? `\`${tag}\`` : "an object"}, which has a \`toJSON\` — node CALLS it and ` +
+        `serializes what it RETURNS, where nativets generates the serializer from the static FIELDS and would emit the raw shape instead. ` +
+        `Call it yourself: \`JSON.stringify(x.toJSON())\`.`);
+    for (const f of objectFields(ty)) checkJsonStringifyArg(f.ty, "field", hasToJson);
+    return;
+  }
   throw nyi(NYI.JSON, `JSON.stringify of a ${ty} — nativets generates the serializer from the STATIC type and has ` +
     `no node-exact rendering for this one, and the literal \`null\` it used to emit was a silent wrong answer. ` +
     jsonStringifyFix(ty));
@@ -4204,7 +4233,7 @@ function findUnionIn(ty: Ty): Ty | undefined {
  *        through `ToPrimitive` (`String([1,2,3])` is `"1,2,3"`, so `%f` of it is 1) —
  *        a coercion nativets does not implement for arrays.
  */
-export function checkFormatArg(spec: FmtSpec, at: Ty): void {
+export function checkFormatArg(spec: FmtSpec, at: Ty, hasToJson: (tag: string) => boolean): void {
   if (spec === "c") return; // consumed and ignored
   if (spec === "s") {
     // node's `%s` inspects an object only when it has no custom `toString`; a typed
@@ -4216,7 +4245,7 @@ export function checkFormatArg(spec: FmtSpec, at: Ty): void {
   if (spec === "O") return checkConsoleArg(at);
   const scalar = at === "number" || at === "boolean" || at === "string" || at === "undefined" ||
     at === "void" || at === "null" || isDateTy(at);
-  if (isNullableTy(at)) return checkFormatArg(spec, baseTy(at));
+  if (isNullableTy(at)) return checkFormatArg(spec, baseTy(at), hasToJson);
   if (spec === "o") {
     if (!scalar) throw nyi(NYI.CONSOLE, `\`%o\` of a ${at} (node's \`showHidden\` inspect, e.g. \`[ 1, 2, 3, [length]: 3 ]\`) — use \`%O\``);
     return;
@@ -4238,7 +4267,7 @@ export function checkFormatArg(spec: FmtSpec, at: Ty): void {
     // `JSON.stringify(undefined)` is still refused: its result type is `string` here
     // and the undefined VALUE does not fit in one.
     if (at === "undefined" || at === "void") return;
-    return checkJsonStringifyArg(at, "root");
+    return checkJsonStringifyArg(at, "root", hasToJson);
   }
   // %d / %i / %f
   if (!scalar && !isObjectTy(at) && !isMapTy(at) && !isSetTy(at))

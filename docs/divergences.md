@@ -175,11 +175,12 @@ have scanned.
 approximation:
 
 - **`%o`** of a compound (node adds `showHidden`: `[ 1, 2, 3, [length]: 3 ]`) — use `%O`;
-- **`%j`** of whatever `JSON.stringify` itself refuses — a `Dyn` or a `URL`/`Response`
-  handle. `%j` IS `JSON.stringify`, so it routes through the one predicate
-  (`checkJsonStringifyArg`) rather than keeping a second list in step. It previously refused
-  a `Map`/`Set` outright while the direct call rendered the literal `null` for one; both now
-  render `{}`, which is what node prints for every Map and every Set.
+- **`%j`** of whatever `JSON.stringify` itself refuses — a `Dyn`, a `URL`/`Response` handle,
+  a value with a `toJSON` — and **nothing else**. `%j` IS `JSON.stringify`, so it routes
+  through the one predicate (`checkJsonStringifyArg`) rather than keeping a second list in
+  step. It previously refused a `Map`/`Set` outright while the direct call rendered the
+  literal `null` for one; both now render `{}`, which is what node prints for every Map and
+  every Set.
 
   `%j` accepts strictly MORE in exactly one place, and node is the reason: `%j` does not
   RETURN the stringify result, it CONCATENATES it (`formatWithOptions` does
@@ -442,6 +443,19 @@ What is REFUSED (`NT1005`), each with the fix named:
 - **`URL` / `URLSearchParams` / `Response` / `Headers` / `TextEncoder` / `TextDecoder`** —
   no renderer here. (node's answers are known — `u.href` for a URL, `{}` for the rest — so
   these are addable; they are refused rather than guessed until measured case by case.)
+- **anything with a `toJSON`** — a class declaring a `toJSON()` method, or an object literal
+  with a callable `toJSON` field. `toJSON` REPLACES the value: node calls it and serializes
+  what it RETURNS, at every position (test262
+  `built-ins/JSON/stringify/value-tojson-result.js`; `JSON.stringify([q])` is `[{"y":2}]`).
+  nativets builds the serializer from the STATIC FIELDS, so it ignored the method and
+  emitted the raw shape — `{"x":1}` where node gives `"P!"`. Call it yourself:
+  `JSON.stringify(x.toJSON())`. Only a CALLABLE `toJSON` is refused — node ignores a
+  non-callable one (`value-tojson-not-function.js`), so `{toJSON: 1, a: 2}` still
+  serializes as `{"toJSON":1,"a":2}` exactly as node does.
+
+  This one is worth calling out as the pattern: a class instance is STRUCTURALLY an object
+  here, so it fell into the object arm and was "handled". Making a fall-through exhaustive
+  closes the types with no arm; it does not close the types that reach the WRONG arm.
 
 The ARRAY-element position is unreachable for all of these: `Map<…>[]`, `Uint8Array[]` and
 an array of functions are `NT1001` ("arrays of X is not supported yet"), which predates

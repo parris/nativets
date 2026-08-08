@@ -19,10 +19,23 @@
  * with an `NT****` before codegen ever sees it. A seventh box type is a compile
  * error, not a seventh wrong answer.
  *
- * Every case here is DERIVED — measured against `node` on this machine, stdout AND
- * exit code — not borrowed from a suite. The first block pins what already worked,
- * because `JSON.stringify` is load-bearing everywhere and the fall-through sits
- * directly under it.
+ * Every case here is measured against `node` on this machine, stdout AND exit code. Most
+ * were DERIVED rather than borrowed; the ones that came from test262
+ * (`test/built-ins/JSON/stringify/`) cite the file they came from at the case, per
+ * CLAUDE.md's "Use reference tests". The suite is what found the `toJSON` hole below —
+ * the derived cases did not, because a class instance is structurally an object here and
+ * so it looked handled. The first block pins what already worked, because
+ * `JSON.stringify` is load-bearing everywhere and the fall-through sits directly under it.
+ *
+ * SWEPT FROM test262 AND FOUND ALREADY CORRECT, so no case was added: `-0` is `"0"`
+ * (`value-number-negative-zero.js`), NaN/±Infinity are `null` (`value-number-non-finite.js`,
+ * closed by this lane), the control-character escape table incl. lowercase `\u001a`
+ * (`value-string-escape-ascii.js`), a function is dropped (`value-function.js`), and the
+ * whole `space` argument contract — clamped to 10, floored, `<1` means compact, a string
+ * gap truncated to its first 10 code units (`space-number-range.js`, `space-number-float.js`,
+ * `space-number.js`, `space-string-range.js`). OUT OF SUBSET, so not swept: BigInt, Symbol,
+ * boxed primitives, Proxy, replacer functions/arrays (refused), circular structures (not
+ * expressible), and sparse arrays (`[1, , 3]` is NT0001 at the parser).
  */
 
 import { test, expect, describe } from "bun:test";
@@ -251,6 +264,34 @@ describe("JSON.stringify — what is REFUSED rather than guessed", () => {
 
   test("a TextEncoder has no renderer here and is refused", () => {
     expect(rejectCode(`const e = new TextEncoder(); console.log(JSON.stringify(e));`)).toBe("NT1005");
+  });
+
+  // test262 `built-ins/JSON/stringify/value-tojson-result.js`: `toJSON` REPLACES the
+  // value — node calls it and serializes what it RETURNS, at every position. nativets
+  // builds the serializer from the static FIELDS, so it ignored the method and emitted
+  // the raw shape: `{"x":1}` where node gives `"P!"`. That is the SAME defect class this
+  // lane closes (a type with no node-exact rule rendered anyway), and it survived the
+  // first pass because a class instance is structurally an object and fell into the
+  // object arm. Refused now, with the call named.
+  const P = `class P { x: number; constructor(x: number) { this.x = x; } toJSON(): string { return "P!"; } }\n`;
+  test("a class with a toJSON is refused, not serialized from its fields", () => {
+    expect(rejectCode(P + `console.log(JSON.stringify(new P(1)));`)).toBe("NT1005");
+    expect(rejectMessage(P + `console.log(JSON.stringify(new P(1)));`)).toContain("toJSON");
+  });
+
+  test("a toJSON class NESTED in an object is refused too", () => {
+    expect(rejectCode(P + `console.log(JSON.stringify({ p: new P(1), n: 2 }));`)).toBe("NT1005");
+  });
+
+  test("an object literal with a toJSON FUNCTION field is refused", () => {
+    // Without this the lane's own function-field DROP hides it: node gives `"X"`, and
+    // dropping the key would give `{"a":1}` — a more plausible wrong answer than the
+    // `{"toJSON":null,"a":1}` it replaced.
+    expect(rejectCode(`const o = { toJSON: (): string => "X", a: 1 }; console.log(JSON.stringify(o));`)).toBe("NT1005");
+  });
+
+  test("a class WITHOUT a toJSON still serializes from its fields", () => {
+    expect(rejectCode(`class Q { x: number; constructor(x: number) { this.x = x; } }\nconsole.log(JSON.stringify(new Q(1)));`)).toBe(null);
   });
 
   test("the refusal names the type and offers a fix", () => {
