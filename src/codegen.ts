@@ -312,6 +312,7 @@ const DECLARES = [
   "declare ptr @nt_arr_slice(ptr, double, double)",
   "declare void @nt_arr_extend(ptr, ptr)",
   "declare ptr @js_json_quote(ptr)",
+  "declare ptr @nt_json_num(double)",
   "declare ptr @nt_json_parse(ptr)",
   "declare double @nt_dyn_as_number(ptr)",
   "declare i32 @nt_dyn_as_bool(ptr)",
@@ -398,6 +399,7 @@ const DECLARES = [
   "declare double @nt_bytes_index(ptr, double, ptr)",
   "declare void @nt_bytes_index_set(ptr, double, double, ptr)",
   "declare double @nt_bytes_len(ptr)",
+  "declare ptr @nt_bytes_json(ptr, ptr, double)",
   "declare ptr @nt_bytes_encode(ptr)",
   "declare ptr @nt_bytes_decode(ptr)",
   // --- B3 v0 actors (spawn/send/receive/self) ---
@@ -4352,7 +4354,9 @@ class FnGen {
    */
   private genJsonStringify(val: Val, indent = "", depth = 0): Val {
     const ty = val.ty;
-    if (ty === "number") { const t = this.fresh(); this.emit(`${t} = call ptr @js_num_to_str(double ${val.v})`); return { v: t, ty: "string" }; }
+    // `nt_json_num`, not `js_num_to_str`: JSON has no non-finite number, so node
+    // writes `null` for NaN/±Infinity where `String(x)` writes the token.
+    if (ty === "number") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_json_num(double ${val.v})`); return { v: t, ty: "string" }; }
     if (ty === "boolean") {
       const z = this.fresh(); this.emit(`${z} = zext i1 ${val.v} to i32`);
       const t = this.fresh(); this.emit(`${t} = call ptr @js_bool_to_str(i32 ${z})`);
@@ -4370,7 +4374,28 @@ class FnGen {
     if (isNullableTy(ty)) return this.genJsonNullable(val.v, baseTy(ty), indent, depth);
     if (isArrayTy(ty)) return this.genJsonArray(val, indent, depth);
     if (isObjectTy(ty)) return this.genJsonObject(val, indent, depth);
-    return { v: this.mod.intern("null"), ty: "string" };
+    // The `null` VALUE is the one literal `null` node actually writes here. It used
+    // to arrive by accident, through the fall-through this replaces.
+    if (ty === "null") return { v: this.mod.intern("null"), ty: "string" };
+    // A Map/Set has no own ENUMERABLE property — its contents live in internal slots
+    // `JSON.stringify` never walks — so node serializes EVERY one of them as `{}`.
+    // Constant, and exact for any contents, so it is emitted rather than refused.
+    if (isMapTy(ty) || isSetTy(ty)) return { v: this.mod.intern("{}"), ty: "string" };
+    // A typed array's own enumerable properties ARE its indices, so node writes an
+    // index-keyed object: `{"0":1,"1":255}`, not `[1,255]`.
+    if (isBytesTy(ty)) {
+      const t = this.fresh();
+      this.emit(`${t} = call ptr @nt_bytes_json(ptr ${val.v}, ptr ${this.mod.intern(indent)}, double ${llvmDouble(depth)})`);
+      return { v: t, ty: "string" };
+    }
+    // NOT a default. This used to `return this.mod.intern("null")`, which quietly
+    // absorbed every type nobody had written a rule for — six were already wrong
+    // against node (Map, Set, Uint8Array, a function, a Dyn, and `undefined`), and
+    // a nested one looked right because it sat inside a correct object. The
+    // checker's `checkJsonStringifyArg` walks this same shape first and refuses
+    // anything with no node-exact rendering, so reaching here is a broken invariant
+    // between the two — and the next box type is a loud error, not a wrong answer.
+    throw internalError(`no JSON.stringify rule for ${ty}, which checkJsonStringifyArg admitted — add one rather than defaulting`);
   }
 
   /** JSON for a nullable box: nullish -> `null`, present -> the base value's JSON. */
@@ -4402,7 +4427,12 @@ class FnGen {
    * undefined arm keeps the old compile-time path.
    */
   private genJsonObject(val: Val, indent = "", depth = 0): Val {
-    const fields = objectFields(val.ty);
+    // A FUNCTION-typed field is dropped, exactly as node drops one: `JSON.stringify`
+    // maps a function to `undefined`, and an object's undefined-valued key is
+    // omitted. Unlike a `T | undefined` field this is a COMPILE-TIME decision — a
+    // field's type either IS a function or is not — so it never reaches the runtime
+    // `emitted` machinery below, and an object of only function fields is `{}`.
+    const fields = objectFields(val.ty).filter((f) => !isFuncTy(f.ty));
     const pretty = indent !== "";
     // node prints an empty object inline as `{}` even with an indent.
     if (fields.length === 0) return { v: this.mod.intern("{}"), ty: "string" };

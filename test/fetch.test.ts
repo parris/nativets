@@ -393,4 +393,55 @@ console.log(two());
   _test("un-awaited immediately-invoked async arrow", () => rejects(`
 console.log((async (): Promise<number> => 1)());
 `));
+
+  // HIGHER-ORDER async. An async function passed AS A VALUE is still promise-returning
+  // when it is finally called — test262 pins that the promise comes from the function,
+  // not the call site (test/language/expressions/async-arrow-function/
+  // returns-async-arrow-returns-newtarget.js and .../statements/async-function/
+  // evaluation-body-that-returns.js both call the function through a binding and assert
+  // the RESULT is a promise). The name-based guard cannot follow a value across a call
+  // boundary, so the declared TYPE carries it: a parameter annotated
+  // `(…) => Promise<T>` is exactly as promise-returning as an `async function`.
+  _test("un-awaited call through a `() => Promise<T>` PARAMETER", () => rejects(`
+const one = async (): Promise<number> => 1;
+function callit(f: () => Promise<number>): number { return f(); }
+console.log(callit(one));
+`));
+
+  // An ARROW's parameter list is parsed by a different routine, and a higher-order
+  // callback is far more often an arrow than a `function` — so it gets the same rule.
+  _test("un-awaited call through a `() => Promise<T>` parameter of an ARROW", () => rejects(`
+const one = async (): Promise<number> => 1;
+const callit = (f: () => Promise<number>): number => f();
+console.log(callit(one));
+`));
+
+  // The type is only load-bearing if it is TRUE. `f: () => number` is a lie about an
+  // async function (tsc rejects the assignment; node runs it and yields two promises,
+  // printing `[object Promise][object Promise]`), and once the lie is believed the
+  // callee is compiled as an ordinary function and the promise disappears. So the
+  // ESCAPE itself is checked: an async value may only be handed to a parameter that
+  // declares it promise-returning.
+  _test("async value passed to a parameter that is NOT `() => Promise<T>`", () => rejects(`
+const one = async (): Promise<number> => 1;
+function twice(f: () => number): number { return f() + f(); }
+console.log(twice(one));
+`));
+
+  // The other direction out of a function: an async function RETURNED as a value. The
+  // return annotation carries it exactly as a parameter annotation does, so calling the
+  // result is a call to an async function and needs the same `await`.
+  _test("un-awaited call through a returned `() => Promise<T>`", () => rejects(`
+const one = async (): Promise<number> => 1;
+function pick(): () => Promise<number> { return one; }
+console.log(pick()());
+`));
+
+  // …and returning one where the annotation does NOT say so drops the promise the same
+  // way an argument does.
+  _test("async value returned where the annotation is not `() => Promise<T>`", () => rejects(`
+const one = async (): Promise<number> => 1;
+function pick(): () => number { return one; }
+console.log(pick()());
+`));
 });
