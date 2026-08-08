@@ -229,6 +229,12 @@ export const NYI = {
   // is refused instead. Before this code existed the whole construct died on the `[]`
   // array-suffix loop as an ANONYMOUS `NT0001 Expected ']'`, with no hint and no name.
   INDEXED_ACCESS: { code: "NT1029", milestone: "later", hint: "an indexed access type is supported as `T[\"field\"]` where `T` is a record type declared in THIS file and the key is a string literal; write the field's type directly, or add a `type` alias for it, otherwise" },
+  // The parser resolves type names in SOURCE ORDER, so a name used above its declaration
+  // used to fall back to `number` silently — and the program was then rejected downstream
+  // by an NT2001 that blamed the VALUE, naming neither the type nor the cause. Refused
+  // here instead, at the type, saying which of the two shapes it is. Only names declared
+  // in the same file reach this: an imported or stdlib name still falls back.
+  FORWARD_TYPE: { code: "NT1030", milestone: "later", hint: "declare the type above its first use. A type that (directly or mutually) contains itself cannot be reordered into range: types are encoded STRUCTURALLY as a string (`Ty` in src/ast.ts), so a self-containing type has no finite encoding — nominal recursive types are not implemented (docs/divergences.md)" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
