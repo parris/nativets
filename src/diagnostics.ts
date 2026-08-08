@@ -106,12 +106,32 @@ function leadingWhitespace(s: string): number {
  */
 export function formatDiagnostic(diag: Diagnostic, source?: string): string {
   const head = `error[${diag.code}]: ${diag.message}`;
+  // A span with no real line is worse than no span. Not every AST node carries a `loc`,
+  // so a producer that writes `line: e.loc?.line ?? 0` emits line 0 — which rendered as a
+  // blank gutter row and a caret under nothing:
+  //
+  //     error[NT1604]: cannot move out of `d`: it is borrowed
+  //         |
+  //       0 |
+  //         | ^ occurs here
+  //
+  // pointing the reader at a line that does not exist. Dropping those falls back to the
+  // compact one-line form, which at least does not lie about a location.
+  //
+  // Written as a guard-then-filter rather than `diag.spans?.filter(...)` because a method
+  // call on a nullable is NT1002 — and this file has to stay inside the subset it
+  // compiles (docs/self-hosting.md). The optional-chained spelling silently moved this
+  // module's SH6 blocker backwards; the shape below does not.
   if (!diag.spans || diag.spans.length === 0 || !source) {
+    return diag.hint ? `${head}\n  = help: ${diag.hint}` : head;
+  }
+  const located = diag.spans.filter((s) => s.line > 0);
+  if (located.length === 0) {
     return diag.hint ? `${head}\n  = help: ${diag.hint}` : head;
   }
   const srcLines = source.split("\n");
   // Primary span(s) first, then secondaries, but keep source order within each group.
-  const spans = [...diag.spans].sort(
+  const spans = [...located].sort(
     (a, b) => Number(!!b.primary) - Number(!!a.primary) || a.line - b.line,
   );
   const gutter = Math.max(...spans.map((s) => String(s.line).length));

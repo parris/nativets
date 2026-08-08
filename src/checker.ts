@@ -9,7 +9,7 @@
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
-import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText, freshArray } from "./ast.ts";
+import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText, exprLoc, freshArray } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
 // Stage 47 (console.log of compound values): the handle-type predicates the
@@ -1424,7 +1424,7 @@ class Checker {
       case "ReturnStmt":
         if (s.argument) {
           const t = this.type(s.argument, scope, ret === "void" ? undefined : ret); // return type is the context (e.g. `return []`)
-          if (ret !== "void" && !this.fitsParam(ret, t)) throw typeError(`return type ${t} does not match declared ${ret}`);
+          if (ret !== "void" && !this.fitsParam(ret, t)) throw typeError(`return type ${t} does not match declared ${ret}`, exprLoc(s.argument), undefined, "returned here");
         }
         return;
       case "IfStmt": {
@@ -2091,7 +2091,7 @@ class Checker {
           e.args.forEach((a, i) => {
             const exp = ctor.params[i + 1]!;
             const at = this.typeArg(a, exp, scope);
-            if (!this.fitsArg(exp, at, a)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`);
+            if (!this.fitsArg(exp, at, a)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument")
           });
           return objTy;
         }
@@ -2595,7 +2595,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = msig.params[i + 1]!;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${e.callee.property}' arg ${i} expects ${exp}, got ${at}`);
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${e.callee.property}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument")
         });
         return msig.ret;
       }
@@ -2713,7 +2713,7 @@ class Checker {
         if (e.args.length !== ps.length) throw typeError(`'${e.callee.name}' expects ${ps.length} arguments, got ${e.args.length}`);
         e.args.forEach((a, i) => {
           const at = this.typeArg(a, ps[i]!, scope);
-          if (at !== ps[i]) throw typeError(`'${e.callee.name}' arg ${i} expects ${ps[i]}, got ${at}`);
+          if (at !== ps[i]) throw typeError(`'${e.callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument")
         });
         return funcRet(bound.ty);
       }
@@ -2738,7 +2738,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = i < fixed ? sig.params[i]! : restElem;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsArg(exp, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`);
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument")
         });
         return sig.ret;
       }
@@ -2747,7 +2747,7 @@ class Checker {
       }
       e.args.forEach((a, i) => {
         const at = this.typeArg(a, sig.params[i]!, scope); // contextual: function-typed params type their arrow args
-        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`);
+        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`, exprLoc(a), undefined, "this argument")
       });
       return sig.ret;
     }
@@ -2756,7 +2756,7 @@ class Checker {
     if (isFuncTy(ct)) {
       const ps = funcParams(ct);
       if (e.args.length !== ps.length) throw typeError(`call expects ${ps.length} arguments, got ${e.args.length}`);
-      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`); });
+      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument") });
       return funcRet(ct);
     }
     throw nyi(NYI.CLOSURE, "unsupported call target");
@@ -3310,7 +3310,7 @@ class Checker {
       // forcing case. `null` in argTys means "any type", hence no hint.
       const want = sig.argTys[i];
       const at = want ? this.type(a, scope, want) : this.type(a, scope);
-      if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`);
+      if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`, exprLoc(a), undefined, "this argument")
     });
   }
 }
