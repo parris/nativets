@@ -389,8 +389,8 @@ export function useBeforeAssign(message: string, at?: { line: number; col: numbe
   });
 }
 
-export function parseError(message: string): NTError {
-  return new NTError({ code: "NT0001", message });
+export function parseError(message: string, hint?: string): NTError {
+  return new NTError({ code: "NT0001", message, hint });
 }
 
 /**
