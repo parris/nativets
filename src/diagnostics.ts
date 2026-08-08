@@ -212,6 +212,23 @@ export const NYI = {
   // yields a Buffer; a `spawnSync` option changes what the call does), because
   // half-implementing those would be a silent divergence rather than a refusal.
   HOSTMOD: { code: "NT1028", milestone: "later", hint: "the host FFI implements exactly what a self-hosted compiler needs — `node:fs` (readFileSync/writeFileSync/existsSync/mkdtempSync/readdirSync/rmSync), `node:path`, `node:os` (tmpdir/homedir), `node:url` (fileURLToPath), `node:child_process` (spawnSync). See docs/self-hosting.md (SH4)" },
+  // Indexed access types (`T["field"]` — TypeScript's "lookup type"). The SUPPORTED shape
+  // is the one the parser can resolve PRECISELY: a base whose structure is known in THIS
+  // file (a `type`/`interface`/class declared here) indexed by a STRING LITERAL naming one
+  // of its fields — that lookup becomes the field's type, exactly.
+  //
+  // This code refuses the shapes that would have to be GUESSED: a non-literal index
+  // (`T[number]`, `T[K]`, `T[keyof T]`), a key the record does not have, and a base whose
+  // structure this file does not know — note that an unknown named type ERASES to `number`
+  // here (`resolveNamed`), which is precisely why a cross-module `Mod["field"]` cannot be
+  // resolved and must not be approximated.
+  //
+  // An indexed access carries no runtime of its own, but its RESULT decides how the
+  // annotated value is stored, compared and printed. Erasing an unresolved lookup to a
+  // guess would therefore be a silent wrong answer — the worst outcome available — so it
+  // is refused instead. Before this code existed the whole construct died on the `[]`
+  // array-suffix loop as an ANONYMOUS `NT0001 Expected ']'`, with no hint and no name.
+  INDEXED_ACCESS: { code: "NT1029", milestone: "later", hint: "an indexed access type is supported as `T[\"field\"]` where `T` is a record type declared in THIS file and the key is a string literal; write the field's type directly, or add a `type` alias for it, otherwise" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
