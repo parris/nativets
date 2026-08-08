@@ -797,7 +797,11 @@ export interface ArrowFunction {
 // the parser desugars it into a class field + a `this.x = x` init in the ctor body.
 export interface Param { name: string; annot?: Ty; default?: Expr; rest?: boolean; paramProp?: boolean; }
 
-export interface Declarator { name: string; annot?: Ty; init: Expr; ty?: Ty; }
+/** `annotHead` is the annotation's leading identifier AS WRITTEN (`Record`, `Map`, an
+ *  alias name). `annot` is the ERASED type, so the two differ wherever a utility type
+ *  maps onto a supported shape — and a diagnostic that prints only the erasure names a
+ *  type the user never typed. Diagnostics only; nothing lowers from it. */
+export interface Declarator { name: string; annot?: Ty; annotHead?: string; init: Expr; ty?: Ty; }
 export interface VarDecl {
   kind: "VarDecl";
   declKind: "let" | "const";

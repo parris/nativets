@@ -960,7 +960,15 @@ class Parser {
   private parseDeclarator(): Declarator {
     const name = this.expectIdent();
     let annot: Ty | undefined;
-    if (this.at(":")) { this.eat(":"); annot = this.parseType(); }
+    // Keep the annotation's leading identifier as WRITTEN, before `parseType` erases it.
+    // `Record<K,V>` and `Map<K,V>` erase to the same `Ty`, so a mismatch diagnostic built
+    // from the erasure alone names a `Map` in a program whose author wrote `Record`.
+    let annotHead: string | undefined;
+    if (this.at(":")) {
+      this.eat(":");
+      if (this.peek().type === "ident") annotHead = this.peek().value;
+      annot = this.parseType();
+    }
     let init: Expr;
     if (this.at("=")) { this.eat("="); init = this.parseAssign(); }
     else init = { kind: "UndefinedLiteral" };
@@ -974,7 +982,7 @@ class Parser {
     if (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name))) {
       this.asyncFns.add(name);
     }
-    return { name, annot, init };
+    return { name, annot, annotHead, init };
   }
   private parseVarDecl(): VarDecl {
     const declKind = this.next().value as "let" | "const";

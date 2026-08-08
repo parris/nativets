@@ -482,6 +482,49 @@ collection**, where node returns a **boolean**; (3) ~~`.get` of an absent key re
 via the A2 nullable machinery (miss → `undefined`, node-matched byte-for-byte). Fixtures
 use the *use-the-returned-handle* pattern, whose observable output matches node.
 
+### `Record<K, V>` is a `Map`, not an object — and an object literal cannot initialize one
+
+In TypeScript `Record<K, V>` is an **object** type, so `const o: Record<string, string> = { a: "1" }`
+is ordinary code and `o["a"]` prints `1` under node. nativets erases `Record<K, V>` to its
+**`Map<K, V>`** (`parseGenericType`, `src/parser.ts`), so that program is **rejected**:
+
+```
+error[NT2001]: 'o' declared Record<string,string> but initialized with {a:string}
+```
+
+**Why the erasure is the right one.** An object here is a flat slot array whose field list comes
+from its TYPE, and a `Record`'s key set is by definition *not* statically known — that is the
+whole point of the type. So `Record` cannot be an object in this model without runtime-keyed
+objects (the same machinery whose absence forces the `delete` and key-enumeration refusals
+above). A `Map` is what a dictionary with runtime keys already is.
+
+**The read side cannot match node either, and that is the deeper reason.** node's `o[k]` consults
+the **prototype chain**. Measured on `{ n: "N" }`:
+
+| expression | node |
+|---|---|
+| `o["n"]` / `o["zz"]` | `"N"` / `undefined` |
+| `o["toString"]`, `o["constructor"]`, `o["hasOwnProperty"]` | a **function** |
+| `o["__proto__"]` | an **object** |
+| `o["toString"] ?? FALLBACK` | the inherited **function**, not the fallback |
+
+nativets objects have no prototype chain — a literal-key `o.toString` is refused outright
+("Property 'toString' does not exist on `{n:string}`") — so *any* own-keys-only lowering of a
+variable-key index would answer `undefined` where node answers a function. Indexing an object by
+a non-literal key therefore stays refused, and a `Map` is the sound alternative: node's own
+`m.get("toString")` is `undefined`, which we match exactly.
+
+**What to write instead:** build the dictionary with `new Map<K, V>()` and `.set(k, v)`, reading
+it with `.get(k)`. If the key set really is fixed, annotate the exact object shape
+(`{ n: string, t: string }`) — but only where every read uses a **literal** key. The compiler's
+own lexer took a third option for its escape table: a `switch`, which is what a hand-written
+lexer would reach for anyway (`escapeChar`, `src/lexer.ts`).
+
+**Known imprecision:** `Record` and `Map` erase to the same `Ty`, so the two are the same type to
+the checker; only the diagnostic distinguishes them, by keeping the annotation's leading
+identifier as written (`annotHead`, `src/ast.ts`). A `Record`-annotated **parameter** is simply a
+`Map` parameter, with no trace of the spelling.
+
 ### Map/Set iteration: insertion-ordered (node-matched), but the iterators are arrays
 
 Iteration **order matches node exactly** — node guarantees insertion order and the runtime keeps
