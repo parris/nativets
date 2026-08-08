@@ -390,9 +390,9 @@ standalone column is the one that tells you what to fix:
 | `parser.ts` | `NT1009` 1030:66 | optional element access — **`?.[]`** (was `NT0001` 225:95, `satisfies`, until the satisfies lane) |
 | `checker.ts` | `NT1009` | `Record<string, number \| "var">` — a general union |
 | `codegen.ts` | `NT1015` 475:3 | **`static`** class member |
-| `modules.ts` | `NT1015` | **generic class method** — `private t<T extends Ty \| undefined>` |
+| `modules.ts` | `NT1015` | ~~**generic class method** — `private t<T extends Ty \| undefined>`~~ — also stale: by the time it was next measured this was `(p)` at 41, contextual typing. See below |
 | `driver.ts` | `NT1017` 27:1 | the **text-asset import** (12 of them, 305 KB of C) |
-| `lexer.ts` | `NT2001` | `ESCAPES` declared `Map<string, string>` but initialized with an **object literal** |
+| `lexer.ts` | `NT2001` | ~~`ESCAPES` declared `Map<string, string>` but initialized with an **object literal**~~ — **WRONG, corrected below**: it was `(n = 1)` at 146, a parameter default. Re-measure before you believe a row here |
 | `coverage-preprocess.ts` | `NT1606` | array **`.push`** (arrays are immutable) |
 | `diagnostics.ts` | `NT2001` | narrowing does not flow across `\|\|` |
 | `cli.ts` | `NT2001` | `process.stdout is not supported` (was `'source' declared string but initialized with undefined` until the definite-assignment lane: `let source: string;` assigned inside a `try` is now compiled, not refused — see docs/divergences.md) |
@@ -411,6 +411,66 @@ phase floor, and the set of NT codes present across the tree, so a *new* code ap
 a hard failure. The remaining hole: a module regressing to a code **already** in the set is
 invisible to both. Closing that means ratcheting per-module blocker codes, not just the
 tree-wide set.
+
+### `test/selfhost-ratchet.test.ts` — the hole, closed and demonstrated
+
+The hole was **wider than the paragraph above says**, and the reason is the confound in the
+table above: every existing instrument measures the whole-program **link**, where most
+modules report a *dependency's* blocker rather than their own. With six modules inheriting
+`parser.ts`'s `?.[]`, a refused construct planted in any one of them changes nothing that
+is measured. Reproduced, not argued — `new Map([[k, v], …])` (the entries form, still
+refused) planted at the top of `src/modules.ts` in a scratch tree:
+
+| Instrument | What it saw |
+|---|---|
+| `bootstrap.test.ts` phase floor | nothing — still `parsed` |
+| `bootstrap.test.ts` tree-wide code set | nothing — `NT1014` was already in it |
+| `sh6.test.ts` rung floor + per-module `code` map | nothing — the LINKED code is still the dependency's |
+| `self-host-coverage.test.ts` histogram | nothing — its checker contributes at most ONE blocker per file |
+| **`selfhost-ratchet.test.ts`** | **red, naming the module, both blockers, and the fix** |
+
+What it records, per `src/*.ts` module (the list is **discovered**, so a thirteenth module
+cannot arrive unmeasured), in `test/selfhost-ratchet.baseline.json`:
+
+- a **standalone** column — the module compiled as its own program, no link. This is the
+  column that says whose gap it is, and the only one in which a planted blocker is visible;
+- a **linked** column — the same pipeline through `linkProgram`, i.e. what stage-1 is;
+- for each: the pipeline **stage** that threw, the NT code, and the **message** with
+  positions normalized out. Identity is the message, not the code: `NT1009` alone spans
+  general unions, intersections and `?.[]`, so a code comparison cannot tell a module
+  regressing to a different `NT1009` from one holding still.
+
+**How it tells progress from regression** — the part a phase floor cannot do, since both
+movements sit inside `parsed`. A blocker is a function of exactly two inputs, so the
+baseline records the module's **source hash** next to the blocker and the causes separate:
+
+| | blocker changed |
+|---|---|
+| source hash **unchanged** | only the compiler can have done it → the frontier moved → **passes** |
+| source hash **changed** | the module's own source changed what stops it first → **fails**, with both blockers named |
+
+So the everyday case — a lane clears a blocker in `checker.ts` and nine modules move — stays
+green, which is the difference between a ratchet people read and one they rubber-stamp.
+Two rules are unconditional: a module that reached IR may never stop reaching IR (this is
+the only ratchet in the tree that protects a module that *already* self-compiles), and a
+blocker may never move to an **earlier** pipeline stage.
+
+`git` is deliberately not an input to any verdict — `actions/checkout` fetches depth 1, so a
+git-informed verdict would differ between a laptop and CI. It is used only to *enrich* a
+failure message with a before/after taken against the recorded revision.
+
+Re-record deliberately, in one command — nine parallel lanes move these numbers:
+
+```sh
+NT_RECORD=1 bun test test/selfhost-ratchet.test.ts   # rewrites the baseline, prints the diff
+```
+
+**What it still cannot see**, stated because an instrument that overstates is worse than
+none: it is a **first**-blocker measurement, so a construct planted *behind* a module's
+existing blocker is invisible until that one clears (the same plant placed one line *below*
+`modules.ts`'s arrow-parameter blocker is not caught). And the standalone column is blind
+for a module whose first standalone error is the unlinked-import artifact — `driver.ts` and
+`coverage.ts` — whose rows are marked `artifact` for that reason.
 
 ### Re-measured after SHORT-CIRCUIT NARROWING — the `NT2001` bucket is empty
 
@@ -483,6 +543,52 @@ Because node has no `type: "text"` attribute, this construct cannot be different
 usual way — see `docs/divergences.md`, which records the divergence and how the oracle is split
 (a `main.ts`/`oracle.ts` twin per fixture, identical below the binding).
 
+### Re-measured after PARAMETER-TYPE INFERENCE — and two recorded blockers were WRONG
+
+Two rows of the SH6 table above named the wrong construct. Both were re-measured, not re-read.
+
+- **`lexer.ts` `NT2001` was not "`ESCAPES` declared `Map<string,string>`, initialized with an
+  object literal."** It was `cannot infer type of arrow parameter 'n'` at **src/lexer.ts:146**,
+  `const advance = (n = 1) => { … }` — a parameter with a default and no annotation.
+- **`modules.ts` was not blocked on a parameter default at all**, which a handoff note claimed.
+  Standalone it was `cannot infer type of arrow parameter 'p'` at **src/modules.ts:41**,
+  `const defaultRead: ReadModule = (p) => readFileSync(p, "utf8")` — an arrow whose parameter
+  type comes from the *annotation on the binding*, with no default anywhere in sight. (Its
+  *linked* blocker was, and still is, `parser.ts`'s `?.[]`; the standalone column is the one
+  that says whose blocker it is.)
+
+Two independent gaps, both now closed:
+
+1. **A parameter takes its type from its DEFAULT**, TypeScript's widening rule
+   (`tests/cases/conformance/es6/defaultParameters/`): `(n = 1)` is `number`, `(s = "a")` is
+   `string`, `(b = true)` is `boolean`. Applied in every parameter position at once — arrows,
+   named functions, methods, constructors — the way the Stage-15 binding-pattern desugaring was.
+   A default whose type we cannot pin down (`undefined`, `null`, `[]`) is refused with a hint;
+   TypeScript's answers there are `any` and `any[]`, and guessing is the silent wrong answer.
+2. **An arrow takes its parameter types from the annotation it is assigned to.** The dispatch in
+   `Checker.infer` passed `undefined` where every other call site passed the contextual type, so
+   a contextually typed *callback* compiled and a contextually typed *binding* never did.
+
+| Module | Before | After |
+|---|---|---|
+| `lexer.ts` | `NT2001` — `(n = 1)` at 146 | **`NT1031`** — `line++` inside that same arrow's body, a write to a captured binding |
+| `modules.ts` | `NT2001` — `(p)` at 41 | **`NT2001`** — `Stmt[]` erases to `number[]` at 229, so `s.kind` fails: the general-union alias, not a new gap |
+| `diagnostics.ts` | (unchanged code) | unblocked at `label = "here"`, src/diagnostics.ts:332 — the same default rule |
+| every other module | — | **unchanged** |
+
+Two checker ESCAPES fell out with it, both programs node runs and clang then rejected — the
+diagnostic contract failing outright, which is worse than a refusal:
+
+- `function f(s = "abc") { return s + 1 }` → `'%t0' defined with type 'ptr' but expected 'double'`.
+  The signature table typed the parameter from its default; the *body* scope declared it `number`.
+- `function f(n: string = 1)` → `floating point constant invalid for type`. An annotated default
+  was reshaped when assignable and **silently ignored** when not. tsc rejects it (TS2322); so do we now.
+
+**Still open, and pinned rather than fixed** (`test/param-defaults.test.ts`): a default does not
+make a *value arrow's* parameter optional at the CALL site. A nativets function type is a flat
+`(number)=>number` with no notion of optionality, so `const f = (n = 1) => …; f()` is refused on
+arity while the `function` spelling honours it — a real asymmetry between the two spellings.
+Relatedly, an explicit `undefined` argument is refused rather than triggering the default.
 ### CONSTRUCT CENSUS — counting the construct, not the first blocker
 
 Every table above this one is a **first-blocker** table, and this document already carries a

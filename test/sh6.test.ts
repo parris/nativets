@@ -237,8 +237,12 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // link surfaced the deepest one they share.
   "ast.ts": { rung: 0, code: "NT1030", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
-  // `new Set(iterable)` compile; the module now stops on the ESCAPES object literal.
-  "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
+  // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
+  // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
+  // `cannot infer type of arrow parameter 'n'` at src/lexer.ts:146, `const advance = (n = 1)
+  // => …`. Inferring a parameter's type from its default cleared it; the module now walks
+  // into `advance`'s BODY and stops on `line++`, a write to a captured binding.
+  "lexer.ts": { rung: 0, code: "NT1031", blame: "self" },
   // Round the houses: NT1606 (`[...spans].sort()`) -> NT1006 (`Math.max(...spans.map(…))`)
   // -> back to NT1606, now a `.push` on a NAMED accumulator — a shape the fresh-receiver
   // rule deliberately does not cover, because permitting it needs in-place mutation of an
