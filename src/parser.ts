@@ -1964,7 +1964,20 @@ class Parser {
   private parseConditional(): Expr {
     let test = this.parseBinary(0);
     while (this.at("as") || this.at("satisfies")) {
-      if (this.at("as")) { this.eat("as"); test = { kind: "AsExpr", expr: test, ty: this.parseType() }; }
+      if (this.at("as")) {
+        this.eat("as");
+        // `as const` is a CONST ASSERTION, not a type assertion — `const` is a keyword,
+        // not a type name. Parsing it as one made it an unknown named type, which erases
+        // to `number`, so `{a:1} as const` had the static type `number`.
+        //
+        // In TypeScript the assertion keeps literal types unwidened and makes the value
+        // deeply readonly. nativets already does both unconditionally (values are
+        // immutable unless `@@mutable`; a string-literal type widens back to `string`
+        // outside a union tag — `parseType`), so there is nothing left for it to change:
+        // it is the IDENTITY, and the operand keeps its own inferred type.
+        if (this.at("const")) { this.eat("const"); continue; }
+        test = { kind: "AsExpr", expr: test, ty: this.parseType() };
+      }
       else { this.eat("satisfies"); test = { kind: "SatisfiesExpr", expr: test, ty: this.parseType() }; }
     }
     if (this.at("?")) {
