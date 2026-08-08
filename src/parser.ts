@@ -7,7 +7,7 @@
  * them with a precise NT-coded diagnostic that `coverage` can report.
  */
 
-import { lex, type Token } from "./lexer.ts";
+import { lex, LexError, type Token } from "./lexer.ts";
 import { parseError, nyi, NYI, mutationError, decoratorError } from "./diagnostics.ts";
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
@@ -886,7 +886,7 @@ class Parser {
     if (this.at("do")) return this.parseDoWhile();
     if (this.at("for")) return this.parseFor();
     if (this.at("switch")) return this.parseSwitch();
-    if (this.at("throw")) { this.eat("throw"); const a = this.parseExpression(); this.eat(";"); return { kind: "ThrowStmt", argument: a }; }
+    if (this.at("throw")) { const t = this.peek(); this.eat("throw"); const a = this.parseExpression(); this.eat(";"); return { kind: "ThrowStmt", argument: a, line: t.line, col: t.col }; }
     if (this.at("try")) return this.parseTry();
     if (this.at("break")) { this.eat("break"); this.eat(";"); return { kind: "BreakStmt" }; }
     if (this.at("continue")) { this.eat("continue"); this.eat(";"); return { kind: "ContinueStmt" }; }
@@ -2180,10 +2180,30 @@ function decodeEscape(ch: string): string {
   return map[ch] ?? ch;
 }
 
+/**
+ * Tokenize, turning a lexical failure into the ordinary NT0001 syntax error.
+ *
+ * `LexError` is a plain `Error` subclass and has to stay one — it lives in the compiler's
+ * OWN source, and `extends Error` is the only inheritance nativets compiles, so making it
+ * an NTError would add a self-hosting blocker to lexer.ts. Translating HERE keeps the
+ * lexer self-hostable and still gives the user a code: without this a missing closing
+ * quote printed a raw Bun stack trace naming src/lexer.ts. node rejects these too
+ * (SyntaxError), so they are syntax errors — the same NT0001 every other parse failure
+ * uses — not deferred features. The message already carries `at line:col`.
+ */
+function tokenize(source: string): Token[] {
+  try {
+    return lex(source);
+  } catch (e) {
+    if (e instanceof LexError) throw parseError(e.message);
+    throw e;
+  }
+}
+
 export function parse(source: string, opts: ParseOpts = {}): Program {
-  return new Parser(lex(source), opts).parseProgram();
+  return new Parser(tokenize(source), opts).parseProgram();
 }
 
 export function parseExpressionFrom(source: string): Expr {
-  return new Parser(lex(source)).parseExpression();
+  return new Parser(tokenize(source)).parseExpression();
 }

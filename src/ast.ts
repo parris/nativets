@@ -872,7 +872,10 @@ export interface ForOfStmt { kind: "ForOfStmt"; name: string; annot?: Ty; iterab
 export interface ForInStmt { kind: "ForInStmt"; name: string; object: Expr; body: Stmt[]; }
 export interface SwitchCase { test: Expr | null; body: Stmt[]; } // test null === default
 export interface SwitchStmt { kind: "SwitchStmt"; discriminant: Expr; cases: SwitchCase[]; }
-export interface ThrowStmt { kind: "ThrowStmt"; argument: Expr; }
+/** `line`/`col` are the `throw` keyword's own position — codegen refuses a throw it cannot
+ *  lower (one with no enclosing `try` in the same function) and has no other way to say
+ *  WHICH throw, since the statement is otherwise position-free. */
+export interface ThrowStmt { kind: "ThrowStmt"; argument: Expr; line?: number; col?: number; }
 export interface TryStmt { kind: "TryStmt"; block: Stmt[]; param: string | null; handler: Stmt[] | null; finalizer: Stmt[] | null; catchTy?: Ty; }
 export interface ExprStmt { kind: "ExprStmt"; expr: Expr; }
 export interface BlockStmt { kind: "BlockStmt"; body: Stmt[]; }
