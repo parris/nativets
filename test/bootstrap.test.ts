@@ -351,10 +351,26 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // parse), and an assertion on them makes this test fail for the *good* reason —
     // progress — which trains people to edit it rather than read it. The gap between
     // "coverage says clean" and "the compiler refuses it" is the invariant.
+    // WAS `expect(r.blockers.length).toBe(0)`. Definite assignment cleared cli.ts's
+    // `let source: string;`, so coverage now reaches further and reports ONE blocker —
+    // and that blocker is ITSELF an artifact: the preprocess strips imports, so
+    // `readFileSync` reads as an unknown callee (NT1003), the same artifact class the
+    // standalone probe invents for any cross-module call.
+    //
+    // Counting blockers was pinning the symptom. The INVARIANT is the GAP: whatever
+    // coverage reports, it is not what actually stops the module. Asserted that way now,
+    // so this survives the frontier moving instead of failing for the good reason.
     const r = coverage(read("cli.ts"));
     expect(r.parsed).toBe(true);
-    expect(r.blockers.length).toBe(0);
-    expect(() => sourceToIR(read("cli.ts"), new URL("cli.ts", SRC).pathname)).toThrow();
+    const covCodes = r.blockers.map((b) => b.code);
+    let realCode = "";
+    try { sourceToIR(read("cli.ts"), new URL("cli.ts", SRC).pathname); } catch (e) {
+      realCode = /\[(NT\d+)\]/.exec(String((e as Error).message))?.[1] ?? "";
+    }
+    // The pipeline DOES refuse it...
+    expect(realCode).not.toBe("");
+    // ...and coverage does not see that reason. That is the gap, and it is the point.
+    expect(covCodes).not.toContain(realCode);
   });
 });
 

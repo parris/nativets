@@ -801,7 +801,19 @@ export interface ArrowFunction {
 // the parser desugars it into a class field + a `this.x = x` init in the ctor body.
 export interface Param { name: string; annot?: Ty; default?: Expr; rest?: boolean; paramProp?: boolean; }
 
-export interface Declarator { name: string; annot?: Ty; init: Expr; ty?: Ty; }
+/*
+ * `init` is OPTIONAL, and its absence means a bare `let x: T;` — a declaration with no
+ * initializer at all. This used to be non-optional, and the parser synthesized an
+ * `UndefinedLiteral` to fill it, which made `let s: string;` (legal) and
+ * `let s: string = undefined;` (correctly rejected) indistinguishable downstream: both
+ * were NT2001. Keeping the absence REPRESENTABLE is what lets the checker run
+ * definite-assignment analysis on the first and still reject the second.
+ *
+ * A consumer that merely WALKS the initializer should skip an absent one. Codegen, which
+ * needs a VALUE, stores the slot's `defaultZero` instead — the checker has by then proved
+ * the binding is assigned before any read, so that zero is never observed.
+ */
+export interface Declarator { name: string; annot?: Ty; init?: Expr; ty?: Ty; }
 export interface VarDecl {
   kind: "VarDecl";
   declKind: "let" | "const";
