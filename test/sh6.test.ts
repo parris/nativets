@@ -305,7 +305,34 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // reflective one wrote `o[k] = f(v)`, so this is the SAME wall in honest clothing, and
   // clearing it means deciding whether the AST interfaces carry `@@mutable` (which makes
   // them nominally tagged) or whether the walkers return new nodes. A decision, not a gap.
-  "ast.ts": { rung: 0, code: "NT2001", blame: "self" },
+  //
+  // THE DEAD GUARD IS GONE and the probe was right: this row is NT1606 now, held by the
+  // same nine modules. The empty-list divergence was verified against the oracle first
+  // (`const xs: number[] = []; xs[xs.length - 1]` -> node "undefined" exit 0, nativets
+  // panic exit 255), so the fix is behavioural: a `list.length > 0` test that never forms
+  // the index. Pinned under bun by an out-of-range-throws proxy in test/block-drops.test.ts,
+  // because node's own answer is the one this function must not depend on.
+  //
+  // The DECISION the note above defers was then measured, and one arm of it is DEAD:
+  //   - `@@mutable` on the AST interfaces cannot work. The tag is NOMINAL, and a tagged
+  //     member makes its union unrepresentable — a two-member discriminated union is
+  //     NT1009 with ONE member tagged and still NT1009 with BOTH. `Expr`/`Stmt` are such
+  //     unions. Separately, every walker mutates its `e: Expr` PARAMETER, and a parameter
+  //     is a borrow: NT1607 by design (docs/decorators.md). Two independent refusals.
+  //   - returning new nodes is a 48-constructor rewrite inside ast.ts. It clears 45 of
+  //     ast.ts's 46 `o.f = v` sites — and none of the tree's other 145.
+  // Census, because a first-blocker row never sizes a construct (the `.push` lesson):
+  // 191 non-`this` `o.f = v` across 8 of 12 modules — checker 56, ast 46, parser 29,
+  // modules 28, codegen 13, ownership 9, coverage-preprocess 9, lexer 1 — plus 73
+  // `this.f = v` that `@@mutable class` already covers. Note the last two: a module at
+  // rung 3 holds nine of them, so `o.f = v` on an OWNED LOCAL already compiles. What is
+  // refused is mutating through a borrow, which is what every AST pass does.
+  //
+  // ast.ts's own chain behind the walkers was probed too (neuter, re-measure, repeat):
+  // `.push` on the `list` PARAMETER in `setBlockDrops` -> NT1014 `new Map(p.recTypes ?? [])`,
+  // whose `[string, Ty][]` is a TUPLE type nativets does not have -> NT2001 reading a field
+  // off an un-narrowed `Expr`. So ast.ts is several blockers deep, not one.
+  "ast.ts": { rung: 0, code: "NT1606", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -367,7 +394,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. parser.ts's own 18
   // `this.<field>` push sites are NOT cleared — a field names no binding the ownership
   // pass can prove unique, so they stay NT1606 behind this.
-  "parser.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "parser.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -411,7 +438,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `.push` legal on a `@@mutable` accumulator, nothing stops here any more and all four
   // walk through to ast.ts's ONE `trimEnd` site (NT1002). driver.ts goes to lexer.ts's
   // NT2001 instead. Neither lane could have measured this alone.
-  "checker.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "checker.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -422,7 +449,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
   // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
   // fires first through the link. Its own tables are the same shape and sit behind it.
-  "codegen.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "codegen.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
   // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
   // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
   // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
@@ -437,7 +464,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Both rows moved to their real blockers, and the blame column is the interesting part:
   // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
   // below; coverage-preprocess.ts finally has one of its OWN.
-  "coverage.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "coverage.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -454,8 +481,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // The Map spread in `clone` was the one blocker this module ever owned in the STANDALONE
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
-  "ownership.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
-  "driver.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "ownership.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "driver.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
   //
@@ -484,14 +511,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
   // and it only ever held it because this lane had not landed yet. Sixth time a merge here
   // produced a frontier neither side could have computed from its own diff.
-  "cli.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "cli.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
   // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
   // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
-  "modules.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "modules.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
@@ -620,7 +647,7 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // ...and NT1011 gave way to NT2001 when ast.ts's three reflective AST walkers became one
 // typed traversal: stage-1 inherits ast.ts's `setBlockDrops` union-vs-undefined guard now.
 // Still rung 0, and still nine modules — the frontier is a conjunction, said again.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT2001" };
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1606" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -944,8 +971,19 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // ast.ts's own source defect (see the BASELINE row). Asserted on the tail of the
       // message rather than the head: the head is the whole 18-member `Stmt` union
       // printed out, which is 3 KB of encoding that would churn on any AST change.
-      expect(m.error).toContain("with undefined");
-      expect(m.error).toContain("Cannot compare");
+      // TWELFTH — and it is the ELEVENTH's own note coming true. The `!== undefined` guard
+      // was DEAD (an out-of-range index panics by design, so the read is typed `Stmt`) and,
+      // worse, DIVERGENT: on an empty list node answers `undefined` and appends while
+      // nativets panics. It is a `list.length > 0` test now. Behind it, inherited by all
+      // nine modules at once, is `o.f = v` on an AST node — the typed walkers writing
+      // `e.ty = f(e.ty)` exactly where the reflective ones wrote `o[k] = f(v)`. The same
+      // wall in honest clothing, and a DECISION rather than a gap: `@@mutable` cannot tag
+      // a discriminated-union member (the tag makes the union NT1009 — measured, both with
+      // one member tagged and with all of them) and cannot reach a parameter (NT1607 by
+      // design), so the tag is not the answer; returning new nodes is a 48-constructor
+      // rewrite that clears 45 of ast.ts's 46 sites and none of the tree's other 145.
+      expect(m.error).toContain("objects are immutable");
+      expect(m.error).toContain("`o.f = v`");
       return;
     }
 

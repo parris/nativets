@@ -2596,6 +2596,104 @@ nominally tagged, and the `Ty` encoding has a defect history that argues for cau
 the walkers stop mutating and return new nodes (which changes node identity for every
 consumer). Neither belongs in a lane whose bar was observational nullity.
 
+### Re-measured after the DEAD GUARD — it WAS a node divergence, and `@@mutable`-the-AST is DEAD
+
+The note above deferred two things to the next lane: verify the empty-list divergence, and
+decide how the walkers mutate. Both are measured here. Nothing reached IR, and the reason
+is worth more than the rung.
+
+**1. The guard was a real node divergence, not just dead code.** Verified against the oracle
+before anything was changed:
+
+```ts
+const xs: number[] = []; console.log(xs[xs.length - 1]);
+node     -> "undefined", exit 0
+nativets -> panic: index out of bounds: the length is 0 but the index is -1, exit 255
+```
+
+So on an empty list node takes the `push` path and nativets dies. `setBlockDrops` now tests
+`list.length > 0` and never forms the index — behaviour-identical under node for every list,
+divergence-free under nativets for the empty one. It is pinned under bun by an
+**out-of-range-throws Proxy** in `test/block-drops.test.ts`, which is the only way to hold
+the rule under the oracle: node's own answer is precisely the one the function must not
+depend on, so a plain assertion would be green on the broken spelling. It was RED on
+`last !== undefined` (at `src/ast.ts:1092`) and is green on the `length` guard.
+
+Unreachable today from the one caller — `Analyzer.scoped` returns early when the block
+declares nothing, and both of its name lists are derived from `list`, so an empty `list`
+never gets there — but it is an exported function whose contract diverged, and the
+divergence is what put `src/ast.ts` outside the subset it has to compile.
+
+**2. `@@mutable` on the AST interfaces is DEAD, for two independent reasons.** Both measured,
+neither predicted:
+
+- **A tag destroys the union.** `@@mutable` is nominal (docs/decorators.md), and a tagged
+  member is `A{kind:string,n:number}` where its siblings are `{kind:string,s:string}`. A
+  two-member discriminated union is **`NT1009`** with ONE member tagged — and still `NT1009`
+  with **both** tagged. `Expr` (30 members) and `Stmt` (18) are exactly such unions, so
+  option (a) cannot even be attempted, let alone at 48 declarations.
+- **A walker mutates a PARAMETER.** `walkExprChildren(e: Expr, …)` writes `e.ty`, and a
+  parameter is a borrow: `function tick(c: Cell) { c.n = 5 }` on a `@@mutable` record is
+  **`NT1607`** by design. Tagging would not have helped even if the union survived.
+
+**3. The narrow option (c) collapses INTO (a).** "Only the interfaces whose `ty` is actually
+rewritten" sounds much smaller than 48 and is not: `walkExprChildren` ends with a single
+`if (e.ty !== undefined) e.ty = ft(e.ty)` that runs for **every** expression kind, leaves
+included. Measured write set: all 30 `Expr` members, 13 of the 18 `Stmt` members (all but
+`BlockStmt`, `MultiStmt`, `BreakStmt`, `ContinueStmt`, `BlockDrops`), plus `ObjectProperty`,
+`Param`, `Declarator`, `SwitchCase` and `Capture`. That is the ~48. There is no smaller
+subset to tag.
+
+**4. The census, because a first-blocker row never sizes a construct.** The `.push` lesson
+applied to the new bucket — **191 non-`this` `o.f = v` sites across 8 of the 12 modules**:
+
+| Module | `o.f = v` | `this.f = v` |
+|---|---|---|
+| `checker.ts` | 56 | 1 |
+| `ast.ts` | 46 | 0 |
+| `parser.ts` | 29 | 37 |
+| `modules.ts` | 28 | 0 |
+| `codegen.ts` | 13 | 30 |
+| `ownership.ts` | 9 | 3 |
+| `coverage-preprocess.ts` | 9 | 0 |
+| `lexer.ts` | 1 | 0 |
+| `driver.ts`, `cli.ts`, `coverage.ts`, `diagnostics.ts` | 0 | 0 / 0 / 0 / 2 |
+
+The 73 `this.f = v` are already covered by `@@mutable class` (Stage 45). Two rows are the
+reading: **`coverage-preprocess.ts` holds nine of them and is at rung 3**, so `o.f = v` on an
+**owned local** already compiles. What is refused is mutation through a **borrow** — and that
+is what every AST pass in this compiler does. The wall is not "objects are immutable", it is
+"the passes mutate trees they do not own".
+
+**5. So the recommendation is (b), and it is not sufficient by itself.** Returning new nodes
+needs a 48-arm reconstructing switch inside `ast.ts` (≈45 of ast.ts's 46 sites), and the
+caller side is smaller than feared — **7 call sites**, of which `parser.ts:2508/2509`,
+`parser.ts:853/858`, `parser.ts:2917`, `checker.ts:508` and `modules.ts:620` all rebind a
+LOCAL, and `checker.ts:473` passes the identity function and wants to be a pure visitor
+rather than a rewrite at all. `collectBindingNames` mutates only as a side effect of sharing
+the walker; it should not mutate at all. But (b) clears **45 of 191** tree-wide, and ast.ts's
+own chain behind the walkers — probed by neuter-and-re-measure — is at least three deep:
+
+```
+setBlockDrops `last.names = names`   NT1606  <- where the tree is now
+setBlockDrops `list.push(…)`         NT1606  .push on a PARAMETER; the accumulator opt-in is
+                                             on a let/const binding and cannot reach one
+`new Map(p.recTypes ?? [])`          NT1014  `recTypes?: [string, Ty][]` is a TUPLE type
+a field read off an un-narrowed Expr NT2001  present in every member, still refused
+```
+
+| Module | Before | After |
+|---|---|---|
+| `ast.ts` (standalone + linked) | `NT2001` — union vs `undefined`, `setBlockDrops` | **`NT1606`** — `o.f = v` on an AST node, same function |
+| `parser.ts`, `checker.ts`, `codegen.ts`, `coverage.ts`, `ownership.ts`, `driver.ts`, `modules.ts`, `cli.ts` (linked) | `NT2001` — inherited | **`NT1606`** — inherited |
+| `lexer.ts`, `coverage-preprocess.ts`, `diagnostics.ts` | rung 3 | **unchanged — rung 3, IR byte-length identical** (163991 / 152673 / 111243) |
+
+Nine modules moved, none reached IR, and the tree-wide code set is again exactly one code.
+Four instruments were re-recorded deliberately under the "moved shallower is not
+automatically a regression" rule: the blocker stayed at the **same pipeline stage** (`check`),
+no module lost IR, and the newly-reported construct was previously **masked**, not handled —
+which is the question that rule says separates a correction from a regression.
+
 **One self-inflicted blocker was planted and caught by re-measuring after the final edit**,
 which is exactly the rule this document already carries. The first draft declared
 `type ExprFn = (e: Expr) => Expr`; an alias whose shape mentions a recursive type is
