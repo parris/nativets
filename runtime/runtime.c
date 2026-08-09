@@ -639,8 +639,28 @@ double js_str_to_num(const char *s) {
   return *end == '\0' ? v : NAN;
 }
 
-/* Math.round: JS semantics floor(x + 0.5) */
-double js_math_round(double x) { return floor(x + 0.5); }
+/* Math.round — ECMA-262 21.3.2.28, which is NOT `floor(x + 0.5)`.
+ *
+ * This WAS `floor(x + 0.5)`, and that formulation is wrong in two ways, both silent:
+ *
+ *  - `x + 0.5` is a DOUBLE add, so it ROUNDS. For x = 0.49999999999999994 (the largest
+ *    double below 0.5) the sum is exactly 1.0 and the floor returns 1; the spec says 0.
+ *    Past 2^52 the same rounding walks whole integers: round(9007199254740991) returned
+ *    9007199254740992, i.e. `Math.round(Number.MAX_SAFE_INTEGER) !== Number.MAX_SAFE_INTEGER`.
+ *  - `floor` returns +0 for the whole of [-0.5, -0]; the spec returns -0 there (steps 1
+ *    and 4), which `1 / Math.round(-0.5)` observes as -Infinity vs Infinity.
+ *
+ * The spec, in order: an integral (or non-finite) x is returned AS IS — which covers ±0,
+ * ±Infinity, NaN and every large value, and is what makes the 2^52 problem impossible.
+ * Then the two zero-sign rules, then the ordinary half-up-toward-+Infinity round, done on
+ * the FRACTIONAL part (`x - floor(x)`, exact for every double) so nothing rounds early. */
+double js_math_round(double x) {
+  if (isnan(x) || isinf(x) || x == floor(x)) return x;  /* incl. ±0 and every |x| >= 2^52 */
+  if (x > 0 && x < 0.5) return 0.0;                     /* step 3 */
+  if (x < 0 && x >= -0.5) return -0.0;                  /* step 4 — the sign matters */
+  double f = floor(x);                                  /* |x| < 2^52 here, so f and f+1 are exact */
+  return x - f >= 0.5 ? f + 1.0 : f;                    /* ties go toward +Infinity */
+}
 
 /* Math.max / Math.min, folded PAIRWISE. C's fmax/fmin are the wrong identity twice
  * over: fmax(NaN, 1) is 1 (JS propagates the NaN), and IEEE-754 maxNum leaves the
@@ -923,6 +943,46 @@ static int64_t arr_at(NtArray *a, int64_t i) {
   return a->pv ? nt_pv_get(a->pv, (uint32_t)i) : a->data[i];
 }
 
+/* `fromIndex` for Array#indexOf / #lastIndexOf.
+ *
+ * NEITHER of these treats NaN as "absent": `ToIntegerOrInfinity(NaN)` is 0, so
+ * `[1,2,1].lastIndexOf(1, NaN)` is 0, not 4. The ABSENT case is supplied by codegen
+ * instead (0 forward, +Infinity backward) precisely so the two cannot be conflated —
+ * and note String#lastIndexOf is the OTHER way round (ES 22.1.3.11 turns a NaN position
+ * into +Infinity), which is why it keeps a NaN sentinel and these do not.
+ *
+ * The argument is TRUNCATED TOWARD ZERO BEFORE the underflow test, so on a 5-element
+ * array `-5.5` is `-5`, i.e. index 0 — not an underflow. Comparing the raw double
+ * against `-len` gets that wrong. */
+
+/* ES 23.1.3.17 steps 4-7 — first index to scan FORWARD from; `len` means scan nothing.
+ * A negative index counts from the end and UNDERFLOWS TO 0. */
+static int64_t arr_from_start(int64_t len, double fromd) {
+  if (fromd >= (double)len) return len;             /* incl. +Infinity: scan nothing */
+  if (fromd == -INFINITY) return 0;                 /* NaN falls through: both are false */
+  int64_t n = isnan(fromd) ? 0 : (int64_t)fromd;    /* ToIntegerOrInfinity(NaN) is 0 */
+  if (n >= 0) return n;                             /* n < len here, and the loop bounds it */
+  n += len;
+  return n < 0 ? 0 : n;                             /* underflow clamps to 0 */
+}
+/* ES 23.1.3.20 steps 4-6 — first index to scan BACKWARD from, or -1 to scan nothing.
+ * Same argument, deliberately different clamps: an index past the end becomes len-1
+ * rather than "nothing", and a negative index that underflows gives up rather than
+ * restarting at 0. */
+static int64_t arr_from_end(int64_t len, double fromd) {
+  if (fromd >= (double)len) return len - 1;         /* incl. +Infinity: min(n, len-1) */
+  if (fromd == -INFINITY) return -1;                /* NaN falls through: both are false */
+  int64_t n = isnan(fromd) ? 0 : (int64_t)fromd;    /* ToIntegerOrInfinity(NaN) is 0 */
+  /* `min(n, len - 1)` — the min is LOAD-BEARING, not decoration, and EVERY non-negative
+   * n has to go through it including the NaN-becomes-0 one. On an EMPTY array both `-0.5`
+   * (which truncates toward zero to 0) and NaN would otherwise start the backward scan at
+   * index 0 of zero elements: one past the end. The guard above does not catch either
+   * (`-0.5 >= 0` is false, and every NaN comparison is false). Every INTEGER fromIndex
+   * escapes this window, which is why it survived the first round of cases. */
+  if (n >= 0) return n < len ? n : len - 1;
+  return len + n;                                   /* may stay < 0: scan nothing */
+}
+
 NtArray *nt_arr_new(double capd) {
   int64_t cap = (int64_t)capd; if (cap < 1) cap = 1;
   NtArray *a = arr_header();
@@ -1100,8 +1160,9 @@ int32_t nt_arr_includes_str(NtArray *a, const char *x) {
   for (int64_t i = 0; i < a->len; i++) if (strcmp((const char *)(intptr_t) arr_at(a, i), x) == 0) return 1;
   return 0;
 }
-double nt_arr_indexof_num(NtArray *a, double x) {
-  for (int64_t i = 0; i < a->len; i++) if (slot_to_num(arr_at(a, i)) == x) return (double)i;
+double nt_arr_indexof_num(NtArray *a, double x, double fromd) {
+  for (int64_t i = arr_from_start(a->len, fromd); i < a->len; i++)
+    if (slot_to_num(arr_at(a, i)) == x) return (double)i;
   return -1.0;
 }
 /* Math.max/Math.min over a SPREAD array: fold `acc` over every element with the JS
@@ -1114,8 +1175,9 @@ double js_math_fold_arr(NtArray *a, double acc, int32_t is_max) {
   }
   return acc;
 }
-double nt_arr_indexof_str(NtArray *a, const char *x) {
-  for (int64_t i = 0; i < a->len; i++) if (strcmp((const char *)(intptr_t) arr_at(a, i), x) == 0) return (double)i;
+double nt_arr_indexof_str(NtArray *a, const char *x, double fromd) {
+  for (int64_t i = arr_from_start(a->len, fromd); i < a->len; i++)
+    if (strcmp((const char *)(intptr_t) arr_at(a, i), x) == 0) return (double)i;
   return -1.0;
 }
 
@@ -2846,8 +2908,12 @@ const char *js_str_pad_end(const char *s, double targetd, const char *pad) {
 int32_t js_str_starts_with(const char *s, const char *sub, double posd) {
   long n = (long)nt_strlen(s), m = (long)nt_strlen(sub);
   long pos = isnan(posd) ? 0 : (long)posd;
+  /* ES 22.1.3.23 step 5: CLAMP pos into [0, n] — it is not an out-of-range failure.
+   * This read `if (pos > n || ...) return 0;`, which answered false for an EMPTY needle
+   * past the end where the spec (and `.endsWith` two lines down) answer true. */
   if (pos < 0) pos = 0;
-  if (pos > n || pos + m > n) return 0;
+  if (pos > n) pos = n;
+  if (pos + m > n) return 0;
   return memcmp(s + pos, sub, (size_t)m) == 0 ? 1 : 0;
 }
 int32_t js_str_ends_with(const char *s, const char *sub, double endd) {
@@ -2903,13 +2969,26 @@ const char *js_str_replace(const char *s, const char *pat, const char *rep, int3
   return sb_finish_rc(&b);
 }
 
-/* String#lastIndexOf(sub) — last match position, -1 when absent; an empty
- * needle matches at the end (node: "abc".lastIndexOf("") === 3). */
-double js_str_last_index_of(const char *s, const char *sub) {
+/* String#lastIndexOf(search, position) — ES 22.1.3.11. Last match position, -1 when
+ * absent; an EMPTY needle matches at `position` itself, so with no position it is the
+ * length (node: `"abc".lastIndexOf("")` === 3, `"abc".lastIndexOf("", 1)` === 1).
+ *
+ * `position` is where a match may START (not end), CLAMPED to [0, len]; omitted or NaN
+ * means +Infinity, i.e. search the whole string. That asymmetry with `.indexOf` is the
+ * spec's, not ours: `lastIndexOf(x)` scans everything, `lastIndexOf(x, 0)` scans only
+ * position 0. `posd` is NaN when the argument is absent, which is the same value the
+ * spec's NaN case produces — so one code path serves both. */
+double js_str_last_index_of(const char *s, const char *sub, double posd) {
   size_t n = nt_strlen(s), m = nt_strlen(sub);
-  if (m == 0) return (double)n;
+  /* start = clamp(pos, 0, n); NaN (absent, or a NaN argument) => +Infinity => n. */
+  size_t start = n;
+  if (!isnan(posd)) {
+    if (posd < 0) start = 0;
+    else if (posd < (double)n) start = (size_t)posd;
+  }
   if (m > n) return -1.0;
-  for (size_t i = n - m + 1; i-- > 0;) if (memcmp(s + i, sub, m) == 0) return (double)i;
+  if (start > n - m) start = n - m;   /* the last index a match of length m can begin at */
+  for (size_t i = start + 1; i-- > 0;) if (memcmp(s + i, sub, m) == 0) return (double)i;
   return -1.0;
 }
 
@@ -2935,15 +3014,20 @@ double nt_arr_at_index(NtArray *a, double id) {
   return (double)i;
 }
 
-/* Array#lastIndexOf — last match, -1 when absent (number and string flavors,
- * mirroring the existing nt_arr_indexof_* pair). */
-double nt_arr_last_indexof_num(NtArray *a, double x) {
-  for (int64_t i = a->len - 1; i >= 0; i--) if (slot_to_num(a->data[i]) == x) return (double)i;
+/* Array#lastIndexOf(x, fromIndex) — last match at or before fromIndex, -1 when absent
+ * (number and string flavors, mirroring the nt_arr_indexof_* pair).
+ *
+ * `arr_at`, NOT `a->data`: past NT_PV_THRESHOLD the receiver may have been frozen into
+ * the trie, which FREES the flat block and NULLs `data`. These two read it directly and
+ * segfaulted on any frozen array — see test/sharing.test.ts. */
+double nt_arr_last_indexof_num(NtArray *a, double x, double fromd) {
+  for (int64_t i = arr_from_end(a->len, fromd); i >= 0; i--)
+    if (slot_to_num(arr_at(a, i)) == x) return (double)i;
   return -1.0;
 }
-double nt_arr_last_indexof_str(NtArray *a, const char *x) {
-  for (int64_t i = a->len - 1; i >= 0; i--)
-    if (strcmp((const char *)(intptr_t)a->data[i], x) == 0) return (double)i;
+double nt_arr_last_indexof_str(NtArray *a, const char *x, double fromd) {
+  for (int64_t i = arr_from_end(a->len, fromd); i >= 0; i--)
+    if (strcmp((const char *)(intptr_t) arr_at(a, i), x) == 0) return (double)i;
   return -1.0;
 }
 
@@ -2951,8 +3035,9 @@ double nt_arr_last_indexof_str(NtArray *a, const char *x) {
  * are left untouched (node-compatible, and the immutable model's shape). */
 void *nt_arr_concat(NtArray *a, NtArray *b) {
   NtArray *o = nt_arr_new((double)(a->len + b->len + 1));
-  for (int64_t i = 0; i < a->len; i++) nt_arr_push(o, a->data[i]);
-  for (int64_t i = 0; i < b->len; i++) nt_arr_push(o, b->data[i]);
+  /* arr_at on BOTH operands: either may be trie-backed, in which case `data` is NULL. */
+  for (int64_t i = 0; i < a->len; i++) nt_arr_push(o, arr_at(a, i));
+  for (int64_t i = 0; i < b->len; i++) nt_arr_push(o, arr_at(b, i));
   return o;
 }
 
@@ -2961,9 +3046,11 @@ void *nt_arr_concat(NtArray *a, NtArray *b) {
 void *nt_arr_flat1(NtArray *a) {
   NtArray *o = nt_arr_new(1);
   for (int64_t i = 0; i < a->len; i++) {
-    NtArray *sub = (NtArray *)(intptr_t)a->data[i];
+    /* arr_at twice over: the OUTER array and each SUB-array may independently be
+     * trie-backed, and a trie-backed one has a NULL `data`. */
+    NtArray *sub = (NtArray *)(intptr_t) arr_at(a, i);
     if (!sub) continue;
-    for (int64_t j = 0; j < sub->len; j++) nt_arr_push(o, sub->data[j]);
+    for (int64_t j = 0; j < sub->len; j++) nt_arr_push(o, arr_at(sub, j));
   }
   return o;
 }
