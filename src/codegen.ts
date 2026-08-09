@@ -1106,7 +1106,13 @@ class FnGen {
         if (this.finallyStack.length > 0) {
           // return inside a try/catch with a finally: stash value, run finally (mode=1)
           const f = this.finallyStack[this.finallyStack.length - 1]!;
-          if (s.argument && f.retSlot) { const v = this.genExpr(s.argument); this.emit(`store ${llvmTy(this.retTy)} ${v.v}, ptr ${f.retSlot}`); }
+          // Coerced to the DECLARED return type, exactly as the ordinary return path
+          // below is. Without this the stash STORED the raw value under the declared
+          // type's LLVM type: `function g(): string | boolean { try { return "hi" } finally {…} }`
+          // wrote a bare string pointer into a slot the caller reads as a [tag,value]
+          // box (exit 255, empty stdout, where node prints the string), and a `double`
+          // arm did not even survive `llvm-as`. A no-op when the types already match.
+          if (s.argument && f.retSlot) { const v = this.coerce(this.genExpr(s.argument), this.retTy); this.emit(`store ${llvmTy(this.retTy)} ${v.v}, ptr ${f.retSlot}`); }
           this.emit(`store double ${llvmDouble(1)}, ptr ${f.modeSlot}`);
           this.terminate(`br label %${f.finallyLbl}`);
           return;
@@ -2826,7 +2832,12 @@ class FnGen {
 
   /** Call a function VALUE (closure ptr already computed): indirect call through slot 0. */
   private genCallValueFrom(clo: string, fnTy: Ty, args: Expr[]): Val {
-    return this.callClosure(clo, fnTy, (ps) => args.map((a, i) => ({ v: this.genExpr(a).v, ty: ps[i]! })));
+    // Each argument is COERCED to the parameter type, exactly as the direct-call path
+    // (`genUserCall`) does — this one merely RELABELLED the raw value with the parameter's
+    // type, so a `string` passed to a `(s: string | undefined) => …` closure arrived as a
+    // bare string pointer where the callee loads a [tag,value] box. A no-op when the types
+    // already match, so ordinary closure calls emit exactly the IR they always did.
+    return this.callClosure(clo, fnTy, (ps) => args.map((a, i) => this.coerce(this.genExpr(a), ps[i]!)));
   }
 
   /** Call a closure value with ALREADY-generated argument values — B3 v4's
@@ -5250,7 +5261,10 @@ class FnGen {
     if (sig.rest) {
       const fixed = sig.params.length - 1;
       const argVals: string[] = [];
-      for (let i = 0; i < fixed; i++) argVals.push(`${llvmTy(sig.params[i]!)} ${this.genExpr(args[i]!).v}`);
+      // The FIXED parameters coerce just like a non-rest call's do (see below) — this
+      // path emitted them raw, so a nullable/general-union fixed parameter of a rest
+      // function received an unboxed value.
+      for (let i = 0; i < fixed; i++) argVals.push(`${llvmTy(sig.params[i]!)} ${this.coerce(this.genExpr(args[i]!), sig.params[i]!).v}`);
       const arr = this.fresh(); // pack trailing args into the rest array
       this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(args.length - fixed, 1))})`);
       for (let i = fixed; i < args.length; i++) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.genExpr(args[i]!))})`);

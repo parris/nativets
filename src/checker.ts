@@ -2046,7 +2046,7 @@ class Checker {
           a = yes(() => this.type(e.consequent, scope, hint));
           b = no(() => this.type(e.alternate, scope, hint ?? a));
         }
-        if (a !== b) throw typeError(`Ternary branches differ: ${a} vs ${b}`);
+        if (a !== b) throw typeError(`Ternary branches differ: ${a} vs ${b}`, exprLoc(e), thisNarrowHint(e, a, b));
         return a;
       }
       case "AssignExpr": {
@@ -2832,7 +2832,12 @@ class Checker {
         if (e.args.length !== ps.length) throw typeError(`'${e.callee.name}' expects ${ps.length} arguments, got ${e.args.length}`);
         e.args.forEach((a, i) => {
           const at = this.typeArg(a, ps[i]!, scope);
-          if (at !== ps[i]) throw typeError(`'${e.callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
+          // `fitsArg`, like every other call site — this one was a bare identity test, so a
+          // call through a function-typed VARIABLE was stricter than the identical call to a
+          // named function (no union arm, no nullable arm, no literal reshape). Safe because
+          // `genCallValueFrom` now coerces each argument to the parameter type, exactly as
+          // the direct-call path does.
+          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
         });
         return funcRet(bound.ty);
       }
@@ -3508,7 +3513,25 @@ class Checker {
    * structural-object and nullable arms would accept values codegen does not box here.
    */
   private fitsParam(expected: Ty, actual: Ty): boolean {
-    return actual === expected || ((isUnionTy(expected) || isGeneralUnionTy(expected)) && this.assignable(expected, actual));
+    if (actual === expected) return true;
+    if ((isUnionTy(expected) || isGeneralUnionTy(expected)) && this.assignable(expected, actual)) return true;
+    // A NULLABLE parameter/return takes the matching nullish literal and a present value
+    // of its base type — TypeScript's rule (`null` is assignable to `T | null`, `undefined`
+    // to `T | undefined`, a `T` to either). Refused before this arm, so `pick(null)` against
+    // `pick(n: Node | null)` was an error on code node runs — the shape `new Scope(null)`
+    // hits on this compiler's own symbol table (src/checker.ts:93), and the shape
+    // docs/self-hosting.md records as forcing every `?Ustring` argument through an
+    // annotated local.
+    //
+    // Deliberately NARROWER than `assignable`, and narrow for a REASON: exactly these two
+    // sources are what codegen's `coerce` can build the [tag,value] box from — the nullish
+    // literal carries its tag (0/1) and a base-typed value goes in whole under tag 2. A
+    // merely structurally-compatible object has a different SLOT LAYOUT and cannot be boxed
+    // without being rebuilt, so it is left to `fitsArg`, which accepts it only when it is a
+    // literal it can actually reshape. Widening this to the full `assignable` relation is
+    // the memory bug (a dereference of a raw double), not the feature.
+    if (isNullableTy(expected)) return actual === nullishKind(expected) || actual === baseTy(expected);
+    return false;
   }
 
   /**
@@ -4034,6 +4057,42 @@ function collectAssignedStmts(body: Stmt[], direct: Set<string>, closure: Set<st
       default: break;
     }
   }
+}
+
+/** The field name if `e` reads `this.<f>` (not `this.<f>?.`, not a nested receiver). */
+function thisFieldRead(e: Expr): string | undefined {
+  if (e.kind !== "MemberExpr" || e.optional === true) return undefined;
+  if (e.object.kind !== "Identifier" || e.object.name !== "this") return undefined;
+  return e.property;
+}
+
+/**
+ * Why a ternary whose arms are `T` and `?U/?N T` was refused when one of them reads
+ * `this.<f>`: narrowing does not reach a field of `this`, so `this.s === undefined ?
+ * "none" : this.s` types its arms `string` and `?Ustring` and fails to join.
+ *
+ * Stated rather than merely refused because the type mismatch alone reads like a bug in
+ * the user's code, and it is not — the guard IS correct, and the same guard on an
+ * ordinary binding or on `d.spans` works. It also got far easier to hit the day optional
+ * class fields started producing real nullables. `accessPath` records no fact rooted at
+ * `this` because a field of `this` can be REASSIGNED inside the very method that proved
+ * the guard (`this.s = undefined` is legal there and is what a field-assigning method
+ * does), and the invalidation scan is by NAME — it sees a rebinding of `d`, not a write
+ * to `this.s`. A local is the fix, and it is a fix rather than a workaround: once bound,
+ * the value cannot change under the guard at all.
+ */
+function thisNarrowHint(e: Extract<Expr, { kind: "ConditionalExpr" }>, a: Ty, b: Ty): string | undefined {
+  const nullablePair = (baseTy(a) === baseTy(b)) && (isNullableTy(a) !== isNullableTy(b));
+  if (!nullablePair) return undefined;
+  const f = thisFieldRead(e.consequent) ?? thisFieldRead(e.alternate);
+  if (f === undefined) return undefined;
+  return (
+    `narrowing does not reach a field of \`this\`: the guard proved \`this.${f}\` is not nullish, but ` +
+    `later reads of it still have the nullable type ${isNullableTy(a) ? a : b}. Unlike an ordinary ` +
+    `binding — or a field of another object, which is immutable — \`this.${f}\` can be reassigned by ` +
+    `this same method, so no fact is recorded for it. Bind it first: ` +
+    `\`const ${f} = this.${f}; return ${f} === ${nullishKind(isNullableTy(a) ? a : b)} ? … : ${f};\``
+  );
 }
 
 /** An expression as a one-statement region, so `factsFor` takes one shape of region. */
