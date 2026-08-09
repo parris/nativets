@@ -32,7 +32,38 @@ export type Ty = ScalarTy | `${string}[]` | `{${string}}`;
 export function isArrayTy(t: Ty): boolean {
   return typeof t === "string" && t.endsWith("[]") && !isNullableTy(t) && !isFuncTy(t);
 }
-export function elemTy(t: Ty): Ty { return t.slice(0, -2) as Ty; }
+export function elemTy(t: Ty): Ty { return unparen(t.slice(0, -2) as Ty); }
+/**
+ * BUILD an array type. Not `${el}[]`, because the nullable encoding is a PREFIX and the
+ * array encoding is a SUFFIX, so the two compose ambiguously:
+ *
+ *   makeNullable("null", "string")  + "[]"  === "?Nstring[]"   // (string | null)[]
+ *   makeNullable("null", "string[]")        === "?Nstring[]"   // string[] | null
+ *
+ * `isNullableTy` anchors at the front and wins, so the concatenated spelling has always
+ * READ as the second one. `(string|null)[]` was therefore typed `string[] | null` — which
+ * surfaced as `NT2001 array elements must share a type (got string, null)` on the literal
+ * and, worse, as `'a' is possibly null` on `const a: (string|null)[] = ["x","y"]; a.length`,
+ * a nullability diagnostic about a program containing no null at all.
+ *
+ * The fix is the one `parseTypeAtom` (src/parser.ts) already prescribes for the identical
+ * collision between an array-of-functions and a function-returning-an-array: PARENTHESIZE
+ * the element. `(?Nstring)[]` cannot be confused with anything — it does not start with
+ * `?U`/`?N`, and `isFuncTy` needs a top-level `=>` that a bare paren group has not got.
+ * Only the nullable element needs it; every other element type is unambiguous, so every
+ * existing `Ty` string in the tree is unchanged byte for byte.
+ */
+export function makeArrayTy(el: Ty): Ty { return (isNullableTy(el) ? `(${el})[]` : `${el}[]`) as Ty; }
+/** Strip ONE balanced wrapping paren pair (the `makeArrayTy` element guard, undone). */
+function unparen(t: Ty): Ty {
+  if (typeof t !== "string" || !t.startsWith("(") || !t.endsWith(")")) return t;
+  let depth = 0;
+  for (let i = 0; i < t.length; i++) {
+    if (t[i] === "(") depth++;
+    else if (t[i] === ")") { depth--; if (depth === 0) return i === t.length - 1 ? (t.slice(1, -1) as Ty) : t; }
+  }
+  return t;
+}
 
 /**
  * Nullable / optional encoding (A2). A runtime-nullable value — `T | undefined`,
