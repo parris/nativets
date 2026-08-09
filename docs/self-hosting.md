@@ -3012,6 +3012,134 @@ test, or the fix reads as a regression to the next reader.
 
 ---
 
+### `.push` ON A PARAMETER IS CLEARED — ONE line gated all nine, and they all moved one term
+
+The previous section's predicted next term, measured and closed. The headline is the SIZE of
+the thing, not the feature: **the nine remaining modules did not have nine blockers, or even
+nine sites of one blocker. They had ONE LINE** — `src/ast.ts`'s
+
+```ts
+export function setBlockDrops(list: Stmt[], names: string[]): void { … list.push({ kind: "BlockDrops", names }); }
+```
+
+— which every one of them imports. Established by patching `mutationError` to carry the
+receiver and the line (it carries neither; see the bug below) and re-running the frontier
+instrument: all nine reported `@RECV=Identifier:list @LINE1133`, the same site.
+
+**Which gate fires: the CHECKER, on the RECEIVER — and it is NOT the field case's gate.** The
+previous section's finding was `NT1606` from the checker on the TYPE (`isMutableTy`), with
+ownership's `NT1607` never reached. Here it is `NT1606` from the checker in
+`inferArrayMethod`'s `case "push"`, where `accumulatorName(recv, scope)` returns `null`
+because the scope binding for a parameter has no `mutable` flag. Ownership was never reached
+either, but for a different reason, and an ownership-side fix would again have cleared
+nothing. **Do not generalize "it is the checker" into "it is the same check".**
+
+**The record precedent does NOT transfer, and that decided the lane.** `@@mutable` on a record
+works because it tags a NOMINAL type that travels with the signature. An array type is
+**structural** (`T[]`): there is no name to tag, and inventing a tagged array encoding would
+touch `isArrayTy`/`elemTy`/`makeArrayTy` and every array operation in the tree.
+
+**The census, taken with the compiler's own parser** (walk each module's AST, classify every
+`.push` receiver against the enclosing function's parameter set):
+
+| | |
+|---|---|
+| `.push` calls tree-wide | **210** (162 identifier receivers, 48 `MemberExpr`) |
+| on a **PARAMETER** | **9**, in 3 modules — `ast.ts` ×1, `parser.ts` ×3, `checker.ts` ×5 |
+| distinct (function, parameter) pairs | **7** |
+| actually BLOCKING anything | **1** — `ast.ts`'s `setBlockDrops` |
+
+Eight of the nine are the **out-parameter accumulator** shape (`directBound(stmts, out)`,
+`addFact(…, out)`, `applyWrappers(…, emitted, decorators)`): the caller allocates a fresh
+array, hands it in, and reads it afterwards. The ninth, the blocking one, is different — an
+**in-place AST annotation**, where the array belongs to the tree the pass is walking.
+
+**What was rejected, and why:**
+
+- **CONSUMING the parameter** is simply wrong here. All nine callers read the list after the
+  call; `setBlockDrops`'s list *is* the AST that codegen reads next. Consumption is the
+  constructor-parameter-property rule and it does not describe this shape.
+- **The SOURCE change** was costed and is not cheap for the one site that matters. The list
+  belongs to the AST, so there is no local to return into: `scoped(list)` receives it as a
+  parameter too, and the outermost caller passes `s.body`, a field. Writing it back would be
+  `o.f = v` on a parameter. The only source alternative is to **pre-seed a `BlockDrops` marker
+  into every block at parse time**, so `setBlockDrops` only ever does `last.names = names`
+  (which already compiles) — that changes every program's AST and every snapshot, to avoid a
+  two-line marker. The eight out-parameter sites *could* be rewritten to return, and this
+  document's usual verdict would apply — but none of them blocks anything, so rewriting them
+  buys nothing measurable today.
+- **New lexer syntax** turned out not to be needed, which is what made the language change
+  cheap. A previous lane established that `//@@mutable(c)` mid-parameter-list is silently
+  ignored, and concluded a per-parameter opt-in would need new lexing. **Measured, that is
+  false for the spelling that matters**: the lexer already emits `@@` + `mutable` for a
+  `//@@mutable` comment at ANY position, including between parameters. What the earlier lane
+  hit was the *argument* form `@@name(x)`, not the position.
+
+**So: a per-parameter marker**, `//@@mutable` on its own line before the parameter. It meets
+the record answer's own criterion — it is part of the SIGNATURE, so the calling convention is
+visible at the call site — and it is more precise, because it names which parameter grows.
+Two call-site rules carry the rest (`NT1607` the marker must travel, `NT1603` iterator
+invalidation); the full design, the soundness argument and the imprecision are in
+`docs/decorators.md`.
+
+**Where it landed.** Two marked parameters in the whole tree: `setBlockDrops`'s `list` and
+`ownership.ts`'s `scoped`'s `list`.
+
+| Module | Before | After |
+|---|---|---|
+| `ast.ts` (standalone + linked) | `NT1606` — `.push` on `list` | **`NT1014`** — its own `new Map(p.recTypes ?? [])` |
+| the other eight, linked | `NT1606` — inherited | **`NT1014`** — inherited |
+| stage-1 (`cli.ts` as a compiler) | rung 0, `NT1606` | **rung 0, `NT1014`** |
+| `lexer.ts`, `diagnostics.ts`, `coverage-preprocess.ts` | rung 3 | **unchanged — rung 3, IR byte-length identical** (161959 / 111252 / 152886, before and after) |
+
+**Nine modules moved one term and NOT ONE reached IR.** That is the fourth time this document
+has recorded it and the sentence does not improve with repetition: the frontier is a
+CONJUNCTION. `NT1014` here is the **dynamic** entries-form site the earlier "entries form is
+gone from `src/`" section explicitly parked (it needs a real `[K, V]` tuple TYPE, which is why
+the `.set`-chain rewrite could not reach it), and behind it is the `@Expr` property read that
+blocks most of `checker.ts`. Both have their own lanes.
+
+#### PRE-EXISTING BUGS this turned up
+
+**1 — `NT1606` carries NO source location, and it is the most-hit refusal in the tree.**
+
+```sh
+printf 'const xs: number[] = [];\nconsole.log(1);\nxs.push(2);\n' > /tmp/b.ts
+bun run src/cli.ts run /tmp/b.ts
+# error[NT1606]: arrays are immutable: `.push` would mutate the array in place
+#   = help: …
+# — no line, no column, no gutter, no receiver name.
+```
+
+Every sibling rule renders one (`NT1607` on the same program shape prints
+`| 3 | const f = … ^^^ occurs here`). `mutationError(message, hint)` takes no `line` and
+builds an `NTError` with no `spans`. On a 5,748-line module with 205 `.push` sites the
+diagnostic says only *that* something is refused — locating the ONE blocking site across nine
+modules for this lane required patching the compiler and re-running the instrument, which is
+exactly the work a diagnostic exists to prevent. **Not fixed here**: threading a location into
+`mutationError` changes the rendering of ~12 call sites across three checks, which is a
+diagnostics lane, not this one.
+
+**2 — a `//@@name` comment in a non-declaration position is a PARSE ERROR, on valid
+TypeScript.** The pragma lexes to real tokens everywhere, so a comment that merely happens to
+be positioned in an expression is rejected where node runs the file:
+
+```ts
+const x = 1 +
+  //@@mutable
+  2;
+console.log(x);        // node: 3     nativets: error[NT0001] Unexpected token '@@' at 2:3
+```
+
+A refusal, not a miscompile, so it does not violate the prime directive — but the message
+names a token the user did not write. The design note in `docs/decorators.md` ("only an exact
+match counts, so a comment that merely mentions `@@mutable` in prose stays a comment") is about
+the comment's BODY and does not cover its POSITION. Not fixed; it wants a decision about which
+positions the pragma is meaningful in, which is the same decision the arrow-parameter refusal
+above is waiting on.
+
+---
+
 ## Milestones
 
 - **SH0 — Gradient first (highest-value, do first).** Teach `coverage` (and a throwaway

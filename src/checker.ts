@@ -4014,7 +4014,21 @@ class Checker {
    */
   private declareParams(fn: FuncDecl, base: Scope): void {
     const tys = fn.params.map((p) => p.annot ?? this.defaultParamTy(p, base) ?? "number");
-    fn.params.forEach((p, i) => base.declare(p.name, tys[i]!, false));
+    // `@@mutable` on a parameter makes it an ACCUMULATOR exactly as the attribute on a
+    // `let`/`const` does, so `accumulatorName` needs no new case: the binding carries
+    // `mutable`, and the receiver is still a bare identifier. The array-only restriction
+    // is the same one `checkAccumulator` enforces, and for the same reason — the
+    // attribute legalizes `.push`, and on anything else it would read as a much bigger
+    // promise than the one implemented.
+    fn.params.forEach((p, i) => {
+      if (p.mutable && !isArrayTy(tys[i]!)) {
+        throw decoratorError(
+          `'@@mutable' on parameter '${p.name}', which is not an array (it is '${tys[i]}')`,
+          "`@@mutable` on a parameter marks an ARRAY the callee may `.push` to in place. For a record parameter use `@@mutable type`, for a class `@@mutable class`",
+        );
+      }
+      base.declare(p.name, tys[i]!, false, undefined, undefined, p.mutable);
+    });
   }
 
   private computeCaptures(arrow: ArrowFunction, scope: Scope): { name: string; ty: Ty }[] {

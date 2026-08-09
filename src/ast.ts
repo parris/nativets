@@ -1017,7 +1017,14 @@ export interface ArrowFunction {
 
 // `paramProp` marks a constructor *parameter property* (`constructor(private x: T)`):
 // the parser desugars it into a class field + a `this.x = x` init in the ctor body.
-export interface Param { name: string; annot?: Ty; default?: Expr; rest?: boolean; paramProp?: boolean; }
+//
+// `mutable` marks the PER-PARAMETER `@@mutable` opt-in (`//@@mutable` on its own line
+// before the parameter): `.push` may append to this array parameter in place, and the
+// caller observes the append. It is the array's answer to the question `@@mutable`
+// answers nominally for a record — an array type is STRUCTURAL, so there is no name to
+// tag, and the marker goes on the parameter, which is still part of the SIGNATURE and so
+// still visible at the call site. See docs/decorators.md.
+export interface Param { name: string; annot?: Ty; default?: Expr; rest?: boolean; paramProp?: boolean; mutable?: boolean; }
 
 /*
  * `init` is OPTIONAL, and its absence means a bare `let x: T;` — a declaration with no
@@ -1122,7 +1129,11 @@ export interface BlockDropsStmt { kind: "BlockDrops"; names: string[]; }
  * Pinned by an out-of-range-throws proxy in test/block-drops.test.ts, because node's own
  * answer is precisely the one this function must not depend on.
  */
-export function setBlockDrops(list: Stmt[], names: string[]): void {
+export function setBlockDrops(
+  //@@mutable
+  list: Stmt[],
+  names: string[],
+): void {
   const n = list.length;
   if (n > 0) {
     // `!` because `n > 0` is not something `noUncheckedIndexedAccess` can see: tsc types
