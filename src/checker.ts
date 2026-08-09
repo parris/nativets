@@ -2804,7 +2804,12 @@ class Checker {
         if (e.args.length !== ps.length) throw typeError(`'${e.callee.name}' expects ${ps.length} arguments, got ${e.args.length}`);
         e.args.forEach((a, i) => {
           const at = this.typeArg(a, ps[i]!, scope);
-          if (at !== ps[i]) throw typeError(`'${e.callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
+          // `fitsArg`, like every other call site — this one was a bare identity test, so a
+          // call through a function-typed VARIABLE was stricter than the identical call to a
+          // named function (no union arm, no nullable arm, no literal reshape). Safe because
+          // `genCallValueFrom` now coerces each argument to the parameter type, exactly as
+          // the direct-call path does.
+          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
         });
         return funcRet(bound.ty);
       }
@@ -3339,7 +3344,25 @@ class Checker {
    * structural-object and nullable arms would accept values codegen does not box here.
    */
   private fitsParam(expected: Ty, actual: Ty): boolean {
-    return actual === expected || ((isUnionTy(expected) || isGeneralUnionTy(expected)) && this.assignable(expected, actual));
+    if (actual === expected) return true;
+    if ((isUnionTy(expected) || isGeneralUnionTy(expected)) && this.assignable(expected, actual)) return true;
+    // A NULLABLE parameter/return takes the matching nullish literal and a present value
+    // of its base type — TypeScript's rule (`null` is assignable to `T | null`, `undefined`
+    // to `T | undefined`, a `T` to either). Refused before this arm, so `pick(null)` against
+    // `pick(n: Node | null)` was an error on code node runs — the shape `new Scope(null)`
+    // hits on this compiler's own symbol table (src/checker.ts:93), and the shape
+    // docs/self-hosting.md records as forcing every `?Ustring` argument through an
+    // annotated local.
+    //
+    // Deliberately NARROWER than `assignable`, and narrow for a REASON: exactly these two
+    // sources are what codegen's `coerce` can build the [tag,value] box from — the nullish
+    // literal carries its tag (0/1) and a base-typed value goes in whole under tag 2. A
+    // merely structurally-compatible object has a different SLOT LAYOUT and cannot be boxed
+    // without being rebuilt, so it is left to `fitsArg`, which accepts it only when it is a
+    // literal it can actually reshape. Widening this to the full `assignable` relation is
+    // the memory bug (a dereference of a raw double), not the feature.
+    if (isNullableTy(expected)) return actual === nullishKind(expected) || actual === baseTy(expected);
+    return false;
   }
 
   /**

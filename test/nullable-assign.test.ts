@@ -102,14 +102,43 @@ console.log(pick(null), pick({ v: 7 }));
 `);
   });
 
-  test("a null literal reaches a CONSTRUCTOR parameter (`new Scope(null)`)", async () => {
+  test("a null literal reaches a CONSTRUCTOR parameter", async () => {
     await expectNode(`
 class Scope {
-  constructor(private tag: string | null = null) {}
+  tag: string | null;
+  constructor(tag: string | null = null) { this.tag = tag; }
   show(): string { return this.tag === null ? "root" : "child"; }
 }
 console.log(new Scope(null).show(), new Scope("x").show());
 `);
+  });
+
+  /*
+   * THE ACCEPTANCE GATE, verbatim from src/checker.ts:93 — the shape that was blocking
+   * the recursive-type encoding lane. node cannot be the oracle here: it refuses a
+   * PARAMETER PROPERTY outright (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX, it needs codegen,
+   * not type-stripping), so this asserts only that the NULL ARGUMENT is no longer what
+   * stops it. A self-recursive field is still NT1030 — that refusal belongs to the
+   * recursive-type lane, and is asserted here so this test cannot silently start
+   * passing for the wrong reason.
+   */
+  test("`new Scope(null)` is no longer blocked by its null ARGUMENT", () => {
+    // Non-recursive: compiles clean, parameter property and all.
+    expect(() => sourceToIR(`
+class Scope {
+  constructor(private parent: string | null = null) {}
+  depth(): number { return this.parent === null ? 0 : 1; }
+}
+console.log(new Scope(null).depth());
+`)).not.toThrow();
+    // Self-recursive: the ONLY remaining complaint is the recursive field.
+    expectRejected(`
+class Scope {
+  constructor(private parent: Scope | null = null) {}
+}
+const s = new Scope(null);
+console.log("ok");
+`, "NT1030", "parent");
   });
 
   test("a null-typed VARIABLE reaches a `T | null` parameter", async () => {
@@ -149,11 +178,28 @@ console.log(f(4), f(k + 1), f(undefined));
 
   test("a present value reaches a nullable RETURN type", async () => {
     await expectNode(`
-function f(b: boolean): string | undefined { return b ? "yes" : undefined; }
+function f(b: boolean): string | undefined {
+  if (b) { return "yes"; }
+  return undefined;
+}
 const a = f(true);
 const c = f(false);
 console.log(a === undefined ? "none" : a, c === undefined ? "none" : c);
 `);
+  });
+
+  /*
+   * ADJACENT AND NOT TAKEN, pinned so it is a known refusal rather than a surprise.
+   * The same function written with a TERNARY is still refused: the ternary JOIN wants
+   * its two branches to have one type and does not widen `string` + `undefined` into
+   * `?Ustring`. That is a gap in the join, not in assignability — `fitsParam` never
+   * sees it — so it is a separate behavior from this file's three.
+   */
+  test("REFUSED: a ternary does not JOIN a present arm with `undefined`", () => {
+    expectRejected(`
+function f(b: boolean): string | undefined { return b ? "yes" : undefined; }
+console.log(f(true));
+`, "NT2001", "Ternary branches differ");
   });
 });
 
