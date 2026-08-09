@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "a0da3d0"
+    "rev": "7d845a8"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "09d6f3d5be52f8fc",
+      "sha256": "8ac4576267269886",
       "standalone": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'kind' does not exist on @Expr"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'kind' does not exist on @Expr"
       }
     },
     "checker.ts": {
-      "sha256": "3ae1b2eef7b141c4",
+      "sha256": "1bedfea8f52a1476",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'kind' does not exist on @Expr"
       }
     },
     "cli.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'kind' does not exist on @Expr"
       }
     },
     "codegen.ts": {
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'kind' does not exist on @Expr"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'kind' does not exist on @Expr"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'kind' does not exist on @Expr"
       }
     },
     "lexer.ts": {
@@ -125,7 +125,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "e2925ad5905e9a55",
+      "sha256": "d2c59b4c1ad052eb",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'kind' does not exist on @Expr"
       }
     },
     "ownership.ts": {
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'kind' does not exist on @Expr"
       }
     },
     "parser.ts": {
-      "sha256": "3c4011490608d416",
+      "sha256": "e096a06d95d20a8d",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'kind' does not exist on @Expr"
       }
     }
   }

@@ -529,7 +529,24 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ast.ts's own `new Map(p.recTypes ?? [])` — the [key, value] entries form, which
     // needs a tuple type. So NT1014, emptied tree-wide two rounds ago, refills: the
     // earlier clear was of every LITERAL entries site, and this one is DYNAMIC.
-    ["NT1014"],
+    //
+    // ...and NT1014 LEAVES AGAIN — the TENTH refill, and for the third round running the
+    // holder was one line of `src/ast.ts` that nine modules inherit. `new Map(p.recTypes
+    // ?? [])` needed a `[K, V]` tuple type; the answer was NOT to invent one. The census
+    // says the whole compiler contains SIX tuple-type annotations in three files, every
+    // one of them HOMOGENEOUS (`[Expr, Expr][]`, `[Ty, Ty]`, `[string, Ty][]`), so
+    // `parseTupleType`'s existing `[T, U] -> T[]` erasure is already right for all of
+    // them and a real tuple type would buy nothing. `Program.recTypes` is a named
+    // two-field record now (`RecTypeEntry`), which needs no new `Ty` encoding at all —
+    // five source sites in three files, and zero compiler change for that half.
+    // Behind it the nine landed on NT2001, and it took ONE compiler fix to get there:
+    // a discriminated-union tag test did not narrow across the short circuit of `&&`
+    // (`if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr")` — ast.ts's own
+    // `freshArray`). Tag narrowing is a shadow BINDING, not a `NarrowFact`, so the
+    // short-circuit fact plumbing that already existed could not carry it.
+    // What holds all nine now is the KNOWN next term: `Property 'kind' does not exist on
+    // @Expr` — a property read through a recursive back-edge, which has its own lane.
+    ["NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -624,9 +641,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // wrote the entries form again; the frontier moved onto one that was always there.
     // This site genuinely needs the `[K, V]` tuple TYPE, which is why it is the one the
     // `.set`-chain rewrite could not reach.
-    expect(byCode["NT1014"]?.slice().sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    //
+    // EMPTY AGAIN — the sixth time, and the FIRST time this bucket was emptied without a
+    // `.set` rewrite, because this site could not have one. `Program.recTypes` stopped
+    // being `[string, Ty][]` and became `RecTypeEntry[]`, a named two-field record. The
+    // census behind that choice: six tuple-type annotations in the whole compiler, in
+    // three files, EVERY ONE homogeneous — so the `[T, U] -> T[]` erasure the parser
+    // already does is correct for all six, and a real `[K, V]` `Ty` would have bought a
+    // new encoding (and a new set of collisions to check against every predicate) for a
+    // single site. The one honest tuple in the tree is now a record.
+    // All nine moved together onto NT2001 — asserted below, where that bucket lives.
+    expect(byCode["NT1014"]?.slice().sort() ?? []).toEqual([]);
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
@@ -707,7 +732,22 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `list.length > 0` and never forms the out-of-range index, which is behaviour-identical
     // under node for every list and divergence-free under nativets for the empty one.
     // All nine modules moved together to what it was masking — NT1606, asserted below.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    //
+    // ...and it REFILLS with all NINE again, from ONE line of ast.ts again — and this time
+    // it is the KNOWN next term rather than a surprise: `Property 'kind' does not exist on
+    // @Expr`, a property read through a recursive back-edge. `freshArray`'s
+    // `e.kind === "CallExpr" && e.callee.kind === "MemberExpr"` narrows `e` to `CallExpr`
+    // and then reads `.kind` off `callee`, whose type is the folded `@Expr` — which unfolds
+    // for an ordinary field read but not for this one. That is the `@Expr` lane, not this one.
+    //
+    // Note what had to be cleared to REACH it, because the two sit on the same line and are
+    // two different gaps: the `&&` did not narrow AT ALL until this lane, so `.callee`
+    // itself was the error. A tag narrowing is a shadow BINDING (`Checker.narrowInto`), not
+    // a `NarrowFact`, so the short-circuit plumbing that already carried nullish guards
+    // across `&&`/`||` could not carry it. Fixture: test/unions/narrow-shortcircuit.ts.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
     // This is the DECISION the entry above named, arrived at: the typed walkers in
     // src/ast.ts write `e.ty = f(e.ty)` exactly where the reflective ones wrote
@@ -1024,7 +1064,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // AST walkers were masking `setBlockDrops`'s `last !== undefined` on a general union.
     // ...and EMPTY once more: that guard is a `list.length > 0` test now, and all nine
     // moved on together to NT1606 (`o.f = v` on an AST node). See the same bucket above.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    // ...and REFILLED with the same nine, on ast.ts's `@Expr` property read. Same bucket
+    // above, which carries the reasoning.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a

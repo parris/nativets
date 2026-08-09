@@ -3138,6 +3138,107 @@ the comment's BODY and does not cover its POSITION. Not fixed; it wants a decisi
 positions the pragma is meaningful in, which is the same decision the arrow-parameter refusal
 above is waiting on.
 
+### `NT1014` IS GONE AGAIN — and the TUPLE TYPE was not built, because the census said not to
+
+The nine modules' shared blocker was `new Map(p.recTypes ?? [])` in `src/ast.ts`, against a
+declared `recTypes?: [string, Ty][]`. The brief was to decide between building a real `[K, V]`
+tuple `Ty` and changing the source. **The census decided it, and it decided it emphatically.**
+
+`parseTupleType` (src/parser.ts) already models `[T, U]` as `T[]` — the FIRST element's array —
+which is why the diagnostic reads `new Map(string[][])` rather than naming a tuple at all. So the
+question is not "is the erasure wrong", it is "where is it wrong". Counted by INSTRUMENTING
+`parseTupleType` and re-parsing all twelve modules — the compiler's own parser, not a grep, since
+a grep cannot tell a tuple type from an array index:
+
+| site | tuple | homogeneous? |
+|---|---|---|
+| `checker.ts:996`, `:1103`, `:1645` | `[Expr, Expr][]` | yes |
+| `parser.ts:1012` | `[Ty, Ty]` | yes |
+| `ast.ts:1298` | `[string, Ty][]` | yes (`Ty` IS `string`) |
+
+**Six annotations, three files, every one homogeneous.** The erasure is already the correct
+answer for all six, and a real 2-tuple would have bought a new `Ty` spelling — plus a check
+against `isArrayTy`/`isObjectTy`/`isFuncTy`/`isNullableTy`/`isUnionTy`/`isTypeRefTy`/`elemTy`/
+`objectFields`/`fieldIndex`/`isLinearTy`/`emitDrops`, which this document records going wrong
+three separate times — plus a representation, plus contextual reshaping of a mixed array
+literal, for ONE site. **Option (b), a named record, was taken:** `Program.recTypes` is
+`RecTypeEntry[]` (`{ name: string; ty: Ty }`), which is the shape `objectFields` already returns
+and which needs no encoding at all. Five source sites in three files (`ast.ts` ×2 declaration +
+`recTypeTable`, `parser.ts` ×1 write, `modules.ts` ×1 read + ×1 write); zero compiler change for
+this half. The two `[...map]` writes become explicit loops, which the linker was doing anyway.
+
+A heterogeneous tuple is still refused, and refused SAFELY rather than erased: the erasure is
+masked by the array-literal rule, so `const p: [string, number] = ["a", 1]` is `NT2001 array
+elements must share a type`. Reject, never miscompile — but the message names the wrong thing.
+
+**One compiler fix was needed behind it, and it is a real gap.** With the record in place all
+nine modules moved to `Property 'callee' does not exist on {…}|{…}|…` — `src/ast.ts:1383`:
+
+```ts
+if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") {
+```
+
+**A discriminated-union tag test did not narrow across the SHORT CIRCUIT of `&&`/`||` at all**,
+on a plain non-recursive union. It is not the same mechanism as the nullish narrowing that
+already crossed a short circuit (landed with the `||` lane): a nullish fact is a `NarrowFact` on
+the `narrowStack`, while a tag narrowing is a **shadow BINDING** declared in a child scope
+(`Checker.narrowInto`), so `withFacts` could never have carried it. `Checker.narrowTagsInto`
+now walks the guard with the same De Morgan rule `guardFacts` uses — `&&` proves both operands
+when true, `||` proves both when false — and applies the narrowings SEQUENTIALLY through one
+child scope, which is what makes a chain (`s.kind === "circle" && s.radius > 1 && s.radius < 100`)
+work and makes a contradictory chain collapse safely instead of re-narrowing from the full union.
+Three call sites share it: the right operand of a short circuit, the two arms of an `if`, and
+`eliminateAfterEarlyExit`, so `if (s.kind === "a" || s.kind === "b") return …;` now leaves the
+third member behind for the rest of the block.
+
+Fixture: `test/unions/narrow-shortcircuit.ts`, shapes borrowed from `microsoft/TypeScript`
+`tests/cases/conformance/controlFlow/controlFlowBinary{And,Or}Expression.ts`. Memory: the
+narrowing is pure type space and emits no code — `__objLive()`/`__arrLive()` are `0`/`0` over a
+200-iteration loop, byte-identical to the nested-`if` CONTROL spelling, exit 0 both ways.
+
+| Module | Before | After |
+|---|---|---|
+| `ast.ts` (standalone + linked) | `NT1014` — `new Map(p.recTypes ?? [])` | **`NT2001`** — `Property 'kind' does not exist on @Expr` |
+| the other eight, linked | `NT1014` — inherited | **`NT2001`** — inherited |
+| stage-1 (`cli.ts` as a compiler) | rung 0, `NT1014` | **rung 0, `NT2001`** |
+| `lexer.ts`, `diagnostics.ts`, `coverage-preprocess.ts` | rung 3 | **unchanged — rung 3, IR byte-length identical** (161667 / 111240 / 152602) |
+
+**Nine modules moved one term and NOT ONE reached IR** — the fifth time this document records
+it. The term they landed on is the one the brief predicted: `e.callee` is typed `@Expr`, the
+folded back-edge, and a `@Expr` unfolds for an ordinary field read but not for the discriminant
+read a narrowing needs. That is the `@Expr` lane.
+
+#### PRE-EXISTING BUG this turned up
+
+**`parseTupleType` erases `[T, U]` to `T[]` with no diagnostic**, so a tuple's SECOND element
+type is silently discarded. It is safe today only by accident — the array-literal rule catches
+the mixed case first — and the accident does not cover every position:
+
+```ts
+function pair(): [string, number] { return ["a", 1]; }   // node: fine
+// nativets: error[NT2001] array elements must share a type (got string, number)
+```
+
+The message names the array-literal rule, not the tuple, and points at the wrong thing. A
+homogeneous tuple is accepted with its ARITY erased too — tsc rejects an out-of-range tuple
+index outright (TS2493), nativets does not:
+
+```ts
+function f(p: [number, number]): number { return p[5]; }
+console.log(f([1, 2]));
+// node: undefined     tsc: TS2493     nativets: compiles, then panics at 1:51
+```
+
+(A `const` initialized with a literal is caught by the ordinary bounds check — `NT2002` — so the
+gap only shows where the length has to come from the ANNOTATION, i.e. exactly where a tuple type
+is the only thing that knows it.) This is also what made
+`recTypes?: [string, Ty][]` read as `string[][]` and produce an `NT1014` that named `new Map`
+rather than the tuple that caused it. **Not fixed** — the honest fix is `NT1xxx` on any tuple
+annotation whose elements are not all the same type (and a hint naming the record spelling),
+which is a diagnostics decision touching a construct with six sites in `src/` and an unknown
+number in `test/`; it wants its own lane, and this lane's whole finding is that the tuple TYPE
+itself should not be built.
+
 ---
 
 ## Milestones
