@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "143326b"
+    "rev": "a12dc1e"
   },
   "modules": {
     "ast.ts": {
       "sha256": "e2fccc5970a145a9",
       "standalone": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] string method 'trimEnd' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] string method 'trimEnd' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     },
     "checker.ts": {
-      "sha256": "d32bae0842ec156e",
+      "sha256": "b591d3b8f312f3a5",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -44,7 +44,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "165380b29099588d",
+      "sha256": "1b703350be734dfd",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -111,16 +111,16 @@
       }
     },
     "lexer.ts": {
-      "sha256": "41f12f4f1974b041",
+      "sha256": "4ab63503e3cbd30d",
       "standalone": {
-        "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot compare string with undefined"
+        "stage": "codegen",
+        "code": "NT1004",
+        "message": "[NT1004] `throw` at L:C that is not inside a `try` in the same function is not supported yet"
       },
       "linked": {
-        "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot compare string with undefined"
+        "stage": "codegen",
+        "code": "NT1004",
+        "message": "[NT1004] `throw` at L:C that is not inside a `try` in the same function is not supported yet"
       }
     },
     "modules.ts": {
@@ -133,11 +133,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare string with undefined"
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     },
     "ownership.ts": {
-      "sha256": "e2400079d31ba649",
+      "sha256": "e0078d7829fda44d",
       "standalone": {
         "stage": "check",
         "code": "NT1014",
@@ -159,7 +159,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare string with undefined"
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     }
   }

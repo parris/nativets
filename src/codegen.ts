@@ -223,6 +223,8 @@ const DECLARES = [
   "declare ptr @js_str_upper(ptr)",
   "declare ptr @js_str_lower(ptr)",
   "declare ptr @js_str_trim(ptr)",
+  "declare ptr @js_str_trim_end(ptr)",
+  "declare ptr @js_str_trim_start(ptr)",
   "declare ptr @js_str_char_at(ptr, double)",
   "declare ptr @js_str_slice(ptr, double, double)",
   "declare ptr @js_str_substring(ptr, double, double)",
@@ -3714,6 +3716,8 @@ class FnGen {
       case "toUpperCase": return { v: call("js_str_upper", `ptr ${recv.v}`), ty: "string" };
       case "toLowerCase": return { v: call("js_str_lower", `ptr ${recv.v}`), ty: "string" };
       case "trim": return { v: call("js_str_trim", `ptr ${recv.v}`), ty: "string" };
+      case "trimEnd": return { v: call("js_str_trim_end", `ptr ${recv.v}`), ty: "string" };
+      case "trimStart": return { v: call("js_str_trim_start", `ptr ${recv.v}`), ty: "string" };
       case "charAt": return { v: call("js_str_char_at", `ptr ${recv.v}, double ${a[0]!.v}`), ty: "string" };
       case "repeat": return { v: call("js_str_repeat", `ptr ${recv.v}, double ${a[0]!.v}`), ty: "string" };
       case "slice": return { v: call("js_str_slice", `ptr ${recv.v}, double ${a[0]!.v}, double ${a[1]?.v ?? POS_INF}`), ty: "string" };
