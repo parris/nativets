@@ -468,7 +468,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
   }
 
   const entry = resolve(entryPath ?? "entry.ts");
-  const sources = new Map<string, string>([[entry, entrySource]]);
+  const sources = new Map<string, string>().set(entry, entrySource);
   const deps = new Map<string, ImportDecl[]>();
   const order = moduleOrder(entry, read, sources, deps);
   const prefixBase = choosePrefixBase([...sources.values()]);
@@ -611,6 +611,6 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
 
 /** The module paths an entry file pulls in, in evaluation order (for tooling/tests). */
 export function moduleGraph(entrySource: string, entryPath: string, read: ReadModule = defaultRead): string[] {
-  const sources = new Map<string, string>([[resolve(entryPath), entrySource]]);
+  const sources = new Map<string, string>().set(resolve(entryPath), entrySource);
   return moduleOrder(resolve(entryPath), read, sources);
 }

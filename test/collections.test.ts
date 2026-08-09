@@ -30,6 +30,27 @@ function codeOf(src: string): string | null {
   try { sourceToIR(src); return null; } catch (e) { return e instanceof NTError ? e.diag.code : "throw"; }
 }
 
+/**
+ * Lift a top-level declaration VERBATIM out of a real `src/*.ts` file, so the
+ * self-hosting gates below test the compiler's own table rather than a copy of it
+ * that can drift. Scans to the terminating `;` at bracket depth 0 and drops the
+ * `export`. Read with readFileSync, never shell `grep` (project memory: the shimmed
+ * grep on some setups silently misses matches, which would make these vacuous).
+ */
+function liftDecl(src: string, marker: string): string {
+  const at = src.indexOf(marker);
+  expect(at).toBeGreaterThan(-1);
+  let end = at, depth = 0;
+  for (; end < src.length; end++) {
+    const c = src[end]!;
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === ";" && depth === 0) { end++; break; }
+  }
+  const decl = src.slice(at, end);
+  return decl.startsWith("export ") ? decl.slice("export ".length) : decl;
+}
+
 describe("Map/Set iteration (insertion order)", () => {
   test("for (const k of map.keys()) iterates in insertion order, not hash order", async () => {
     // Deliberately NOT sorted and NOT hash-ordered: node prints z, a, m.
@@ -456,16 +477,7 @@ console.log(new Map<string, number>().size, new Map().size);`;
    */
   test("src/ast.ts's real DATE_GETTERS table compiles, and equals node's entries form", async () => {
     const src = readFileSync(new URL("../src/ast.ts", import.meta.url), "utf8");
-    const at = src.indexOf("export const DATE_GETTERS");
-    expect(at).toBeGreaterThan(-1);
-    let end = at, depth = 0, seen = false;
-    for (; end < src.length; end++) {
-      const c = src[end]!;
-      if (c === "(" || c === "[" || c === "{") { depth++; seen = true; }
-      else if (c === ")" || c === "]" || c === "}") depth--;
-      else if (c === ";" && depth === 0 && seen) { end++; break; }
-    }
-    const decl = src.slice(at, end).replace("export const", "const");
+    const decl = liftDecl(src, "export const DATE_GETTERS");
     const driver = `
 console.log(DATE_GETTERS.size, DATE_GETTERS.has("toString"), DATE_GETTERS.has("getTime"));
 for (const [k, g] of DATE_GETTERS) console.log(k, g.which, g.utc);`;
@@ -483,6 +495,78 @@ for (const [k, g] of DATE_GETTERS) console.log(k, g.which, g.utc);`;
     expect(ours.stdout).toBe(oracle.stdout);
     expect(ours.exitCode).toBe(oracle.exitCode);
     expect(oracle.stdout.split("\n")[0]).toBe("16 false false");
+  });
+
+  /*
+   * The same gate for `src/checker.ts`'s two tables. Between them they were the FIRST
+   * blocker for SIX of the twelve modules — checker's OWN, inherited through the link
+   * by codegen, coverage, ownership, driver and cli (= stage-1). Both are annotated
+   * `ReadonlyMap<…>`, which is why the ReadonlyMap erasure below had to be fixed first.
+   */
+  test("src/checker.ts's real CONSOLE_STREAMS table compiles, and equals node's entries form", async () => {
+    const src = readFileSync(new URL("../src/checker.ts", import.meta.url), "utf8");
+    const decl = liftDecl(src, "export const CONSOLE_STREAMS");
+    const driver = `
+console.log(CONSOLE_STREAMS.size, CONSOLE_STREAMS.get("log"), CONSOLE_STREAMS.get("warn"), CONSOLE_STREAMS.has("table"));
+for (const [m, s] of CONSOLE_STREAMS) console.log(m, s);`;
+    // The oracle is the ENTRIES form of the same table under node — so this asserts the
+    // rewrite is observationally null, not merely that the new spelling runs.
+    const oracle = runWithNode(`const CONSOLE_STREAMS: ReadonlyMap<string, "out" | "err"> = new Map([
+  ["log", "out"], ["info", "out"], ["debug", "out"],
+  ["error", "err"], ["warn", "err"],
+] as const);${driver}`);
+    const ours = await compileAndRun(decl + driver);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("5 out err false\nlog out\ninfo out\ndebug out\nerror err\nwarn err\n");
+  });
+
+  test("src/checker.ts's real FMT_SPECS table compiles, and equals node's entries form", async () => {
+    const src = readFileSync(new URL("../src/checker.ts", import.meta.url), "utf8");
+    // The value type is the `FmtSpec` alias, so lift that verbatim too.
+    const decl = liftDecl(src, "export type FmtSpec") + "\n" + liftDecl(src, "const FMT_SPECS");
+    const driver = `
+console.log(FMT_SPECS.size, FMT_SPECS.get("O"), FMT_SPECS.get("o"), FMT_SPECS.has("z"), FMT_SPECS.has("%"));
+for (const [c, s] of FMT_SPECS) console.log(c, s);`;
+    const oracle = runWithNode(`type FmtSpec = "s" | "d" | "i" | "f" | "j" | "o" | "O" | "c";
+const FMT_SPECS: ReadonlyMap<string, FmtSpec> = new Map([
+  ["s", "s"], ["d", "d"], ["i", "i"], ["f", "f"], ["j", "j"], ["o", "o"], ["O", "O"], ["c", "c"],
+] as const);${driver}`);
+    const ours = await compileAndRun(decl + driver);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    // Case matters — `%o` and `%O` are different specifiers in node's formatter.
+    expect(oracle.stdout.split("\n")[0]).toBe("8 O o false false");
+  });
+
+  /*
+   * The DYNAMIC entries site. `src/ownership.ts`'s `clone` built its result from a
+   * MAP SPREAD (`new Map([...s].map(([k, v]) => [k, { ...v }]))`), which is the same
+   * missing tuple type reached from the other side: spreading a Map yields
+   * `[key, value]` pairs. Unlike the tables above, a `.set` CHAIN cannot express it —
+   * the entries are not known at the source. The loop is what the constructor does
+   * internally anyway (ES2024 24.1.1.1 §8 calls `set` once per entry, in order), so
+   * the oracle is again node running the spelling nativets refuses.
+   *
+   * It was the first blocker for ownership.ts, driver.ts and cli.ts (= stage-1).
+   */
+  test("src/ownership.ts's real `clone` compiles, and equals node's Map-spread form", async () => {
+    const src = readFileSync(new URL("../src/ownership.ts", import.meta.url), "utf8");
+    const decl = liftDecl(src, "type VarState =") + "\n" +
+      liftDecl(src, "type State =") + "\n" + liftDecl(src, "const clone =");
+    const driver = `
+const a: State = new Map<string, VarState>().set("x", { moved: true, must: false, at: 3 }).set("y", { moved: false, must: false });
+const b = clone(a);
+console.log(a.size, b.size, a === b, b.get("x")! === a.get("x")!);
+for (const [k, v] of b) console.log(k, v.moved, v.must, v.at);`;
+    const oracle = runWithNode(`type VarState = { moved: boolean; must: boolean; at?: number };
+type State = Map<string, VarState>;
+const clone = (s: State): State => new Map([...s].map(([k, v]) => [k, { ...v }]));${driver}`);
+    const ours = await compileAndRun(decl + driver);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    // A SHALLOW copy: same keys and order, but every VarState is a fresh object.
+    expect(oracle.stdout).toBe("2 2 false false\nx true false 3\ny false false undefined\n");
   });
 
   /*

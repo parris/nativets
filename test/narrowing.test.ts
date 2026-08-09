@@ -792,3 +792,64 @@ console.log("" + p, "" + a, "" + s, "" + n);
     expect(ours.exitCode).toBe(oracle.exitCode);
   });
 });
+
+/*
+ * PRE-EXISTING SILENT WRONG ANSWER, found while sizing the `.set`-chain rewrite of
+ * `src/ownership.ts`'s `clone` (whose test compares two `Map.get` results).
+ *
+ * `===` between TWO nullable boxes is the missing member of the family this file
+ * already documents. `refuseUnboxedUnion` (src/checker.ts) lists the four ways a
+ * tagged box goes wrong for a GENERAL union — "truthiness tested the box POINTER,
+ * `===` compared TAGS, JSON.stringify rendered the literal `null`, concatenation
+ * emitted invalid IR" — and three of the four were fixed for the NULLABLE box in the
+ * blocks above. The fourth never was, and there was no refusal in front of it:
+ *
+ *     const p: number | undefined = 1;
+ *     const q: number | undefined = 2;
+ *     console.log(p === q);        // node: false     nativets: TRUE, exit 0
+ *
+ * The cause is a DEFAULT ARM, the same shape as the `.join()` bug the nullable-element
+ * lane found. `genExpr`'s FCMP chain dispatches on `number` / `boolean` / array+object
+ * / relational-string and then falls through to `js_str_eq` on the two operands — for
+ * a nullable that is `strcmp` over the `[tag, value]` BLOCK, which stops at the first
+ * NUL byte of the i64 tag, so every present box equals every other present box
+ * regardless of what it carries. `?Nstring` is wrong the same way ("a" === "b").
+ *
+ * Fixed the way this project fixes a miscompile it cannot yet lower: REFUSED. A
+ * correct lowering is a tag dispatch (`both nullish -> true; both present -> compare
+ * the unwrapped bases; else false`), which needs a branch per base type and belongs to
+ * the lane that takes it. `nullable === undefined` / `=== null` is untouched — that is
+ * a TAG comparison and it is the one this really is.
+ */
+describe("`===` between two nullable boxes is refused, not answered from the TAG", () => {
+  const NEEDLE = "tagged box";
+  test("the shape that came back `true` for 1 === 2", () => {
+    expectRejected(
+      `const p: number | undefined = 1;\nconst q: number | undefined = 2;\nconsole.log(p === q);`,
+      "NT1009", NEEDLE);
+  });
+
+  test("`!==`, and the string base, are the same refusal", () => {
+    expectRejected(
+      `const p: number | undefined = 1;\nconst q: number | undefined = 2;\nconsole.log(p !== q);`,
+      "NT1009", NEEDLE);
+    expectRejected(
+      `const a: string | null = "a";\nconst b: string | null = "b";\nconsole.log(a === b);`,
+      "NT1009", NEEDLE);
+  });
+
+  test("comparing a nullable to `undefined` / `null` still WORKS — it really is a tag test", async () => {
+    await expectNode(`const p: number | undefined = [7].at(0);
+const a: number | undefined = [7].at(9);
+console.log(p === undefined, a === undefined, p !== undefined, undefined === a);
+const n: string | null = null;
+console.log(n === null, n !== null);`);
+  });
+
+  test("the NARROWED comparison is the fix the hint hands back, and it matches node", async () => {
+    await expectNode(`const p: number | undefined = [1].at(0);
+const q: number | undefined = [2].at(0);
+if (p !== undefined && q !== undefined) console.log(p === q, p !== q);
+console.log((p ?? -1) === (q ?? -1));`);
+  });
+});

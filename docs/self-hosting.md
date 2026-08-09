@@ -1792,6 +1792,73 @@ other wrong answers**; everything not node-exact is a named refusal (`.at`, `.fi
 `.indexOf`/`.includes`/`.lastIndexOf`/`.with` on the argument's type, `.concat`, `.toSorted`
 without a comparator, `.map` producing a nullable).
 
+### THE ENTRIES FORM IS GONE FROM `src/` — and the six modules did NOT stay a group
+
+`NT1014` was the first blocker for **six of the twelve** modules. It is now absent from the
+whole tree, cleared entirely by SOURCE changes, and the census that drove them was run with
+`readFileSync` rather than shell `grep` (project memory: the shimmed `grep` here silently
+misses matches, and several wrong conclusions today came from it).
+
+**The census splits the construct in two, and the split is the whole finding:**
+
+| | sites in `src/` | shape | available fix |
+|---|---|---|---|
+| **LITERAL** `[[k, v], …]` | 4 | the entries are written out | the `.set` chain — mechanical, **taken** |
+| **DYNAMIC** | 4 | the entries come from a value | a `[K, V]` **tuple type** — not available |
+
+Taken (literal): `checker.ts`'s `CONSOLE_STREAMS` and `FMT_SPECS`, `modules.ts`'s two `sources`
+maps. Left (dynamic): `ast.ts:1287` `new Map(p.recTypes ?? [])` against a declared
+`[string, Ty][]`, and `.map`-produced pair arrays at `codegen.ts:1089` and `ownership.ts:899`.
+`new Map(anotherMap)` — `parser.ts:600`, `codegen.ts:4214` — was never blocked; the Map-copy
+form is supported.
+
+**One dynamic site WAS the blocker, and it did not need the tuple type after all.**
+`ownership.ts:111`'s `clone` was
+`new Map([...s].map(([k, v]) => [k, { ...v }]))`, and what stopped it was reported as a **Map
+SPREAD** (`[...s]` yields pairs) — the same missing tuple reached from the other side. A `.set`
+*chain* cannot express it, since the entries are not known at the source; a `.set` *loop* can,
+and it is what the constructor does internally anyway (24.1.1.1 §8 calls `set` once per entry,
+in order). So the rewrite is a loop, it drops an intermediate pair array under bun, and no
+encoding was invented. This mattered: ownership.ts, driver.ts and cli.ts were all sitting on it.
+
+| module | was (linked) | now |
+|---|---|---|
+| `checker.ts`, `codegen.ts`, `coverage.ts`, `ownership.ts`, `driver.ts` | `NT1014` | **`NT1606`** — `.push` |
+| `cli.ts` (= stage-1) | `NT1014` | **`NT2001`** — `process.stdout is not supported`, its OWN |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+**Five of the six landed exactly where the previous lane MEASURED they would** in a scratch
+tree — `.push`, refused by decision (commit `1ea7fa2`) — which is the first time in this
+document that a prediction about the next blocker has been recorded in advance and then held.
+
+**The sixth did not, and it is the more interesting row.** `cli.ts` does not join the `.push`
+group; it stops on `process.stdout`, a host surface nativets has simply never grown. That is
+a *missing feature*, not a refusal-by-decision, and it means **stage-1's next step is now
+independent of the 185-site `.push` rewrite** — the first time those two have been separable.
+Nobody predicted it, because the six had moved together for four measurements running.
+
+The tree-wide set is still two codes, but its shape has changed completely: **ten of twelve
+modules are now behind ONE construct** (`.push`), with `diagnostics.ts` at rung 3 and `cli.ts`
+on its own blocker. There is no nearer blocker left anywhere to unmask. The compiler's own
+frontier is no longer a list — it is a single decision plus one host builtin.
+
+**PRE-EXISTING BUG, found on the way, and it is a SILENT WRONG ANSWER.**
+
+```
+const p: number | undefined = 1, q: number | undefined = 2;  p === q
+                                   node false        nativets TRUE     exit 0 on BOTH
+```
+
+Found because the `clone` gate test compares two `Map.get` results. `===` between two nullable
+BOXES fell through the comparison chain's **default arm** to `js_str_eq`, i.e. `strcmp` over the
+`[tag, value]` block, which stops at the first NUL byte of the i64 tag — so every present box
+equalled every other one, `?Nstring` included (`"a" === "b"` was `true`). It is the fourth member
+of the family `refuseUnboxedUnion` records for the general-union box, and the only one that never
+had a refusal in front of it. **Refused now** (`NT1009`, with the narrowing and `??` fixes in the
+hint); a correct lowering is a tag dispatch needing a branch per base type. `x === undefined` /
+`x === null` is untouched — that one really is a tag comparison. See `docs/divergences.md` and
+`test/narrowing.test.ts`.
+
 ---
 
 ## Milestones

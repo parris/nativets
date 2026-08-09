@@ -430,8 +430,21 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ARRAY-OF-NULLABLE encoding fix, which is what NT2001 was). Re-run on the MERGED tree,
     // the set is two codes and eleven modules: `.push` and the `new Map` entries form.
     // The compiler's own frontier is now a 185-site source idiom plus five table sites.
+    //
+    // NT1014 LEAVES, and it is the third code cleared by a pure SOURCE change in as many
+    // lanes: the last literal entries-form tables (checker.ts's CONSOLE_STREAMS/FMT_SPECS,
+    // modules.ts's two `sources` maps) are `.set` chains, and ownership.ts's `clone` — the
+    // one DYNAMIC site that was actually blocking, via a Map SPREAD — is a loop. Zero
+    // literal `new Map([[k, v], …])` sites remain in `src/`; the three that do are dynamic
+    // (`ast.ts:1287`, `codegen.ts:1089`, `ownership.ts:899`) and genuinely need a `[K, V]`
+    // tuple type, so they are a language gap and not a rewrite.
+    //
+    // The set is still TWO codes, and the swap is the interesting part: ten modules are on
+    // `.push` and the eleventh is cli.ts on `process.stdout`. Ten of twelve now share ONE
+    // blocker — the tightest the tree-wide list has ever been — and stage-1 is no longer
+    // one of them, so the `.push` decision and stage-1's next step have come apart.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1014", "NT1606"],
+      ["NT1606", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -515,9 +528,22 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // the construct, never a count of it.
     // SIX at the merge, not five: main independently moved `cli.ts` off NT1020 (the
     // un-awaited `buildBinary`), and it landed in this bucket with the rest.
-    expect(byCode["NT1014"]!.sort()).toEqual(
-      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
-    );
+    //
+    // ...AND EMPTY, for the FOURTH time — but this emptying is different from the three
+    // before it, and the difference is the point. Every earlier one moved the construct to
+    // another file; this one removes it from `src/` altogether. A readFileSync census (not
+    // shell `grep` — project memory) finds ZERO literal `new Map([[k, v], …])` sites left.
+    // The three `new Map(x)` sites that remain are dynamic (`ast.ts:1287` over a declared
+    // `[string, Ty][]`, and `.map`-produced pair arrays at `codegen.ts:1089` and
+    // `ownership.ts:899`); a `.set` chain cannot express any of them, so they are the
+    // `[K, V]` tuple TYPE gap and will refill this bucket only if a module reaches them.
+    // Read as MEMBERSHIP, as the paragraphs above keep insisting: this bucket has now been
+    // emptied and refilled four times, and today's emptiness is a fact about today.
+    expect(byCode["NT1014"]).toBeUndefined();
+    // The six did NOT stay a group. Five went to `.push`, exactly where the previous lane
+    // measured they would in a scratch tree; cli.ts went to `process.stdout`, which nobody
+    // had predicted because the six had moved together for four measurements running.
+    expect(byCode["NT2001"]).toEqual(["cli.ts"]);
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
@@ -547,7 +573,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // reading won. A parenthesized element (`(?Nstring)[]`) tells them apart — the fix
     // `parseTypeAtom` already prescribes for the identical array-of-functions collision.
     // All SIX moved together onto NT1014; the group stayed a group, cli.ts included.
-    expect(byCode["NT2001"]).toBeUndefined();
+    //
+    // ...AND BACK, with ONE holder — cli.ts on `process.stdout is not supported`. Asserted
+    // as membership a dozen lines above, next to the NT1014 emptying that produced it,
+    // rather than twice; this note stays because the emptiness claim here was the thing
+    // that turned out not to be an invariant.
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -710,7 +740,16 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // accumulators in `tokenize`/`emit`/`preprocessForCoverage`), unmasked by the capture-
     // write lane's `TokState` rewrite. Same reading as every row above it: the module did
     // not acquire a `.push`, it stopped reporting something nearer.
-    expect(byCode["NT1606"]!.sort()).toEqual(["ast.ts", "coverage-preprocess.ts", "lexer.ts", "modules.ts", "parser.ts"]);
+    // ...and a SEVENTH, to TEN of the twelve — the largest single jump this bucket has
+    // taken, and the completion of the prediction the census made. Clearing the entries
+    // form moved checker, codegen, coverage, driver and ownership onto `.push` in one step.
+    // Every module in the tree except `diagnostics.ts` (rung 3) and `cli.ts` (its own
+    // `process.stdout`) is now behind ONE construct, refused by DECISION (commit 1ea7fa2).
+    // There is no longer a nearer blocker anywhere to unmask, so this is the frontier.
+    expect(byCode["NT1606"]!.sort()).toEqual(
+      ["ast.ts", "checker.ts", "codegen.ts", "coverage-preprocess.ts", "coverage.ts",
+       "driver.ts", "lexer.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
@@ -759,7 +798,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // SIX, with cli.ts back from NT1020 (see the same list above).
     // ...and EMPTY, for the fourth time in this bucket's life — the ENCODING ambiguity
     // above. The membership that replaces it is NT1014's, next to its clearance note.
-    expect(byCode["NT2001"]).toBeUndefined();
+    // ...and BACK, with cli.ts alone on `process.stdout` once NT1014 cleared. Membership is
+    // asserted once, at the NT1014 clearance; this bucket had TWO emptiness assertions for
+    // the same code and both had to be edited, which is the argument for one.
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a
