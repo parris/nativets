@@ -5,7 +5,7 @@ different mechanisms with different costs, and the sigil tells you which one you
 
 | Sigil | What it is | Runtime footprint | Applies to |
 |---|---|---|---|
-| `@@name` | a **compile-time attribute** the compiler reads — Rust's `#[derive]` | **none** | a `class`, or a record `type`/`interface` |
+| `@@name` | a **compile-time attribute** the compiler reads — Rust's `#[derive]` | **none** | a `class`, a record `type`/`interface`, or a `let`/`const` array ACCUMULATOR |
 | `//@@name` | the **same attribute**, spelled as a comment (see "Two toolchains" below) | **none** | ditto |
 | `@name` | a real **runtime wrapper** — Python's `f = w(f)` | a real call | a `class` or a **method** |
 
@@ -283,6 +283,99 @@ without the key.
 
 ---
 
+## `@@mutable` on an ARRAY ACCUMULATOR (`let` / `const`)
+
+```ts
+//@@mutable
+let tokens: Token[] = [];
+for (…) tokens.push(t);        // a real in-place append
+return tokens;                 // handed out by MOVE — an ordinary immutable array again
+```
+
+An undecorated binding is unchanged: `xs.push(v)` is still `NT1606` pointing at `[...xs, v]`.
+
+### The attribute is on the BINDING, not the type
+
+This is the one place the three `@@mutable` forms differ, and it is deliberate. A class's
+mutability is nominal (the tag); a record's is nominal (the tag). An **array's is neither** — it is
+a property of one `let`/`const`.
+
+Had it travelled with the type, every `T[]` anywhere would have become appendable through any
+handle, which is the silent hole the record section already warns about. Attached to a binding, the
+opt-in cannot leak: the value this binding eventually hands out — returned, stored in a container,
+passed to a function — is an ordinary immutable array, and the receiving scope must opt in on its
+own binding before it can append. So the attribute has no reach beyond the declaration you can see.
+
+One declarator only. `@@mutable let a = [], b = []` would have to say which binding it means, and a
+destructuring pattern lowers to several declarators none of which the user wrote — both `NT1023`.
+
+### Why it exists: a TWO-TOOLCHAIN cost, not a semantics one
+
+The sanctioned `xs = [...xs, v]` is **already O(1) amortized in nativets** (codegen's
+consuming-append). It is a real **O(n) copy per append under bun**, and bun is stage 0 — it runs
+`src/*.ts` and the whole test suite today. 30,000 appends:
+
+| idiom | bun | nativets |
+|---|---|---|
+| `xs = [...xs, v]` | 760 ms | 4 ms |
+| `xs.push(v)` | 2 ms | 0 ms |
+| builder object + `.build()` | 632 ms | 20 ms |
+
+`lex`'s `tokens` reaches ~35,000 elements on `src/checker.ts` alone. The builder was measured
+because it is the obvious immutable-first answer, and it loses on exactly the axis that matters: it
+is a **source rewrite of 185 sites** AND still 632 ms under bun, because its own internal append has
+to be the spread. `.push` under an opt-in needs **no source rewrite at all** — `src/*.ts` keeps
+writing `.push`, which is native speed in bun, and nativets compiles it as real mutation. That is
+the whole argument. The standing performance follow-up is in `docs/ROADMAP.md`.
+
+### Ownership: the SAME rule, and no new analysis
+
+Only the owner may mutate. For an accumulator the compiler already had everything it needs:
+
+| | |
+|---|---|
+| `const b = xs` | a **MOVE** — an array is LINEAR, so a second live handle cannot exist; a push after one is `NT1601` |
+| a **parameter** | a borrow, and it cannot carry the attribute (the attribute is on a `let`/`const`) — so `NT1606` |
+| `this.f`, `xs[0]`, `f()` | name **no binding** — never match the opt-in, so `NT1606` |
+| a **captured** accumulator | **`NT1607`** — the one hole the three facts above do not cover |
+| pushing while a `for-of` borrows it | `NT1603` (iterator invalidation), the pre-existing rule |
+| `.push`'s **argument** | **CONSUMED**, exactly as an array-literal element is |
+
+The closure rule is the only new one, and it is the only one that had to be. Our closure
+environment is a heap block filled **by value** when the closure is built (see `NT1031`), so an
+arrow copies the array POINTER — and unlike a scalar capture, writing through a copied pointer is
+visible outside. What that buys the closure is a second handle this scope cannot null, on a value
+this scope will free. The refusal is over-approximated ("mentioned inside ANY arrow in this scope"),
+which refuses the push whether it is written inside the arrow or outside it while an arrow holds the
+name. Over-refusal, never a use-after-free. It is what keeps `src/modules.ts` refused, whose
+accumulators are all pushed from inside `const walk = (list) => { out.push(…) }`.
+
+**`.push` consuming its argument was a REAL use-after-free, found here.** While the argument was
+merely borrowed — which is right for every *other* call, where the callee only reads it — a linear
+value pushed inside a function stayed owned by its local, the local freed it at scope exit, and the
+array went on pointing at it:
+
+```ts
+function fill(): number { const a: number[] = [4, 5]; g.push(a); return a.length; }
+console.log(fill(), g[0].length);   // printed "2 3" — exit 0, WRONG ANSWER
+```
+
+It is now the same move `[...xs, v]` makes, guarded on the RECEIVER'S TYPE rather than the method
+name, so a user class's own `.push` still only borrows its argument.
+
+### Known imprecision
+
+- **An accumulator has no statically-known length**, even as a `const` bound to a literal, so it is
+  excluded from the `NT2002` compile-time bounds check. Recording the literal length would have
+  rejected an index that is in range after the appends.
+- The closure refusal is **scope-wide**, like every other borrow here: an arrow anywhere in the
+  function poisons the name for the whole function. No NLL.
+- `.pop`/`.shift`/`.unshift`/`.splice`/`.fill`/`.copyWithin` are **not** legalized. The opt-in is
+  `.push` only — an append is the one mutation whose immutable equivalent was measured to be the
+  bottleneck, and each of the others has a different aliasing story.
+
+---
+
 ## `@wrapper` — the runtime decorator
 
 A `@wrapper` is an **ordinary user function** that takes the thing being decorated and returns
@@ -333,6 +426,8 @@ Refused (`NT1023`), because the wrapper's type is the method's own signature:
 
 ## Tests
 
+`test/push-accumulator.test.ts` (the array accumulator: node as oracle on stdout AND exit code,
+the test262-derived `.push` behaviours, the rejection table, and the live-value counters),
 `test/decorators.test.ts` (the specified design) and `test/mutable-records.test.ts` (the extension:
 the `//@@` pragma, records, their ownership rules, and the module-linker path).
 

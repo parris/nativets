@@ -87,6 +87,7 @@ export function makeNullable(which: "undefined" | "null", base: Ty): Ty {
 
 /** Split on `sep` at nesting depth 0 (respecting (), [], {}) — for nested types. */
 export function splitTopLevel(s: string, sep: string): string[] {
+  //@@mutable
   const out: string[] = [];
   let depth = 0, angle = 0, start = 0; // `angle` tracks `Map<…>`/`Set<…>` generic brackets
   for (let i = 0; i < s.length; i++) {
@@ -1056,6 +1057,11 @@ export interface VarDecl {
   kind: "VarDecl";
   declKind: "let" | "const";
   decls: Declarator[];
+  /** `@@mutable` (or `//@@mutable`) on the declaration — an ACCUMULATOR binding whose
+   *  array may be appended to in place with `.push`. Opt-in, per BINDING: it never
+   *  travels with the type, so a value handed out of this scope is an ordinary
+   *  immutable array again. See docs/decorators.md. */
+  mutable?: boolean;
 }
 
 export interface FuncDecl {

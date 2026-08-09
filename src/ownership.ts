@@ -604,9 +604,44 @@ class Analyzer {
           if (this.linear.has(recv) && this.isBorrowed(recv) && MUTATING.has(e.callee.property)) {
             this.report({ code: OWN_CODES.MUTATE_WHILE_BORROWED, message: `cannot mutate \`${recv}\` while it is borrowed (iterator invalidation)`, line: e.callee.object.loc?.line ?? 0 });
           }
+          // `@@mutable` ACCUMULATOR (`//@@mutable let xs: T[] = []` + `xs.push(v)`): the
+          // append really writes the array the binding owns, so it needs EXCLUSIVE ACCESS,
+          // exactly like a `@@mutable` setter. Three facts already establish it and cost
+          // nothing here:
+          //   - an array is LINEAR, so `const b = xs` MOVES; a second name is never a
+          //     second live handle, and a push after it is the ordinary NT1601;
+          //   - a PARAMETER is a borrow and cannot carry the attribute (the attribute is
+          //     on a `let`/`const`), so the checker's NT1606 already covers it;
+          //   - `this.f`, `xs[0]`, `f()` name no binding, so they are NT1606 too.
+          // The one hole the type/flow layers cannot see is a CLOSURE: an arrow copies the
+          // pointer into an env that this scope cannot null and that may outlive the
+          // binding, so a push through it is a write to storage we may already have freed.
+          // `captured` is the scan pass's over-approximation ("mentioned inside ANY arrow
+          // in this scope"), which refuses the push whether it is written inside the arrow
+          // or outside it while an arrow holds the name. Over-refusal, never a UAF.
+          if (e.callee.property === "push" && this.linear.has(recv) && this.captured.has(recv)) {
+            this.report({
+              code: OWN_CODES.MUTATE_THROUGH_BORROW,
+              message: `cannot \`.push\` to \`${recv}\`: a closure captures it, so this scope is not its only handle`,
+              line: e.callee.object.loc?.line ?? 0,
+              hint: "an arrow copies the array pointer into an env this scope cannot null, and the closure may outlive the binding — so an in-place append could write storage that is already freed. Build the array with `[...xs, v]` here and pass the finished array in, or move the accumulation inside the closure",
+            });
+          }
         }
         if (e.callee.kind === "MemberExpr") this.expr(e.callee.object, state, false); // receiver borrow
-        for (const a of e.args) this.expr(a, state, false); // args borrowed
+        // `xs.push(v)` STORES `v` in the array, so it CONSUMES it — the same move
+        // `[...xs, v]` makes, and for the same reason: a container holds its slots and the
+        // slot outlives the expression. Borrowing the argument (which is right for every
+        // other call, where the callee only reads it) left the pushed value owned by its
+        // original binding, so the binding freed it at scope exit while the array went on
+        // pointing at it: `g.push(a)` inside a function, then `g[0].length` from outside,
+        // read freed memory and printed 3 for a 2-element array. Exit 0, wrong answer.
+        // Guarded on the RECEIVER'S TYPE, not the method name — a user class may define
+        // its own `.push`, and consuming ITS argument would move a value the callee only
+        // borrows. `this` is the array-builtin `.push` only when the receiver is an array.
+        const arrPush = e.callee.kind === "MemberExpr" && e.callee.property === "push"
+          && e.callee.object.ty !== undefined && isArrayTy(e.callee.object.ty);
+        for (const a of e.args) this.expr(a, state, arrPush);
         return;
       }
       case "AssignExpr":

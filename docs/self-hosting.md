@@ -992,6 +992,7 @@ lexes constantly, unusable. `diagnostics.ts` paid nothing for its 4 sites becaus
 accumulator is a handful of lines. So the deciding factor is **the size the accumulator
 reaches**, not the shape of the receiver, and the 185-site census needs that second column
 before it is a plan. Not taken here; `lexer.ts` stops at rung 0 on `NT1606`.
+
 ### Re-measured after the `get` ACCESSOR — a SOURCE change, and the NT1607 over-refusal cleared
 
 Two items, one lane, and they are the two halves of "the compiler must stay inside the
@@ -1793,6 +1794,69 @@ other wrong answers**; everything not node-exact is a named refusal (`.at`, `.fi
 without a comparator, `.map` producing a nullable).
 
 ---
+
+### RESOLVED — `.push` is legal on a `@@mutable` ACCUMULATOR, and the rewrite was never taken
+
+The 1036x measurement above is the reason, and it survived re-measurement on a later tree
+(30,000 appends: **760 ms** bun / **4 ms** nativets for `xs = [...xs, v]`, **2 ms** / **0 ms** for
+`.push`). Read it precisely, because the number invites the wrong conclusion:
+
+> **The spread idiom is NOT slow in nativets. It is slow in bun.**
+
+It is O(1) amortized here via the transient path, and a real O(n) copy per append there. Since
+`src/*.ts` must satisfy **both** toolchains — bun runs it today, nativets must compile it tomorrow
+— the requirement was never "find a faster immutable idiom for nativets". It was "find one that is
+fast in **bun** and compilable **here**". That narrows the problem a great deal, and it rules out
+every immutable candidate at once: a builder object was measured at **632 ms** under bun for the
+same 30,000 appends, because a builder written in the subset has to spread internally.
+
+So `.push` is legal on a binding declared `@@mutable` — the comment-pragma spelling, exactly the
+route `@@mutable class` (Stage 45) and `@@mutable` records (Stage 49) took for the same
+two-toolchain reason. **It needs no source rewrite at all**: `src/*.ts` keeps writing `.push`,
+which is native speed in bun, and nativets compiles it as real mutation. Two declarations carry the
+pragma today — `lex`'s `tokens` and `splitTopLevel`'s `out`.
+
+**What it did to the frontier.** All FOUR modules `.push` was the first blocker for moved off it:
+
+| module | before | after |
+|---|---|---|
+| `ast.ts` | `NT1606` `.push`, own | **`NT1002`** — `String.prototype.trimEnd` |
+| `lexer.ts` | `NT1606` `.push`, own | **`NT2001`** — "Cannot compare string with undefined", own |
+| `parser.ts` | `NT1606` `.push`, lexer.ts's | **`NT2001`** — lexer.ts's, through the link |
+| `modules.ts` | `NT1606` `.push`, lexer.ts's | **`NT2001`** — lexer.ts's, through the link |
+
+As a first-blocker set `NT1606` drops from **five modules to one** — the survivor is
+`coverage-preprocess.ts`, whose accumulators this lane did not annotate (`test/bootstrap.test.ts`,
+the seventh turn of that bucket). None of the four reached IR, so `diagnostics.ts` is still the
+only rung-3 module.
+
+**The census's second column, now that it exists.** Re-run, the census counts **205** sites (up
+from 185 — the tree grew), and only **two declarations** carry the pragma. The
+ones that need more than a comment are the shapes the opt-in **deliberately refuses**:
+
+| shape | sites | why it stays refused |
+|---|---|---|
+| a plain local, pushed at function level | most of the 145 | **cleared** — one `//@@mutable` line per declaration |
+| a plain local, pushed from inside a **capturing arrow** | all of `modules.ts`'s | a closure env holds a second pointer this scope cannot null (`NT1607`) |
+| `this.<field>` | 38 | a field names no binding whose ownership the pass can establish |
+| a **parameter** (`ast.ts` `setBlockDrops(list: Stmt[], …)`) | 1 | a parameter is a BORROW; the caller owns it |
+
+That third row is the honest sizing correction: the census's "38 `this.<field>` sites need a
+decision rather than a rewrite" is still true and is now the largest remaining block, concentrated
+in `src/parser.ts` (18 of them).
+
+**And commit `1ea7fa2` was right about what it measured.** It refused `.push` on a
+syntactically-FRESH receiver as vacuous — nothing can name a temporary, so mutating it is
+unobservable *by construction* — and that argument is untouched: `[1,2].push(3)` is still refused.
+The shape that is now legal is the opposite one, a NAMED accumulator, and what makes it safe is not
+a new analysis: an array is LINEAR, so `const b = xs` MOVES and a second live handle cannot exist.
+See `docs/decorators.md`.
+
+**One real use-after-free was found doing this**, and it is the kind this document exists to
+record. `.push` **consumes** its argument, exactly as `[...xs, v]` does. While the argument was
+merely borrowed — which is right for every *other* call — a linear value pushed inside a function
+stayed owned by its local, the local freed it at scope exit, and the array went on pointing at it:
+`g.push(a)` then `g[0].length` printed `3` for a 2-element array, at exit 0.
 
 ## Milestones
 

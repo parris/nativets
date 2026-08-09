@@ -4019,11 +4019,23 @@ class FnGen {
         this.emit(`${t} = call ptr @nt_arr_to_reversed(ptr ${recv.v})`);
         return { v: t, ty: recv.ty };
       }
+      // `.push` on a `@@mutable` accumulator binding (the checker refuses every other
+      // receiver). node's contract, mined from test262
+      // test/built-ins/Array/prototype/push/: append the arguments LEFT TO RIGHT and
+      // return the NEW length — which for zero arguments is just the current length.
       case "push": {
-        const slot = this.toSlot(this.genExpr(args[0]!));
-        const t = this.fresh();
-        this.emit(`${t} = call double @nt_arr_push(ptr ${recv.v}, i64 ${slot})`);
-        return { v: t, ty: "number" };
+        if (args.length === 0) {
+          const t = this.fresh();
+          this.emit(`${t} = call double @nt_arr_len(ptr ${recv.v})`);
+          return { v: t, ty: "number" };
+        }
+        let last = "";
+        for (const a of args) {
+          const slot = this.toSlot(this.genExpr(a));
+          last = this.fresh();
+          this.emit(`${last} = call double @nt_arr_push(ptr ${recv.v}, i64 ${slot})`);
+        }
+        return { v: last, ty: "number" };
       }
       case "pop": {
         const slot = this.fresh();

@@ -7,7 +7,7 @@
  * supported programs.
  */
 
-import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr } from "./ast.ts";
+import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, Declarator } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText, exprLoc, freshArray } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
@@ -27,7 +27,7 @@ import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, typeofTagOf 
 import type { ArrowFunction, BinaryExpr, Loc } from "./ast.ts";
 // `unlinkedImportError` says "you did not link" instead of blaming closures, for a call
 // to an imported binding that the standalone (unlinked) check cannot see.
-import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError, unlinkedImportError, useBeforeAssign } from "./diagnostics.ts";
+import { NTError, NYI, nyi, typeError, mutationError, emptyArrayError, boundsError, unlinkedImportError, useBeforeAssign, decoratorError } from "./diagnostics.ts";
 
 export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr | null)[]; rest: boolean; }
 
@@ -100,6 +100,9 @@ function literalIndex(e: Expr): number | undefined {
  *  compile-time out-of-bounds rejection. */
 interface Binding {
   ty: Ty; constant: boolean; len?: number;
+  /** `@@mutable let xs: T[] = []` — this binding is an ACCUMULATOR: `.push` may append to
+   *  it in place. Per-BINDING, never part of `ty` (see parser `applyVarAttrs`). */
+  mutable?: boolean;
   /** SH2: this binding is a NARROWING shadow of a discriminated union, and this is the
    *  union it was narrowed from. Assigning through it is refused (see the checker) —
    *  the narrowing was proved for the OLD value and a new one can carry a different
@@ -127,7 +130,7 @@ class Scope {
   readonly hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
-  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty): void { this.vars.set(name, { ty, constant, len, narrowedFrom }); }
+  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty, mutable?: boolean): void { this.vars.set(name, { ty, constant, len, narrowedFrom, mutable }); }
   own(name: string): Binding | undefined { return this.vars.get(name); }
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
@@ -1629,7 +1632,8 @@ class Checker {
               d.init = { kind: "UndefinedLiteral" }; // fall through to the normal path
             } else {
               d.ty = d.annot;
-              scope.declare(d.name, d.ty, s.declKind === "const");
+              this.checkAccumulator(s, d);
+              scope.declare(d.name, d.ty, s.declKind === "const", undefined, undefined, s.mutable);
               continue;
             }
           }
@@ -1643,8 +1647,13 @@ class Checker {
           // which sets the literal's own inferred `.ty`, so it must overwrite here.
           if (d.annot) this.retypeLiteral(d.init, d.annot);
           d.ty = d.annot ?? t;
+          this.checkAccumulator(s, d);
+          // A `@@mutable` binding's length is NOT static even when it starts as a literal:
+          // `.push` changes it. Recording `len` here would let the NT2002 compile-time
+          // bounds check reject an index that is in range after the appends.
           scope.declare(d.name, d.ty, s.declKind === "const",
-            s.declKind === "const" ? literalLength(d.init) : undefined);
+            s.declKind === "const" && !s.mutable ? literalLength(d.init) : undefined,
+            undefined, s.mutable);
         }
         return;
       case "FuncDecl": return;
@@ -3364,6 +3373,38 @@ class Checker {
     }
   }
 
+  /**
+   * `@@mutable let xs: T[] = []` — validate the ACCUMULATOR opt-in (docs/decorators.md).
+   *
+   * The attribute legalizes exactly one thing, `.push` on this binding, so it is refused
+   * on anything that is not an array: on a `Map`/object/scalar it would be read as "this
+   * value is mutable", which is a much bigger promise than the one implemented.
+   */
+  private checkAccumulator(s: { mutable?: boolean; declKind: "let" | "const" }, d: Declarator): void {
+    if (!s.mutable) return;
+    if (d.ty === undefined || !isArrayTy(d.ty)) {
+      throw decoratorError(
+        `'@@mutable' on '${d.name}', which is not an array (it is '${d.ty ?? "unknown"}')`,
+        "`@@mutable` on a `let`/`const` marks an ARRAY ACCUMULATOR — a binding `.push` may append to in place. For a record use `@@mutable type`, for a class `@@mutable class`",
+      );
+    }
+  }
+
+  /**
+   * Is this `.push` receiver an ACCUMULATOR binding — a name declared `@@mutable` in a
+   * scope reachable from here? Returns the name, or null.
+   *
+   * A bare IDENTIFIER only. `this.f.push(…)`, `xs[0].push(…)`, `f().push(…)` and every
+   * other path are deliberately not accumulators: the attribute is attached to a binding,
+   * and those receivers name no binding whose ownership can be established. The ownership
+   * pass re-derives the same fact and refuses the shapes the checker cannot see (a
+   * capture, a moved-out binding) — this check is necessary, not sufficient.
+   */
+  private accumulatorName(recv: Expr, scope: Scope): string | null {
+    if (recv.kind !== "Identifier") return null;
+    return scope.lookup(recv.name)?.mutable === true ? recv.name : null;
+  }
+
   private inferArrayMethod(recv: Ty, callee: MemberExpr, args: Expr[], scope: Scope): Ty {
     const method = callee.property;
     const el = elemTy(recv);
@@ -3412,6 +3453,36 @@ class Checker {
     }
     if (method === "toReversed") { if (args.length !== 0) throw typeError(".toReversed expects 0 args"); return recv; }
 
+    // --- `.push` — the ACCUMULATOR opt-in ------------------------------------------
+    //
+    // Immutable-by-default (Stage 29) stands: `.push` on an ordinary binding is still
+    // NT1606 with the spread hint. It is legal on ONE shape — a binding declared
+    // `@@mutable` (docs/decorators.md), which is what makes the append an OPT-IN rather
+    // than a relaxation of the model. The reason the opt-in exists at all is measured and
+    // recorded in docs/ROADMAP.md: the sanctioned `xs = [...xs, v]` is O(1) amortized HERE
+    // (codegen's consuming-append) but a real O(n) copy under bun, and `src/*.ts` must run
+    // under both — 30k appends cost 4 ms here and 760 ms there.
+    //
+    // Handled ahead of `argTys` below so each argument is typed WITH the element type as
+    // its context: `tokens.push({ … })` has to reshape its literal to the declared element
+    // layout exactly as `[...tokens, { … }]` does.
+    if (method === "push") {
+      const acc = this.accumulatorName(callee.object, scope);
+      if (acc === null) {
+        throw mutationError("arrays are immutable: `.push` would mutate the array in place",
+          "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage. To append with `.push` instead, declare the binding `@@mutable` (`//@@mutable` on the line above `let acc: T[] = []`) — that works only on a plain local, never on a field, a parameter or an element");
+      }
+      // test262 test/built-ins/Array/prototype/push/: `S15.4.4.7_A2` (the return value is
+      // the NEW length), `S15.4.4.7_A1` (0 args is legal and returns the current length),
+      // and the multi-argument form (`push(a, b, c)` appends left to right).
+      for (const a of args) {
+        const at = this.typeArg(a, el, scope);
+        if (!this.assignable(el, at)) throw typeError(`.push expects ${el}, got ${at}`, exprLoc(a));
+        this.retypeLiteral(a, el);
+      }
+      return "number";
+    }
+
     const argTys = args.map((a) => this.type(a, scope));
     const need = (n: number) => { if (args.length !== n) throw typeError(`.${method} expects ${n} args`); };
     switch (method) {
@@ -3429,7 +3500,7 @@ class Checker {
       // loop to be quadratic": under node that spelling really is O(n²) (12.4s for 100k
       // appends, against 21ms for the same program built here), so the reader's
       // scepticism is well earned and has to be answered in the hint itself.
-      case "push": throw mutationError("arrays are immutable: `.push` would mutate the array in place", "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage");
+      // (`.push` is handled above `argTys`, next to the accumulator opt-in.)
       // The rest of node's in-place mutators (stdlib Batch 1): same treatment as
       // .push/.pop — refuse and name the immutable replacement.
       case "fill": throw mutationError("arrays are immutable: `.fill` would overwrite the array in place", "build a new array instead, e.g. `arr.map(() => v)` for a same-length fill, or `arr.with(i, v)` for one slot");
