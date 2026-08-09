@@ -181,7 +181,10 @@ export function sourceToIR(source: string, entryPath?: string): string {
       { line: d.line, label: d.movedAt ? "value used here after move" : "occurs here", primary: true },
     ];
     if (d.movedAt) spans.push({ line: d.movedAt, label: "value moved here" });
-    throw new NTError({ code: d.code, message: d.message, spans });
+    // `hint` is carried through. Every NT16xx rule in the ownership pass builds one, and
+    // dropping it here made all of them invisible — the pass said "hand out `c` itself
+    // instead" and the CLI printed the bare refusal (test/ownership.test.ts).
+    throw new NTError({ code: d.code, message: d.message, spans, hint: d.hint });
   }
   return codegen(checked);
 }

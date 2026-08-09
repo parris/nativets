@@ -184,3 +184,88 @@ console.log(Sym.width);
     expect(msg).not.toContain("'Sym' is not defined");
   });
 });
+
+/*
+ * CONSUMING PARAMETERS. A constructor parameter property stores its argument into a slot
+ * that outlives the call, so the parameter cannot be a borrow — the caller would still
+ * drop the value while the object held a pointer to it. It is a MOVE: rustc's
+ * `fn new(d: D) -> Self` against `fn new(d: &D)`, and every `new C(v)` site gives `v` up.
+ *
+ * These are behavioural, not node-differential, for the same reason as the block above:
+ * node's strip-only mode rejects parameter properties outright. The values are checked
+ * against a hand-desugared twin run under node, and `__objLive()` / `__arrLive()` carry
+ * the memory evidence node cannot.
+ */
+describe("consuming parameters (constructor parameter properties)", () => {
+  // The exact shape that gave EXIT 255 when the NT1604 refusal was suppressed without the
+  // move (docs/self-hosting.md): the object escapes the scope that built its field, so a
+  // borrow leaves two owners and the value is freed twice. With the move there is one
+  // owner. Node's twin prints `[NT1] boom`.
+  test("a value moved into a parameter property survives its builder's scope", async () => {
+    const r = await run(`
+class E {
+  constructor(readonly d: {code: string, message: string}) {}
+}
+function make(c: string, m: string): E {
+  const v: {code: string, message: string} = { code: c, message: m };
+  return new E(v);
+}
+function show(): string {
+  const e = make("NT1", "boom");
+  return "[" + e.d.code + "] " + e.d.message;
+}
+console.log(show());
+`);
+    expect(r.stdout).toBe("[NT1] boom\n");
+    expect(r.status).toBe(0); // 255 was the double free
+  });
+
+  // The object itself is dropped EXACTLY ONCE — `__objLive()` is 0 for it, over 200
+  // iterations so a double free would have to be luckier than once. (The array field is a
+  // separate, PRE-EXISTING matter: `nt_obj_free` is shallow, so an aggregate reached
+  // through a field is never freed. `__arrLive()` records that honestly rather than
+  // hiding it; it reads the same on the already-legal `this.xs = [..]` spelling.)
+  test("the constructed object is freed exactly once (200 iterations)", async () => {
+    const r = await run(`
+class Sized {
+  n: number;
+  constructor(readonly xs: number[]) { this.n = xs.length; }
+}
+function loop(k: number): number {
+  let total = 0;
+  for (let i = 0; i < k; i++) {
+    const a: number[] = [1, 2, 3];
+    const s = new Sized(a);
+    total = total + s.n;
+  }
+  return total;
+}
+console.log(loop(200));
+console.log(__objLive());
+console.log(__arrLive());
+`);
+    expect(r.stdout).toBe("600\n0\n200\n"); // 200 Sized objects freed; the moved arrays are the shallow-free leak
+    expect(r.status).toBe(0);
+  });
+
+  // MAY-move: the drop flag. `v` is moved on one path and not the other, so the scope must
+  // still drop it where it was not moved and must NOT drop it where it was. Node's twin
+  // prints 5 then 0.
+  test("a value moved on only ONE path is dropped on the other, and never twice", async () => {
+    const r = await run(`
+class Box { constructor(readonly inner: {x:number}) {} }
+function g(flag: boolean): number {
+  const v: {x:number} = { x: 5 };
+  if (flag) {
+    const b = new Box(v);
+    return b.inner.x;
+  }
+  return 0;
+}
+console.log(g(true));
+console.log(g(false));
+`);
+    expect(r.stdout).toBe("5\n0\n");
+    expect(r.status).toBe(0);
+  });
+});

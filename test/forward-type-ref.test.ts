@@ -182,6 +182,59 @@ console.log(p.kind);`);
     expect(r.hint).toContain("Reordering cannot help");
   });
 
+  // A class declares a TYPE too, and it had its OWN erasure — a separate code path from
+  // `resolveNamed`, so the refusal above never covered it. `parseClass` resolves the class
+  // name inside its own body to a self MARKER (so `bump(): Counter` works before the
+  // instance shape exists) and then substituted the marker for the real shape at the end.
+  // A FIELD naming the class cannot take that substitution — the shape would contain
+  // itself — so the marker was rewritten to `number` instead, unconditionally and with no
+  // diagnostic. That is the same recursion `interface N { next: N }` is refused for, in the
+  // other spelling, and it must be told the same way.
+  test("a self-recursive CLASS field is refused as recursive, not erased to number", () => {
+    const r = reject(`
+class N {
+  v: number;
+  next: N;
+  constructor(v: number, next: N) { this.v = v; this.next = next; }
+}
+console.log(1);`);
+    expect(r.code).toBe("NT1030");
+    expect(r.message).toContain("'N'");
+    expect(r.message).toContain("itself");
+    expect(r.message).toContain("next"); // names the FIELD, which is where the cycle closes
+    expect(r.hint).toContain("Reordering cannot help");
+  });
+
+  // The erasure was not only in a bare field: it fired on any field type CONTAINING the
+  // marker, so an array/Map/optional/function-typed field erased its inner reference the
+  // same silent way (`kids: N[]` became `number[]`). Each is still recursion.
+  test("a class field that contains itself indirectly is refused too", () => {
+    for (const field of ["kids: N[];", "next?: N;", "by: Map<string, N>;", "self: () => N;"]) {
+      const r = reject(`
+class N {
+  v: number;
+  ${field}
+  constructor(v: number) { this.v = v; }
+}
+console.log(1);`);
+      expect({ field, code: r.code }).toEqual({ field, code: "NT1030" });
+      expect(r.message).toContain("itself");
+    }
+  });
+
+  // The guard on the guard: a method may still name its own class in a SIGNATURE. That is
+  // what the self marker exists for and it is not recursion — the instance shape does not
+  // contain itself, the method merely mentions it — so this must keep compiling.
+  test("a method naming its own class in a signature still compiles and matches node", async () => {
+    await matchesNode(`
+class Counter {
+  n: number;
+  constructor(n: number) { this.n = n; }
+  bump(): Counter { return new Counter(this.n + 1); }
+}
+console.log(new Counter(2).bump().n);`);
+  });
+
   // Declaration order is the whole difference: the same source, reordered, compiles.
   test("the same alias declared after its members compiles", () => {
     const r = reject(`

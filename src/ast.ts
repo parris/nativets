@@ -747,6 +747,14 @@ export interface FieldAssign {
   kind: "FieldAssign"; object: Expr; field: string; value: Expr; ty?: Ty;
   /** The parser proved this is `this.f = v` inside a member body where that is legal. */
   viaThis?: boolean;
+  /**
+   * The DEFINITIONAL store of a constructor parameter property (`constructor(readonly d: T)`
+   * desugars to a field plus `this.d = d`). It is the one assignment in the language that
+   * does not move its value out of the enclosing scope: the parameter is CONSUMING, so the
+   * value it names arrived owned by this object and the caller already gave it up.
+   * src/ownership.ts reads this to keep the store from being a move-out-of-borrow (NT1604).
+   */
+  paramProp?: boolean;
 }
 
 export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }

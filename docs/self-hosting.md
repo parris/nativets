@@ -455,6 +455,24 @@ Two rules are unconditional: a module that reached IR may never stop reaching IR
 the only ratchet in the tree that protects a module that *already* self-compiles), and a
 blocker may never move to an **earlier** pipeline stage.
 
+**"Moved shallower" is NOT automatically a regression.** The rule of thumb this ratchet was
+being read with — *re-record only when each moved blocker moved DEEPER* — is too crude, and
+following it would have held a correct fix. A blocker moving to an earlier line is a
+regression when the module genuinely got worse; it is a **correction** when a blocker that
+was always there stops being MASKED by a miscompile further in. The question that separates
+them is not the direction of the move, it is:
+
+> was the newly-reported construct previously **silently mis-handled**, or was it previously
+> handled **correctly** and passed?
+
+Only the second is a regression. The first means the instrument was crediting the module
+with progress it never had — the same failure mode as `coverage` once scoring a compiler
+crash as "no blockers", and as `phaseOf` returning `ir` from both branches of its `try`.
+
+The worked example is the one that forced the amendment; see the re-measurement below.
+Holding a correct refusal to keep a gate green is the rubber-stamp dynamic with the sign
+flipped, and it is the one this ratchet exists to prevent.
+
 `git` is deliberately not an input to any verdict — `actions/checkout` fetches depth 1, so a
 git-informed verdict would differ between a laptop and CI. It is used only to *enrich* a
 failure message with a before/after taken against the recorded revision.
@@ -662,6 +680,124 @@ setups silently misses matches, which would make every number above too small.
 array `.push` from a same-named method on a user object, and it cannot see a call reached
 through an alias. The numbers are an upper bound on sites and a *lower* bound on effort. They
 are still the right order of magnitude, and an order of magnitude was exactly what was missing.
+
+### Re-measured after the RECURSIVE-CLASS-FIELD refusal — the gap GREW, and that is the finding
+
+`interface N { next: N }` has been refused (`NT1030`) since the forward-type lane. The CLASS
+spelling of the identical recursion was not: `parseClass` resolves a class name inside its own
+body to a self MARKER (so `bump(): Counter` works before the instance shape exists), and a
+FIELD carrying that marker was rewritten to `number` — unconditionally, with no diagnostic, on
+a line whose own comment called it "the pre-existing erasure".
+
+**That erasure was hiding a miscompile in the compiler's own symbol table.** `src/checker.ts:93`
+is `class Scope { constructor(private parent: Scope | null = null) {} … }`. Minimized and run
+against the parser as it stood, the compiler describes its own scope chain in its own words:
+
+```
+BEFORE: error[NT2001]: new Scope arg 0 expects ?NScope{parent:?Nnumber}, got null
+AFTER:  error[NT1030]: recursive type 'Scope' — its field 'parent' refers to itself
+```
+
+`parent: ?Nnumber`. **The scope chain has been a number in every self-host measurement ever
+taken.** checker.ts was recorded as blocked at line 676 (`Checker.inArrow`); it had in fact
+never got past line 93 with its symbol table intact.
+
+| Module | Before | After |
+|---|---|---|
+| `checker.ts` | `NT1023` — `Checker.inArrow` assigns a field, line 676 | **`NT1030`** — `Scope.parent`, line **93** |
+| `ownership.ts` | `NT1023` — the same, inherited through the link | **`NT1030`** — the same, inherited |
+| every other module | — | **unchanged** |
+
+So the measured gap **widened**: recursive types now gate **9 of 12** modules in the linked
+column, not 7. Four instruments reddened on a strict improvement — `selfhost-ratchet`, `sh6`,
+`bootstrap` and `self-host-coverage` — and all four were re-recorded deliberately, under the
+"moved shallower is not automatically a regression" rule the same lane added above. Attribution
+was a controlled experiment, not an inference: reverting the *other* commit in the lane (the
+optional-class-field fix) leaves the ratchet still red, so the move belongs to this refusal
+alone and the optional-field fix is ratchet-neutral.
+
+**What this changes about the plan.** `Scope` is **self**-recursive, and not a member of
+`src/ast.ts`'s 44-declaration mutually-recursive SCC. So the earlier sizing — *"self-recursion
+alone moves zero modules, there is no partial credit before the SCC resolves"* — needs one
+amendment: self-recursion alone still moves nothing *forward*, but it is now what `checker.ts`
+and `ownership.ts` need to get back to where the measurement wrongly thought they already were.
+The recursive-type work is no longer pure foundation.
+
+A second, independent silent wrong answer fell out of the same file and is fixed with it: the
+`?` on a class field was parsed and **discarded**, so `s?: string` was typed `string` rather
+than `?Ustring` as the identical interface field already was. An unassigned optional field read
+back as the zero slot — a NULL `char*` for a string, `0` for a number, `typeof` reporting
+`"string"` — and `this.s = undefined` was *rejected* on code tsc accepts. Fixed rather than
+refused (it mirrors `parseObjectType`), with the non-obvious half being that "absent" has to be
+WRITTEN: an instance is a heap block and every field is a real slot, so an optional field with
+no initializer now gets `undefined` in the constructor prelude. Fixture:
+`test/fixtures/classes/optional-field.ts`, which exited **255 with no output at all** before.
+
+Two adjacent gaps this exposed, neither taken: narrowing still does not reach `this.<field>`
+(`this.s === undefined ? "none" : this.s` is `NT2001`), which optional class fields make far
+easier to hit now that they produce real nullables; and `null` is still not accepted for a
+`?N` **parameter** (`new Scope(null)`), adjacent to the recorded `?Ustring` argument gap.
+### THE FIRST MODULE SELF-COMPILES — `diagnostics.ts` at rung 3 (consuming parameters)
+
+Every re-measurement above this one records a frontier that moved *within* rung 0. This one
+does not. **`src/diagnostics.ts` reaches rung 3**: nativets compiles it to 95,851 bytes of LLVM
+IR, clang links that IR into a native binary, and the binary's stdout and exit code match the
+`bun`-run module. It is the first of the twelve to leave the floor since `test/sh6.test.ts` was
+written, and the headline assertion in that file changed from `[]` to `["diagnostics.ts"]`.
+
+The last of its six blockers was `constructor(readonly diag: Diagnostic)` — **NT1604**, and the
+previous lane was right that it was neither a false positive nor a nudge away. A linear
+parameter is a BORROW: the caller owns the value and drops it, so storing one in a field left
+the caller freeing a pointer the object still held (suppressing the rule and running
+`function make(): E { const v = {…}; return new E(v); }` gave **exit 255**). The source-side
+shallow-copy workaround leaked instead. What it needed was the feature that note named:
+
+**A constructor PARAMETER PROPERTY is a CONSUMING parameter.** The callee takes ownership, and
+the move propagates to every `new C(v)` site, so the caller stops dropping the value and using
+it afterwards is NT1601 (≈ rustc E0382). This is `fn new(d: D) -> Self` against `fn new(d: &D)`.
+The surface question — how does a parameter get marked consuming? — is answered **syntactically**
+rather than by inference or by an attribute, because a parameter property is the one parameter
+whose store is guaranteed: the desugaring emits `this.d = d`, so there is nothing to infer and
+no spelling to add, and `src/*.ts` keeps running unchanged under bun. Inference over general
+parameters was rejected for the opposite reason: it would make a function's calling convention a
+property of its *body*, invisible at the call site, and would flip pinned NT1604 refusals across
+`test/ownership/` — an invisible ABI is the wrong default for a compiler whose second rule is
+"reject, never miscompile". Full detail in `docs/ownership.md`.
+
+| Module | Before | After |
+|---|---|---|
+| `diagnostics.ts` | rung 0 — `NT1604`, `constructor(readonly diag: Diagnostic)` | **rung 3** — IR, links, runs; output matches bun |
+| every other module | — | **unchanged**, rung 0, same blocker |
+
+**The rung-3 row for a library module is WEAK** (caveat 3 of `test/sh6.test.ts`: it prints
+nothing, so the comparison is empty == empty). The non-weak evidence is a **driver
+differential** added with it — a program that imports the module, builds three diagnostics
+through three constructors, reads `.diag` back off the class whose parameter property was the
+blocker, and renders one through the multi-span formatter over real source. 466 bytes of stdout,
+byte-identical to `bun run` over the same file, exit 0 == 0. That is the "per-module EXERCISE
+entry" `sh6.test.ts` has been asking for since it was written.
+
+**Leak / double-free accounting, since this project has shipped both.** Zero double frees: the
+value has exactly one owner (`__objLive()` → 0 for the constructed object across a 200-iteration
+loop, and the escaping `return new E(v)` shape now exits 0 rather than 255). There IS a leak, and
+it is **pre-existing, known, and unrelated**: `nt_obj_free` is SHALLOW, so an aggregate reached
+through a field is never freed — the shallow-drop characterization above and `docs/ROADMAP.md`
+Phase C. Measured identically on the unmodified tree before this change landed: `const o = {
+inner: {a:1}, b:2 }` leaves `__objLive()` at 1, as does `class Box { inner: {x:number};
+constructor() { this.inner = {x:41}; } }`. Consuming parameters reach the same accounting the
+already-legal spelling had; they do not add a leak class, and a moved-in field is exactly the
+"an object field can be MOVED OUT while the parent's slot still points at it" shape that
+characterization pins as a precondition for any future recursive free.
+
+**Two costs, stated because the next module will pay them.** The compiler's dominant class idiom
+IS the parameter property — `Scope(private parent)`, `ModuleGen(readonly functions, readonly
+globals)`, `FnGen(private mod)`, `Renamer(private names, private tags)`, `Parser(private toks)`,
+`Analyzer(private linear, private topLevel, …)` — so this construct is not a `diagnostics.ts`
+one-off. But the call-site half bites: `src/ownership.ts` constructs **two** `Analyzer`s from the
+same `linear`/`topLevel`/`paramBorrows` locals, which is now a use-after-move. `diagnostics.ts`
+paid nothing (all fourteen of its `new NTError(…)` sites pass a fresh object literal, and moving
+a temporary is free); `ownership.ts` will need a source rewrite. That is the honest shape of the
+remaining work, and it is the same Path-B grind the `.push` census found.
 
 ---
 

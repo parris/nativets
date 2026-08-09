@@ -11,7 +11,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ownershipCheck } from "../src/driver.ts";
+import { ownershipCheck, sourceToIR } from "../src/driver.ts";
+import { NTError } from "../src/diagnostics.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DIR = join(HERE, "ownership");
@@ -41,4 +42,51 @@ describe("ownership (linear move checker)", () => {
       expect(diags.length).toBe(expected.length);
     });
   }
+});
+
+/*
+ * The HINT has to survive the trip. Every NT16xx rule in `src/ownership.ts` builds one —
+ * `OwnDiag.hint` — and it is the whole point of CLAUDE.md's "anything we can't compile
+ * correctly gets an NT**** diagnostic WITH A HINT". `sourceToIR` constructed the thrown
+ * `NTError` from the code, the message and the spans only, so not one of them ever reached
+ * a reader: the pass said "hand out `c` itself instead" and the CLI printed the bare
+ * refusal. A hint nobody can see is a hint that does not exist.
+ */
+describe("ownership diagnostics reach the user", () => {
+  function thrown(src: string): NTError | null {
+    try { sourceToIR(src); return null; } catch (e) { return e instanceof NTError ? e : null; }
+  }
+
+  test("an NT1604 alias hint survives into the thrown diagnostic", () => {
+    const e = thrown(`
+//@@mutable
+type Cell = { n: number };
+function leak(): Cell {
+  const c: Cell = { n: 1 };
+  const b = c;
+  return b;
+}
+console.log(leak().n);
+`);
+    expect(e?.diag.code).toBe("NT1604");
+    expect(e?.diag.hint).toContain("hand out `c` itself instead");
+  });
+
+  // The refusal this feature deliberately does NOT lift: a HAND-WRITTEN `this.f = p` in a
+  // constructor body. Only a parameter PROPERTY is syntactically guaranteed to store, so
+  // only it is inferred consuming; the hand-written store stays refused and must say what
+  // to write instead.
+  test("NT1604 on a constructor's hand-written field store names the parameter-property form", () => {
+    const e = thrown(`
+class Box {
+  inner: {x:number};
+  constructor(v: {x:number}) { this.inner = v; }
+}
+const b = new Box({x: 1});
+console.log(b.inner.x);
+`);
+    expect(e?.diag.code).toBe("NT1604");
+    expect(e?.diag.hint).toContain("PARAMETER PROPERTY");
+    expect(e?.diag.hint).toContain("constructor(readonly v: T)");
+  });
 });

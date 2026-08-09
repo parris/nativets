@@ -28,7 +28,7 @@ hand-off explicit and to satisfy the checker.
 | **NT1601** | E0382 | use of moved value | ✅ implemented |
 | **NT1602** | E0505 | cannot move while borrowed (for-of borrow live) | ✅ implemented |
 | **NT1603** | E0502 | cannot mutate while borrowed (iterator invalidation) | ✅ implemented |
-| **NT1604** | E0507 | move out of borrowed content (a for-of element, a by-borrow param, a `@@mutable` alias or method result) | ✅ implemented |
+| **NT1604** | E0507 | move out of borrowed content (a for-of element, a by-borrow param, a `@@mutable` alias or method result) — but see **consuming parameters** below | ✅ implemented |
 | **NT1605** | E0508 | move out of a linear array element (`arr[i]`) | ✅ implemented |
 | **NT1607** | E0596 | cannot mutate through a borrow — a `@@mutable` setter needs an OWNED receiver | ✅ implemented |
 
@@ -41,6 +41,38 @@ parameter, a `for-of` element, a container element, a callback parameter or a ca
 **NT1607**; and reassigning an owner something still aliases is **NT1602** (≈ E0506). This
 proves no double-free / use-after-free from aliasing; it is deliberately *not* full `&mut`
 exclusivity (the owner may mutate while an alias is live — that is the specified behaviour).
+
+**Consuming parameters — the callee takes ownership.** A parameter is normally a **borrow**:
+the caller owns the value and drops it when its scope ends, so storing one into anything that
+outlives the call would give it two owners and free it twice (measured: exit 255). rustc draws
+the same line between `fn f(x: T)` and `fn f(x: &T)`, and nativets now has the first side of it
+in exactly one syntactic place — a **constructor parameter property**:
+
+```ts
+class NTError extends Error {
+  constructor(readonly diag: Diagnostic) { super(diag.message); }
+}
+const d: Diagnostic = { code: "NT0001", message: "…" };
+const e = new NTError(d);   // `d` MOVES into the error
+console.log(d.code);        // NT1601 — use of moved value
+```
+
+A parameter property is the one parameter whose store is **guaranteed by the desugaring**
+(`constructor(readonly d: T)` emits a field plus `this.d = d`), so "is it consuming?" has a
+syntactic answer that needs no inference and no new spelling. The rule is two-sided and both
+sides are required for soundness:
+
+- **In the callee**, the definitional store is not a move-out — the value arrived owned by this
+  object — and the parameter keeps *borrowing* it afterwards, so
+  `constructor(readonly xs: T[]) { this.n = xs.length }` reads fine while a *second* hand-off
+  (`const stolen = xs`, `move(xs)`, `return xs`) is still **NT1604**.
+- **At every `new C(v)` site**, the argument MOVES: the caller stops dropping it and using it
+  afterwards is **NT1601** (≈ E0382), including `new Pair(v, v)`.
+
+Everything else stays a borrow, deliberately. A hand-written `this.f = p` in a constructor body
+is still **NT1604** — only the parameter-property spelling is guaranteed to store — and its hint
+names the form to write instead. Plain functions have no consuming parameter, so
+`function wrap(d: T): Box { return new Box(d); }` is refused rather than miscompiled.
 
 **Borrows (phase 2, done for for-of).** A `for-of (const x of arr)` holds a borrow of `arr`
 for the whole loop body. Inside the body: reads (`.length`, `arr[i]`, `.includes`) are shared

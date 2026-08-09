@@ -315,8 +315,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // of twelve modules) and NT2001 (parameter-default inference); this lane had emptied
     // NT1606 (diagnostics.ts was its only holder) and added NT1604. The union of those four
     // moves is the list below, measured on the merged tree, not inferred from either side.
+    // NT1604 IS NOW EMPTY, and this is the first time a bucket emptied by a module
+    // LEAVING the table rather than moving within it: `diagnostics.ts` was its only
+    // holder, and it now produces IR, so it contributes no blocker at all. Consuming
+    // parameters (a constructor PARAMETER PROPERTY takes ownership; every `new C(v)` site
+    // moves `v`) is what cleared it — see test/sh6.test.ts, where the module reaches
+    // rung 3 and its output matches the bun-run module byte for byte.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1023", "NT1030", "NT1031", "NT1604"],
+      ["NT1023", "NT1030", "NT1031"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -351,7 +357,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and it has since GROWN to three, all of it forward movement: the optional-element
     // lane cleared `?.[]`, so `checker.ts` walked on to `Checker.inArrow` (a method that
     // assigns a field), and `ownership.ts` inherits that identical error through the link.
-    expect(byCode["NT1023"]!.sort()).toEqual(["checker.ts", "codegen.ts", "ownership.ts"]);
+    // ...and then SHRANK back to one, and that was NOT forward movement — it is the
+    // opposite, and it is still correct. `checker.ts` and `ownership.ts` left this bucket
+    // for NT1030 at a SHALLOWER line: `class Scope { parent: Scope | null }` (checker.ts:93,
+    // the compiler's own symbol table) had its recursive field silently erased to `number`,
+    // so this bucket was crediting checker.ts with reaching line 676 past a miscompiled
+    // Scope. A bucket can shrink because the frontier RETREATED to the truth. See the
+    // "moved shallower is not automatically a regression" rule in selfhost-ratchet.test.ts.
+    expect(byCode["NT1023"]!.sort()).toEqual(["codegen.ts"]);
     // RATCHET MOVE (collections): NT1014 is now EMPTY. It held lexer.ts on
     // `new Set([...])` for REGEX_AFTER_KEYWORD; `new Set(iterable)` compiles now, so the
     // module walks on to what sat behind it — NT2001, an object literal where a Map is
@@ -425,8 +438,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // — `ast.ts`'s forward type reference is what the link reaches once `?.[]` is gone. It
     // is the single highest-leverage blocker on the board now, on the same reasoning that
     // made `?.[]` the last one: nothing else here moves more than one module.
+    //
+    // NINE of the twelve now, and the two that joined did NOT arrive by moving forward.
+    // `checker.ts` and `ownership.ts` came here from NT1023 at a SHALLOWER line, because a
+    // recursive CLASS field used to be erased to `number` silently and `class Scope {
+    // parent: Scope | null }` (checker.ts:93) is the compiler's own symbol table — it was
+    // being described as `?NScope{parent:?Nnumber}`. This bucket growing is the measurement
+    // getting more honest, not the frontier getting worse; the refusal is correct under the
+    // prime directive whatever this number says. Note also that the two are not the same
+    // problem: ast.ts needs the 44-declaration MUTUAL cycle, Scope needs only SELF-recursion.
     expect(byCode["NT1030"]!.sort()).toEqual(
-      ["ast.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+      ["ast.ts", "checker.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
     // NT1015 is empty — the generic-method lane cleared modules.ts's, and codegen.ts's
     // static-member site was cleared earlier. (A fact about today; this file has been
@@ -444,12 +466,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // blockers that were queued behind them. A fact about today, not an invariant — this
     // file has been wrong three times treating an emptied bucket as one.
     expect(byCode["NT1606"]).toBeUndefined();
-    // NEW BUCKET, and it is the END of that module's chain rather than another step along
-    // it: NT1604, `constructor(readonly diag: Diagnostic)` — an object-typed parameter
-    // moved into a field. A linear parameter is a BORROW (the caller owns and drops it),
-    // so the refusal is SOUND: suppressing it and running the escaping shape gives exit
-    // 255. Clearing it needs consuming parameters, which is a feature, not a predicate.
-    expect(byCode["NT1604"]!.sort()).toEqual(["diagnostics.ts"]);
+    // ...and NT1604 emptied one round later, which is the END of that module's chain and
+    // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
+    // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
+    // caller owns and drops it), so the refusal was SOUND: suppressing it and running the
+    // escaping shape gave exit 255. It took the feature that note named: CONSUMING
+    // PARAMETERS. A constructor parameter property is one by construction — the desugaring
+    // stores it — so the callee takes ownership and every `new C(v)` site moves `v`. One
+    // owner, one drop, exit 0.
+    //
+    // `diagnostics.ts` is therefore the FIRST module in the tree that contributes no
+    // blocker at all: it produces IR, links, and runs (test/sh6.test.ts, rung 3).
+    expect(byCode["NT1604"]).toBeUndefined();
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not
