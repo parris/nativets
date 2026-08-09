@@ -663,6 +663,65 @@ array `.push` from a same-named method on a user object, and it cannot see a cal
 through an alias. The numbers are an upper bound on sites and a *lower* bound on effort. They
 are still the right order of magnitude, and an order of magnitude was exactly what was missing.
 
+### THE FIRST MODULE SELF-COMPILES — `diagnostics.ts` at rung 3 (consuming parameters)
+
+Every re-measurement above this one records a frontier that moved *within* rung 0. This one
+does not. **`src/diagnostics.ts` reaches rung 3**: nativets compiles it to 95,851 bytes of LLVM
+IR, clang links that IR into a native binary, and the binary's stdout and exit code match the
+`bun`-run module. It is the first of the twelve to leave the floor since `test/sh6.test.ts` was
+written, and the headline assertion in that file changed from `[]` to `["diagnostics.ts"]`.
+
+The last of its six blockers was `constructor(readonly diag: Diagnostic)` — **NT1604**, and the
+previous lane was right that it was neither a false positive nor a nudge away. A linear
+parameter is a BORROW: the caller owns the value and drops it, so storing one in a field left
+the caller freeing a pointer the object still held (suppressing the rule and running
+`function make(): E { const v = {…}; return new E(v); }` gave **exit 255**). The source-side
+shallow-copy workaround leaked instead. What it needed was the feature that note named:
+
+**A constructor PARAMETER PROPERTY is a CONSUMING parameter.** The callee takes ownership, and
+the move propagates to every `new C(v)` site, so the caller stops dropping the value and using
+it afterwards is NT1601 (≈ rustc E0382). This is `fn new(d: D) -> Self` against `fn new(d: &D)`.
+The surface question — how does a parameter get marked consuming? — is answered **syntactically**
+rather than by inference or by an attribute, because a parameter property is the one parameter
+whose store is guaranteed: the desugaring emits `this.d = d`, so there is nothing to infer and
+no spelling to add, and `src/*.ts` keeps running unchanged under bun. Inference over general
+parameters was rejected for the opposite reason: it would make a function's calling convention a
+property of its *body*, invisible at the call site, and would flip pinned NT1604 refusals across
+`test/ownership/` — an invisible ABI is the wrong default for a compiler whose second rule is
+"reject, never miscompile". Full detail in `docs/ownership.md`.
+
+| Module | Before | After |
+|---|---|---|
+| `diagnostics.ts` | rung 0 — `NT1604`, `constructor(readonly diag: Diagnostic)` | **rung 3** — IR, links, runs; output matches bun |
+| every other module | — | **unchanged**, rung 0, same blocker |
+
+**The rung-3 row for a library module is WEAK** (caveat 3 of `test/sh6.test.ts`: it prints
+nothing, so the comparison is empty == empty). The non-weak evidence is a **driver
+differential** added with it — a program that imports the module, builds three diagnostics
+through three constructors, reads `.diag` back off the class whose parameter property was the
+blocker, and renders one through the multi-span formatter over real source. 466 bytes of stdout,
+byte-identical to `bun run` over the same file, exit 0 == 0. That is the "per-module EXERCISE
+entry" `sh6.test.ts` has been asking for since it was written.
+
+**Leak / double-free accounting, since this project has shipped both.** Zero double frees: the
+value has exactly one owner (`__objLive()` → 0 for the constructed object across a 200-iteration
+loop, and the escaping `return new E(v)` shape now exits 0 rather than 255). There IS a leak, and
+it is **pre-existing and unrelated**: `nt_obj_free` is SHALLOW, so an object field holding another
+object is never freed. Measured identically on the unmodified tree — `const o = { inner: {a:1},
+b:2 }` leaves `__objLive()` at 1, as does `class Box { inner: {x:number}; constructor() {
+this.inner = {x:41}; } }`. Consuming parameters reach the same accounting the already-legal
+spelling had; they do not add a leak class.
+
+**Two costs, stated because the next module will pay them.** The compiler's dominant class idiom
+IS the parameter property — `Scope(private parent)`, `ModuleGen(readonly functions, readonly
+globals)`, `FnGen(private mod)`, `Renamer(private names, private tags)`, `Parser(private toks)`,
+`Analyzer(private linear, private topLevel, …)` — so this construct is not a `diagnostics.ts`
+one-off. But the call-site half bites: `src/ownership.ts` constructs **two** `Analyzer`s from the
+same `linear`/`topLevel`/`paramBorrows` locals, which is now a use-after-move. `diagnostics.ts`
+paid nothing (all fourteen of its `new NTError(…)` sites pass a fresh object literal, and moving
+a temporary is free); `ownership.ts` will need a source rewrite. That is the honest shape of the
+remaining work, and it is the same Path-B grind the `.push` census found.
+
 ---
 
 ## Milestones

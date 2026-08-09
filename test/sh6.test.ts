@@ -67,9 +67,9 @@
  */
 
 import { test, expect, describe, afterAll } from "bun:test";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { sourceToIR, buildBinary } from "../src/driver.ts";
@@ -250,18 +250,26 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   //   3. NT2001  `label = "here"` typed number             -> annotated (src)
   //   4. NT2001  optional field inside an ARRAY element    -> checker: array assignability
   //   5. NT2001  `this.name` on a class extending Error    -> declared the field (src)
-  //   6. NT1604  `constructor(readonly diag: Diagnostic)`  -> STILL BLOCKED
+  //   6. NT1604  `constructor(readonly diag: Diagnostic)`  -> CONSUMING PARAMETERS
   //
   // Six is the honest number for the rung 0 -> 1 distance of the SHALLOWEST module in the
   // tree, and it is the first time that distance has been measured for any module at all.
   //
-  // The last one is not a false positive and not a nudge away. A linear parameter is a
-  // BORROW — the caller owns and drops it — so storing one in a field would leave the
-  // caller freeing a pointer the object still holds. Measured, not assumed: suppressing
-  // the rule and running `function make(): E { const v = {...}; return new E(v); }` gives
-  // exit 255. Clearing it needs CONSUMING PARAMETERS (the callee takes ownership and the
-  // move propagates to every call site), which is a feature.
-  "diagnostics.ts": { rung: 0, code: "NT1604", blame: "self" },
+  // THE FIRST MODULE OFF THE FLOOR. Blocker 6 was not a false positive and not a nudge
+  // away: a linear parameter is a BORROW (the caller owns and drops it), so storing one in
+  // a field left the caller freeing a pointer the object still held — suppressing the rule
+  // and running `function make(): E { const v = {...}; return new E(v); }` gave exit 255.
+  // It took the feature the note asked for: a constructor PARAMETER PROPERTY is a
+  // CONSUMING parameter (rustc's `fn new(d: D)`, not `fn new(d: &D)`), and every `new C(v)`
+  // site moves `v` — so there is exactly one owner and no second drop. Rungs 1 -> 3 then
+  // cost nothing, as this file's ladder predicted: the IR links via clang and the binary's
+  // stdout and exit code match the bun-run module exactly.
+  //
+  // Rung 3 here is WEAK (see caveat 3 in the header): `diagnostics.ts` is a library and
+  // prints nothing, so this row compares empty to empty. The non-weak evidence is the
+  // driver differential at the end of this file, which exercises the module's exports and
+  // matches bun byte for byte over 466 bytes of real output.
+  "diagnostics.ts": { rung: 3, code: "", blame: "self" },
   // RE-MEASURED by the `?.[]` lane. parser.ts had been the ONLY module blocking on a
   // problem of its own for several rounds; clearing `?.[]` took its last self-blocker
   // away, and it now inherits ast.ts's forward type reference through the link. The blame
@@ -420,10 +428,15 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * score identically. Its top rung cannot distinguish success from failure. This
    * ladder's rung 1 is exactly that distinction, which is why it exists.
    */
-  test("no module reaches IR — the whole ladder is at rung 0", async () => {
+  test("exactly ONE module reaches IR — the rest of the ladder is at rung 0", async () => {
     const rows = await Promise.all(MODULES.map(async (e) => [e.file, (await measure(e)).rung] as const));
     const reachedIR = rows.filter(([, r]) => r >= 1).map(([f]) => f);
-    expect(reachedIR).toEqual([]);
+    // THE HEADLINE NUMBER CHANGED, for the first time since this file was written. It read
+    // `[]` — "ZERO of the twelve modules produce IR" — for every measurement until
+    // consuming parameters landed. `diagnostics.ts` is the first, and it did not stop at
+    // rung 1: it links and runs. Eleven still sit at rung 0, so this is one module, not a
+    // trend; the list is exact so the twelfth cannot arrive unnoticed either way.
+    expect(reachedIR).toEqual(["diagnostics.ts"]);
   }, 300_000);
 
   /**
@@ -466,7 +479,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * CHECKER, after parse is over. A parse-clean module is not an unblocked module, so
    * attribution has to compare what the whole pipeline actually reports.
    */
-  test("parsing clean is not being unblocked — nine parse, none compiles", async () => {
+  test("parsing clean is not being unblocked — nine parse, one compiles", async () => {
     const { parse } = await import("../src/parser.ts");
     const parseClean: string[] = [];
     for (const e of MODULES) {
@@ -477,15 +490,18 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // `?.[]` was the last construct in the parser's own source that the parser could not
     // read. The point of this test is unchanged and is the uncomfortable one — parsing
     // clean has never ONCE correlated with being closer to compiling. Nine of twelve
-    // modules parse their own source; ZERO produce IR.
+    // modules parse their own source; ONE produces IR.
     expect(parseClean.sort()).toEqual([
       "cli.ts", "coverage-preprocess.ts", "coverage.ts", "diagnostics.ts", "driver.ts",
       "lexer.ts", "modules.ts", "ownership.ts", "parser.ts",
     ]);
-    // ...and not one of them reaches IR.
+    // ...and the point SURVIVES the first module getting off the floor, which is the
+    // interesting part. `diagnostics.ts` reaching rung 3 did not come from parsing — it
+    // has parsed cleanly for many rounds — it came from clearing six blockers, five of
+    // them AFTER parse. The other eight parse-clean modules are still at rung 0.
     for (const file of parseClean) {
       const m = await measure(MODULES.find((e) => e.file === file)!);
-      expect(`${file} rung ${m.rung}`).toBe(`${file} rung 0`);
+      expect(`${file} rung ${m.rung}`).toBe(`${file} rung ${file === "diagnostics.ts" ? 3 : 0}`);
     }
   }, 300_000);
 
@@ -630,12 +646,74 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
    * is the reminder that per-module EXERCISE entries (import the module, do real work,
    * print a digest) are what turn rung 3 into a real behavioural differential.
    */
-  test("no module is claiming a non-weak rung 3 (none has reached rung 3 at all)", async () => {
+  test("no module is claiming a non-weak rung 3 (the one that reached it prints nothing)", async () => {
     const strong: string[] = [];
     for (const e of MODULES) {
       const m = await measure(e);
       if (m.rung === 3 && !m.weak) strong.push(e.file);
     }
+    // `diagnostics.ts` is at rung 3 and is NOT in this list, which is the caveat doing its
+    // job rather than a contradiction: a library that prints nothing matched a bun run that
+    // printed nothing. The behavioural evidence is the DRIVER differential below — the
+    // "per-module EXERCISE entry" this comment has been asking for since the file was
+    // written, now that there is a module to write one for.
     expect(strong).toEqual([]);
+  }, 300_000);
+
+  /**
+   * THE NON-WEAK DIFFERENTIAL, for the one module that self-compiles.
+   *
+   * A driver imports `src/diagnostics.ts` and does real work with it — builds three
+   * diagnostics through three different constructors, reads `.diag` off the thrown-error
+   * class whose parameter property was the last blocker, and renders one with the
+   * rustc-style multi-span formatter over real source. It is compiled by nativets (the
+   * SH1 linker pulls the module in through an ordinary relative import) and run; the
+   * oracle is `bun run` over the identical file. stdout must be byte-identical.
+   *
+   * This is what caveat 3 asks for and what the row above cannot supply: 466 bytes of
+   * output that a broken compile would get wrong, instead of empty == empty. It exercises
+   * the consuming-parameter path end to end — `new NTError({...})` moves its argument into
+   * the object, and the object is read back out afterwards.
+   */
+  test("diagnostics.ts DRIVER: real output, byte-identical to the bun-run module", async () => {
+    // `realpathSync`, not the raw mkdtemp path: on macOS `/var` is a symlink to
+    // `/private/var`, so a `..` chain computed from `/var/...` walks a different number of
+    // levels than the resolver sees, and bun cannot find the module. The compiled side
+    // happens to survive it; the ORACLE does not, which would have read as a diff.
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nativets-sh6-drive-")));
+    try {
+      const driver = join(dir, "drive.ts");
+      // A relative specifier is the only import form the linker takes (SH1), so the path
+      // from the scratch directory to the real module is computed rather than written.
+      const spec = relative(dir, realpathSync(pathOf("diagnostics.ts")));
+      writeFileSync(driver, [
+        `import { formatDiagnostic, nyi, parseError, NYI } from ${JSON.stringify(spec)};`,
+        ``,
+        `const e1 = nyi(NYI.CLASS_FEATURE, "generic classes");`,
+        `console.log(e1.message);`,
+        `console.log(e1.diag.code + " / " + (e1.diag.hint ?? "(none)"));`,
+        `console.log(formatDiagnostic(e1.diag));`,
+        ``,
+        `const e3 = parseError("Expected ';'");`,
+        `console.log(formatDiagnostic(e3.diag));`,
+        `console.log(e3.diag.code + " " + e3.name);`,
+        ``,
+        `const src: string | undefined = "const a = 1;\\nconst b = 2;\\nconsole.log(x);\\n";`,
+        `console.log(formatDiagnostic({ code: "NT2001", message: "'x' is not defined", hint: "declare it first", spans: [{ line: 3, label: "here", primary: true }] }, src));`,
+        ``,
+      ].join("\n"));
+
+      const bin = join(dir, "drive");
+      await buildBinary(readFileSync(driver, "utf8"), bin, { target: "host", entryPath: driver });
+      const ours = spawnSync(bin, [], { encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL" });
+      const oracle = spawnSync("bun", ["run", driver], { encoding: "utf8", timeout: 120_000 });
+
+      expect(oracle.stdout.length).toBeGreaterThan(0); // the oracle must actually print
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.status).toBe(oracle.status);
+      expect(ours.status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }, 300_000);
 });

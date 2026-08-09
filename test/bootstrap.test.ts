@@ -315,8 +315,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // of twelve modules) and NT2001 (parameter-default inference); this lane had emptied
     // NT1606 (diagnostics.ts was its only holder) and added NT1604. The union of those four
     // moves is the list below, measured on the merged tree, not inferred from either side.
+    // NT1604 IS NOW EMPTY, and this is the first time a bucket emptied by a module
+    // LEAVING the table rather than moving within it: `diagnostics.ts` was its only
+    // holder, and it now produces IR, so it contributes no blocker at all. Consuming
+    // parameters (a constructor PARAMETER PROPERTY takes ownership; every `new C(v)` site
+    // moves `v`) is what cleared it — see test/sh6.test.ts, where the module reaches
+    // rung 3 and its output matches the bun-run module byte for byte.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1023", "NT1030", "NT1031", "NT1604"],
+      ["NT1023", "NT1030", "NT1031"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -444,12 +450,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // blockers that were queued behind them. A fact about today, not an invariant — this
     // file has been wrong three times treating an emptied bucket as one.
     expect(byCode["NT1606"]).toBeUndefined();
-    // NEW BUCKET, and it is the END of that module's chain rather than another step along
-    // it: NT1604, `constructor(readonly diag: Diagnostic)` — an object-typed parameter
-    // moved into a field. A linear parameter is a BORROW (the caller owns and drops it),
-    // so the refusal is SOUND: suppressing it and running the escaping shape gives exit
-    // 255. Clearing it needs consuming parameters, which is a feature, not a predicate.
-    expect(byCode["NT1604"]!.sort()).toEqual(["diagnostics.ts"]);
+    // ...and NT1604 emptied one round later, which is the END of that module's chain and
+    // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
+    // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
+    // caller owns and drops it), so the refusal was SOUND: suppressing it and running the
+    // escaping shape gave exit 255. It took the feature that note named: CONSUMING
+    // PARAMETERS. A constructor parameter property is one by construction — the desugaring
+    // stores it — so the callee takes ownership and every `new C(v)` site moves `v`. One
+    // owner, one drop, exit 0.
+    //
+    // `diagnostics.ts` is therefore the FIRST module in the tree that contributes no
+    // blocker at all: it produces IR, links, and runs (test/sh6.test.ts, rung 3).
+    expect(byCode["NT1604"]).toBeUndefined();
     // RATCHET MOVE (short-circuit narrowing): the NT2001 bucket is now EMPTY. It held
     // one module, `diagnostics.ts`, on `!diag.spans || diag.spans.length === 0` — a
     // FALSE POSITIVE (correct TypeScript, correct at runtime) because a guard did not

@@ -175,14 +175,21 @@ class Analyzer {
     private varTy: Map<string, import("./ast.ts").Ty> = new Map(),
     /** alias name → the binding that OWNS the value (`const b = a` ⇒ b → a). */
     private aliasOf: Map<string, string> = new Map(),
+    /** class tag → the ARGUMENT indices its constructor CONSUMES (parameter properties
+     *  of a linear type). Empty for every program without one, so the rule is inert. */
+    private consuming: Map<string, Set<number>> = new Map(),
   ) {
-    for (const p of paramBorrows) this.borrowBindings.add(p);
+    for (const p of paramBorrows) { this.borrowBindings.add(p); this.borrowParams.add(p); }
     for (const a of aliasOf.keys()) this.borrowBindings.add(a); // an alias may never escape
     for (const owner of aliasOf.values()) if (owner) this.aliasedOwners.add(owner);
   }
 
   /** Owners that something else aliases — reassigning one would dangle the alias. */
   private readonly aliasedOwners = new Set<string>();
+
+  /** The subset of `borrowBindings` that are PARAMETERS — the ones whose fix is a
+   *  consuming parameter rather than "use the owner instead". */
+  private readonly borrowParams = new Set<string>();
 
   /** Is this type an instance of an `@@mutable` class? */
   private isMutableInstance(ty: import("./ast.ts").Ty): boolean {
@@ -471,7 +478,13 @@ class Analyzer {
             line: e.loc?.line ?? 0,
             hint: owner !== undefined && owner !== ""
               ? `\`${e.name}\` names the value \`${owner}\` owns, so handing it out would leave \`${owner}\` to free a pointer the receiver still holds — hand out \`${owner}\` itself instead`
-              : undefined,
+              : this.borrowParams.has(e.name)
+                // The one CONSUMING position the language has, and the way out of this
+                // refusal for the shape it actually blocks: storing a parameter into an
+                // object. `constructor(readonly d: T)` makes the parameter a move rather
+                // than a borrow, and the `new` site gives the value up.
+                ? `a parameter is a BORROW — the caller still owns the value and drops it when its scope ends, so a second owner here would free it twice. To take OWNERSHIP of an argument, declare it as a constructor PARAMETER PROPERTY (\`constructor(readonly ${e.name}: T)\`), which stores it into the object and moves it at every \`new\` site; otherwise build and return a new value instead of handing this one out`
+                : undefined,
           });
           return;
         }
@@ -594,7 +607,14 @@ class Analyzer {
         // keep it single-owner).
         if (!e.viaThis) this.checkOwnedReceiver(e.object, e.field);
         this.expr(e.object, state, false);
-        this.expr(e.value, state, true);
+        // A parameter property's DEFINITIONAL store does not move: a consuming parameter
+        // arrived already owned by this object (the `new` site gave it up), so the value
+        // is not being taken out of anything. Treating it as a move would be the NT1604
+        // this feature exists to answer, and would also strip the name of its remaining
+        // BORROW — `constructor(readonly xs: T[]) { this.n = xs.length }` reads `xs` after
+        // the store, which is exactly the rustc-legal `Self { n: xs.len(), xs }` reordered.
+        // `xs` stays in `borrowBindings`, so moving it out a SECOND time is still NT1604.
+        this.expr(e.value, state, e.paramProp !== true);
         return;
       case "IndexAssign": // `u[i] = v` (Uint8Array only reaches here — arrays/objects rejected in the checker)
         this.expr(e.object, state, false);
@@ -628,7 +648,17 @@ class Analyzer {
         for (const el of e.elements) this.expr(el, state, el.kind !== "SpreadExpr");
         return;
       case "SpreadExpr": this.expr(e.argument, state, false); return; // spread copies (borrow)
-      case "NewExpr": for (const a of e.args) this.expr(a, state, false); return;
+      case "NewExpr": {
+        // CONSUMING PARAMETERS. Most arguments are borrows — the caller keeps ownership
+        // and drops the value. A constructor PARAMETER PROPERTY is the exception: it
+        // stores its argument into a slot that outlives the call, so the callee takes
+        // ownership and the caller must NOT drop it. That is rustc's `fn new(d: D)`
+        // against `fn new(d: &D)`, and it is what makes the store legal at all — without
+        // the move here the value would have two owners and be freed twice.
+        const consuming = this.consuming.get(e.callee);
+        for (let i = 0; i < e.args.length; i++) this.expr(e.args[i]!, state, consuming !== undefined && consuming.has(i));
+        return;
+      }
       case "AsExpr": this.expr(e.expr, state, false); return;
       // `satisfies` is a pure type-layer check; ownership flows straight through it.
       case "SatisfiesExpr": this.expr(e.expr, state, consume); return;
@@ -767,6 +797,37 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     // `s.replace(/\$inner$/, "")` — the suffix, without a RegExp (nativets has none).
     mutable.setterProps.add(m.endsWith("$inner") ? m.slice(0, m.length - "$inner".length) : m);
   }
+  /**
+   * CONSUMING PARAMETERS — the one place a callee takes ownership of an argument.
+   *
+   * A constructor parameter property (`constructor(readonly d: Diagnostic)`) desugars to a
+   * field plus `this.d = d`, so the parameter is stored into a slot that outlives the call.
+   * A borrow cannot do that: the caller would still drop the value while the object holds
+   * a pointer to it, which is a double free (observed: exit 255). So the parameter is a
+   * MOVE — rustc's `fn new(d: D) -> Self` — and every `new C(v)` site moves `v`, after
+   * which using `v` is NT1601 (≈ E0382).
+   *
+   * Only PARAMETER PROPERTIES qualify, because only they are syntactically guaranteed to
+   * store: the desugaring emits the assignment, so the answer needs no inference and no
+   * new spelling. A hand-written `this.d = d` in a constructor body stays NT1604, and its
+   * hint names the parameter-property form.
+   *
+   * The map is keyed by class tag; argument index `i` is constructor parameter `i + 1`
+   * (parameter 0 is the receiver `this`).
+   */
+  const CTOR = ".constructor";
+  const consuming = new Map<string, Set<number>>();
+  for (const s of checked.program.body) {
+    if (s.kind !== "FuncDecl" || !s.name.endsWith(CTOR)) continue;
+    const sig = checked.functions.get(s.name);
+    if (sig === undefined) continue;
+    const idx = new Set<number>();
+    for (let i = 1; i < s.params.length; i++) {
+      if (s.params[i]!.paramProp === true && isLinearTy(sig.params[i] ?? "number")) idx.add(i - 1);
+    }
+    if (idx.size > 0) consuming.set(s.name.slice(0, s.name.length - CTOR.length), idx);
+  }
+
   const isMutableTy = (t: import("./ast.ts").Ty): boolean => {
     if (!mutable.classes.size || !isObjectTy(t)) return false;
     const tag = classTag(t);
@@ -808,9 +869,9 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     // Pass 1 (discard): which names does a closure body mention? Those pointers may be
     // copied into a closure env that outlives the binding, so they are never freed on
     // reassignment. Diagnostics from this pass are dropped — pass 2 is the real one.
-    const scan = new Analyzer(linear, topLevel, paramBorrows, new Set(), mutable, varTy, aliases);
+    const scan = new Analyzer(linear, topLevel, paramBorrows, new Set(), mutable, varTy, aliases, consuming);
     scan.seq(body, entry());
-    const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames, mutable, varTy, aliases);
+    const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames, mutable, varTy, aliases, consuming);
     const st = entry();
     a.seq(body, st);
     const end = a.ownedTopLevel(st); // computed BEFORE marking: it can add to condDrops
