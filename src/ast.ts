@@ -1294,14 +1294,33 @@ export interface Program {
    * so a growing module-level table is not expressible in the subset this compiler must
    * eventually compile itself with. Putting it here would plant a self-hosting blocker in
    * the very module being unblocked. Every pass already receives the Program.
+   *
+   * SPELLED AS A NAMED RECORD, not as `[string, Ty][]`. A tuple type has no
+   * representation in nativets — `parseTupleType` models `[T, U]` as `T[]`, so the
+   * declaration read back as `string[][]` and `new Map(entries)` over it was `NT1014`,
+   * the first blocker of NINE of the twelve modules. A two-field record is a shape the
+   * compiler already handles everywhere, so this needs no new `Ty` encoding.
    */
-  recTypes?: [string, Ty][];
+  recTypes?: RecTypeEntry[];
+}
+
+/** One entry of {@link Program.recTypes} — the record spelling of a `[name, shape]` pair.
+ *  See the note on that field for why this is not a tuple. */
+export interface RecTypeEntry {
+  name: string;
+  ty: Ty;
 }
 
 /** The recursive-shape table as a lookup. Stored as pairs on the Program (JSON-shaped,
- *  and linker-mergeable); every consumer wants a Map. */
+ *  and linker-mergeable); every consumer wants a Map.
+ *
+ *  Built with a `.set` LOOP rather than `new Map(entries)`: that is exactly what the
+ *  constructor does internally (ES2024 24.1.1.1 §8 calls `set` per entry), and `Map` here
+ *  is persistent, so the result of each `.set` is what carries forward. */
 export function recTypeTable(p: Program): Map<string, Ty> {
-  return new Map(p.recTypes ?? []);
+  let m = new Map<string, Ty>();
+  for (const e of p.recTypes ?? []) m = m.set(e.name, e.ty);
+  return m;
 }
 
 /** Every tag whose values mutate in place: `@@mutable` classes AND `@@mutable` records.

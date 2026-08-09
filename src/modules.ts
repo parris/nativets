@@ -33,6 +33,7 @@ import { moduleError, mutationError } from "./diagnostics.ts";
 import { resolveStaticFieldReads } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Ty, Declarator, Param, ArrowFunction, VarDecl, FuncDecl, ImportDecl,
+  RecTypeEntry,
 } from "./ast.ts";
 
 /** How the linker reads a module. Injectable so tests can link in-memory graphs. */
@@ -573,9 +574,9 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     if (!isEntry) for (const r of program.mutableRecords ?? []) tags.set(r, `${prefixBase}${i}_${r}`);
     for (const c of program.mutableClasses ?? []) mutableClasses.add(names.get(c) ?? c);
     for (const r of program.mutableRecords ?? []) mutableRecords.add(tags.get(r) ?? r);
-    for (const [n, shape] of program.recTypes ?? []) {
-      const to = isEntry ? n : `${prefixBase}${i}_${n}`;
-      recTypes.set(to, rewriteRefs(rewriteTags(shape, tags), n, to) as Ty);
+    for (const e of program.recTypes ?? []) {
+      const to = isEntry ? e.name : `${prefixBase}${i}_${e.name}`;
+      recTypes.set(to, rewriteRefs(rewriteTags(e.ty, tags), e.name, to) as Ty);
     }
     for (const h of program.hostImports ?? []) hostImports.add(h);
     new Renamer(names, tags).program(program);
@@ -626,7 +627,12 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
   const merged: Program = { kind: "Program", body };
   if (mutableClasses.size) merged.mutableClasses = [...mutableClasses];
   if (mutableRecords.size) merged.mutableRecords = [...mutableRecords];
-  if (recTypes.size) merged.recTypes = [...recTypes];
+  if (recTypes.size) {
+    // A record array, not a `Map` spread's `[string, Ty][]` — see `Program.recTypes`.
+    let recs: RecTypeEntry[] = [];
+    for (const [n, shape] of recTypes) recs = [...recs, { name: n, ty: shape }];
+    merged.recTypes = recs;
+  }
   if (hostImports.size) merged.hostImports = [...hostImports];
   return merged;
 }
