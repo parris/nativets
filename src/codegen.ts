@@ -26,7 +26,7 @@ import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isF
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
 // SH2 (discriminated unions): a union value IS its member's object block, so every
 // lowering below treats it exactly like an object pointer.
-import { isUnionTy, unionDiscriminant } from "./ast.ts";
+import { isUnionTy, unionDiscriminant, widenLiteralTys } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI, internalError } from "./diagnostics.ts";
@@ -760,8 +760,17 @@ class FnGen {
   constructor(private mod: ModuleGen) {}
 
   /** Unfold a nominal back-edge one level (`@N` -> its shape); identity on anything else.
-   *  Applied wherever a type's SHAPE is needed rather than its identity. */
-  private unfold(t: Ty): Ty { return expandTypeRef(t, this.mod.recTypes); }
+   *  Applied wherever a type's SHAPE is needed rather than its identity.
+   *
+   *  WIDENED, exactly as `checker.unfold` is and for the same reason: `recTypes` stores the
+   *  literal-preserving `parseTypeInner` spelling, and codegen must see the type the checker
+   *  gave the value or the two drift. It showed up as a wrong ANSWER rather than a crash —
+   *  `genInspect` has no arm for a string-LITERAL field type, so it fell through to
+   *  `undefined` and `console.log` of a node through a back-edge printed
+   *  `{ tag: undefined, n: 2 }` where node prints `{ tag: 'm', n: 2 }`.
+   *  `widenLiteralTys` does not descend into a `U<…>`, so a recursive union keeps the tags
+   *  its dispatch reads, and a literal-typed field is one string slot either way. */
+  private unfold(t: Ty): Ty { return widenLiteralTys(expandTypeRef(t, this.mod.recTypes)); }
 
   /**
    * The storage address of a variable. Normally its frame alloca `%x.addr`; for a
@@ -1639,7 +1648,12 @@ class FnGen {
     }
     // Everything below is a JS object, and an object is always truthy — including an
     // EMPTY array/object/Map/Set, and including a Date whose time value is NaN.
+    // A DISCRIMINATED union belongs here: its value IS the member object pointer, and
+    // every member is an object type by construction. (A GENERAL union does NOT — it is
+    // a box that can carry `0` or `""`, and reading the box pointer as the value is the
+    // wrong answer it is refused for.)
     if (
+      isUnionTy(val.ty) ||
       isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) ||
       isBytesTy(val.ty) || isBytesRefTy(val.ty) || isFetchRefTy(val.ty) || isUrlRefTy(val.ty) ||
       isDateTy(val.ty) || isResponseTy(val.ty) || isHeadersTy(val.ty) || isTextEncoderTy(val.ty) || isTextDecoderTy(val.ty)
@@ -1788,7 +1802,13 @@ class FnGen {
     const base = baseTy(r.ty);
     const slot = this.fresh();
     this.emit(`${slot} = call i64 @nt_nonnull(ptr ${r.v}, ptr ${this.locArg(e.loc) ?? "null"})`);
-    return { v: this.fromSlot(slot, base), ty: base };
+    // The unwrapped value may ALSO have been tag-narrowed (`if (!e) return; if (e.kind
+    // === "A")` on an `E | undefined`). A discriminated union is the member pointer
+    // itself, so that second narrowing is pure retype — the same rule the `Identifier`
+    // case applies to a non-nullable union binding, applied here to what came out of
+    // the box. Representation is `base`'s either way; only the layout name changes.
+    const ty = isUnionTy(base) && e.ty !== undefined && e.ty !== base ? e.ty : base;
+    return { v: this.fromSlot(slot, base), ty };
   }
 
   // ---- nullable tagged pair [tag, value] (A2) ----
@@ -1881,7 +1901,28 @@ class FnGen {
   }
 
   // ---- expressions ----
+  /**
+   * The codegen half of the checker's `type()` funnel: a VALUE never carries the folded
+   * `@Name`, only the shape it names.
+   *
+   * A field whose declared type is the back-edge (`CallExpr.callee: @Expr`) loads a pointer
+   * exactly like the unfolded union does — the encoding is representation-identical, which
+   * is why `isTypeRefTy` and `isUnionTy` already select the same `nt_obj_free` — but every
+   * structural predicate below answers "no" to `@Expr`, so the receiver of the NEXT access
+   * fell through to `no member lowering for .kind on @Expr`. Unfolding here keeps codegen's
+   * view of a value in step with the checker's, which is the property the narrowing hand-off
+   * at the `MemberExpr` case depends on (it compares `obj.ty` against the checker's
+   * `e.object.ty`).
+   *
+   * One level, for the reason `checker.type` states: the shape's own recursive positions
+   * stay folded, so this is O(1) and driven by real accesses.
+   */
   private genExpr(e: Expr): Val {
+    const val = this.genExprInner(e);
+    return isTypeRefTy(val.ty) ? { v: val.v, ty: this.unfold(val.ty) } : val;
+  }
+
+  private genExprInner(e: Expr): Val {
     switch (e.kind) {
       case "NumberLiteral": return { v: llvmDouble(e.value), ty: "number" };
       case "BooleanLiteral": return { v: e.value ? "true" : "false", ty: "boolean" };
@@ -2568,8 +2609,10 @@ class FnGen {
           const csig = this.mod.functions.get(`${cls}.constructor`)!;
           const argVals: string[] = [`ptr ${obj}`];
           for (let i = 1; i < csig.params.length; i++) {
-            const provided = e.args[i - 1];
-            const v = provided ? this.genExpr(provided) : this.genExpr(csig.defaults[i]!);
+            // `i - 1 < e.args.length` FIRST: a defaulted parameter means the read is at
+            // index == length, which nativets PANICS on (Stage 41) — see the census note
+            // in test/no-index-last.test.ts.
+            const v = i - 1 < e.args.length ? this.genExpr(e.args[i - 1]!) : this.genExpr(csig.defaults[i]!);
             argVals.push(`${llvmTy(csig.params[i]!)} ${this.coerce(v, csig.params[i]!).v}`);
           }
           // A DECORATED class's constructor returns the instance (the `@wrapper` sees
@@ -2637,7 +2680,9 @@ class FnGen {
         this.emitExcCheck();
         return { v: t, ty: "Dyn" };
       }
-      return this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args[2]), 0);
+      // `e.args.length > 2` guards the read: `JSON.stringify(v)` is the common call and
+      // `e.args[2]` would be an index == length read, which nativets PANICS on.
+      return this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args.length > 2 ? e.args[2] : undefined), 0);
     }
 
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
@@ -3337,7 +3382,17 @@ class FnGen {
     // A recursive node renders as the object it names. Safe against a cycle for the same
     // reason nesting is: `genInspectObject` cuts at INSPECT_DEPTH, which is node's own
     // depth-2 `[Object]` rule, so the unfolding is bounded by the printer, not by the type.
-    if (isTypeRefTy(ty)) return this.genInspect({ v: val.v, ty: this.unfold(ty) }, depth, indent);
+    if (isTypeRefTy(ty)) {
+      // `expandTypeRef` returns an UNKNOWN name unchanged — the deliberate "cannot decide,
+      // do not guess" rule — and this line re-enters itself with it. JSC makes that tail
+      // call a loop, so a dangling `@N` HUNG the compiler with no diagnostic and no exit
+      // (see src/modules.ts `rewriteRefs`, which is where one used to come from). A `@N`
+      // the table cannot resolve must fail LOUDLY, which is what property 2 of the
+      // encoding promises (ast.ts).
+      const shape = this.unfold(ty);
+      if (isTypeRefTy(shape)) throw internalError(`no shape for the recursive type ${ty} — its back-edge resolves to nothing in the merged program`);
+      return this.genInspect({ v: val.v, ty: shape }, depth, indent);
+    }
     if (isObjectTy(ty)) return this.genInspectObject(val, depth, indent);
     if (isBytesTy(ty)) return this.genInspectBytes(val, depth, indent);
     if (isArrayTy(ty)) return this.genInspectArray(val, depth, indent);
@@ -3668,6 +3723,13 @@ class FnGen {
       else this.emit(`${t} = call double @nt_arr_len(ptr ${obj.v})`);
       return { v: t, ty: "number" };
     }
+    // A FOLDED receiver has no fields — `objectFields("@N")` is the empty list, so
+    // `fieldType` is `undefined` and `fieldIndex` is a slot number computed from nothing.
+    // Every caller is required to unfold first (they read the SHAPE, not the reference);
+    // saying so here turns the one that forgets into a compiler bug report instead of a
+    // load from the wrong offset. This is the `objectFields("@N")` phantom-record trap,
+    // and it has now cost this project two silent wrong answers.
+    if (isTypeRefTy(obj.ty)) throw internalError(`field read '.${prop}' on the folded reference ${obj.ty} — the receiver must be unfolded first`);
     const ft = fieldType(obj.ty, prop)!;
     const gep = this.fresh();
     this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, prop)}`);
@@ -3757,7 +3819,13 @@ class FnGen {
         const contLbl = this.label("occ");
         this.terminate(`br i1 ${isN}, label %${nullJoin}, label %${contLbl}`);
         this.to(this.block(contLbl));
-        const base = baseTy(cur.ty);
+        // UNFOLD, as `emitPrintNullable` does one screen up: `baseTy("?U@N")` is the bare
+        // back-edge, and handing that to `genFieldRead` asks `fieldIndex("@N", …)` — where
+        // `objectFields` returns the empty list, so the read silently took slot 0 of the
+        // wrong shape. `a.next?.n` printed `0` and `a.next?.label` printed `(null)` where
+        // node prints `2` and `y`: a SILENT WRONG ANSWER, which is the one outcome this
+        // compiler refuses to have.
+        const base = this.unfold(baseTy(cur.ty));
         cur = { v: this.fromSlot(this.nullVal(cur.v), base), ty: base }; // unbox the present value
       }
       cur = link.kind === "MemberExpr" ? this.genFieldRead(cur, link.property) : this.genElemRead(cur, link);
@@ -3872,7 +3940,8 @@ class FnGen {
         // NaN through one: the 1-arg call stays exactly the instruction it always was,
         // so no existing `.ll` (or IR snapshot) moves.
         const t = this.fresh();
-        if (a[1]) this.emit(`${t} = call double @js_str_index_of_from(ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1].v})`);
+        // `a.length > 1`, not `a[1]`: the 1-arg form reads index == length, a panic.
+        if (a.length > 1) this.emit(`${t} = call double @js_str_index_of_from(ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1]!.v})`);
         else this.emit(`${t} = call double @js_str_index_of(ptr ${recv.v}, ptr ${a[0]!.v})`);
         return { v: t, ty: "number" };
       }
@@ -4250,7 +4319,8 @@ class FnGen {
       }
       case "slice": {
         const a0 = this.genExpr(args[0]!).v;
-        const a1 = args[1] ? this.genExpr(args[1]).v : POS_INF;
+        // `args.length > 1`, not `args[1]`: `slice(n)` reads index == length, a panic.
+        const a1 = args.length > 1 ? this.genExpr(args[1]!).v : POS_INF;
         const t = this.fresh();
         this.emit(`${t} = call ptr @nt_arr_slice(ptr ${recv.v}, double ${a0}, double ${a1})`);
         return { v: t, ty: recv.ty };
@@ -5149,7 +5219,8 @@ class FnGen {
     switch (name) {
       case "parseInt": {
         const s = this.genExpr(args[0]!).v;
-        const radix = args[1] ? this.genExpr(args[1]).v : llvmDouble(0);
+        // `args.length > 1`, not `args[1]`: `parseInt(s)` reads index == length, a panic.
+        const radix = args.length > 1 ? this.genExpr(args[1]!).v : llvmDouble(0);
         const t = this.fresh();
         this.emit(`${t} = call double @js_parse_int(ptr ${s}, double ${radix})`);
         return { v: t, ty: "number" };
@@ -5566,7 +5637,9 @@ class FnGen {
    *  element of a `Val[]` parameter is a move out of a borrowed array element (NT1605). */
   private argVal(i: number, args: Expr[], preArg0: string, sig: Sig): Val {
     if (i === 0 && preArg0 !== "") return { v: preArg0, ty: args[0]!.ty ?? sig.params[0]! };
-    return this.genExpr(args[i] ?? sig.defaults[i]!);
+    // `i < args.length`, not `args[i] ?? …`: a defaulted parameter reads index == length,
+    // which nativets PANICS on (Stage 41) — the `??` could never see `undefined`.
+    return this.genExpr(i < args.length ? args[i]! : sig.defaults[i]!);
   }
 
   /** `preArg0`, when non-empty, is the SSA value of argument 0 already lowered by the

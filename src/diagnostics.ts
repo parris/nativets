@@ -137,7 +137,19 @@ export function formatDiagnostic(diag: Diagnostic, source?: string): string {
   const gutter = Math.max(...spans.map((s) => String(s.line).length));
   let lines = [head];
   for (const s of spans) {
-    const text = srcLines[s.line - 1] ?? "";
+    // `?? ""` was a DEAD GUARD twice over, and the second half is the more interesting one.
+    //   1. A span whose line is PAST the end of `source` made `srcLines[s.line - 1]` a read
+    //      at index >= length, which nativets PANICS on (Stage 41) before the `??` runs.
+    //   2. A NON-INTEGER `s.line` is `undefined` in JS (there is no "1.5" property) but
+    //      nativets TRUNCATES a computed non-integer index and returns element 1 — a SILENT
+    //      WRONG ANSWER at exit 0. `Number.isInteger` is node's own rule spelled out, so
+    //      this guard is exact rather than defensive. The compiler defect underneath it is
+    //      NOT fixed by this line and is still live for every other computed index:
+    //        const xs: string[] = ["a","b","c"]; let i = 0; i = i + 1.5;
+    //        console.log(xs[i] ?? "undefined");   // node: undefined   nativets: b
+    //      A LITERAL non-integer index is caught by NT2002; a computed one is not.
+    const inRange = Number.isInteger(s.line) && s.line >= 1 && s.line <= srcLines.length;
+    const text = inRange ? srcLines[s.line - 1]! : "";
     const num = String(s.line).padStart(gutter);
     const pad = " ".repeat(gutter);
     const trimmed = text.slice(leadingWhitespace(text));

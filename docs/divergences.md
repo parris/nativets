@@ -472,6 +472,72 @@ All now match node. Two consequences worth knowing:
   is omitted, as node does. An `undefined` inside an ARRAY is unaffected — `null` is what node
   writes there.
 
+### A NULLISH guard did not compose with a TAG narrowing (`E | undefined`) — closed
+
+The **fourth** hole in the same box, and the only one that was never written down. A discriminated
+union behind a nullable — `E | undefined`, `E | null` — could be proved present and then could not
+be narrowed:
+
+```ts
+interface A { kind: "A"; left: number }
+interface B { kind: "B"; right: number }
+type E = A | B;
+function f(e: E | undefined): number {
+  if (!e) return -1;                  // proves e is present
+  if (e.kind === "A") return e.left;  // NT2001 — "narrow it first (`if (x.kind === "…")`)"
+  return 0;
+}
+```
+
+node prints `7`. We refused it, **with a hint prescribing the exact line above it**. Dropping
+`| undefined` made the identical body compile, which is the tell.
+
+**Why.** The two narrowings are different mechanisms and did not meet. A nullish guard is a
+control-flow `NarrowFact` carried on `Checker.narrowStack` (`withFacts`): the BINDING still says
+`?UU<…>`, and each read is stamped `narrowed` so codegen unwraps the box there. A tag test is a
+shadow BINDING (`Checker.narrowInto`). `discriminantRead` asked the binding for its type, saw a
+nullable rather than a `U<…>`, and declined — so no tag narrowing was ever attempted.
+
+**What changed** (`src/checker.ts`, `src/codegen.ts`):
+
+- `discriminantRead` reads the type through `accessPath`, i.e. **as narrowed at that point**,
+  not off the binding. That is the whole fix in one line; the rest is making it sound.
+- A shadow declared over a name whose STORAGE is a box carries `Binding.nullBox`, and reads of
+  such a name are stamped `narrowed` too. Without it the member's field layout would have been
+  applied to the box POINTER — a silent wrong answer, not a diagnostic.
+- `narrowRead` (codegen) applies the member type to what comes OUT of the box, the same retype the
+  `Identifier` case already applied to a non-nullable union binding.
+- The tag walk now runs with the arm's own facts live (`narrowTagsWith`), at the `if` arms and
+  across `&&`/`||` short circuits — otherwise `if (e !== undefined && e.kind === "A")` still had no
+  union to discriminate when the second operand was read. This is the fourth wiring of
+  `narrowTagsInto`.
+- `truthyOf` gained the discriminated-union case: `if (e)` on an `?UU<…>` reaches it through
+  `truthyNullable`, and a union value IS the member object pointer, so it is always truthy. (A
+  GENERAL union `G<…>` is deliberately NOT in that list — it is a box that can carry `0` or `""`.)
+
+Every in-place spelling was affected and all are fixed: `!e`, `e === undefined`,
+`if (e !== undefined) { … }`, `if (e) { … }`, on `?U` and `?N`, with `if` and with `switch`, for a
+parameter and for a local `let`/`const`. Only the spellings that introduce a NEW binding —
+`const q = e!`, `e ?? fallback` — worked before, because those bind a plain `U<…>`. A nullable
+RECORD (a single object type, not a union) was never affected.
+
+**Still refused, on purpose:** a bare nullable as a `&&` operand (`if (e && e.kind === "A")`) is
+`NT2001: '&&' operands must be matching …`. That is a different gap — node's `a && b` evaluates to
+`a` when `a` is falsy, so the expression's type is a general union — and it is not specific to
+unions (`if (o && o.n > 1)` on any `R | undefined` is refused the same way). Spell it
+`e !== undefined && e.kind === "A"`.
+
+**And the hint was fixed.** "Narrow it first" was one fixed sentence, and three shapes reached it
+with a tag test already written. `Checker.narrowAdvice` now says which one it is:
+
+| Receiver | What it says now |
+|---|---|
+| a plain name, never narrowed | narrow it first — `if (e.kind === "A")` or `switch (e.kind)` |
+| a PATH (`o.inner`, `this.e`) | narrowing tracks a plain NAME — bind it first (`const v = o.inner;`) and narrow `v` |
+| already narrowed to a SUB-union (`case "A": case "B":` sharing a body) | narrowed here to MORE THAN ONE member (`"A"`, `"B"`), so only the shared tag is readable — give each tag its own arm |
+
+Each of the three workarounds it prescribes was verified to compile and match node.
+
 ### `JSON.stringify` — the default-to-`null` fall-through (closed)
 
 `genJsonStringify` handled number/boolean/string/`Date`/nullable/array/object and then
@@ -2476,6 +2542,27 @@ as recursion. That is sound and it is a measurement hazard — `src/ast.ts` enco
 45 look like a recursion problem. So the NT1030 **hint** now names the residual members and
 their own diagnostics. The message is deliberately unchanged: it is what
 `test/selfhost-ratchet.baseline.json` records as a blocker's identity.
+
+**A VALUE never carries the folded spelling.** The invariant is that `@Name` appears only
+NESTED inside a shape; a value's own static type is always the expanded one. That is enforced
+in exactly two places — `Checker.type` and `CodeGen.genExpr`, the single funnels where an
+expression's type is produced — plus the three receivers that do not go through them (a
+nullable base, an array element, a `for-of` binding). One level per access, driven by a real
+source-level read, so it terminates without a fixpoint. Before that, `e.operand.kind` on a
+recursive union was `NT2001 Property 'kind' does not exist on @Expr` while passing the same
+value to a function that annotates the type worked — the information was there, it was just
+not consulted where a value's type is made.
+
+The unfold WIDENS string-literal field types, because the table and an annotation are two
+spellings of one declaration: `recTypes` keeps `tag: "m"` (a recursive union's discriminant
+must survive) and `parseType` widens it to `string`. Widening does not descend into a `U<…>`,
+so a recursive union keeps the tags its dispatch reads.
+
+**Across MODULES the back-edge is renamed with the module.** A non-entry module is
+alpha-renamed, and every `@Name` it mints travels with it — in the shape table, in the
+module's own signatures, and in the shape it exports. Two modules may each declare a
+recursive `Node` and they stay distinct types with distinct layouts. A `@` inside a quoted
+tag or property key (`kind: "user@host"`) is NOT a reference and is left alone.
 
 Still refused, each with its own message: a cycle with nowhere to put a back-edge
 (`type P = Q[]` / `type Q = P[]` — a reference needs a slot to be a pointer in), and the four

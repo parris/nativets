@@ -32,10 +32,20 @@
  * processes; what it adds is the COUNTS (how many of the 501 real files each cause hits),
  * not new causes.
  *
- * WHAT THE FULL SWEEP FOUND, so a reader does not have to run it: 84 of 553 inputs diverge
- * for `lexer.ts` and 82 of 553 for `coverage-preprocess.ts`. 73 of each are ONE cause — a
- * line comment with an empty body — and the compiled `lexer.ts` aborts on 8 of the
- * compiler's own 12 modules, including itself.
+ * WHAT THE FULL SWEEP FOUND, so a reader does not have to run it. FIRST RUN: 84 of 553
+ * inputs diverged for `lexer.ts` and 82 of 553 for `coverage-preprocess.ts`; 73 of each
+ * were ONE cause — a line comment with an empty body — and the compiled `lexer.ts` aborted
+ * on 8 of the compiler's own 12 modules, INCLUDING ITSELF.
+ *
+ * AFTER THE OUT-OF-RANGE CLASS WAS FIXED — the six sites this sweep could REACH, and 31 in
+ * total once `src/`'s 573 computed index reads were censused and every end-of-input path
+ * swept (test/no-index-last.test.ts, docs/self-hosting.md): 18 of 553, and NONE of them is
+ * a `src/*.ts` file — the compiled lexer and the compiled preprocessor now process all
+ * twelve of the compiler's own modules identically.
+ * That claim has its own ratcheted test rather than living only in this comment: the
+ * `corpus: "src"` mode below, pinned at ZERO divergences. What is left in the 18 is four
+ * real files (`test/selfhost-ratchet.test.ts`, `test/sh6-fuzz.ts`, `test/textimport.test.ts`)
+ * plus the adversarial set, every one of them a documented NUL or UTF-8-byte door.
  *
  * WHAT IT COMPARES
  * ----------------
@@ -498,8 +508,14 @@ export function minimize(
 
 export interface FuzzOptions {
   /** `all` (default) = every `.ts` under src/test/examples; `sample` = every 20th;
-   *  `none` = the adversarial set only, which is what the pinned test uses. */
-  corpus?: "all" | "sample" | "none";
+   *  `none` = the adversarial set only, which is what the pinned test uses;
+   *  `src` = the compiler's own twelve modules and nothing else.
+   *
+   *  `src` exists because it is the question rung 3 is actually about. A module that
+   *  processes hand-written snippets is not self-hosting anything; a module that processes
+   *  `src/*.ts` is. It is small enough (12 files, ~48 processes) to be a ratcheted TEST
+   *  rather than a script, which `all` is not. */
+  corpus?: "all" | "sample" | "none" | "src";
   quick?: boolean;
   /**
    * Skip the megabyte-scale adversarial inputs. DEFAULTS TO TRUE, and that default is a
@@ -542,7 +558,10 @@ export async function fuzz(opts: FuzzOptions = {}): Promise<FuzzReport> {
     const mode = opts.corpus ?? (opts.quick ? "sample" : "all");
     let files = mode === "none" ? [] : fileCorpus();
     if (mode === "sample") files = files.filter((_, i) => i % 20 === 0);
-    let adversarial = adversarialCorpus();
+    if (mode === "src") files = files.filter((p) => p.startsWith(join(ROOT, "src") + "/"));
+    // `src` is the compiler's own source and nothing else — no adversarial inputs, so a
+    // failure names a real module rather than a hand-built edge case.
+    let adversarial = mode === "src" ? [] : adversarialCorpus();
     if (opts.skipHuge !== false) adversarial = adversarial.filter((c) => c.bytes.length < 200_000);
     for (const c of adversarial) writeFileSync(join(inputsDir, c.name), c.bytes);
     const advFiles = adversarial.map((c) => join(inputsDir, c.name));
@@ -616,7 +635,11 @@ export async function fuzz(opts: FuzzOptions = {}): Promise<FuzzReport> {
     }
 
     // --- diagnostics.ts: shapes, not files ---
-    {
+    // Skipped in `src` mode, which asks a question about SOURCE FILES: this module renders
+    // diagnostic shapes and has no file corpus, so including it would answer a different
+    // question and would put its (documented, group-D) rows into an assertion about
+    // whether the compiler can read its own source.
+    if (mode !== "src") {
       const module = "diagnostics.ts";
       const catalogKeys = Object.keys(
         (await import(srcPath("diagnostics.ts"))).NYI as Record<string, unknown>,

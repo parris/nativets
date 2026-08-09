@@ -66,6 +66,16 @@ const CASES = [
   // and was never alpha-renamed — `'table' is not defined` for a module-level const,
   // `NT1003 unknown callee` for a call. Correct TypeScript that node runs.
   "nonnull",
+  // Recursive types (the nominal `@Name` back-edge) ACROSS a module boundary. A non-entry
+  // module is alpha-renamed, and `rewriteRefs` followed only a shape's own SELF-reference —
+  // so in a MUTUAL cycle every reference to a SIBLING declaration stayed unrenamed and went
+  // dangling in the merged table. That is the compiler's own shape (src/ast.ts is a
+  // 46-declaration cycle imported by every other module), and the failure was not a refusal:
+  // `console.log` of such a value made `genInspect` unfold `@N` to itself and TAIL-CALL
+  // forever, so the compiler HUNG on a program node runs. The case also collides two
+  // same-named recursive `Node`s, one per module, to pin that the rename keeps their layouts
+  // apart rather than giving one module's nodes the other's.
+  "rectypes",
 ];
 
 describe("modules (differential vs node)", () => {
@@ -133,6 +143,55 @@ describe("module graph", () => {
   test("a module-less source is untouched by the linker", () => {
     const src = "const x = 1;\nconsole.log(x);\n";
     expect(linkProgram(src).body.length).toBe(2);
+  });
+
+  /*
+   * THE MERGED RECURSIVE-TYPE TABLE IS CLOSED: every `@Name` it mentions has an entry.
+   *
+   * Asserted structurally rather than through a program, because the failure mode of an
+   * open table is not a wrong answer — it is a HANG. `expandTypeRef` returns an unresolvable
+   * name UNCHANGED (the deliberate "cannot decide, do not guess" rule) and `genInspect`
+   * re-enters itself with it, which JSC turns into a tail-call loop: no diagnostic, no exit
+   * code, nothing for a differential test to compare. `rewriteRefs` renamed only a shape's
+   * own name, so in a MUTUAL cycle every sibling reference was left open — which is
+   * src/ast.ts, a 46-declaration cycle imported by every other module of this compiler.
+   *
+   * The entry's own declarations keep their names, and a non-entry module's are prefixed, so
+   * this also pins that the two halves agree: an `@Node` from the library must NOT resolve
+   * to the entry's same-named `Node`.
+   */
+  test("the merged recursive-type table has no dangling back-edge", () => {
+    const entry = join(DIR, "rectypes", "main.ts");
+    const prog = linkProgram(readFileSync(entry, "utf8"), entry);
+    const names = new Set((prog.recTypes ?? []).map((r) => r.name));
+    expect(names.size).toBeGreaterThan(0);
+    // Both `Node`s survive, under distinct names, with their own layouts.
+    expect(names.has("Node")).toBe(true);                        // the entry's, unrenamed
+    const libNode = [...names].find((n) => n !== "Node" && n.endsWith("_Node"));
+    expect(libNode).toBeDefined();
+    expect(prog.recTypes!.find((r) => r.name === "Node")!.ty).toContain("n:number");
+    expect(prog.recTypes!.find((r) => r.name === libNode)!.ty).toContain("label:string");
+
+    // The library's tag is the string `"lib@Node"` — a `@` inside a QUOTED run, which is
+    // legal and lands verbatim in the encoding (`hasTypeRef`, ast.ts). The rename must not
+    // touch it, or the module's own tag becomes a different string from the one its values
+    // carry. Asserted directly, since the scan below has to skip the same runs.
+    expect(prog.recTypes!.find((r) => r.name === libNode)!.ty).toContain(`"lib@Node"`);
+
+    // Every `@Name` in a TYPE position resolves. Quoted runs are skipped for the reason
+    // above: a `@` in a tag or a property key is not a reference.
+    const dangling: string[] = [];
+    for (const r of prog.recTypes ?? []) {
+      for (let i = 0; i < r.ty.length; i++) {
+        if (r.ty[i] === `"`) { const c = r.ty.indexOf(`"`, i + 1); if (c < 0) break; i = c; continue; }
+        if (r.ty[i] !== "@") continue;
+        let j = i + 1;
+        while (j < r.ty.length && /[A-Za-z0-9_$]/.test(r.ty[j]!)) j++;
+        const ref = r.ty.slice(i + 1, j);
+        if (!names.has(ref)) dangling.push(`${r.name} -> @${ref}`);
+      }
+    }
+    expect(dangling).toEqual([]);
   });
 
   test("coverage reports the whole linked graph as static", () => {

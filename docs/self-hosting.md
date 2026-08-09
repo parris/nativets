@@ -3241,6 +3241,171 @@ itself should not be built.
 
 ---
 
+### THE `@Expr` PROPERTY READ IS CLEARED — the unfold was missing from the one place a value's type is PRODUCED
+
+The last known term in the chain, and it was exactly what the brief predicted: a **missing
+unfold**, not a representation problem.
+
+`ast.ts`'s `@Name` block already stated the invariant — *"`@Name` appears only NESTED inside a
+shape (a field type, an element type). A value's own static type is always the expanded shape …
+the reference is unfolded on demand — exactly when a field carrying one is read."* The encoding
+shipped with that promise kept everywhere a shape is **consumed** (`assignable`, `reshapable`,
+`retypeLiteral`, the three deep walks) and **nowhere it is produced**. So the declared field type
+`CallExpr.callee: @Expr` came straight back out of `Checker.infer` as the value's own type, and
+`@Expr` matches none of the structural predicates: `NT2001 Property 'kind' does not exist on
+@Expr`.
+
+**Where it landed: two funnels and four predicates.**
+
+| # | site | what it was |
+|---|---|---|
+| 1 | `Checker.type` (`checker.ts`) | the ONE place an expression's type is produced — unfold there |
+| 2 | `CodeGen.genExpr` (`codegen.ts`) | its codegen twin, so the two never see different types for one value |
+| 3 | `arrayElementOk` | a slot predicate that had no `@N` arm — `args: Expr[]` was `NT1001 arrays of @Expr` |
+| 4 | `fieldOnBase` / `indexResultTy` / the `ForOfStmt` element binding | receivers that arrive as `baseTy("?U@N")` or `elemTy("@N[]")`, i.e. NOT through `type()` |
+
+**Why the FUNNEL and not the member access.** Unfolding only at a receiver would have left
+`const o = e.operand` bound at `@Expr` — and a tag narrowing is not a fact, it is a **constant
+shadow BINDING** whose type `restrictUnion` computes from a real union (the same distinction the
+short-circuit lane recorded one section up). The narrowing would not have attached and `o.value`
+would be refused one line later with a *different* message for the same gap. Unfolding where a
+value's type is produced makes the binding an ordinary union, and every downstream pass —
+narrowing, `switch`, drops, codegen's layout — is unchanged. The `ForOfStmt` element binding is
+the proof: it is declared directly from `elemTy` rather than through `type()`, so it kept the
+folded spelling and a `for (const a of call.args)` loop would not narrow while the identical
+non-recursive loop did.
+
+**The termination argument, explicitly.** `expandTypeRef` replaces a bare `@N` with `N`'s shape
+and is the identity on everything else, *including a type that merely CONTAINS a reference*. A
+shape's own recursive positions stay folded — the parser mints a back-edge exactly there — so the
+result is either concrete or another `@N` one access deeper. There is no fixpoint, no transitive
+expansion, and no `seen` set: each unfold is paid for by a real source-level access and a program
+has finitely many. (`assignable` is the one place that DOES need the coinductive `assumed` set,
+because it descends into two shapes at once; that was already there.)
+
+**The encoding trap, checked.** `isArrayTy`, `isObjectTy`, `isFuncTy`, `isNullableTy`,
+`isUnionTy`, `isTypeRefTy`, `elemTy`, `objectFields`, `fieldIndex`, `isLinearTy` and `emitDrops`'
+selection were each re-read against the change. Nothing moved in the last two: a `@N` and the
+union/object it names are both linear and both free through `nt_obj_free`, so the drop sets are
+identical before and after — which is also why unfolding is representation-neutral. `fieldIndex`
+was the one real hazard and it now REFUSES a folded receiver outright (see the wrong answer
+below).
+
+**A second spelling problem, found on the way.** `recTypes` stores the `parseTypeInner` form,
+which KEEPS a string-literal field type (a recursive union's discriminant must survive, or
+`unionDiscriminant` cannot prove the tag sits at one slot in every member); an ANNOTATION goes
+through `parseType`, which widens it. So `interface N { tag: "m"; n: number; next?: N }` declared
+one spelling and unfolded the other, and the refusal printed BOTH SIDES IDENTICALLY —
+`declared {tag:string,n:number,next:?U@N} but initialized with {tag:string,n:number,next:{…}}` —
+because the message applies the same widening. Both `unfold`s now widen; `widenLiteralTys` does
+not descend into a `U<…>`, so a recursive union keeps the tags its dispatch reads, and a
+literal-typed field is one string slot either way.
+
+| Module | Before | After |
+|---|---|---|
+| `ast.ts` (standalone + linked) | `NT2001` — `Property 'kind' does not exist on @Expr` | **`NT2001` — `Property 'property' does not exist on U<Expr…> — narrow it first`** |
+| the other eight, linked | `NT2001` — `@Expr`, inherited | **`NT2001` — the same, inherited** |
+| `lexer.ts`, `diagnostics.ts`, `coverage-preprocess.ts` | rung 3 | **unchanged — rung 3, and all three emit BYTE-IDENTICAL IR** (161886 / 115242 / 152815, `cmp`'d against the branch base in the same worktree) |
+
+**Nine modules moved and none reached IR — the sixth time this document records it.** The wall is
+now a term that has nothing to do with recursion: **a tag test does not narrow a DOTTED PATH.**
+
+```ts
+if (e.callee.kind === "MemberExpr") e.callee.property   // src/ast.ts:1383, freshArray
+// NT2001 Property 'property' does not exist on U<…> — narrow it first
+```
+
+Verified NOT recursion-specific — the identical non-recursive program is refused the same way:
+
+```ts
+type Inner = { kind: "A"; a: number } | { kind: "B"; b: string };
+const o: { name: string; inner: Inner } = { name: "x", inner: { kind: "A", a: 1 } };
+if (o.inner.kind === "A") o.inner.a;   // same NT2001, no recursion anywhere
+```
+
+Probed one deeper (neuter `freshArray` by binding `const callee = e.callee` first, re-measure):
+the next site is `exprLoc`'s `e.left`, the same construct again. **Census, because a
+first-blocker row never sizes a construct** — `x.y.kind === "lit"` taken from real `BinaryExpr`
+nodes via the compiler's own parser, not from `grep`: **198 sites in five modules** (checker 110,
+codegen 47, ownership 25, parser 10, ast 6). That is an upper bound on what needs the feature
+(not every one is followed by a read of the narrowed path), and it is the same order as the
+`o.f = v` census that decided the mutable-AST question — so the source-side workaround (bind a
+local first) is 198 edits across five files, and the compiler-side fix is one feature.
+
+So it is ONE feature held at many sites, and it is a real decision rather than a gap: the nullish half already exists
+(`narrowedPath`), a tag narrowing would need to key its shadow binding on the PATH text rather
+than a name, and soundness needs the path to be provably stable — which means refusing to narrow
+through a `@@mutable` receiver. That is a narrowing lane, not this one, and it should not be
+started without agreeing which tests define it.
+
+#### PRE-EXISTING BUGS this turned up
+
+**1 — THE LINKER LEFT MUTUAL BACK-EDGES DANGLING, AND THE COMPILER HUNG.** `rewriteRefs` took a
+single `from`/`to` pair — right for a SELF-recursive declaration, wrong for every mutual cycle.
+`Call.callee: Expr` and `Expr = Num | Call` are two entries of one SCC, so `Call`'s shape carries
+a reference to a SIBLING, which the single-name form left unrenamed and therefore **dangling in
+the merged table**. `src/ast.ts` is a 46-declaration cycle imported by every other module of this
+compiler, so this was the shape that mattered.
+
+It did not fail loudly. `expandTypeRef` returns an unknown name UNCHANGED (the deliberate "cannot
+decide, do not guess" rule), `genInspect` re-enters itself with it, and JSC turns that tail call
+into a **loop**: no diagnostic, no exit code, nothing for a differential test to compare. On an
+untouched tree:
+
+```ts
+// m.ts
+export interface A { kind: "A"; b: B }
+export interface B { kind: "B"; s: string; a?: A }
+// main.ts
+import type { A } from "./m.ts";
+const a: A = { kind: "A", b: { kind: "B", s: "hello" } };
+console.log(a);
+// node: <the object>, exit 0.   nativets: HANGS in codegen. Killed at 25s, 120s.
+```
+
+Fixed three ways, because the rename had three doors: `rewriteRefs` takes a MAP of every
+recursive name the module declares; the module's own AST types go through it (`Renamer`), or a
+non-entry module's signatures keep the pre-rename spelling and an argument typed by the
+correctly-renamed imported shape is refused against its own callee; and the EXPORTED shape goes
+through it, or the importer resolves an `@N` against ITS names. `genInspect` now refuses a `@N`
+the table cannot resolve instead of looping, which is what property 2 of the encoding promises.
+Gated by `test/modules/rectypes` (differential) plus a structural test that the merged table is
+CLOSED — asserted structurally on purpose, since the failure mode of an open table is a hang and
+a hang has no output to diff.
+
+**2 — A SILENT WRONG ANSWER through `?.`, created and closed inside this lane.** Clearing the
+property read turned an optional chain through a back-edge from a refusal into a wrong answer:
+`genOptChain` unboxes with `baseTy(cur.ty)` — the bare `@N` — and hands it to `genFieldRead`,
+where `objectFields("@N")` is the empty list, so `fieldType` is `undefined` and `fieldIndex` is a
+slot number computed from nothing.
+
+```ts
+interface N { n: number; label: string; next?: N }
+const a: N = { n: 1, label: "x", next: { n: 2, label: "y" } };
+console.log(a.next?.n, a.next?.label);
+// node: 2 y      nativets (mid-lane): 0 (null)      exit 0 on BOTH
+```
+
+`genOptChain` unfolds, and `genFieldRead` now throws an internal error on a folded receiver so
+the NEXT caller that forgets reports itself instead of loading the wrong offset. That is the
+`objectFields("@N")` phantom-record trap for the second time in this project; the guard is there
+so there is not a third.
+
+**A THIRD refusal moved, and a pinned test asked for it.** `test/mutable-records.test.ts` held
+*"an ARRAY of the recursive type never reaches the cycle rule — NT1001 is nearer"*, pinned
+explicitly so the lane that implemented `@Node[]` would come back and check that the
+cycle-capability rule carried the shape. It does: with `arrayElementOk`'s `@N` arm the nearer
+gate is gone and `a.kids = []` on a `@@mutable` recursive record is now
+`NT1030 'kids' … is a RECURSIVE field (its type '@Node[]' can contain a Node)` — the right
+refusal, naming the array type. The test is rewritten to assert that instead, with its own
+history in the comment so the change does not read as a relaxation.
+
+**Memory.** Measured against a CONTROL (the same program with the recursive field flattened to a
+structurally identical non-recursive one), not against zero: `__objLive()`/`__arrLive()` are
+`3`/`0` vs `3`/`0` for the record shape, `0`/`0` vs `0`/`0` for the union shape, and `2`/`1` vs
+`2`/`1` for the array-of-back-edge shape — identical in every pair, and the record shape's
+one live block is the pre-existing nullable-field leak this document already records (it
+reproduces byte-for-byte on the branch base).
 ### RUNG 3 DIFFERENTIAL-FUZZED — all three modules DIVERGE, and the compiled lexer cannot lex its own source
 
 `test/sh6-fuzz.ts` (script) + `test/sh6-fuzz.test.ts` (ratchet, 8 s).
@@ -3340,6 +3505,76 @@ worth the name.
   the same door on `String.fromCharCode` is not recorded, and it is the one `src/lexer.ts` uses
   to build every `\uXXXX` escape.
 - The quadratic `+=` above.
+
+
+### GROUP A IS ZERO — the compiled lexer lexes `src/`, and it took 31 sites, not four
+
+`test/sh6-fuzz.test.ts` (`corpus: "src"`, ratcheted), `test/no-index-last.test.ts` (fast gate).
+
+The section above ends by naming what would settle rung 3: "the four `.at` fixes, the
+non-integer index fix, and then this sweep re-run to zero on the group-A rows". That is done,
+and the interesting part is the SIZE — the sweep's four sites were four the sweep's corpus
+could REACH, and the real number is 31.
+
+**The census, and the instrument behind it.** `src/` holds **573 computed index reads**. Every
+one was rewritten into a recording helper (`RECV[SUB]` → `__NTIDX(RECV, SUB, site)`, driven by
+the compiler's own lexer, never a text scan), and the evidence the rewrite was faithful is that
+the instrumented compiler emits byte-identical IR. Running lex + `preprocessForCoverage` over
+all of `src/`, lex over all 492 `.ts` files in the tree, and `sourceToIR` over 169 fixtures and
+examples found **15 reads that actually go out of range on that workload**:
+
+| kind | count | where |
+|---|---|---|
+| STRING | 7 | `pragmaName` ×2 (the bare `//`), the three numeric-literal continuations at end of file, `modules.ts`'s `t[j] === "{"` |
+| ARRAY | 8 | `e.args[0]`, `args[1] ? …`, `args[i] ?? …`, `fn.params[0]?.name` — argument lists shorter than the read: `checker.ts` 1, `codegen.ts` 6, `ownership.ts` 1 |
+
+The eight ARRAY rows are the ones no previous instrument had seen at all, and they are not
+edge cases: `checker.ts`'s fires on 14 of the 169 fixtures and `ownership.ts`'s on 22. A
+self-hosted checker would abort compiling ordinary programs.
+
+**And then the error paths, which a real-workload census is structurally blind to.** A
+well-formed corpus never ends a file in `/`, `"`, `` ` ``, `\`, `$` or `*`, so a census over
+real files cannot reach the code that handles it. Lexing every PREFIX of ten inputs, with a
+throwing getter installed at `String.prototype["0".."31"]` so an out-of-range read at a small
+index throws under bun exactly as it panics under nativets, found **16 more** — every
+end-of-input path in both scanners. Both halves were needed: the census finds what fires today,
+the prefix sweep finds where a compiler spends its time being wrong.
+
+**31 sites, 7 modules, all fixed**, every one with a `length` test that never FORMS the index
+(`.at(i)` is the other sanctioned spelling; see `test/no-index-last.test.ts`). Three of them
+carried a `?? ""` the panic never reached — a dead guard, and one `tsc` reads as LIVE because
+`noUncheckedIndexedAccess` types the read `T | undefined`. That blindness is now recorded
+twice: for index −1 and for index == length.
+
+**What moved as a result:**
+
+- The full 553-input sweep goes **84 / 82 / 6 → 18 total**, and **not one of the 18 is a
+  `src/*.ts` file**. The compiled lexer and the compiled preprocessor process all twelve of
+  the compiler's own modules identically. What is left is four real files
+  (`test/selfhost-ratchet.test.ts`, `test/sh6-fuzz.ts`, `test/textimport.test.ts`) plus the
+  adversarial set, every one a documented NUL or UTF-8-byte door — groups C and D, nothing new.
+- **THE ERROR-PATH SPLIT IS CLOSED.** `"abc` and `"abc\n` now behave identically: two inputs
+  moved out of group A and INTO the error-path agreement set, which is the shape of the result
+  rather than a disappearance. The last character of a file no longer decides whether the
+  lexer raises `LexError` or aborts.
+- Rung 3 for these modules is now backed by a ratcheted **`corpus: "src"`** differential rather
+  than by hand-written snippets. That assertion costs ~60 s today, and the corpus was NOT
+  shrunk to make it cheap: it is quadratic string indexing (see item 5 above), and it drops to
+  seconds when that lands.
+
+**NO MODULE IS DEMOTED, and the reason is the fix rather than the standard.** The standard went
+UP: before this lane the three rung-3 rows rested on snippets, and `lexer.ts`'s rested on
+nothing at all (`weak` — empty stdout matching empty stdout, and no driver). Measured against
+the stronger claim they all failed; measured against it after the 31 fixes they all pass. Had
+they not, the rows would have come down — an honest rung 2 beats a rung 3 that means nothing.
+
+**Group B is NOT fixed and the empty bucket must not be read as such.** `formatDiagnostic` no
+longer REACHES the non-integer index defect (its guard spells out node's own rule with
+`Number.isInteger`), so the row is gone from the ratchet — but a runtime non-integer array
+index still truncates for every other program in the tree. Same four-line repro as above. It
+needs a codegen + runtime change AND a decision (panic, like out-of-range, or refuse at
+compile time), so it is still owed a lane.
+
 
 ---
 

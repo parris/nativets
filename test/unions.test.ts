@@ -99,6 +99,82 @@ describe("narrowing is the ONLY way to a member's fields — the unsound reads a
     expect(codeOf(`${SHAPES}function f(s: Shape): string { return s.kind; }\nconsole.log(f({ kind: "square", size: 1 }));\n`)).toBe(null);
   });
 
+  /**
+   * A NULLISH guard composes with a TAG narrowing (`E | undefined`) — the behavior the
+   * `narrow-nullable.ts` fixture runs against node. What is pinned HERE is the other
+   * half: widening a narrowing makes strictly MORE programs compile, so what must not
+   * move is the set of programs still REFUSED. See docs/divergences.md.
+   */
+  describe("a nullish guard leaves something the TAG narrowing can narrow", () => {
+    const E = `interface A { kind: "A"; left: number }
+interface B { kind: "B"; right: number }
+type E = A | B;
+function mkA(n: number): E { return { kind: "A", left: n }; }
+function opt(e: E, on: boolean): E | undefined { return on ? e : undefined; }
+`;
+    const f = (body: string) => `${E}function f(e: E | undefined): number { ${body} }\nconsole.log(f(opt(mkA(7), true)));\n`;
+
+    test("the guarded-then-narrowed read compiles", () => {
+      expect(codeOf(f(`if (!e) return -1; if (e.kind === "A") return e.left; return 0;`))).toBe(null);
+      expect(codeOf(f(`if (e === undefined) return -1; switch (e.kind) { case "A": return e.left; } return 0;`))).toBe(null);
+      expect(codeOf(f(`if (e !== undefined && e.kind === "A") return e.left; return 0;`))).toBe(null);
+    });
+
+    test("...and the reads that were never proved are STILL refused", () => {
+      // guarded, but not narrowed — the member's field is not there yet
+      expect(codeOf(f(`if (!e) return -1; return e.left;`))).toBe("NT2001");
+      // narrowed, but to the OTHER member
+      expect(codeOf(f(`if (!e) return -1; if (e.kind === "A") return e.right; return 0;`))).toBe("NT2001");
+      // narrowed by ELIMINATION to B, so `.left` is still absent
+      expect(codeOf(f(`if (!e) return -1; if (e.kind === "A") { return e.left; } return e.left;`))).toBe("NT2001");
+      // read BEFORE the guard
+      expect(messageOf(f(`const n = e.left; if (!e) return -1; return n;`))).toContain("possibly undefined");
+      // no guard at all
+      expect(messageOf(f(`if (e.kind === "A") return e.left; return 0;`))).toContain("possibly undefined");
+      // assigned between the proof and the use — the fact is dropped, so is the narrowing
+      expect(messageOf(`${E}function f(e: E | undefined, o: E): number { if (!e) return -1; e = o; if (e.kind === "A") return e.left; return 0; }\nconsole.log(f(opt(mkA(7), true), mkA(1)));\n`))
+        .toContain("possibly undefined");
+    });
+
+    test("the DISCRIMINANT alone is readable after only the nullish guard", () => {
+      expect(codeOf(`${E}function f(e: E | undefined): string { if (!e) return "none"; return e.kind; }\nconsole.log(f(opt(mkA(7), true)));\n`)).toBe(null);
+    });
+  });
+
+  /**
+   * The hint must never prescribe what the program already does. Three shapes reach the
+   * "does not exist on a union" message with a tag test ALREADY written, and each one now
+   * names its own real cause — and prescribes a workaround that compiles.
+   */
+  describe("the union field diagnostic says something TRUE about this receiver", () => {
+    const E = `interface A { kind: "A"; left: number }
+interface B { kind: "B"; right: number }
+type E = A | B;
+interface Box { inner: E }
+function mkA(n: number): E { return { kind: "A", left: n }; }
+function mkBox(): Box { return { inner: mkA(7) }; }
+`;
+    test("a receiver that is a PATH is told that narrowing tracks a NAME", () => {
+      const bad = `${E}function f(o: Box): number { if (o.inner.kind === "A") return o.inner.left; return 0; }\nconsole.log(f(mkBox()));\n`;
+      expect(messageOf(bad)).toContain("narrowing tracks a plain NAME");
+      expect(messageOf(bad)).toContain("o.inner");
+      // ...and the binding it prescribes actually works
+      expect(codeOf(`${E}function f(o: Box): number { const v: E = o.inner; if (v.kind === "A") return v.left; return 0; }\nconsole.log(f(mkBox()));\n`)).toBe(null);
+    });
+
+    test("a receiver already narrowed to a SUB-union is told there are several members left", () => {
+      const bad = `${E}function f(e: E): number { switch (e.kind) { case "A": case "B": return e.left; } }\nconsole.log(f(mkA(7)));\n`;
+      expect(messageOf(bad)).toContain("MORE THAN ONE member");
+      expect(codeOf(`${E}function f(e: E): number { switch (e.kind) { case "A": return e.left; case "B": return e.right; } }\nconsole.log(f(mkA(7)));\n`)).toBe(null);
+    });
+
+    test("a plain never-narrowed name still gets the plain advice, spelled with ITS name", () => {
+      const bad = `${E}function f(e: E): number { return e.left; }\nconsole.log(f(mkA(7)));\n`;
+      expect(messageOf(bad)).toContain("narrow it first");
+      expect(messageOf(bad)).toContain('if (e.kind === "A")');
+    });
+  });
+
   test("narrowing does not leak past the arm it was proved in", () => {
     const leaks = `${SHAPES}function f(s: Shape): number {
   if (s.kind === "square") { return s.size; }
