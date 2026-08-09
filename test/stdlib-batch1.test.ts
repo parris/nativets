@@ -96,6 +96,88 @@ console.log("".startsWith("a"), "".endsWith("a"), "".startsWith(""));
 `,
   },
   {
+    /*
+     * The ZERO-ARGUMENT `.slice()`. `"abc".slice()` is the whole string and `[1,2].slice()`
+     * is a copy — ordinary TypeScript that nativets rejected with
+     * `[NT2001] '.slice' expects 1..2 args, got 0`, i.e. an NT2xxx TYPE error blaming a
+     * program that is correctly typed (`slice(start?, end?)` — both optional in
+     * lib.es5.d.ts; `start` defaults to 0, ES 22.1.3.22 / 23.1.3.28).
+     *
+     * The arity table follows TYPESCRIPT, not node's runtime laxity, and the two disagree
+     * here: node also accepts `"abc".substring()` / `.charAt()` / `.at()`, but
+     * lib.es5.d.ts declares those first parameters REQUIRED, so tsc reports TS2554 and
+     * NT2001 is the right answer. Pinned below so the two halves cannot drift.
+     *
+     * `.slice()` is also the idiom that makes an immutable sort legal: `slice` is in
+     * `FRESH_ARRAY_CALLS` (src/ast.ts), so `xs.slice().sort()` — the shape this repo's own
+     * test files use — is a fresh receiver and permitted.
+     */
+    name: ".slice() with NO arguments — the whole receiver (ES 22.1.3.22 / 23.1.3.28)",
+    code: `
+const s = "nativets";
+console.log(s.slice(), "".slice(), s.slice() === s, s.slice().length);
+const xs = [3, 1, 2];
+console.log(xs.slice().length, xs.slice().join(","));
+console.log(xs.slice().sort().join(","), xs.join(","));
+const ys: string[] = [];
+console.log(ys.slice().length);
+`,
+  },
+  {
+    /*
+     * `.startsWith(search, position)` CLAMPS position to [0, length] before comparing —
+     * ES 22.1.3.23 step 5, `start = clamp(pos, 0, len)`, then `if start + searchLen > len
+     * return false`. The runtime instead had `if (pos > n || pos + m > n) return 0;`, and
+     * that first clause is the bug: with an EMPTY needle past the end the spec compares
+     * "" against "" at the clamped index and answers TRUE, while we answered false.
+     * `.endsWith` next to it already clamped (`if (end > n) end = n;`), which is what
+     * makes this an oversight rather than a decision.
+     *
+     * BORROWED: tc39/test262 `built-ins/String/prototype/startsWith/` —
+     * `searchstring-found-with-position` and the empty-search-string cases. Both sides
+     * exit 0, so this was a silent wrong answer, not a refusal.
+     */
+    name: ".startsWith position is CLAMPED to the length (test262 startsWith/position)",
+    code: `
+const s = "nativets";
+console.log(s.startsWith("", s.length), s.startsWith("", s.length + 1), s.startsWith("", 99));
+console.log("".startsWith("", 0), "".startsWith("", 5), "".endsWith("", 5));
+console.log(s.startsWith("ts", 6), s.startsWith("ts", 7), s.startsWith("ts", 99));
+console.log(s.startsWith("nat", -1), s.startsWith("nat", -99), s.startsWith("", -1));
+console.log(s.endsWith("", 99), s.endsWith("", 0), s.endsWith("nativets", 99));
+`,
+  },
+  {
+    /*
+     * `.lastIndexOf(search, position)` — the second argument. `.indexOf` already took a
+     * `fromIndex`; its mirror was capped at one argument, so the backwards search from a
+     * point (`line.lastIndexOf("(", at)` — a shape this repo's own `test/tsc.test.ts`
+     * uses) was rejected as `[NT2001] '.lastIndexOf' expects 1..1 args, got 2`.
+     *
+     * ES 22.1.3.11 is deliberately NOT symmetric with `.indexOf`: `position` is where the
+     * match may START (not end), it is CLAMPED to [0, len], and an OMITTED-or-NaN position
+     * means +Infinity, not 0 — so `lastIndexOf(x)` searches the whole string while
+     * `lastIndexOf(x, 0)` searches only position 0. Getting that backwards is the natural
+     * bug and every case below separates the two.
+     *
+     * BORROWED: tc39/test262 `built-ins/String/prototype/lastIndexOf/` —
+     * `position-tointeger-*` and the NaN-position cases (`S15.5.4.8_A4_T*`).
+     */
+    name: ".lastIndexOf(search, position) — position is a START, clamped, NaN means +Infinity",
+    code: `
+const s = "abcabc";
+console.log(s.lastIndexOf("b"), s.lastIndexOf("b", 4), s.lastIndexOf("b", 3));
+console.log(s.lastIndexOf("b", 2), s.lastIndexOf("b", 1), s.lastIndexOf("b", 0));
+console.log(s.lastIndexOf("b", 99), s.lastIndexOf("b", -1), s.lastIndexOf("b", -99));
+console.log(s.lastIndexOf("abc", 0), s.lastIndexOf("abc", 2), s.lastIndexOf("abc", 3));
+console.log("aaa".lastIndexOf("aa", 0), "aaa".lastIndexOf("aa", 1), "aaa".lastIndexOf("aa", 9));
+console.log("abc".lastIndexOf("", 0), "abc".lastIndexOf("", 1), "abc".lastIndexOf("", 99));
+console.log("abc".lastIndexOf("", -1), "".lastIndexOf("", 0), "".lastIndexOf("", 9));
+console.log("abc".lastIndexOf("d", 1), "abc".lastIndexOf("abcd", 9));
+console.log(s.lastIndexOf("b", 0 / 0), "abc".lastIndexOf("a", 0 / 0));
+`,
+  },
+  {
     name: ".replace(str, str) — FIRST occurrence only, no-match, empty pattern, $-substitutions",
     code: `
 console.log("a-b-c".replace("-", "+"));
@@ -188,6 +270,91 @@ console.log(s.lastIndexOf("a"), s.lastIndexOf("b"), s.lastIndexOf("z"));
 const c = a.concat([7, 8]);
 console.log(c.join(","), a.join(","), c.length);
 console.log(["x"].concat(["y"], ["z"]).join("-"));
+`,
+  },
+  {
+    /*
+     * `Array#indexOf(x, fromIndex)` / `Array#lastIndexOf(x, fromIndex)` — the second
+     * argument, optional in lib.es5.d.ts and so not a type error, but capped at one here
+     * (`[NT2001] .indexOf expects 1 args`).
+     *
+     * The two clamp DIFFERENTLY and that is the whole content of the feature
+     * (ES 23.1.3.17 / 23.1.3.20): a negative fromIndex counts from the end for BOTH, but
+     * on underflow `indexOf` restarts at 0 while `lastIndexOf` gives up and returns -1;
+     * `indexOf` past the end is -1 while an OMITTED `lastIndexOf` index means len-1. Each
+     * line below separates one of those from the plausible wrong answer.
+     *
+     * BORROWED: tc39/test262 `built-ins/Array/prototype/indexOf/` and `lastIndexOf/` —
+     * the `fromIndex-*` families (`15.4.4.14-9-*` / `15.4.4.15-8-*`).
+     */
+    name: "Array#indexOf / #lastIndexOf take a fromIndex, and clamp it differently",
+    code: `
+const a = [1, 2, 3, 2, 1];
+console.log(a.indexOf(2), a.indexOf(2, 0), a.indexOf(2, 2), a.indexOf(2, 4));
+console.log(a.indexOf(1, -1), a.indexOf(1, -5), a.indexOf(1, -99), a.indexOf(1, 99));
+console.log(a.lastIndexOf(2), a.lastIndexOf(2, 2), a.lastIndexOf(2, 0));
+console.log(a.lastIndexOf(1, -1), a.lastIndexOf(1, -5), a.lastIndexOf(1, -99));
+console.log(a.lastIndexOf(1, 99), a.lastIndexOf(9, 2));
+const s = ["a", "b", "a", "b"];
+console.log(s.indexOf("b", 2), s.indexOf("b", 4), s.lastIndexOf("a", 1), s.lastIndexOf("a", -3));
+const e: number[] = [];
+console.log(e.indexOf(1, 0), e.indexOf(1, -1), e.lastIndexOf(1, 0), e.lastIndexOf(1, -1));
+`,
+  },
+  {
+    /*
+     * A NON-INTEGER fromIndex is TRUNCATED TOWARD ZERO FIRST (ToIntegerOrInfinity), and
+     * only then tested for underflow — so on a 5-element array `-5.5` becomes `-5`, which
+     * is index 0, NOT an underflow. Comparing the raw double against `-len` instead gets
+     * `lastIndexOf(x, -5.5)` wrong by returning -1 where node returns 0; the `indexOf`
+     * side happens to land on the same answer, which is exactly why it needs its own case.
+     * The infinities are the other end of the same step.
+     *
+     * BORROWED: tc39/test262 `Array/prototype/lastIndexOf/` `fromIndex-*` (the
+     * `-Infinity` / non-integer members of the family).
+     */
+    name: "Array fromIndex is truncated toward zero BEFORE the underflow test",
+    code: `
+const a = [1, 2, 3, 2, 1];
+console.log(a.indexOf(1, -5.5), a.lastIndexOf(1, -5.5));
+console.log(a.indexOf(1, -4.5), a.lastIndexOf(1, -4.5));
+console.log(a.indexOf(2, 1.9), a.lastIndexOf(2, 3.9));
+console.log(a.indexOf(1, -0.5), a.lastIndexOf(1, -0.5));
+console.log(a.indexOf(1, -6.5), a.lastIndexOf(1, -6.5));
+console.log(a.indexOf(1, -1 / 0), a.lastIndexOf(1, -1 / 0));
+console.log(a.indexOf(1, 1 / 0), a.lastIndexOf(1, 1 / 0));
+console.log(a.indexOf(1, 0 / 0), a.lastIndexOf(1, 0 / 0));
+`,
+  },
+  {
+    /*
+     * The EMPTY receiver, with a fromIndex strictly between -1 and 0. ES 23.1.3.20 step 6
+     * is `k = min(n, len - 1)` for a non-negative n, and that `min` is not decoration:
+     * `-0.5` truncates toward zero to `0`, which is `>= 0` and therefore takes the
+     * non-negative branch, so without the clamp the backward scan starts at index 0 of a
+     * ZERO-LENGTH array. That is a read one past the end — it SEGFAULTED for a string
+     * receiver (a garbage pointer handed to strcmp) and silently returned a wrong answer
+     * for a number one.
+     *
+     * It is a narrow window and it was a bug in this lane's own first draft: every
+     * INTEGER fromIndex escapes it (a negative one takes the `len + n` branch, and `0`
+     * itself is caught by the `fromd >= len` guard when len is 0), so only a FRACTIONAL
+     * negative index on an EMPTY array reaches it. `.indexOf` is immune for a structural
+     * reason — its loop is bounded by `i < len` — which is why the pair is tested here
+     * and not just the one that crashed.
+     */
+    name: "an empty receiver with a fractional negative fromIndex (the min(n, len-1) clamp)",
+    code: `
+const e: number[] = [];
+const es: string[] = [];
+for (const f of [-0.5, -0.25, -0.75, -1, 0, 1, -1.5, 0 / 0, 1 / 0, -1 / 0]) {
+  console.log(f, e.indexOf(1, f), e.lastIndexOf(1, f), es.indexOf("a", f), es.lastIndexOf("a", f));
+}
+const one = [7];
+const oneS = ["a"];
+for (const f of [-0.5, -0.25, -1, 0, 0.5, 1]) {
+  console.log(f, one.indexOf(7, f), one.lastIndexOf(7, f), oneS.indexOf("a", f), oneS.lastIndexOf("a", f));
+}
 `,
   },
   {
@@ -305,6 +472,69 @@ console.log(Number.isNaN(NaN), Number.isNaN(1), Number.isNaN(0 / 0));
 console.log(Number.parseInt("42px"), Number.parseInt("ff", 16), Number.parseInt("zz"));
 console.log(Number.parseFloat("3.5x"), Number.parseFloat("nope"));
 console.log(Number.isInteger(4), Number.isFinite(1 / 0), Number.isSafeInteger(2 ** 53));
+`,
+  },
+]);
+
+/*
+ * `Math.round` — ECMAScript 21.3.2.28, which is NOT `floor(x + 0.5)`.
+ *
+ * The runtime shipped `double js_math_round(double x) { return floor(x + 0.5); }` with
+ * the comment "JS semantics", and nothing in the corpus ever tested it beyond
+ * `Math.round(3.5)` (test/corpus/gap_cases.json) — a value on which the two agree. The
+ * addition is the bug: `x + 0.5` is a DOUBLE add, so it rounds, and for large or
+ * near-half x it rounds into the next integer BEFORE the floor sees it.
+ *
+ * BORROWED: tc39/test262 `built-ins/Math/round/` — `S15.8.2.15_A1` (the -0 results) and
+ * the `exponent-boundaries` / large-integer cases; the `0.49999999999999994` value is
+ * V8's own regression case for exactly this `floor(x+0.5)` formulation (it is the
+ * largest double below 0.5, and `x + 0.5` rounds it up to exactly 1.0).
+ *
+ * Every expected value below was MEASURED from node, and the four integer answers are
+ * ordinary wrong answers, not sign-of-zero pedantry: `Math.round(Number.MAX_SAFE_INTEGER)`
+ * returned MAX_SAFE_INTEGER + 1. Both sides exit 0 — the silent-wrong-answer class.
+ */
+differential("stdlib batch 1: Math.round matches node (ES 21.3.2.28, NOT floor(x+0.5))", [
+  {
+    name: "halves round toward +Infinity; the classic cases",
+    code: `
+console.log(Math.round(0.5), Math.round(-0.5), Math.round(1.5), Math.round(-1.5));
+console.log(Math.round(2.5), Math.round(-2.5), Math.round(8.5), Math.round(-8.5));
+console.log(Math.round(3.5), Math.round(-3.5), Math.round(0.1), Math.round(-0.1));
+`,
+  },
+  {
+    name: "0.49999999999999994 — `x + 0.5` rounds UP to 1.0 before the floor (V8's regression case)",
+    code: `
+console.log(Math.round(0.49999999999999994));
+console.log(Math.round(-0.49999999999999994));
+console.log(Math.round(0.5 - Number.EPSILON / 4));
+`,
+  },
+  {
+    name: "large integers are returned unchanged — `x + 0.5` is not exact past 2**52",
+    code: `
+console.log(Math.round(4503599627370496));
+console.log(Math.round(4503599627370497));
+console.log(Math.round(-4503599627370497));
+console.log(Math.round(9007199254740991));
+console.log(Math.round(Number.MAX_SAFE_INTEGER) === Number.MAX_SAFE_INTEGER);
+console.log(Math.round(1e21), Math.round(-1e21));
+`,
+  },
+  {
+    name: "negative zero is PRESERVED: -0.5 <= x < 0 rounds to -0, and so does -0 itself",
+    code: `
+console.log(Math.round(-0), Math.round(-0.5), Math.round(-0.1), Math.round(-1e-323));
+console.log(1 / Math.round(-0.5), 1 / Math.round(-0.2), 1 / Math.round(-0));
+console.log(1 / Math.round(0), 1 / Math.round(0.1));
+`,
+  },
+  {
+    name: "NaN and the infinities pass through",
+    code: `
+console.log(Math.round(NaN), Math.round(Infinity), Math.round(-Infinity));
+console.log(Math.round(1 / 0), Math.round(-1 / 0));
 `,
   },
 ]);
@@ -453,5 +683,53 @@ describe("stdlib batch 1: in-place array mutators are REJECTED (NT1606), like .p
   }
   test("the immutable replacements compile", () => {
     expect(rejectCode(`const a = [1, 2, 3]; const b = a.with(0, 9); const c = [...a, 4]; console.log(b.length, c.length);`)).toBeNull();
+  });
+});
+
+/*
+ * ARITY FOLLOWS TYPESCRIPT, NOT node's runtime laxity — and the two genuinely disagree.
+ *
+ * node accepts `"abc".substring()`, `.charAt()` and `.at()`, defaulting the index to 0.
+ * lib.es5.d.ts declares all three first parameters REQUIRED, so `tsc` reports TS2554 and
+ * the right nativets answer is NT2001, a type error about the USER's program. `.slice`,
+ * `.lastIndexOf` and `Array#indexOf`/`#lastIndexOf` are the opposite: tsc accepts the
+ * short/long forms, so refusing them was nativets reporting a type error against
+ * correctly-typed code.
+ *
+ * Both halves are pinned because the tempting simplification — "node runs it, so accept
+ * it" — quietly admits the FIRST list, i.e. makes nativets accept programs `tsc` rejects.
+ * That would not be caught anywhere else: `test/tsc.test.ts` checks `src/` and the
+ * `*.test.ts` harness, never the fixture strings inside them.
+ */
+describe("stdlib batch 1: method ARITY matches TypeScript's lib, in both directions", () => {
+  const TSC_REQUIRES_IT: string[] = [           // tsc: TS2554 -> nativets: NT2001
+    `console.log("abc".substring());`,
+    `console.log("abc".charAt());`,
+    `console.log("abc".at());`,
+    `console.log([1, 2].at());`,
+  ];
+  for (const src of TSC_REQUIRES_IT) {
+    test(`refused (tsc requires the argument): ${src.trim()}`, () => {
+      expect(rejectCode(src)).toBe("NT2001");
+    });
+  }
+
+  const TSC_ACCEPTS_IT: string[] = [            // tsc: clean -> nativets must compile
+    `console.log("abc".slice());`,
+    `console.log([1, 2].slice().length);`,
+    `console.log("abcabc".lastIndexOf("b", 2));`,
+    `console.log([1, 2, 1].indexOf(1, 1));`,
+    `console.log([1, 2, 1].lastIndexOf(1, 1));`,
+  ];
+  for (const src of TSC_ACCEPTS_IT) {
+    test(`accepted (tsc accepts it): ${src.trim()}`, () => {
+      expect(rejectCode(src)).toBeNull();
+    });
+  }
+
+  test("too MANY arguments stays a type error — tsc rejects that too", () => {
+    expect(rejectCode(`console.log("abc".slice(0, 1, 2));`)).toBe("NT2001");
+    expect(rejectCode(`console.log([1, 2].slice(0, 1, 2).length);`)).toBe("NT2001");
+    expect(rejectCode(`console.log([1, 2].indexOf(1, 0, 3));`)).toBe("NT2001");
   });
 });

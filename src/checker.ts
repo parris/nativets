@@ -205,7 +205,12 @@ const STRING_METHODS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("trimEnd", { min: 0, max: 0, argTys: [], ret: "string" })
   .set("trimStart", { min: 0, max: 0, argTys: [], ret: "string" })
   .set("charAt", { min: 1, max: 1, argTys: ["number"], ret: "string" })
-  .set("slice", { min: 1, max: 2, argTys: ["number", "number"], ret: "string" })
+  // Arity follows TYPESCRIPT's lib, not node's runtime laxity — an arity tsc rejects is a
+  // real user type error (NT2001), and one it accepts must not be reported as one.
+  // `slice(start?, end?)`: both optional, so `s.slice()` is the whole string (ES 22.1.3.22).
+  // `substring(start, end?)`: `start` is REQUIRED in lib.es5.d.ts even though node defaults
+  // it to 0, so `s.substring()` stays TS2554 == NT2001. Likewise `charAt`/`at`.
+  .set("slice", { min: 0, max: 2, argTys: ["number", "number"], ret: "string" })
   .set("substring", { min: 1, max: 2, argTys: ["number", "number"], ret: "string" })
   .set("repeat", { min: 1, max: 1, argTys: ["number"], ret: "string" })
   .set("padStart", { min: 1, max: 2, argTys: ["number", "string"], ret: "string" })
@@ -221,7 +226,9 @@ const STRING_METHODS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("replaceAll", { min: 2, max: 2, argTys: ["string", "string"], ret: "string" })  // string pattern only (no RegExp)
   .set("startsWith", { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" })
   .set("endsWith", { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" })
-  .set("lastIndexOf", { min: 1, max: 1, argTys: ["string"], ret: "number" }); // number | undefined (node: undefined out of range)
+  // 2nd arg = `position`, the index a match may START at (ES 22.1.3.11) — clamped, and
+  // omitted means +Infinity, NOT 0. Not symmetric with `.indexOf`'s fromIndex.
+  .set("lastIndexOf", { min: 1, max: 2, argTys: ["string", "number"], ret: "number" });
 /**
  * Host FFI (SH4) — the signatures of the `node:` builtins, keyed by their canonical
  * name. Unlike GLOBAL_FUNCS these are NOT ambient: a name is only in scope when the
@@ -3948,7 +3955,14 @@ class Checker {
       case "copyWithin": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.copyWithin\` would overwrite the array in place`, "build a new array from `.slice` + spread instead", exprLoc(callee.object) ?? callee.loc);
       case "pop": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.pop\` would mutate the array in place`, "use `arr.slice(0, -1)` for the shorter array, or `arr[arr.length - 1]` for the last element", exprLoc(callee.object) ?? callee.loc);
       case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
-      case "indexOf": need(1); if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`); return "number";
+      // `.indexOf(x, fromIndex?)` — the second parameter is optional in lib.es5.d.ts, so
+      // requiring exactly one rejected valid TypeScript with a TYPE error. See the
+      // `.lastIndexOf` arm below: same argument, deliberately different clamping.
+      case "indexOf":
+        if (args.length < 1 || args.length > 2) throw typeError(".indexOf expects 1..2 args");
+        if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`);
+        if (args.length === 2 && argTys[1] !== "number") throw typeError(".indexOf fromIndex must be a number");
+        return "number";
       // ACCEPTED, unlike its in-place siblings above: `.reverse` returns its RECEIVER,
       // so the result type is `recv` and the two are the SAME array. `RETAINS_RECEIVER`
       // (src/ownership.ts) is what keeps that single-owner; adding another such method
@@ -3963,8 +3977,12 @@ class Checker {
         return el;
       }
       case "lastIndexOf":
-        need(1);
+        // `.lastIndexOf(x, fromIndex?)` — optional in lib.es5.d.ts. NOT symmetric with
+        // `.indexOf`: omitted means len-1, and a negative index that underflows returns
+        // -1 rather than restarting at 0 (ES 23.1.3.20).
+        if (args.length < 1 || args.length > 2) throw typeError(".lastIndexOf expects 1..2 args");
         if (argTys[0] !== el) throw typeError(`.lastIndexOf expects ${el}`);
+        if (args.length === 2 && argTys[1] !== "number") throw typeError(".lastIndexOf fromIndex must be a number");
         if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.lastIndexOf on ${recv}`);
         return "number";
       case "concat": // variadic; every argument must be an array of the same element type
@@ -3983,7 +4001,8 @@ class Checker {
         if (argTys[1] !== el) throw typeError(`.with value expects ${el}`);
         return recv;
       case "slice":
-        if (args.length < 1 || args.length > 2) throw typeError(".slice expects 1..2 args");
+        // `start` defaults to 0 (ES 23.1.3.28): `xs.slice()` is a COPY, not a type error.
+        if (args.length > 2) throw typeError(".slice expects 0..2 args");
         if (argTys.some((t) => t !== "number")) throw typeError(".slice args must be numbers");
         return recv;
       case "join":
