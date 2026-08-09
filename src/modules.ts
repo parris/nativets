@@ -77,6 +77,27 @@ function isIdentPart(c: string): boolean {
  * after the run a `{`?" — and when it is not, every start position inside that run fails
  * identically, so the scan skips the whole run exactly as the engine's own restarts do.
  */
+/**
+ * Rewrite the nominal back-edge `@from` to `@to` inside a recursive shape — the `@` twin of
+ * `rewriteTags`, and needed for the same reason: a non-entry module's declarations are
+ * alpha-renamed, so its shape's own self-reference has to follow. A maximal identifier run
+ * after an `@` is the whole name, so there is no partial match to worry about.
+ */
+function rewriteRefs(t: string, from: string, to: string): string {
+  if (from === to) return t;
+  let out = "";
+  let i = 0;
+  while (i < t.length) {
+    if (t[i] !== "@" || i + 1 >= t.length || !isIdentStart(t[i + 1]!)) { out += t[i]; i++; continue; }
+    let j = i + 1;
+    while (j < t.length && isIdentPart(t[j]!)) j++;
+    const name = t.slice(i + 1, j);
+    out += name === from ? `@${to}` : t.slice(i, j);
+    i = j;
+  }
+  return out;
+}
+
 function rewriteTags(t: string, tags: Map<string, string>): string {
   let out = "";
   let i = 0;
@@ -423,6 +444,11 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
    *  every Ty that mentions it, so it is renamed per module through `tags` for exactly
    *  the reason class tags are: two modules may each declare a `Cell`. */
   const mutableRecords = new Set<string>();
+  /* Recursive-type shapes (`@Name` back-edges, ast.ts). Merged across modules under the
+   * SAME per-module renaming class tags get: two modules may each declare a recursive
+   * `Node`, and a shape is only meaningful next to the name its back-edge resolves through,
+   * so a collision here would silently give one module's nodes the other's layout. */
+  const recTypes = new Map<string, Ty>();
   /** Host builtins (SH4) imported ANYWHERE in the graph. These are canonical builtin
    *  names, not module bindings, so they are never renamed — a `node:` import binds a
    *  compiler builtin, and the merged program simply needs the union. The compiler's
@@ -486,6 +512,10 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     if (!isEntry) for (const r of program.mutableRecords ?? []) tags.set(r, `${prefixBase}${i}_${r}`);
     for (const c of program.mutableClasses ?? []) mutableClasses.add(names.get(c) ?? c);
     for (const r of program.mutableRecords ?? []) mutableRecords.add(tags.get(r) ?? r);
+    for (const [n, shape] of program.recTypes ?? []) {
+      const to = isEntry ? n : `${prefixBase}${i}_${n}`;
+      recTypes.set(to, rewriteRefs(rewriteTags(shape, tags), n, to) as Ty);
+    }
     for (const h of program.hostImports ?? []) hostImports.add(h);
     new Renamer(names, tags).program(program);
 
@@ -534,6 +564,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
   const merged: Program = { kind: "Program", body };
   if (mutableClasses.size) merged.mutableClasses = [...mutableClasses];
   if (mutableRecords.size) merged.mutableRecords = [...mutableRecords];
+  if (recTypes.size) merged.recTypes = [...recTypes];
   if (hostImports.size) merged.hostImports = [...hostImports];
   return merged;
 }
