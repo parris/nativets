@@ -191,16 +191,25 @@ differential("JSON.stringify — the pretty-printed forms still match node", [
 // property — their contents live in internal slots that `JSON.stringify` never
 // walks. That is not an approximation of node: `{}` is what node prints for
 // EVERY Map and EVERY Set, whatever is in them, so it is exact by construction.
+//
+// NOTE — the "non-empty" cases below were, until the discarded-mutator refusal landed
+// (NT1606, src/checker.ts `rejectDiscardedMutator`), NOT ACTUALLY NON-EMPTY. They were
+// written in JS's discarding style (`const s = new Set(); s.add("a");`), which under
+// nativets' PERSISTENT Map/Set is a no-op — so every one of them stringified an EMPTY
+// collection while claiming to cover a full one. The assertion could not tell, because
+// `{}` is node's answer either way, which is exactly why the defect survived here.
+// They now use the chained form and genuinely carry entries, so the cases test what
+// their names say. This is a strengthening, not a workaround.
 differential("JSON.stringify — a Map/Set is {}, as in node", [
   { name: "an empty Set at the root", code: `const s = new Set<string>(); console.log(JSON.stringify(s));` },
-  { name: "a non-empty Set at the root", code: `const s = new Set<string>(); s.add("a"); s.add("b"); console.log(JSON.stringify(s));` },
+  { name: "a non-empty Set at the root", code: `const s = new Set<string>().add("a").add("b"); console.log(JSON.stringify(s));` },
   { name: "an empty Map at the root", code: `const m = new Map<string, number>(); console.log(JSON.stringify(m));` },
-  { name: "a non-empty Map at the root", code: `const m = new Map<string, number>(); m.set("a", 1); console.log(JSON.stringify(m));` },
-  { name: "a Set as an object field", code: `const s = new Set<string>(); s.add("a"); console.log(JSON.stringify({ s: s, ok: 1 }));` },
-  { name: "a Map as an object field", code: `const m = new Map<string, string>(); m.set("a", "1"); console.log(JSON.stringify({ m: m, ok: 1 }));` },
-  { name: "a Map as the ONLY field", code: `const m = new Map<string, string>(); m.set("a", "1"); console.log(JSON.stringify({ m: m }));` },
+  { name: "a non-empty Map at the root", code: `const m = new Map<string, number>().set("a", 1); console.log(JSON.stringify(m));` },
+  { name: "a Set as an object field", code: `const s = new Set<string>().add("a"); console.log(JSON.stringify({ s: s, ok: 1 }));` },
+  { name: "a Map as an object field", code: `const m = new Map<string, string>().set("a", "1"); console.log(JSON.stringify({ m: m, ok: 1 }));` },
+  { name: "a Map as the ONLY field", code: `const m = new Map<string, string>().set("a", "1"); console.log(JSON.stringify({ m: m }));` },
   { name: "a Map and a Set, pretty-printed", code: `const s = new Set<string>(); const m = new Map<string, string>(); console.log(JSON.stringify({ s: s, m: m }, null, 2));` },
-  { name: "a Map of a Map", code: `const inner = new Map<string, number>(); const m = new Map<string, string>(); m.set("k", "v"); console.log(JSON.stringify({ a: m, b: inner }));` },
+  { name: "a Map of a Map", code: `const inner = new Map<string, number>(); const m = new Map<string, string>().set("k", "v"); console.log(JSON.stringify({ a: m, b: inner }));` },
 ]);
 
 // A Uint8Array has INDEX properties, and they are own and enumerable, so node
@@ -352,8 +361,10 @@ differential("`%j` of undefined matches node", [
 ]);
 
 differential("`%j` of a Map/Set/Uint8Array now matches node", [
-  { name: "%j of a Map", code: `const m = new Map<string, number>(); m.set("a", 1); console.log("%j", m);` },
-  { name: "%j of a Set", code: `const s = new Set<string>(); s.add("a"); console.log("%j", s);` },
+  // Chained, not discarded — see the note on the `JSON.stringify` block above: the
+  // discarding spelling built an EMPTY collection here and `{}` hid it.
+  { name: "%j of a Map", code: `const m = new Map<string, number>().set("a", 1); console.log("%j", m);` },
+  { name: "%j of a Set", code: `const s = new Set<string>().add("a"); console.log("%j", s);` },
   { name: "%j of a Uint8Array", code: `const u = new Uint8Array(2); u[0] = 3; console.log("%j", u);` },
   { name: "%j of an object holding a Map", code: `const m = new Map<string, number>(); console.log("%j", { m: m, n: 1 });` },
 ]);
