@@ -274,7 +274,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // module on to NT1027, a regex literal.
   // `?.[]` cleared; walked on to `Checker.inArrow`, a method that assigns a field and
   // does not return the receiver (NT1023) — the same shape codegen.ts stops on.
-  "checker.ts": { rung: 0, code: "NT1023", blame: "self" },
+  // ...and then moved SHALLOWER, ~580 lines, which is a CORRECTION and not a regression.
+  // `class Scope { constructor(private parent: Scope | null = null) }` at line 93 is the
+  // compiler's own symbol table, and a recursive CLASS field used to be erased to `number`
+  // silently — the compiler described its own scope chain as `?NScope{parent:?Nnumber}`.
+  // This row was crediting checker.ts with reaching line 676 past a miscompiled Scope. It
+  // never did. See the "moved shallower is not automatically a regression" rule in
+  // test/selfhost-ratchet.test.ts.
+  "checker.ts": { rung: 0, code: "NT1030", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   "codegen.ts": { rung: 0, code: "NT1023", blame: "self" },
   "coverage.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
@@ -284,7 +291,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // trap, still visible. MEASURED, not predicted: the lane that moved checker.ts expected
   // this row to land on NT1014, and it did not — it tracks checker.ts exactly, because the
   // two errors are byte-identical. Always re-measure this column rather than inferring it.
-  "ownership.ts": { rung: 0, code: "NT1023", blame: "checker.ts" },
+  // Now FOUR codes — NT1009 -> NT1606 -> NT1027 -> NT1023 -> NT1030 — still never its own.
+  "ownership.ts": { rung: 0, code: "NT1030", blame: "checker.ts" },
   "driver.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   "cli.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
