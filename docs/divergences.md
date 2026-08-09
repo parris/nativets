@@ -1917,6 +1917,13 @@ it describes need not be, so each walk has to be told to stop.
   end of `msgLeafOk` — two bugs cancelling rather than a guarantee. It is now deliberate, and
   `genDeepClone` itself throws on a back-edge so the safety is a property of the walk rather
   than of two independent gates staying in place.
+- **The test for "is this recursive" is STRUCTURAL, not a substring.** `Ty` is a flat string
+  and the first cut was `t.includes("@")` — but `@` is legal inside a string-literal tag
+  (`kind: "user@host"`) and inside a property key (`{ "x@y": 1 }`), both of which land
+  verbatim in the encoding, so structuredClone refused a program node runs. `containsTypeRef`
+  walks the type instead; `hasTypeRef` survives as a cheap pre-filter whose `false` is
+  conclusive and whose `true` decides nothing. Same landmine as `objectFields("@N")` once
+  returning a phantom one-field record.
 - **`JSON.stringify` of a recursive value is refused** (NT1005). The serializer is unrolled
   at compile time from the static type, so it terminates only because the type shrinks at
   every step — and a back-edge does not. `genJsonStringify` refuses one by name, with a

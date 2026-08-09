@@ -577,6 +577,28 @@ const a: N = { v: 1, next: { v: 2 } };
 console.log(c.n, a.v, a.next === undefined);`);
   });
 
+  /*
+   * THE FALSE POSITIVE these guards nearly shipped with, and the reason `hasTypeRef` is a
+   * pre-filter and not a decision. `Ty` is a flat string and the test for a back-edge was
+   * `t.includes("@")` — but `@` is not a forbidden character in a string-literal TAG or in a
+   * property KEY, so `{ "x@y": 1 }` read as recursive and structuredClone refused a program
+   * node runs. Same landmine as `objectFields("@N")` returning a phantom record: a substring
+   * test over a structural encoding is not a structural question.
+   */
+  test("an `@` in a property key or a tag value is not a back-edge", async () => {
+    await matchesNode(`
+const o = { "x@y": 1, b: 2 };
+console.log(JSON.stringify(o));
+const c = structuredClone(o);
+console.log(c.b);`);
+    await matchesNode(`
+interface U { kind: "user@host"; n: number }
+interface G { kind: "group"; n: number }
+type T = U | G;
+const t: T = { kind: "user@host", n: 1 };
+console.log(JSON.stringify(t));`);
+  });
+
   // Non-recursive structuredClone is untouched — the refusal is about the back-edge, not
   // about deep copying.
   test("structuredClone of a NON-recursive nested value still deep-copies", async () => {

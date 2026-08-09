@@ -19,7 +19,7 @@ import { freshArray, RETAINS_RECEIVER } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
-import { isTypeRefTy, hasTypeRef, expandTypeRef, recTypeTable } from "./ast.ts";
+import { isTypeRefTy, expandTypeRef, recTypeTable } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
@@ -3711,7 +3711,11 @@ class FnGen {
     // type, so an unrefused recursive value was copied by ALIASING it. Both callers
     // (`structuredClone`, the actor-message copy) refuse this in the checker; this makes the
     // safety a property of the WALK rather than of two independent gates staying in place.
-    if (hasTypeRef(ty)) {
+    // A BARE `@N` is the whole test: the walk decomposes fields and elements itself, so a
+    // reference nested anywhere arrives here on its own step. Asking `containsTypeRef` up
+    // front would be the same answer more expensively, and asking `t.includes("@")` would
+    // refuse a record with an `@` in a KEY.
+    if (isTypeRefTy(ty)) {
       throw internalError(`deep copy of the recursive type ${ty} reached codegen — the walk has no seen-set, so it would alias rather than copy. This must be refused in the checker (structuredClone / actor message)`);
     }
     // B3 v5: for an actor message the copy must reach STRINGS too — a receiver whose
@@ -4425,8 +4429,10 @@ class FnGen {
     // and a recursive type is exactly the one that does not. Today a bare `@N` falls through
     // to the exhaustive `internalError` at the bottom, and the checker refuses it (NT1005)
     // before that; both are true and neither says so, which is the shape of a guarantee that
-    // quietly stops holding. So the back-edge is refused HERE, by name.
-    if (hasTypeRef(ty)) {
+    // quietly stops holding. So the back-edge is refused HERE, by name — a BARE `@N`, since
+    // the serializer decomposes fields and elements itself and a nested reference arrives on
+    // its own step.
+    if (isTypeRefTy(ty)) {
       throw internalError(`JSON.stringify of the recursive type ${ty} reached codegen — the serializer is unrolled from the static type and a back-edge does not shrink, so it has no base case. This must be refused in the checker (checkJsonStringifyArg)`);
     }
     // And a ceiling, because the argument above is about the types that exist TODAY. A
