@@ -474,6 +474,10 @@ const ACTOR_V4_DECLARES = [
 
 interface Val { v: string; ty: Ty; }
 
+// Like `FnGen` below, a module emitter is an accumulator: `this.strings`/`this.strDefs`
+// grow and `this.arrowCounter` counts up as the module is built. `@@mutable`, in the same
+// pragma spelling.
+//@@mutable
 class ModuleGen {
   private strings = new Map<string, string>();
   private strDefs: string[] = [];

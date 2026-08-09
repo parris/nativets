@@ -868,6 +868,53 @@ paid nothing (all fourteen of its `new NTError(…)` sites pass a fresh object l
 a temporary is free); `ownership.ts` will need a source rewrite. That is the honest shape of the
 remaining work, and it is the same Path-B grind the `.push` census found.
 
+### `NT1023` IS GONE — two pragma comments, and the census says there is no third class
+
+`NT1023` ("method `C.m` assigns a field, so it produces a NEW `C`, but it does not return one")
+was the first blocker for **three of the twelve** modules — `checker.ts` and `codegen.ts` on
+their own account, `ownership.ts` inheriting `checker.ts`'s through the link.
+
+**It was a SOURCE gap, not a compiler gap, and the measurement says so unambiguously.**
+`src/parser.ts` reads the diagnostic out of `lowerSetter`, which throws *only* under
+`if (!isMutable)` — so a class carrying `@@mutable` cannot reach it, for a method exactly as
+much as for a constructor. `class Parser`, `FnGen` and `Analyzer` have carried the pragma since
+Stage 45/49; `class Checker` and `class ModuleGen` simply never got one. They are accumulators
+in exactly the same sense (`Checker` counts loop/switch depth up and down and pushes/pops
+`fnStack`; `ModuleGen` grows `strings`/`strDefs` and counts `arrowCounter` up), so the pragma is
+the *honest* spelling — copy-on-write would be a different program from the one bun runs today.
+
+**The census, not the first-blocker table.** This document's standing correction ("a
+first-blocker histogram measures what to fix NEXT; it never measures how much of a construct is
+in the tree") applies here, so the construct was counted before the fix, with the NT1023 throw
+turned into a collector: **six setter methods, in exactly two classes** — `Checker.inArrow`,
+`Checker.declareGeneric`, `Checker.checkStmt`, `Checker.checkMapEntriesLoop`, and
+`ModuleGen.liftArrow`, `ModuleGen.build`. No third class holds any. `test/self-host-coverage.ts`'s
+whole-tree histogram — the one instrument that recovers statement-by-statement rather than
+stopping at the first blocker — now reports **zero** NT1023 sites tree-wide. This bucket did not
+shrink; it emptied.
+
+**What was unmasked** (all three modules move within the `parse` stage — no column moved
+shallower, and `diagnostics.ts` still reaches IR at rung 3, byte-identical output):
+
+| Module | Was | Now |
+|---|---|---|
+| `checker.ts` | `NT1023` — `Checker.inArrow` | **`NT1009`** — `FmtPiece` (line 4385), `{text:string; spec?:undefined} \| {text?:undefined; spec:FmtSpec; arg:number}`, an optional-field union with no string-literal discriminant |
+| `ownership.ts` | `NT1023` — the same, through the link | **`NT1009`** — the same, still never its own |
+| `codegen.ts` | `NT1023` — `ModuleGen.build` | **`NT1015`** — a `get` accessor in `FnGen` (~165 lines deeper than the static member this bucket used to hold) |
+
+**The cost, stated because it is a real one and it is deferred, not avoided.** `@@mutable`
+switches on the ownership pass's exclusive-access rule, and `codegen.ts` has two receivers that
+rule cannot establish ownership of — `this.mod.liftArrow(e)` (line 1822: the receiver is a FIELD
+of `FnGen`) and `new ModuleGen(…).build(…)` (line 5303: the receiver is a fresh temporary).
+Both are `NT1607`, verified on minimized programs, and both sit far behind the `NT1015` above so
+neither is reachable today. The second of the two is an over-refusal in the pass rather than a
+problem with the source — a `new C(…)` receiver is *more* uniquely owned than the "local bound
+to `new C(…)`" its own hint asks for, since nothing can name it. That is a separate lane.
+
+The `Analyzer` hazard recorded just above is untouched: `Analyzer` was already `@@mutable`, so
+the two-instance use-after-move is a parameter-property/move question, not a mutability one, and
+this change neither worsens nor fixes it.
+
 ---
 
 ## Milestones

@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "2dca793"
+    "rev": "d53ebe8"
   },
   "modules": {
     "ast.ts": {
@@ -18,16 +18,16 @@
       }
     },
     "checker.ts": {
-      "sha256": "b7340245c72635e3",
+      "sha256": "d6a88c88b6c5598e",
       "standalone": {
         "stage": "parse",
-        "code": "NT1023",
-        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
+        "code": "NT1009",
+        "message": "[NT1009] union of object types '{text:string,spec:?Uundefined} | {text:?Uundefined,spec:string,arg:number}' without a usable discriminant — the shared field(s) text, spec are not string-literal typed …"
       },
       "linked": {
         "stage": "parse",
-        "code": "NT1023",
-        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
+        "code": "NT1009",
+        "message": "[NT1009] union of object types '{text:string,spec:?Uundefined} | {text:?Uundefined,spec:string,arg:number}' without a usable discriminant — the shared field(s) text, spec are not string-literal typed …"
       }
     },
     "cli.ts": {
@@ -44,16 +44,16 @@
       }
     },
     "codegen.ts": {
-      "sha256": "0a0ac00f9fdc4e23",
+      "sha256": "ca23dc5b0fe8f2f4",
       "standalone": {
         "stage": "parse",
-        "code": "NT1023",
-        "message": "[NT1023] method 'ModuleGen.build' assigns a field, so it produces a NEW ModuleGen, but it does not return one"
+        "code": "NT1015",
+        "message": "[NT1015] class member modifier/accessor 'get' at L:C is not supported yet"
       },
       "linked": {
         "stage": "parse",
-        "code": "NT1023",
-        "message": "[NT1023] method 'ModuleGen.build' assigns a field, so it produces a NEW ModuleGen, but it does not return one"
+        "code": "NT1015",
+        "message": "[NT1015] class member modifier/accessor 'get' at L:C is not supported yet"
       }
     },
     "coverage-preprocess.ts": {
@@ -145,8 +145,8 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1023",
-        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
+        "code": "NT1009",
+        "message": "[NT1009] union of object types '{text:string,spec:?Uundefined} | {text:?Uundefined,spec:string,arg:number}' without a usable discriminant — the shared field(s) text, spec are not string-literal typed …"
       }
     },
     "parser.ts": {
