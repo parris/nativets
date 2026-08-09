@@ -197,6 +197,17 @@ reports 0** — it counts headers, so it cannot see this class at all), array-in
 a discriminated-union member's object field, and a `@@mutable` record's object field. Nesting
 depth 3 leaks 2. Refcounted string slots do *not* leak this way.
 
+**A NULLABLE box is a stronger case than any of these, and it is not on the list above because
+it never reaches a drop at all.** `isLinearTy` (src/ownership.ts) is
+`isArrayTy || isObjectTy || isUnionTy || isTypeRefTy` — a nullable is none of them, so a
+`[tag, value]` box is in NO scope's drop set anywhere: 100 loose `string | null` locals in a
+loop measure `__objLive() === 100`, with no nesting and no array involved. That makes an array
+of nullables (`(string|null)[]`, landed with the paren element encoding — see
+docs/self-hosting.md) leak its boxes for TWO independent reasons, and it is why the array case
+is a leak and provably not a double free: the box is never freed once, so it cannot be freed
+twice. Both measurements are pinned in `test/nullable-element.test.ts`, the loose baseline
+included, so the day nullables become linear the array case is already watched.
+
 A **generic** recursive free is impossible, not merely unsafe: `nt_obj_new` returns a bare
 `int64_t*` of n slots with **no header**, so at the free site the runtime knows neither the slot
 count nor whether a given 64-bit word is a bit-punned double, a refcounted `char*`, a linear

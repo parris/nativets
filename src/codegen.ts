@@ -16,6 +16,7 @@ import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, type FmtSpec } from 
 // not an expando read back off the array, so codegen reads it in the normal statement loop.
 // `Program` stays — it is still used below, and the lane's branch predated its arrival.
 import { freshArray, RETAINS_RECEIVER } from "./ast.ts";
+import { makeArrayTy } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
@@ -1302,7 +1303,7 @@ class FnGen {
         // walk its insertion-ordered key array and look each value up per step.
         const mapV = s.name2 ? this.genExpr(s.iterable) : null;
         const src = mapV
-          ? (() => { const a = this.fresh(); this.emit(`${a} = call ptr @nt_coll_keys(ptr ${mapV.v})`); return { v: a, ty: `${s.elemTy ?? "string"}[]` as Ty }; })()
+          ? (() => { const a = this.fresh(); this.emit(`${a} = call ptr @nt_coll_keys(ptr ${mapV.v})`); return { v: a, ty: makeArrayTy(s.elemTy ?? "string") }; })()
           : this.genExpr(s.iterable);
         const isStr = src.ty === "string";
         const isBytes = isBytesTy(src.ty);
@@ -1843,10 +1844,13 @@ class FnGen {
               this.emit(`call void @nt_arr_extend(ptr ${arr}, ptr ${src.v})`);
             }
           } else {
-            this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.genExpr(element))})`);
+            // COERCE into the declared element type, the same store boundary an object
+            // literal's field takes. `["x", null]` against `(string | null)[]` has to push
+            // BOXES, not a raw `ptr` and a raw 0 — the slot's type is `?Nstring`, so an
+            // unboxed element read back as a box loads its first word as the tag.
+            this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.coerce(this.genExpr(element), el))})`);
           }
         }
-        void el;
         return { v: arr, ty };
       }
 
@@ -2598,7 +2602,7 @@ class FnGen {
         const val: Val = { v: this.fromSlot(slot, f.ty), ty: f.ty };
         this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(val)})`);
       });
-      return { v: arr, ty: `${fields[0]!.ty}[]` as Ty };
+      return { v: arr, ty: makeArrayTy(fields[0]!.ty) };
     }
 
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Math") {
@@ -2676,7 +2680,7 @@ class FnGen {
           const arr = this.fresh();
           this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(vals.length, 1))})`);
           for (const v of vals) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(v)})`);
-          return { v: arr, ty: `${vals[0]!.ty}[]` as Ty };
+          return { v: arr, ty: makeArrayTy(vals[0]!.ty) };
         }
       }
     }
@@ -3917,7 +3921,7 @@ class FnGen {
       case "keys": case "values": {
         const a = this.fresh();
         this.emit(`${a} = call ptr @nt_coll_${method}(ptr ${recv.v})`);
-        return { v: a, ty: `${method === "keys" ? k : v}[]` as Ty };
+        return { v: a, ty: makeArrayTy(method === "keys" ? k : v) };
       }
       case "set": {
         const ks = keySlot();
@@ -3970,7 +3974,7 @@ class FnGen {
       case "keys": case "values": {
         const a = this.fresh();
         this.emit(`${a} = call ptr @nt_coll_keys(ptr ${recv.v})`);
-        return { v: a, ty: `${el}[]` as Ty };
+        return { v: a, ty: makeArrayTy(el) };
       }
       case "add": {
         const es = elSlot();
@@ -4342,7 +4346,7 @@ class FnGen {
     this.emit(`call double @nt_arr_push(ptr ${out}, i64 ${this.toSlot(rv)})`);
     this.hofStep(L.idx, L.upd, L.cond);
     this.to(this.block(L.end));
-    return { v: out, ty: `${R}[]` as Ty };
+    return { v: out, ty: makeArrayTy(R) };
   }
 
   /** flatMap — map's loop, but each callback result (an array) is CONCATENATED
@@ -4383,7 +4387,7 @@ class FnGen {
     this.to(this.block(skipLbl));
     this.hofStep(L.idx, L.upd, L.cond);
     this.to(this.block(L.end));
-    return { v: out, ty: `${el}[]` as Ty };
+    return { v: out, ty: makeArrayTy(el) };
   }
 
   /** some/every/find/findIndex/findLast/findLastIndex — ONE inlined predicate loop.

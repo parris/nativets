@@ -10,6 +10,7 @@
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText, exprLoc, freshArray } from "./ast.ts";
+import { makeArrayTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
 // Stage 47 (console.log of compound values): the handle-type predicates the
@@ -52,6 +53,30 @@ export interface CheckedProgram {
  * Deliberately narrow: a literal array/string (or a `const` bound to one) indexed by
  * a numeric literal. Anything less certain is left to the runtime panic.
  * ------------------------------------------------------------------ */
+
+/**
+ * May an array slot hold `el`? The two array-literal paths (empty-with-a-hint, and
+ * inferred-from-elements) asked this with two hand-inlined chains; it is one predicate.
+ *
+ * The NULLABLE arm is what `(string | null)[]` needs, and it costs the vector nothing: a
+ * nullable IS a heap `[tag, value]` box, so the slot holds a pointer exactly as an object
+ * element's slot does. It recurses on the base so `(() => number | null)[]` stays refused
+ * for the reason the base type is refused, not by accident.
+ *
+ * This arm was unreachable before the paren element encoding (`makeArrayTy`, src/ast.ts):
+ * `(string|null)[]` and `string[]|null` were the same `Ty` string, and the nullable prefix
+ * won, so the annotation never produced an array type to ask about.
+ *
+ * `allowDate` is a PRE-EXISTING asymmetry, preserved deliberately rather than quietly
+ * fixed here: `const d: Date[] = [new Date()]` compiles and `const d: Date[] = []` is
+ * `NT1001 arrays of Date`. A Date IS a double, so the empty case is a one-word fix; it is
+ * not this lane's, and changing it would move a blocker nobody measured.
+ */
+function arrayElementOk(el: Ty, allowDate: boolean): boolean {
+  if (isNullableTy(el)) return arrayElementOk(baseTy(el), allowDate);
+  return el === "number" || el === "string" || el === "boolean"
+    || isObjectTy(el) || isArrayTy(el) || isUnionTy(el) || (allowDate && isDateTy(el));
+}
 
 /** The length of an expression whose size is fixed at compile time, else undefined. */
 function literalLength(e: Expr): number | undefined {
@@ -1794,7 +1819,7 @@ class Checker {
           // context we still reject (don't guess) — see `emptyArrayError`.
           if (hint && isArrayTy(hint)) {
             const el = elemTy(hint);
-            if (el !== "number" && el !== "string" && el !== "boolean" && !isObjectTy(el) && !isArrayTy(el) && !isUnionTy(el)) throw nyi(NYI.ARRAY, `arrays of ${el}`);
+            if (!arrayElementOk(el, false)) throw nyi(NYI.ARRAY, `arrays of ${el}`);
             return hint;
           }
           throw emptyArrayError();
@@ -1833,8 +1858,8 @@ class Checker {
         if (!tys.every((t) => t === first)) throw typeError(`array elements must share a type (got ${[...new Set(tys)].join(", ")})`);
         // A `Date` is represented AS a double (stdlib batch 3), so `Date[]` is a
         // `number[]` in every way that matters to the slot vector — allow it.
-        if (first !== "number" && first !== "string" && first !== "boolean" && !isObjectTy(first) && !isArrayTy(first) && !isDateTy(first) && !isUnionTy(first)) throw nyi(NYI.ARRAY, `arrays of ${first}`);
-        return `${first}[]`;
+        if (!arrayElementOk(first, true)) throw nyi(NYI.ARRAY, `arrays of ${first}`);
+        return makeArrayTy(first);
       }
       case "ObjectLiteral": {
         // SH2: when the context wants a UNION, the literal's own tag says which member
@@ -2257,7 +2282,7 @@ class Checker {
             // `new Set(iterable)` — bulk construction. The element type comes from the
             // argument (an array's element type), so `new Set([1,2,3])` is Set<number>
             // without a type argument, exactly as node/tsc infer it.
-            const at = this.type(e.args[0]!, scope, declared ? (`${declared}[]` as Ty) : undefined);
+            const at = this.type(e.args[0]!, scope, declared ? makeArrayTy(declared) : undefined);
             if (isArrayTy(at)) el = elemTy(at);
             else if (isSetTy(at)) el = setElemTy(at);
             // A string is deliberately REFUSED: node iterates it by code point
@@ -2581,7 +2606,7 @@ class Checker {
           if (child === null) child = et;
           else if (et !== child) throw typeError("supervise: all children must share one ChildSpec shape");
         }
-        childrenArg.ty = `${child}[]` as Ty; // array node type for codegen (reads e.ty)
+        childrenArg.ty = makeArrayTy(child); // array node type for codegen (reads e.ty)
         if (fieldType(child!, "id") !== "string") throw typeError("supervise: ChildSpec.id must be a string");
         const startTy = fieldType(child!, "start");
         if (!startTy || !isFuncTy(startTy) || funcParams(startTy).length !== 0 || funcRet(startTy) !== "number")
@@ -2713,7 +2738,7 @@ class Checker {
       if (fs.length === 0) throw nyi(NYI.OBJECT, "Object.values of an empty object");
       const vt = fs[0]!.ty;
       if (!fs.every((f) => f.ty === vt)) throw nyi(NYI.OBJECT, "Object.values of a heterogeneous object (arrays are homogeneous)");
-      return `${vt}[]` as Ty;
+      return makeArrayTy(vt);
     }
 
     // --- stdlib (web standards) Batch 1: static-namespace member calls ---
@@ -2764,7 +2789,7 @@ class Checker {
         const ts = e.args.map((a) => this.type(a, scope));
         if (ts.some((t) => t !== ts[0])) throw typeError("Array.of expects arguments of one type (arrays are homogeneous)");
         if (ts[0] !== "number" && ts[0] !== "string" && ts[0] !== "boolean") throw nyi(NYI.ARRAY, `Array.of of ${ts[0]}`);
-        return `${ts[0]}[]` as Ty;
+        return makeArrayTy(ts[0]!);
       }
       throw nyi(NYI.OBJECT, `Array.${p}`);
     }
@@ -3288,7 +3313,7 @@ class Checker {
       if (args.length !== 0) throw typeError(`.${method} takes no arguments`);
       if (!this.iterOk.has(node)) throw nyi(NYI.COLLECTION, `a Map iterator outside for-of / Array.from / [...spread] (\`.${method}()\`)`);
       if (method === "entries") throw nyi(NYI.COLLECTION, "`.entries()` outside `for (const [k, v] of …)` (no tuple type yet)");
-      return `${method === "keys" ? k : v}[]` as Ty;
+      return makeArrayTy(method === "keys" ? k : v);
     }
     if (method === "forEach") throw nyi(NYI.COLLECTION, "Map .forEach (use `for (const [k, v] of map)` — insertion-ordered, same visit order)");
     // The declared K/V are the CONTEXT each argument is typed in, via `typeArg` — the same
@@ -3322,7 +3347,7 @@ class Checker {
     if (method === "keys" || method === "values") {
       if (args.length !== 0) throw typeError(`.${method} takes no arguments`);
       if (!this.iterOk.has(node)) throw nyi(NYI.COLLECTION, `a Set iterator outside for-of / Array.from / [...spread] (\`.${method}()\`)`);
-      return `${el}[]` as Ty;
+      return makeArrayTy(el);
     }
     if (method === "forEach") throw nyi(NYI.COLLECTION, "Set .forEach (use `for (const v of set)` — insertion-ordered, same visit order)");
     const argTys = args.map((a) => this.type(a, scope));
@@ -3377,7 +3402,7 @@ class Checker {
     if (method === "toSorted") {
       if (args.length > 1) throw typeError(".toSorted expects 0..1 args");
       if (args.length === 0) {
-        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.toSorted() without a comparator on ${el}[] (node compares String(x) — pass a comparator)`);
+        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.toSorted() without a comparator on ${makeArrayTy(el)} (node compares String(x) — pass a comparator)`);
         return recv;
       }
       const want = makeFuncTy([el, el], "number");
@@ -3457,6 +3482,18 @@ class Checker {
       case "join":
         if (args.length > 1) throw typeError(".join expects 0..1 args");
         if (args.length === 1 && argTys[0] !== "string") throw typeError(".join separator must be string");
+        // The SAME allow-list `checkStringCoercion` applies to `${arr}` / `String(arr)` /
+        // concatenation, which are node's `Array#toString`, i.e. `join(",")` — one list
+        // that was written on only ONE of the two paths. `joinFn` (src/codegen.ts) is a
+        // three-way dispatch whose DEFAULT is `nt_arr_join_str`, so any other element
+        // reached `strlen` on a slot that is not a `char *`:
+        //   [[1],[2]].join(";")        node `1;2`                nativets `\x01;\x01`
+        //   [{x:1},{x:2}].join(",")    node `[object Object],…`  nativets `,`
+        // both **exit 0 on both sides** — the silent wrong answer, pre-existing and
+        // independent of nullable elements (which land in the same default arm).
+        if (el !== "number" && el !== "string" && el !== "boolean") {
+          throw nyi(NYI.STRINGIFY, `.join() on ${recv} (node stringifies each element; only number/string/boolean elements are node-exact here)`);
+        }
         return "string";
       default:
         throw nyi(NYI.ARRAY, `array method '.${method}'`);
@@ -3501,10 +3538,10 @@ class Checker {
     }
     if (method === "filter") {
       if (bodyTy !== "boolean") throw typeError(".filter callback must return boolean");
-      return `${el}[]`;
+      return makeArrayTy(el);
     }
     if (bodyTy !== "number" && bodyTy !== "string" && bodyTy !== "boolean" && !isObjectTy(bodyTy) && !isArrayTy(bodyTy)) throw nyi(NYI.ARRAY, `.map producing ${bodyTy}`);
-    return `${bodyTy}[]`;
+    return makeArrayTy(bodyTy);
   }
 
   /** Type an inlined HOF callback body (map/filter/reduce). Supports both an
