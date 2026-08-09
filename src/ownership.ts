@@ -681,6 +681,7 @@ class Analyzer {
       // `expr!` is a type-level assertion; ownership flows straight through it.
       case "NonNullExpr": this.expr(e.expr, state, consume); return;
       case "InstanceOfExpr": this.expr(e.object, state, false); return; // a type TEST only borrows
+      case "InExpr": this.expr(e.key, state, false); this.expr(e.object, state, false); return; // a key-presence TEST only borrows
       case "ObjectLiteral": for (const p of e.properties) this.expr(p.value, state, !p.spread); return; // fields move into the object; a `...spread` source is COPIED (borrow), so it stays usable + owned
       case "ArrowFunction": // captures/params aren't linear here; the BODY is its own scope
         this.arrowDepth++;

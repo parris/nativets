@@ -16,6 +16,8 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
 import { isTypeRefTy, expandTypeRef, recTypeTable } from "./ast.ts";
+// `k in o`: node's prototype chain is the whole reason `"valueOf" in {}` is true.
+import { OBJECT_PROTO_KEYS } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
 import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
 // The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
@@ -469,6 +471,62 @@ function dictHint(annot: Ty, head: string | undefined, got: Ty): string | undefi
     `Annotating the exact shape instead (\`{ ${sample}: ${v} }\`) also works, but ONLY if every read uses a LITERAL key — an object is indexed by a string literal here, so \`o[someVariable]\` stays refused`;
 }
 
+/**
+ * Decide `k in o` from the static type, or refuse — the `instanceof` split applied to key
+ * presence (see `InExpr` in src/ast.ts for why it is the same question).
+ *
+ * DECIDABLE, and answered:
+ *   - a LITERAL key naming a REQUIRED field of an object type  → `true`
+ *   - a LITERAL key naming nothing, but a name node INHERITS from `Object.prototype`
+ *     → `true` (test262 `S8.12.6_A2_T1`: `"valueOf" in {}`). nativets has no prototype
+ *     chain, so this list is the whole of it, and a literal key is exactly what lets us
+ *     consult it — the hole that keeps the variable-key case refused
+ *   - a LITERAL key naming nothing at all → `false` (test262 `S8.12.6_A3` CHECK#4)
+ * A field whose value is `undefined` is PRESENT (`S8.12.6_A3` CHECK#3): this is a
+ * presence test, never a truthiness test, and folding from the field list gets that for
+ * free — no value is consulted.
+ *
+ * NOT DECIDABLE, and refused. Note this is strictly SHARPER than the `Object.keys`
+ * refusal, which trips on any optional field anywhere in the type: `in` asks about one
+ * key, so only a key that IS the optional field has no answer.
+ */
+function keyPresence(key: Expr, ot: Ty): boolean {
+  const where = "`in` (the key-presence operator)";
+  if (!isObjectTy(ot)) {
+    // `k in m` on a Map/Set is the trap worth naming: node tests the Map OBJECT's
+    // properties, never its entries, so `m.set("a",1); "a" in m` is FALSE. Compiling it
+    // to `.has` would be a silent wrong answer in the user's favour, which is worse.
+    const alt = isMapTy(ot) || isSetTy(ot)
+      ? "node tests the properties of the Map/Set OBJECT, not its entries — `m.set(\"a\", 1); \"a\" in m` is `false` in node — so this cannot mean what it looks like. Use `m.has(k)`"
+      : isArrayTy(ot)
+      ? "on an array `in` tests INDEX presence (`0 in [1]` is true, `3 in [1]` is false), which depends on the runtime length. Use `i >= 0 && i < xs.length`, or `xs.includes(v)` to test a VALUE"
+      : "node throws a TypeError when the right operand is not an object (test262 `S11.8.7_A3`), so there is no value to test against";
+    throw nyi(NYI.OBJECT, `${where} on \`${ot}\``, alt);
+  }
+  if (key.kind !== "StringLiteral") {
+    throw nyi(
+      NYI.OBJECT,
+      `${where} with a non-literal key`,
+      "a LITERAL key is decided at compile time from the object's TYPE, which is where its key set comes from here. A computed key cannot be: node's `in` also walks the PROTOTYPE CHAIN " +
+      "(`\"valueOf\" in {}` is true), and a key we cannot see cannot be checked against it — an own-fields-only test would answer `false` where node answers `true`. " +
+      "Test the field directly (`o.k !== undefined`), or use a `Map` and `m.has(k)` for a key set that varies at runtime",
+    );
+  }
+  const k = key.value;
+  const f = objectFields(ot).find((x) => x.key === k);
+  if (f !== undefined && isNullableTy(f.ty) && nullishKind(f.ty) === "undefined") {
+    throw nyi(
+      NYI.OBJECT,
+      `${where} on the optional field '${k}'`,
+      "a key set is decided at compile time here (from the TYPE), but node decides it per value at runtime — `{}` and " +
+      `\`{${k}: …}\` share this type and have different key sets, so there is no answer to give. ` +
+      `Read the field instead (\`o.${k} !== undefined\`), or make it REQUIRED and assign \`undefined\` when it is missing. ` +
+      `Note that \`${k}: T | undefined\` is encoded exactly like \`${k}?: T\` here, so it is refused too even though its key is always present in node`,
+    );
+  }
+  return f !== undefined || OBJECT_PROTO_KEYS.has(k);
+}
+
 function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
   const opt = objectFields(ot).find((f) => isNullableTy(f.ty) && nullishKind(f.ty) === "undefined");
   if (opt === undefined) return;
@@ -819,6 +877,7 @@ class Checker {
       case "TypeofExpr": go(e.operand); return;
       case "AsExpr": case "SatisfiesExpr": go(e.expr); return;
       case "InstanceOfExpr": go(e.object); return;
+      case "InExpr": go(e.key); go(e.object); return;
       case "BinaryExpr": go(e.left); go(e.right); return;
       case "LogicalExpr": go(e.left); return; // the right operand is conditional
       case "ConditionalExpr": go(e.test); return; // ditto the arms
@@ -2270,6 +2329,17 @@ class Checker {
         else if (c === "Set") e.result = isSetTy(ot);
         else if (this.functions.has(`${c}.constructor`)) e.result = classTag(ot) === c;
         else throw nyi(NYI.INSTANCEOF, `'instanceof ${c}'${c === "Error" ? " (Error is modelled structurally as {message:string})" : ""}`);
+        e.ty = "boolean";
+        return "boolean";
+      }
+      case "InExpr": {
+        // `k in o`, decided here and folded to a constant by codegen — the same move
+        // `instanceof` makes just above, and sound for the same reason: an object's key
+        // set comes from its TYPE. `keyPresence` owns the split between what a type
+        // decides and what it cannot.
+        const ot = this.type(e.object, scope);
+        this.type(e.key, scope); // the key still type-checks, and may name a binding
+        e.result = keyPresence(e.key, ot);
         e.ty = "boolean";
         return "boolean";
       }
@@ -4130,6 +4200,7 @@ function collectIdents(e: Expr, out: Set<string>): void {
     case "AsExpr": case "SatisfiesExpr": collectIdents(e.expr, out); return;
     case "NonNullExpr": collectIdents(e.expr, out); return;
     case "InstanceOfExpr": collectIdents(e.object, out); return; // the class name is not a value
+    case "InExpr": collectIdents(e.key, out); collectIdents(e.object, out); return;
     case "ArrowFunction": if (e.exprBody) collectIdents(e.body as Expr, out); return;
     default: return; // literals
   }
@@ -4176,6 +4247,7 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
     case "TypeofExpr": go(e.operand); return;
     case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": go(e.expr); return;
     case "InstanceOfExpr": go(e.object); return;
+    case "InExpr": go(e.key); go(e.object); return;
     case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
     case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;
     case "SequenceExpr": case "TemplateLiteral": (e.exprs as Expr[]).forEach(go); return;
@@ -4332,6 +4404,7 @@ function escapingWritesExpr(e: Expr, bound: Set<string>, out: Map<string, string
     case "TypeofExpr": go(e.operand); return;
     case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": go(e.expr); return;
     case "InstanceOfExpr": go(e.object); return;
+    case "InExpr": go(e.key); go(e.object); return;
     case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
     case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;
     case "SequenceExpr": case "TemplateLiteral": (e.exprs as Expr[]).forEach(go); return;
@@ -4383,6 +4456,7 @@ function refsInExpr(e: Expr, name: string, skip: ArrowFunction): boolean {
     case "TypeofExpr": return refsInExpr(e.operand, name, skip);
     case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": return refsInExpr(e.expr, name, skip);
     case "InstanceOfExpr": return refsInExpr(e.object, name, skip);
+    case "InExpr": return refsInExpr(e.key, name, skip) || refsInExpr(e.object, name, skip);
     case "BinaryExpr": case "LogicalExpr": return any([e.left, e.right]);
     case "ConditionalExpr": return any([e.test, e.consequent, e.alternate]);
     case "SequenceExpr": case "TemplateLiteral": return any(e.exprs as Expr[]);
