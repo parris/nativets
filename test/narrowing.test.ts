@@ -41,7 +41,12 @@ function expectRejected(source: string, code: string, needle: string): void {
   let err: unknown;
   try { sourceToIR(source); } catch (e) { err = e; }
   expect(err).toBeInstanceOf(NTError);
-  const text = formatDiagnostic(err as NTError);
+  // `.diag`, NOT the NTError. `formatDiagnostic` takes a `Diagnostic`; handed the
+  // error it renders `error[undefined]: …` and SILENTLY DROPS THE HINT. The code
+  // assertion below passed anyway, purely because `NTError.message` happens to embed
+  // `[NT1031]` — so this helper looked healthy while it could never have checked a
+  // hint. Every other test file already spells it `.diag`; this was the one holdout.
+  const text = formatDiagnostic((err as NTError).diag);
   expect(text).toContain(code);
   expect(text).toContain(needle);
 }
