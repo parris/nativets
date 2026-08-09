@@ -58,6 +58,46 @@ console.log(c.join(",").length, b.join(",").length);`;
     });
   }
 
+  /*
+   * THE READ HAS TO GO THROUGH `arr_at`. Past the threshold `arr_freeze` moves the slots
+   * into the trie, `free()`s the flat block and NULLs `a->data` — so any routine that
+   * still indexes `a->data[i]` directly reads freed/NULL memory.
+   *
+   * Three did: `nt_arr_last_indexof_num`/`_str`, `nt_arr_concat` (BOTH operands) and
+   * `nt_arr_flat1` (the outer array AND each sub-array). All three SEGFAULTED — a
+   * memory-safe language crashing, with every buffered line of stdout lost, on programs
+   * node runs fine. The case above hid it because it exercises `.indexOf`/`.includes`,
+   * which were already written through `arr_at`; nothing in the corpus called the other
+   * three on an array that had been frozen.
+   *
+   * `const b = [...a]` is what freezes `a` here: a LEADING spread of a >32-element source
+   * takes the O(1) adopt path in `nt_arr_extend`, which freezes the source first. The
+   * spread must be non-consuming (`a` stays live afterwards) or the ownership pass routes
+   * it to the consuming append instead and no freeze happens.
+   */
+  for (const n of [33, 64, 1025]) {
+    test(`size ${n}: .lastIndexOf / .concat / .flat on a FROZEN (trie-backed) array`, async () => {
+      const src = `${BUILD}
+const a: number[] = build(${n});
+const frozen: number[] = [...a];        // adopts a's slots -> freezes a to the trie
+console.log(frozen.length, a.length);
+console.log(a.lastIndexOf(${n} - 1), a.lastIndexOf(0), a.lastIndexOf(7), a.lastIndexOf(-1));
+const c: number[] = a.concat([777]);
+console.log(c.length, c[0], c[${n} - 1], c[${n}]);
+const d: number[] = a.concat(a);
+console.log(d.length, d[${n}], d[d.length - 1]);
+const words: string[] = a.map((x) => "w" + x);
+const fw: string[] = [...words];
+console.log(fw.length, words.lastIndexOf("w0"), words.lastIndexOf("w" + (${n} - 1)), words.lastIndexOf("nope"));
+const nested: number[][] = a.map((x) => [x, x]);
+const fn2: number[][] = [...nested];
+console.log(fn2.length, nested.flat().length, nested.flat()[0], nested.flat()[1]);`;
+      const { ours, oracle } = await expectMatchesNode(src);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.exitCode).toBe(oracle.exitCode);
+    });
+  }
+
   test("deep index + update at ~2000 matches node", async () => {
     const src = `${BUILD}
 const a: number[] = build(2000);

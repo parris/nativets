@@ -3662,6 +3662,236 @@ index still truncates for every other program in the tree. Same four-line repro 
 needs a codegen + runtime change AND a decision (panic, like out-of-range, or refuse at
 compile time), so it is still owed a lane.
 
+### STAGE-1 ATTEMPTED — it stops in `ast.ts`, and 46% of the compiler does not check
+
+`test/blocker-metric.ts` (tool), `test/blocker-metric.test.ts` (validation).
+
+Stage-1 had never been run. It has now: `bun run src/cli.ts emit src/cli.ts` over all
+twelve modules.
+
+**It stops at `src/ast.ts:1384:39`, `NT2001`, in `freshArray`** — `e.callee.property`,
+where `e.callee` was narrowed through a PATH rather than a plain name. That is
+byte-identical to what `test/selfhost-ratchet.baseline.json` already recorded for
+`ast.ts` in both columns, so the headline first-blocker held no surprise. Two things
+about the run itself did:
+
+- the refusal prints **with no location at all**. `fieldOnBase` calls `typeError(msg)`
+  without the optional `at` its siblings pass, so the single most-hit self-host blocker
+  renders with no line and no source frame, on a 20 k-line program. Finding line 1384
+  needed an instrumented build — the exact cost `src/ast.ts:1391`'s own comment says was
+  paid once already.
+- resources are a non-issue and always were. Three runs: **0.60 / 0.60 / 0.61 s** wall to
+  the failure, peak RSS **334–345 MB**. `linkProgram` is 0.55–0.60 s of that (933 top-level
+  statements, 731 bindings, 78,329 AST nodes, **0** mangled-name collisions); `check` dies
+  28–34 ms in. Ownership, codegen, IR, clang and the binary are never reached.
+
+**The toolchain half is proven at stage-1's exact scale, separately.** 39 modules /
+21,568 lines of real compiler source that *does* compile (13 copies of
+lexer+diagnostics+coverage-preprocess) go to **5,192,041 bytes of IR / 141,123 lines in
+0.51 s**, full build to binary in **1.26–1.29 s**, peak RSS 326–336 MB. clang on that IR:
+**-O0 0.58–0.61 s, -O2 3.11–3.18 s** (5.3×, both linear) — `linkArgv` passes no `-O`, so
+`nativets-1` will be an `-O0` binary. The binary's stdout is 91 bytes, non-empty, and
+byte-identical to `bun` over the same sources at both -O0 and -O2. (node cannot be the
+oracle for that program: `diagnostics.ts` uses a parameter property, which node refuses
+with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`.)
+
+#### The number that reframes the work: **301 of 646**
+
+Every instrument in this document is FIRST-BLOCKER, so a twelve-module program reports
+one blocker however many it holds. Running the per-function loop to completion instead:
+
+| | |
+|---|---|
+| **non-generic functions in the linked program** | **646** |
+| **whose body the checker refuses** | **301 (46.6%)** |
+| distinct blocker shapes | 88 |
+| cascade suspects (recovery damage) | 1 |
+
+By NT code — the tool's own table, so it reproduces exactly:
+
+| code | × | | code | × |
+|---|---|---|---|---|
+| `NT2001` | 153 | | `NT1002` | 4 |
+| `NT1606` | 115 | | `NT1007` | 3 |
+| `NT1003` | 11 | | `NT1006` | 2 |
+| `NT1001` | 5 | | `NT1011` | 2 |
+| `NT1014` | 5 | | `NT1012` | 1 |
+
+`NT1606` splits cleanly (from `--shapes`): **60** array mutation, **44** a persistent
+`Map`/`Set` method whose result is discarded, **11** object mutation. `NT2001` does not
+split cleanly and is not presented as if it did — roughly a third are union member reads
+(`does not exist on <UNION>`, both the plain and the path-narrowing hint), and the rest
+are nullable/optional typing and ordinary type rules in proportions that depend on where
+you draw the line.
+
+Per module, `failing / functions`: `ownership` 33/38 (87%), `checker` 101/158 (64%),
+`parser` 66/108 (61%), `modules` 12/21 (57%), `codegen` 59/151 (39%), `driver` 10/29,
+`ast` 17/97 (18%), `coverage` 2/3, `coverage-preprocess` 1/10, **`lexer` 0/11,
+`diagnostics` 0/17**, entry 0/3.
+
+The reading: the remaining work is not "clear `ast.ts:1384`". Either of the two big
+buckets on its own — 153 type-rule refusals, 115 mutation refusals — is an order of
+magnitude larger than the twelve-row first-blocker table this document has been
+maintaining, and neither was visible in it.
+
+#### The CROSS-MODULE class, which no per-module instrument can see
+
+`coverage-preprocess.ts` has **0 failing functions standalone and 1 when linked**.
+
+`Checker.closureAssigned` is keyed by bare NAME and is program-wide, and NT1031's check is
+`bodyChain.some(body => referencesName(body, name, arrow))` where `bodyChain[0]` is the
+whole merged program. The linker renames only **top-level** bindings, so every module's
+locals and parameters share one flat namespace for both analyses. In the linked stage-1
+program **11 names are unnarrowable everywhere** — `a arrow b ft init last n s t test ty` —
+purely because some other module assigns that name inside an arrow.
+
+Reduced to two files that **each compile alone and cannot be compiled together**:
+
+```ts
+// a.ts — exit 0 alone
+export function makeCounter(): () => number { let t = 0; return () => { t = t + 1; return t; }; }
+// b.ts — exit 0 alone
+interface Tok { kind: string; value: string }
+export function isP(t: Tok | undefined, v: string): boolean { return !!t && t.kind === "punct" && t.value === v; }
+// main.ts importing both -> error[NT1031]: "'t' is also used outside the closure"
+```
+
+The comment at `src/checker.ts` above `addCaptured` documents this bug class as *"PRE-EXISTING
+BUG this closes"*. It closed only the sub-case where the inner function binds the name
+itself; the cross-function and cross-module cases are still live. **This is why
+`blocker-metric` defaults to the LINKED program** — the standalone column cannot express
+the question.
+
+#### PRE-EXISTING BUGS this turned up
+
+Each is handed to its own lane; none is fixed here.
+
+- **A compiler CRASH (ICE), 7 lines.** A truthiness test on an optional field of a
+  self-recursive interface: `interface Node { name: string; next?: Node }` with
+  `n.next ? … : …` → `InternalError: no truthiness rule for @Node` (`src/codegen.ts`
+  `truthyOf` ← `truthyNullable`), exit 1, where node prints `2`. The frontend accepts what
+  codegen cannot lower.
+- **A SILENT WRONG ANSWER in `??`.** For `l ?? r` with `l` nullable the result type is
+  `baseTy(l)` regardless of whether `r` is still nullable, so `f() ?? f()` on a
+  `string | undefined` types as `string`. node prints `undefined` then throws (exit 1);
+  nativets prints `string` / `0` / `[]` and exits 0. Not in docs/divergences.md.
+- **A braced `case` body is treated as falling through.** `leavesBlock` tests only the
+  KIND of the last statement and never enters a `BlockStmt`, so `case "A": { … return x; }`
+  leaves the next case narrowed to both tags and its member read refused. Runtime codegen
+  is correct (verified with side effects) — a false refusal only, over **177** braced case
+  bodies in `src/`.
+- **A nominal recursive type is not unfolded under a type constructor at a parameter.**
+  `?U@E` against `?UU<…>` (same under `[]`), 12 lines, single file — the shape every AST
+  walker needs.
+- **The cross-module `closureAssigned` / NT1031 leak** above.
+
+Census corrections, since this document keeps a record of measurement mistakes:
+`grep -E 'case [^:]+:\s*case '` reports 55 multi-tag cases and the same pattern in Python
+reports **68** — grep is line-based and misses the multi-line spelling, the shimmed-grep
+hazard project memory records, arriving by a different door. Corrected counts over `src/`:
+multi-tag `case` **68**, chained `??` **35**, braced case bodies **177**, `x.y.kind ===`
+path narrowings **101**.
+
+#### Using it, and what it deliberately does NOT do
+
+```sh
+bun run test/blocker-metric.ts            # the stage-1 program, LINKED
+bun run test/blocker-metric.ts --json     # stable key order, for a before/after diff
+bun run test/blocker-metric.ts --shapes   # + the 88 distinct blocker messages
+bun run test/blocker-metric.ts src/checker.ts   # any other entry, single-module
+```
+
+**It is not a ratchet and must not become one.** It reports; it does not gate. The tests
+beside it validate the INSTRUMENT — 0 on programs that compile and run, 0 on the three
+modules recorded clear, the per-module rows summing to the totals, contamination bounded,
+an abort reported as an abort rather than as "0 failing", and byte-identical output across
+runs — and assert nothing about the frontier, because seven lanes move these numbers at
+once.
+
+**What it cannot see**, stated because an instrument that overstates is worse than none:
+function bodies ONLY (a failed top-level statement aborts the run, and it says so); FIRST
+blocker per function, so a bucket can shrink by less than a lane's site count; the CHECKER
+only — ownership and codegen never run, so a module at 0 here is not a module that
+compiles; and generic templates are outside the denominator (they are checked per
+specialization). Its footprint on its own numbers is **zero**: the collection hook is an
+arrow inside `check`, not a new top-level function, because the first cut *was* a
+top-level `function` and the tool immediately counted it as a 302nd blocker.
+
+### THE DOTTED-PATH TAG TEST IS CLEARED — 199 sites, and the soundness rules were already written
+
+`if (e.callee.kind === "MemberExpr") { e.callee.property }` — the shape nine modules'
+linked blocker had converged on, and the shape most of this compiler's own passes are
+written in. Counted with **this compiler's own parser** (not `grep`, which misses
+multi-line spellings): **199 dotted-path tag tests in five files** — `checker.ts` 111,
+`codegen.ts` 47, `ownership.ts` 25, `parser.ts` 10, `ast.ts` 6.
+
+**Why it was refused.** A tag narrowing is a constant shadow **BINDING** declared in the
+arm's scope (`narrowInto`) — the mechanism every later pass already reads. `e.callee` has
+no name to shadow, so `discriminantRead` required `e.object.kind === "Identifier"` and the
+test proved nothing.
+
+**What it is now.** A dotted path records a `NarrowFact` instead — the *same* structure the
+NULLISH half of narrowing has tracked access paths with since `discriminantPropertyCheck.ts`
+landed. Nothing new was invented for the invalidation model, which is the point: the rules
+that make a nullish path fact sound are exactly the rules a tag path fact needs.
+
+| rule | enforced by | what it stops |
+|---|---|---|
+| every object on the path is IMMUTABLE (no `@@mutable`), and not `this` | `accessPath` | `g.swap()` rewriting the very field the tag test proved, through a second handle |
+| no `?.`, no index, no call step | `accessPath` | a receiver that is not a stable NAME for a value (two calls need not return the same object) |
+| the ROOT is not assigned in the guard or in the region the fact covers | `unstableNames`, shared verbatim with `factsFor` | `if (o.inner.kind==="A") { o = other; … o.inner.left }`, and a loop back-edge (the body IS the region) |
+| the ROOT is not assigned inside ANY arrow in the program | `closureAssigned` | an inline `map`/`filter`/`reduce` callback, the one arrow `NT1031` permits to write |
+| a `let` root's fact stops at an arrow boundary | `constant` / `arrowDepth` | a closure running after a later assignment |
+
+**Verified by MUTATION, not by argument.** With the assignment filter removed,
+`if (o.inner.kind === "A") { o = other; return "n" + o.inner.left; }` compiles and prints
+`n2.1622591016e-314` — a string pointer reinterpreted as a double — where node prints
+`nundefined`. That is the silent wrong answer this project exists to avoid, and it is one
+`if` away from the accepting path.
+
+**One more unfold was needed, in `accessPath` itself.** The previous section cleared `@N` at
+the two funnels where a value's type is PRODUCED; `accessPath` is a third producer and was
+missed, so `e.callee`'s declared type came back as the folded `@Expr`, which is not
+`isObjectTy` — every step off a recursive field declined before the narrowing was even
+considered. That is most of an AST walker. The `@@mutable` test moved onto the UNFOLDED type
+in the same change, because a `@N` is never `isObjectTy` and so answered "not mutable" for a
+`@@mutable` class reached through a type reference.
+
+**Frontier delta, measured (`test/selfhost-ratchet.baseline.json`).** Nine linked columns
+plus `ast.ts`'s standalone column moved off `Property 'property' does not exist on …`. That
+is nine first-blockers cleared, **not** nine modules unlocked: a parallel probe measuring
+ALL function-body blockers at once finds 301 of 649 functions in the linked stage-1 program
+still failing, across 129 distinct shapes.
+
+| Module (linked) | Before | After |
+|---|---|---|
+| `ast.ts` (also standalone), `checker.ts`, `cli.ts`, `codegen.ts`, `coverage.ts`, `driver.ts`, `modules.ts`, `ownership.ts`, `parser.ts` | `NT2001 Property 'property' does not exist on {…Expr…}` — the path tag test | `NT2001 Property 'left' does not exist on {BinaryExpr} \| {LogicalExpr} — narrowed here to MORE THAN ONE member` |
+
+**The next term, and it is NOT the same construct.** `ast.ts`'s `exprLoc`:
+
+```ts
+case "BinaryExpr": case "LogicalExpr": return exprLoc(e.left) ?? exprLoc(e.right);
+```
+
+Two `case` labels share a body, so the receiver narrows to a two-member SUB-union. `tsc`
+allows `.left` because every surviving member has it at the same type; we do not, yet. Note
+the extra condition our representation adds that `tsc` never has to check: **the field must
+sit at the same SLOT INDEX in every surviving member**, or the load is wrong. Its own lane.
+
+**And that blocker now SELF-LOCATES.** `fieldOnBase` was the one diagnostic site calling
+`typeError(msg)` with no position while every sibling passed one, so the single most common
+self-host blocker printed with no `L:C` — on a 4000-line file. `ast.ts`'s own `exprLoc`
+carries the note that this "cost a lane an instrumented build of the compiler to find the
+line"; this lane paid it again, writing a throwaway AST walker to learn the site was line
+1384. The location was available at all three call sites the whole time. It now prints:
+
+```
+error[NT2001]: Property 'left' does not exist on … at 1407:60
+       |
+  1407 |     case "BinaryExpr": case "LogicalExpr": return exprLoc(e.left) ?? exprLoc(e.right);
+       |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this read
+```
+
 
 ---
 

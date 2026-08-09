@@ -740,6 +740,67 @@ instructions, and it was 76% of that file. `git log` is the other view of the sa
   Stage 48's guarantee holds unchanged: the `isPrintableTy` net still means **no input prints
   nothing**. Tests: `test/console.test.ts` (118, node-differential on BOTH streams except the
   refusal table and the deliberate non-literal panic).
+- **Stage 51 ✅ (the stdlib lane that did NOT build a regex engine — three live defects instead)**
+  Commissioned as "regex and standard-library helpers, in a way that doesn't put self-hosting
+  back." **The census said regex is not on the self-hosting path and the lane was spent
+  elsewhere.** `src/` contains zero regex literals *by construction* — `test/no-regex.test.ts` is a
+  ratchet whose whole purpose is that the compiler stays compilable by a language that refuses
+  `RegExp` (`NT1027`, a permanent Tier-C refusal in `docs/divergences.md`). An engine would have
+  added the largest single new compiler+runtime surface in the stdlib plan, which must itself stay
+  inside the self-hostable subset, for zero movement of the frontier. Measured instead: the NT1xxx
+  feature-blocker histogram over all twelve `src/` modules is **1 × NT1002, 1 × NT1001, 1 × NT1012
+  (`new DataView`), 2 × NT1020 (`await` in `cli.ts`), plus NT1003 measurement artifacts** — *no
+  stdlib method gap blocks self-hosting at all*. What the sweep found instead were three live
+  defects in the surface that already exists.
+  **(1) `Math.round` was `floor(x + 0.5)`** — a formulation the comment called "JS semantics" and
+  that ECMA-262 21.3.2.28 explicitly is not. The add ROUNDS, so `Math.round(0.49999999999999994)`
+  gave 1 (node: 0, V8's own regression value) and past 2^52 it walked whole integers:
+  **`Math.round(Number.MAX_SAFE_INTEGER)` returned MAX_SAFE_INTEGER + 1**. `floor` also returns +0
+  across the whole of `[-0.5, -0]` where the spec returns **-0**, observable as
+  `1 / Math.round(-0.5)`. Both sides exited 0 — the silent-wrong-answer class. Nothing in the
+  corpus had ever tested `Math.round` beyond `Math.round(3.5)`, a value on which the two agree.
+  **(2) `String#startsWith(s, pos)` did not CLAMP `pos`** (`if (pos > n || pos + m > n) return 0;`).
+  ES 22.1.3.23 clamps into `[0, len]` first, so an empty needle past the end is `true`; we said
+  `false`. `js_str_ends_with`, two lines below, already clamped — which is what makes it an
+  oversight rather than a decision.
+  **(3) `.lastIndexOf` / `.concat` / `.flat` SEGFAULTED on a trie-backed array.** Past
+  `NT_PV_THRESHOLD` (32) `arr_freeze` moves the slots into the persistent vector, `free()`s the
+  flat block and NULLs `data`; those three routines still indexed `a->data[i]` instead of going
+  through `arr_at`. `nt_arr_flat1` did it twice over (the outer array *and* each sub-array),
+  `nt_arr_concat` on both operands. A memory-safe language crashing, with every buffered line of
+  stdout lost, on programs node runs fine. `sharing.test.ts` missed it because its behaviour case
+  exercises `.indexOf`/`.includes`, which were already written through `arr_at`. Worth stating
+  plainly, because `docs/divergences.md` says "every indexed accessor in the runtime is
+  bounds-checked, so nativets never performs an out-of-bounds *memory* access — that part was never
+  in question": the guarantee held for the ACCESSORS and not for the SCAN routines beside them,
+  which reached past `arr_at` into the raw block. All five remaining raw `a->data[i]` reads in the
+  runtime are inside a `!a->pv` branch or follow `arr_thaw`; these three were the only unguarded
+  ones, and `arr_at` is now the only legal way to read an element.
+  **Plus the arity fills, which is the same bug wearing a diagnostic:** `"abc".slice()`,
+  `[1,2].slice()`, `"abc".lastIndexOf("b", 2)`, `[1,2].indexOf(x, i)` and `[1,2].lastIndexOf(x, i)`
+  are all accepted by `tsc` and were refused as **`NT2001` — an NT2xxx TYPE error, i.e. a claim
+  that the user's correctly-typed program is ill-typed**. That band matters beyond politeness:
+  `coverage` counts only NT1xxx as feature blockers and treats NT2xxx as a real user error, so
+  every one of these gaps was **invisible to the self-hosting gradient instrument**. The arity
+  table now follows **TypeScript's lib**, not node's runtime laxity, and the two disagree in both
+  directions — node also accepts `"abc".substring()` / `.charAt()` / `.at()`, but `lib.es5.d.ts`
+  declares those first parameters required (TS2554), so those stay NT2001. Both directions are
+  pinned in `test/stdlib-batch1.test.ts` because "make every optional argument optional, node runs
+  it" is the tempting wrong simplification. `Array#indexOf`/`#lastIndexOf` take the same argument
+  with deliberately different clamps (absent = 0 vs len-1; negative underflow = 0 vs -1), which is
+  the whole content of the feature and is what the cases separate.
+  **Two of those clamps were wrong in this lane's own first draft**, and neither was found by
+  reasoning — both fell out of adding the borrowed case. (a) The index must be TRUNCATED TOWARD
+  ZERO *before* the underflow test, so `-5.5` on a 5-element array is index 0, not an underflow;
+  comparing the raw double against `-len` got `lastIndexOf` wrong while `indexOf` coincidentally
+  agreed, which is exactly why each needs its own case. (b) An explicitly passed **NaN is not
+  "absent"**: `ToIntegerOrInfinity(NaN)` is 0 for the array methods, while ES 22.1.3.11 turns a NaN
+  position into +Infinity for `String#lastIndexOf` — opposite answers from the same value. A NaN
+  runtime sentinel therefore cannot represent "argument omitted" for the array pair, so the default
+  is spelled in codegen (0 forward, +Infinity backward) and the two can no longer be conflated.
+  Cases borrowed from **tc39/test262** (`built-ins/Math/round/`, `String/prototype/startsWith/` and
+  `lastIndexOf/`, `Array/prototype/indexOf/` and `lastIndexOf/` `fromIndex-*`); every expected
+  value measured from node. Tests: `test/stdlib-batch1.test.ts`, `test/sharing.test.ts`.
 - **SH5 ✅ (compile-time text imports — `import s from "./f.c" with { type: "text" }`)**
   The one self-hosting blocker that was not "TypeScript we refused": `src/driver.ts` embeds the
   twelve C files of the runtime (~305KB, `runtime/runtime.c` alone 147KB) with bun's text-asset

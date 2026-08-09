@@ -20,7 +20,7 @@ import { makeArrayTy } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
-import { isTypeRefTy, expandTypeRef, recTypeTable } from "./ast.ts";
+import { isTypeRefTy, unfoldTypeRef, recTypeTable } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
@@ -269,8 +269,8 @@ const DECLARES = [
   "declare ptr @nt_arr_join_bool(ptr, ptr)",
   "declare i32 @nt_arr_includes_num(ptr, double)",
   "declare i32 @nt_arr_includes_str(ptr, ptr)",
-  "declare double @nt_arr_indexof_num(ptr, double)",
-  "declare double @nt_arr_indexof_str(ptr, ptr)",
+  "declare double @nt_arr_indexof_num(ptr, double, double)",
+  "declare double @nt_arr_indexof_str(ptr, ptr, double)",
   "declare ptr @nt_arr_copy(ptr)",
   // ordering primitives (ES2023 copying methods): default sort by string form,
   // comparator sort through a codegen-emitted closure shim, and reverse-copy.
@@ -308,11 +308,11 @@ const DECLARES = [
   "declare i32 @js_str_starts_with(ptr, ptr, double)",
   "declare i32 @js_str_ends_with(ptr, ptr, double)",
   "declare ptr @js_str_replace(ptr, ptr, ptr, i32)",
-  "declare double @js_str_last_index_of(ptr, ptr)",
+  "declare double @js_str_last_index_of(ptr, ptr, double)",
   "declare ptr @nt_str_split_n(ptr, ptr, double)",
   "declare double @nt_arr_at_index(ptr, double)",
-  "declare double @nt_arr_last_indexof_num(ptr, double)",
-  "declare double @nt_arr_last_indexof_str(ptr, ptr)",
+  "declare double @nt_arr_last_indexof_num(ptr, double, double)",
+  "declare double @nt_arr_last_indexof_str(ptr, ptr, double)",
   "declare ptr @nt_arr_concat(ptr, ptr)",
   "declare ptr @nt_arr_flat1(ptr)",
   "declare ptr @js_num_to_fixed(double, double)",
@@ -770,7 +770,7 @@ class FnGen {
    *  `{ tag: undefined, n: 2 }` where node prints `{ tag: 'm', n: 2 }`.
    *  `widenLiteralTys` does not descend into a `U<…>`, so a recursive union keeps the tags
    *  its dispatch reads, and a literal-typed field is one string slot either way. */
-  private unfold(t: Ty): Ty { return widenLiteralTys(expandTypeRef(t, this.mod.recTypes)); }
+  private unfold(t: Ty): Ty { return widenLiteralTys(unfoldTypeRef(t, this.mod.recTypes)); }
 
   /**
    * The storage address of a variable. Normally its frame alloca `%x.addr`; for a
@@ -1916,10 +1916,18 @@ class FnGen {
    *
    * One level, for the reason `checker.type` states: the shape's own recursive positions
    * stay folded, so this is O(1) and driven by real accesses.
+   *
+   * The guard tests whether unfolding CHANGED the type rather than testing for a bare `@N`,
+   * because `?U@N` — an optional back-edge — is a value type the checker now unfolds too, and
+   * the two halves of this funnel disagreeing is what the funnel exists to prevent. It stays
+   * a guard rather than an unconditional `this.unfold` because `unfold` also WIDENS string
+   * literals, and widening every expression's type here would erase the tags the discriminated
+   * dispatch reads.
    */
   private genExpr(e: Expr): Val {
     const val = this.genExprInner(e);
-    return isTypeRefTy(val.ty) ? { v: val.v, ty: this.unfold(val.ty) } : val;
+    const un = unfoldTypeRef(val.ty, this.mod.recTypes);
+    return un === val.ty ? val : { v: val.v, ty: this.unfold(val.ty) };
   }
 
   private genExprInner(e: Expr): Val {
@@ -3925,7 +3933,9 @@ class FnGen {
       case "trimStart": return { v: call("js_str_trim_start", `ptr ${recv.v}`), ty: "string" };
       case "charAt": return { v: call("js_str_char_at", `ptr ${recv.v}, double ${a[0]!.v}`), ty: "string" };
       case "repeat": return { v: call("js_str_repeat", `ptr ${recv.v}, double ${a[0]!.v}`), ty: "string" };
-      case "slice": return { v: call("js_str_slice", `ptr ${recv.v}, double ${a[0]!.v}, double ${a[1]?.v ?? POS_INF}`), ty: "string" };
+      // `.slice(start?, end?)`: both optional in lib.es5.d.ts, so `s.slice()` is the whole
+      // string. `.substring(start, end?)` keeps a REQUIRED start — see STRING_METHODS.
+      case "slice": return { v: call("js_str_slice", `ptr ${recv.v}, double ${a[0]?.v ?? "0.0"}, double ${a[1]?.v ?? POS_INF}`), ty: "string" };
       case "substring": return { v: call("js_str_substring", `ptr ${recv.v}, double ${a[0]!.v}, double ${a[1]?.v ?? POS_INF}`), ty: "string" };
       case "padStart": return { v: call("js_str_pad_start", `ptr ${recv.v}, double ${a[0]!.v}, ptr ${a[1]?.v ?? this.mod.intern(" ")}`), ty: "string" };
       case "includes": {
@@ -3955,7 +3965,9 @@ class FnGen {
       }
       case "lastIndexOf": {
         const t = this.fresh();
-        this.emit(`${t} = call double @js_str_last_index_of(ptr ${recv.v}, ptr ${a[0]!.v})`);
+        // The optional `position` is NaN when omitted — which is also what the spec's
+        // own NaN case means (+Infinity, i.e. search the whole string), so one path serves both.
+        this.emit(`${t} = call double @js_str_last_index_of(ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1]?.v ?? NAN_HEX})`);
         return { v: t, ty: "number" };
       }
       case "replace": case "replaceAll":
@@ -4271,19 +4283,28 @@ class FnGen {
         this.emit(`${t} = icmp ne i32 ${r}, 0`);
         return { v: t, ty: "boolean" };
       }
+      // `.indexOf(x, fromIndex?)` / `.lastIndexOf(x, fromIndex?)`. The OMITTED case is
+      // spelled here, not as a NaN sentinel in the runtime, because an explicitly passed
+      // NaN is NOT the same thing: `ToIntegerOrInfinity(NaN)` is 0, so
+      // `[1,2,1].lastIndexOf(1, NaN)` is 0 while `[1,2,1].lastIndexOf(1)` is 2. Absent is
+      // 0 forward and +Infinity backward (which the runtime clamps to len-1).
+      // (`String#lastIndexOf` is the opposite — there a NaN position IS +Infinity by
+      // ES 22.1.3.11 — so it keeps its NaN sentinel.)
       case "indexOf": {
         const x = this.genExpr(args[0]!).v;
+        const from = args.length > 1 ? this.genExpr(args[1]!).v : "0.0";
         const t = this.fresh();
-        if (numeric) this.emit(`${t} = call double @nt_arr_indexof_num(ptr ${recv.v}, double ${x})`);
-        else this.emit(`${t} = call double @nt_arr_indexof_str(ptr ${recv.v}, ptr ${x})`);
+        if (numeric) this.emit(`${t} = call double @nt_arr_indexof_num(ptr ${recv.v}, double ${x}, double ${from})`);
+        else this.emit(`${t} = call double @nt_arr_indexof_str(ptr ${recv.v}, ptr ${x}, double ${from})`);
         return { v: t, ty: "number" };
       }
       case "reverse": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_arr_reverse(ptr ${recv.v})`); return { v: t, ty: recv.ty }; }
       // --- stdlib Batch 1 (part 2): array fills ---
       case "lastIndexOf": {
         const x = this.genExpr(args[0]!).v;
+        const from = args.length > 1 ? this.genExpr(args[1]!).v : POS_INF; // absent => len-1
         const t = this.fresh();
-        this.emit(`${t} = call double @${numeric ? "nt_arr_last_indexof_num" : "nt_arr_last_indexof_str"}(ptr ${recv.v}, ${numeric ? "double" : "ptr"} ${x})`);
+        this.emit(`${t} = call double @${numeric ? "nt_arr_last_indexof_num" : "nt_arr_last_indexof_str"}(ptr ${recv.v}, ${numeric ? "double" : "ptr"} ${x}, double ${from})`);
         return { v: t, ty: "number" };
       }
       case "concat": { // variadic: fold each argument array onto a fresh copy
@@ -4318,7 +4339,8 @@ class FnGen {
         return { v: t, ty: recv.ty };
       }
       case "slice": {
-        const a0 = this.genExpr(args[0]!).v;
+        // `start` defaults to 0, so `xs.slice()` copies the whole array.
+        const a0 = args.length > 0 ? this.genExpr(args[0]!).v : "0.0";
         // `args.length > 1`, not `args[1]`: `slice(n)` reads index == length, a panic.
         const a1 = args.length > 1 ? this.genExpr(args[1]!).v : POS_INF;
         const t = this.fresh();

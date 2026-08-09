@@ -538,6 +538,72 @@ with a tag test already written. `Checker.narrowAdvice` now says which one it is
 
 Each of the three workarounds it prescribes was verified to compile and match node.
 
+### `break` is not `return` — one conflation, one false refusal and four wrong answers (closed)
+
+Two passes asked "does this code leave?" and both got `break` wrong, in opposite directions.
+
+**The false refusal.** A BRACED case body — `case "X": { … return …; }` — read as *falling
+through*, so the next case was narrowed to both tags and its member read refused:
+
+```ts
+switch (n.kind) {
+  case "A": { const x = n.a; return "A" + x; }
+  case "B": return "B" + n.b;   // NT2001 — narrowed here to MORE THAN ONE member
+}
+```
+
+`leavesBlock` tested only the KIND of the case body's last statement, and a braced body's last
+statement is a `BlockStmt`. Nothing was ever miscompiled — codegen terminates the block correctly
+— these were refusals of programs node runs. `src/` writes that shape **181 times** (counted with
+our own parser; a line-based grep undercounts it).
+
+**The wrong answers**, all in definite assignment (NT1600), all the same root cause: a `break` or
+`continue` path was treated as *diverging*, so it was dropped from the assignment intersection and
+the code after the construct was never analyzed at all. Each printed the slot's zero where node
+prints `undefined`:
+
+```ts
+switch (c) { case 1: x = 1; break; default: break; }   return x; // 0, not undefined
+switch (c) { default: { if (b) break; x = 1; break; } } return x; // 0, not undefined
+do { if (c) break; n = 7; } while (false);             return n;  // 0, not undefined
+do { continue; } while (false);                        return n;  // 0, not undefined
+```
+
+**What changed** (`src/checker.ts`). The return value now answers only "does control reach the
+statement AFTER this one?" (`DAExit` = `"fall" | "left"`), because a path that leaves by `break`
+or `continue` is not lost — it is RECORDED, with the flow it carries, in a `DAEscapes` collector.
+That split is the fix: a `break` halfway down a body escapes exactly as much as one at the end,
+and no single return value can carry a flow from the middle.
+
+`breaks` land at the enclosing switch-or-loop's EXIT; `conts` land at the enclosing loop's TEST,
+which may then fall out of the loop. Both are live incoming paths to the construct that owns them
+and join its merge. Ownership follows the language: a `switch` shadows `breaks` and passes `conts`
+through to the loop, a loop shadows both — neither carries a label here, so "nearest enclosing" is
+the whole rule. Only `return`/`throw`/`process.exit` truly diverge.
+
+`while`/`for`/`for-of`/`for-in` were never affected: they may run zero times, so they keep nothing
+their body assigns, and the entry flow is already a subset of every escape path's. `do…while` is
+the one loop whose body always runs and whose assignments are therefore kept — which is exactly
+why it is the one loop where the escape paths change the answer.
+
+`leavesBlock` then **delegates** to that same analysis in a shape-only mode (`tracked === null`:
+track nothing, prove nothing, refuse nothing) rather than keeping a second, weaker model of
+control flow. That is what closes the false refusal, and it only became sound once the `break`
+conflation above was fixed: without it, `case "X": { switch (y) { default: break; } }` would have
+read as *leaving*, and the next case's member read would have been wrongly ACCEPTED.
+
+**Oracle.** The TypeScript conformance suite is not on disk, so the cases are derived, not mined;
+but all twelve were run through `tsc --strict` as the same program, and tsc's verdict agrees with
+ours on every one — the six that end (`return`, `throw`, `break`, a nested block, an if/else
+returning on both arms, a `try` whose `finally` cannot rescue it) and the six that fall through
+(an `if` with only one arm returning, a `try` whose `catch` falls out, an inner `switch` whose
+arms only `break`, a side effect with no terminator, an empty braced body, a bare fallthrough).
+
+**Not fixed, and still a gap:** `leavesFunction` — read only by the exhaustive-tail-switch
+diagnostic — is still the shallow last-statement test, so a tail switch whose arms are all braced
+does not get its missing-tag diagnostic. That direction is a MISSED refusal, not a wrong answer,
+so it was left alone rather than widened here.
+
 ### `JSON.stringify` — the default-to-`null` fall-through (closed)
 
 `genJsonStringify` handled number/boolean/string/`Date`/nullable/array/object and then
@@ -2739,6 +2805,39 @@ the heap and store the box pointer in the env slot, so every closure and the enc
 share one cell. That is a real feature, not a patch, and it is what would let condition 2 go away.
 
 | NT1029 | a closure writing a binding it captured, where the write would be observable (or the binding is not a `number`) | later | by-reference capture: box the captured cell so every closure and the declaring frame share one |
+
+### STRICTER THAN `tsc` ON PURPOSE — a dotted-path narrowing an inline callback invalidates
+
+A dotted path narrows now (`if (o.inner.kind === "A") { o.inner.left }`, `docs/self-hosting.md`),
+and its stability rules are `tsc`'s — with **one place where we deliberately refuse a program
+`tsc` accepts**, because `tsc` is wrong there and we would miscompile it.
+
+```ts
+let o: Box = { name: "p", inner: { kind: "A", left: 1 } };
+if (o.inner.kind === "A") {
+  [1].map((x: number): number => { o = { name: "q", inner: { kind: "B", right: "boom" } }; return x; });
+  return "n" + o.inner.left;      // tsc: fine. node: "nundefined".
+}
+```
+
+`tsc --strict` reports no error: it does not invalidate the narrowing for an assignment inside a
+callback. node runs the callback inline, so by the read `o.inner` is the `B` member and `.left`
+is `undefined`. For `tsc` that is a type-level lie with a benign runtime result; for us the same
+lie is a **slot layout**, and the read would return a string pointer reinterpreted as a double.
+
+So `closureAssigned` drops the fact and the read keeps its `NT2001`. Same input, three answers:
+
+| | `tsc --strict` | node | nativets |
+|---|---|---|---|
+| the narrowed read above | accepted | `nundefined` | **refused**, `NT2001`, naming the assignment |
+
+The *neighbouring* case needs no special pleading — `tsc` refuses a plain `o = other;` between
+the proof and the read exactly as we do (`TS2339`, verified against `typescript@7.0.2`). Only the
+callback shape diverges, and it diverges toward refusing.
+
+| refusal | why | lift it by |
+|---|---|---|
+| a dotted-path tag narrowing whose root is assigned inside any arrow in the program | the arrow may run between the proof and the read, and unlike `tsc` we would emit the wrong slot layout rather than a merely-wrong type | tracking WHERE each arrow can run (an effect/order analysis), not by matching `tsc` |
 
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
