@@ -449,6 +449,11 @@ export function check(program: Program): CheckedProgram {
     if (hasTypeParam(t)) throw nyi(NYI.GENERIC, `unresolved generic type parameter '${t}' survived monomorphization`);
     return t;
   });
+  // Give every block scope its OWN frame slot. Runs on the final body (so it covers the
+  // specializations just spliced in) and BEFORE definite assignment, which is name-based
+  // and had to refuse a shadowed binding outright precisely because it could not tell
+  // two same-named bindings apart. After this pass it can: they have different names.
+  alphaRenameShadows(program.body);
   // Definite assignment runs LAST: it reads `Declarator.init`, and `checkStmt` above is
   // what materializes that initializer for the types which admit `undefined`. Running it
   // on the final body also covers every generic specialization just spliced in.
@@ -5152,4 +5157,280 @@ export function isPrintableTy(t: Ty): boolean {
     t === "null" || t === "Dyn" || isDateTy(t) || isNullableTy(t) || isGeneralUnionTy(t) ||
     isObjectTy(t) || isArrayTy(t) || isMapTy(t) || isSetTy(t) || isBytesTy(t)
   );
+}
+
+/* ============================================================
+ * BLOCK SCOPES → DISTINCT FRAME SLOTS (alpha-renaming).
+ *
+ * Codegen lowers a function to ONE flat frame whose allocas are keyed by SOURCE NAME:
+ * `addLocal` returns early when the name is already known, so every block scope in a
+ * function shared storage with every other one. `const a = 1; { const a = 2; } …a…`
+ * printed `2` twice where node prints `2` then `1` — a silent wrong answer on the most
+ * basic construct the language has. Three sharper edges hid behind it: at DIFFERENT
+ * types the FIRST declaration's type won and the second read its value at the wrong
+ * LLVM type (a string pointer as a double, or an internal error); SIBLING scopes
+ * collided identically though neither shadows the other; and with a LINEAR type the
+ * inner scope's drop freed storage the outer name still read — a double free, exit 255,
+ * which is what forced the ownership pass's `shadowedNames` disqualification.
+ *
+ * The fix is lexical, and it happens HERE rather than in codegen because the ownership
+ * pass sits in between and is name-keyed too. A declaration in a nested scope whose name
+ * is already spoken for in the enclosing frame is renamed to `name.N`; every reference
+ * that the scope chain resolves to it is rewritten with it. `.` cannot occur in a source
+ * identifier, so a fresh name can never collide with a real one — the same device
+ * `freshenHofArrow` uses for inlined callbacks, and `src/modules.ts` for cross-module
+ * bindings.
+ *
+ * WHAT NEVER MOVES, deliberately:
+ *   - module top-level bindings — they may be promoted to LLVM globals under their
+ *     source name and read from a function body by that name;
+ *   - a function's parameters and its body's top-level declarations — those already had
+ *     their own frame and were always correct, and renaming them would churn the IR of
+ *     every program that has no shadowing at all;
+ *   - `FuncDecl` names — the signature table and every call site are keyed by them, and
+ *     the checker has already been run.
+ * So a program with no name reuse inside a frame is byte-identical after this pass.
+ *
+ * SCOPING is JS's, not the flat one the rest of this file's name-based analyses use: a
+ * block, each loop's binding list, a loop BODY (separately from its `for (let i …)`
+ * head, since `for (let i = 0; …) { let i = 9; }` is legal), a `switch` body (ONE scope
+ * shared by every case), and a `catch` parameter together with its handler. A
+ * `MultiStmt` is a desugaring group and introduces NO scope.
+ *
+ * A NESTED scope binds each name where it is DECLARED, not on scope entry — deliberately,
+ * and it is the one place this pass is not JS. Binding on entry is the correct model and
+ * was tried first; it makes a reference that precedes its declarator resolve to the inner
+ * binding, which is right, but the inner binding's slot is still uninitialized there, so
+ *
+ *   const g = (): number => 100;
+ *   { const f = (): number => g() + 1; const g = (): number => 5; console.log(f()); }
+ *
+ * turned a pre-existing wrong answer (`101`, node says `6`) into a call through garbage.
+ * Forward-referencing a `const` arrow is not supported at all — with no outer binding to
+ * absorb the reference the same program is `NT1003` — so binding at the declarator keeps
+ * that shape exactly as broken as it already was instead of upgrading it to UB. Hoisted
+ * `FuncDecl` names ARE bound on entry, because they genuinely hoist and never rename.
+ * ============================================================ */
+
+/** One lexical scope: source name → the name its storage is keyed by. */
+type RenameScope = Map<string, string>;
+
+/** The names bound DIRECTLY by this statement list (a `MultiStmt` is a scope-less group).
+ *  `hoistedOnly` collects just the `FuncDecl`s, which is what a nested scope pre-binds. */
+function directBound(stmts: Stmt[], out: string[], hoistedOnly = false): void {
+  for (const s of stmts) {
+    if (s.kind === "VarDecl") { if (!hoistedOnly) for (const d of s.decls) out.push(d.name); }
+    else if (s.kind === "FuncDecl") out.push(s.name);
+    else if (s.kind === "MultiStmt") directBound(s.stmts, out, hoistedOnly);
+  }
+}
+
+export function alphaRenameShadows(body: Stmt[]): void {
+  let seq = 0;
+
+  const lookup = (scopes: RenameScope[], n: string): string | undefined => {
+    for (let i = scopes.length - 1; i >= 0; i--) {
+      const m = scopes[i]!.get(n);
+      if (m !== undefined) return m;
+    }
+    return undefined;
+  };
+
+  /**
+   * Bind `name` in the innermost scope. `pinned` marks the two scopes whose names must
+   * keep their source spelling (the module top level, and a function/arrow frame's own
+   * parameters + top-level body). A name already bound in THIS scope is a redeclaration
+   * in one scope — illegal in node, accepted here today — and keeps its first binding
+   * rather than gaining a second slot.
+   */
+  const bind = (scopes: RenameScope[], used: Set<string>, name: string, pinned: boolean): void => {
+    const cur = scopes[scopes.length - 1]!;
+    if (cur.has(name)) return;
+    if (pinned || !used.has(name)) { cur.set(name, name); used.add(name); return; }
+    const nn = `${name}.${seq++}`;
+    cur.set(name, nn);
+    used.add(nn);
+  };
+
+  /**
+   * Push a scope. A FRAME's own scope (`pinned`) pre-binds every name the body declares
+   * directly, which is what keeps those names — and only those — at their source
+   * spelling. A nested scope pre-binds only the hoisted `FuncDecl` names; its `let`/
+   * `const`s are bound where they are declared (see the header).
+   */
+  const pushScope = (stmts: Stmt[], scopes: RenameScope[], used: Set<string>, pinned = false): RenameScope[] => {
+    const inner = [...scopes, new Map<string, string>()];
+    const names: string[] = [];
+    directBound(stmts, names, !pinned);
+    for (const n of names) bind(inner, used, n, true);
+    return inner;
+  };
+
+  const walkExpr = (e: unknown, scopes: RenameScope[], used: Set<string>): void => {
+    if (e === null || e === undefined || typeof e !== "object") return;
+    if (Array.isArray(e)) { for (const x of e) walkExpr(x, scopes, used); return; }
+    const n = e as Record<string, unknown>;
+    if (n["kind"] === "Identifier" && typeof n["name"] === "string") {
+      const m = lookup(scopes, n["name"]);
+      if (m !== undefined) n["name"] = m;
+      return;
+    }
+    if (n["kind"] === "ArrowFunction") { walkArrow(n, scopes, used); return; }
+    // The two write-only forms carry their target as a bare STRING, so the walk below
+    // cannot see them: rewrite explicitly, then fall through for `value`/`targetExpr`.
+    if ((n["kind"] === "AssignExpr" || n["kind"] === "UpdateExpr") && typeof n["target"] === "string") {
+      const m = lookup(scopes, n["target"]);
+      if (m !== undefined) n["target"] = m;
+    }
+    // Shape-blind below this point, on purpose: an expression kind added later must not
+    // silently escape renaming (a missed reference is a miscompile, not a lost rename).
+    for (const k of Object.keys(n)) { if (k !== "loc") walkExpr(n[k], scopes, used); }
+  };
+
+  /** An arrow (lifted to its own LLVM function, or inlined) is a new FRAME: its own
+   *  parameters and top-level body names are pinned, and `used` forks so a sibling
+   *  arrow reusing a name does not force a rename here. The scope CHAIN is kept, so a
+   *  capture of an already-renamed enclosing binding still resolves to it. */
+  const walkArrow = (node: unknown, scopes: RenameScope[], used: Set<string>): void => {
+    // Annotated `unknown` and CAST, never annotated `Record<…>`: `src/*.ts` may not
+    // declare a `Record` annotation (test/record-dict.test.ts — a Record erases to a Map
+    // here). An index signature is not the way out either: this compiler cannot parse
+    // one, so `{ [k: string]: unknown }` is an NT0001 blocker in its own source.
+    const a = node as Record<string, unknown>;
+    const params = (a["params"] ?? []) as { name: string; default?: unknown }[];
+    const stmts = (a["exprBody"] ? [] : (a["stmts"] ?? [])) as Stmt[];
+    // `captures` was computed while CHECKING, under the source names, and codegen reads
+    // it to build the env block and to decide that a reference is a capture rather than
+    // a frame local. It is resolved in the ENCLOSING chain (a capture is by definition
+    // not bound by this arrow), so rewrite it before the parameters shadow anything.
+    for (const c of (a["captures"] ?? []) as { name: string }[]) {
+      const m = lookup(scopes, c.name);
+      if (m !== undefined) c.name = m;
+    }
+    const inner = new Set(used);
+    const chain = [...scopes, new Map<string, string>()];
+    for (const p of params) bind(chain, inner, p.name, true);
+    const names: string[] = [];
+    directBound(stmts, names);
+    for (const nm of names) bind(chain, inner, nm, true);
+    for (const p of params) if (p.default) walkExpr(p.default, chain, inner);
+    if (a["exprBody"]) walkExpr(a["body"], chain, inner);
+    else walkStmts(stmts, chain, inner);
+  };
+
+  const walkStmts = (stmts: Stmt[], scopes: RenameScope[], used: Set<string>): void => {
+    for (const s of stmts) walkStmt(s, scopes, used);
+  };
+
+  /** A nested statement list that IS a scope of its own (a block, a loop body, …). */
+  const walkBlock = (stmts: Stmt[], scopes: RenameScope[], used: Set<string>): void => {
+    walkStmts(stmts, pushScope(stmts, scopes, used), used);
+  };
+
+  const walkStmt = (s: Stmt, scopes: RenameScope[], used: Set<string>): void => {
+    switch (s.kind) {
+      case "VarDecl":
+        for (const d of s.decls) {
+          // The initializer is evaluated BEFORE the binding exists, so it is walked
+          // first: `const a = a` reads the outer `a` (and is a TDZ error in node).
+          if (d.init) walkExpr(d.init, scopes, used);
+          bind(scopes, used, d.name, false);
+          d.name = lookup(scopes, d.name) ?? d.name;
+        }
+        return;
+      case "FuncDecl": {
+        // Its NAME never moves; its body is a frame, pinned exactly like an arrow's.
+        const inner = new Set(used);
+        const chain = [...scopes, new Map<string, string>()];
+        for (const p of s.params) bind(chain, inner, p.name, true);
+        const names: string[] = [];
+        directBound(s.body, names);
+        for (const nm of names) bind(chain, inner, nm, true);
+        for (const p of s.params) if (p.default) walkExpr(p.default, chain, inner);
+        walkStmts(s.body, chain, inner);
+        return;
+      }
+      case "IfStmt":
+        walkExpr(s.test, scopes, used);
+        walkBlock(s.consequent, scopes, used);
+        if (s.alternate) walkBlock(s.alternate, scopes, used);
+        return;
+      case "WhileStmt":
+        walkExpr(s.test, scopes, used);
+        walkBlock(s.body, scopes, used);
+        return;
+      case "DoWhileStmt":
+        walkBlock(s.body, scopes, used);
+        walkExpr(s.test, scopes, used);
+        return;
+      case "ForStmt": {
+        // The head is a scope; the BODY is a child of it (`for (let i…) { let i… }`).
+        const head = s.init && (s.init as VarDecl).kind === "VarDecl"
+          ? pushScope([s.init as VarDecl], scopes, used)
+          : [...scopes, new Map<string, string>()];
+        if (s.init) {
+          if ((s.init as VarDecl).kind === "VarDecl") walkStmt(s.init as VarDecl, head, used);
+          else walkExpr(s.init as Expr, head, used);
+        }
+        if (s.test) walkExpr(s.test, head, used);
+        if (s.update) walkExpr(s.update, head, used);
+        walkBlock(s.body, head, used);
+        return;
+      }
+      case "ForOfStmt": {
+        walkExpr(s.iterable, scopes, used);
+        const head = [...scopes, new Map<string, string>()];
+        bind(head, used, s.name, false);
+        s.name = lookup(head, s.name) ?? s.name;
+        if (s.name2) { bind(head, used, s.name2, false); s.name2 = lookup(head, s.name2) ?? s.name2; }
+        walkBlock(s.body, head, used);
+        return;
+      }
+      case "ForInStmt": {
+        walkExpr(s.object, scopes, used);
+        const head = [...scopes, new Map<string, string>()];
+        bind(head, used, s.name, false);
+        s.name = lookup(head, s.name) ?? s.name;
+        walkBlock(s.body, head, used);
+        return;
+      }
+      case "SwitchStmt": {
+        walkExpr(s.discriminant, scopes, used);
+        // ONE scope for the whole switch body: a `const` in `case 1:` is visible in
+        // `case 2:` (that is what makes an unguarded one a TDZ error in node).
+        const all: Stmt[] = [];
+        for (const c of s.cases) all.push(...c.body);
+        const inner = pushScope(all, scopes, used);
+        for (const c of s.cases) {
+          if (c.test) walkExpr(c.test, scopes, used);
+          walkStmts(c.body, inner, used);
+        }
+        return;
+      }
+      case "TryStmt":
+        walkBlock(s.block, scopes, used);
+        if (s.handler) {
+          // The catch parameter and its handler share one scope (node makes
+          // `catch (e) { let e; }` a syntax error for exactly that reason).
+          const inner = pushScope(s.handler, scopes, used);
+          if (s.param) {
+            bind(inner, used, s.param, false);
+            s.param = lookup(inner, s.param) ?? s.param;
+          }
+          walkStmts(s.handler, inner, used);
+        }
+        if (s.finalizer) walkBlock(s.finalizer, scopes, used);
+        return;
+      case "BlockStmt": walkBlock(s.body, scopes, used); return;
+      case "MultiStmt": walkStmts(s.stmts, scopes, used); return; // a group, not a scope
+      case "BlockDrops": s.names = s.names.map((n) => lookup(scopes, n) ?? n); return;
+      default: walkExpr(s, scopes, used); return; // ReturnStmt / ThrowStmt / ExprStmt / …
+    }
+  };
+
+  // The module top level: pinned, because a binding here can be promoted to an LLVM
+  // global and read from a function body under its source name.
+  const used = new Set<string>();
+  const top = pushScope(body, [], used, true);
+  walkStmts(body, top, used);
 }

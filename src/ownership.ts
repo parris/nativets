@@ -861,9 +861,15 @@ function closureDecls(list: Stmt[], out: Map<string, object>): void {
  * slot per function (`addLocal` returns early if the name is already known), so two
  * declarations of `f` share storage: the inner one overwrites the outer's env pointer
  * and the inner block's drop would then free a pointer the outer name still reads.
- * (That sharing is a pre-existing MISCOMPILE for shadowed closures — the outer `f` reads
- * the inner arrow after the block — but a wrong answer must not be upgraded into a
- * use-after-free, so every shadowed name is disqualified here.)
+ *
+ * BLOCK SHADOWING no longer reaches here: `alphaRenameShadows` (src/checker.ts) gives a
+ * nested-scope declaration its own name before this pass runs, so the two `f`s have
+ * different names and both envs are dropped normally. What is left is the residue that
+ * rename deliberately does NOT touch — two declarations of one name in ONE scope, and a
+ * function-body declaration colliding with a parameter. node rejects both outright
+ * (`SyntaxError: Identifier 'f' has already been declared`) and nativets does not yet,
+ * so they still reach codegen sharing a slot; disqualifying them keeps that pre-existing
+ * gap a LEAK rather than a use-after-free.
  *
  * A DECLARING occurrence is any node carrying a `name` string that is not an
  * `Identifier` (declarators have no `kind` at all; params, `for-of` bindings and
