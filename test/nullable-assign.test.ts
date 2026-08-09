@@ -125,31 +125,47 @@ console.log(new Scope(null).show(), new Scope("x").show());
   });
 
   /*
-   * THE ACCEPTANCE GATE, verbatim from src/checker.ts:93 — the shape that was blocking
-   * the recursive-type encoding lane. node cannot be the oracle here: it refuses a
-   * PARAMETER PROPERTY outright (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX, it needs codegen,
-   * not type-stripping), so this asserts only that the NULL ARGUMENT is no longer what
-   * stops it. A self-recursive field is still NT1030 — that refusal belongs to the
-   * recursive-type lane, and is asserted here so this test cannot silently start
-   * passing for the wrong reason.
+   * THE ACCEPTANCE GATE, verbatim from src/checker.ts:93 — the compiler's own symbol
+   * table, and the shape that was blocking the recursive-type encoding lane.
+   *
+   * node cannot be the oracle for this exact source: it refuses a PARAMETER PROPERTY
+   * outright (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX — it needs codegen, not type-stripping).
+   * So the gate is asserted as "compiles", and the RUNTIME meaning is pinned separately
+   * below against node with the field written out longhand.
+   *
+   * This lane owed only the null ARGUMENT; the self-recursive FIELD was the recursive-type
+   * lane's, and has since landed, so the whole thing now compiles with nothing left over.
    */
-  test("`new Scope(null)` is no longer blocked by its null ARGUMENT", () => {
-    // Non-recursive: compiles clean, parameter property and all.
+  test("`new Scope(null)` — the full gate compiles", () => {
     expect(() => sourceToIR(`
 class Scope {
-  constructor(private parent: string | null = null) {}
+  constructor(private parent: Scope | null = null) {}
   depth(): number { return this.parent === null ? 0 : 1; }
 }
-console.log(new Scope(null).depth());
-`)).not.toThrow();
-    // Self-recursive: the ONLY remaining complaint is the recursive field.
-    expectRejected(`
-class Scope {
-  constructor(private parent: Scope | null = null) {}
-}
 const s = new Scope(null);
-console.log("ok");
-`, "NT1030", "parent");
+console.log(s.depth());
+`)).not.toThrow();
+  });
+
+  /*
+   * The same symbol table, longhand so node can be the oracle for what it MEANS: both
+   * a `null` and a `Scope` reach the recursive `Scope | null` parameter.
+   *
+   * Deliberately NOT recursing through `parent.depth()`. A method call on the nominal
+   * recursive type is `NT1002` ("method call on @Scope"), which belongs to the
+   * recursive-type encoding lane that just landed the type — not to this one.
+   */
+  test("a self-recursive `T | null` parameter takes both null and an instance", async () => {
+    await expectNode(`
+class Scope {
+  parent: Scope | null;
+  constructor(parent: Scope | null = null) { this.parent = parent; }
+  isRoot(): boolean { return this.parent === null; }
+}
+const root = new Scope(null);
+const mid = new Scope(root);
+console.log(root.isRoot(), mid.isRoot());
+`);
   });
 
   test("a null-typed VARIABLE reaches a `T | null` parameter", async () => {

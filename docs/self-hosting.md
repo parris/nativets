@@ -774,10 +774,12 @@ class Scope { constructor(private parent: Scope | null = null) {} }
 const s = new Scope(null);
 ```
 
-is `NT1030` for the self-recursive field, which belongs to the recursive-type encoding
-lane. That is the acceptance gate this lane owed, and the `NT1030`-and-nothing-else
-state is asserted in `test/nullable-assign.test.ts` so it cannot silently start passing
-for the wrong reason.
+was `NT1030` for the self-recursive field, which belonged to the recursive-type encoding
+lane. That lane has since landed its nominal encoding, and with both halves in the gate
+**compiles with nothing left over** — asserted in `test/nullable-assign.test.ts`, together
+with a longhand spelling node can actually run (node refuses a parameter property outright:
+`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`). What remains on the recursive type is `NT1002`, a
+method call on `@Scope`, which is that lane's next step and not this one's.
 
 **A real miscompile fell out of the same file, pre-existing and unrelated to the
 feature.** `coerce` is what turns a raw value into its declared type's representation,
