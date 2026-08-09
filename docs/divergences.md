@@ -800,35 +800,76 @@ The `return`-from-`: boolean` row holds for a `function` declaration or a method
 **not** hold for an **arrow**, because an arrow's declared return type is never checked
 against its body at all — a separate, pre-existing hole found here:
 `const f = (k: string): boolean => m.delete(k); console.log(f("zz"))` prints the map where
-node prints `false`, with no diagnostic. Not this section's bug and not fixed here.
+node prints `false`, with no diagnostic. It is worse than it looks *and* harder to spot,
+for the same reason: an unchecked annotation agrees with node by **accident** in most
+programs, because node erases types too — `(n: number): string => n + 1` prints `2` on both
+sides. It becomes a wrong *answer* only where the declared type is load-bearing for our
+codegen and the body's real type differs, so the bug is the **asymmetry** with the
+`function` spelling (which *is* `NT2001`), and `.delete` merely made it visible. Not this
+section's bug and not fixed here; routed to its own lane.
 
-**It keys on `.delete`, not on "a Map/Set in a condition."** `if (m)` on a plain handle is
-always-true under node too, so it **agrees** and keeps compiling; so do `if (m.size)`,
-`if (m.has(k))` and `if (m.get(k))` — the spellings the hint points at. A user class with its
-own `.delete(): boolean` method is untouched (measured). All are pinned as passing tests in
+`if (m.size)`, `if (m.has(k))` and `if (m.get(k))` — the spellings the hint points at — are
+`number`/`boolean`/`V | undefined` tests and never reach the rule. A user class with its own
+`.delete(): boolean` method is untouched (measured). All are pinned as passing tests in
 `test/mapset-immutable.test.ts`.
 
-**Residual hole, deliberately left open.** Routing the result through a binding first is
-still silently wrong:
+test262 basis, re-measured on node here: `built-ins/Map/prototype/delete/returns-true.js`,
+`returns-false.js` and the `Set/prototype/delete` pair — `.delete` answers "was the key
+there?", `true` on the first call and `false` on the second.
+
+#### …and a truthiness test on a NON-NULLABLE `Map`/`Set` is refused too (`NT1606`)
+
+The `.delete` rule above keyed on `.delete`, and one `const` walked around it:
 
 ```ts
 let m = new Map<string, number>().set("a", 1);
 const gone = m.delete("zz");
 if (gone) { console.log("hit"); } else { console.log("miss"); }   // node: miss.  here: hit.
-console.log(gone);                                                 // node: false. here: Map(1) {…}
 ```
 
-At `if (gone)` the expression is a plain `Map`-typed identifier, *indistinguishable* from the
-`if (m)` that must keep working — and `const gone = m.delete(k)` is itself the legitimate
-persistent spelling (it is a pinned test). Closing it needs either a taint that leaks one
-alias later (`const g2 = gone; if (g2)`), which is worse than not trying because it trains
-false confidence, or refusing every always-true collection test, which would take `if (m)`
-with it. The complete fix is the same one the discarded-mutator section names: box the handle
-so `.delete` can return node's boolean.
+At `if (gone)` the expression is a plain `Map`-typed identifier — **indistinguishable** from
+`if (m)`, and `const gone = m.delete(k)` is itself the legitimate persistent spelling. There
+is no analysis that separates them short of a taint that leaks one alias later
+(`const g2 = gone; if (g2)`), and being *partly* clever is worse than not trying: it trains
+confidence the rule cannot honour. So the rule is written on the **type** and refuses both:
 
-test262 basis, re-measured on node here: `built-ins/Map/prototype/delete/returns-true.js`,
-`returns-false.js` and the `Set/prototype/delete` pair — `.delete` answers "was the key
-there?", `true` on the first call and `false` on the second.
+```
+error[NT1606]: a non-nullable `Map` is always truthy, so this `if` condition at 3:5 is
+               ALWAYS true — the `else` arm is unreachable
+  = help: `gone` is a handle and its type is not `Map<…> | undefined`, so it can never be
+          absent — node evaluates this test to `true` as well, which makes it dead code
+          rather than a check. Did you mean `gone.size` (is it empty?) or `gone.has(k)`
+          (is the key there?)? A `Map<…> | undefined` IS worth testing and is still accepted
+```
+
+**Why refusing `if (m)` costs nothing.** It is not a check in *either* language. A
+non-nullable handle is never `null`/`undefined`, so node evaluates the test to `true` too:
+the condition is **vacuous, not divergent**, and no correct program's behaviour can depend on
+a condition that cannot be false. Against that, leaving it open costs a silent wrong answer
+that survives one binding. The blast radius was measured before widening: **no** non-nullable
+collection truthiness test exists anywhere in `src/`, `test/fixtures/` or `examples/`.
+
+**`Map | undefined` is a different type and a real check, and still compiles** — that test
+decides something and node and we agree on what. The nullable box is `?N…`/`?U…`, which the
+`isMapTy`/`isSetTy` predicates do not match, so it never reaches the rule:
+
+```ts
+const hit: Map<string, number> | undefined = new Map<string, number>().set("a", 1);
+const nope: Map<string, number> | undefined = undefined;
+if (hit) { console.log("some", hit.size); } else { console.log("none"); }   // "some 1"
+if (nope) { console.log("some2"); } else { console.log("none2"); }          // "none2"
+```
+
+The two diagnostics are deliberately worded differently for the same code: a `.delete` test
+is a **misunderstanding** (you wanted node's boolean; the fix is `.has`), a bare handle test
+is **dead code** (delete it, or test `.size`).
+
+**Still open, and the complete fix.** `console.log(m.delete("zz"))` prints the map where node
+prints `false`, and `const gone = m.delete(k); console.log(gone)` does the same — those are
+value positions, not boolean ones, and under our semantics printing the resulting collection
+is the *correct* rendering, indistinguishable from `console.log(m.set(k, v))`. The complete
+fix is the one the discarded-mutator section names: box the handle so `.delete` can return
+node's boolean.
 
 ### `Record<K, V>` is a `Map`, not an object — and an object literal cannot initialize one
 

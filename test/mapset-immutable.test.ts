@@ -217,7 +217,6 @@ describe(".delete consumed as a BOOLEAN is refused (node returns a boolean, we r
     const src = `
 const m = new Map<string, number>().set("a", 1);
 const s = new Set<string>().add("a");
-if (m) { console.log("handle"); }
 if (m.size) { console.log("size"); }
 if (m.has("a")) { console.log("has"); }
 if (m.get("a")) { console.log("get"); }
@@ -226,7 +225,7 @@ if (!m.has("zz")) { console.log("nothas"); }
 console.log(m.has("zz") ? "y" : "n");`;
     expect(rejectionOf(src)).toBeNull();
     const r = await compileAndRun(src);
-    expect(r.stdout).toBe("handle\nsize\nhas\nget\nshas\nnothas\nn\n");
+    expect(r.stdout).toBe("size\nhas\nget\nshas\nnothas\nn\n");
     expect(r.exitCode).toBe(0);
   });
 
@@ -246,6 +245,77 @@ if (m.delete("b").size === 0) { console.log("emptied"); }`;
     expect(rejectionOf(src)).toBeNull();
     const r = await compileAndRun(src);
     expect(r.stdout).toBe("1 0 1 true\nemptied\n");
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+/*
+ * THE VACUOUS COLLECTION TEST — the residual hole above, closed by widening.
+ *
+ * The `.delete` rule keys on `.delete`, so routing the result through a binding escaped it:
+ *
+ *     const gone = m.delete("zz");
+ *     if (gone) { … } else { … }     // node: else.  here, before: THEN. Exit 0, no diagnostic.
+ *
+ * At `if (gone)` the expression is a plain Map-typed identifier, indistinguishable from
+ * `if (m)`. There is no analysis that separates them, so the honest move is to refuse BOTH —
+ * and the reason that is affordable is that `if (m)` is not a check in EITHER language.
+ *
+ * A non-nullable handle is never `null`/`undefined`, so node evaluates the test to `true`
+ * too: it is vacuous, not divergent. Refusing it costs a user nothing semantically — no
+ * correct program's behaviour depends on a condition that cannot be false — while leaving
+ * it open costs a silent wrong answer that survives one `const`. Measured blast radius
+ * before widening: NO occurrence of a non-nullable collection truthiness test anywhere in
+ * `src/`, `test/fixtures/` or `examples/`.
+ *
+ * `Map | undefined` is a DIFFERENT type and a real check — `if (maybeMap)` must keep
+ * working, and does: the nullable box is `?N…`/`?U…`, which is not `isMapTy`.
+ */
+describe("a truthiness test on a NON-NULLABLE Map/Set is vacuous, and refused", () => {
+  test("`if (m)` on a plain handle is NT1606 — always true in node too", () => {
+    const r = rejectionOf(`const m = new Map<string, number>().set("a", 1);\nif (m) { console.log("t"); } else { console.log("f"); }\n`);
+    expect(r?.code).toBe("NT1606");
+    expect(r?.message).toContain("always truthy");
+    expect(r?.message).toContain("2:5");
+    expect(r?.hint).toContain("m.size");
+    expect(r?.hint).toContain("m.has(");
+  });
+
+  test("it closes the `.delete`-through-a-binding hole this rule exists for", () => {
+    const r = rejectionOf(`let m = new Map<string, number>().set("a", 1);\nconst gone = m.delete("zz");\nif (gone) { console.log("hit"); } else { console.log("miss"); }\n`);
+    expect(r?.code).toBe("NT1606");
+    expect(r?.hint).toContain("gone.size");
+  });
+
+  test("every truthiness position, and `Set` as well as `Map`", () => {
+    const pre = `const m = new Map<string, number>().set("a", 1);\nconst s = new Set<string>().add("a");\n`;
+    for (const tail of [
+      `while (m) { console.log("x"); }`,
+      `do { console.log("x"); } while (m);`,
+      `for (; m; ) { console.log("x"); }`,
+      `console.log(m ? "y" : "n");`,
+      `if (!m) { console.log("x"); }`,
+      `if (s) { console.log("x"); }`,
+      `if (!s) { console.log("x"); }`,
+    ]) expect(rejectionOf(pre + tail + "\n")?.code).toBe("NT1606");
+  });
+
+  /*
+   * The one that must NOT be refused. `Map | undefined` can genuinely be absent, so the
+   * test decides something and node and we agree on what — this is the whole reason the
+   * rule is written on NON-nullable types rather than on "a collection in a condition".
+   */
+  test("a NULLABLE Map/Set test is a real check and still compiles", async () => {
+    const src = `
+const hit: Map<string, number> | undefined = new Map<string, number>().set("a", 1);
+const nope: Map<string, number> | undefined = undefined;
+const noSet: Set<string> | undefined = undefined;
+if (hit) { console.log("some", hit.size); } else { console.log("none"); }
+if (nope) { console.log("some2"); } else { console.log("none2"); }
+if (!noSet) { console.log("no-set"); }`;
+    expect(rejectionOf(src)).toBeNull();
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("some 1\nnone2\nno-set\n");
     expect(r.exitCode).toBe(0);
   });
 });
