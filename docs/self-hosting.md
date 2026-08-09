@@ -1618,6 +1618,64 @@ per-token accumulator that way would break the two-toolchain constraint (`src/*.
 `coverage-preprocess.ts` joins `ast.ts`, `lexer.ts`, `modules.ts` and `parser.ts` in the `NT1606`
 bucket, which is now **five of twelve** and is the single largest thing between here and SH6.
 
+### STAGE-1 GIVES BACK THE ONLY BLOCKER IT EVER OWNED — `await` at the inner call site
+
+`cli.ts` is stage-1: the real entry point, whose import graph pulls in everything. In every
+measurement in this document but one it has been gated on a *dependency*. The exception was
+its own `NT1020`:
+
+```ts
+await guard(() => buildBinary(source, out, { target, static: isStatic, entryPath: file }));
+//           ^ the arrow's body calls an async function without `await` — NT1020 at 76:21
+```
+
+Under node this promise is **not** dropped: `guard` is `async function guard<T>(fn: () =>
+Promise<T> | T)` and its body is `return await fn()`, so the promise is awaited one frame up.
+Two options were sized:
+
+| | verdict |
+|---|---|
+| **(a) SOURCE change** — `async () => await buildBinary(…)`, the `await` at the inner call site | **TAKEN** |
+| (b) COMPILER — narrow NT1020 for a call whose value is returned rather than discarded | rejected, and the reason is already written down |
+
+**(b) is rejected by a decision this project has already made and recorded.**
+`docs/divergences.md` names this exact shape a **deliberate over-rejection**:
+
+> A promise that is threaded through un-awaited and only awaited further up … produces
+> node's answer here, but is still refused … Knowing which of these is safe is a taint
+> analysis over promise values; refusing the un-awaited call is the same rule everywhere,
+> and **`await` at the inner call site is always the fix**.
+
+A recent lane deliberately made this guard *wider*, not narrower (it now covers promise-typed
+values escaping through parameters and returns). Narrowing it here for one call shape would
+re-open the hole that lane closed, and would make the accept/reject boundary syntactic again.
+
+**(a) is observationally null under bun**, and that is checked rather than argued. `guard`
+awaits whatever the callback returns, so `() => f(…)` and `async () => await f(…)` hand it the
+same promise; a rejection propagates through the async arrow to `guard`'s `catch` identically,
+which is the path that turns an `NTError` into a clean `error[NT….]` line instead of a stack
+trace. Old and new `src/cli.ts` were run side by side on `build`, `run`, `emit`, a program that
+exits 7, and a program that is refused: **identical stdout and identical exit codes** (1, 1, 7,
+0), including the diagnostic text.
+
+| Module | Before | After |
+|---|---|---|
+| `cli.ts` **linked (= stage-1)** | `link` — `NT1020`, its OWN | **`check` — `NT2001`**, checker.ts's `argTys: ["string", null]` |
+| `cli.ts` standalone | `NT2001` `process.stdout is not supported` | **unchanged** |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+The blocker moved to a LATER stage (`link` -> `check`) and back to a dependency's, so stage-1 is
+once again gated on the thing that gates five other modules: an **array of nullable elements**.
+
+**One instrument reports a blocker the compiler does not, and it is worth naming.**
+`test/self-host-coverage.test.ts`'s histogram gained `NT1020` x2 for `cli.ts` — an artifact of
+`coverage`'s statement-at-a-time recovery, which parses the call with no `guard` declaration in
+scope, so `promiseParamsByFn` is empty and the escape check refuses an async arrow that the real
+parser accepts. Measured both ways (declaration+call together parses; the call alone reports it).
+It is the mirror image of the confound this document already records for `lexer.ts`: a clean row
+in that histogram is not evidence a module is clean, and a dirty row is not evidence it is
+blocked.
+
 ---
 
 ## Milestones

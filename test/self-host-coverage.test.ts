@@ -295,8 +295,23 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // old vs new `preprocessForCoverage` over all 486 `.ts` files in src/, test/ and
     // examples/ (0 differences), with three mutations of the rewritten lines each redding
     // it (133/22/466 files) so the null result is known to be reached rather than skipped.
+    // NT1020 x2 ARRIVES, and it is an ARTIFACT OF THIS TOOL, not a blocker — the fourth
+    // such entry in this list, alongside ast.ts's `t.endsWith` on a `Ty` erased to
+    // `number`. `src/cli.ts`'s two `await guard(async () => await buildBinary(…))` sites
+    // are correct: `guard` declares `fn: () => Promise<T> | T`, and a parameter annotated
+    // promise-returning is exactly where an async value is allowed to go. But `coverage`
+    // recovers ONE TOP-LEVEL STATEMENT AT A TIME, so the statement holding the call is
+    // parsed with no `guard` declaration in sight, `promiseParamsByFn` is empty, and the
+    // escape check refuses it. MEASURED, not assumed: parsing the declaration and the call
+    // together succeeds and parsing the call alone reports this exact NT1020 — and the
+    // real pipeline (test/selfhost-ratchet.test.ts, test/sh6.test.ts) has cli.ts past
+    // NT1020 entirely, on checker.ts's NT2001.
+    //
+    // This is the same confound the file already records for lexer.ts ("a clean row here
+    // is NOT evidence a module is clean"), running in the other direction: a DIRTY row is
+    // not evidence a module is blocked either.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1001", "NT1002", "NT1003", "NT1012", "NT1606"],
+      ["NT1001", "NT1002", "NT1003", "NT1012", "NT1020", "NT1606"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the

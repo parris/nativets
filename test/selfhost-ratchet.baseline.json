@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "942f48b"
+    "rev": "4cbd954"
   },
   "modules": {
     "ast.ts": {
@@ -31,16 +31,16 @@
       }
     },
     "cli.ts": {
-      "sha256": "d43a56e762a1302a",
+      "sha256": "00f3186158a99ba6",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
         "message": "[NT2001] process.stdout is not supported"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1020",
-        "message": "[NT1020] calling async function 'buildBinary' without 'await' at L:C (its value is a Promise under node; nativets runs it to completion immediately) is not supported yet"
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] array elements must share a type (got string, null)"
       }
     },
     "codegen.ts": {

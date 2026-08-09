@@ -414,8 +414,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // progress, and it is worth saying that it is a SOURCE change: the compiler is
     // unchanged, so a re-run against main's `src/coverage-preprocess.ts` still reports
     // NT1031 (that is the controlled experiment the selfhost-ratchet rules ask for).
+    //
+    // NT1020 LEAVES with it, and for the same kind of reason: cli.ts was its only holder,
+    // and both `guard(() => buildBinary(…))` call sites now spell the callback
+    // `async () => await buildBinary(…)` — the fix docs/divergences.md names for that
+    // deliberate over-rejection. Two codes gone in one lane, both by SOURCE changes, and
+    // the tree-wide set is down to TWO for the first time: `.push` and a type error.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1020", "NT1606", "NT2001"],
+      ["NT1606", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -510,8 +516,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NULLABLE elements, which is refused at a plain `const` declaration too, i.e. a real
     // feature gap and not a `.set` one. Behind it: the five remaining entries-form sites,
     // then `.push`. Three of the eight (ast, parser, modules) went straight to `.push`.
+    // SIX now: `cli.ts` joins them, coming back from the one blocker it ever owned
+    // (NT1020, the un-awaited `buildBinary`) once both call sites took the `await` that
+    // diagnostic prescribes. Stage-1 is once again gated on a DEPENDENCY, which is where
+    // it has been for every measurement but one.
     expect(byCode["NT2001"]!.sort()).toEqual(
-      ["checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
@@ -721,8 +731,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // eleven declarations — see the census note at the NT1014 clearance above and
     // test/record-dict.test.ts). ast.ts, parser.ts and modules.ts left for NT1606; the
     // five that remain share `argTys: ["string", null]`, an ARRAY OF NULLABLE elements.
+    // SIX, with cli.ts back from NT1020 (see the same list above).
     expect(byCode["NT2001"]!.sort()).toEqual(
-      ["checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a

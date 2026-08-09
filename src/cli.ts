@@ -17,7 +17,18 @@ import { sourceToIR, buildBinary, BuildError, type Target } from "./driver.ts";
 import { coverage, renderCoverage } from "./coverage.ts";
 import { NTError, formatDiagnostic } from "./diagnostics.ts";
 
-/** Run a compile action, printing NT diagnostics cleanly instead of a stack trace. */
+/**
+ * Run a compile action, printing NT diagnostics cleanly instead of a stack trace.
+ *
+ * Callers that hand this an ASYNC action must write `async () => await f(…)`, not
+ * `() => f(…)`. The two are the same program under node — `guard` awaits whatever the
+ * callback returns either way, and a rejection reaches the `catch` below identically —
+ * but the second is an un-awaited call to an async function, which is NT1020 here.
+ * That refusal is a DELIBERATE over-rejection (docs/divergences.md): knowing that a
+ * promise threaded through un-awaited is awaited further up is a taint analysis over
+ * promise values, so the rule is the same everywhere and `await` at the inner call site
+ * is the fix it prescribes. It was stage-1's own first blocker.
+ */
 async function guard<T>(fn: () => Promise<T> | T): Promise<T> {
   try {
     return await fn();
@@ -73,7 +84,7 @@ if (cmd === "build") {
   const out = getFlag(rest, "-o") ?? (base.endsWith(".ts") ? base.slice(0, -3) : base);
   const target = (getFlag(rest, "--target") ?? "host") as Target;
   const isStatic = hasFlag(rest, "--static");
-  await guard(() => buildBinary(source, out, { target, static: isStatic, entryPath: file }));
+  await guard(async () => await buildBinary(source, out, { target, static: isStatic, entryPath: file }));
   console.error(`wrote ${out}`);
   process.exit(0);
 }
@@ -82,7 +93,7 @@ if (cmd === "run") {
   const dir = mkdtempSync(join(tmpdir(), "nativets-cli-"));
   try {
     const bin = join(dir, "prog");
-    await guard(() => buildBinary(source, bin, { target: "host", entryPath: file }));
+    await guard(async () => await buildBinary(source, bin, { target: "host", entryPath: file }));
     // Forward CLI args after the source file to the program as process.argv[2..]
     // (a leading `--` separator is dropped): `nativets run chat.ts -- --key $KEY`.
     const fwd = rest[0] === "--" ? rest.slice(1) : rest;
