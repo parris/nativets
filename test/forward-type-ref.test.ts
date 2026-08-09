@@ -654,18 +654,41 @@ console.log(b);`);
     expect(r.hint).toContain("[Circular *1]"); // what node prints, and we cannot
   });
 
-  // Same refusal in the RECORD spelling. A cycle is not reachable there today — linearity
-  // stops it (`a.next = b; b.next = a` is NT1601) — but leaning on that would be the same
-  // "it happens to be blocked elsewhere" that made the structuredClone alias possible. One
-  // recursion, told one way.
-  test("a @@mutable record with a recursive field is refused, in the same words", () => {
+  /*
+   * The RECORD spelling used to be refused here in the same words. It is now SPLIT at the
+   * field (docs/decorators.md, `Checker.checkCycleCapableField`): the DECLARATION compiles
+   * and the refusal moves to the assignment of a field whose type can reach the record.
+   *
+   * The comment this test used to carry — "a cycle is not reachable there today, linearity
+   * stops it (`a.next = b; b.next = a` is NT1601)" — was WRONG, and it is exactly the
+   * "it happens to be blocked elsewhere" reasoning it warned against. Linearity blocks
+   * those two spellings and an ALIAS defeats it:
+   *
+   *     const a: Cell = { v: 1 };  const alias = a;   // a borrow; survives the move below
+   *     a.next = a;                                   // owned receiver, nothing refuses it
+   *     console.log(alias);
+   *     node -> `<ref *1> { v: 1, next: [Circular *1] }`;  nativets -> depth-limited nesting
+   *
+   * Measured with the declaration refusal neutered, which is why the rule is on the FIELD
+   * and not on the declaration and not on linearity.
+   */
+  test("a @@mutable record with a recursive field DECLARES; the recursive FIELD is refused", () => {
+    expect(reject(`
+//@@mutable
+type Cell = { v: number; next?: Cell };
+const a: Cell = { v: 1 };
+a.v = 2;
+console.log(a.v);`).code).toBe("");   // "" == compiled
+
     const r = reject(`
 //@@mutable
 type Cell = { v: number; next?: Cell };
 const a: Cell = { v: 1 };
+a.next = { v: 2 };
 console.log(a.v);`);
     expect(r.code).toBe("NT1030");
-    expect(r.message).toContain("'@@mutable record Cell' is RECURSIVE");
+    expect(r.message).toContain("'next' of '@@mutable Cell' is a RECURSIVE field");
+    expect(r.hint).toContain("[Circular *1]");
   });
 
   // The blast radius: `@@mutable` on a NON-recursive declaration is untouched, and so is a

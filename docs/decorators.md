@@ -243,6 +243,78 @@ the tag from its **context** — a binding annotation, a declared return type, a
 array element type. `const c: Cell = { n: 1 }`, `return { n: 1 }` and `f({ n: 1 })` all produce a
 `Cell` through the one hint channel the checker already had.
 
+### A `@@mutable` record may be a DISCRIMINATED-UNION MEMBER
+
+`discriminatedUnion` (src/parser.ts) used to require `classTag(a) === undefined` of every arm, so
+a tagged record made `Expr`/`Stmt` an `NT1009`. That clause dates to SH2 behavior 1, when the only
+carrier of a tag was a CLASS instance — and **it is vacuous even for that subject**: a class field
+annotation is parsed with `parseType`, which WIDENS a string-literal type, while a record field
+goes through `parseTypeInner`, which keeps it. So a class instance can never hold the
+literal-typed discriminant `unionDiscriminant` demands; removing the clause outright, a union of
+two classes still fails one step later with *"the shared field(s) kind are not string-literal
+typed"*.
+
+A tagged member is sound for the reason the whole encoding is: there is **no box**, a union value
+IS the member's object block, and a tagged block has the same slots as an untagged one.
+
+The relaxation is therefore exactly as wide as the dead guard was — a tag is admitted only when it
+names a `@@mutable` record. A class-tagged arm still takes the old path and keeps its exact
+message.
+
+**The tag set has to be SHARED across the hoist.** `hoistTypeDecls` re-parses each declaration in
+a **fresh sub-Parser**, which has never seen the `//@@mutable` on some *other* declaration in the
+file. A **recursive** union is resolved through that hoist, so without sharing the set, a tagged
+member fell back to the general-union refusal and stalled the whole cycle — `NT1030 recursive type
+'Expr' … what is left is not recursion but [NT1009] general union type 'Num{…} | @Neg'`. A
+non-recursive union never goes through the hoist and passed either way, which is precisely why
+this needed its own test. The set is shared by reference, exactly as `recTypes` already was.
+
+### A RECURSIVE `@@mutable` record: the refusal is on the FIELD, not the declaration
+
+`@@mutable` + recursive used to be refused whole (`recursiveMutableError`). The hazard was never
+memory safety — it is that in-place mutation of a self-containing value can close a **CYCLE**, and
+every walk here assumes a tree.
+
+**The cycle is real and REACHABLE**, verified with the old refusal neutered rather than argued:
+
+```ts
+const a: Node = { n: 1, next: null };
+const alias = a;      // an ALIAS — it survives the move the next line performs
+a.next = a;           // an OWNED receiver, so nothing refuses it
+console.log(alias);
+// node:     <ref *1> { n: 1, next: [Circular *1] }
+// nativets: Node { n: 1, next: Node { n: 1, next: [Node] } }      exit 0 on BOTH
+```
+
+Depth-limited, so **not a hang** — a silent wrong answer, which is worse than a refusal.
+`JSON.stringify` and `structuredClone` of a recursive type are already refused (`NT1005` /
+`NT1002`), so `console.log` is the entire exposure. Note the obvious spellings are already blocked
+by the **value** side — `x.next = y` with `y` a parameter is `NT1604`, with `y` owned it MOVES `y`
+— and the alias route defeats both. `test/forward-type-ref.test.ts` used to claim "a cycle is not
+reachable there today, linearity stops it"; that claim was wrong.
+
+So the declaration compiles and the refusal moves to the assignment of a **cycle-capable** field:
+
+> **`ft` is cycle-capable for receiver tag `R` iff `R` is type-reachable from `ft`.** `Ty` is flat
+> text and a nominal name appears in exactly two spellings — folded `@Name` and inline `Name{…}` —
+> so ONE scan finds every occurrence at every depth, through `{…}`, `[]`, `?N`/`?U`, `U<…>`, `G<…>`
+> and function types alike. Close over `recTypes` to a fixpoint.
+
+Conservative in one direction on purpose: a folded `@X` absent from `recTypes` is treated as
+reaching everything (**cannot decide ⇒ refuse**), and the rule is a TYPE-level over-approximation
+of a VALUE-level question, so it refuses writes that happen not to close a cycle. A false refusal
+is a missing feature; a false accept is the wrong answer above. Mutual recursion falls out of the
+same fixpoint with no extra flag, and a NON-recursive `@@mutable` record has an empty fixpoint, so
+nothing that compiled before changes.
+
+**Why this is exactly the cycle boundary:** a cycle can only be created by an in-place write into
+a slot of a value already reachable from the value being written, and any such write's field type
+must type-reach the receiver's own type. CONSTRUCTION cannot make one — a literal's fields are
+values that already exist.
+
+A `@@mutable` **class** that is recursive stays refused at the declaration: its write is
+`this.f = v` inside a method, a different receiver question.
+
 ### The ownership rule is the SAME one
 
 Only the **owner** may mutate, and a borrow may never outlive its owner — stated over a field write
@@ -251,15 +323,41 @@ instead of a setter call:
 | | |
 |---|---|
 | `const b = c` | an **alias** (a borrow), not a move — every handle observes the mutation, and the value is still dropped exactly once, by the owner (`__objLive()` → 0) |
-| `b.n = 1` through an alias, a **parameter**, a `for-of` element, a **container element** (`cells[0].n = 1`), a capture | **`NT1607`** (≈ rustc E0596) — the receiver is not a binding whose ownership this scope can establish |
+| `b.n = 1` through an alias, a **container element** (`cells[0].n = 1`), `p.b.n = 1`, a call result, a capture | **`NT1607`** (≈ rustc E0596) — the receiver is not a binding whose ownership this scope can establish |
+| `c.n = 1` through a **PARAMETER** or a `for-of` **element** | **ACCEPTED** — see below |
 | a setter on a **fresh** `new C(…)` receiver (`new Counter().bump().get()`) | **accepted** — a temporary nothing can name is uniquely owned by construction |
 | letting an alias **escape** (`return b`) | **`NT1604`** (≈ E0507) — including a *fresh* chain's result |
 | reassigning an owner that is still aliased | **`NT1602`** (≈ E0506) |
 | **reading** through any handle | always fine |
 
-Parameters being borrows means a mutating helper (`function tick(c: Cell) { c.n++; }`) is refused:
-mutate where the record is owned, or return a new one. That is the same restriction a `@@mutable`
-class setter has, and the same one that keeps the model single-owner.
+#### The PARAMETER / `for-of` arm is dropped for a `@@mutable` RECORD
+
+A mutating helper — `function tick(c: Cell) { c.n++; }` — used to be `NT1607`. It is accepted.
+
+**The opt-in travels with the NOMINAL type, which is part of the SIGNATURE**, so `tick(c: Cell)`
+announces "may mutate" in its own type and the calling convention stays visible at the call site.
+That is the objection that ruled out *inferring* a mutating parameter; requiring a second opt-in
+at each (function × receiver) site would not have satisfied it any better.
+
+Dropped for **records only**. A class's mutation is a setter CALL whose receiver is `this` inside
+the method, which is a different question, so `MutableInfo` grows a `records` set beside the
+`classes` set that `mutableTags` deliberately merges.
+
+`borrowBindings` is exactly {parameters} ∪ {aliases} ∪ {`for-of` elements}, so subtracting
+`aliasOf` leaves precisely the two this arm covers. **Still refused:** an ALIAS receiver, a
+container element, a call result, a capture, and `p.b.n = 1` — the record actually mutated there
+is a container element, not a binding.
+
+**Soundness.** The three obligations already held, and none of them is new machinery:
+
+- **a borrow never FREES**, so the caller still drops exactly once — no double free, no UAF;
+- **the assigned VALUE is consumed** — `b.items = local` MOVES `local`, which is the rule that
+  closed the use-after-free `.push` once had;
+- **the OVERWRITTEN value is leaked, not freed** — required, since an alias may still hold it.
+
+What is lost is **exclusivity**, which "What this proves, and what it does not" above already
+disclaims. Measured: `__objLive()` 0 / `__arrLive()` 0 through three mutating calls, exit 0,
+stdout matching node.
 
 ### `delete o.k` is still refused, and that is a decision
 

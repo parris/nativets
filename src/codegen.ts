@@ -524,6 +524,12 @@ class ModuleGen {
   /** Recursive-type shapes, the table a `@Name` back-edge resolves through (ast.ts).
    *  Read through `FnGen.unfold`; empty unless the program declared a recursive type. */
   recTypes = new Map<string, Ty>();
+  /** `@@mutable` RECORD tags. A record reuses the CLASS tag encoding (`Cell{n:number}`),
+   *  which is what makes its mutability nominal — but `util.inspect` must tell the two
+   *  apart: node prints `Counter { pos: 0 }` for a class instance and a bare `{ n: 1 }`
+   *  for a record, because a record has no constructor to name. Empty for every program
+   *  that declares no `@@mutable` record, so nothing else changes. */
+  recordTags = new Set<string>();
   /** Does the program contain a `try` at all? When it does NOT, no handler exists in
    *  any frame, so a `throw` with no local `try` is an UNCAUGHT exception rather than
    *  the cross-frame propagation NT1004 refuses. See `FnGen.uncatchable`. */
@@ -651,6 +657,7 @@ class ModuleGen {
     this.hasTry = scanHasTry(program);
     this.hostImports = new Set(program.hostImports ?? []);
     this.recTypes = recTypeTable(program); // `@Name` back-edges (empty for most programs)
+    this.recordTags = new Set(program.mutableRecords ?? []);
     const fns: string[] = [];
     for (const s of program.body) {
       if (s.kind === "FuncDecl") fns.push(new FnGen(this).genFunction(s));
@@ -3362,7 +3369,13 @@ class FnGen {
    */
   private genInspectObject(val: Val, depth: number, indent: number): Val {
     const fields = objectFields(val.ty);
-    const tag = classTag(val.ty);
+    // A `@@mutable` RECORD carries a tag for the same reason a class instance does, but
+    // node has no name to print for it — there is no constructor. So the tag is folded into
+    // the brace only for a CLASS. Getting this wrong is a silent wrong answer at exit 0
+    // (`Cell { n: 1 }` where node prints `{ n: 1 }`), and it scales with every record
+    // declared. The class side is unchanged: node really does print `Counter { pos: 0 }`.
+    const rawTag = classTag(val.ty);
+    const tag = rawTag !== undefined && this.mod.recordTags.has(rawTag) ? undefined : rawTag;
     const open = `${tag ? `${tag} ` : ""}{`;
     if (fields.length === 0) return { v: this.mod.intern(`${open}}`), ty: "string" };
     if (depth > INSPECT_DEPTH) return { v: this.mod.intern(`[${tag ?? "Object"}]`), ty: "string" };

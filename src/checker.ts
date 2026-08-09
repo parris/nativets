@@ -269,6 +269,14 @@ export function spawnMode(args: Expr[]): "capture" | "inherit" | null {
   return null;
 }
 
+/* Identifier classes for scanning a `Ty` STRING (`Checker.nominalRefs`). Spelled out
+ * char-by-char rather than with a character class because `src/` is regex-free by
+ * discipline — nativets has no `RegExp` and has to compile itself (test/no-regex.test.ts). */
+function tyIdentStart(c: string): boolean {
+  return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c === "_" || c === "$";
+}
+function tyIdentPart(c: string): boolean { return tyIdentStart(c) || (c >= "0" && c <= "9"); }
+
 const GLOBAL_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("parseInt", { min: 1, max: 2, argTys: ["string", "number"], ret: "number" })
   .set("parseFloat", { min: 1, max: 1, argTys: ["string"], ret: "number" })
@@ -732,6 +740,97 @@ class Checker {
     if (!this.mutable.size || !isObjectTy(ot)) return false;
     const tag = classTag(ot);
     return tag !== undefined && this.mutable.has(tag);
+  }
+
+  /**
+   * Every nominal NAME a `Ty` mentions. The encoding is flat text and a name appears in
+   * exactly two spellings, so one scan finds every occurrence at every depth — through
+   * `{…}`, `[]`, `?N`/`?U`, `U<…>`, `G<…>` and function types alike:
+   *
+   *   FOLDED  `@Name`  — a recursive back-edge; its shape lives in `recTypes`;
+   *   INLINE  `Name{…}` — a tagged shape written out, so its body is already in this
+   *                       same string and needs no expansion.
+   *
+   * Returned apart because only the folded form has to be looked up, and a folded name
+   * that is NOT in `recTypes` is the case we cannot decide.
+   */
+  private nominalRefs(t: Ty): { folded: string[]; inline: string[] } {
+    const folded: string[] = [], inline: string[] = [];
+    const s = String(t);
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === "@") {
+        let j = i + 1;
+        while (j < s.length && tyIdentPart(s[j]!)) j++;
+        if (j > i + 1 && tyIdentStart(s[i + 1]!)) folded.push(s.slice(i + 1, j));
+        i = j - 1;
+      } else if (s[i] === "{" && i > 0 && tyIdentPart(s[i - 1]!)) {
+        let j = i;
+        while (j > 0 && tyIdentPart(s[j - 1]!)) j--;
+        if (tyIdentStart(s[j]!)) inline.push(s.slice(j, i));
+      }
+    }
+    return { folded, inline };
+  }
+
+  /**
+   * Can a value of type `t` transitively CONTAIN a value tagged `target`? A least-fixpoint
+   * over `recTypes`, seeded with `t`'s own nominal references.
+   *
+   * CONSERVATIVE IN ONE DIRECTION ON PURPOSE: a folded `@X` with no entry in `recTypes` is
+   * treated as reaching everything. We cannot decide, and the two errors are not symmetric
+   * — a false YES costs a refused assignment (a missing feature), a false NO costs a cycle
+   * and a silent wrong answer out of `console.log`.
+   */
+  private typeReaches(t: Ty, target: string): boolean {
+    const seen = new Set<string>();
+    const front: Ty[] = [t];
+    while (front.length) {
+      const { folded, inline } = this.nominalRefs(front.pop()!);
+      for (const n of inline) if (n === target) return true; // its body was in that string
+      for (const n of folded) {
+        if (n === target) return true;
+        if (seen.has(n)) continue;
+        seen.add(n);
+        const shape = this.recTypes.get(n);
+        if (shape === undefined) return true;                // cannot decide => refuse
+        front.push(shape);
+      }
+    }
+    return false;
+  }
+
+  /**
+   * THE CYCLE RULE. May field `field` of the `@@mutable` receiver type `ot` be assigned?
+   *
+   * Only if writing it cannot close a cycle — i.e. the field's declared type cannot
+   * type-reach `ot`'s own tag. `console.log`, `structuredClone` and the actor deep-copy
+   * all walk a value as a TREE with no seen-set, so a cycle is a wrong answer (`console.log`
+   * unfolds to util.inspect's depth limit where node prints `[Circular *1]`); the other two
+   * are already refused outright for a recursive type, which leaves `console.log`.
+   *
+   * A cycle can only be created by an in-place write into a slot of a value already
+   * reachable from the value being written, and any such write's field type must type-reach
+   * the receiver's own type. CONSTRUCTION cannot make one — a literal's fields are values
+   * that already exist. So refusing every cycle-capable write is exactly the tree invariant.
+   *
+   * This is a TYPE-level over-approximation of a VALUE-level question, so it also refuses
+   * writes that happen not to close a cycle. That is the side to be wrong on.
+   *
+   * A NON-recursive `@@mutable` record has no nominal reference in any field, so the
+   * fixpoint is empty and nothing that compiled before changes — `Cell.n = 1` is untouched.
+   */
+  private checkCycleCapableField(ot: Ty, field: string, ft: Ty): void {
+    const tag = classTag(ot);
+    if (tag === undefined || !this.typeReaches(ft, tag)) return;
+    throw nyi(
+      NYI.FORWARD_TYPE,
+      `'${field}' of '@@mutable ${tag}' is a RECURSIVE field (its type '${ft}' can contain a ${tag}), so assigning it in place could close a CYCLE`,
+      "every walk over a value here assumes a TREE and none carries a seen-set: `console.log` unfolds a back-edge " +
+      "until util.inspect's depth limit and prints nesting where node prints `[Circular *1]`, and `structuredClone` " +
+      "and an actor message would alias or diverge. A NON-recursive field of the same record (a `string`, a `number`, " +
+      "a type) may still be assigned in place. To replace a recursive CHILD, rebuild the node instead — " +
+      "`{ ...n, " + field + ": v }` — which cannot close a cycle. See docs/decorators.md",
+    );
   }
 
   /* ============================================================
@@ -2312,6 +2411,11 @@ class Checker {
         if (!isObjectTy(ot)) throw typeError(`cannot assign field on non-object type ${ot}`);
         const ft = fieldType(ot, e.field);
         if (!ft) throw typeError(`Property '${e.field}' does not exist on ${ot}`);
+        // THE CYCLE RULE (piece 2). A recursive `@@mutable` record DECLARES — the refusal
+        // that used to sit on the whole declaration sits on this one field instead. Inert
+        // for a non-recursive record, and for `this.f = v` inside a class, whose recursive
+        // spelling is still refused at the declaration.
+        if (!e.viaThis) this.checkCycleCapableField(ot, e.field, ft);
         const vt = this.type(e.value, scope, baseTy(ft)); // field type is the context (e.g. `items: number[] = []`)
         if (vt !== ft && !this.assignable(ft, vt)) throw typeError(`cannot assign ${vt} to field '${e.field}' of type ${ft}`);
         return ft;

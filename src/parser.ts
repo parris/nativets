@@ -415,7 +415,7 @@ class Parser {
    *  an extension of the class attribute to a `type`/`interface` declaration. The record
    *  is tagged with this name (`Cell{n:number}`), so mutability is NOMINAL rather than
    *  structural; published on the Program for the checker + ownership pass. */
-  private readonly mutableRecords = new Set<string>();
+  private mutableRecords = new Set<string>();
   /** Module surface (SH1): `import` declarations and the export table. Empty for an
    *  ordinary single-file program, in which case `parseProgram` leaves them off the
    *  Program entirely — so every existing single-module path is untouched. */
@@ -546,6 +546,14 @@ class Parser {
         const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
         sub.pos = this.typeDeclStarts.get(name)!;
         sub.hoisting = true;
+        // SHARED, like `recTypes` in `resolveCycle`: each declaration is re-parsed in a
+        // FRESH sub-parser, which has never seen the `//@@mutable` on some OTHER
+        // declaration in this file. `discriminatedUnion` asks this set whether a tagged
+        // arm is a record, so without sharing it, a union with a tagged member resolved
+        // during hoisting (i.e. any RECURSIVE one) fell back to the general-union refusal
+        // and stalled the whole cycle. Shared by reference so a tag the sub-parser
+        // discovers is carried back too.
+        sub.mutableRecords = this.mutableRecords;
         try {
           sub.parseStatement();
         } catch (e) {
@@ -628,6 +636,7 @@ class Parser {
         sub.hoisting = true;
         sub.cycleNames = this.cycleNames;
         sub.recTypes = this.recTypes; // shared: an earlier round's shapes are what unions expand through
+        sub.mutableRecords = this.mutableRecords; // shared, for the same reason (see hoistTypeDecls)
         try {
           sub.parseStatement();
         } catch (e) {
@@ -1066,7 +1075,29 @@ class Parser {
     for (const a of rawArms.map((a) => expandTypeRef(a, this.recTypes))) {
       if (isUnionTy(a)) arms.push(...unionMembers(a)); else arms.push(a);
     }
-    if (!arms.every((a) => isObjectTy(a) && classTag(a) === undefined)) return null;
+    // THE TAG RULE. `classTag(a) === undefined` used to be required of every arm. That
+    // clause dates to SH2 behavior 1, when the only carrier of a tag was a CLASS instance
+    // — and for that subject it is VACUOUS: a class field annotation is parsed with
+    // `parseType`, which WIDENS a string-literal type, so a class instance type can never
+    // hold the literal-typed discriminant `unionDiscriminant` demands. Removed outright,
+    // a union of two classes still fails one step below with "not string-literal typed".
+    //
+    // Its only LIVE effect was to block a `@@mutable` RECORD, which did not exist when it
+    // was written and whose fields ARE parsed with `parseTypeInner` (literals kept). A
+    // tagged record is a sound member for the same reason the whole encoding works: there
+    // is no box, a union value IS the member's object block, and a tagged block has the
+    // same slots as an untagged one — the tag is a NAME the checker reads for mutability
+    // and method resolution, never a runtime word.
+    //
+    // So the relaxation is exactly as wide as the dead guard was: a tag is admitted only
+    // when it names a `@@mutable` record declared here. A CLASS-tagged arm still returns
+    // null, so it keeps the byte-identical general-union refusal it has today rather than
+    // falling through to a different (and, for a class, less accurate) message.
+    const armTagOk = (a: Ty): boolean => {
+      const tag = classTag(a);
+      return tag === undefined || this.mutableRecords.has(tag);
+    };
+    if (!arms.every((a) => isObjectTy(a) && armTagOk(a))) return null;
     const members = [...new Set(arms)];
     const shown = members.map(widenLiteralTys).join(" | ");
     if (members.length < 2) return null;
@@ -1589,7 +1620,13 @@ class Parser {
    */
   private recordTypeDecl(name: string, shape: Ty, recursive: boolean): Ty {
     if (!recursive) return shape;
-    if (this.mutableRecords.has(name)) throw recursiveMutableError(name, "record");
+    // `@@mutable` + recursive used to be refused HERE, for the whole declaration. It is not
+    // refused any more: the hazard is not the declaration, it is the one ASSIGNMENT that can
+    // close a cycle, and the checker refuses exactly that (`cycleCapableField`). `n.label = s`
+    // on a recursive node cannot make a cycle; `n.next = m` can. Refusing the declaration
+    // refused both — see docs/decorators.md and the note above `recursiveMutableError`,
+    // which is still the CLASS spelling's refusal (`parseClass`), where the receiver is
+    // `this` inside a method and the split has not been made.
     // A DISCRIMINATED UNION is also a legal carrier, and it is the one src/ast.ts's `Expr`
     // needs. It qualifies for exactly the reason an object does: there is no box, so a
     // `U<…>` value IS the member's object block and the reference has a pointer to be.

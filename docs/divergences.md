@@ -97,7 +97,11 @@ exists. Compound values now render through a port of node's
 depth 2, maxArrayLength 100** — and are **byte-identical to node**:
 
 - **objects** `{ a: 1, b: 'x' }` (keys bare only for node's `/^[a-zA-Z_][a-zA-Z_0-9]*$/`
-  — `$x` IS quoted), **class instances** `Point { x: 1 }`, **arrays** `[ 1, 2, 3 ]` /
+  — `$x` IS quoted), **class instances** `Point { x: 1 }` — but a **`@@mutable` RECORD prints
+  UNTAGGED**, `{ n: 1 }`, even though it carries a tag in the type encoding, because node has no
+  constructor to name for it (this was a silent wrong answer at exit 0 — `Cell { n: 1 }` — until
+  the mutable-recursive lane; the depth cut follows the same split, `[Object]` for a record and
+  `[C]` for a class) —, **arrays** `[ 1, 2, 3 ]` /
   `[]`, **Map/Set** `Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`, and every nesting of them;
 - **node's line-breaking**, including the column-grouped layout for arrays past six
   entries and the `... n more items` cut at 100;
@@ -1893,7 +1897,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
-| NT1030 | a recursive type with nowhere to put a back-edge (`type P = Q[]`), a `@@mutable` recursive declaration, or a cycle one of whose members is refused for its own reason | later | self- AND mutually-recursive object/union declarations now COMPILE via the nominal `@Name` back-edge; ordering was never the problem — see below |
+| NT1030 | a recursive type with nowhere to put a back-edge (`type P = Q[]`), an in-place write to a **cycle-capable FIELD** of a `@@mutable` record, a `@@mutable` recursive CLASS declaration, or a cycle one of whose members is refused for its own reason | later | self- AND mutually-recursive object/union declarations now COMPILE via the nominal `@Name` back-edge; ordering was never the problem — see below |
 
 ### An UNCAUGHT `throw` compiles; a throw that CROSSES A FRAME is still `NT1004`
 

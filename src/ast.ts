@@ -1103,6 +1103,7 @@ export interface ReturnStmt { kind: "ReturnStmt"; argument: Expr | null; drops?:
  * above records. `structuredClone` (generic specialization) runs BEFORE ownership, so
  * the marker is appended after the last clone and nothing is lost.
  */
+//@@mutable
 export interface BlockDropsStmt { kind: "BlockDrops"; names: string[]; }
 
 /**
