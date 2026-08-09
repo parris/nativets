@@ -682,19 +682,39 @@ function planLink(ir: string): LinkPlan {
   return { units, headers, defines, libs, actor };
 }
 
-/** Write the IR and a plan's sources into a fresh scratch dir. The disk half of `planLink`. */
+/**
+ * Write the IR and a plan's sources into a fresh scratch dir. The disk half of `planLink`.
+ *
+ * THE SCRATCH DIR IS THE LAST THING THAT CAN GO WRONG. Everything able to throw — the
+ * frontend, the toolchain probes (`ccFor`/`targetFlags`, which shell out to xcrun and hunt
+ * for an NDK or a wasi-sdk), and `raylibLinkFlags()` — runs strictly BEFORE this function,
+ * and every caller opens its `try`/`finally` on the very next statement. That ordering is
+ * the actual fix for a leak that had accumulated thousands of directories: `writeIR` used
+ * to create the dir and only THEN call `raylibLinkFlags()`, outside any `finally`, so a
+ * machine without raylib leaked one dir per GUI build and a machine without an NDK leaked
+ * one per Android build.
+ *
+ * The window that ordering cannot close is a failure INSIDE this function (a full disk
+ * mid-write), so it cleans up after itself and rethrows. Between them the invariant is
+ * total: no path creates a scratch dir it does not remove.
+ */
 function materialize(ir: string, plan: LinkPlan): { dir: string; ll: string; sources: string[] } {
   reapOnce();
   const dir = mkdtempSync(join(tmpdir(), "nativets-build-"));
-  const ll = join(dir, "module.ll");
-  writeFileSync(ll, ir);
-  for (const h of plan.headers) writeFileSync(join(dir, h.name), h.text);
-  const sources = plan.units.map((u) => {
-    const p = join(dir, u.name);
-    writeFileSync(p, u.text); // embedded runtime → self-contained executable
-    return p;
-  });
-  return { dir, ll, sources };
+  try {
+    const ll = join(dir, "module.ll");
+    writeFileSync(ll, ir);
+    for (const h of plan.headers) writeFileSync(join(dir, h.name), h.text);
+    const sources = plan.units.map((u) => {
+      const p = join(dir, u.name);
+      writeFileSync(p, u.text); // embedded runtime → self-contained executable
+      return p;
+    });
+    return { dir, ll, sources };
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
 }
 
 function writeIR(source: string, entryPath?: string): { dir: string; ll: string } {

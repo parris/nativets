@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   reapStaleScratchDirs, reapStaleCacheEntries, buildCacheKey, buildCacheStats, buildBinary,
+  raylibAvailable, wasmToolchainAvailable,
   type BuildKeyInputs,
 } from "../src/driver.ts";
 
@@ -79,6 +80,59 @@ describe("scratch-dir reaping", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+});
+
+describe("a failed build leaves no scratch dir", () => {
+  /*
+   * The general shape of the leak that produced thousands of abandoned directories, and
+   * the reason it is stated as an invariant over ALL failures rather than as a fix to one
+   * call: `writeIR` created its scratch dir and only THEN called `raylibLinkFlags()`,
+   * which throws when raylib is absent — and `buildBinary` called `writeIR` outside its
+   * own `try`/`finally`, so nothing removed it. raylib was merely the instance we could
+   * see. `ccFor()` throws exactly the same way for a missing Android NDK or wasi-sdk, and
+   * `targetFlags()` shells out to xcrun, so the identical leak was waiting on every
+   * machine that cross-compiles without the full toolchain installed.
+   *
+   * Each arm below is skipped where the toolchain happens to BE present, since a
+   * successful build is not what this measures.
+   */
+  function buildDirCount(): number {
+    return readdirSync(tmpdir()).filter((n) => n.startsWith("nativets-build-")).length;
+  }
+
+  async function expectNoLeak(what: string, build: () => Promise<unknown>) {
+    const before = buildDirCount();
+    let threw = false;
+    try { await build(); } catch { threw = true; }
+    expect(threw).toBe(true); // the arm must actually FAIL, or it measures nothing
+    expect(buildDirCount()).toBeLessThanOrEqual(before);
+  }
+
+  test.skipIf(raylibAvailable())("a GUI build without raylib", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "noleak-gui-"));
+    try {
+      await expectNoLeak("gui", () =>
+        buildBinary('initWindow(240, 360, "x");\n', join(dir, "gui"), { target: "host" }));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }, 60_000);
+
+  test.skipIf(wasmToolchainAvailable())("a wasm build without a wasi-sdk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "noleak-wasm-"));
+    try {
+      await expectNoLeak("wasm", () =>
+        buildBinary('console.log("x");\n', join(dir, "a.wasm"), { target: "wasm" }));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }, 60_000);
+
+  test("a program the compiler REFUSES", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "noleak-refuse-"));
+    try {
+      // A refusal throws out of the frontend, before any dir exists — pinned so a future
+      // refactor cannot quietly move dir creation ahead of the compile.
+      await expectNoLeak("refusal", () =>
+        buildBinary("const re = /nope/;\n", join(dir, "bad"), { target: "host" }));
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }, 60_000);
 });
 
 describe("cache eviction", () => {
