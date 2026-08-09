@@ -1315,7 +1315,7 @@ constructs are refused when the object type carries one:
 |---|---|
 | `Object.keys` / `Object.values` / `Object.entries` / `Object.getOwnPropertyNames` | `NT1002` |
 | `for (const k in o)` | `NT1010` |
-| `k in o` (the operator) | `NT1002` |
+| `k in o` (the operator) — the optional key only; see below | `NT1002` |
 
 This closed a **silent wrong answer** — it is not a new restriction on working code:
 
@@ -1344,9 +1344,43 @@ Three things to know about the edges:
   in both, while node's `Object.keys` still reports `["a","b"]`. Anyone changing that walk should
   not assume the agreement is load-bearing.
 
-`in` is refused **unconditionally**, not just over optional fields: over a fixed shape it could
-only restate the declared type, and seeing a key appear or disappear at runtime — the only reason
-to ask — is precisely what this object model cannot do.
+**`in` was refused unconditionally; it is now DECIDED, and that reasoning was the mistake.**
+"Over a fixed shape it could only restate the declared type" is true and is not a reason to
+refuse — restating the declared type IS the right answer, and it is the same answer node
+computes, because over a shape with no optional field the presence set and the field set are
+the same set. So `k in o` now folds at compile time, exactly as `instanceof` does:
+
+| Shape | Answer |
+|---|---|
+| a literal key naming a REQUIRED field | `true` |
+| a literal key naming NOTHING | `false` |
+| a literal key on an `Object.prototype` name (`"valueOf" in {}`) | `true` — `in` walks the PROTOTYPE CHAIN |
+| a literal key naming an OPTIONAL field | **`NT1002`** — `{}` and `{a:1}` share the type |
+| a NON-literal key (`k in o`) | **`NT1002`** — see below |
+| a `Map`/`Set` right operand | **`NT1002`** — see below |
+| an array (`0 in xs`) | **`NT1002`** — INDEX presence, and the length is not static |
+| a primitive (`"length" in "s"`) | **`NT1002`** — node throws a `TypeError` |
+
+Presence, never truthiness: a field holding `undefined`/`0`/`""`/`false` is present. Folding
+from the field list gets that for free, since no value is consulted.
+
+Two of those refusals are worth their own line:
+
+- **A non-literal key.** The own-key half would be a runtime string compare against a static
+  list, which is fine — what defeats it is node's prototype chain. `"valueOf" in {}` is `true`
+  (test262 `S8.12.6_A2_T1`) and nativets objects have no prototype, so an own-fields-only
+  test would answer `false` there. A LITERAL key can be checked against `Object.prototype`'s
+  names and is; a key we cannot see cannot.
+- **A `Map`/`Set` right operand**, which is the trap. `Record<K,V>` erases to `Map<K,V>` here
+  (see above), so `k in someRecord` reaches `in` with a Map on the right — and in node,
+  `m.set("a", 1); "a" in m` is **`false`**: `in` tests the Map OBJECT's properties, never its
+  entries. Lowering it to `.has` would be a silent wrong answer in the user's favour, so it is
+  refused and `.has` is named as the fix.
+
+Semantics are borrowed from tc39/test262 `test/language/expressions/in/` — `S8.12.6_A1`,
+`S8.12.6_A2_T1`, `S8.12.6_A3`, `S11.8.7_A3` — each re-run against node as a `.ts` fixture in
+`test/key-presence.test.ts`. The four enumerating `Object.*` constructs and `for-in` are
+unchanged: they ask for the WHOLE key set, which an optional field really does make unanswerable.
 
 ### Strings are reference-counted, not linear (memory model)
 

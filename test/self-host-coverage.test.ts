@@ -253,8 +253,10 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // src/codegen.ts:1052 that need a real tuple TYPE, not the `new Map` argument position.
     // The sanctioned `.set`-chain rewrite is verified to compile for each of the first
     // five; they are left for a lane that can also measure the movement.
+    // NT1002 LEFT when `in` landed — decided at compile time for a literal key over a
+    // static shape, the same move `instanceof` made.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1002", "NT1003", "NT1031"],
+      ["NT1003", "NT1031"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the

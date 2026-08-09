@@ -702,6 +702,7 @@ export type Expr =
   | SatisfiesExpr
   | NonNullExpr
   | InstanceOfExpr
+  | InExpr
   | CallExpr;
 
 export type Stmt =
@@ -917,6 +918,39 @@ export interface NonNullExpr { kind: "NonNullExpr"; expr: Expr; loc?: Loc; }
  * rather than guessed.
  */
 export interface InstanceOfExpr { kind: "InstanceOfExpr"; object: Expr; className: string; result?: boolean; ty?: Ty; }
+
+/**
+ * `k in o` — key PRESENCE, decided at compile time exactly as `instanceof` is, and for
+ * the same reason: an object's key set here comes from its TYPE.
+ *
+ * That reason cuts both ways, which is the whole split. When the type carries no OPTIONAL
+ * field the presence set IS the field set and a LITERAL key has one static answer
+ * (`result`). When it carries one, `{}` and `{a:1}` share the type and have different key
+ * sets — no answer exists, and the construct is refused with the same words `Object.keys`
+ * uses. A non-literal key is refused too: the own-key half would be a runtime string
+ * compare against a static list, but node also walks the PROTOTYPE CHAIN (test262
+ * `S8.12.6_A2_T1`: `"valueOf" in {}` is true), and an unseen key cannot be checked
+ * against it. A literal key can, so the inherited names are answered `true`.
+ */
+export interface InExpr { kind: "InExpr"; key: Expr; object: Expr; result?: boolean; ty?: Ty; loc?: Loc; }
+
+/**
+ * The own-property names of node's `Object.prototype` — the only reason `"valueOf" in {}`
+ * is `true` (test262 `S8.12.6_A2_T1.js`). nativets objects have no prototype chain, so a
+ * lowering that consulted own fields alone would answer `false` there; a LITERAL key is
+ * checked against this list instead and folded to node's answer.
+ *
+ * Verified against the running oracle, not recalled:
+ *   node -e 'console.log(Object.getOwnPropertyNames(Object.prototype))'
+ * Spelled as an ARRAY, not a `Set`: `new Set([…])` is NT1014, and this file has to stay
+ * inside the subset it compiles (the two `new Set([…])` tables further down predate that
+ * rule and sit behind an earlier blocker).
+ */
+export const OBJECT_PROTO_KEYS: string[] = [
+  "constructor", "__defineGetter__", "__defineSetter__", "hasOwnProperty", "__lookupGetter__",
+  "__lookupSetter__", "isPrototypeOf", "propertyIsEnumerable", "toString", "valueOf",
+  "__proto__", "toLocaleString",
+];
 
 /**
  * Arrow function. `captures` (filled by the checker) are free vars closed over.

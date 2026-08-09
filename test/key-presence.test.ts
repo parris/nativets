@@ -111,27 +111,145 @@ describe("an object with NO optional field keeps working — all five constructs
   });
 });
 
-describe("binary `in` gets a real diagnostic, not a parse error", () => {
+/**
+ * Binary `in`, DECIDED AT COMPILE TIME — the `instanceof` split, applied to key presence.
+ *
+ * The refusal above (`Object.keys` on an optional field) is about a key set that is not a
+ * function of the TYPE. `k in o` is the same question asked one key at a time, and that
+ * changes the answer: for an object type with no optional field the presence set IS the
+ * field set, exactly, so a LITERAL key is decidable statically — the identical move
+ * `instanceof` makes ("a value's static type IS its class here"). What a static type
+ * cannot decide — an optional field, a variable key — stays refused, as `NT1022` does for
+ * `instanceof`.
+ *
+ * Semantics are node's, borrowed from **tc39/test262 `test/language/expressions/in/`**:
+ *   - `S8.12.6_A1.js`      — `"fooProp" in {fooProp:"fooooooo"}` is true (own property)
+ *   - `S8.12.6_A2_T1.js`   — `"valueOf" in {}` is **true**: `in` walks the PROTOTYPE CHAIN
+ *   - `S8.12.6_A3.js`      — `__obj.hole = undefined`; `"hole" in __obj` is true and
+ *                            `"notexist" in __obj` is false — presence, never truthiness
+ *   - `S11.8.7_A3.js`      — a non-object right operand is a TypeError (`"length" in "s"`)
+ * Each borrowed case is re-run against node below as a `.ts` fixture.
+ */
+describe("`k in o` with a LITERAL key and a static shape is folded, and equals node", () => {
+  /** test262 S8.12.6_A1 (present) + S8.12.6_A3 CHECK#4 (absent), as one differential. */
+  test("present and absent own keys", async () => {
+    const source = `const o = { fooProp: "fooooooo", b: 2 };\nconsole.log("fooProp" in o);\nconsole.log("notexist" in o);\n`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("true\nfalse\n");
+  });
+
   /**
-   * `"a" in o` is the OTHER way node exposes key presence, so it is refused for the same
-   * reason. What it used to produce, though, was `error[NT0001]: Expected ')' but found
-   * 'in'` — the parser falling off the end of an expression, blaming a paren. That names
-   * neither the construct nor the reason, and `coverage` bucketed it as a syntax error.
+   * test262 S8.12.6_A2_T1 — the case an own-fields-only lowering gets WRONG. nativets
+   * objects have no prototype chain (`o.toString` is "Property 'toString' does not
+   * exist"), so `in` would answer `false` here; node answers `true`. A literal key can be
+   * checked against `Object.prototype`'s names, and is.
    */
-  test("`\"a\" in o` names the construct and the reason", () => {
-    const r = rejectionOf(`const o = { a: 1, b: 2 };\nconsole.log("a" in o);\n`);
+  test("an INHERITED name is present — `in` walks the prototype chain", async () => {
+    const source = `const o = { a: 1 };\nconsole.log("valueOf" in o);\nconsole.log("toString" in o, "hasOwnProperty" in o, "constructor" in o);\n`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("true\ntrue true true\n");
+  });
+
+  /**
+   * test262 S8.12.6_A3 CHECK#3 — presence, not truthiness. A field holding `undefined`,
+   * `0`, `""` or `false` is PRESENT. Folding from the field list gets this for free: no
+   * value is ever consulted.
+   */
+  test("a field whose value is undefined / falsy is still present", async () => {
+    const source = `const o = { hole: undefined, z: 0, e: "", f: false };\nconsole.log("hole" in o, "z" in o, "e" in o, "f" in o, "notexist" in o);\n`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("true true true true false\n");
+  });
+
+  /**
+   * The OBJECT operand is still EVALUATED — the fold replaces the answer, not the
+   * effects. (The key operand cannot have any: a non-literal key is refused below.)
+   */
+  test("side effects on the object operand still happen", async () => {
+    const source =
+      `function o(): { a: number } { console.log("o"); return { a: 1 }; }\n` +
+      `console.log("a" in o());\n`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("o\ntrue\n");
+  });
+});
+
+describe("what a static type CANNOT decide is refused, with the reason", () => {
+  /**
+   * The optional field — the same non-answer `Object.keys` has, but asked one key at a
+   * time, so the refusal is strictly NARROWER: only the optional key itself is refused.
+   */
+  test("the optional key has no answer", () => {
+    const r = rejectionOf(`type O = { a?: number; b: number };\nconst o: O = { b: 2 };\nconsole.log("a" in o);\n`);
     expect(r?.code).toBe("NT1002");
-    expect(r?.message).toContain("in");
-    expect(r?.message).toContain("2:17");
+    expect(r?.message).toContain("optional");
     expect(r?.hint).toContain("compile time");
+    expect(r?.hint).toContain("undefined");
   });
 
-  test("it is no longer reported as a syntax error", () => {
-    const r = rejectionOf(`const o = { a: 1, b: 2 };\nconsole.log("a" in o);\n`);
-    expect(r?.code).not.toBe("NT0001");
-    expect(r?.message).not.toContain("Expected ')'");
+  test("a REQUIRED key of the SAME type still answers — `Object.keys` refuses this shape outright", async () => {
+    const source = `type O = { a?: number; b: number };\nconst o: O = { b: 2 };\nconsole.log("b" in o, "zz" in o);\n`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("true false\n");
   });
 
+  /** A key we cannot see cannot be checked against the prototype chain. */
+  test("a non-literal key is refused, and the hint says why the prototype chain blocks it", () => {
+    const r = rejectionOf(`const o = { a: 1 };\nconst k = "a";\nconsole.log(k in o);\n`);
+    expect(r?.code).toBe("NT1002");
+    expect(r?.message).toContain("non-literal");
+    expect(r?.hint).toContain("PROTOTYPE CHAIN");
+    expect(r?.hint).toContain("m.has(k)");
+  });
+
+  /**
+   * The trap worth naming loudly. `"a" in m` after `m.set("a", 1)` is **false** in node —
+   * `in` tests the Map OBJECT's properties, never its entries. Lowering it to `.has`
+   * would be a silent wrong answer, so it is refused and `.has` is named as the fix.
+   */
+  test("a Map right operand is refused, naming `.has`", () => {
+    const r = rejectionOf(`const m = new Map<string, number>();\nconsole.log("a" in m);\n`);
+    expect(r?.code).toBe("NT1002");
+    expect(r?.hint).toContain("m.has(k)");
+    expect(r?.hint).toContain("false");
+  });
+
+  test("node really does answer false there — the divergence this refusal avoids", () => {
+    const oracle = runWithNode(`const m = new Map<string, number>();\nm.set("a", 1);\nconsole.log("a" in m, m.has("a"));\n`);
+    expect(oracle.stdout).toBe("false true\n");
+  });
+
+  /** An array's key set is its INDICES, and its length is not static. */
+  test("an array right operand is refused", () => {
+    const r = rejectionOf(`const xs = [1, 2, 3];\nconsole.log("0" in xs);\n`);
+    expect(r?.code).toBe("NT1002");
+    expect(r?.hint).toContain("INDEX presence");
+  });
+
+  /** test262 S11.8.7_A3 — node throws a TypeError; there is nothing to test against. */
+  test("a primitive right operand is refused, citing node's TypeError", () => {
+    const r = rejectionOf(`const s = "string";\nconsole.log("length" in s);\n`);
+    expect(r?.code).toBe("NT1002");
+    expect(r?.hint).toContain("TypeError");
+  });
+});
+
+describe("binary `in` gets a real diagnostic, not a parse error", () => {
   test("`for (const k in o)` still parses — the for-in header is not the operator", async () => {
     const source = `const o = { a: "1", b: "2" };\nfor (const k in o) console.log(k);\n`;
     const oracle = runWithNode(source);

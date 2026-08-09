@@ -401,8 +401,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // entries-form fix) and NT1031 (the type-cycle lane's). The true set is the union of
     // what each branch cleared minus what the other cleared, and no reviewer holding two
     // diffs can compute that by reading — only by running it on the merged tree.
+    // NT1002 LEFT when `in` landed (compile-time decidable for a literal key over a static
+    // shape — the same move `instanceof` made). NT1020 arrives in its place: cli.ts calling
+    // an async function without `await`. Re-measured on the merged tree.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1002", "NT1031", "NT1606", "NT2001"],
+      ["NT1020", "NT1031", "NT1606", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -482,7 +485,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
-    expect(byCode["NT2001"]).toEqual(["ast.ts", "parser.ts", "checker.ts", "coverage.ts", "ownership.ts", "modules.ts"]);
+    // EIGHT now: codegen.ts and driver.ts joined by leaving NT1002. Every one of them is
+    // ast.ts's `HOST_MODULES` through the link — a `Record` initialized with an object
+    // literal — except codegen.ts, which has four tables of its own with the same shape.
+    expect(byCode["NT2001"]!.sort()).toEqual(
+      ["ast.ts", "checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -618,7 +626,8 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `driver.ts` import codegen.ts, and once ast.ts's NT1030 stopped firing first the
     // link reached `op in FCMP` through it. Same single construct, same single site — a
     // bucket's SIZE counts modules that can SEE a blocker, never how much of it there is.
-    expect(byCode["NT1002"]!.sort()).toEqual(["cli.ts", "codegen.ts", "driver.ts"]);
+    // EMPTY NOW: `in` is decided at compile time for a literal key over a static shape.
+    expect(byCode["NT1002"]).toBeUndefined();
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
     // the fresh-receiver lane) -> NT1006 (`Math.max(...)`, cleared by the variadic lane) ->
     // back to NT1606, this time a `.push` on a NAMED accumulator. That last shape is
@@ -674,7 +683,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // duplicate it.
     // coverage.ts joined this bucket by LEAVING NT1702 — the type-only cycle fix let it
     // through to ast.ts's next blocker, which it inherits like the four before it.
-    expect(byCode["NT2001"]).toEqual(["ast.ts", "parser.ts", "checker.ts", "coverage.ts", "ownership.ts", "modules.ts"]);
+    // EIGHT now: codegen.ts and driver.ts joined by leaving NT1002 when `in` landed.
+    // Sorted, because the bucket's ORDER is an artifact of module iteration and asserting
+    // it unsorted has produced two spurious conflicts already.
+    expect(byCode["NT2001"]!.sort()).toEqual(
+      ["ast.ts", "checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a

@@ -328,7 +328,10 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // the whole-tree construct census found exactly ONE getter and NO setters in `src/*.ts`,
   // so the source change was the fix rather than a language feature. Behind it, NT1002 —
   // `op in FCMP` at codegen.ts:2078, the key-presence operator, 1300 lines deeper.
-  "codegen.ts": { rung: 0, code: "NT1002", blame: "self" },
+  // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
+  // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
+  // fires first through the link. Its own tables are the same shape and sit behind it.
+  "codegen.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
   // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
   // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
@@ -358,8 +361,10 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Six codes, never once its own.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
   "ownership.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
-  "driver.ts": { rung: 0, code: "NT1002", blame: "codegen.ts" },
-  "cli.ts": { rung: 0, code: "NT1002", blame: "codegen.ts" },
+  "driver.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  // Stage-1's entry point now stops on its OWN code for the first time: calling the async
+  // `buildBinary` without `await`. Not a dependency's blocker.
+  "cli.ts": { rung: 0, code: "NT1020", blame: "self" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
@@ -458,7 +463,7 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // Stage-1 (cli.ts, the whole compiler through its real entry point) left NT1017 when
 // `export async function` landed and now stops on parser.ts's `?.[]` at 1109:66 —
 // inherited through the link, not cli.ts's own code. Still rung 0.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1002" };
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1020" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -591,8 +596,11 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // softening it: ast.ts went from "the single highest-leverage blocker on the board,
     // holding nine modules" to parsing clean, and it is STILL at rung 0 — it now stops at
     // `new Map([[k, v], …])`, one line further on.
+    // TWELVE now — codegen.ts joined when `in` landed, so EVERY module in the tree parses
+    // its own source. One produces IR. That is this test's point at its sharpest: parsing
+    // clean has never once correlated with being closer to compiling.
     expect(parseClean.sort()).toEqual([
-      "ast.ts", "checker.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts",
+      "ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage-preprocess.ts", "coverage.ts",
       "diagnostics.ts", "driver.ts", "lexer.ts", "modules.ts", "ownership.ts", "parser.ts",
     ]);
     // ...and the point SURVIVES the first module getting off the floor, which is the
@@ -729,7 +737,9 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // its largest term reveals the next one rather than finishing it.
       expect(`stage-1 rung ${m.rung}, ${m.code}`)
         .toBe(`stage-1 rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}`);
-      expect(m.error).toContain("`in` (the key-presence operator)");
+      // FIFTH construct for stage-1, and the first that is cli.ts's OWN rather than a
+      // dependency's: calling the async `buildBinary` without `await`.
+      expect(m.error).toContain("calling async function 'buildBinary' without 'await'");
       return;
     }
 

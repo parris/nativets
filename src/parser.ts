@@ -2689,19 +2689,18 @@ class Parser {
         left = { kind: "InstanceOfExpr", object: left, className: cls.value };
         continue;
       }
-      // `k in o` — the key-presence test, at the same relational precedence. node answers
-      // it per VALUE at runtime; an object's key set is fixed by its TYPE here, so the two
-      // part company on an optional field exactly as `Object.keys` does. Refused with the
-      // reason rather than left to fall out of the expression parser as `Expected ')'`,
-      // which blamed a paren and bucketed a real gap as a syntax error.
+      // `k in o` — the key-presence test, at the same relational precedence, and decided
+      // by the CHECKER from the static type exactly as `instanceof` is. Parsed rather
+      // than refused here so the decision can see a type: whether an answer exists
+      // depends on the object's shape (an optional field has none) and on whether the
+      // key is a literal, neither of which the parser knows. What it must not do is fall
+      // out of the expression parser as `Expected ')'`, which blamed a paren and bucketed
+      // a real gap as a syntax error.
       if (t.type === "ident" && t.value === "in" && BIN["<"]!.prec >= minPrec) {
-        throw nyi(
-          NYI.OBJECT,
-          `\`in\` (the key-presence operator) at ${t.line}:${t.col}`,
-          "an object's key set is fixed at compile time here (it comes from the TYPE), so `in` can only ever restate the declared shape — " +
-          "it could not see a key added or removed at runtime, which is the only reason to ask. " +
-          "Test the field instead (`o.k !== undefined`), or use a `Map` and `m.has(k)` for a key set that varies at runtime",
-        );
+        this.next();
+        const object = this.parseBinary(BIN["<"]!.prec + 1);
+        left = { kind: "InExpr", key: left, object, loc: { line: t.line, col: t.col } };
+        continue;
       }
       if (t.type !== "punct") break;
       const info = BIN[t.value];

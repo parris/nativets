@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "a3bbe4d"
+    "rev": "1d2cda7"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "9ae1e358db62ad94",
+      "sha256": "243df5ca986b2b85",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "448305bb9c702d81",
+      "sha256": "5aebe1f2330de97b",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -39,21 +39,21 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1002",
-        "message": "[NT1002] `in` (the key-presence operator) at L:C is not supported yet"
+        "code": "NT1020",
+        "message": "[NT1020] calling async function 'buildBinary' without 'await' at L:C (its value is a Promise under node; nativets runs it to completion immediately) is not supported yet"
       }
     },
     "codegen.ts": {
-      "sha256": "1e20599fc5f167c4",
+      "sha256": "52c566ba1531fcf4",
       "standalone": {
-        "stage": "parse",
-        "code": "NT1002",
-        "message": "[NT1002] `in` (the key-presence operator) at L:C is not supported yet"
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] 'FCMP' declared Record<string,string> but initialized with {<:string,<=:string,>:string,>=:string,===:string,==:string,!==:string,!=:string}"
       },
       "linked": {
-        "stage": "parse",
-        "code": "NT1002",
-        "message": "[NT1002] `in` (the key-presence operator) at L:C is not supported yet"
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] '_nt_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "coverage-preprocess.ts": {
@@ -105,9 +105,9 @@
         "artifact": true
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1002",
-        "message": "[NT1002] `in` (the key-presence operator) at L:C is not supported yet"
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] '_nts0_m2_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "lexer.ts": {
@@ -137,7 +137,7 @@
       }
     },
     "ownership.ts": {
-      "sha256": "c4d2b68c52a830da",
+      "sha256": "83f7cc48a98c17bd",
       "standalone": {
         "stage": "check",
         "code": "NT1014",
@@ -150,7 +150,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "139ea51377fe7500",
+      "sha256": "67d8498f2bc76722",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
