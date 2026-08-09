@@ -101,6 +101,23 @@ function mentions(node: unknown, name: string): boolean {
 /* `freshArray`/`FRESH_ARRAY_CALLS` and `RETAINS_RECEIVER` all live in ast.ts — the
  * checker and the ownership pass need the same judgments, and copies could drift. */
 
+/**
+ * Which `nt_arr_join_*` an element type takes. THREE-way, and one function rather than
+ * a ternary at each call site: the split used to be `el === "number" ? num : str`, which
+ * sent a `boolean[]` — whose slots hold `zext i1`, i.e. the integers 0 and 1 — into
+ * `nt_arr_join_str`, where `strlen((char *)1)` killed the process with no diagnostic.
+ * A two-way choice written twice is exactly how the third case gets missed twice, so
+ * the callers (`.join`, and `coerceToString` for node's `Array#toString`) share this.
+ *
+ * `checkStringCoercion` in checker.ts is the allow-list that must stay in step with the
+ * element types named here; anything else is still refused (NT1032) rather than joined.
+ */
+function joinFn(el: Ty): string {
+  if (el === "number") return "nt_arr_join_num";
+  if (el === "boolean") return "nt_arr_join_bool";
+  return "nt_arr_join_str";
+}
+
 function llvmTy(ty: Ty): string {
   // A nominal recursive reference IS the object block it names — a pointer, like every
   // other heap value. Placed with the other `ptr` arms rather than left to the `default`,
@@ -232,6 +249,7 @@ const DECLARES = [
   "declare double @nt_arr_len(ptr)",
   "declare ptr @nt_arr_join_num(ptr, ptr)",
   "declare ptr @nt_arr_join_str(ptr, ptr)",
+  "declare ptr @nt_arr_join_bool(ptr, ptr)",
   "declare i32 @nt_arr_includes_num(ptr, double)",
   "declare i32 @nt_arr_includes_str(ptr, ptr)",
   "declare double @nt_arr_indexof_num(ptr, double)",
@@ -1587,12 +1605,12 @@ class FnGen {
       return t;
     }
     // node's `Array#toString` IS `join(",")` — `String([1,2,3])` is `"1,2,3"`, an empty
-    // array is `""` and a one-element array carries no separator. Only the two element
-    // types whose join is node-exact reach here; the checker refuses the rest (NT1032),
-    // so this is not a fallback and must not become one.
+    // array is `""` and a one-element array carries no separator. Only the three element
+    // types `joinFn` knows reach here; the checker refuses the rest (NT1032), so this is
+    // not a fallback and must not become one.
     if (isArrayTy(val.ty)) {
       const t = this.fresh();
-      this.emit(`${t} = call ptr @${elemTy(val.ty) === "number" ? "nt_arr_join_num" : "nt_arr_join_str"}(ptr ${val.v}, ptr ${this.mod.intern(",")})`);
+      this.emit(`${t} = call ptr @${joinFn(elemTy(val.ty))}(ptr ${val.v}, ptr ${this.mod.intern(",")})`);
       return t;
     }
     // `boolean` is the LAST case, not the default one. Everything that is not a type
@@ -2972,7 +2990,7 @@ class FnGen {
       });
     } else {
       for (const piece of plan.pieces) {
-        if (piece.spec === undefined) { this.emit(`call void @${P}_str(ptr ${this.mod.intern(piece.text)})`); continue; }
+        if (piece.kind === "text") { this.emit(`call void @${P}_str(ptr ${this.mod.intern(piece.text)})`); continue; }
         const s = this.genFormatArg(vals[piece.arg]!, piece.spec);
         if (s !== null) this.emit(`call void @${P}_str(ptr ${s.v})`);
       }
@@ -3755,6 +3773,18 @@ class FnGen {
    *  an array becomes a fresh vector with each element cloned in a loop. */
   private genDeepClone(v: Val, copyStrings = false): Val {
     const ty = v.ty;
+    // THE GUARANTEE, not a second opinion. Every arm below falls through to `return v` —
+    // value semantics — for a type it does not recognize, and a `@Name` back-edge is such a
+    // type, so an unrefused recursive value was copied by ALIASING it. Both callers
+    // (`structuredClone`, the actor-message copy) refuse this in the checker; this makes the
+    // safety a property of the WALK rather than of two independent gates staying in place.
+    // A BARE `@N` is the whole test: the walk decomposes fields and elements itself, so a
+    // reference nested anywhere arrives here on its own step. Asking `containsTypeRef` up
+    // front would be the same answer more expensively, and asking `t.includes("@")` would
+    // refuse a record with an `@` in a KEY.
+    if (isTypeRefTy(ty)) {
+      throw internalError(`deep copy of the recursive type ${ty} reached codegen — the walk has no seen-set, so it would alias rather than copy. This must be refused in the checker (structuredClone / actor message)`);
+    }
     // B3 v5: for an actor message the copy must reach STRINGS too — a receiver whose
     // record pointed into the sender's (refcounted, releasable) buffer would not be
     // isolated. structuredClone itself leaves strings alone: they are immutable values
@@ -3988,7 +4018,7 @@ class FnGen {
       case "join": {
         const sep = args[0] ? this.genExpr(args[0]).v : this.mod.intern(",");
         const t = this.fresh();
-        this.emit(`${t} = call ptr @${numeric ? "nt_arr_join_num" : "nt_arr_join_str"}(ptr ${recv.v}, ptr ${sep})`);
+        this.emit(`${t} = call ptr @${joinFn(el)}(ptr ${recv.v}, ptr ${sep})`);
         return { v: t, ty: "string" };
       }
       case "includes": {
@@ -4462,6 +4492,24 @@ class FnGen {
    */
   private genJsonStringify(val: Val, indent = "", depth = 0): Val {
     const ty = val.ty;
+    // TERMINATION, stated rather than inherited. The serializer is UNROLLED at compile time
+    // from the static type, so it terminates only because the type shrinks at every step —
+    // and a recursive type is exactly the one that does not. Today a bare `@N` falls through
+    // to the exhaustive `internalError` at the bottom, and the checker refuses it (NT1005)
+    // before that; both are true and neither says so, which is the shape of a guarantee that
+    // quietly stops holding. So the back-edge is refused HERE, by name — a BARE `@N`, since
+    // the serializer decomposes fields and elements itself and a nested reference arrives on
+    // its own step.
+    if (isTypeRefTy(ty)) {
+      throw internalError(`JSON.stringify of the recursive type ${ty} reached codegen — the serializer is unrolled from the static type and a back-edge does not shrink, so it has no base case. This must be refused in the checker (checkJsonStringifyArg)`);
+    }
+    // And a ceiling, because the argument above is about the types that exist TODAY. A
+    // static type nests a handful of levels deep; 64 is far past anything a program writes
+    // and far short of a stack overflow, so an unrolling that runs away announces itself
+    // instead of taking the process out.
+    if (depth > 64) {
+      throw internalError(`JSON.stringify unrolled past 64 levels on ${ty} — the generated serializer is not terminating`);
+    }
     // `nt_json_num`, not `js_num_to_str`: JSON has no non-finite number, so node
     // writes `null` for NaN/±Infinity where `String(x)` writes the token.
     if (ty === "number") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_json_num(double ${val.v})`); return { v: t, ty: "string" }; }

@@ -242,7 +242,15 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `cannot infer type of arrow parameter 'n'` at src/lexer.ts:146, `const advance = (n = 1)
   // => …`. Inferring a parameter's type from its default cleared it; the module now walks
   // into `advance`'s BODY and stops on `line++`, a write to a captured binding.
-  "lexer.ts": { rung: 0, code: "NT1031", blame: "self" },
+  // ...and TWO more fell in one lane, both source-side. The cursor became one
+  // `//@@mutable` record (mutating a field of an owned local is not a capture write), which
+  // unmasked NT1003: `scanTemplateBody`/`scanSubstitution` were MUTUALLY RECURSIVE closures,
+  // and nativets supports no nested recursion at all — nor can the cursor travel as a
+  // parameter to top-level functions instead (NT1607, a parameter is a borrow). They are now
+  // one loop over an explicit frame stack, verified token-identical over 477 files.
+  // What is behind them is the census elephant: `tokens.push`, 13 sites in this module and
+  // 185 tree-wide. It is NOT free here — see the note on the `.push` idiom's cost below.
+  "lexer.ts": { rung: 0, code: "NT1606", blame: "self" },
   // WALKED, not nudged. This module's blocker CHAIN was measured end to end — six
   // distinct blockers between it and rung 1 — and five of them are now cleared:
   //   1. NT1606  `.push` x4 in formatDiagnostic            -> immutable rebind (src)
@@ -295,7 +303,13 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // 45/49 set, not a language change. What sat behind NT1023 is NT1009: `FmtPiece` at
   // checker.ts:4385, `{text: string; spec?: undefined} | {text?: undefined; spec: FmtSpec}`
   // — an optional-field union with no string-literal discriminant.
-  "checker.ts": { rung: 0, code: "NT1009", blame: "self" },
+  // ...and that was a SOURCE gap too, for the same reason NT1023 was. SH2's union has NO
+  // BOX, so a union needs a literal-typed discriminant at the same slot in every member;
+  // presence-discrimination has none. `FmtPiece` carries a `kind` tag now, five lines.
+  // With it, checker.ts has NO BLOCKER OF ITS OWN for the first time ever — the blame
+  // column flips "self" -> "ast.ts" and it lands on the mutually-recursive `Expr` SCC that
+  // eight other modules already share. That flip is the news in this row, not the code.
+  "checker.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -305,12 +319,12 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `op in FCMP` at codegen.ts:2078, the key-presence operator, 1300 lines deeper.
   // ...and NT1002 is cleared: `in` is DECIDED at compile time for a literal key over a
   // static shape, so `op in FCMP` stopped being a blocker instead of moving. This module
-  // now has NO blocker of its own under the LINK — it follows checker.ts's `FmtPiece`
-  // union, the attribution trap `ownership.ts` has demonstrated for many rounds. Its own
-  // standalone blocker is `const FCMP: Record<string,string> = {…}` (NT2001), the
-  // deliberate Record→Map refusal, ~1450 lines EARLIER — which is why "`in` was the last
-  // thing between codegen.ts and IR" was wrong: the parse error was masking it.
-  "codegen.ts": { rung: 0, code: "NT1009", blame: "checker.ts" },
+  // now has NO blocker of its OWN under the link — it joins the nine on ast.ts's NT1030.
+  // Its own STANDALONE blocker is `const FCMP: Record<string,string> = {…}` (NT2001), the
+  // deliberate Record→Map refusal, ~1450 lines EARLIER than the `in` was — which is why
+  // "`in` was the last thing between codegen.ts and IR" was wrong: the PARSE-stage refusal
+  // was masking a CHECK-stage one that had been sitting in front of it all along.
+  "codegen.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   "coverage.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
@@ -321,7 +335,10 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Now FOUR codes — NT1009 -> NT1606 -> NT1027 -> NT1023 -> NT1030 — still never its own.
   // ...and back to NT1009, still byte-identical to checker.ts's. `Analyzer` has carried
   // `//@@mutable` since Stage 45, so this module has never had an NT1023 of its own.
-  "ownership.ts": { rung: 0, code: "NT1009", blame: "checker.ts" },
+  // ...and now NT1030, blaming ast.ts DIRECTLY rather than checker.ts — because checker.ts
+  // stopped having a blocker of its own, so the nearest module that still does is ast.ts.
+  // Six codes, never once its own.
+  "ownership.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   "driver.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   "cli.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
@@ -380,6 +397,23 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
  * — the immutable-data refusal, an NT16xx and so still outside the coverage histogram.
  * The same lane fixed the two defects the note above describes: NT2001 now carries a
  * primary span and names the receiver as written (`'diag.spans'`, not `'value'`).
+ *
+ * THE `.push` IDIOM IS NOT FREE FOR EVERY ACCUMULATOR — measured, because `lexer.ts` is
+ * the first module to reach it and the census assumed the 145 plain-local sites were the
+ * "mechanical" ones. `xs = [...xs, v]` is O(1) amortized in NATIVETS (the transient path,
+ * pinned at 200 appends), and O(n) per append in BUN — which `src/*.ts` must also keep
+ * running, and usably, since bun is stage-0. The lexer's `tokens` is not a small
+ * accumulator: it reaches 34,987 elements on `src/checker.ts`, and building that array
+ * measures
+ *
+ *     .push                1.1 ms
+ *     xs = [...xs, v]   1150.9 ms      (1036x, and quadratic — it gets worse with size)
+ *
+ * so converting `lex`'s 13 sites would cost ~6 s per full-tree lex and make the test
+ * suite, which lexes constantly, unusable. `diagnostics.ts` paid nothing for its 4 sites
+ * because its accumulator is a handful of lines. The size of the accumulator, not the
+ * shape of the receiver, is what decides whether a `.push` site is mechanical — so the
+ * 185-site census needs a second column before it is a plan. Not taken in this lane.
  */
 
 /** As a library (no argv) — every module compiled as its own entry. */
@@ -508,7 +542,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * CHECKER, after parse is over. A parse-clean module is not an unblocked module, so
    * attribution has to compare what the whole pipeline actually reports.
    */
-  test("parsing clean is not being unblocked — ten parse, one compiles", async () => {
+  test("parsing clean is not being unblocked — eleven parse, one compiles", async () => {
     const { parse } = await import("../src/parser.ts");
     const parseClean: string[] = [];
     for (const e of MODULES) {
@@ -518,15 +552,16 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // generic class methods did; `parser.ts` when optional element access `?.[]` did —
     // `?.[]` was the last construct in the parser's own source that the parser could not
     // read. The point of this test is unchanged and is the uncomfortable one — parsing
-    // clean has never ONCE correlated with being closer to compiling. TEN of twelve
-    // modules parse their own source; ONE produces IR.
-    // TEN now: `codegen.ts` joined when `in` stopped being refused in the PARSER. It is
-    // the sharpest illustration this test has had of its own point — the module gained a
-    // whole pipeline stage and its rung did not move, because a `Record` annotation the
-    // checker refuses sits 1450 lines before anything the parser ever objected to.
+    // clean has never ONCE correlated with being closer to compiling. ELEVEN of twelve
+    // modules parse their own source; ONE produces IR. `checker.ts` joined when the
+    // `FmtPiece` union got a `kind` tag, and it is the sharpest illustration this test has
+    // ever had: the largest module in the tree parses clean, blames no construct of its
+    // own, and is still at rung 0. `codegen.ts` joined when `in` stopped being refused in
+    // the PARSER — it gained a whole pipeline stage and its rung did not move, because a
+    // `Record` annotation the CHECKER refuses sits 1450 lines in front of it.
     expect(parseClean.sort()).toEqual([
-      "cli.ts", "codegen.ts", "coverage-preprocess.ts", "coverage.ts", "diagnostics.ts",
-      "driver.ts", "lexer.ts", "modules.ts", "ownership.ts", "parser.ts",
+      "checker.ts", "cli.ts", "codegen.ts", "coverage-preprocess.ts", "coverage.ts",
+      "diagnostics.ts", "driver.ts", "lexer.ts", "modules.ts", "ownership.ts", "parser.ts",
     ]);
     // ...and the point SURVIVES the first module getting off the floor, which is the
     // interesting part. `diagnostics.ts` reaching rung 3 did not come from parsing — it

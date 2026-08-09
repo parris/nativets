@@ -292,7 +292,7 @@ against node first:
 | `"" + { a: 1 }` | `[object Object]` | `NT1032` |
 | `"" + new C()` (class) | `[object Object]`, or its `toString()` | `NT1032` |
 | `"" + new Map()` / `new Set()` | `[object Map]` / `[object Set]` | `NT1032` |
-| `"" + [true, false]` | `true,false` | `NT1032` |
+| `"" + [true, false]` | `true,false` | **implemented** — see below |
 | `"" + [[1,2],[3]]`, `"" + [{},{}]` | `1,2,3` / `[object Object],…` | `NT1032` |
 | `"" + new Uint8Array([1,2])` | `1,2` | `NT1032` |
 | `` `${JSON.parse(s).f}` `` | the field's own string | `NT1032`, hint: narrow it (`as string`) |
@@ -306,12 +306,19 @@ outcome available, traded for the second-worst. `[object Object]` is also never 
 line meant, so the hint points at `JSON.stringify(x)` — and at `console.log(x)` on its own,
 which already renders objects, class instances, `Map`/`Set` byte-identically to node.
 
-**Why `boolean[]` is refused** even though the numeric and string cases are implemented:
-`nt_arr_join_str` reads each slot as a `ptr`, so `[true, false].join(",")` prints **empty**
-here where node prints `true,false` — a pre-existing silent wrong answer in `.join` itself.
-Routing `+` into a join that is already wrong would launder that bug into a second construct.
-Same reason for a nested or object array: the element's own coercion is what node splices in,
-and we do not have it.
+**`boolean[]` WAS refused, and no longer is.** The reason was never about the coercion: it was
+that `.join` was itself broken for booleans. `genArrayMethod` split array methods on one bit
+(`el === "number"`, number vs "everything else = strings"), so `[true, false].join(",")` went
+to `nt_arr_join_str`, which read each slot — holding `zext i1`, i.e. the integers 0 and 1 — as
+a `char *` and ran `strlen((char *)1)`. Empty output, exit 255, no diagnostic. Routing `+`
+into a join that is already wrong would have laundered that into a second construct, so the
+refusal was the right call *at the time*. `nt_arr_join_bool` closes the join (booleans spell
+`true`/`false`, which neither sibling produces), the split is now the three-way `joinFn`, and
+the coercion follows it. Pinned against node in `test/boolean-array-join.test.ts`.
+
+A **nested or object** array stays refused for a different reason, which has not expired: what
+node splices in is each element's OWN coercion, and that is the `[object …]` problem above, one
+level down.
 
 The refusal is **default-deny** — the checker allows a fixed list and rejects everything else —
 because the failure being closed is precisely "a type nobody added a case for reached codegen".
@@ -585,6 +592,31 @@ cooperative scheduler). Within that surface, three deliberate rules:
   (this used to compile and print garbage). A message is always present: unwrap it first
   (`send(pid, x ?? fallback)`). As a *receive annotation* `T | undefined` keeps its A2
   meaning — "a `T`, or a timeout".
+
+### An ARRAY OF FUNCTIONS is `NT1001` — and the reason is the type ENCODING
+
+`((n: number) => number)[]` was already refused in its array-literal spelling ("arrays of X is
+not supported yet"). The ANNOTATION is now refused at the same code, in the type parser, and the
+reason is worth recording because it constrains whoever lifts the refusal.
+
+Types are strings. The function encoding is `(p1,p2)=>ret` and the array encoding is a bare
+`${elem}[]` suffix with **no parentheses**, so:
+
+```
+makeFuncTy(["number"], "number[]")        === "(number)=>number[]"   // (n) => number[]
+makeFuncTy(["number"], "number") + "[]"   === "(number)=>number[]"   // ((n) => number)[]
+```
+
+The two types are **the same string**. `isArrayTy` used to answer *array* for both — including
+for a plain arrow returning an array, which put the closure in the scope's drop set and freed it
+with `nt_arr_free`; `const g = () => arr` died with exit 255 and no diagnostic. It now answers
+*function*, which is correct for the shape that occurs and wrong for the one that does not.
+
+That is safe only while arrays of functions cannot exist, so the ambiguous string is no longer
+constructible from source: the parser refuses the suffix where it would form it. **Implementing
+arrays of functions therefore starts with the encoding** (parenthesize the element, or stop
+encoding types as strings) — not with lifting the refusal. Pinned in
+`test/arrow-returns-array.test.ts`.
 
 ### Modules (SH1) — a whole-program link, and no import cycles
 
@@ -1638,7 +1670,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
-| NT1030 | a **recursive** type — one that contains itself, directly or mutually | later | top-level type declarations now HOIST, so ordering is no longer a refusal; a self-containing type needs a nominal `Ty` — see below |
+| NT1030 | a recursive type with nowhere to put a back-edge (`type P = Q[]`), a `@@mutable` recursive declaration, or a cycle one of whose members is refused for its own reason | later | self- AND mutually-recursive object/union declarations now COMPILE via the nominal `@Name` back-edge; ordering was never the problem — see below |
 
 ### Spreading a value INTO a call — the three cases, and why only two compile
 
@@ -1889,12 +1921,100 @@ the type encoding. `Ty` is a **structural string** (`src/ast.ts`) — `{a:number
 no finite structural string, so no amount of multi-pass resolution helps; a resolver that
 did not stop would replace the silent erasure with infinite expansion.
 
-Supporting it honestly requires a **nominal, by-reference form in `Ty`** — a type that names
-a declaration instead of spelling out its shape — plus every structural comparison,
-widening, and layout decision taught to resolve through it. That is a foundational change to
-the type representation, not a union feature and not a small one. Until it exists, the
-compiler's own `Expr`/`Stmt` unions (`src/ast.ts`) are outside the subset nativets compiles,
-and **that, not any single union or intersection, is what gates `src/ast.ts` self-hosting**.
+### Recursive types ARE representable now — the nominal `@Name` back-edge
+
+The paragraph above used to end "supporting it honestly requires a nominal, by-reference
+form in `Ty`". That form exists. A declaration in a cycle keeps its structural shape at the
+top level and encodes the recursive POSITION as a reference, `@Name`, whose shape lives in a
+table on the `Program`:
+
+```
+interface N { v: number; next?: N }    ->  {v:number,next:?U@N}
+class Scope { parent: Scope | null }   ->  Scope{parent:?N@Scope}
+```
+
+`Ty` stays a string, `===` stays type comparison, and a type that is not recursive keeps its
+exact previous encoding — no `Ty` contained `@` before, so this is additive rather than a
+rewrite, and a `@N` reaching a site that has not been taught about it fails loudly instead
+of being mistaken for something else.
+
+**MUTUAL recursion** takes the same encoding one declaration wider. When the hoisting
+fixpoint stalls it has PROVED a set of names is stuck on each other; each is then re-parsed
+with every member's name resolving to `@Name`. Inside that round a **union member may not be
+a bare `@Name`** — a union value IS the member's object block (there is no box, see SH2), so
+`unionDiscriminant` needs each member's SHAPE to prove the tag sits at the same slot index in
+every one. A reference is therefore expanded **one level** at the member boundary and only
+references below it stay folded:
+
+```
+type Expr = Num | Negate;  interface Negate { kind: "Negate"; operand: Expr }
+  ->  U<{kind:"Num",value:number}|{kind:"Negate",operand:@Expr}>
+```
+
+One level, not transitive, so it is finite even where the member points back at the union it
+belongs to.
+
+**A component is encoded ALL OR NOTHING.** A back-edge is only minted where it resolves, so
+one member the subset cannot represent takes the whole cycle with it and every member reports
+as recursion. That is sound and it is a measurement hazard — `src/ast.ts` encodes **41 of its
+45** cycle members, and the four that do not (general unions like
+`ArrowFunction.body: Expr | Stmt[]`, an array arm beside a discriminated-union arm) made all
+45 look like a recursion problem. So the NT1030 **hint** now names the residual members and
+their own diagnostics. The message is deliberately unchanged: it is what
+`test/selfhost-ratchet.baseline.json` records as a blocker's identity.
+
+Still refused, each with its own message: a cycle with nowhere to put a back-edge
+(`type P = Q[]` / `type Q = P[]` — a reference needs a slot to be a pointer in), and the four
+deep-walk cases below.
+
+### A recursive value is assumed to be a TREE — the walks that refuse a cycle
+
+Three passes walk a value by its STATIC type: `structuredClone`, the actor-message deep copy,
+and `JSON.stringify`. A recursive type is the one shape whose type is finite while the value
+it describes need not be, so each walk has to be told to stop.
+
+- **`structuredClone` of a recursive value is refused.** It was a real silent wrong answer:
+  `genDeepClone` had no case for `@N`, so it hit its value-semantics fallthrough and stored
+  the SOURCE's pointer into the clone — `a.next === b.next` was `true` where node says
+  `false`. Correct once the walk carries a seen-set, which node's structured-clone algorithm
+  has and a type-directed walk does not.
+- **An actor message of a recursive type is refused**, same walk, same reason. It was already
+  rejected before, but only because `isObjectTy("@N")` is false and a back-edge fell off the
+  end of `msgLeafOk` — two bugs cancelling rather than a guarantee. It is now deliberate, and
+  `genDeepClone` itself throws on a back-edge so the safety is a property of the walk rather
+  than of two independent gates staying in place.
+- **The test for "is this recursive" is STRUCTURAL, not a substring.** `Ty` is a flat string
+  and the first cut was `t.includes("@")` — but `@` is legal inside a string-literal tag
+  (`kind: "user@host"`) and inside a property key (`{ "x@y": 1 }`), both of which land
+  verbatim in the encoding, so structuredClone refused a program node runs. `containsTypeRef`
+  walks the type instead; `hasTypeRef` survives as a cheap pre-filter whose `false` is
+  conclusive and whose `true` decides nothing. Same landmine as `objectFields("@N")` once
+  returning a phantom one-field record.
+- **`JSON.stringify` of a recursive value is refused** (NT1005). The serializer is unrolled
+  at compile time from the static type, so it terminates only because the type shrinks at
+  every step — and a back-edge does not. `genJsonStringify` refuses one by name, with a
+  64-level ceiling behind it.
+- **`@@mutable` + recursive is refused.** Linearity keeps a recursive value a tree — a second
+  owner is NT1601/NT1604 — but `@@mutable class N { loop() { this.next = this } }` compiled
+  and ran, and `this` is not a second owner. The cost is measured, and it is not the leak it
+  was predicted to be (`__objLive()` is 1 for the same class *without* the cycle, the
+  pre-existing shallow drop). It is a silent wrong answer:
+
+  ```
+  node:     <ref *1> N { v: 7, next: [Circular *1] }
+  nativets: N { v: 7, next: N { v: 7, next: N { v: 7, next: [N] } } }
+  ```
+
+  `genInspect` unfolds the back-edge and stops on util.inspect's DEPTH limit, which is a cap
+  on nesting and not a cycle detector.
+
+Everything else about a recursive value is ordinary object machinery: it is linear,
+move-checked, and dropped once — and the drop is **shallow**, exactly like every other
+object's, so a node reached through a field leaks (ROADMAP Phase C, not recursion-specific).
+
+Until the four general unions above are representable, the compiler's own `Expr`/`Stmt`
+(`src/ast.ts`) stay outside the subset, and **that — not the recursion, and not any single
+intersection — is what now gates `src/ast.ts` self-hosting**.
 
 ### A parameter default makes a `function` parameter optional — but not a value ARROW's
 

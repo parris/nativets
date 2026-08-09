@@ -20,6 +20,19 @@ export interface Token {
   col: number;
 }
 
+/**
+ * The scanner's cursor — byte offset plus the 1-based line/column it names.
+ *
+ * It is a RECORD rather than three `let`s because `advance` and the three
+ * `scan*` helpers are closures that move it, and a write to a binding captured
+ * from an enclosing scope is `NT1031` (it was the last thing standing between
+ * this module and self-compilation). Mutating a field of an `@@mutable` record
+ * is not a capture write — the binding never changes, the object does — and
+ * `//@@mutable` is a comment to TypeScript, so bun runs this file unchanged.
+ */
+//@@mutable
+interface LexState { i: number; line: number; col: number }
+
 const PUNCT_4 = [">>>="];
 const PUNCT_3 = ["===", "!==", ">>>", "...", "<<=", ">>=", "**="];
 const PUNCT_2 = [
@@ -242,14 +255,12 @@ function allHexDigits(s: string): boolean {
 
 export function lex(source: string): Token[] {
   const tokens: Token[] = [];
-  let i = 0;
-  let line = 1;
-  let col = 1;
+  const st: LexState = { i: 0, line: 1, col: 1 };
 
-  const advance = (n = 1) => {
+  const advance = (n: number) => {
     for (let k = 0; k < n; k++) {
-      if (source[i] === "\n") { line++; col = 1; } else { col++; }
-      i++;
+      if (source[st.i] === "\n") { st.line++; st.col = 1; } else { st.col++; }
+      st.i++;
     }
   };
 
@@ -263,67 +274,92 @@ export function lex(source: string): Token[] {
   // *everywhere* — `const a<FEFF>= 1` runs under node — but the main scan loop below
   // recognizes only ` \t\r\n` as space anyway, so a mid-file FEFF still (correctly)
   // rejects rather than miscompiles. Widening the whole whitespace class is its own job.
-  if (source.charCodeAt(0) === 0xfeff) advance();
+  if (source.charCodeAt(0) === 0xfeff) advance(1);
 
   // A `#!` shebang on line 1 is not JavaScript — it is a hashbang comment (TC39
   // "HashbangComment", which node and every JS engine strip before parsing). It is
   // skipped to end-of-line rather than tokenized, so an executable script such as
   // our OWN `src/cli.ts` (`#!/usr/bin/env bun`) lexes. Only at offset 0: a `#`
   // anywhere else is still an "Unexpected character". (SH1 tail, self-hosting.)
-  if (source.startsWith("#!", i)) {
-    while (i < source.length && source[i] !== "\n") advance();
+  if (source.startsWith("#!", st.i)) {
+    while (st.i < source.length && source[st.i] !== "\n") advance(1);
   }
-
-  /** Raw inner text of a template, up to (not including) its closing backtick. */
-  const scanTemplateBody = (sl: number, sc: number): string => {
-    let raw = "";
-    while (i < source.length && source[i] !== "`") {
-      if (source[i] === "\\") { raw += source[i]; advance(); raw += source[i] ?? ""; advance(); continue; }
-      if (source[i] === "$" && source[i + 1] === "{") { raw += "${"; advance(2); raw += scanSubstitution(sl, sc); continue; }
-      raw += source[i];
-      advance();
-    }
-    if (source[i] !== "`") throw new LexError(`Unterminated template at ${sl}:${sc}`);
-    return raw;
-  };
-
-  /** A `${…}` substitution's source, up to AND including its matching `}`. Nested
-   *  templates, quoted strings and braces are tracked so none of them ends it early. */
-  const scanSubstitution = (sl: number, sc: number): string => {
-    let out = "";
-    let depth = 1;
-    while (i < source.length) {
-      const ch = source[i]!;
-      if (ch === "\\") { out += ch; advance(); out += source[i] ?? ""; advance(); continue; }
-      if (ch === "`") { out += ch; advance(); out += scanTemplateBody(sl, sc) + "`"; advance(); continue; }
-      if (ch === '"' || ch === "'") { out += scanQuoted(ch, sl, sc); continue; }
-      if (ch === "{") depth++;
-      else if (ch === "}") { depth--; if (depth === 0) { advance(); return out + "}"; } }
-      out += ch;
-      advance();
-    }
-    throw new LexError(`Unterminated template substitution at ${sl}:${sc}`);
-  };
 
   /** A quoted string INSIDE a substitution, copied verbatim (quotes included). */
   const scanQuoted = (q: string, sl: number, sc: number): string => {
     let out = q;
-    advance();
-    while (i < source.length && source[i] !== q) {
-      if (source[i] === "\\") { out += source[i]; advance(); }
-      out += source[i];
-      advance();
+    advance(1);
+    while (st.i < source.length && source[st.i] !== q) {
+      if (source[st.i] === "\\") { out += source[st.i]; advance(1); }
+      out += source[st.i];
+      advance(1);
     }
-    if (source[i] !== q) throw new LexError(`Unterminated string at ${sl}:${sc}`);
-    advance();
+    if (source[st.i] !== q) throw new LexError(`Unterminated string at ${sl}:${sc}`);
+    advance(1);
     return out + q;
   };
 
-  while (i < source.length) {
-    const c = source[i]!;
+  /**
+   * Raw inner text of a template, up to (not including) its closing backtick —
+   * INCLUDING every `${…}` substitution, with nested templates, quoted strings
+   * and braces tracked so that none of them ends the literal early.
+   *
+   * A template body and a substitution used to be two MUTUALLY RECURSIVE
+   * closures. nativets supports no nested recursion at all (`NT1003`: a nested
+   * `function`, a self-recursive arrow and a forward-referenced one are equally
+   * refused), and neither the mutable cursor nor an `@@mutable` record survives
+   * being passed to a top-level function (`NT1607` — a parameter is a borrow).
+   * So the recursion is made explicit instead of implicit, which it can be
+   * because every frame appended to the SAME string in source order:
+   *
+   *   `frames` is the context stack — `-1` is a template body, `n >= 1` is a
+   *   substitution whose brace depth is `n`. It is never deeper than the
+   *   source's own template nesting (2 in this tree), so the copy-on-append is
+   *   free.
+   */
+  const scanTemplateBody = (sl: number, sc: number): string => {
+    let raw = "";
+    let frames: number[] = [-1];
+    while (frames.length > 0) {
+      const top = frames[frames.length - 1]!;
+      if (st.i >= source.length)
+        throw new LexError(top === -1
+          ? `Unterminated template at ${sl}:${sc}`
+          : `Unterminated template substitution at ${sl}:${sc}`);
+      const ch = source[st.i]!;
+      if (ch === "\\") { raw += ch; advance(1); raw += source[st.i] ?? ""; advance(1); continue; }
+      if (top === -1) {
+        // a template body: `${` opens a substitution, a backtick closes the body
+        if (ch === "`") {
+          frames = frames.slice(0, frames.length - 1);
+          // the OUTERMOST backtick is consumed by the caller, an inner one here
+          if (frames.length > 0) { raw += "`"; advance(1); }
+          continue;
+        }
+        if (ch === "$" && source[st.i + 1] === "{") { raw += "${"; advance(2); frames = [...frames, 1]; continue; }
+        raw += ch;
+        advance(1);
+        continue;
+      }
+      // a substitution: braces nest, a backtick opens a nested template body
+      if (ch === "`") { raw += ch; advance(1); frames = [...frames, -1]; continue; }
+      if (ch === '"' || ch === "'") { raw += scanQuoted(ch, sl, sc); continue; }
+      if (ch === "{") frames = [...frames.slice(0, frames.length - 1), top + 1];
+      else if (ch === "}") {
+        if (top === 1) { advance(1); raw += "}"; frames = frames.slice(0, frames.length - 1); continue; }
+        frames = [...frames.slice(0, frames.length - 1), top - 1];
+      }
+      raw += ch;
+      advance(1);
+    }
+    return raw;
+  };
 
-    if (c === " " || c === "\t" || c === "\r" || c === "\n") { advance(); continue; }
-    if (c === "/" && source[i + 1] === "/") {
+  while (st.i < source.length) {
+    const c = source[st.i]!;
+
+    if (c === " " || c === "\t" || c === "\r" || c === "\n") { advance(1); continue; }
+    if (c === "/" && source[st.i + 1] === "/") {
       // PRAGMA COMMENT `//@@name` — the comment spelling of a compile-time attribute.
       //
       // `@@mutable` is not valid TypeScript, so a file carrying the bare sigil cannot
@@ -333,26 +369,26 @@ export function lex(source: string): Token[] {
       // sigil, so the attribute is invisible to TypeScript and load-bearing here.
       // Anything else after `//` — including a comment that merely mentions `@@mutable`
       // in prose — stays an ordinary comment. See docs/decorators.md.
-      const startLine = line, startCol = col;
-      let j = i + 2;
+      const startLine = st.line, startCol = st.col;
+      let j = st.i + 2;
       while (j < source.length && source[j] !== "\n") j++;
-      const body = source.slice(i + 2, j);
+      const body = source.slice(st.i + 2, j);
       const attr = pragmaName(body);
       if (attr !== "") {
         tokens.push({ type: "punct", value: "@@", line: startLine, col: startCol });
         tokens.push({ type: "ident", value: attr, line: startLine, col: startCol + 2 });
       }
-      while (i < source.length && source[i] !== "\n") advance();
+      while (st.i < source.length && source[st.i] !== "\n") advance(1);
       continue;
     }
-    if (c === "/" && source[i + 1] === "*") {
+    if (c === "/" && source[st.i + 1] === "*") {
       advance(2);
-      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) advance();
+      while (st.i < source.length && !(source[st.i] === "*" && source[st.i + 1] === "/")) advance(1);
       advance(2);
       continue;
     }
 
-    const sl = line, sc = col;
+    const sl = st.line, sc = st.col;
 
     // number
     if (c >= "0" && c <= "9") {
@@ -360,22 +396,22 @@ export function lex(source: string): Token[] {
       // text — the parser's `Number(value)` decodes every form exactly as node does.
       // Without this the lexer read `0` and then `x1f` as an identifier, which is what
       // made `src/codegen.ts`'s byte constants (`0x22`, `0x5c`) unparseable.
-      const radix = source[i + 1];
+      const radix = source[st.i + 1];
       if (c === "0" && radix !== undefined && "xXbBoO".includes(radix)) {
         let s = "0" + radix;
         advance(2);
-        while (i < source.length && (isHexDigit(source[i]!) || source[i] === "_")) { if (source[i] !== "_") s += source[i]; advance(); }
+        while (st.i < source.length && (isHexDigit(source[st.i]!) || source[st.i] === "_")) { if (source[st.i] !== "_") s += source[st.i]; advance(1); }
         tokens.push({ type: "num", value: s, line: sl, col: sc });
         continue;
       }
       let s = "";
       // `_` is a numeric SEPARATOR (`1_000_000`) — legal between digits, dropped here.
-      while (i < source.length && ((source[i]! >= "0" && source[i]! <= "9") || source[i] === "_")) { if (source[i] !== "_") s += source[i]; advance(); }
-      if (source[i] === ".") { s += "."; advance(); while (i < source.length && source[i]! >= "0" && source[i]! <= "9") { s += source[i]; advance(); } }
-      if (source[i] === "e" || source[i] === "E") {
-        s += source[i]; advance();
-        if (source[i] === "+" || source[i] === "-") { s += source[i]; advance(); }
-        while (i < source.length && source[i]! >= "0" && source[i]! <= "9") { s += source[i]; advance(); }
+      while (st.i < source.length && ((source[st.i]! >= "0" && source[st.i]! <= "9") || source[st.i] === "_")) { if (source[st.i] !== "_") s += source[st.i]; advance(1); }
+      if (source[st.i] === ".") { s += "."; advance(1); while (st.i < source.length && source[st.i]! >= "0" && source[st.i]! <= "9") { s += source[st.i]; advance(1); } }
+      if (source[st.i] === "e" || source[st.i] === "E") {
+        s += source[st.i]; advance(1);
+        if (source[st.i] === "+" || source[st.i] === "-") { s += source[st.i]; advance(1); }
+        while (st.i < source.length && source[st.i]! >= "0" && source[st.i]! <= "9") { s += source[st.i]; advance(1); }
       }
       tokens.push({ type: "num", value: s, line: sl, col: sc });
       continue;
@@ -384,7 +420,7 @@ export function lex(source: string): Token[] {
     // identifier / keyword
     if (isIdentStart(c)) {
       let s = "";
-      while (i < source.length && isIdentPart(source[i]!)) { s += source[i]; advance(); }
+      while (st.i < source.length && isIdentPart(source[st.i]!)) { s += source[st.i]; advance(1); }
       tokens.push({ type: "ident", value: s, line: sl, col: sc });
       continue;
     }
@@ -392,21 +428,21 @@ export function lex(source: string): Token[] {
     // string literal
     if (c === '"' || c === "'") {
       const quote = c;
-      advance();
+      advance(1);
       let s = "";
-      while (i < source.length && source[i] !== quote) {
-        if (source[i] === "\\") {
-          const { text, next } = decodeEscapeAt(source, i, line, col);
+      while (st.i < source.length && source[st.i] !== quote) {
+        if (source[st.i] === "\\") {
+          const { text, next } = decodeEscapeAt(source, st.i, st.line, st.col);
           s += text;
-          advance(next - i);
+          advance(next - st.i);
         } else {
-          if (source[i] === "\n") throw new LexError(`Unterminated string at ${line}:${col}`);
-          s += source[i];
-          advance();
+          if (source[st.i] === "\n") throw new LexError(`Unterminated string at ${st.line}:${st.col}`);
+          s += source[st.i];
+          advance(1);
         }
       }
-      if (source[i] !== quote) throw new LexError(`Unterminated string at ${sl}:${sc}`);
-      advance(); // closing quote
+      if (source[st.i] !== quote) throw new LexError(`Unterminated string at ${sl}:${sc}`);
+      advance(1); // closing quote
       tokens.push({ type: "str", value: s, line: sl, col: sc });
       continue;
     }
@@ -417,9 +453,9 @@ export function lex(source: string): Token[] {
     // `` `{${xs.map((x) => `${x.k}`).join(",")}}` `` — the shape `src/ast.ts` and every
     // `src/codegen.ts` emit site are written in — could not be tokenized at all.
     if (c === "`") {
-      advance();
+      advance(1);
       const raw = scanTemplateBody(sl, sc);
-      advance(); // closing backtick
+      advance(1); // closing backtick
       tokens.push({ type: "template", value: raw, line: sl, col: sc });
       continue;
     }
@@ -435,7 +471,7 @@ export function lex(source: string): Token[] {
     //   2. a closing unescaped `/` must exist on the SAME line (a regex literal cannot
     //      span lines), else we fall through and treat `/` as the operator it is.
     if (c === "/" && regexCanStart(tokens[tokens.length - 1])) {
-      let j = i + 1;
+      let j = st.i + 1;
       let inClass = false; // inside `[...]`, where `/` is literal and needs no escape
       let closed = false;
       for (; j < source.length && source[j] !== "\n"; j++) {
@@ -451,25 +487,25 @@ export function lex(source: string): Token[] {
       if (closed) {
         let end = j + 1;
         while (end < source.length && source[end]! >= "a" && source[end]! <= "z") end++; // flags
-        const raw = source.slice(i, end);
-        advance(end - i);
+        const raw = source.slice(st.i, end);
+        advance(end - st.i);
         tokens.push({ type: "regex", value: raw, line: sl, col: sc });
         continue;
       }
       // no closer on this line -> it was division after all; fall through to PUNCT.
     }
 
-    const four = source.slice(i, i + 4);
+    const four = source.slice(st.i, st.i + 4);
     if (PUNCT_4.includes(four)) { tokens.push({ type: "punct", value: four, line: sl, col: sc }); advance(4); continue; }
-    const three = source.slice(i, i + 3);
+    const three = source.slice(st.i, st.i + 3);
     if (PUNCT_3.includes(three)) { tokens.push({ type: "punct", value: three, line: sl, col: sc }); advance(3); continue; }
-    const two = source.slice(i, i + 2);
+    const two = source.slice(st.i, st.i + 2);
     if (PUNCT_2.includes(two)) { tokens.push({ type: "punct", value: two, line: sl, col: sc }); advance(2); continue; }
-    if (PUNCT_1.includes(c)) { tokens.push({ type: "punct", value: c, line: sl, col: sc }); advance(); continue; }
+    if (PUNCT_1.includes(c)) { tokens.push({ type: "punct", value: c, line: sl, col: sc }); advance(1); continue; }
 
-    throw new LexError(`Unexpected character '${c}' at ${line}:${col}`);
+    throw new LexError(`Unexpected character '${c}' at ${st.line}:${st.col}`);
   }
 
-  tokens.push({ type: "eof", value: "", line, col });
+  tokens.push({ type: "eof", value: "", line: st.line, col: st.col });
   return tokens;
 }
