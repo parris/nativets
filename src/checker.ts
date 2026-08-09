@@ -2527,8 +2527,25 @@ class Checker {
           if (l === "null" || l === "undefined") return r;
           if (isNullableTy(l)) {
             const base = baseTy(l);
-            if (base !== r && !this.assignable(base, r) && !this.assignable(r, base)) throw typeError(`?? branches differ: ${base} vs ${r}`);
-            return base;
+            // `??` consumes the LEFT's nullishness and NOTHING else — the specified type
+            // is `NonNullable<L> | R`. So a still-nullable RIGHT keeps the result
+            // nullable, in the right's own nullish flavour (`x ?? y` on two
+            // `string | undefined`s is `string | undefined`, and `x ?? null` is
+            // `string | null`). Answering `base` here unconditionally was a WRONG
+            // ANSWER, not a refusal: `typeof (f() ?? f())` printed "string" where node
+            // prints "undefined", and codegen then stored the right operand's
+            // [tag,value] BOX into a slot declared to hold the bare base value — so the
+            // ordinary chained cascade `a ?? b ?? "fallback"` reinterpreted that box as
+            // a string pointer, decided the third `??` had a non-nullable left, and
+            // never evaluated the fallback at all. See test/nullish-coalesce.ts.
+            const rbase = r === "null" || r === "undefined" ? base : baseTy(r);
+            if (rbase !== base && !this.assignable(base, rbase) && !this.assignable(rbase, base))
+              throw typeError(`?? branches differ: ${base} vs ${r}`);
+            // The result's base is whichever side is the WIDER of the two (they are
+            // assignable in one direction, proved just above).
+            const j = rbase === base || this.assignable(base, rbase) ? base : rbase;
+            if (r === "null" || r === "undefined") return makeNullable(r, j);
+            return isNullableTy(r) ? makeNullable(nullishKind(r), j) : j;
           }
           if (l !== r) throw typeError(`?? branches differ: ${l} vs ${r}`);
           return l;

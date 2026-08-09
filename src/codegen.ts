@@ -2330,25 +2330,36 @@ class FnGen {
           const lt = e.left.ty ?? "number";
           if (lt === "null" || lt === "undefined") return this.genExpr(e.right); // statically nullish → right
           if (!isNullableTy(lt)) return this.genExpr(e.left);                     // statically present → left
-          // runtime-nullable left: TAG-based branch (never truthiness), collapse to base.
+          // runtime-nullable left: TAG-based branch (never truthiness).
+          //
+          // The RESULT type is the checker's, not `baseTy(lt)`: `??` only consumes the
+          // LEFT's nullishness, so a still-nullable right keeps the whole expression
+          // nullable (`a ?? b` on two `string|undefined`s). Both arms are therefore
+          // COERCED into it, exactly as `ConditionalExpr` below does — the left arm
+          // unboxes to the base and may re-box, the right arm may already be a box.
+          // Storing the right arm RAW into a `base` slot is what silently reinterpreted
+          // a [tag,value] box as a string pointer and made `a ?? b ?? "fallback"` skip
+          // its fallback. See test/nullish-coalesce.test.ts.
           const base = baseTy(lt);
+          const ty = (e.ty ?? base) as Ty;
           const box = this.genExpr(e.left);
-          const slot = this.slot(base);
+          const slot = this.slot(ty);
           const isN = this.isNullish(box.v);
           const rLbl = this.label("nc"), lLbl = this.label("ncl"), endLbl = this.label("nce");
           this.terminate(`br i1 ${isN}, label %${rLbl}, label %${lLbl}`);
           this.to(this.block(rLbl));
-          const rv = this.genExpr(e.right);
-          this.emit(`store ${llvmTy(base)} ${rv.v}, ptr ${slot}`);
+          const rv = this.coerce(this.genExpr(e.right), ty);
+          this.emit(`store ${llvmTy(ty)} ${rv.v}, ptr ${slot}`);
           this.terminate(`br label %${endLbl}`);
           this.to(this.block(lLbl));
           const lv = this.fromSlot(this.nullVal(box.v), base); // unbox the present value
-          this.emit(`store ${llvmTy(base)} ${lv}, ptr ${slot}`);
+          const lc = this.coerce({ v: lv, ty: base }, ty);
+          this.emit(`store ${llvmTy(ty)} ${lc.v}, ptr ${slot}`);
           this.terminate(`br label %${endLbl}`);
           this.to(this.block(endLbl));
           const t = this.fresh();
-          this.emit(`${t} = load ${llvmTy(base)}, ptr ${slot}`);
-          return { v: t, ty: base };
+          this.emit(`${t} = load ${llvmTy(ty)}, ptr ${slot}`);
+          return { v: t, ty };
         }
         // `&&` / `||` — value-returning short-circuit (result type = operand type).
         const ty = (e.ty ?? "boolean") as Ty;
