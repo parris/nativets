@@ -3467,9 +3467,8 @@ class Checker {
     // (2) again: only a widening `fitsParam` rejects but `assignable` accepts keeps the
     // inferred type. A body the annotation genuinely contradicts goes to `checkBlock`
     // against the DECLARED type, so the `NT2001` names the offending `return`'s position.
-    const ret = declared !== undefined && !(!this.fitsParam(declared, inferred) && this.assignable(declared, inferred))
-      ? declared
-      : inferred;
+    const widened = declared !== undefined && !this.fitsParam(declared, inferred) && this.assignable(declared, inferred);
+    const ret = declared === undefined || widened ? inferred : declared;
     this.checkBlock(body, inner.child(), ret); // validate every return against it
     return ret;
   }
@@ -3646,7 +3645,8 @@ class Checker {
    */
   private checkStringCoercion(t: Ty, what: string, at?: { line: number; col: number }): void {
     if (t === "string" || t === "number" || t === "boolean" || t === "undefined" || t === "null" || t === "void") return;
-    if (isNullableTy(t)) return this.checkStringCoercion(baseTy(t), what, at); // the box branches on its tag
+    // The box branches on its tag, so it coerces iff its base does.
+    if (isNullableTy(t)) { this.checkStringCoercion(baseTy(t), what, at); return; }
     // node's `Array#toString` IS `join(",")` — but only for the element types whose join
     // is node-exact here (`nt_arr_join_num` / `nt_arr_join_str`).
     if (isArrayTy(t) && (elemTy(t) === "number" || elemTy(t) === "string")) return;
