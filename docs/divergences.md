@@ -636,6 +636,17 @@ arrays of functions therefore starts with the encoding** (parenthesize the eleme
 encoding types as strings) — not with lifting the refusal. Pinned in
 `test/arrow-returns-array.test.ts`.
 
+Answering *function* also took closures OUT of the scope drop set entirely, so from that fix
+until Stage C's closure-env drops **every bound arrow leaked its environment** — one heap block
+per arrow evaluated, so a bound arrow in a 100-iteration loop leaked 100. Corruption traded for
+an unbounded leak, which was the only direction available at the time and the safe one. It is
+now a BOUNDED leak: `test/closure-env-drops.test.ts` frees the env as the OBJECT it is
+(`nt_obj_free`, never `nt_arr_free`), shallowly, and only for a `const f = <arrow literal>` whose
+name is used nowhere but as the callee of a direct call — so an env that ESCAPES (returned,
+aliased, passed as an argument, stored, captured by another closure) is still never freed. The
+naive version of this — putting function types back into `isLinearTy` — was measured and frees
+the escaping-counter idiom's live env: exit 255. See docs/ROADMAP.md's Phase C.
+
 ### Modules (SH1) — a whole-program link, and no import cycles
 
 `import`/`export` across `.ts` files are compiled by resolving the graph from the entry file and
@@ -1206,7 +1217,81 @@ freed exactly once, the result is a distinct pointer) and node-differentially in
 `test/immutable.test.ts`, including node's lexicographic default (`[10,9,1,100,2].sort()` →
 `1,10,100,2,9`).
 
-### `.push()` gets NO fresh-receiver permission — unlike `.sort()`
+### `.push()` — refused by default, legal on a `@@mutable` ACCUMULATOR binding
+
+> **Superseded in part.** The section below argued — correctly, and it is kept because the
+> argument is still the reason the *fresh*-receiver permission was never taken — that a fresh
+> receiver buys nothing and that the shape people want is a NAMED accumulator needing real
+> in-place mutation. That shape is now legal, behind an explicit opt-in. Everything the old
+> section says about a fresh receiver still holds: `[1,2].push(3)` is still refused.
+
+```ts
+//@@mutable
+let acc: T[] = [];
+for (…) acc.push(x);          // a real in-place append
+```
+
+**The default is unchanged.** `.push` on any other receiver is still `NT1606` with the spread
+hint — the Stage 29 immutability rule is not relaxed, an opt-in is added next to it, exactly as
+`@@mutable` was added for classes (Stage 45) and records (Stage 49). The attribute attaches to a
+**BINDING**, not to a type: it never travels with the value, so an array handed out of the scope
+(returned, stored, passed on) is an ordinary immutable array again and the caller cannot append to
+it without opting in itself.
+
+**Why the opt-in exists is a two-toolchain fact, not a semantics one.** `xs = [...xs, v]` is
+already **O(1) amortized in nativets** — that is what the rest of this section documents. It is a
+real **O(n) copy per append under bun**, and bun is stage 0: it runs `src/*.ts` and the whole test
+suite today. 30,000 appends:
+
+| idiom | bun | nativets |
+|---|---|---|
+| `xs = [...xs, v]` | 760 ms | 4 ms |
+| `xs.push(v)` | 2 ms | 0 ms |
+| builder object + `.build()` | 632 ms | 20 ms |
+
+`lex`'s `tokens` reaches ~35,000 elements on `src/checker.ts` alone. This is a deliberate,
+documented trade with a standing performance follow-up in `docs/ROADMAP.md`, not a silent
+relaxation of the immutability model.
+
+**What makes it sound.** `@@mutable` means TRUE in-place mutation, so exclusive access has to be
+established — but not by a new analysis. Three facts the compiler already has do it:
+
+- an array is **LINEAR**, so `const b = xs` **MOVES**; a second live handle cannot exist, and a
+  push after one is the ordinary `NT1601`;
+- a **PARAMETER** is a borrow (the caller owns and drops it) and cannot carry the attribute, since
+  the attribute is on a `let`/`const`;
+- `this.f`, `xs[0]` and `f()` name **no binding**, so they never match the opt-in.
+
+The one hole those do not cover is a **CLOSURE**: an arrow copies the array POINTER into a heap env
+this scope cannot null, and the closure may outlive the binding. A push to a captured accumulator is
+`NT1607`.
+
+**The receiver shapes that stay refused**, each pinned in `test/push-accumulator.test.ts`:
+
+| receiver | code |
+|---|---|
+| an undecorated local | `NT1606` |
+| a **parameter** | `NT1606` |
+| `this.<field>` | `NT1606` |
+| a container **element** (`g[0].push(v)`) | `NT1606` |
+| a **captured** accumulator | `NT1607` |
+| an accumulator already **moved out** | `NT1601` |
+| the accumulator while a `for-of` **borrows** it (iterator invalidation) | `NT1603` |
+| `@@mutable` on a non-array, or on a multi-name declaration | `NT1023` |
+| `.pop`/`.shift`/`.unshift`/`.splice`/`.fill`/`.copyWithin` — the opt-in legalizes `.push` ONLY | `NT1606` |
+
+**`push` CONSUMES its argument**, exactly as `[...xs, v]` does, and getting that wrong was a real
+use-after-free found in this lane: while the argument was merely borrowed (which is right for every
+*other* call), a linear value pushed inside a function stayed owned by its local, the local freed it
+at scope exit, and the array went on pointing at it — `g.push(a)` then `g[0].length` printed `3`
+for a 2-element array, at **exit 0**. The move is guarded on the RECEIVER'S TYPE, not the method
+name, so a user class's own `.push` still only borrows.
+
+node's behaviour is matched exactly, mined from test262 `test/built-ins/Array/prototype/push/`: the
+return value is the **new length** (`S15.4.4.7_A2`), `push()` with no arguments is legal and returns
+the current length (`S15.4.4.7_A1`), and multiple arguments append **left to right** (`S15.4.4.7_A3`).
+
+#### The original argument, kept: `.push()` gets NO fresh-receiver permission — unlike `.sort()`
 
 The obvious next question after the rule above is whether `.push` can take the same treatment.
 It **cannot usefully**, and it is refused on *every* receiver, fresh ones included.

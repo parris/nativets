@@ -872,8 +872,13 @@ class FnGen {
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       // Move-aware RAII: objects free via nt_obj_free, arrays via nt_arr_free.
+      // A CLOSURE ENV is an object too — `nt_obj_new(1 + caps.length)`, a bare slot
+      // block with no `NtArray` header — and freeing one as an array frees two words
+      // past its end (the wild free that made function types non-linear in the first
+      // place; see `nonEscapingClosures` in ownership.ts). Shallow, as everywhere here:
+      // the capture slots alias values their own scope owns and drops.
       const dropTy = this.varTypes.get(n) ?? "number";
-      const free = isObjectTy(dropTy) || isUnionTy(dropTy) || isTypeRefTy(dropTy) ? "nt_obj_free" : "nt_arr_free"; // a union IS an object block (SH2); so is a recursive node
+      const free = isObjectTy(dropTy) || isUnionTy(dropTy) || isTypeRefTy(dropTy) || isFuncTy(dropTy) ? "nt_obj_free" : "nt_arr_free"; // a union IS an object block (SH2); so is a recursive node, and so is a closure env
       this.emit(`call void @${free}(ptr ${p})`);
     }
   }
@@ -4014,11 +4019,23 @@ class FnGen {
         this.emit(`${t} = call ptr @nt_arr_to_reversed(ptr ${recv.v})`);
         return { v: t, ty: recv.ty };
       }
+      // `.push` on a `@@mutable` accumulator binding (the checker refuses every other
+      // receiver). node's contract, mined from test262
+      // test/built-ins/Array/prototype/push/: append the arguments LEFT TO RIGHT and
+      // return the NEW length — which for zero arguments is just the current length.
       case "push": {
-        const slot = this.toSlot(this.genExpr(args[0]!));
-        const t = this.fresh();
-        this.emit(`${t} = call double @nt_arr_push(ptr ${recv.v}, i64 ${slot})`);
-        return { v: t, ty: "number" };
+        if (args.length === 0) {
+          const t = this.fresh();
+          this.emit(`${t} = call double @nt_arr_len(ptr ${recv.v})`);
+          return { v: t, ty: "number" };
+        }
+        let last = "";
+        for (const a of args) {
+          const slot = this.toSlot(this.genExpr(a));
+          last = this.fresh();
+          this.emit(`${last} = call double @nt_arr_push(ptr ${recv.v}, i64 ${slot})`);
+        }
+        return { v: last, ty: "number" };
       }
       case "pop": {
         const slot = this.fresh();

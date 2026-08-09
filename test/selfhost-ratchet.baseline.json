@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "a4335be"
+    "rev": "ee25a3b"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "eb1323644af6d0b0",
+      "sha256": "e2fccc5970a145a9",
       "standalone": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1002",
+        "message": "[NT1002] string method 'trimEnd' is not supported yet"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1002",
+        "message": "[NT1002] string method 'trimEnd' is not supported yet"
       }
     },
     "checker.ts": {
-      "sha256": "19826200a9d2c4ca",
+      "sha256": "b95080e8f3820527",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1002",
+        "message": "[NT1002] string method 'trimEnd' is not supported yet"
       }
     },
     "cli.ts": {
@@ -44,7 +44,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "0141f088615f92c0",
+      "sha256": "35404c3c81ac63ba",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -52,8 +52,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1002",
+        "message": "[NT1002] string method 'trimEnd' is not supported yet"
       }
     },
     "coverage-preprocess.ts": {
@@ -79,8 +79,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1002",
+        "message": "[NT1002] string method 'trimEnd' is not supported yet"
       }
     },
     "diagnostics.ts": {
@@ -106,21 +106,21 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare string with undefined"
       }
     },
     "lexer.ts": {
-      "sha256": "f874705d93927d45",
+      "sha256": "41f12f4f1974b041",
       "standalone": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare string with undefined"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare string with undefined"
       }
     },
     "modules.ts": {
@@ -132,12 +132,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare string with undefined"
       }
     },
     "ownership.ts": {
-      "sha256": "73c35174aaea5af3",
+      "sha256": "fbeea5d8dbf866e0",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -146,12 +146,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1002",
+        "message": "[NT1002] string method 'trimEnd' is not supported yet"
       }
     },
     "parser.ts": {
-      "sha256": "19f5660367711fde",
+      "sha256": "486f6d23fbf52278",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -159,8 +159,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare string with undefined"
       }
     }
   }

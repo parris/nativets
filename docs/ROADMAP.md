@@ -162,11 +162,78 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
 - ✅ **Move-out-of-borrow / array-element** (`E0507`/`E0508` → NT1604/NT1605, Stage 28).
 - Reconciled with B2/B4: **linear ownership for uniquely-owned handles, refcounting for
   shared-immutable storage** (trie nodes, strings) — and `rc == 1` is what licenses transients.
+- ✅ **CLOSURE ENVIRONMENTS, for the non-escaping case** — and this one was the largest of the
+  leaks in a compiler written with closures, which is why it is called out rather than folded
+  into the line below. Every arrow bound to a value allocates an env (`nt_obj_new(1 + caps)`) and
+  NOTHING freed one, so a bound arrow inside a 100-iteration loop leaked 100 envs: unbounded, and
+  invisible to `test/hof-drops.test.ts`, which measured `__arrLive()` only (an env is an object;
+  `__arrLive()` reads 0 for every shape of this bug). It is the standing cost of the `isArrayTy`
+  wild-free fix — see docs/divergences.md — which removed function types from the drop set
+  entirely because freeing an env as an ARRAY frees two words past a headerless block.
+  `test/closure-env-drops.test.ts` puts them back on both halves of what that requires: freed as
+  the OBJECT it is (`nt_obj_free`, shallow — capture slots alias values the enclosing scope still
+  owns and drops), and only where a purely SYNTACTIC rule proves unique ownership — a
+  `const f = <arrow literal>` whose name is used only as the callee of a direct call.
+  **Still leaked, by that rule:** a closure that is returned, aliased (`const g = f`), passed as
+  an ARGUMENT (the callee's escape behavior is not summarized anywhere — the widening that would
+  buy the most), stored in an array/object/field, or mentioned inside another arrow's body; a
+  binding whose initializer is a CALL rather than a literal; and a bound arrow inside an inlined
+  HOF callback, which the ownership pass marks droppable but whose drop marker sits after the
+  callback's `return` (the same codegen gap `test/hof-drops.test.ts` already pins for arrays).
+  Re-adding function types to `isLinearTy` is NOT the way to widen this: measured, the naive
+  version frees the escaping-counter idiom's env and exits 255.
 - **Still open:** values escaping through a `break`/`continue`/`throw` out of a block, temporaries
   in non-chain positions (call arguments), chain temporaries whose method hands the receiver
   back, array/object ELEMENTS (an array does not recursively
-  free what its slots point at), and module-level bindings a function may have aliased. All are
+  free what its slots point at), module-level bindings a function may have aliased, and the
+  escaping closure envs above. All are
   leaks by construction, never a double free or a dangling pointer.
+
+### PERFORMANCE FOLLOW-UP — the immutable-first answer to `.push` (owed)
+
+**What was legalized.** `.push` on an array binding declared `@@mutable`
+(`//@@mutable let xs: T[] = []`) is a real in-place append. Everything else stays `NT1606`
+(`docs/decorators.md`, `docs/divergences.md`, `test/push-accumulator.test.ts`).
+
+**Why — and it is NOT because the immutable idiom is slow here.** `xs = [...xs, v]` is already
+O(1) amortized in nativets via the transient path. It is O(n) per append **under bun**, and bun is
+**stage 0**: it runs `src/*.ts` and the whole test suite today, and `src/*.ts` has to satisfy both
+toolchains at once. 30,000 appends, measured on this tree:
+
+| idiom | bun | nativets |
+|---|---|---|
+| `xs = [...xs, v]` | 760 ms | 4 ms |
+| `xs.push(v)` | 2 ms | 0 ms |
+| builder object + `.build()` | 632 ms | 20 ms |
+
+`lex`'s `tokens` reaches ~35,000 elements on `src/checker.ts` alone (1.1 ms vs 1150.9 ms
+end-to-end, the 1036x figure in `docs/self-hosting.md`). Converting the 13 sites in `lex` would
+have cost ~6 s per full-tree lex.
+
+**What the eventual immutable-first answer is.** A **transient BUILDER** — `immutable.js`'s
+`withMutations` / Clojure's `transient`/`persistent!`: a linear, single-owner handle that appends
+in place and is *frozen* into an immutable value by `.build()`, with the type system making the
+builder unusable afterwards. That is the shape that ends this trade, because it expresses
+"uniquely owned right now, shared forever after" **in the type**, rather than in an attribute on a
+binding. It was measured here and lost on today's constraints, not on its merits:
+
+- it is a **185-site source rewrite**, against zero for the opt-in;
+- it is **still 632 ms under bun**, because a builder written in the subset has to spread
+  internally — it only wins once bun is no longer stage 0, or once the builder is a *runtime*
+  primitive with a bun-fast implementation.
+
+So the follow-up is not "make `.push` faster". It is: **once nativets compiles itself, re-evaluate
+whether the `@@mutable` accumulator should be replaced by a builder type**, and if so do the
+rewrite then, when only one toolchain has to be satisfied. Until that day the opt-in is the
+deliberate, documented trade — an opt-in beside the immutability rule, not a relaxation of it.
+
+**Two smaller items this lane leaves behind**, both refusals rather than gaps:
+
+- `.push` on `this.<field>` (38 sites tree-wide, 18 in `src/parser.ts`) — a field names no binding
+  whose ownership the pass can establish. Needs the class-field analogue of the binding attribute.
+- `.push` to a **captured** accumulator (all of `src/modules.ts`'s, shape
+  `const walk = (list) => { out.push(…) }`) — refused because a closure env holds a second pointer
+  this scope cannot null. Needs closure ESCAPE analysis, not a wider attribute.
 
 ### Why ELEMENTS is not a one-line fix (measured, `test/drops-obj.test.ts`)
 
