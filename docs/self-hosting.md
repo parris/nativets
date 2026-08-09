@@ -3241,6 +3241,108 @@ itself should not be built.
 
 ---
 
+### RUNG 3 DIFFERENTIAL-FUZZED — all three modules DIVERGE, and the compiled lexer cannot lex its own source
+
+`test/sh6-fuzz.ts` (script) + `test/sh6-fuzz.test.ts` (ratchet, 8 s).
+
+Rung 3 for `lexer.ts`, `diagnostics.ts` and `coverage-preprocess.ts` rested on ONE driver each
+over a handful of inputs — 466 and 814 bytes of matched output, and for `lexer.ts` not even
+that (its row is `weak`: empty == empty). This lane widened that to a corpus: every `.ts` file
+under `src/`, `test/` and `examples/` (501) plus 52 adversarial inputs, each fed to a
+nativets-COMPILED driver and to `bun run` over the identical driver, comparing stdout byte for
+byte and the exit code. `diagnostics.ts` renders rather than transforms, so it got 85 generated
+`Diagnostic` shapes instead of files.
+
+**84 of 553 inputs diverge for `lexer.ts`; 82 of 553 for `coverage-preprocess.ts`; 6 of 85
+shapes for `diagnostics.ts`.** Not one is a logic difference — the logic is the same text on
+both sides — and they reduce to four causes.
+
+**1. An out-of-range index, four sites, and it ABORTS.** The Stage 41 bounds rule says a string
+or array index out of range PANICS; `noUncheckedIndexedAccess` says the same read is
+`T | undefined`. The compiler's own modules are written to the second rule in four places, and
+three of them wrote a `?? ""` next to it that the panic never lets run:
+
+| site | input | node/bun | nativets |
+|---|---|---|---|
+| `src/lexer.ts:95` / `src/coverage-preprocess.ts:141` `pragmaName` — `body[a]` | `//` | lexes fine, exit 0 | SIGABRT |
+| `src/lexer.ts:193` `decodeEscapeAt` — `raw[i + 1] ?? ""` | `"\` | `LexError`, exit 1 | SIGABRT |
+| `src/lexer.ts:276` `advance` — `source[st.i]` | `/*` | exit 0 | SIGABRT |
+| `src/lexer.ts:463` — `source[st.i] !== quote` | `"` | `LexError`, exit 1 | SIGABRT |
+| `src/coverage-preprocess.ts:177` — `source[0] === "#"` | *(empty file)* | exit 0 | SIGABRT |
+| `src/diagnostics.ts:140` — `srcLines[s.line - 1] ?? ""` | a span past end-of-source | renders a blank line | SIGABRT |
+
+The first row is the one that matters. A line comment with an EMPTY body is not exotic: **71 of
+the 501 `.ts` files in this repo contain one, and 8 of the compiler's own 12 modules do —
+including `src/lexer.ts` itself.** The compiled lexer aborts on `ast.ts`, `checker.ts`,
+`codegen.ts`, `diagnostics.ts`, `lexer.ts`, `modules.ts`, `ownership.ts` and `parser.ts`. Two
+bytes, `//`, and stage-1 could not have got past its own first file. `.at(i)` is the spelling
+that means the same thing in both toolchains — the same fix `lexer.ts`'s `source[st.i + 1]` and
+`ast.ts`'s `list[list.length - 1]` already took, twice, in earlier rounds. **Not fixed here:**
+this lane measures, and each site belongs with its module.
+
+**2. THE ERROR PATH IS SPLIT, and that is the answer to "does `LexError` match".** Where `lex`
+actually reaches its `throw`, the compiled module agrees EXACTLY — same stdout, exit 1 on both
+sides — for all eleven inputs that get there (octal escapes, invalid `\x`/`\u`, an unterminated
+string or template that stops at a NEWLINE, `#`, and four non-ASCII code points). Only the
+stderr TEXT differs, as documented. But where the malformed input runs off the END of the
+source, the index panic above fires ONE STATEMENT BEFORE the throw, and the exit code is
+SIGABRT rather than 1: `"abc\n` matches, `"abc` does not. So the error path is not broken and
+not sound — the LAST CHARACTER of the file decides which.
+
+**3. A COMPILER bug, and a silent wrong answer.** A runtime NON-INTEGER array index is
+truncated instead of missing:
+
+```ts
+const xs: string[] = ["a", "b", "c"];
+let i = 0; i = i + 1.5;
+console.log(xs[i] ?? "undefined");
+// node: undefined     nativets: b     (both exit 0)
+```
+
+With a LITERAL index the checker catches it (`NT2002`), so it only escapes when the index is
+computed — which is exactly how `formatDiagnostic` computes `srcLines[s.line - 1]`. **Not
+fixed.**
+
+**4. The documented divergences, and what they COST.** `String.fromCharCode(0)` being the empty
+string and `readFileSync` truncating at a NUL are already recorded in docs/divergences.md as
+open runtime doors; the sweep shows them changing real output (a `"\0"` in a source file loses
+its NUL, a file with a NUL byte lexes short). The UTF-8-byte string model is subtracted by the
+harness where it only shifts lengths and columns — but it also changes what the code DECIDES,
+and that cannot be subtracted: a BOM is one whitespace code unit to bun and three non-ASCII
+bytes to nativets, so the compiled lexer THROWS on a file bun lexes; and `leadingWhitespace` in
+`diagnostics.ts` open-codes ECMAScript's WhiteSpace table by `charCodeAt`, which on bytes
+matches none of it, so the caret lands in the wrong column of any non-ASCII line.
+
+**5. NOT a correctness divergence, but it would stop a bootstrap anyway.** `lex` accumulates a
+token with `s += source[st.i]`, one character at a time. JavaScriptCore makes that linear with
+ropes; the nativets runtime copies, so it is QUADRATIC — a single identifier at 16 k chars takes
+55 ms and at 32 k takes 194 ms against a flat 22 ms under bun, and the 1 MB case reached 20 GB
+RSS and 54 s of CPU before it was killed. A megabyte-long string literal (a base64 data URI) is
+enough to reach it.
+
+#### What this says about rung 3
+
+Rung 3 as recorded is **necessary and a long way from sufficient**, and this is the concrete
+form of caveat 1 in `test/sh6.test.ts`'s header. All three modules pass their existing driver
+and all three abort on inputs the compiler will certainly hand them. What would settle it is
+not more inputs — it is the four `.at` fixes, the non-integer index fix, and then this sweep
+re-run to zero on the group-A rows; after that, rung 3 for these three modules would mean the
+compiled module behaves like the bun-run module over every file in the repo, which is a claim
+worth the name.
+
+#### PRE-EXISTING BUGS this turned up
+
+- **The non-integer index above** — silent wrong answer, four lines, no self-hosting involved.
+  Undocumented.
+- **`String.fromCharCode(0xD83D) + String.fromCharCode(0xDE00)`** emits CESU-8
+  (`ED A0 BD ED B8 80`) where node emits U+1F600 (`F0 9F 98 80`). Two lines, exit 0, silent.
+  docs/divergences.md records surrogate-pair `\u` escapes as undecoded for `JSON.parse` (D6);
+  the same door on `String.fromCharCode` is not recorded, and it is the one `src/lexer.ts` uses
+  to build every `\uXXXX` escape.
+- The quadratic `+=` above.
+
+---
+
 ## Milestones
 
 - **SH0 — Gradient first (highest-value, do first).** Teach `coverage` (and a throwaway
