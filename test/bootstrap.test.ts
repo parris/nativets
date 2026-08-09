@@ -328,10 +328,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // accumulators, so they now carry `//@@mutable` (the same pragma `Parser`, `FnGen`
     // and `Analyzer` already carried). checker.ts/ownership.ts stop on NT1009 (a
     // discriminant-less object union in diagnostics' `parseTemplate`) and codegen.ts on
-    // NT1015 (a `get` accessor in `FnGen`). checker.ts's is `FmtPiece` at line 4385, an
-    // optional-field union with no string-literal discriminant.
+    // NT1002 (`op in FCMP` — the key-presence operator). checker.ts's is `FmtPiece` at line
+    // 4385, an optional-field union with no string-literal discriminant. codegen.ts's own
+    // NT1015 was a `get` accessor, now rewritten as the method it always was — accessors
+    // stay refused, and the tree holds exactly one getter and no setters.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1009", "NT1015", "NT1030", "NT1031"],
+      ["NT1002", "NT1009", "NT1030", "NT1031"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -478,7 +480,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and it refilled with a THIRD kind of class member: `//@@mutable` on `ModuleGen`
     // cleared codegen.ts's NT1023, and behind it is a `get` accessor in `FnGen` — neither
     // the static member nor the generic method this bucket held before.
-    expect(byCode["NT1015"]!.sort()).toEqual(["codegen.ts"]);
+    // ...and it is EMPTY again, this time by a SOURCE change rather than a language one.
+    // `get` accessors stay refused (a getter would make `o.x` sometimes a slot load and
+    // sometimes a call, which dotted-path narrowing and field linearity both assume it is
+    // not) — but the whole-tree construct census found ONE getter and NO setters in
+    // `src/*.ts`, so `FnGen`'s became the zero-argument method it already was. Behind it,
+    // NT1002: `op in FCMP` at codegen.ts:2078.
+    expect(byCode["NT1015"]).toBeUndefined();
+    expect(byCode["NT1002"]!.sort()).toEqual(["codegen.ts"]);
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
     // the fresh-receiver lane) -> NT1006 (`Math.max(...)`, cleared by the variadic lane) ->
     // back to NT1606, this time a `.push` on a NAMED accumulator. That last shape is

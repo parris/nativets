@@ -1854,7 +1854,24 @@ class Parser {
       }
       const tok = this.peek();
       // Modifiers/accessors that change semantics (static/get/set/…) stay deferred (NT1015).
-      if (tok.type === "ident" && REJECTED_MEMBER_MODS.has(tok.value) && !MEMBER_START.has(this.peek(1).value)) throw nyi(NYI.CLASS_FEATURE, `class member modifier/accessor '${tok.value}' at ${tok.line}:${tok.col}`);
+      // `get`/`set` get their OWN hint, because unlike the rest they have an exact,
+      // mechanical rewrite — a getter IS a zero-argument method, and the only thing an
+      // accessor adds is dropping the parens at the use site. Naming it matters: the whole
+      // of `src/*.ts` holds one getter and no setters (docs/self-hosting.md's construct
+      // census), so the rewrite is the answer rather than a placeholder for a future
+      // feature. Supporting accessors would make `o.x` sometimes a slot load and sometimes
+      // a call, which the checker's dotted-path narrowing and the linearity of a field read
+      // both assume it is not.
+      if (tok.type === "ident" && REJECTED_MEMBER_MODS.has(tok.value) && !MEMBER_START.has(this.peek(1).value)) {
+        const accessor = tok.value === "get" || tok.value === "set";
+        throw nyi(
+          NYI.CLASS_FEATURE,
+          `class member modifier/accessor '${tok.value}' at ${tok.line}:${tok.col}`,
+          accessor
+            ? `an accessor is a method with the parens dropped — write it as an ordinary method and call it: \`${tok.value === "get" ? "name(): T { … }" : "setName(v: T): void { … }"}\`, then \`this.${tok.value === "get" ? "name()" : "setName(v)"}\` at every use site`
+            : undefined,
+        );
+      }
       if (this.at("[")) throw nyi(NYI.CLASS_FEATURE, `computed/index class member at ${tok.line}:${tok.col}`);
       const member = this.expectIdent();
       if (memberWrappers.length && !(this.peek().value === "(" && member !== "constructor")) {

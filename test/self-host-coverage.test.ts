@@ -234,8 +234,13 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // than copy-on-write values, so they now carry `//@@mutable` exactly as
     // `Parser`/`FnGen`/`Analyzer` already did. There is no third class behind them: this
     // bucket did not shrink, it emptied.
+    // NT1015 then emptied the same way, and the census is again what says so: this
+    // instrument counts the construct, and `get`/`set` accessors number ONE and ZERO across
+    // all twelve modules. Accessors stay refused (NT1015 with a hint naming the rewrite);
+    // `FnGen`'s lone getter became the zero-argument method it already was, and NT1002
+    // (`op in FCMP`) is what sat behind it.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1003", "NT1014", "NT1015", "NT1031"],
+      ["NT1002", "NT1003", "NT1014", "NT1031"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the
