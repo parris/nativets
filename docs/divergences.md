@@ -1791,6 +1791,48 @@ would be a silent wrong answer — the worst outcome available. Before `NT1029` 
 died in the `[]` array-suffix loop as an **anonymous `NT0001 Expected ']'`**, with no code and no
 hint; it was the last unnamed refusal in the tree.
 
+### Type queries — `typeof x` and `keyof T` in TYPE position are `NT1033`
+
+Both are **refused**, and the reason is that neither can be *answered* where annotations are
+resolved. `Ty` (`src/ast.ts`) is produced by the parser, before any inference has run, so
+`typeof S` has no value environment to ask for `S`'s type; and `keyof T` has no `Ty` inhabitant at
+all — "one of these keys" is the same unrepresentable thing `NT1029` already refuses for
+`T[keyof T]`. It has to be the *parser* that says so, for the reason `NT2003` gives: the erasure
+to `number` is destructive, and once it happens no later pass can tell the result from a `number`
+the user wrote.
+
+**`typeof` as an EXPRESSION is untouched** — `typeof s === "string"` is a different parse path
+(`parseUnary`) and compiles exactly as it always did.
+
+**What it replaced was one bug with two faces.** `typeof` and `keyof` both sat in the parser's
+`AMBIENT_TYPES` escape, which resolves a bare *name*. So the KEYWORD was resolved as though it
+were the type — erasing to `number` — and the OPERAND was left in the token stream, where it
+re-parsed as a stray expression statement:
+
+```ts
+const S = "a";
+type X = typeof S;                              // became: type X = number;  then  S;
+function f(v: X): number { return v.length; }
+console.log(f("hello"));   // node: 5   was: error[NT2001] 'f' arg 0 expects number, got string
+```
+
+```ts
+type T = { a: number, b: number };
+type K = keyof T;          // became: type K = number;  then  T;
+                           // node: a   was: error[NT2001] 'T' is not defined
+```
+
+The first is the dangerous one: the stray `S;` is a *legal* statement, so `X` silently meant
+`number` and the program was rejected downstream blaming the CALL for a type nobody wrote. The
+second is merely misattributed — it names a line the user did not write.
+
+**Why not implement the decidable subset.** Resolving `typeof S` where `S` is a `const` with a
+literal initializer *is* possible in the parser, and it was rejected on purpose: it puts the
+accept/reject boundary on the SYNTAX of the initializer — `const S = "a"` would compile while
+`const S = f()` one line below it would keep erasing silently. That is the same trade
+`docs/self-hosting.md` rejected for a `new Map`-argument-position-only entries form. A partial
+answer that keeps the silent case is worse than no answer.
+
 ### `interface B extends A` — a field-set UNION, base fields FIRST (`NT1034` otherwise)
 
 An interface is erased **structurally** here: a declaration binds a name to a `Ty` string

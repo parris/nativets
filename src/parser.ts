@@ -1083,6 +1083,13 @@ class Parser {
     else if (this.at("{")) base = this.parseObjectType();
     else if (this.at("[")) base = this.parseTupleType();
     else if (this.at("import")) base = this.parseImportType();    // inline import type: import("m").T
+    // A TYPE QUERY (`typeof x`) or the `keyof` operator. Refused HERE, before the name
+    // path below can absorb the KEYWORD as if it were a type: both sit in `AMBIENT_TYPES`,
+    // so `resolveNamed("typeof")` used to answer `number` and leave the OPERAND in the
+    // token stream, where it re-parsed as a stray expression statement — silently for
+    // `typeof S` (the stray `S;` is legal, so `X` just quietly meant `number`) and as
+    // `'T' is not defined` for `keyof T`, a diagnostic naming a line nobody wrote.
+    else if (this.at("typeof") || this.at("keyof")) base = this.refuseTypeQuery();
     else {
       const id = this.expectIdent();
       baseName = id;
@@ -1120,6 +1127,41 @@ class Parser {
       baseName = undefined;
     }
     return (base + suffix) as Ty;
+  }
+
+  /**
+   * `typeof x` / `keyof T` in TYPE position — always a refusal, never a `Ty`.
+   *
+   * Neither can be ANSWERED here, and that is the whole argument for refusing rather than
+   * implementing. `Ty` is produced by this parser, before any inference has run, so a type
+   * query has no value environment to ask for `x`'s type; and `keyof T` has no `Ty`
+   * inhabitant at all — "one of these keys" is the same unrepresentable thing `NT1029`
+   * already refuses for `T[keyof T]`.
+   *
+   * It has to be the PARSER that says so, for the reason `refuseUnknownName` gives: the
+   * erasure to `number` is destructive, and once it has happened no later pass can tell the
+   * result from a `number` the user wrote.
+   *
+   * Resolving `typeof S` for the narrow case that IS decidable here — a `const` with a
+   * literal initializer — was considered and rejected. It puts the accept/reject boundary
+   * on the SYNTAX of the initializer (`const S = "a"` would compile, `const S = f()` would
+   * keep erasing silently), which is exactly the trade docs/self-hosting.md rejected for a
+   * `new Map`-position-only entries form: a partial answer that keeps the silent case is
+   * worse than no answer.
+   *
+   * SPECULATION-SAFE, like `refuseUnknownName`: `tryCallTypeArgs` backtracks on any throw,
+   * so this must stay a throw with no side effect.
+   */
+  private refuseTypeQuery(): never {
+    const kw = this.next().value;                  // `typeof` / `keyof`
+    const operand = this.peek();
+    const shown = operand.type === "ident" || operand.type === "str" ? `${kw} ${operand.value}` : kw;
+    throw nyi(
+      NYI.TYPE_QUERY,
+      kw === "typeof"
+        ? `the type query '${shown}' (a \`typeof\` in TYPE position)`
+        : `the type operator '${shown}'`,
+    );
   }
 
   /**
