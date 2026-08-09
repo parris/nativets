@@ -618,6 +618,17 @@ arrays of functions therefore starts with the encoding** (parenthesize the eleme
 encoding types as strings) — not with lifting the refusal. Pinned in
 `test/arrow-returns-array.test.ts`.
 
+Answering *function* also took closures OUT of the scope drop set entirely, so from that fix
+until Stage C's closure-env drops **every bound arrow leaked its environment** — one heap block
+per arrow evaluated, so a bound arrow in a 100-iteration loop leaked 100. Corruption traded for
+an unbounded leak, which was the only direction available at the time and the safe one. It is
+now a BOUNDED leak: `test/closure-env-drops.test.ts` frees the env as the OBJECT it is
+(`nt_obj_free`, never `nt_arr_free`), shallowly, and only for a `const f = <arrow literal>` whose
+name is used nowhere but as the callee of a direct call — so an env that ESCAPES (returned,
+aliased, passed as an argument, stored, captured by another closure) is still never freed. The
+naive version of this — putting function types back into `isLinearTy` — was measured and frees
+the escaping-counter idiom's live env: exit 255. See docs/ROADMAP.md's Phase C.
+
 ### Modules (SH1) — a whole-program link, and no import cycles
 
 `import`/`export` across `.ts` files are compiled by resolving the graph from the entry file and
