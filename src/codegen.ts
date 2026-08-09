@@ -1541,6 +1541,19 @@ class FnGen {
       this.emit(`${t} = call ptr @js_num_to_str(double ${val.v})`);
       return t;
     }
+    // node's `Array#toString` IS `join(",")` — `String([1,2,3])` is `"1,2,3"`, an empty
+    // array is `""` and a one-element array carries no separator. Only the two element
+    // types whose join is node-exact reach here; the checker refuses the rest (NT1032),
+    // so this is not a fallback and must not become one.
+    if (isArrayTy(val.ty)) {
+      const t = this.fresh();
+      this.emit(`${t} = call ptr @${elemTy(val.ty) === "number" ? "nt_arr_join_num" : "nt_arr_join_str"}(ptr ${val.v}, ptr ${this.mod.intern(",")})`);
+      return t;
+    }
+    // `boolean` is the LAST case, not the default one. Everything that is not a type
+    // above is refused by `checkStringCoercion` before it gets here — reaching this line
+    // with (say) an object emitted `zext i1 <ptr>` and made clang's error the user's.
+    if (val.ty !== "boolean") throw internalError(`coerceToString of ${val.ty} (the checker should have refused it — see NYI.STRINGIFY)`);
     const z = this.fresh();
     this.emit(`${z} = zext i1 ${val.v} to i32`);
     const t = this.fresh();

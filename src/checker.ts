@@ -1679,7 +1679,15 @@ class Checker {
       case "NullLiteral": return "null";
       case "TemplateLiteral":
         // Same box, same invalid IR, as string concatenation just above.
-        for (const x of e.exprs) refuseUnboxedUnion(this.type(x, scope), "a template literal");
+        for (const x of e.exprs) {
+          const t = this.type(x, scope);
+          refuseUnboxedUnion(t, "a template literal");
+          // No location: a substitution is re-lexed from its own source fragment
+          // (`parseExpressionFrom`, src/parser.ts), so every node in it carries a
+          // FRAGMENT-relative `loc` — `1:1` for the whole file. A wrong line number is
+          // worse than none, so the type in the message is what locates this one.
+          this.checkStringCoercion(t, "a template literal");
+        }
         return "string";
       case "ArrayLiteral": {
         if (e.elements.length === 0) {
@@ -1986,6 +1994,12 @@ class Checker {
           // the tz display-name tables. Refuse rather than approximate.
           for (const t of [l, r]) if (isDateTy(t) || isUrlTy(t) || isSearchParamsTy(t))
             throw nyi(NYI.WEBAPI, `string concatenation with a ${t} (use ${isDateTy(t) ? "`.toISOString()`" : "`.toString()` / a component"})`);
+          // …and everything ELSE that `coerceToString` cannot render. The specific
+          // refusals above stay because they name a better workaround than the generic
+          // one; this is the DEFAULT-DENY behind them, and it is what stops an unhandled
+          // type from reaching codegen and coming back as a clang error (NT1032).
+          this.checkStringCoercion(l, "string concatenation", exprLoc(e.left));
+          this.checkStringCoercion(r, "string concatenation", exprLoc(e.right));
           return "string";
         }
         if (l !== "number" || r !== "number") throw typeError(`Arithmetic needs numbers, got ${l} ${e.op} ${r}`);
@@ -2823,7 +2837,17 @@ class Checker {
     // global builtin, function value, or user function
     if (e.callee.kind === "Identifier") {
       const g = GLOBAL_FUNCS[e.callee.name];
-      if (g) { this.checkArgs(e.args, g, scope, e.callee.name); return g.ret; }
+      if (g) {
+        this.checkArgs(e.args, g, scope, e.callee.name);
+        // `String(x)` is `"" + x` by another name — same `coerceToString`, same
+        // default-deny. Read the type `checkArgs` just recorded rather than typing the
+        // argument a second time: a second `type()` re-runs inference over it, which for
+        // an arrow means a second capture analysis and for a generic call a second
+        // instantiation.
+        const arg = e.args[0];
+        if (e.callee.name === "String" && arg?.ty) this.checkStringCoercion(arg.ty, "`String(…)`", exprLoc(arg));
+        return g.ret;
+      }
 
       // calling a function VALUE (a variable/param whose type is a function type)
       const bound = scope.lookup(e.callee.name);
@@ -3569,6 +3593,37 @@ class Checker {
         `A counter whose state lives ONLY in the closure — nothing outside it mentions '${name}' — does compile`,
       );
     }
+  }
+
+  /**
+   * Gate a STRING-COERCION position — `"a=" + x`, `${x}`, `String(x)`.
+   *
+   * The three share `coerceToString` in codegen, and it handles the primitives, a nullable
+   * box and (now) a `number[]`/`string[]`, then FALLS THROUGH to the boolean path for
+   * everything else — `zext i1 <ptr>`, which clang rejects. So the checker's allow-list
+   * here and `coerceToString`'s cases are one list written twice and must stay in step;
+   * this is the side that produces a diagnostic instead of a build error.
+   *
+   * DEFAULT-DENY on purpose. The failure this closes is an internal representation
+   * mismatch reaching the user as `'%t4' defined with type 'ptr' but expected 'i1'`, and a
+   * deny-list would let the next unhandled type do it again. See NYI.STRINGIFY for what is
+   * refused and why each one is a refusal rather than a feature.
+   */
+  private checkStringCoercion(t: Ty, what: string, at?: { line: number; col: number }): void {
+    if (t === "string" || t === "number" || t === "boolean" || t === "undefined" || t === "null" || t === "void") return;
+    if (isNullableTy(t)) return this.checkStringCoercion(baseTy(t), what, at); // the box branches on its tag
+    // node's `Array#toString` IS `join(",")` — but only for the element types whose join
+    // is node-exact here (`nt_arr_join_num` / `nt_arr_join_str`).
+    if (isArrayTy(t) && (elemTy(t) === "number" || elemTy(t) === "string")) return;
+    // A `Dyn` (a `JSON.parse` result) is the one refusal with a genuinely cheap fix at the
+    // SOURCE, so it says so instead of repeating the catalog's object advice: its string
+    // form depends on a runtime tag we would have to dispatch on, but narrowing it (`as
+    // string`, or `JSON.parse(s) as T`) is the spelling the rest of the language already
+    // wants and makes the interpolation ordinary.
+    const hint = t === "Dyn"
+      ? "a `JSON.parse` result carries its type at RUNTIME, so `${d.f}` has no static string form. Narrow it first — `d.f as string` / `d.f as number`, or type the whole parse (`JSON.parse(s) as { f: string }`) — and the interpolation is ordinary"
+      : undefined;
+    throw nyi(NYI.STRINGIFY, `${what} with a ${t}`, hint, at);
   }
 
   /**
