@@ -453,12 +453,19 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT2001 therefore does NOT leave the set — it changes owner, from lexer.ts's dead
     // guard to ast.ts's ternary. A code holding still while the module behind it changes
     // is exactly what this tree-wide set cannot see, and why selfhost-ratchet exists.
+    //
+    // ...and NT1011 ARRIVES, on the same pattern for the fourth time here: the ternary
+    // lane cleared ast.ts's `?:` join and then six blockers behind it, and the SEVENTH is
+    // `for (const x of n)` where `n: unknown` — `mapTypesDeep`, a reflective AST walker.
+    // NT2001 again does not leave the set (cli.ts's `process.stdout` is its own, and
+    // depends on none of this), and again it has changed owner: ast.ts's ternary is gone,
+    // so the eight modules that reported it now report NT1011 instead.
     expect(Object.keys(byCode).sort()).toEqual(
       // NT1014 IS GONE tree-wide: every LITERAL entries-form site in src/ is a `.set` chain
     // now, and the one DYNAMIC site that was actually blocking (ownership.ts's `clone`,
     // refused for the Map spread) became a `.set` LOOP — which is what the constructor
     // does internally, so no tuple encoding was invented.
-    ["NT1004", "NT1606", "NT2001"],
+    ["NT1004", "NT1011", "NT1606", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -592,9 +599,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // cli.ts is the exception that proves the shape: its NT2001 is its OWN
     // (`process.stdout is not supported`), so stage-1 is separable from the grind for
     // the first time.
-    expect(byCode["NT2001"]!.sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    //
+    // ...and the concentration PAID OFF: the ternary lane cleared the join (a present arm
+    // and a nullish literal now widen to `?U`/`?N`, TypeScript's rule), then walked the eight
+    // dependents through six more ast.ts blockers behind it. NT2001 collapses from NINE
+    // modules to ONE — cli.ts, which never depended on any of it. The eight moved to
+    // NT1011, `for-of` over an `unknown` in a reflective AST walker, which is the first
+    // entry in this table that is a design decision rather than a gap (see sh6.test.ts).
+    expect(byCode["NT2001"]!.sort()).toEqual(["cli.ts"]);
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -840,9 +852,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // cli.ts is the exception that proves the shape: its NT2001 is its OWN
     // (`process.stdout is not supported`), so stage-1 is separable from the grind for
     // the first time.
-    expect(byCode["NT2001"]!.sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    //
+    // ...and the concentration PAID OFF: the ternary lane cleared the join (a present arm
+    // and a nullish literal now widen to `?U`/`?N`, TypeScript's rule), then walked the eight
+    // dependents through six more ast.ts blockers behind it. NT2001 collapses from NINE
+    // modules to ONE — cli.ts, which never depended on any of it. The eight moved to
+    // NT1011, `for-of` over an `unknown` in a reflective AST walker, which is the first
+    // entry in this table that is a design decision rather than a gap (see sh6.test.ts).
+    expect(byCode["NT2001"]!.sort()).toEqual(["cli.ts"]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a

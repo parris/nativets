@@ -128,6 +128,29 @@ console.log("abcabc".lastIndexOf("b"), "abcabc".lastIndexOf("abc"), "abc".lastIn
 console.log("abc".lastIndexOf(""), "".lastIndexOf(""), "aaa".lastIndexOf("a"));
 `,
   },
+  /*
+   * `.indexOf(search, fromIndex)` — the 2-argument form (ECMA-262 22.1.3.9). Only the
+   * 1-argument form existed, so `t.indexOf('"', i + 1)` — ordinary JS, and the shape a
+   * scanner is written with — was `'.indexOf' expects 1..1 args, got 2`. It was the
+   * first blocker for eight of the twelve compiler modules (`src/ast.ts`'s
+   * `widenLiteralTys`).
+   *
+   * The edges are the whole feature, and each row is one: `fromIndex` past the match,
+   * past the END, NEGATIVE (clamps to 0), and fractional; plus the EMPTY needle, which
+   * answers the clamped position itself and so is the one case that can return `len`.
+   * node is the oracle for every value.
+   */
+  {
+    name: ".indexOf(search, fromIndex) — clamping, negatives, and the empty needle",
+    code: `
+const s = "abcabc";
+console.log(s.indexOf("b", 0), s.indexOf("b", 2), s.indexOf("b", 4), s.indexOf("b", 5));
+console.log(s.indexOf("b", -3), s.indexOf("b", 99), s.indexOf("abc", 1), s.indexOf("z", 1));
+console.log(s.indexOf("", 3), s.indexOf("", 6), s.indexOf("", 99), s.indexOf("", -1));
+console.log(s.indexOf("c", 2.7), "".indexOf("", 0), "".indexOf("x", 0));
+console.log(s.indexOf("abc"), s.indexOf("abc", 0));
+`,
+  },
   {
     name: ".split(sep, limit) — truncating limit, limit 0, limit past the end, char split",
     code: `

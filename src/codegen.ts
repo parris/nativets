@@ -232,6 +232,7 @@ const DECLARES = [
   "declare ptr @js_str_pad_start(ptr, double, ptr)",
   "declare i32 @js_str_includes(ptr, ptr)",
   "declare double @js_str_index_of(ptr, ptr)",
+  "declare double @js_str_index_of_from(ptr, ptr, double)",
   // string reference counting (value-semantics strings; rc side-table in the runtime)
   "declare ptr @nt_str_retain(ptr)",
   "declare void @nt_str_release(ptr)",
@@ -2270,12 +2271,19 @@ class FnGen {
         const elseLbl = this.label("ternelse");
         const endLbl = this.label("ternend");
         this.terminate(`br i1 ${cond}, label %${thenLbl}, label %${elseLbl}`);
+        // COERCE each arm into the ternary's own type. The checker's `?:` join is a
+        // union (`b ? tag : undefined` is `?Ustring`), so an arm's value is not always
+        // already in the result's representation — the `undefined` arm is an i64 zero
+        // where the slot wants a [tag,value] box. Storing it raw emitted
+        // `store ptr 0, ptr %s1`, which clang rejects outright ("integer constant must
+        // have integer type"): the diagnostic contract failing, not a miscompile, but
+        // in the same family as the try/finally return slot that never coerced.
         this.to(this.block(thenLbl));
-        const c = this.genExpr(e.consequent);
+        const c = this.coerce(this.genExpr(e.consequent), ty);
         this.emit(`store ${llvmTy(ty)} ${c.v}, ptr ${slot}`);
         this.terminate(`br label %${endLbl}`);
         this.to(this.block(elseLbl));
-        const a = this.genExpr(e.alternate);
+        const a = this.coerce(this.genExpr(e.alternate), ty);
         this.emit(`store ${llvmTy(ty)} ${a.v}, ptr ${slot}`);
         this.terminate(`br label %${endLbl}`);
         this.to(this.block(endLbl));
@@ -3731,8 +3739,12 @@ class FnGen {
         return { v: t, ty: "boolean" };
       }
       case "indexOf": {
+        // The optional fromIndex takes a DIFFERENT entry point rather than defaulting to
+        // NaN through one: the 1-arg call stays exactly the instruction it always was,
+        // so no existing `.ll` (or IR snapshot) moves.
         const t = this.fresh();
-        this.emit(`${t} = call double @js_str_index_of(ptr ${recv.v}, ptr ${a[0]!.v})`);
+        if (a[1]) this.emit(`${t} = call double @js_str_index_of_from(ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1].v})`);
+        else this.emit(`${t} = call double @js_str_index_of(ptr ${recv.v}, ptr ${a[0]!.v})`);
         return { v: t, ty: "number" };
       }
       case "split": // optional 2nd arg = limit (NaN when omitted)

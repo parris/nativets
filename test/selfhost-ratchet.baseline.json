@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "5f25d03"
+    "rev": "1d08c02"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "e2fccc5970a145a9",
+      "sha256": "73bbc02d5ae30f30",
       "standalone": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over number is not supported yet at L:C"
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over number is not supported yet at L:C"
       }
     },
     "checker.ts": {
-      "sha256": "a4ae437077765c5f",
+      "sha256": "bf6e331ee2e28701",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over number is not supported yet at L:C"
       }
     },
     "cli.ts": {
@@ -44,7 +44,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "1b703350be734dfd",
+      "sha256": "27809b1f6ec9ceb1",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -52,8 +52,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over number is not supported yet at L:C"
       }
     },
     "coverage-preprocess.ts": {
@@ -79,8 +79,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over number is not supported yet at L:C"
       }
     },
     "diagnostics.ts": {
@@ -106,8 +106,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over number is not supported yet at L:C"
       }
     },
     "lexer.ts": {
@@ -124,7 +124,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "dc81973db7b27170",
+      "sha256": "727be4fa96bcfea1",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -132,8 +132,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over number is not supported yet at L:C"
       }
     },
     "ownership.ts": {
@@ -146,8 +146,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over number is not supported yet at L:C"
       }
     },
     "parser.ts": {
@@ -159,8 +159,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
+        "code": "NT1011",
+        "message": "[NT1011] for-of over number is not supported yet at L:C"
       }
     }
   }

@@ -2038,6 +2038,110 @@ strings are UTF-8 **bytes**, so `" x".length` is 3 here and 2 in node), not the
 test262 asserts the trimmed **value**; so does this now. The trimmed bytes were node-exact all
 along.
 
+### Re-measured after the TERNARY JOIN — NT2001 falls from nine modules to one, and the wall behind it is a DIFFERENT KIND of thing
+
+`src/ast.ts:244` — `return isIdentifier(tag) ? tag : undefined;` in `classTag`, whose declared
+return type is `string | undefined` — was the first blocker for **nine of the twelve** modules
+through the whole-program link. The verdict was **compiler, not source**: TypeScript's rule is that
+a conditional expression has the UNION of its branch types, nativets has represented that union
+since A2 (`?Ustring`, the two-slot [tag,value] box), and what was missing was only the JOIN, which
+was type IDENTITY (`if (a !== b) throw`). The source is ordinary TypeScript and stays as written.
+
+The join is deliberately narrow: a present arm unifies with a NULLISH LITERAL arm
+(`undefined`/`null`) and nothing else. `T` joined with `?U T` is a legal TypeScript union too and
+stays **refused** — that pair is exactly what `thisNarrowHint` detects, and it carries the
+"narrowing does not reach a field of \`this\`" diagnostic; joining it would replace a targeted,
+actionable refusal with a return-type mismatch three lines later. Codegen's `ConditionalExpr` also
+had to start COERCING its arms: it stored them raw, which for an `undefined` arm emitted
+`store ptr 0, ptr %s1` — clang rejects that outright, the same diagnostic-contract failure family
+as the try/finally return slot that never coerced.
+
+**Then the eight dependents were walked through six more blockers behind it, one re-measurement at
+a time. Only TWO of the seven were compiler gaps; five were the source.** That ratio is the finding:
+
+| # | blocker | verdict |
+|---|---|---|
+| 1 | `NT2001` the `?:` join | **compiler** — the join now widens (test/ternary-nullable.test.ts) |
+| 2 | `NT1001` `.find(…)?.ty` on an object array | source — an INDEX search; the aliasing refusal is by design |
+| 3 | `NT1606` `values.add(f.ty)` discarded | source — `values = values.add(…)`; `Set` is persistent |
+| 4 | `NT1003` `.map(widenLiteralTys)` | source — an inline arrow; point-free needs a function VALUE |
+| 5 | `NT2001` `.indexOf(x, from)` | **compiler** — the 2-argument form did not exist |
+| 6 | `NT1606` a `Map` OUT-PARAMETER (`unifyTypeParams`) | source — RETURN the bindings; a persistent Map cannot be an accumulator argument |
+| 7 | `NT2001` a poisoned narrowing | **compiler** — see the pre-existing bug below |
+
+| Module | Before | After |
+|---|---|---|
+| `ast.ts` | `NT2001` — the ternary at 244:22, own | **`NT1011`** — `for-of` over `unknown` at 669, own |
+| `parser.ts`, `checker.ts`, `codegen.ts`, `coverage.ts`, `ownership.ts`, `driver.ts`, `modules.ts` | `NT2001` — ast.ts's, linked | **`NT1011`** — ast.ts's, linked |
+| `lexer.ts`, `cli.ts`, `coverage-preprocess.ts` | — | **unchanged** |
+| `diagnostics.ts` | rung 3 | **rung 3**, IR byte-identical |
+
+Tree-wide, `NT2001` goes from **nine modules to one**: `cli.ts`, whose `process.stdout` never
+depended on any of this. Stage-1 remains separable from the grind.
+
+**The wall it stops at is not another gap, and the next lane should size it before starting.**
+`src/ast.ts` holds THREE REFLECTIVE walkers over `unknown` — `mapTypesDeep`, the static-field
+rewriter, and the declared-name collector — written with `Array.isArray(n)`, `n as Record<string,
+unknown>`, `Object.keys(o)` and `o[k] = …` over arbitrary AST nodes. Probed one deeper than the
+recorded blocker: behind the `for-of` is `Object.keys expects an object`. That is either a dynamic
+`unknown`/`Dyn` object model in the language, or three exhaustive TYPED traversals of the 44 AST
+node kinds in the source. It is a design decision, not a burn-down item, and it is the first entry
+in this document's frontier tables that is.
+
+**A SECOND PRE-EXISTING BUG, in the module linker, and it is why the attribution table kept
+lying.** `ModuleGen.expr` (src/modules.ts) had no case for `NonNullExpr` — the `!` non-null
+assertion — nor for `InExpr`, so both fell through to the LITERAL default and **nothing under a
+`!` was ever alpha-renamed in a non-entry module**. Correct TypeScript that node runs:
+
+```ts
+// tags.ts
+export const table: string[] = ["p", "q"];
+export function fields(t: string): string[] { return [t + "!"]; }
+export function firsts(xs: string[]): string[] { return xs.map((m) => fields(m)[0]!); }
+// main.ts
+import { firsts } from "./tags.ts";   // NT1003: call to 'fields' — unknown callee
+```
+
+`'table' is not defined` for the const, `NT1003 unknown callee` for the call. It was never
+arrow-specific. Found at `src/ast.ts:404` (`unionTagValues`), and it is what made seven modules
+report an `ast.ts` blocker they did not own. Fixed, with the `default:` arm replaced by an
+explicit list of the childless literal kinds plus a `never` binding — so a new `Expr` kind is now
+a TYPE error in the renamer instead of a silently missed rename. Regression fixture:
+`test/modules/nonnull/`.
+
+**THE PRE-EXISTING BUG THIS LANE FOUND, and it is the one with the widest blast radius.**
+`Checker.closureAssigned` is the program-wide set of names assigned inside some function or arrow
+body; a name in it is **never narrowed anywhere**, which is TypeScript's rule for a CAPTURED
+binding (a closure may run after the proof). The set is keyed by bare NAME, and it took *every*
+assignment inside *every* function body — including assignments to bindings that function
+**declares itself**. Eight lines, and node runs them:
+
+```ts
+function use(s: string): number { return s.length; }
+function f(xs: string[]): number {
+  const a = xs.at(0);
+  if (a !== undefined) return use(a);   // NT2001: 'use' arg 0 expects string, got ?Ustring
+  return -1;
+}
+function other(): number { let a = 0; a = a + 1; return a; }
+console.log(f(["hi"]), other());
+```
+
+`other`'s private `a` makes `a` unnarrowable in `f`. It is an over-REFUSAL, never a wrong answer,
+which is why it survived — the failure mode is a diagnostic on correct code, and it gets rarer the
+shorter your program is. On `src/` it is everywhere: `let a = 0` in **`src/lexer.ts`**'s
+`pragmaName` was on its own enough to unnarrow `a` in **`src/ast.ts`**'s `unifyTypeParams`, two
+modules away, and that single collision was blocker #7 above. Fixed: an inner function's
+assignment counts only if it can actually reach an outer binding, i.e. the name is not one of that
+function's parameters or its body's top-level declarations. Tests in `test/narrowing.test.ts`.
+
+**Half of it is still open and is pinned as a refusal rather than left as a surprise.** The
+subtraction covers parameters and TOP-LEVEL body declarations only — exact, because a name declared
+there cannot be reached from outside by any assignment anywhere in that function. A `let a` in an
+inner BLOCK (a `switch` case, say — which is literally `src/checker.ts:2207`) is *not* subtracted
+and still poisons the name program-wide. Closing that means resolving each assignment against a
+real scope chain instead of matching names, which is a bigger change than this one.
+
 ## Milestones
 
 - **SH0 — Gradient first (highest-value, do first).** Teach `coverage` (and a throwaway

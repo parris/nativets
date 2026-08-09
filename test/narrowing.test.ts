@@ -853,3 +853,109 @@ if (p !== undefined && q !== undefined) console.log(p === q, p !== q);
 console.log((p ?? -1) === (q ?? -1));`);
   });
 });
+
+/*
+ * A NAME'S NARROWING IS NOT POISONED BY AN UNRELATED FUNCTION'S OWN LOCAL.
+ *
+ * `Checker.closureAssigned` is the program-wide set of names assigned inside some
+ * function/arrow body — a name in it is never narrowed anywhere, which is
+ * TypeScript's rule for a CAPTURED binding (`narrowingPastLastAssignment.ts`): the
+ * closure may run after the narrowing was established.
+ *
+ * The set was keyed by bare NAME and took EVERY assignment inside every function
+ * body, including ones to bindings that function declares itself. A private
+ * `let a = 0` in one function therefore made `a` unnarrowable in every other
+ * function in the program — an over-refusal on code node runs, and one that gets
+ * likelier the bigger the program is. On the compiler's own source it was the first
+ * blocker for eight of the twelve modules: `let a = 0` in `src/lexer.ts`'s
+ * `pragmaName` unnarrowed `a` in `src/ast.ts`'s `unifyTypeParams`, two modules away.
+ *
+ * The rule now: an inner function's assignment counts only if it can actually reach
+ * an outer binding, i.e. the name is not one of that function's parameters or its
+ * body's top-level declarations.
+ */
+describe("closure-assignment poisoning is scoped to real captures", () => {
+  test("another function's own local does not block narrowing here", async () => {
+    await expectNode(`
+function use(s: string): number { return s.length; }
+function f(xs: string[]): number {
+  const a = xs.at(0);
+  if (a !== undefined) return use(a);
+  return -1;
+}
+function other(): number { let a = 0; a = a + 1; return a; }
+console.log(f(["hi"]), other());
+`);
+  });
+
+  test("...nor does another function's PARAMETER of the same name", async () => {
+    await expectNode(`
+function use(s: string): number { return s.length; }
+function f(xs: string[]): number {
+  const a = xs.at(0);
+  if (a !== undefined) return use(a);
+  return -1;
+}
+function other(a: number): number { a = a + 1; return a; }
+console.log(f(["hey"]), other(1));
+`);
+  });
+
+  test("...nor an ARROW's own local", async () => {
+    await expectNode(`
+function use(s: string): number { return s.length; }
+const bump = (): number => { let a = 0; a = a + 2; return a; };
+function f(xs: string[]): number {
+  const a = xs.at(0);
+  if (a !== undefined) return use(a);
+  return -1;
+}
+console.log(f(["abcd"]), bump());
+`);
+  });
+
+  /*
+   * ...and the rule it exists to enforce still holds: a genuine CAPTURE — an inner
+   * function assigning a binding it does NOT declare — is still refused. Note WHICH
+   * refusal arrives: a captured WRITE is `NT1031` in its own right (closures capture by
+   * value here), and that fires before the narrowing question is ever asked. So on this
+   * shape `closureAssigned` is a second line of defence rather than the only one — which
+   * is exactly why loosening it is safe, and why the test asserts the refusal that the
+   * user actually sees instead of one the compiler happens to reach first today.
+   */
+  test("REFUSED: a real captured assignment is still rejected", () => {
+    expectRejected(`
+function use(s: string): number { return s.length; }
+let a: string | undefined = "hi";
+const clear = (): void => { a = undefined; };
+if (a !== undefined) console.log(use(a));
+clear();
+`, "NT1031", "captured binding");
+  });
+
+  /*
+   * STILL OPEN, pinned so it is a known refusal rather than a surprise. The subtraction
+   * covers a function's parameters and its body's TOP-LEVEL declarations only. A `let a`
+   * declared in an inner BLOCK (here a `switch` case, which is exactly the shape at
+   * src/checker.ts:2207) is not subtracted, so it still poisons the name program-wide.
+   * Closing it means resolving the assignment against a real scope chain rather than
+   * matching names, which is a bigger change than this one and belongs on its own.
+   */
+  test("REFUSED, still: a block-scoped local in another function poisons the name", () => {
+    expectRejected(`
+function use(s: string): number { return s.length; }
+function f(xs: string[]): number {
+  const a = xs.at(0);
+  if (a !== undefined) return use(a);
+  return -1;
+}
+function other(k: number): number {
+  switch (k) {
+    case 1: { let a = 0; a = a + 1; return a; }
+    default: return 0;
+  }
+}
+console.log(f(["hi"]), other(1));
+`, "NT2001", "got ?Ustring");
+  });
+});
