@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "d7d89f8"
+    "rev": "2dca793"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "e066488149f05537",
+      "sha256": "b138686774c0ce5a",
       "standalone": {
         "stage": "parse",
         "code": "NT1030",
@@ -18,16 +18,16 @@
       }
     },
     "checker.ts": {
-      "sha256": "67510b6152c5af4f",
+      "sha256": "b7340245c72635e3",
       "standalone": {
         "stage": "parse",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'Scope' — its field 'parent' refers to itself (declared at line N) is not supported yet"
+        "code": "NT1023",
+        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
       },
       "linked": {
         "stage": "parse",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'Scope' — its field 'parent' refers to itself (declared at line N) is not supported yet"
+        "code": "NT1023",
+        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
       }
     },
     "cli.ts": {
@@ -44,7 +44,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "5a4c7f588669e2c6",
+      "sha256": "0a0ac00f9fdc4e23",
       "standalone": {
         "stage": "parse",
         "code": "NT1023",
@@ -124,7 +124,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "95003bb313d69ad1",
+      "sha256": "81aa9db531ce274b",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -137,7 +137,7 @@
       }
     },
     "ownership.ts": {
-      "sha256": "91db572239859e41",
+      "sha256": "748e858dfa8c391b",
       "standalone": {
         "stage": "check",
         "code": "NT1014",
@@ -145,12 +145,12 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'Scope' — its field 'parent' refers to itself (declared at line N) is not supported yet"
+        "code": "NT1023",
+        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
       }
     },
     "parser.ts": {
-      "sha256": "86312c9f76b2e771",
+      "sha256": "0a6f56ee133fdff6",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

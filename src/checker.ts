@@ -15,6 +15,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // Stage 47 (console.log of compound values): the handle-type predicates the
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
+import { isTypeRefTy, expandTypeRef, recTypeTable } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
 import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
 // The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
@@ -299,7 +300,7 @@ export function check(program: Program): CheckedProgram {
   const importedFrom = new Map<string, string>();
   for (const im of program.imports ?? [])
     for (const s of im.specs ?? []) if (!s.typeOnly) importedFrom.set(s.local, im.source);
-  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []), importedFrom);
+  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []), importedFrom, recTypeTable(program));
   const builtins = () => {
     const s = new Scope();
     for (const n of BUILTIN_NUMBERS) s.declare(n, "number", true);
@@ -551,7 +552,13 @@ class Checker {
      *  been linked. Empty after linking (the linker rewrites the bindings), so this only
      *  ever improves the diagnostic for a single-module check — it never accepts a call. */
     private importedFrom: Map<string, string> = new Map(),
+    /** Recursive-type shapes, the table a `@Name` back-edge resolves through (ast.ts).
+     *  Empty for every program with no recursive type, so nothing else changes. */
+    private recTypes: Map<string, Ty> = new Map(),
   ) {}
+
+  /** Unfold a nominal back-edge one level (`@N` -> its shape); identity on anything else. */
+  private unfold(t: Ty): Ty { return expandTypeRef(t, this.recTypes); }
 
   /**
    * Does class `tag` declare a `toJSON` METHOD? The parser desugars `class C { toJSON() {} }`
@@ -1202,8 +1209,24 @@ class Checker {
    * and every absent target field is optional (nullable). Extra source fields are
    * tolerated (a widening on assignment; excess-property linting is out of scope).
    */
-  private assignable(target: Ty, source: Ty): boolean {
+  private assignable(target: Ty, source: Ty, assumed?: Set<string>): boolean {
     if (target === source) return true;
+    // FOLD/UNFOLD. A `@N` and the shape it names are the SAME type, just written at
+    // different depths — a literal builds the unfolded spelling, an annotation carries the
+    // folded one — so unfold whichever side is a reference and compare again.
+    //
+    // The `assumed` set is what makes that terminate, and it is the standard coinductive
+    // rule for equirecursive types (Amadio-Cardelli): comparing `@N` against `@M` unfolds
+    // both, descends into their fields, and arrives back at `@N` vs `@M`. Assuming a pair
+    // while it is being proved turns that infinite regress into a fixed point. Sound
+    // because the assumption is only ever used to close a cycle it is itself inside.
+    if (isTypeRefTy(target) || isTypeRefTy(source)) {
+      const key = `${target}|${source}`;
+      const seen = assumed ?? new Set<string>();
+      if (seen.has(key)) return true;
+      seen.add(key);
+      return this.assignable(this.unfold(target), this.unfold(source), seen);
+    }
     // SH2: a union value IS one of its members' object blocks — there is no box — so
     // what flows in must have EXACTLY a member's layout. Deliberately identity, not the
     // structural rule below: a record that is merely structurally compatible with a
@@ -1224,14 +1247,14 @@ class Checker {
     if (isNullableTy(target)) {
       const which = nullishKind(target);
       if (source === which) return true;                 // undefined→?U / null→?N
-      if (isNullableTy(source)) return this.assignable(baseTy(target), baseTy(source));
-      return this.assignable(baseTy(target), source);    // a present value of the base type
+      if (isNullableTy(source)) return this.assignable(baseTy(target), baseTy(source), assumed);
+      return this.assignable(baseTy(target), source, assumed);    // a present value of the base type
     }
     if (isObjectTy(target) && isObjectTy(source)) {
       for (const tf of objectFields(target)) {
         const sf = fieldType(source, tf.key);
         if (sf === undefined) { if (!isNullableTy(tf.ty)) return false; continue; } // absent → must be optional
-        if (!this.assignable(tf.ty, sf)) return false;
+        if (!this.assignable(tf.ty, sf, assumed)) return false;
       }
       return true;
     }
@@ -1240,7 +1263,7 @@ class Checker {
     // optional field was refused — while the identical shape at the top level was fine.
     // Sound for the same reason the object arm is: acceptance is gated by `reshapable`,
     // so only a literal whose elements can be rebuilt in the target layout gets through.
-    if (isArrayTy(target) && isArrayTy(source)) return this.assignable(elemTy(target), elemTy(source));
+    if (isArrayTy(target) && isArrayTy(source)) return this.assignable(elemTy(target), elemTy(source), assumed);
     return false;
   }
 

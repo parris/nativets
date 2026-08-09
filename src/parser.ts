@@ -14,7 +14,7 @@ import {
   isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES,
   makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf,
-  resolveStaticFieldReads, collectBindingNames,
+  resolveStaticFieldReads, collectBindingNames, typeRefTy,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -170,6 +170,14 @@ class Parser {
   /** The `interface`/`type` name whose own body is being parsed — a reference to it from
    *  in there is RECURSIVE, which reordering cannot fix, so it is reported differently. */
   private declaringType: string | undefined;
+  /** Set by `resolveNamed` when the declaration being parsed referred to ITSELF, so the
+   *  shape it produced contains a `@Name` back-edge and has to be registered in
+   *  `recTypes`. Read and reset by whichever of parseTypeAlias/parseInterface set
+   *  `declaringType`. */
+  private declaringTypeIsRecursive = false;
+  /** Recursive declaration name -> its shape, the table `@Name` resolves through. Published
+   *  on the Program; empty (and so absent) for every non-recursive program. */
+  private recTypes = new Map<string, Ty>();
   /**
    * Type names `hoistTypeDecls` proved to be in a CYCLE, each mapped to the name it is
    * blocked on (itself, for a directly self-recursive type). Hoisting resolves a forward
@@ -368,6 +376,9 @@ class Parser {
         }
         const ty = sub.typeAliases.get(name);
         if (ty !== undefined) this.typeAliases.set(name, ty);
+        // A shape with a `@Name` back-edge is meaningless without the table that resolves
+        // it, and the sub-parser is where both were produced. Carry it back with the alias.
+        for (const [n, shape] of sub.recTypes) this.recTypes.set(n, shape);
       }
       if (deferred.length < pending.length) { pending = deferred; continue; }
       // No progress. Everything left is stuck — but on WHAT matters: stuck on another
@@ -405,6 +416,17 @@ class Parser {
    *  number, matching prior behavior). */
   private resolveNamed(id: string): Ty {
     if (this.inTypeParamScope(id)) return typeParamTy(id);
+    // BEFORE the alias lookup, deliberately. Inside its own body a name is always the
+    // back-edge, and an alias may well be registered for it already: type hoisting resolves
+    // every top-level declaration in a sub-parser and the main parse then re-parses the
+    // same declaration with that result in scope. Looking the alias up first made the
+    // second parse UNFOLD one level (`?U@N` became `?U{v:number,next:?U@N}`), so the same
+    // type had two spellings and `===` — which is the whole point of a string encoding —
+    // stopped holding between an annotation and a literal.
+    if (id === this.declaringType) {
+      this.declaringTypeIsRecursive = true;
+      return typeRefTy(id);
+    }
     const alias = this.typeAliases.get(id);
     if (alias) return alias;
     if (id === "Uint8Array" || id === "TextEncoder" || id === "TextDecoder") return id as Ty; // stdlib batch-2 bytes types
@@ -431,7 +453,11 @@ class Parser {
       // the other cannot be fixed by reordering at all. Saying "declare it earlier" for a
       // recursive type would be the same kind of misdirection this diagnostic exists to
       // end, so each carries its own hint rather than the catalog's shared one.
-      const through = id === this.declaringType ? id : this.cyclicTypes.get(id);
+      // SELF-recursion never reaches here — it is the back-edge, handled at the top of this
+      // function. What is left is a MUTUAL cycle, still refused: resolving one member needs
+      // the others' shapes, which do not exist yet. That is Lane C, and until it lands the
+      // two cases must stay told apart.
+      const through = this.cyclicTypes.get(id);
       if (through !== undefined) {
         throw nyi(
           NYI.FORWARD_TYPE,
@@ -510,6 +536,8 @@ class Parser {
     // attribute, so an ordinary program's Program is byte-identical to what it was.
     if (this.mutableClasses.size) program.mutableClasses = [...this.mutableClasses];
     if (this.mutableRecords.size) program.mutableRecords = [...this.mutableRecords];
+    // Recursive-type shapes (`@Name` back-edges). Absent unless the source declared one.
+    if (this.recTypes.size) program.recTypes = [...this.recTypes];
     // Host FFI (SH4) — attached only when the source imported a `node:` builtin.
     if (this.hostImports.size) program.hostImports = [...this.hostImports];
     if (this.collectTypes) for (const [k, v] of this.typeAliases) this.collectTypes.set(k, v);
@@ -927,12 +955,15 @@ class Parser {
     this.eat("=");
     // Stored RAW (literal types intact) so `type Square = { kind: "square" }` can later
     // be a union member; every USE goes through `parseType`, which widens.
-    const outer = this.declaringType;
+    const outer = this.declaringType, outerRec = this.declaringTypeIsRecursive;
     this.declaringType = name; // a reference to `name` in here is recursion, not ordering
+    this.declaringTypeIsRecursive = false;
     const rhs = this.parseTypeInner();
+    const recursive = this.declaringTypeIsRecursive;
     this.declaringType = outer;
+    this.declaringTypeIsRecursive = outerRec;
     if (this.at(";")) this.eat(";");
-    this.typeAliases.set(name, this.applyRecordAttrs(dec, name, rhs, "type"));
+    this.typeAliases.set(name, this.recordTypeDecl(name, this.applyRecordAttrs(dec, name, rhs, "type"), recursive));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
   }
 
@@ -983,12 +1014,40 @@ class Parser {
     const name = this.expectIdent();
     if (this.at("<")) this.skipGenerics();
     if (this.at("extends")) { this.eat("extends"); this.parseType(); while (this.at(",")) { this.eat(","); this.parseType(); } }
-    const outer = this.declaringType;
+    const outer = this.declaringType, outerRec = this.declaringTypeIsRecursive;
     this.declaringType = name; // see parseTypeAlias: self-reference here is recursion
+    this.declaringTypeIsRecursive = false;
     const shape = this.parseObjectType();
+    const recursive = this.declaringTypeIsRecursive;
     this.declaringType = outer;
-    this.typeAliases.set(name, this.applyRecordAttrs(dec, name, shape, "interface"));
+    this.declaringTypeIsRecursive = outerRec;
+    this.typeAliases.set(name, this.recordTypeDecl(name, this.applyRecordAttrs(dec, name, shape, "interface"), recursive));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
+  }
+
+  /**
+   * The tail every recursive declaration shares: a shape containing a `@Name` back-edge is
+   * only meaningful next to the table that resolves it, so the two are produced together.
+   * `recTypes` maps the name to the FINAL shape — after `applyRecordAttrs`, since a
+   * `@@mutable` record is tagged and `@N` must resolve to what `N` actually means.
+   *
+   * A recursive shape must be an OBJECT. Every other carrier of a back-edge (`type L = L[]`,
+   * `type F = () => F`) has no slot layout to give the reference a pointer identity, so it
+   * is refused rather than encoded into something codegen would have to guess at.
+   */
+  private recordTypeDecl(name: string, shape: Ty, recursive: boolean): Ty {
+    if (!recursive) return shape;
+    if (!isObjectTy(shape)) {
+      throw nyi(
+        NYI.FORWARD_TYPE,
+        `recursive type '${name}' — it refers to itself, and its shape is not an object type (${shape})`,
+        "a recursive type is represented as an object whose recursive field holds a POINTER back; " +
+        "a self-referential array/function/scalar alias has no such field. Wrap it in an object — " +
+        "`interface " + name + " { items: " + name + "[] }` — see docs/divergences.md",
+      );
+    }
+    this.recTypes.set(name, shape);
+    return shape;
   }
 
   // ---- modules (SH1) --------------------------------------------------------
@@ -1781,15 +1840,22 @@ class Parser {
     // Only a FIELD. A method may still name its own class in a signature (`bump(): Counter`)
     // — that is what the self marker exists for, and it is not recursion: the instance shape
     // does not contain itself, the method merely mentions it.
+    // A FIELD naming its own class is genuine recursion, and it is REPRESENTABLE: the
+    // marker becomes the nominal back-edge `@Name` (ast.ts), exactly as a self-recursive
+    // `interface` does. Routed through the SAME encoding deliberately — `class Scope {
+    // parent: Scope | null }` and `interface Scope { parent: Scope | null }` are the same
+    // shape and must not acquire two representations.
+    //
+    // A method SIGNATURE naming the class keeps the old substitution (`unself`, below): the
+    // instance shape does not contain itself there, so there is no cycle to break.
+    let selfRecursive = false;
     for (const f of fields) {
       if (!f.ty.includes(selfMarker)) continue;
-      throw nyi(
-        NYI.FORWARD_TYPE,
-        `recursive type '${name}' — its field '${f.key}' refers to itself (declared at line ${classTok.line})`,
-        RECURSIVE_TYPE_HINT,
-      );
+      selfRecursive = true;
+      f.ty = f.ty.split(selfMarker).join(typeRefTy(name)) as Ty;
     }
     const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
+    if (selfRecursive) this.recTypes.set(name, objTy);
     this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
     const emitted: FuncDecl[] = [];

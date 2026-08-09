@@ -19,6 +19,7 @@ import { freshArray, RETAINS_RECEIVER } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
+import { isTypeRefTy, expandTypeRef, recTypeTable } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
@@ -101,6 +102,11 @@ function mentions(node: unknown, name: string): boolean {
  * checker and the ownership pass need the same judgments, and copies could drift. */
 
 function llvmTy(ty: Ty): string {
+  // A nominal recursive reference IS the object block it names — a pointer, like every
+  // other heap value. Placed with the other `ptr` arms rather than left to the `default`,
+  // which answers `i8`: a `@N` truncated to one byte at every parameter, return and alloca
+  // is pointer corruption with no diagnostic.
+  if (isTypeRefTy(ty)) return "ptr";
   if (isUnionTy(ty)) return "ptr"; // SH2: the member object block itself — there is no box
   if (isGeneralUnionTy(ty)) return "ptr"; // a general union IS a box: [tag, value], tag = member index
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) return "ptr"; // nullable = ptr to [tag,val]; Map/Set = NtMap*; Uint8Array = NtBytes*; URL/URLSearchParams = the URL/query TEXT
@@ -124,7 +130,7 @@ function llvmTy(ty: Ty): string {
 function userSym(name: string): string { return name === "main" ? "nt_user_main" : name; }
 
 function defaultZero(ty: Ty): string {
-  if (isUnionTy(ty) || isGeneralUnionTy(ty)) return "null";
+  if (isTypeRefTy(ty) || isUnionTy(ty) || isGeneralUnionTy(ty)) return "null";
   if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "null";
   switch (ty) {
     case "number": return "0x0000000000000000";
@@ -475,6 +481,9 @@ class ModuleGen {
   private arrowCounter = 0;
   /** Module-level bindings promoted to LLVM globals (SH1): the ones a function body
    *  reads. `main` uses the global as their storage; every other frame loads from it. */
+  /** Recursive-type shapes, the table a `@Name` back-edge resolves through (ast.ts).
+   *  Read through `FnGen.unfold`; empty unless the program declared a recursive type. */
+  recTypes = new Map<string, Ty>();
   constructor(readonly functions: Map<string, Sig>, readonly globals: Map<string, Ty> = new Map()) {}
 
   /** `@nt.g.<name>` — the storage symbol of a promoted module-level binding. */
@@ -593,6 +602,7 @@ class ModuleGen {
   build(program: Program): string {
     this.usesActors = scanUsesActors(program);
     this.hostImports = new Set(program.hostImports ?? []);
+    this.recTypes = recTypeTable(program); // `@Name` back-edges (empty for most programs)
     const fns: string[] = [];
     for (const s of program.body) {
       if (s.kind === "FuncDecl") fns.push(new FnGen(this).genFunction(s));
@@ -677,6 +687,10 @@ class FnGen {
   private globalVars = new Set<string>();
 
   constructor(private mod: ModuleGen) {}
+
+  /** Unfold a nominal back-edge one level (`@N` -> its shape); identity on anything else.
+   *  Applied wherever a type's SHAPE is needed rather than its identity. */
+  private unfold(t: Ty): Ty { return expandTypeRef(t, this.mod.recTypes); }
 
   /**
    * The storage address of a variable. Normally its frame alloca `%x.addr`; for a
@@ -825,7 +839,7 @@ class FnGen {
       this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       // Move-aware RAII: objects free via nt_obj_free, arrays via nt_arr_free.
       const dropTy = this.varTypes.get(n) ?? "number";
-      const free = isObjectTy(dropTy) || isUnionTy(dropTy) ? "nt_obj_free" : "nt_arr_free"; // a union IS an object block (SH2)
+      const free = isObjectTy(dropTy) || isUnionTy(dropTy) || isTypeRefTy(dropTy) ? "nt_obj_free" : "nt_arr_free"; // a union IS an object block (SH2); so is a recursive node
       this.emit(`call void @${free}(ptr ${p})`);
     }
   }
@@ -1577,7 +1591,7 @@ class FnGen {
     if (val.ty === "string") this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
     const t = this.fresh();
     if (val.ty === "number" || isDateTy(val.ty)) this.emit(`${t} = bitcast double ${val.v} to i64`); // a Date IS a double (batch 3)
-    else if (isUnionTy(val.ty) || isGeneralUnionTy(val.ty) || val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
+    else if (isTypeRefTy(val.ty) || isUnionTy(val.ty) || isGeneralUnionTy(val.ty) || val.ty === "string" || isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isNullableTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || (isBytesRefTy(val.ty) || isFetchRefTy(val.ty)) || isUrlRefTy(val.ty)) this.emit(`${t} = ptrtoint ptr ${val.v} to i64`);
     else if (val.ty === "boolean") this.emit(`${t} = zext i1 ${val.v} to i64`);
     else this.emit(`${t} = zext i8 ${val.v} to i64`);
     return t;
@@ -1586,7 +1600,7 @@ class FnGen {
   private fromSlot(slot: string, ty: Ty): string {
     const t = this.fresh();
     if (ty === "number" || isDateTy(ty)) this.emit(`${t} = bitcast i64 ${slot} to double`); // a Date IS a double (batch 3)
-    else if (isUnionTy(ty) || isGeneralUnionTy(ty) || ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
+    else if (isTypeRefTy(ty) || isUnionTy(ty) || isGeneralUnionTy(ty) || ty === "string" || isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty)) || isUrlRefTy(ty)) this.emit(`${t} = inttoptr i64 ${slot} to ptr`);
     else if (ty === "boolean") this.emit(`${t} = trunc i64 ${slot} to i1`);
     else this.emit(`${t} = trunc i64 ${slot} to i8`);
     return t;
@@ -2946,7 +2960,11 @@ class FnGen {
     // A COMPOUND value (object / class instance / array / Map / Set) is rendered by
     // node's util.inspect. Before Stage 47 this fell through to `js_print_str` on the
     // heap POINTER — a silent wrong answer (usually a bare newline).
-    if (isObjectTy(val.ty) || isArrayTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || isBytesTy(val.ty)) {
+    // A recursive node is a compound too. Left out, it reached the `js_print_str` tail below
+    // and printed the raw heap pointer as a C string — exactly the "usually a bare newline"
+    // silent wrong answer the comment above records Stage 47 fixing for objects, reproduced
+    // by a new encoding the arm did not name.
+    if (isObjectTy(val.ty) || isArrayTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) || isBytesTy(val.ty) || isTypeRefTy(val.ty)) {
       this.emit(`call void @${P}_str(ptr ${this.genInspect(val, 0, 0).v})`);
       return;
     }
@@ -3069,6 +3087,10 @@ class FnGen {
     if (isDateTy(ty)) { const t = this.fresh(); this.emit(`${t} = call ptr @nt_date_inspect(double ${val.v})`); return { v: t, ty: "string" }; }
     if (ty === "Dyn") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_dyn_inspect(ptr ${val.v}, double ${llvmDouble(indent)})`); return { v: t, ty: "string" }; }
     if (isNullableTy(ty)) return this.genInspectNullable(val.v, baseTy(ty), depth, indent);
+    // A recursive node renders as the object it names. Safe against a cycle for the same
+    // reason nesting is: `genInspectObject` cuts at INSPECT_DEPTH, which is node's own
+    // depth-2 `[Object]` rule, so the unfolding is bounded by the printer, not by the type.
+    if (isTypeRefTy(ty)) return this.genInspect({ v: val.v, ty: this.unfold(ty) }, depth, indent);
     if (isObjectTy(ty)) return this.genInspectObject(val, depth, indent);
     if (isBytesTy(ty)) return this.genInspectBytes(val, depth, indent);
     if (isArrayTy(ty)) return this.genInspectArray(val, depth, indent);
@@ -3298,7 +3320,11 @@ class FnGen {
   }
 
   /** Print a nullable box: tag 0 → `undefined`, 1 → `null`, else unbox and print the base value. */
-  private emitPrintNullable(ptr: string, base: Ty, stream: "out" | "err" = "out"): void {
+  private emitPrintNullable(ptr: string, rawBase: Ty, stream: "out" | "err" = "out"): void {
+    // Unfold here rather than at the recursive `emitPrint` below: `base` is also what
+    // `fromSlot` is given, and a `@N` there packs as a pointer only because `fromSlot`
+    // knows the encoding — keeping the two in step is easier if the base is a real shape.
+    const base = this.unfold(rawBase);
     const P = stream === "err" ? "js_eprint" : "js_print";
     const tag = this.nullTag(ptr);
     const isU = this.fresh(); this.emit(`${isU} = icmp eq i64 ${tag}, 0`);
