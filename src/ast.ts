@@ -659,83 +659,6 @@ export function unifyTypeParams(pattern: Ty, actual: Ty, out: Map<string, Ty>): 
   return out;
 }
 
-/* AST fields that hold a `Ty` (or a list of them). Deep rewrites touch exactly these —
- * never a `name`/`property`/string-literal `value` — so a program that happens to contain
- * the text "#T" in a string is untouched. */
-const TY_FIELDS = new Set(["annot", "ty", "returnAnnot", "retAnnot", "retTy", "catchTy", "elemTy"]);
-const TY_LIST_FIELDS = new Set(["typeArgs", "paramTys"]);
-/** Deep-rewrite every type-bearing field of an AST subtree, in place. */
-export function mapTypesDeep(n: unknown, f: (t: Ty) => Ty): void {
-  if (Array.isArray(n)) { for (const x of n) mapTypesDeep(x, f); return; }
-  if (!n || typeof n !== "object") return;
-  const o = n as Record<string, unknown>;
-  for (const k of Object.keys(o)) {
-    const v = o[k];
-    if (typeof v === "string") { if (TY_FIELDS.has(k)) o[k] = f(v as Ty); }
-    else if (Array.isArray(v) && TY_LIST_FIELDS.has(k)) o[k] = v.map((t) => (typeof t === "string" ? f(t as Ty) : t));
-    else mapTypesDeep(v, f);
-  }
-}
-
-/**
- * Rewrite every read of a STATIC field — `C.f` on a bare class name — into the plain
- * Identifier `C.f`, the module-level `const` the parser lowered it to.
- *
- * This runs at the END of parsing, before any analysis, and that is the point: a static
- * field is not a slot on a receiver, it is a module binding, so every pass that reasons
- * about NAMES (globals promotion, closure capture, ownership) has to see an identifier or
- * it does not see the read at all. No source identifier can contain a `.`, so the dotted
- * name is unambiguous. Reflective, like `mapTypesDeep` — a rewrite that must not miss a
- * position is safer written once over the object graph than per node kind.
- *
- * A `?.` link is left alone (rewriting it would silently drop the optional; a class name
- * is never nullish, so the read is rejected instead).
- */
-export function resolveStaticFieldReads(n: unknown, names: Set<string>, onAssign?: (name: string) => never): void {
-  if (!n || typeof n !== "object") return;
-  const o = n as Record<string, unknown>;
-  for (const k of Object.keys(o)) {
-    const v = o[k];
-    if (!v || typeof v !== "object") continue;
-    // One flat view of the two node shapes this pass cares about. Deliberately NOT
-    // `Partial<MemberExpr> & {…}`: an intersection type is outside the subset nativets
-    // compiles, and this file is part of the compiler's own source (docs/self-hosting.md).
-    const e = v as { kind?: string; optional?: boolean; property?: string; field?: string; object?: { kind?: string; name?: string } };
-    const head = e.object?.kind === "Identifier" ? e.object.name : undefined;
-    if (head === undefined) { resolveStaticFieldReads(v, names, onAssign); continue; }
-    // `C.f = v` — a WRITE to a static field. Not a read, so never rewritten; the caller
-    // refuses it by name (a static field lowers to a `const`).
-    if (onAssign && e.kind === "FieldAssign" && names.has(`${head}.${e.field}`)) onAssign(`${head}.${e.field}`);
-    if (e.kind === "MemberExpr" && !e.optional && names.has(`${head}.${e.property}`)) {
-      o[k] = { kind: "Identifier", name: `${head}.${e.property}` } as Identifier;
-      continue;
-    }
-    resolveStaticFieldReads(v, names, onAssign);
-  }
-}
-
-/**
- * Every name the program BINDS — declarations, function/arrow parameters, loop and catch
- * bindings. Used to protect the static-field rewrite above: that rewrite is name-based and
- * has no scope, so a binding that shadows a class name would silently redirect `C.f` to
- * the class's static instead of the shadowing value. Collecting the binders lets the
- * parser refuse that program outright rather than answer it wrongly.
- */
-export function collectBindingNames(n: unknown, out: Set<string>): void {
-  if (!n || typeof n !== "object") return;
-  const o = n as Record<string, unknown>; // no intersection type: see `resolveStaticFieldReads`
-  const params = o.params as { name?: string }[] | undefined;
-  if (params && Array.isArray(params)) for (const p of params) if (p?.name) out.add(p.name);
-  switch (o.kind as string | undefined) {
-    case "VarDecl": for (const d of o.decls as { name: string }[]) out.add(d.name); break;
-    case "FuncDecl": out.add(o.name as string); break;
-    case "ForOfStmt": out.add(o.name as string); if (o.name2) out.add(o.name2 as string); break;
-    case "ForInStmt": out.add(o.name as string); break;
-    case "TryStmt": if (o.param) out.add(o.param as string); break;
-  }
-  for (const k of Object.keys(o)) collectBindingNames(o[k], out);
-}
-
 export type Expr =
   | NumberLiteral
   | BooleanLiteral
@@ -968,7 +891,14 @@ export interface SatisfiesExpr { kind: "SatisfiesExpr"; expr: Expr; ty: Ty; }
  * value that is not nullable it IS the identity. `loc` drives the runtime panic when the
  * assertion is false — see the codegen comment.
  */
-export interface NonNullExpr { kind: "NonNullExpr"; expr: Expr; loc?: Loc; }
+/* `ty` was MISSING from this interface while four modules already used it. The checker
+ * writes it through an `(e as { ty?: Ty })` cast like every other expression's, codegen
+ * and the ownership pass read it back the same way, and `tsc` never said a word — see the
+ * note in `walkExprChildren` about why the project's type errors were invisible. Declaring
+ * it changes no behaviour (the field was always there at runtime, on 82 nodes in this
+ * repo's own corpus); what it changes is that the typed AST walk can now SEE it, which the
+ * reflective walk it replaces always could. */
+export interface NonNullExpr { kind: "NonNullExpr"; expr: Expr; loc?: Loc; ty?: Ty; }
 
 /**
  * `x instanceof C` — decided at COMPILE TIME from the static type of `x`.
@@ -1449,4 +1379,284 @@ export function exprText(e: Expr): string | undefined {
     return c === undefined ? undefined : c + (e.args.length === 0 ? "()" : "(...)");
   }
   return undefined;
+}
+
+/* ---------------------------------------------------------------------------
+ * TYPED AST TRAVERSAL — one exhaustive walker, three passes driven by it
+ *
+ * The three passes below (`mapTypesDeep`, `resolveStaticFieldReads`,
+ * `collectBindingNames`) used to be REFLECTIVE: `n: unknown`, `Array.isArray(n)`, a cast
+ * to `Record<string, unknown>`, and a walk over `Object.keys(o)`. Nine reflection sites
+ * over an AST with 48 node kinds. Two things were wrong with that, and only one of them
+ * is about self-hosting.
+ *
+ *   1. It was the last STRUCTURAL blocker for NINE of the twelve compiler modules —
+ *      `NT1011`, `for-of` over `unknown`, with `Object.keys expects an object` behind it.
+ *      Every module that imports this one — which is every module — inherited it through
+ *      the link, so nine modules reported a blocker that lived in these seventy lines.
+ *   2. A reflective walk cannot be told that it MISSED something. It visits whichever
+ *      keys happen to be present, so a node kind nobody thought about is traversed as an
+ *      anonymous bag of fields: the per-node decision (does this bind a name? does this
+ *      field hold a `Ty`?) that nobody wrote simply does not happen, silently. That is
+ *      the same hazard that let `ModuleGen.expr` fall through on `NonNullExpr`, here at
+ *      48× the surface.
+ *
+ * So the recursion is factored ONCE, into `walkExprChildren`/`walkStmtChildren`, and each
+ * of those ends in a `default:` arm that binds `never`: a kind added to `Expr` or `Stmt`
+ * without a case here is a COMPILE-TIME type error, not a silently skipped subtree. The
+ * three passes supply only their own per-node work.
+ *
+ * WHY THE `Ty` REWRITE LIVES IN THE SHARED WALKER instead of in `mapTypesDeep`'s own
+ * per-node body. The reflective walk visited a node's `Ty`-bearing fields INTERLEAVED with
+ * its children, in `Object.keys` (i.e. construction) order: `Param.annot` before
+ * `Param.default`, `Declarator.annot` before `Declarator.init`, `FuncDecl.returnAnnot`
+ * between `params` and `body`, `ForOfStmt.annot` before `iterable` and `elemTy` after
+ * `body`. Hoisting them all before or all after the children would REORDER the calls to
+ * `f`, and `f` is allowed to throw — the checker's belt-and-braces "`#T` survived
+ * monomorphization" guard does — so the order is observable in a diagnostic. The walker
+ * therefore takes the `Ty` rewrite too and applies it exactly where the old key order did; the
+ * two passes that do not rewrite types pass `KEEP_TY`.
+ *
+ * The fields that hold a `Ty` are exactly the old `TY_FIELDS`/`TY_LIST_FIELDS` tables,
+ * now spelled as the field accesses themselves: `annot`, `ty`, `returnAnnot`, `retAnnot`,
+ * `retTy`, `catchTy`, `elemTy`, plus the lists `typeArgs` and `paramTys`. Never a
+ * `name`/`property`/string-literal `value`, so a program that happens to contain the text
+ * `#T` in a string is untouched, exactly as before.
+ *
+ * TWO ASYMMETRIES ARE PRESERVED ON PURPOSE, because they were in the old tables and this
+ * rewrite is meant to be observationally null: `FuncDecl.returnTy` and `ForOfStmt.valTy`
+ * hold a `Ty` and are NOT rewritten (their siblings `ArrowFunction.retTy` and
+ * `ForOfStmt.elemTy` are). Both are checker-RESOLVED types, set after the only pass that
+ * substitutes type parameters has run, so nothing observable depends on them today —
+ * but they are a latent trap for anyone who adds a `Ty` rewrite that runs later.
+ */
+
+/** The identity `Ty` rewrite, for the two passes that only WALK the type fields.
+ *  Written `(t: Ty): Ty` rather than through a `type TyFn = …` alias, for the same reason
+ *  `ExprFn`/`StmtFn` are inlined below plus one more: `coverage` strips undecorated type
+ *  declarations, so an arrow whose parameter type comes only from such an alias reports
+ *  "cannot infer type of arrow parameter" in that tool and nowhere else. */
+const KEEP_TY = (t: Ty): Ty => t;
+/* A child EXPRESSION slot is a REWRITE (the parent stores what comes back) — that is how
+ * `resolveStaticFieldReads` replaces a `MemberExpr` with an `Identifier` without needing
+ * the reflective `o[k] = …` it used to do. A child STATEMENT is only ever visited.
+ *
+ * Spelled INLINE at every position rather than as `type ExprFn = (e: Expr) => Expr`. An
+ * alias whose shape mentions a RECURSIVE type is `NT1030` — this compiler refuses it —
+ * and `Expr` is a 30-member mutually recursive component, so the alias would have planted
+ * a parse-stage blocker in the file this rewrite exists to unblock. */
+
+function walkExprList(list: Expr[], fe: (x: Expr) => Expr): void {
+  for (let i = 0; i < list.length; i++) list[i] = fe(list[i]!);
+}
+function walkStmtList(list: Stmt[], fs: (x: Stmt) => void): void {
+  for (const s of list) fs(s);
+}
+/** A parameter list: `annot` first, then `default` — the old key order. */
+function walkParams(params: Param[], fe: (x: Expr) => Expr, ft: (t: Ty) => Ty): void {
+  for (const p of params) {
+    if (p.annot !== undefined) p.annot = ft(p.annot);
+    if (p.default !== undefined) p.default = fe(p.default);
+  }
+}
+
+/**
+ * Every child of an expression, in the order the reflective walk reached them.
+ * `default:` binds `never` — add an `Expr` member and this stops compiling.
+ */
+function walkExprChildren(e: Expr, fe: (x: Expr) => Expr, fs: (x: Stmt) => void, ft: (t: Ty) => Ty): void {
+  switch (e.kind) {
+    case "NumberLiteral": case "BooleanLiteral": case "StringLiteral":
+    case "UndefinedLiteral": case "NullLiteral": case "Identifier":
+      break; // no child expressions
+    case "TemplateLiteral": walkExprList(e.exprs, fe); break;
+    case "ArrayLiteral": walkExprList(e.elements, fe); break;
+    case "ObjectLiteral": for (const p of e.properties) p.value = fe(p.value); break;
+    case "SpreadExpr": e.argument = fe(e.argument); break;
+    case "MemberExpr": e.object = fe(e.object); break;
+    case "IndexExpr": e.object = fe(e.object); e.index = fe(e.index); break;
+    case "UnaryExpr": case "TypeofExpr": e.operand = fe(e.operand); break;
+    case "UpdateExpr": if (e.targetExpr !== undefined) e.targetExpr = fe(e.targetExpr); break;
+    case "BinaryExpr": case "LogicalExpr": e.left = fe(e.left); e.right = fe(e.right); break;
+    case "SequenceExpr": walkExprList(e.exprs, fe); break;
+    case "ConditionalExpr":
+      e.test = fe(e.test); e.consequent = fe(e.consequent); e.alternate = fe(e.alternate); break;
+    case "AssignExpr": e.value = fe(e.value); break;
+    case "IndexAssign": e.object = fe(e.object); e.index = fe(e.index); e.value = fe(e.value); break;
+    case "FieldAssign": e.object = fe(e.object); e.value = fe(e.value); break;
+    case "InstanceOfExpr": e.object = fe(e.object); break;
+    case "InExpr": e.key = fe(e.key); e.object = fe(e.object); break;
+    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": e.expr = fe(e.expr); break;
+    case "NewExpr":
+      walkExprList(e.args, fe);
+      if (e.typeArgs !== undefined) e.typeArgs = e.typeArgs.map((t: Ty) => ft(t));
+      break;
+    case "CallExpr":
+      e.callee = fe(e.callee); walkExprList(e.args, fe);
+      if (e.typeArgs !== undefined) e.typeArgs = e.typeArgs.map((t: Ty) => ft(t));
+      break;
+    case "ArrowFunction":
+      walkParams(e.params, fe, ft);
+      // Exactly one of `body`/`stmts` is populated — `exprBody` says which (see the note
+      // on the interface: it is two fields rather than a union for a self-hosting reason).
+      if (e.body !== undefined) e.body = fe(e.body);
+      if (e.stmts !== undefined) walkStmtList(e.stmts, fs);
+      if (e.retAnnot !== undefined) e.retAnnot = ft(e.retAnnot);
+      if (e.paramTys !== undefined) e.paramTys = e.paramTys.map((t: Ty) => ft(t));
+      if (e.retTy !== undefined) e.retTy = ft(e.retTy);
+      if (e.captures !== undefined) for (const c of e.captures) c.ty = ft(c.ty);
+      break;
+    default: { const impossible: never = e; return impossible; }
+  }
+  // `ty` is the LAST key on every expression node that carries one — uniformly, across all
+  // thirty kinds. Matching the old key order matters: see the header.
+  if (e.ty !== undefined) e.ty = ft(e.ty);
+}
+
+/**
+ * Every child of a statement, in the order the reflective walk reached them.
+ * `default:` binds `never` — add a `Stmt` member and this stops compiling.
+ */
+function walkStmtChildren(s: Stmt, fe: (x: Expr) => Expr, fs: (x: Stmt) => void, ft: (t: Ty) => Ty): void {
+  switch (s.kind) {
+    case "VarDecl":
+      for (const d of s.decls) {
+        if (d.annot !== undefined) d.annot = ft(d.annot);
+        if (d.init !== undefined) d.init = fe(d.init);
+        if (d.ty !== undefined) d.ty = ft(d.ty);
+      }
+      break;
+    case "FuncDecl":
+      walkParams(s.params, fe, ft);
+      if (s.returnAnnot !== undefined) s.returnAnnot = ft(s.returnAnnot);
+      walkStmtList(s.body, fs);
+      break;
+    case "ReturnStmt": if (s.argument !== null) s.argument = fe(s.argument); break;
+    case "IfStmt":
+      s.test = fe(s.test); walkStmtList(s.consequent, fs);
+      if (s.alternate !== null) walkStmtList(s.alternate, fs);
+      break;
+    case "WhileStmt": s.test = fe(s.test); walkStmtList(s.body, fs); break;
+    case "DoWhileStmt": walkStmtList(s.body, fs); s.test = fe(s.test); break;
+    case "ForStmt":
+      if (s.init !== null) { if (s.init.kind === "VarDecl") fs(s.init); else s.init = fe(s.init); }
+      if (s.test !== null) s.test = fe(s.test);
+      if (s.update !== null) s.update = fe(s.update);
+      walkStmtList(s.body, fs);
+      break;
+    case "ForOfStmt":
+      if (s.annot !== undefined) s.annot = ft(s.annot);
+      s.iterable = fe(s.iterable);
+      walkStmtList(s.body, fs);
+      if (s.elemTy !== undefined) s.elemTy = ft(s.elemTy); // `valTy` is NOT rewritten — see the header
+      break;
+    case "ForInStmt": s.object = fe(s.object); walkStmtList(s.body, fs); break;
+    case "SwitchStmt":
+      s.discriminant = fe(s.discriminant);
+      for (const c of s.cases) { if (c.test !== null) c.test = fe(c.test); walkStmtList(c.body, fs); }
+      break;
+    case "ThrowStmt": s.argument = fe(s.argument); break;
+    case "TryStmt":
+      walkStmtList(s.block, fs);
+      if (s.handler !== null) walkStmtList(s.handler, fs);
+      if (s.finalizer !== null) walkStmtList(s.finalizer, fs);
+      if (s.catchTy !== undefined) s.catchTy = ft(s.catchTy);
+      break;
+    case "ExprStmt": s.expr = fe(s.expr); break;
+    case "BlockStmt": walkStmtList(s.body, fs); break;
+    case "MultiStmt": walkStmtList(s.stmts, fs); break;
+    // No children, and nothing type-bearing. `BlockDrops` is the ownership pass's
+    // synthesized scope-exit marker; the other two are leaves.
+    case "BreakStmt": case "ContinueStmt": case "BlockDrops": break;
+    default: { const impossible: never = s; return impossible; }
+  }
+}
+
+/* ---- pass 1: rewrite every type-bearing field, in place -------------------- */
+
+function tyExpr(e: Expr, f: (t: Ty) => Ty): Expr {
+  walkExprChildren(e, (x) => tyExpr(x, f), (s) => tyStmt(s, f), f);
+  return e;
+}
+function tyStmt(s: Stmt, f: (t: Ty) => Ty): void {
+  walkStmtChildren(s, (x) => tyExpr(x, f), (y) => tyStmt(y, f), f);
+}
+/** Deep-rewrite every type-bearing field of a statement LIST, in place. */
+export function mapTypesDeep(list: Stmt[], f: (t: Ty) => Ty): void { for (const s of list) tyStmt(s, f); }
+/** …of one statement (a generic template's specialized `FuncDecl`, in practice). */
+export function mapTypesDeepStmt(s: Stmt, f: (t: Ty) => Ty): void { tyStmt(s, f); }
+/** …of one expression (a generic ARROW, in practice). */
+export function mapTypesDeepExpr(e: Expr, f: (t: Ty) => Ty): void { tyExpr(e, f); }
+
+/* ---- pass 2: `C.f` static-field reads → the `C.f` module binding ----------- */
+
+function staticExpr(e: Expr, names: Set<string>, onAssign?: (name: string) => never): Expr {
+  // `C.f = v` — a WRITE to a static field. Not a read, so never rewritten; the caller
+  // refuses it by name (a static field lowers to a `const`).
+  if (onAssign !== undefined && e.kind === "FieldAssign" && e.object.kind === "Identifier"
+      && names.has(`${e.object.name}.${e.field}`)) {
+    onAssign(`${e.object.name}.${e.field}`);
+  }
+  // A `?.` link is left alone (rewriting it would silently drop the optional; a class name
+  // is never nullish, so the read is rejected instead).
+  if (e.kind === "MemberExpr" && e.optional !== true && e.object.kind === "Identifier"
+      && names.has(`${e.object.name}.${e.property}`)) {
+    const id: Identifier = { kind: "Identifier", name: `${e.object.name}.${e.property}` };
+    return id; // rewritten: its only child WAS the class name, so there is nothing below
+  }
+  walkExprChildren(e, (x) => staticExpr(x, names, onAssign), (s) => staticStmt(s, names, onAssign), KEEP_TY);
+  return e;
+}
+function staticStmt(s: Stmt, names: Set<string>, onAssign?: (name: string) => never): void {
+  walkStmtChildren(s, (x) => staticExpr(x, names, onAssign), (y) => staticStmt(y, names, onAssign), KEEP_TY);
+}
+/**
+ * Rewrite every read of a STATIC field — `C.f` on a bare class name — into the plain
+ * Identifier `C.f`, the module-level `const` the parser lowered it to.
+ *
+ * This runs at the END of parsing, before any analysis, and that is the point: a static
+ * field is not a slot on a receiver, it is a module binding, so every pass that reasons
+ * about NAMES (globals promotion, closure capture, ownership) has to see an identifier or
+ * it does not see the read at all. No source identifier can contain a `.`, so the dotted
+ * name is unambiguous.
+ */
+export function resolveStaticFieldReads(list: Stmt[], names: Set<string>, onAssign?: (name: string) => never): void {
+  for (const s of list) staticStmt(s, names, onAssign);
+}
+
+/* ---- pass 3: every name the program binds --------------------------------- */
+
+function bindExpr(e: Expr, out: Set<string>): Expr {
+  if (e.kind === "ArrowFunction") for (const p of e.params) if (p.name) out.add(p.name);
+  walkExprChildren(e, (x) => bindExpr(x, out), (s) => bindStmt(s, out), KEEP_TY);
+  return e;
+}
+function bindStmt(s: Stmt, out: Set<string>): void {
+  switch (s.kind) {
+    // Parameters BEFORE the declared name, which is the order the old walk produced.
+    case "FuncDecl": for (const p of s.params) if (p.name) out.add(p.name); out.add(s.name); break;
+    case "VarDecl": for (const d of s.decls) out.add(d.name); break;
+    case "ForOfStmt": out.add(s.name); if (s.name2) out.add(s.name2); break;
+    case "ForInStmt": out.add(s.name); break;
+    case "TryStmt": if (s.param) out.add(s.param); break;
+    // Every other statement kind binds NOTHING. Enumerated rather than defaulted, so a
+    // new statement kind that DOES bind a name cannot slip past this pass in silence —
+    // which is exactly the failure the old reflective spelling could not detect.
+    case "ReturnStmt": case "IfStmt": case "WhileStmt": case "DoWhileStmt": case "ForStmt":
+    case "SwitchStmt": case "ThrowStmt": case "ExprStmt": case "BlockStmt": case "MultiStmt":
+    case "BreakStmt": case "ContinueStmt": case "BlockDrops":
+      break;
+    default: { const impossible: never = s; return impossible; }
+  }
+  walkStmtChildren(s, (x) => bindExpr(x, out), (y) => bindStmt(y, out), KEEP_TY);
+}
+/**
+ * Every name the program BINDS — declarations, function/arrow parameters, loop and catch
+ * bindings. Used to protect the static-field rewrite above: that rewrite is name-based and
+ * has no scope, so a binding that shadows a class name would silently redirect `C.f` to
+ * the class's static instead of the shadowing value. Collecting the binders lets the
+ * parser refuse that program outright rather than answer it wrongly.
+ */
+export function collectBindingNames(list: Stmt[], out: Set<string>): void {
+  for (const s of list) bindStmt(s, out);
 }

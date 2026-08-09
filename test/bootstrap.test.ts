@@ -461,6 +461,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // depends on none of this), and again it has changed owner: ast.ts's ternary is gone,
     // so the eight modules that reported it now report NT1011 instead.
     //
+    // ...and NT1011 LEAVES AGAIN, one round later, by the same move the file keeps
+    // recording: an honest SOURCE change beat growing the language. The three reflective
+    // AST walkers in src/ast.ts (`mapTypesDeep`, `resolveStaticFieldReads`,
+    // `collectBindingNames`) are now exhaustively TYPED traversals over `Expr`/`Stmt`, so
+    // there is no `unknown` left to `for-of` over and no `Object.keys` behind it. All NINE
+    // modules that reported NT1011 through the link moved together, to ast.ts's NEXT
+    // construct — `setBlockDrops`'s `last !== undefined` on a `Stmt`, a general union
+    // compared with `undefined`. So NT2001 does not merely stay in the set, it changes
+    // owner for the third time here: from cli.ts's `process.stdout` to ast.ts's union
+    // comparison. A code holding still while the module behind it changes is precisely
+    // what this tree-wide set cannot see — selfhost-ratchet records the per-module move.
     // ...and NT1606 LEAVES, which empties the code that has been in this set longer than
     // any other. `coverage-preprocess.ts` was its last holder tree-wide, and the fix is a
     // SOURCE change with the compiler untouched: its three accumulators are `//@@mutable`
@@ -476,7 +487,19 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // now, and the one DYNAMIC site that was actually blocking (ownership.ts's `clone`,
     // refused for the Map spread) became a `.set` LOOP — which is what the constructor
     // does internally, so no tuple encoding was invented.
-    ["NT1011"],
+    // RE-MEASURED AT THE MERGE FOR THE SIXTH TIME, and for the sixth time NEITHER SIDE
+    // HAD IT RIGHT — and this merge is the cleanest illustration the file has. Each
+    // branch cleared a DISJOINT part of the set and could not see the other's:
+    //   main       cleared NT1004 (lexer.ts's uncatchable `throw`) and NT1606
+    //              (coverage-preprocess.ts's captured accumulator), and measured
+    //              ["NT1011"] — the walkers, which it had not touched;
+    //   this lane  cleared NT1011 (the three reflective walkers) and measured
+    //              ["NT1004", "NT1606", "NT2001"] — the two main had already emptied,
+    //              plus what the walkers were masking.
+    // The union of the clears leaves exactly ONE code, held by nine modules, and it is
+    // ast.ts's `setBlockDrops` dead guard. No reviewer holding two diffs could have
+    // computed that; it is measured.
+    ["NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -622,7 +645,24 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // — so cli.ts walked off its own blocker and onto ast.ts's NT1011 with the other eight.
     // Neither branch could compute this from its own diff: one emptied the ternary, the
     // other emptied stage-1's, and only together does the bucket go to zero.
-    expect(byCode["NT2001"]).toBeUndefined();
+    //
+    // ...and it REFILLED with all NINE at once, from ONE line, when the three reflective
+    // AST walkers in src/ast.ts became exhaustively typed traversals. What they were
+    // MASKING is `setBlockDrops`: it reads `list[list.length - 1]` and guards the result
+    // `!== undefined`, but nativets types that read `Stmt` (an out-of-range index PANICS by
+    // design — Stage 41), so the guard compares an 18-member general union with
+    // `undefined` and there is no answer to give. Two things worth recording:
+    //   - it is the SAME dead-guard defect lexer.ts held four rounds ago, in the same words
+    //     ("Cannot compare … with undefined"), which `.at(-1)` cleared there;
+    //   - the guard is not merely dead, it is WRONG in the other direction — on an EMPTY
+    //     list node returns `undefined` and takes the `push` path while nativets would
+    //     panic on the index. A source defect with a node divergence behind it, not a
+    //     checker gap. Behind IT is NT1606 (`o.f = v` on an AST node), which is the
+    //     `@@mutable`-the-AST decision, not a gap either.
+    // So NT2001 changes owner for the third time here rather than staying empty.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -894,7 +934,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // — so cli.ts walked off its own blocker and onto ast.ts's NT1011 with the other eight.
     // Neither branch could compute this from its own diff: one emptied the ternary, the
     // other emptied stage-1's, and only together does the bucket go to zero.
-    expect(byCode["NT2001"]).toBeUndefined();
+    //
+    // ...and it REFILLED, all nine at once — see the identical bucket above: the reflective
+    // AST walkers were masking `setBlockDrops`'s `last !== undefined` on a general union.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a
