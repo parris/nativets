@@ -1825,10 +1825,13 @@ pragma today — `lex`'s `tokens` and `splitTopLevel`'s `out`.
 | `parser.ts` | `NT1606` `.push`, lexer.ts's | **`NT2001`** — lexer.ts's, through the link |
 | `modules.ts` | `NT1606` `.push`, lexer.ts's | **`NT2001`** — lexer.ts's, through the link |
 
-`NT1606` is now **empty tree-wide** as a first-blocker set — the sixth turn of that bucket
-(`test/bootstrap.test.ts`). None reached IR, so `diagnostics.ts` is still the only rung-3 module.
+As a first-blocker set `NT1606` drops from **five modules to one** — the survivor is
+`coverage-preprocess.ts`, whose accumulators this lane did not annotate (`test/bootstrap.test.ts`,
+the seventh turn of that bucket). None of the four reached IR, so `diagnostics.ts` is still the
+only rung-3 module.
 
-**The census's second column, now that it exists.** 183 of the 185 sites are still `.push`, and the
+**The census's second column, now that it exists.** Re-run, the census counts **205** sites (up
+from 185 — the tree grew), and only **two declarations** carry the pragma. The
 ones that need more than a comment are the shapes the opt-in **deliberately refuses**:
 
 | shape | sites | why it stays refused |

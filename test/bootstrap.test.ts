@@ -737,7 +737,8 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // The one hole is a CLOSURE, and it is refused (NT1607). docs/decorators.md.
     //
     // The survivor is `coverage-preprocess.ts`, not annotated by that lane. And read the
-    // shrink NARROWLY: 183 of the 185 census sites are still `.push`, most of them shapes
+    // shrink NARROWLY: a re-run census counts 205 `.push` sites tree-wide and only TWO
+    // declarations carry the pragma; the rest are mostly shapes
     // the opt-in refuses on purpose (38 `this.<field>`, one parameter, every accumulator
     // pushed from inside a capturing arrow). Expect an eighth turn.
     expect(byCode["NT1606"]!.sort()).toEqual(["coverage-preprocess.ts"]);
