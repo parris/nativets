@@ -1633,7 +1633,12 @@ class FnGen {
     }
     // Everything below is a JS object, and an object is always truthy — including an
     // EMPTY array/object/Map/Set, and including a Date whose time value is NaN.
+    // A DISCRIMINATED union belongs here: its value IS the member object pointer, and
+    // every member is an object type by construction. (A GENERAL union does NOT — it is
+    // a box that can carry `0` or `""`, and reading the box pointer as the value is the
+    // wrong answer it is refused for.)
     if (
+      isUnionTy(val.ty) ||
       isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) ||
       isBytesTy(val.ty) || isBytesRefTy(val.ty) || isFetchRefTy(val.ty) || isUrlRefTy(val.ty) ||
       isDateTy(val.ty) || isResponseTy(val.ty) || isHeadersTy(val.ty) || isTextEncoderTy(val.ty) || isTextDecoderTy(val.ty)
@@ -1782,7 +1787,13 @@ class FnGen {
     const base = baseTy(r.ty);
     const slot = this.fresh();
     this.emit(`${slot} = call i64 @nt_nonnull(ptr ${r.v}, ptr ${this.locArg(e.loc) ?? "null"})`);
-    return { v: this.fromSlot(slot, base), ty: base };
+    // The unwrapped value may ALSO have been tag-narrowed (`if (!e) return; if (e.kind
+    // === "A")` on an `E | undefined`). A discriminated union is the member pointer
+    // itself, so that second narrowing is pure retype — the same rule the `Identifier`
+    // case applies to a non-nullable union binding, applied here to what came out of
+    // the box. Representation is `base`'s either way; only the layout name changes.
+    const ty = isUnionTy(base) && e.ty !== undefined && e.ty !== base ? e.ty : base;
+    return { v: this.fromSlot(slot, base), ty };
   }
 
   // ---- nullable tagged pair [tag, value] (A2) ----
