@@ -242,27 +242,28 @@ declaration split in two (`@@mutable` names ONE binding, so `const folded = [], 
 `NT1023`). `planFormatString`'s `pieces` is deliberately left UNMARKED — see the captured
 accumulator item below.
 
-**Measured with the per-function instrument** — `check`'s per-function loop over the LINKED
-stage-1 program (`src/cli.ts` + its whole import graph), which is the metric that matters, not the
-per-module rung table. Reproduce it by wrapping that loop (`src/checker.ts`, `for (const s of
-program.body) … c.checkFunction(…)`) in a try/catch that records one row per function, over
-`check(linkProgram(readFileSync("src/cli.ts"), "src/cli.ts"))`:
+**Measured with `bun run test/blocker-metric.ts`** — the canonical per-function count over the
+LINKED stage-1 program (`src/cli.ts` + its whole import graph), which is the metric that matters
+rather than the per-module rung table. Both rows on the same merge base, the "before" side taken
+with `git checkout main -- src/` (NOT `git stash`, which silently no-ops once the work is
+committed and so cannot fail):
 
 | | functions | failing their own body check | NT1606 |
 |---|---|---|---|
-| before | 646 | **301** (46.6%) | 115 |
-| after | 648 | **280** (43.2%) | 85 |
+| before | 647 | **300** (46.4%) | 116 |
+| after | 649 | **279** (43.0%) | 86 |
 
-**30 of the 115 NT1606s are gone and 21 functions closed outright.** The two numbers differ
+**30 of the 116 NT1606s are gone and 21 functions closed outright.** The two numbers differ
 because a first-blocker instrument always overstates what one bucket is worth: clearing the
 NT1606 in a function often just exposes the next code down. The two added functions are
 `fieldRootName` / `borrowedFieldRoot`, both inside the subset.
 
-**Read that "after" NT1606 count carefully.** It is 85, not 115 − 30 = 80: the same run also
+**Read that "after" NT1606 count carefully.** It is 86, not 116 − 30 = 80: the same change also
 fixed `isLinearTy`'s `import("./ast.ts").Ty` annotation (unresolvable, so the parameter typed as
 `number` and every call was `NT2001`), which unblocked functions whose NEXT blocker is an NT1606
 nobody had ever reached. Bucket totals move under each other; the failing-FUNCTION count is the
-number to track.
+number to track — and it cannot see leaks, call-site fitting or codegen defects at all, so it is
+a progress report and never the test of whether a fix is worth landing.
 
 **The remaining NT1606 debt, by sub-bucket** — none of it is "`.push` is refused", and each needs
 a different answer:
