@@ -2018,7 +2018,7 @@ class Checker {
           a = yes(() => this.type(e.consequent, scope, hint));
           b = no(() => this.type(e.alternate, scope, hint ?? a));
         }
-        if (a !== b) throw typeError(`Ternary branches differ: ${a} vs ${b}`);
+        if (a !== b) throw typeError(`Ternary branches differ: ${a} vs ${b}`, exprLoc(e), thisNarrowHint(e, a, b));
         return a;
       }
       case "AssignExpr": {
@@ -3888,6 +3888,42 @@ function collectAssignedStmts(body: Stmt[], direct: Set<string>, closure: Set<st
       default: break;
     }
   }
+}
+
+/** The field name if `e` reads `this.<f>` (not `this.<f>?.`, not a nested receiver). */
+function thisFieldRead(e: Expr): string | undefined {
+  if (e.kind !== "MemberExpr" || e.optional === true) return undefined;
+  if (e.object.kind !== "Identifier" || e.object.name !== "this") return undefined;
+  return e.property;
+}
+
+/**
+ * Why a ternary whose arms are `T` and `?U/?N T` was refused when one of them reads
+ * `this.<f>`: narrowing does not reach a field of `this`, so `this.s === undefined ?
+ * "none" : this.s` types its arms `string` and `?Ustring` and fails to join.
+ *
+ * Stated rather than merely refused because the type mismatch alone reads like a bug in
+ * the user's code, and it is not — the guard IS correct, and the same guard on an
+ * ordinary binding or on `d.spans` works. It also got far easier to hit the day optional
+ * class fields started producing real nullables. `accessPath` records no fact rooted at
+ * `this` because a field of `this` can be REASSIGNED inside the very method that proved
+ * the guard (`this.s = undefined` is legal there and is what a field-assigning method
+ * does), and the invalidation scan is by NAME — it sees a rebinding of `d`, not a write
+ * to `this.s`. A local is the fix, and it is a fix rather than a workaround: once bound,
+ * the value cannot change under the guard at all.
+ */
+function thisNarrowHint(e: Extract<Expr, { kind: "ConditionalExpr" }>, a: Ty, b: Ty): string | undefined {
+  const nullablePair = (baseTy(a) === baseTy(b)) && (isNullableTy(a) !== isNullableTy(b));
+  if (!nullablePair) return undefined;
+  const f = thisFieldRead(e.consequent) ?? thisFieldRead(e.alternate);
+  if (f === undefined) return undefined;
+  return (
+    `narrowing does not reach a field of \`this\`: the guard proved \`this.${f}\` is not nullish, but ` +
+    `later reads of it still have the nullable type ${isNullableTy(a) ? a : b}. Unlike an ordinary ` +
+    `binding — or a field of another object, which is immutable — \`this.${f}\` can be reassigned by ` +
+    `this same method, so no fact is recorded for it. Bind it first: ` +
+    `\`const ${f} = this.${f}; return ${f} === ${nullishKind(isNullableTy(a) ? a : b)} ? … : ${f};\``
+  );
 }
 
 /** An expression as a one-statement region, so `factsFor` takes one shape of region. */

@@ -33,12 +33,23 @@ async function expectNode(source: string): Promise<void> {
   expect(ours.exitCode).toBe(oracle.exitCode);
 }
 
-/** Assert the source is REFUSED with the given code, and for the stated reason. */
-function expectRejected(source: string, code: string, needle: string): void {
+/**
+ * Assert the source is REFUSED with the given code, and for the stated reason.
+ *
+ * `formatDiagnostic` takes a `Diagnostic`, not an `NTError` — passing the error itself
+ * renders `error[undefined]` and, more to the point here, drops the HINT, since the
+ * hint lives on `.diag`. This is the spelling `src/cli.ts` uses, so what a test reads
+ * is what a user sees.
+ */
+function rejection(source: string): string {
   let err: unknown;
   try { sourceToIR(source); } catch (e) { err = e; }
   expect(err).toBeInstanceOf(NTError);
-  const text = formatDiagnostic(err as NTError);
+  return formatDiagnostic((err as NTError).diag, source);
+}
+
+function expectRejected(source: string, code: string, needle: string): void {
+  const text = rejection(source);
   expect(text).toContain(code);
   expect(text).toContain(needle);
 }
@@ -264,5 +275,42 @@ interface Tight { v?: number }
 function f(o: Tight): number { return o.v === undefined ? -1 : o.v; }
 console.log(f({ v: 1 }), f({}));
 `);
+  });
+});
+
+describe("4 — narrowing still does not reach `this.<field>`, and now SAYS SO", () => {
+  /*
+   * A REFUSAL, not a gap closed here. `accessPath` records no fact rooted at `this`
+   * because a field of `this` can be reassigned by the very method that proved the
+   * guard, while the invalidation scan is by NAME — it sees a rebinding of `d`, never
+   * a write to `this.s`. The refusal is sound; what it was missing was a reason, and
+   * optional class fields made it far easier to hit by producing real nullables.
+   */
+  test("the refusal explains WHY, and names `this`", () => {
+    expectRejected(`
+class C {
+  s?: string;
+  get(): string { return this.s === undefined ? "none" : this.s; }
+}
+console.log(new C().get());
+`, "NT2001", "narrowing does not reach a field of `this`");
+  });
+
+  // The hint tells the user to bind a local. That advice has to actually work.
+  test("the hint's own suggested fix compiles and matches node", async () => {
+    await expectNode(`
+class C {
+  s?: string;
+  get(): string { const s = this.s; return s === undefined ? "none" : s; }
+}
+console.log(new C().get());
+`);
+  });
+
+  // The hint is targeted, not sprayed on every ternary mismatch.
+  test("an unrelated ternary mismatch does NOT get the `this` hint", () => {
+    const text = rejection(`const x: number = true ? 1 : "s";`);
+    expect(text).toContain("Ternary branches differ");
+    expect(text).not.toContain("narrowing does not reach");
   });
 });
