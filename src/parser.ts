@@ -1819,11 +1819,58 @@ class Parser {
     // (the extension of the class attribute; see applyRecordAttrs / docs/decorators.md).
     if (this.at("type") && this.peek(1).type === "ident" && (this.peek(2).value === "=" || this.peek(2).value === "<")) return this.parseTypeAlias();
     if (this.at("interface") && this.peek(1).type === "ident") return this.parseInterface();
+    // `@@mutable let xs: T[] = []` — an ACCUMULATOR binding (see applyVarAttrs).
+    if (this.at("let") || this.at("const")) {
+      const dec = this.pendingDecorators;
+      this.pendingDecorators = null;
+      const d = this.parseVarDecl();
+      if (this.at(";")) this.eat(";");
+      return this.applyVarAttrs(dec, d);
+    }
     const t = this.peek();
     throw decoratorError(
       `decorator on a '${t.value || t.type}' declaration at ${t.line}:${t.col}`,
-      "decorators attach to a `class` or a record `type`/`interface` (the `@@` form), or to a class METHOD (`@wrapper m() { … }`) — not to a function, variable or statement",
+      "decorators attach to a `class`, a record `type`/`interface` or a `let`/`const` array accumulator (the `@@` form), or to a class METHOD (`@wrapper m() { … }`) — not to a function or a statement",
     );
+  }
+
+  /**
+   * `@@mutable let xs: T[] = []` — the ACCUMULATOR opt-in (docs/decorators.md).
+   *
+   * Unlike the class and record forms, this attribute is attached to a BINDING and not to
+   * a type. That is the whole design decision: mutability that travelled with the type
+   * would make every `T[]` in the program appendable through any handle, and the value
+   * this binding eventually hands out (returned, stored, passed on) is an ordinary
+   * immutable array again — so `.push` can only ever be written where the attribute is,
+   * next to the `let` whose ownership the ownership pass can establish.
+   *
+   * One declarator only: `@@mutable let a = [], b = []` would have to say which binding it
+   * means, and a destructuring pattern lowers to several declarators none of which the
+   * user wrote.
+   */
+  private applyVarAttrs(dec: { attrs: string[]; wrappers: string[] } | null, d: VarDecl): VarDecl {
+    if (!dec || (!dec.attrs.length && !dec.wrappers.length)) return d;
+    if (dec.wrappers.length) {
+      throw decoratorError(
+        `runtime decorator '@${dec.wrappers[0]}' on a variable declaration`,
+        "a `@wrapper` replaces a class or a method, not a binding. To transform a value, call the function: `const x = w(v)`",
+      );
+    }
+    const unknown = dec.attrs.filter((a) => a !== "mutable");
+    if (unknown.length) {
+      throw decoratorError(
+        `compile-time attribute '@@${unknown[0]}' on a variable declaration`,
+        "the only attribute a `let`/`const` accepts is `@@mutable`",
+      );
+    }
+    if (d.decls.length !== 1) {
+      throw decoratorError(
+        `'@@mutable' on a declaration that binds ${d.decls.length} names`,
+        "`@@mutable` marks ONE accumulator binding — split the declaration (`@@mutable let a: T[] = []` on its own line). Destructuring patterns cannot carry it",
+      );
+    }
+    d.mutable = true;
+    return d;
   }
 
   // ---- statements ----

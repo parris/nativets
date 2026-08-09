@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "d89c71a"
+    "rev": "942f48b"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "46815b294e95718c",
+      "sha256": "f68e7fe16a2bb821",
       "standalone": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1002",
+        "message": "[NT1002] string method 'trimEnd' is not supported yet"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1002",
+        "message": "[NT1002] string method 'trimEnd' is not supported yet"
       }
     },
     "checker.ts": {
-      "sha256": "46c41c79a1f9ab6e",
+      "sha256": "7e9502eee55dafe2",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -44,7 +44,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "8e6b96047a346bfb",
+      "sha256": "5f4d2baa36e24841",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -57,7 +57,7 @@
       }
     },
     "coverage-preprocess.ts": {
-      "sha256": "de28999459a7c074",
+      "sha256": "b09b5deb95e55947",
       "standalone": {
         "stage": "check",
         "code": "NT1031",
@@ -70,7 +70,7 @@
       }
     },
     "coverage.ts": {
-      "sha256": "8cf20add73de7765",
+      "sha256": "756f7d195b4c866e",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -84,7 +84,7 @@
       }
     },
     "diagnostics.ts": {
-      "sha256": "785811865abcc79f",
+      "sha256": "793b1e8f093c9b59",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -111,16 +111,16 @@
       }
     },
     "lexer.ts": {
-      "sha256": "f874705d93927d45",
+      "sha256": "41f12f4f1974b041",
       "standalone": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare string with undefined"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare string with undefined"
       }
     },
     "modules.ts": {
@@ -132,12 +132,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare string with undefined"
       }
     },
     "ownership.ts": {
-      "sha256": "83f7cc48a98c17bd",
+      "sha256": "f447568ef02c9a91",
       "standalone": {
         "stage": "check",
         "code": "NT1014",
@@ -150,7 +150,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "9d2315ec59a6fb3a",
+      "sha256": "7dcbeb9825f4d93b",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -158,8 +158,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare string with undefined"
       }
     }
   }

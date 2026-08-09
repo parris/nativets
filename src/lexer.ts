@@ -254,6 +254,13 @@ function allHexDigits(s: string): boolean {
 }
 
 export function lex(source: string): Token[] {
+  // The token stream is the compiler's hottest accumulator — 34,987 elements for
+  // `src/checker.ts` alone — so it is an `@@mutable` ACCUMULATOR: `.push` appends in
+  // place. Under bun (stage 0) the immutable spelling `tokens = [...tokens, t]` is a real
+  // O(n) copy per append and measured 1036x slower; under nativets both are O(1)
+  // amortized. Spelled as a comment so the one source satisfies both toolchains
+  // (docs/decorators.md, docs/self-hosting.md).
+  //@@mutable
   const tokens: Token[] = [];
   const st: LexState = { i: 0, line: 1, col: 1 };
 

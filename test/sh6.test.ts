@@ -250,7 +250,12 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // them: they really are dictionaries, and `Record<K,V>` was the honest TYPE with the
   // wrong CONSTRUCTOR. `new Map().set(…)` + `.get`/`.has` throughout. What ast.ts stops on
   // now is `.push` — the 185-site census elephant — which is a DECISION, not a gap.
-  "ast.ts": { rung: 0, code: "NT1606", blame: "self" },
+  // ...and the elephant MOVED, by OPT-IN rather than by relaxation. `splitTopLevel`'s
+  // `out` accumulator carries `//@@mutable` and its `.push` appends in place
+  // (docs/decorators.md). Behind it: NT1002, `trimEnd`. Note what did NOT clear —
+  // `setBlockDrops(list: Stmt[], …)` pushes to a PARAMETER, which is a borrow, so it stays
+  // NT1606 and needs a source change rather than a compiler one.
+  "ast.ts": { rung: 0, code: "NT1002", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -265,7 +270,11 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // one loop over an explicit frame stack, verified token-identical over 477 files.
   // What is behind them is the census elephant: `tokens.push`, 13 sites in this module and
   // 185 tree-wide. It is NOT free here — see the note on the `.push` idiom's cost below.
-  "lexer.ts": { rung: 0, code: "NT1606", blame: "self" },
+  // CLEARED, and the cost note above is exactly why it was cleared THIS way: `tokens` is
+  // now an `//@@mutable` ACCUMULATOR and all 13 sites are real in-place appends. The
+  // immutable rewrite was never taken — measured at 760 ms vs 2 ms for 30k appends under
+  // bun, which is stage 0. Behind it: NT2001, "Cannot compare string with undefined".
+  "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
   // WALKED, not nudged. This module's blocker CHAIN was measured end to end — six
   // distinct blockers between it and rung 1 — and five of them are now cleared:
   //   1. NT1606  `.push` x4 in formatDiagnostic            -> immutable rebind (src)
@@ -298,7 +307,10 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // away, and it now inherits ast.ts's forward type reference through the link. The blame
   // column flipping "self" -> "ast.ts" is the real news in this row.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
-  "parser.ts": { rung: 0, code: "NT1606", blame: "lexer.ts" },
+  // Followed lexer.ts off `.push` onto lexer.ts's NT2001. parser.ts's own 18
+  // `this.<field>` push sites are NOT cleared — a field names no binding the ownership
+  // pass can prove unique, so they stay NT1606 behind this.
+  "parser.ts": { rung: 0, code: "NT2001", blame: "lexer.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -374,7 +386,10 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
-  "modules.ts": { rung: 0, code: "NT1606", blame: "lexer.ts" },
+  // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
+  // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
+  // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
+  "modules.ts": { rung: 0, code: "NT2001", blame: "lexer.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
