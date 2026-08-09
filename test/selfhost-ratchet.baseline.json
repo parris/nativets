@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "dc34e4c"
+    "rev": "b4760ef"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "9fdf509df83ea53f",
+      "sha256": "14daf1ba1e974895",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "8f1cb05009708fee",
+      "sha256": "49b663bb83f0325a",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -45,7 +45,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "14b9a32e96b693b4",
+      "sha256": "fe3753d5bd04358f",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -58,16 +58,16 @@
       }
     },
     "coverage-preprocess.ts": {
-      "sha256": "2632d55f8546b8ce",
+      "sha256": "bf01de153f7f5938",
       "standalone": {
-        "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "stage": "clear",
+        "code": "",
+        "message": ""
       },
       "linked": {
-        "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "stage": "clear",
+        "code": "",
+        "message": ""
       }
     },
     "coverage.ts": {
@@ -114,14 +114,14 @@
     "lexer.ts": {
       "sha256": "4ab63503e3cbd30d",
       "standalone": {
-        "stage": "codegen",
-        "code": "NT1004",
-        "message": "[NT1004] `throw` at L:C that is not inside a `try` in the same function is not supported yet"
+        "stage": "clear",
+        "code": "",
+        "message": ""
       },
       "linked": {
-        "stage": "codegen",
-        "code": "NT1004",
-        "message": "[NT1004] `throw` at L:C that is not inside a `try` in the same function is not supported yet"
+        "stage": "clear",
+        "code": "",
+        "message": ""
       }
     },
     "modules.ts": {
