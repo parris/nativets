@@ -442,6 +442,12 @@ describe("the alpha-rename prefix is a function of the sources, never the clock"
  * The three CANARIES are the point of the whole thing: a sweep reporting zero has to be
  * able to fail, and each of these did — until both analyses learned to ask their question
  * of the body that DECLARES the binding rather than of the program.
+ *
+ * WHAT THIS SWEEP DOES NOT COVER: it compares REFUSALS, so it can only see a term whose
+ * symptom is a diagnostic. A cross-module term that merely costs a LEAK is invisible to
+ * it, and there was one — `shadowedNames` in src/ownership.ts, pinned separately by
+ * `test/modules/closure-drop` with a `__objLive()` count rather than a diagnostic. Read a
+ * green run here as "no new REFUSAL crosses the link boundary", nothing wider.
  */
 const NOISE = `
 export function noise(): number {
@@ -524,5 +530,28 @@ describe("no source compiles alone but not linked", () => {
     }
     expect(swept).toBeGreaterThan(100); // the sweep must actually be sweeping
     expect(failures).toEqual([]);
+  });
+
+  /*
+   * ...and the same class where the symptom is a LEAK rather than a diagnostic, which is
+   * why it needed its own test and its own oracle.
+   *
+   * `shadowedNames` (src/ownership.ts) disqualifies a closure env from being dropped when
+   * its name is DECLARED more than once, because codegen gives a name one frame slot per
+   * function and two declarations would then share storage — freeing on the inner one
+   * would leave the outer name reading freed memory. It counted every declaring
+   * occurrence anywhere under the body it was given, and for the module frame that body is
+   * the whole linked program: one `let add = 0` inside an unrelated module's function was
+   * enough to delete the drop for a `const add = …` closure here.
+   *
+   * A leak, never a wrong answer — which is exactly why it survived, since LeakSanitizer
+   * runs on Linux CI only and nothing on a laptop notices. `__objLive()` makes it local:
+   * the env is allocated in a block it never escapes, so it is freed at the block's exit
+   * and the counter reads 0 on the next line.
+   */
+  test("a closure env is still dropped when another module declares its name", async () => {
+    const ours = await compileAndRunFile(join(DIR, "closure-drop", "main.ts"));
+    expect(ours.exitCode).toBe(0);
+    expect(ours.stdout).toBe("7\n1\n0\n"); // the last line is __objLive(): nothing left alive
   });
 });

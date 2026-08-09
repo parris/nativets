@@ -991,6 +991,24 @@ function closureDecls(list: Stmt[], out: Map<string, object>): void {
  * A DECLARING occurrence is any node carrying a `name` string that is not an
  * `Identifier` (declarators have no `kind` at all; params, `for-of` bindings and
  * `FuncDecl`s carry their own). Over-counting only costs a leak.
+ *
+ * ...but it costs one, and a NESTED FUNCTION'S BODY is a different frame, so counting it
+ * here is over-counting with nothing bought. Codegen says so directly rather than by
+ * comment: `collectLocals` (src/codegen.ts) has no `FuncDecl` case at all, and
+ * `genFunction` calls `reset()` before it starts — a declaration inside a nested function
+ * gets a slot in THAT function's frame and can never share one out here. The FuncDecl's
+ * OWN name still counts; only its parameters and body are skipped.
+ *
+ * That is a real leak, and it is a CROSS-MODULE one: `runScope` analyses the module frame
+ * with `program.body`, which after SH1 is every linked module at once, so one `let add = 0`
+ * inside some other file's function deleted the drop for a `const add = …` closure here.
+ * Per-module measurement cannot see it and neither can a differential test — the program's
+ * output is identical, it just never frees. `test/modules/closure-drop` pins it with
+ * `__objLive()`.
+ *
+ * Arrow bodies keep counting. An inlined HOF callback's locals DO land in the enclosing
+ * frame (`freshenHofArrow` makes them unique first), and that is the direction where a
+ * mistake would be a use-after-free rather than a leak.
  */
 function shadowedNames(node: unknown, seeded: string[]): Set<string> {
   const count = new Map<string, number>();
@@ -1004,6 +1022,8 @@ function shadowedNames(node: unknown, seeded: string[]): Set<string> {
     if (Array.isArray(n)) { for (const el of n) walk(el); return; }
     const nm = obj["name"];
     if (typeof nm === "string" && obj["kind"] !== "Identifier") count.set(nm, (count.get(nm) ?? 0) + 1);
+    // A nested function is its own frame: its name is declared here, its insides are not.
+    if (obj["kind"] === "FuncDecl") return;
     for (const k of Object.keys(obj)) walk(obj[k]);
   };
   walk(node);
