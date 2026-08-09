@@ -1606,6 +1606,26 @@ move-checked: aliasing a string is always fine, no `NT1601` on strings. Reclamat
 behavior (rc is a memory-model detail); the only observable guarantee is no leak of heap strings
 (`nt_str_live()` → 0). This supersedes the earlier "strings are linear" research direction.
 
+#### The rc entry also memoizes the BYTE LENGTH, and one-byte strings are INTERNED
+
+Two consequences of the representation, neither of them a divergence — `.length` returns the
+same number it always did (UTF-8 **bytes**, §A.2 below, unchanged), and `s[i]` returns the same
+one-byte string.
+
+- **Length.** A nativets string is a bare NUL-terminated `char *`, so `.length` and `s[i]` both
+  used to `strlen` the whole string: the scanner idiom `while (i < s.length) { const c = s[i]!; … }`
+  was **O(n²)** in the input, measured at exponent 1.98 and 155 s to lex 1.39 MB. The byte length
+  now lives in the rc side-table entry (computed once, lazily, on the first query). A length
+  **header** was rejected: a string LITERAL is an `@.str` global in rodata and cannot carry one,
+  and telling a literal from a heap string requires the side table anyway — so the table holds the
+  length and a nativets string stays *exactly* a `const char *` at the FFI boundary.
+- **Interning.** `s[i]`, `.charAt`, `.at`, `"".split("")` and the stdin byte reads return one of
+  **256 interned statics** instead of a fresh 1-char allocation. Being untracked they behave like
+  literals — `nt_str_retain`/`nt_str_release` are already no-ops for any pointer not in the table.
+  So a character scan now allocates **nothing**: RSS over the same 1.39 MB lex fell 300 MB → 78 MB.
+  The one visible effect is on the debug counter: `__strLive()` no longer counts characters, and a
+  program that indexes strings reports a smaller live count than it used to.
+
 ### Actor receive timeouts run on a VIRTUAL clock (B3 v4)
 
 `receive(ms)` / `receiveMatch(pred, ms)` are Erlang's `after`, but `ms` is measured on a **virtual

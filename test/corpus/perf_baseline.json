@@ -154,14 +154,14 @@
     "maze.ts": {
       "arrLive": 4,
       "objLive": 33,
-      "strLive": 835,
+      "strLive": 629,
       "pvNodes": 0,
       "pvAllocs": 0
     },
     "wordfreq.ts": {
       "arrLive": 3,
       "objLive": 86,
-      "strLive": 231,
+      "strLive": 113,
       "pvNodes": 0,
       "pvAllocs": 0
     },
