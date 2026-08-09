@@ -513,6 +513,12 @@ function mangleTypeArg(t: string): string {
   return out;
 }
 
+// A checker is an accumulator over one program: `this.loopDepth`/`this.switchDepth` count
+// up and down as it descends, `this.fnStack` is pushed and popped. That is in-place
+// mutation of one owned object, not copy-on-write — `@@mutable` (docs/decorators.md), in
+// the pragma spelling that keeps this file runnable by bun (see src/parser.ts's note and
+// src/lexer.ts).
+//@@mutable
 class Checker {
   private loopDepth = 0;
   private switchDepth = 0;
@@ -1695,7 +1701,15 @@ class Checker {
       case "NullLiteral": return "null";
       case "TemplateLiteral":
         // Same box, same invalid IR, as string concatenation just above.
-        for (const x of e.exprs) refuseUnboxedUnion(this.type(x, scope), "a template literal");
+        for (const x of e.exprs) {
+          const t = this.type(x, scope);
+          refuseUnboxedUnion(t, "a template literal");
+          // No location: a substitution is re-lexed from its own source fragment
+          // (`parseExpressionFrom`, src/parser.ts), so every node in it carries a
+          // FRAGMENT-relative `loc` — `1:1` for the whole file. A wrong line number is
+          // worse than none, so the type in the message is what locates this one.
+          this.checkStringCoercion(t, "a template literal");
+        }
         return "string";
       case "ArrayLiteral": {
         if (e.elements.length === 0) {
@@ -2002,6 +2016,12 @@ class Checker {
           // the tz display-name tables. Refuse rather than approximate.
           for (const t of [l, r]) if (isDateTy(t) || isUrlTy(t) || isSearchParamsTy(t))
             throw nyi(NYI.WEBAPI, `string concatenation with a ${t} (use ${isDateTy(t) ? "`.toISOString()`" : "`.toString()` / a component"})`);
+          // …and everything ELSE that `coerceToString` cannot render. The specific
+          // refusals above stay because they name a better workaround than the generic
+          // one; this is the DEFAULT-DENY behind them, and it is what stops an unhandled
+          // type from reaching codegen and coming back as a clang error (NT1032).
+          this.checkStringCoercion(l, "string concatenation", exprLoc(e.left));
+          this.checkStringCoercion(r, "string concatenation", exprLoc(e.right));
           return "string";
         }
         if (l !== "number" || r !== "number") throw typeError(`Arithmetic needs numbers, got ${l} ${e.op} ${r}`);
@@ -2849,7 +2869,17 @@ class Checker {
     // global builtin, function value, or user function
     if (e.callee.kind === "Identifier") {
       const g = GLOBAL_FUNCS[e.callee.name];
-      if (g) { this.checkArgs(e.args, g, scope, e.callee.name); return g.ret; }
+      if (g) {
+        this.checkArgs(e.args, g, scope, e.callee.name);
+        // `String(x)` is `"" + x` by another name — same `coerceToString`, same
+        // default-deny. Read the type `checkArgs` just recorded rather than typing the
+        // argument a second time: a second `type()` re-runs inference over it, which for
+        // an arrow means a second capture analysis and for a generic call a second
+        // instantiation.
+        const arg = e.args[0];
+        if (e.callee.name === "String" && arg?.ty) this.checkStringCoercion(arg.ty, "`String(…)`", exprLoc(arg));
+        return g.ret;
+      }
 
       // calling a function VALUE (a variable/param whose type is a function type)
       const bound = scope.lookup(e.callee.name);
@@ -3388,17 +3418,91 @@ class Checker {
     this.bodyChain.push(arrowBody(arrow));
     let retTy: Ty;
     try {
-      if (arrow.exprBody) {
-        retTy = this.type(arrow.body as Expr, inner);
-      } else {
-        retTy = this.inferBlockReturn(arrow.body as Stmt[], inner); // first top-level `return`
-        this.checkBlock(arrow.body as Stmt[], inner.child(), retTy); // validate every return against it
-      }
+      retTy = this.typeArrowReturn(arrow, inner, this.arrowRetAnnot(arrow, undefined));
     } finally {
       this.bodyChain.pop();
     }
     arrow.retTy = retTy;
     return retTy;
+  }
+
+  /**
+   * The arrow's DECLARED return type, resolved — or `undefined` when it has none (or has
+   * one the checker cannot resolve, in which case it must not be compared against).
+   *
+   * The only unresolvable case is an arrow's OWN type parameter (`<T>(x: T): T => x`). An
+   * arrow is a value, so there is no instantiation site to specialize (M3 monomorphizes
+   * DECLARATIONS): prefer the contextual return type when the arrow is being passed or
+   * assigned somewhere that supplies one, and otherwise DROP the annotation entirely —
+   * the same "erase to the pre-M3 behavior" choice `typeArrow` makes for parameters,
+   * except that erasing a return marker to `number` would REJECT `id("a")`, so the honest
+   * erasure is "no declared type" rather than "declared `number`". A `#T` must never
+   * reach codegen either way, so the resolution is written back into the AST.
+   */
+  private arrowRetAnnot(arrow: ArrowFunction, expected: Ty | undefined): Ty | undefined {
+    const a = arrow.retAnnot;
+    if (a === undefined) return undefined;
+    if (!hasTypeParam(a)) return a;
+    const ctx = expected && isFuncTy(expected) ? funcRet(expected) : undefined;
+    arrow.retAnnot = ctx && !hasTypeParam(ctx) ? ctx : undefined;
+    return arrow.retAnnot;
+  }
+
+  /**
+   * Type an arrow's body and return the arrow's return type — the ONE place an arrow's
+   * declared return type meets its body.
+   *
+   * With a declaration the shape is a `function`'s: the declared type is the CONTEXT the
+   * body is typed in AND the type every `return` is checked against, so the arrow's return
+   * type IS the declared one. That is also what fixes the block-body case whose only
+   * `return` sits inside a `try`/`if`-`else` — `inferBlockReturn` looks at TOP-LEVEL
+   * returns only, so an unannotated arrow like that infers `number` and then rejects its
+   * own `return "x"`; an annotation says what the body means.
+   *
+   * THREE outcomes, not two, and the middle one is the whole reason this is not a
+   * one-line `fitsParam` call. Adding a check to a construct that had none makes strictly
+   * FEWER programs compile, and an arrow whose annotation is honest but WIDER than the
+   * type codegen can carry must not be one of the casualties:
+   *
+   *   1. the body's type FITS (`fitsParam`, i.e. identity or a union member) — the
+   *      declared type wins, and it is the one recorded for codegen;
+   *   2. the body's type does not fit but IS `assignable` — a legitimate widening
+   *      (`(x): string | null => null`, a structural object supertype) that `fitsParam`
+   *      deliberately excludes because codegen does not box at every one of its sites
+   *      (see `fitsParam`). Keep the INFERRED type: that is exactly the pre-annotation
+   *      behaviour, node erases the annotation too, so nothing is miscompiled and nothing
+   *      that compiled yesterday stops. Widening these is `fitsParam`'s job, not this
+   *      one's, and closing it here would refuse `function`-legal code in arrow spelling;
+   *   3. neither — the annotation is a LIE, and that is the `NT2001` this exists for.
+   *
+   * `void` is treated as "no declared type": a `: void` arrow's body is an expression
+   * whose value node discards, and adopting `void` here would change the emitted
+   * signature rather than catch a lie.
+   */
+  private typeArrowReturn(arrow: ArrowFunction, inner: Scope, annot: Ty | undefined): Ty {
+    const declared = annot === "void" ? undefined : annot;
+    if (arrow.exprBody) {
+      const body = arrow.body as Expr;
+      const t = this.type(body, inner, declared);
+      if (declared === undefined) return t;
+      if (this.fitsParam(declared, t)) {
+        // The expression body IS the arrow's single `return`, so reshape it into the
+        // declared slot layout for the same reason `const x: T = literal` is reshaped.
+        this.retypeLiteral(body, declared);
+        return declared;
+      }
+      if (this.assignable(declared, t)) return t; // (2) honest, wider than codegen carries
+      throw typeError(`return type ${t} does not match declared ${declared}`, exprLoc(body), undefined, "returned here");
+    }
+    const body = arrow.body as Stmt[];
+    const inferred = this.inferBlockReturn(body, inner); // first top-level `return`
+    // (2) again: only a widening `fitsParam` rejects but `assignable` accepts keeps the
+    // inferred type. A body the annotation genuinely contradicts goes to `checkBlock`
+    // against the DECLARED type, so the `NT2001` names the offending `return`'s position.
+    const widened = declared !== undefined && !this.fitsParam(declared, inferred) && this.assignable(declared, inferred);
+    const ret = declared === undefined || widened ? inferred : declared;
+    this.checkBlock(body, inner.child(), ret); // validate every return against it
+    return ret;
   }
 
   /** Type an arrow used as a VALUE → a function type, with capture analysis. */
@@ -3439,14 +3543,10 @@ class Checker {
     // sees it as one of ITS enclosing bodies (NT1031) — and comes back off before
     // `computeCaptures`, which asks about the bodies OUTSIDE this arrow.
     this.bodyChain.push(arrowBody(arrow));
+    const declared = this.arrowRetAnnot(arrow, expected);
     let retTy: Ty;
     try {
-      retTy = this.inArrow(() => {
-        if (arrow.exprBody) return this.type(arrow.body as Expr, inner);
-        const t = this.inferBlockReturn(arrow.body as Stmt[], inner);
-        this.checkBlock(arrow.body as Stmt[], inner.child(), t);
-        return t;
-      });
+      retTy = this.inArrow(() => this.typeArrowReturn(arrow, inner, declared));
     } finally {
       this.bodyChain.pop();
     }
@@ -3559,6 +3659,38 @@ class Checker {
         `A counter whose state lives ONLY in the closure — nothing outside it mentions '${name}' — does compile`,
       );
     }
+  }
+
+  /**
+   * Gate a STRING-COERCION position — `"a=" + x`, `${x}`, `String(x)`.
+   *
+   * The three share `coerceToString` in codegen, and it handles the primitives, a nullable
+   * box and (now) a `number[]`/`string[]`, then FALLS THROUGH to the boolean path for
+   * everything else — `zext i1 <ptr>`, which clang rejects. So the checker's allow-list
+   * here and `coerceToString`'s cases are one list written twice and must stay in step;
+   * this is the side that produces a diagnostic instead of a build error.
+   *
+   * DEFAULT-DENY on purpose. The failure this closes is an internal representation
+   * mismatch reaching the user as `'%t4' defined with type 'ptr' but expected 'i1'`, and a
+   * deny-list would let the next unhandled type do it again. See NYI.STRINGIFY for what is
+   * refused and why each one is a refusal rather than a feature.
+   */
+  private checkStringCoercion(t: Ty, what: string, at?: { line: number; col: number }): void {
+    if (t === "string" || t === "number" || t === "boolean" || t === "undefined" || t === "null" || t === "void") return;
+    // The box branches on its tag, so it coerces iff its base does.
+    if (isNullableTy(t)) { this.checkStringCoercion(baseTy(t), what, at); return; }
+    // node's `Array#toString` IS `join(",")` — but only for the element types whose join
+    // is node-exact here (`nt_arr_join_num` / `nt_arr_join_str`).
+    if (isArrayTy(t) && (elemTy(t) === "number" || elemTy(t) === "string")) return;
+    // A `Dyn` (a `JSON.parse` result) is the one refusal with a genuinely cheap fix at the
+    // SOURCE, so it says so instead of repeating the catalog's object advice: its string
+    // form depends on a runtime tag we would have to dispatch on, but narrowing it (`as
+    // string`, or `JSON.parse(s) as T`) is the spelling the rest of the language already
+    // wants and makes the interpolation ordinary.
+    const hint = t === "Dyn"
+      ? "a `JSON.parse` result carries its type at RUNTIME, so `${d.f}` has no static string form. Narrow it first — `d.f as string` / `d.f as number`, or type the whole parse (`JSON.parse(s) as { f: string }`) — and the interpolation is ordinary"
+      : undefined;
+    throw nyi(NYI.STRINGIFY, `${what} with a ${t}`, hint, at);
   }
 
   /**

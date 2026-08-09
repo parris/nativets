@@ -268,6 +268,56 @@ Two things that look like divergences and are not:
 ToFixed; V8's `DoubleToRadixCString`) and are unchanged — see the Batch 1 entry above for their
 one restriction (literal, in-range arguments).
 
+### String coercion of a NON-primitive (`NT1032`) — it used to be a clang error
+
+`"a=" + x`, `` `${x}` `` and `String(x)` all run through one codegen helper
+(`coerceToString`), which handled `string`, `number`, `boolean`, `undefined`, `null` and the
+A2 nullable box — and then **fell through to the boolean path** for everything else, emitting
+`zext i1 <ptr>`. The checker let those types past, so the user's error was clang's:
+
+```
+console.log("a=" + [1, 2, 3]);
+build error: clang failed (1): error: '%t4' defined with type 'ptr' but expected 'i1'
+```
+
+That is an internal representation mismatch escaping as a build error where this project
+promises an `NT****` code with a hint, and it applied to arrays, objects, class instances,
+`Map`, `Set`, `Uint8Array` and a `JSON.parse` result alike. Decided per type, each measured
+against node first:
+
+| expression | node | here |
+|---|---|---|
+| `"" + [1, 2, 3]`, `"" + ["a","b"]` | `1,2,3` / `a,b` | **implemented** — node's `Array#toString` IS `join(",")` |
+| `"" + ([] as number[])` | `` (empty) | **implemented** |
+| `"" + { a: 1 }` | `[object Object]` | `NT1032` |
+| `"" + new C()` (class) | `[object Object]`, or its `toString()` | `NT1032` |
+| `"" + new Map()` / `new Set()` | `[object Map]` / `[object Set]` | `NT1032` |
+| `"" + [true, false]` | `true,false` | `NT1032` |
+| `"" + [[1,2],[3]]`, `"" + [{},{}]` | `1,2,3` / `[object Object],…` | `NT1032` |
+| `"" + new Uint8Array([1,2])` | `1,2` | `NT1032` |
+| `` `${JSON.parse(s).f}` `` | the field's own string | `NT1032`, hint: narrow it (`as string`) |
+
+**Why the `[object …]` forms are refused and not implemented**, given each is one interned
+constant. The constant is node-exact only for a value with **no own `toString`** — node calls
+the method when the class defines one (`class C { toString() { return "hi"; } }; "" + new C()`
+is `hi`, measured). Emitting the constant unconditionally would turn a loud build error into a
+**silent wrong answer** for exactly the programs that bothered to define the method: the worst
+outcome available, traded for the second-worst. `[object Object]` is also never the string the
+line meant, so the hint points at `JSON.stringify(x)` — and at `console.log(x)` on its own,
+which already renders objects, class instances, `Map`/`Set` byte-identically to node.
+
+**Why `boolean[]` is refused** even though the numeric and string cases are implemented:
+`nt_arr_join_str` reads each slot as a `ptr`, so `[true, false].join(",")` prints **empty**
+here where node prints `true,false` — a pre-existing silent wrong answer in `.join` itself.
+Routing `+` into a join that is already wrong would launder that bug into a second construct.
+Same reason for a nested or object array: the element's own coercion is what node splices in,
+and we do not have it.
+
+The refusal is **default-deny** — the checker allows a fixed list and rejects everything else —
+because the failure being closed is precisely "a type nobody added a case for reached codegen".
+`coerceToString` now raises an internal error rather than falling through, so the two lists
+cannot drift apart silently. Pinned in `test/string-coercion.test.ts`.
+
 ### stdlib Batch 3 — `Date` (and the TIMEZONE decision), `URL`, URI encoding
 
 **The timezone decision: local time is REALLY local, and the tests pin `TZ`.**
@@ -796,17 +846,18 @@ split three ways:
 | `m.delete(k) === true` | already `NT2001` (cannot compare) | unchanged |
 | `Boolean(m.delete(k))` | already `NT1003` (`Boolean` unsupported) | unchanged |
 
-The `return`-from-`: boolean` row holds for a `function` declaration or a method. It does
-**not** hold for an **arrow**, because an arrow's declared return type is never checked
-against its body at all — a separate, pre-existing hole found here:
-`const f = (k: string): boolean => m.delete(k); console.log(f("zz"))` prints the map where
-node prints `false`, with no diagnostic. It is worse than it looks *and* harder to spot,
-for the same reason: an unchecked annotation agrees with node by **accident** in most
+The `return`-from-`: boolean` row holds for a `function` declaration, a method **and now an
+arrow**. It used **not** to: an arrow's declared return type was never checked against its
+body at all — `parseArrow` parsed the annotation and threw it away — so
+`const f = (k: string): boolean => m.delete(k); console.log(f("zz"))` printed the map where
+node prints `false`, with no diagnostic. That hole was worse than it looks *and* harder to
+spot, for the same reason: an unchecked annotation agrees with node by **accident** in most
 programs, because node erases types too — `(n: number): string => n + 1` prints `2` on both
-sides. It becomes a wrong *answer* only where the declared type is load-bearing for our
-codegen and the body's real type differs, so the bug is the **asymmetry** with the
-`function` spelling (which *is* `NT2001`), and `.delete` merely made it visible. Not this
-section's bug and not fixed here; routed to its own lane.
+sides. It became a wrong *answer* only where the declared type is load-bearing for our
+codegen and the body's real type differs, so the bug was the **asymmetry** with the
+`function` spelling (which *is* `NT2001`), and `.delete` merely made it visible. Found here,
+fixed in its own lane (see "String coercion" above for that lane's second defect); the row
+now has no exception.
 
 `if (m.size)`, `if (m.has(k))` and `if (m.get(k))` — the spellings the hint points at — are
 `number`/`boolean`/`V | undefined` tests and never reach the rule. A user class with its own

@@ -543,7 +543,7 @@ export function unifyTypeParams(pattern: Ty, actual: Ty, out: Map<string, Ty>): 
 /* AST fields that hold a `Ty` (or a list of them). Deep rewrites touch exactly these —
  * never a `name`/`property`/string-literal `value` — so a program that happens to contain
  * the text "#T" in a string is untouched. */
-const TY_FIELDS = new Set(["annot", "ty", "returnAnnot", "retTy", "catchTy", "elemTy"]);
+const TY_FIELDS = new Set(["annot", "ty", "returnAnnot", "retAnnot", "retTy", "catchTy", "elemTy"]);
 const TY_LIST_FIELDS = new Set(["typeArgs", "paramTys"]);
 /** Deep-rewrite every type-bearing field of an AST subtree, in place. */
 export function mapTypesDeep(n: unknown, f: (t: Ty) => Ty): void {
@@ -870,6 +870,13 @@ export interface ArrowFunction {
   exprBody: boolean;
   ty?: Ty;
   paramTys?: Ty[]; // resolved param types (from annotations or context)
+  /** The DECLARED return type as written — `(x): T => …`. `parseArrow` used to parse this
+   *  and discard it (keeping only "was it a `Promise<…>`" for the async bookkeeping), so
+   *  nothing downstream could compare it against the body and an arrow's annotation was
+   *  the one return type in the language that was never checked. Keeping it lets the
+   *  checker do for an arrow what it already does for a `function`/method: use it as the
+   *  body's CONTEXT and reject a body that does not fit (NT2001). */
+  retAnnot?: Ty;
   retTy?: Ty;
   captures?: { name: string; ty: Ty }[];
   liftedName?: string; // @arrow_N assigned during codegen

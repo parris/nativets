@@ -2443,18 +2443,22 @@ class Parser {
     const promiseIdx = arrowPromiseIdx;
     const mk = (a: Expr): Expr => { if (promiseIdx.size) this.promiseParamsByArrow.set(a, promiseIdx); return a; };
     let retAsyncFn = false;
-    if (this.at(":")) { this.eat(":"); retAsyncFn = this.parseTypeAsyncAware().asyncFn; }
+    // `(x): T => …` — the DECLARED return type. This used to keep only `asyncFn` and drop
+    // `ty` on the floor, which is why an arrow was the one function form whose declared
+    // return type was never checked against its body (see ArrowFunction.retAnnot).
+    let retAnnot: Ty | undefined;
+    if (this.at(":")) { this.eat(":"); const t = this.parseTypeAsyncAware(); retAsyncFn = t.asyncFn; retAnnot = t.ty; }
     this.eat("=>");
     // An arrow's body is a function body for the return-escape rule too (see parseReturn).
     this.returnsAsyncFnStack.push(retAsyncFn);
     this.asyncParamScopes.push(arrowPromiseNames);
     try {
-      if (this.at("{")) return mk({ kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false });
+      if (this.at("{")) return mk({ kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false, retAnnot });
       const body = this.parseAssign();
       // A pattern parameter needs statements to bind its names, so an expression body
       // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
-      if (prelude.length) return mk({ kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false });
-      return mk({ kind: "ArrowFunction", params, body, exprBody: true });
+      if (prelude.length) return mk({ kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false, retAnnot });
+      return mk({ kind: "ArrowFunction", params, body, exprBody: true, retAnnot });
     } finally { this.returnsAsyncFnStack.pop(); this.asyncParamScopes.pop(); }
   }
 
@@ -2486,9 +2490,14 @@ class Parser {
         // checker substitutes the contextual type). Everywhere else inside the arrow there
         // is nothing to resolve it against, so erase to `number` right here — a `#T` must
         // never reach the checker or codegen.
+        // The RETURN annotation is one of those own positions too (`<T>(x: T): T => x`):
+        // the checker resolves it against the contextual type exactly as it does a
+        // parameter, so the marker must survive the blanket erasure here.
         const own = arrow.params.map((p) => p.annot);
+        const ownRet = arrow.retAnnot;
         mapTypesDeep(arrow, eraseTypeParams);
         arrow.params.forEach((p, i) => { if (own[i] !== undefined) p.annot = own[i]; });
+        if (ownRet !== undefined) arrow.retAnnot = ownRet;
       }
       return arrow;
     }

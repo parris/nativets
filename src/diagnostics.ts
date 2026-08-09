@@ -269,6 +269,24 @@ export const NYI = {
   // READS are unaffected: a by-value snapshot of a binding nobody writes IS the
   // by-reference answer, which is why the overwhelming majority of closures still compile.
   CAPTURE_WRITE: { code: "NT1031", milestone: "later", hint: "closures capture by VALUE here, so a write inside one would be lost instead of updating the outer binding. Return the new value and assign it at the call site (`n = bump(n)`), or accumulate with `map`/`filter`/`reduce`, whose callbacks run inline in the enclosing frame" },
+  // STRING COERCION — `"a=" + x`, `${x}`, `String(x)`. The primitives and a nullable box
+  // coerce exactly like node, and so does an ARRAY of `number` or `string`: node's
+  // `Array#toString` IS `join(",")`, which the runtime already has. This code refuses the
+  // rest, because each would have to be GUESSED rather than reproduced:
+  //   * an object / class instance / Map / Set. node's answer is `[object Object]` /
+  //     `[object Map]` / `[object Set]` — ONE interned constant — but only for a value
+  //     with no own `toString`; node calls the method when the class defines one, so
+  //     emitting the constant unconditionally would turn a loud build error into a silent
+  //     wrong answer for exactly the programs that defined it. `[object Object]` is also
+  //     never the string the program wanted, which is what the hint is for.
+  //   * a `boolean[]` or a nested/object array. `nt_arr_join_str` reads each slot as a
+  //     `ptr`, so `[true, false].join(",")` is already wrong here; routing `+` into it
+  //     would launder that bug into a second construct.
+  //   * a Uint8Array / Response / function value — no node-identical form at all.
+  // Before this code existed every one of them fell through `coerceToString` to the
+  // BOOLEAN path (`zext i1 <ptr>`) and the user's error was clang's:
+  // "'%t4' defined with type 'ptr' but expected 'i1'".
+  STRINGIFY: { code: "NT1032", milestone: "later", hint: "`+`/`${…}`/`String(…)` coerce the primitives, a nullable box, and a `number[]`/`string[]` (node joins those with `,`). For an object or class instance use `JSON.stringify(x)` — node's `[object Object]` is not what the line meant — and for a Map/Set spread it first (`JSON.stringify([...m])`). `console.log(x)` on its own prints the value exactly like node" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
@@ -280,9 +298,28 @@ type NyiSpec = { code: string; milestone: Milestone; hint: string };
  * area, so its catalog hint has to speak for every site that uses it — but a refusal is
  * only actionable when it names the workaround for the construct actually written. Where
  * a site can be that specific, it says so here; everything else keeps the catalog text.
+ *
+ * `at` is the offending expression's position, threaded exactly as `typeError` threads it
+ * and for the same reason — a refusal with no location is "somewhere in this file". It is
+ * optional because most call sites are deep in inference and do not have one.
  */
-export function nyi(spec: NyiSpec, what: string, hint?: string): NTError {
-  return new NTError({ code: spec.code, message: `${what} is not supported yet`, milestone: spec.milestone, hint: hint ?? spec.hint });
+// Two RETURNS rather than one with two ternaries, exactly as `typeError` below is
+// written, and for the same reason: nativets does not unify a `?:` whose arms are
+// `undefined` and an object-array (`Ternary branches differ`), so the compact spelling
+// stopped this module self-compiling. `diagnostics.ts` is the first module to reach SH6
+// rung 3, and the ratchet's unconditional rule is that a module which reached IR may
+// never stop. Keep the shape.
+export function nyi(spec: NyiSpec, what: string, hint?: string, at?: { line: number; col: number }): NTError {
+  if (at === undefined) {
+    return new NTError({ code: spec.code, message: `${what} is not supported yet`, milestone: spec.milestone, hint: hint ?? spec.hint });
+  }
+  return new NTError({
+    code: spec.code,
+    message: `${what} is not supported yet at ${at.line}:${at.col}`,
+    milestone: spec.milestone,
+    hint: hint ?? spec.hint,
+    spans: [{ line: at.line, label: "here", primary: true }],
+  });
 }
 
 /**
