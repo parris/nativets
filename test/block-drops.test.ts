@@ -102,4 +102,64 @@ console.log(f());`;
     expect(list.filter((s) => s.kind === "BlockDrops").length).toBe(1);
     expect(list[list.length - 1]).toEqual({ kind: "BlockDrops", names: ["b"] }); // last write wins, and it stays LAST
   });
+
+  /*
+   * `setBlockDrops` used to open with
+   *
+   *     const last = list[list.length - 1];
+   *     if (last !== undefined && ...)
+   *
+   * which reads as a defensive `undefined` guard and is nothing of the sort. On an EMPTY
+   * list the index is `-1`, and node and nativets DISAGREE about that read: node answers
+   * `undefined` and the function appends, while nativets PANICS on an out-of-range index
+   * by design (Stage 41 — `docs/divergences.md`). Measured, not argued:
+   *
+   *     const xs: number[] = []; console.log(xs[xs.length - 1]);
+   *     node     -> "undefined", exit 0
+   *     nativets -> panic: index out of bounds: the length is 0 but the index is -1, exit 255
+   *
+   * So it was a source defect with a node divergence behind it, not dead code — and it
+   * put `src/ast.ts` outside the subset it has to compile (docs/self-hosting.md).
+   *
+   * This test makes BUN agree with nativets: the array is proxied so that an out-of-range
+   * index throws instead of answering `undefined`. That is the only way to hold the rule
+   * under the oracle, because node's own answer is exactly the one we must not rely on.
+   * It was RED on the `last !== undefined` spelling and is green on the `length` guard.
+   */
+  test("setBlockDrops never reads out of range — the index node and nativets disagree about", () => {
+    const isIndexKey = (k: string): boolean => {
+      if (k.length === 0) return false;
+      let i = 0;
+      if (k[0] === "-") { if (k.length === 1) return false; i = 1; }
+      for (; i < k.length; i++) { const c = k.charCodeAt(i); if (c < 48 || c > 57) return false; }
+      return true;
+    };
+    const guarded = (a: Stmt[]): Stmt[] =>
+      new Proxy(a, {
+        get(t, k, r) {
+          if (typeof k === "string" && isIndexKey(k)) {
+            const i = Number(k);
+            if (i < 0 || i >= t.length) {
+              throw new RangeError(`index out of bounds: the length is ${t.length} but the index is ${i}`);
+            }
+          }
+          return Reflect.get(t, k, r);
+        },
+      });
+
+    const empty = guarded([]);
+    setBlockDrops(empty, ["a"]); // the EMPTY case: must append without ever touching [-1]
+    expect(empty.length).toBe(1);
+    expect(empty[0]).toEqual({ kind: "BlockDrops", names: ["a"] });
+
+    setBlockDrops(empty, ["b"]); // and the replace path still finds the marker through the guard
+    expect(empty.length).toBe(1);
+    expect(empty[0]).toEqual({ kind: "BlockDrops", names: ["b"] });
+
+    const stmt = (): Stmt => ({ kind: "ExprStmt", expr: { kind: "NumberLiteral", value: 1 } });
+    const nonEmpty = guarded([stmt()]);
+    setBlockDrops(nonEmpty, ["c"]); // a non-marker tail: append, still no out-of-range read
+    expect(nonEmpty.length).toBe(2);
+    expect(nonEmpty[1]).toEqual({ kind: "BlockDrops", names: ["c"] });
+  });
 });

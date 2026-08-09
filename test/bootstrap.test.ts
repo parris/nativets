@@ -499,7 +499,24 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // The union of the clears leaves exactly ONE code, held by nine modules, and it is
     // ast.ts's `setBlockDrops` dead guard. No reviewer holding two diffs could have
     // computed that; it is measured.
-    ["NT2001"],
+    //
+    // ...and NT2001 LEAVES, replaced by NT1606, which is the EIGHTH refill of the bucket
+    // this file has recorded — and this time the code moving is not the finding. The
+    // finding is that the old code was COSMETIC and the new one is the wall. NT2001 was
+    // `setBlockDrops`'s `last !== undefined` on a general union: a guard that can never be
+    // true here (an out-of-range index PANICS by design, Stage 41, so the read is typed
+    // `Stmt`) and that node and nativets genuinely DISAGREE about on an empty list — node
+    // answers `undefined` and appends, nativets panics. So it was a source defect in
+    // src/ast.ts with a divergence behind it, not dead code, and it is now a `length`
+    // guard (see the note on `setBlockDrops` and the proxy test in test/block-drops.test.ts).
+    // Behind it, held by the same nine modules, is `o.f = v` on an AST node — which is the
+    // typed walkers writing `e.ty = f(e.ty)` exactly where the reflective ones wrote
+    // `o[k] = f(v)`. The same wall in honest clothing, and a DECISION rather than a gap:
+    // `@@mutable` cannot tag a discriminated-union member (the tag makes the union NT1009 —
+    // measured) and cannot reach a parameter (NT1607 by design), so it is not the answer.
+    // Census: 191 non-`this` `o.f = v` sites across 8 of 12 modules, 45 of them in ast.ts's
+    // walkers alone. See docs/self-hosting.md.
+    ["NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -660,7 +677,31 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     //     checker gap. Behind IT is NT1606 (`o.f = v` on an AST node), which is the
     //     `@@mutable`-the-AST decision, not a gap either.
     // So NT2001 changes owner for the third time here rather than staying empty.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+    //
+    // ...and it EMPTIES AGAIN, because that guard is gone. The two bullets above are the
+    // whole justification for removing it rather than working around it: it could never be
+    // true, and where it *could* have mattered it was WRONG. `setBlockDrops` now tests
+    // `list.length > 0` and never forms the out-of-range index, which is behaviour-identical
+    // under node for every list and divergence-free under nativets for the empty one.
+    // All nine modules moved together to what it was masking — NT1606, asserted below.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
+    // This is the DECISION the entry above named, arrived at: the typed walkers in
+    // src/ast.ts write `e.ty = f(e.ty)` exactly where the reflective ones wrote
+    // `o[k] = f(v)`, so clearing NT1011 and then NT2001 has led back to the same wall in
+    // honest clothing. It is not a gap and it is not cheap:
+    //   - `@@mutable` on the AST interfaces is DEAD. Tagging is NOMINAL, and a tagged
+    //     member makes its union unrepresentable — `//@@mutable type A = {kind:"a";…}` in
+    //     a two-member union is NT1009 whether one member is tagged or both. `Expr` and
+    //     `Stmt` ARE such unions. Independently, every walker mutates its `e: Expr`
+    //     PARAMETER, and a parameter is a borrow (NT1607 by design, docs/decorators.md).
+    //   - returning new nodes instead is a 48-constructor rewrite inside ast.ts that
+    //     clears 45 of ast.ts's 46 sites and NONE of the other 145 in the tree.
+    // Census: 191 non-`this` `o.f = v` sites across 8 of 12 modules (checker 56, ast 46,
+    // parser 29, modules 28, codegen 13, ownership 9, coverage-preprocess 9, lexer 1),
+    // plus 73 `this.f = v` which `@@mutable class` already covers. The same shape as the
+    // `.push` census: a first-blocker table never sizes a construct.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
       ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
@@ -860,7 +901,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // still there and the refused shapes are still refused. What changed is that no module's
     // FIRST blocker is one of them any more. Expect a ninth turn — this instrument reports
     // membership, and any module that walks deeper can land here.
-    expect(byCode["NT1606"]).toBeUndefined();
+    //
+    // THE NINTH TURN ARRIVED IN THE VERY NEXT LANE, and from the other end of the bucket.
+    // It is not `.push`: it is `o.f = v` on an AST node, unmasked in nine modules at once
+    // when ast.ts's `setBlockDrops` dead guard (the NT2001 above) was removed. The
+    // membership list and the full argument live on the NT1606 assertion earlier in this
+    // test; asserting the list twice would let the two copies drift, so this defers.
+    expect(byCode["NT1606"]).toBeDefined();
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
@@ -937,9 +984,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     //
     // ...and it REFILLED, all nine at once — see the identical bucket above: the reflective
     // AST walkers were masking `setBlockDrops`'s `last !== undefined` on a general union.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    // ...and EMPTY once more: that guard is a `list.length > 0` test now, and all nine
+    // moved on together to NT1606 (`o.f = v` on an AST node). See the same bucket above.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a
