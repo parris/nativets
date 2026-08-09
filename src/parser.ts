@@ -115,6 +115,10 @@ function isOptChainTarget(e: Expr): boolean {
  * catalog's shared NT1030 hint, which tells you to reorder: reordering fixes a forward
  * reference and cannot fix a cycle.
  */
+const RECURSIVE_TYPE_HINT =
+  "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. " +
+  "Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md";
+
 /**
  * `@@mutable` + RECURSIVE — the one combination that can build a real CYCLE, refused.
  *
@@ -147,10 +151,6 @@ function recursiveMutableError(name: string, what: string): NTError {
 
 /** Truncate for a diagnostic: a type dump is unbounded and a hint has to stay readable. */
 function clip(s: string, n: number): string { return s.length <= n ? s : `${s.slice(0, n)}…`; }
-
-const RECURSIVE_TYPE_HINT =
-  "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. " +
-  "Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md";
 
 /** The shared refusal for `?.` in a write position — one message for all four spellings. */
 function optChainWriteError(what: string): never {
@@ -453,6 +453,20 @@ class Parser {
   }
 
   /**
+   * The sentence that stops a big component's ONE unrepresentable member from hiding behind
+   * forty-four recursion refusals. Empty (so the hint is byte-identical to before) unless
+   * the SCC round actually gave a component back.
+   */
+  private cycleStallHint(): string {
+    if (!this.cycleStall) return "";
+    const n = this.cycleStallSize;
+    const scale = n ? `${n.total - n.left} of the ${n.total} declarations in this cycle were encoded; ` : "";
+    return `. NOTE — the recursion itself is not what stopped this file: ${scale}` +
+      `what is left is not recursion but ${this.cycleStall}. ` +
+      `A cycle is encoded all-or-nothing (a back-edge is only minted where it resolves), so fixing that is what unblocks the rest`;
+  }
+
+  /**
    * The SCC round — MUTUAL recursion (Lane C).
    *
    * `hoistTypeDecls` above has proved that `names` are stuck on each other: no ordering
@@ -475,20 +489,6 @@ class Parser {
    * `@Name` the table cannot resolve is a dangling reference, and this file's rule is that
    * a `@Name` is minted only where it resolves.
    */
-  /**
-   * The sentence that stops a big component's ONE unrepresentable member from hiding behind
-   * forty-four recursion refusals. Empty (so the hint is byte-identical to before) unless
-   * the SCC round actually gave a component back.
-   */
-  private cycleStallHint(): string {
-    if (!this.cycleStall) return "";
-    const n = this.cycleStallSize;
-    const scale = n ? `${n.total - n.left} of the ${n.total} declarations in this cycle were encoded; ` : "";
-    return `. NOTE — the recursion itself is not what stopped this file: ${scale}` +
-      `what is left is not recursion but ${this.cycleStall}. ` +
-      `A cycle is encoded all-or-nothing (a back-edge is only minted where it resolves), so fixing that is what unblocks the rest`;
-  }
-
   private resolveCycle(names: string[]): void {
     if (!names.length) return;
     for (const n of names) this.cycleNames.add(n);
