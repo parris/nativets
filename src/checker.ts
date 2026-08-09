@@ -1451,10 +1451,9 @@ class Checker {
   private eliminateAfterEarlyExit(s: Stmt, scope: Scope): void {
     if (s.kind !== "IfStmt" || s.alternate) return;
     if (!leavesBlock(s.consequent)) return;
-    const t = this.tagTest(s.test, scope);
-    if (!t) return;
-    const others = unionTagValues(t.union).filter((v) => v !== t.tag);
-    this.narrowInto(scope, t.name, t.union, t.negated ? [t.tag] : others);
+    // The FALSE branch of the guard, by the same De Morgan walk the `if` arms use — so
+    // `if (s.kind === "a" || s.kind === "b") return …;` leaves the third member behind.
+    this.narrowTagsInto(s.test, scope, false);
   }
 
   /**
@@ -1650,6 +1649,35 @@ class Checker {
   }
 
   /**
+   * Apply every TAG narrowing `test` proves on the branch `positive` selects, shadowing
+   * into `inner`. Returns whether anything was proved.
+   *
+   * `&&` proves both operands when true and `||` proves both when false (De Morgan) —
+   * the same rule `guardFacts` uses for nullish facts, which is why an operand of the
+   * wrong polarity proves nothing rather than proving the negation.
+   *
+   * Applied SEQUENTIALLY through `inner`, so each leaf is read against what the leaves
+   * before it already proved. That is what makes a contradictory chain
+   * (`s.kind === "a" && s.kind === "b"`) collapse safely: by the second test `s` is no
+   * longer a union in `inner`, `discriminantRead` declines, and the binding is left as
+   * the first test made it rather than being re-narrowed from the full union.
+   */
+  private narrowTagsInto(test: Expr, inner: Scope, positive: boolean): boolean {
+    if (test.kind === "LogicalExpr") {
+      if (test.op === "??" || (test.op === "&&") !== positive) return false;
+      const l = this.narrowTagsInto(test.left, inner, positive);
+      const r = this.narrowTagsInto(test.right, inner, positive);
+      return l || r;
+    }
+    if (test.kind === "UnaryExpr" && test.op === "!") return this.narrowTagsInto(test.operand, inner, !positive);
+    const t = this.tagTest(test, inner);
+    if (!t) return false;
+    const others = unionTagValues(t.union).filter((v) => v !== t.tag);
+    this.narrowInto(inner, t.name, t.union, t.negated !== positive ? [t.tag] : others);
+    return true;
+  }
+
+  /**
    * The type a name gets when its union is restricted to `tags`. One tag ⇒ that
    * member; several ⇒ the sub-union (still discriminated, by construction); none ⇒
    * `undefined`, meaning "leave the binding alone" — TS would say `never`, and the
@@ -1814,14 +1842,13 @@ class Checker {
         // and a TAG test narrows each arm's union — the tested member in one, the
         // remaining members in the other, which is what makes an `else if` chain over a
         // 3-member union work. Compose them rather than choosing one.
-        const t = this.tagTest(s.test, scope);
+        // The tag test may be one operand of a `&&`/`||` chain rather than the whole
+        // condition (`if (s.kind === "label" && s.text.length > 3)`), so the arms take
+        // the same De Morgan walk the right operand of a short circuit does.
         const con = scope.child();
         const alt = scope.child();
-        if (t) {
-          const others = unionTagValues(t.union).filter((v) => v !== t.tag);
-          this.narrowInto(con, t.name, t.union, t.negated ? others : [t.tag]);
-          this.narrowInto(alt, t.name, t.union, t.negated ? [t.tag] : others);
-        }
+        this.narrowTagsInto(s.test, con, true);
+        this.narrowTagsInto(s.test, alt, false);
         this.withFactsIn(this.factsFor(s.test, scope, true, s.consequent),
           () => this.checkBlock(s.consequent, con, ret));
         if (s.alternate) {
@@ -2307,9 +2334,23 @@ class Checker {
         // TRUE ones (`m! && m[0]`, `x !== undefined && x > 3`), `||` the FALSE ones.
         // `??` gets no guard fact (its right operand runs when the left IS nullish), but
         // an `x!` assertion in the left holds for it too — the left ran to completion.
+        // A TAG test on the left narrows the right operand too, and it is a SEPARATE
+        // mechanism from the facts above: a discriminated-union narrowing is a shadow
+        // BINDING (see `narrowInto`), not a `NarrowFact`, so `withFacts` cannot carry
+        // it. `if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr")` — the shape
+        // `src/ast.ts`'s own `freshArray` is written in — needs exactly this.
+        // Polarity, with `pos` = "the right operand runs on the left's TRUE branch":
+        // the tested tag is proved when the test's own sense matches that branch, and
+        // the remaining members are proved otherwise. `??` narrows nothing (its right
+        // operand runs when the left is NULLISH, which no tag test decides).
+        let rscope = scope;
+        if (e.op !== "??") {
+          const inner = scope.child();
+          if (this.narrowTagsInto(e.left, inner, e.op === "&&")) rscope = inner;
+        }
         const r = this.withFacts(
           this.factsFor(e.left, scope, e.op === "&&", exprRegion(e.right), e.op !== "??"),
-          () => this.type(e.right, scope, rhint),
+          () => this.type(e.right, rscope, rhint),
         );
         if (e.op === "??") {
           // `??` collapses to the non-nullish arm. Left may be definitely-nullish
