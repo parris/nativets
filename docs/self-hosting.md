@@ -1559,6 +1559,123 @@ observable.
 `test/record-dict.test.ts` also carries the lint that keeps the construct out: no `src/*.ts`
 may declare a `Record<` annotation, casts and prose excepted.
 
+### `NT1031` IS GONE FOR THE SECOND AND LAST TIME — the same cursor shape, the other tokenizer
+
+`coverage-preprocess.ts` was the only module in the tree still writing a **captured binding**,
+and it was the same construct, in the same kind of code, as the one `src/lexer.ts` cleared two
+rounds earlier: a scanner cursor moved by closures.
+
+```ts
+let line = 1;
+let prev: Tok | undefined;
+const nl   = (s: string) => { for (const c of s) if (c === "\n") line++; };   // NT1031
+const push = (t: Tok)    => { toks.push(t); prev = t; };                      // NT1031
+```
+
+The fix is `LexState`'s, verbatim: **one `//@@mutable` record** (`TokState { line, prev }`)
+declared at module scope and instantiated as an owned local. Mutating a FIELD of an owned local
+is not a capture write — the binding never changes, the object does — and `//@@mutable` is a
+comment to TypeScript, so bun runs the file unchanged. No compiler change; the compiler still
+refuses main's version of this file, which is the controlled experiment
+`test/selfhost-ratchet.test.ts` asks for and which its advisory printed unprompted.
+
+**The evidence is not the tests, it is the corpus.** A source rewrite inside a tokenizer is
+exactly the shape this document has twice recorded as under-tested by a fixture suite (the regex
+removal: five of six mutations invisible to all 121 fixtures). So old and new
+`preprocessForCoverage` were run over **every `.ts` in `src/`, `test/` and `examples/` — 486
+files, 2.49 MB — and their full output compared byte for byte: ZERO differences.**
+
+And, because a null diff proves nothing about code the corpus never reaches, each rewritten line
+was **mutated in turn** and the diff re-run:
+
+| mutation | files that differ |
+|---|---|
+| `nl`'s newline test `\n` -> `\r` | **133** |
+| `regexAllowed(st.prev)` -> `regexAllowed(undefined)` | **22** |
+| the loop's line counter `\n` -> `\r` | **466** |
+| a template's `startLine` -> `1` | **0** — see below |
+
+Three of four red the corpus, so the null result is known to be *reached*. The fourth is a real
+blind spot and is stated rather than glossed: `startLine` only escapes `tokenize` when a template
+literal is the FIRST token of a top-level statement, which no file in the corpus does. It is
+covered by three hand-built inputs instead, whose statement lines come back `[1,4]` / `[1,4,7]`
+and match old for new.
+
+| Module | Before | After |
+|---|---|---|
+| `coverage-preprocess.ts` | `check` — `NT1031`, `line++` in a closure | **`check` — `NT1606`**, `.push` (its own) |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+**`NT1031` is now empty tree-wide**, and unlike the buckets this document keeps watching refill,
+this one has no second holder to unmask: both of the tree's hand-written tokenizers now carry the
+same cursor record, and they were the only two closures-over-a-`let` in `src/`.
+
+**The rung did not move, and it was never going to.** Behind the capture write is `.push` — the
+185-site census elephant, refused **by decision** (commit `1ea7fa2`), whose sanctioned
+`xs = [...xs, v]` idiom is measured at **1036x** under bun at real accumulator sizes. Rewriting a
+per-token accumulator that way would break the two-toolchain constraint (`src/*.ts` has to keep
+*running* under bun), so it is an owner decision and was deliberately not taken here.
+`coverage-preprocess.ts` joins `ast.ts`, `lexer.ts`, `modules.ts` and `parser.ts` in the `NT1606`
+bucket, which is now **five of twelve** and is the single largest thing between here and SH6.
+
+### STAGE-1 GIVES BACK THE ONLY BLOCKER IT EVER OWNED — `await` at the inner call site
+
+`cli.ts` is stage-1: the real entry point, whose import graph pulls in everything. In every
+measurement in this document but one it has been gated on a *dependency*. The exception was
+its own `NT1020`:
+
+```ts
+await guard(() => buildBinary(source, out, { target, static: isStatic, entryPath: file }));
+//           ^ the arrow's body calls an async function without `await` — NT1020 at 76:21
+```
+
+Under node this promise is **not** dropped: `guard` is `async function guard<T>(fn: () =>
+Promise<T> | T)` and its body is `return await fn()`, so the promise is awaited one frame up.
+Two options were sized:
+
+| | verdict |
+|---|---|
+| **(a) SOURCE change** — `async () => await buildBinary(…)`, the `await` at the inner call site | **TAKEN** |
+| (b) COMPILER — narrow NT1020 for a call whose value is returned rather than discarded | rejected, and the reason is already written down |
+
+**(b) is rejected by a decision this project has already made and recorded.**
+`docs/divergences.md` names this exact shape a **deliberate over-rejection**:
+
+> A promise that is threaded through un-awaited and only awaited further up … produces
+> node's answer here, but is still refused … Knowing which of these is safe is a taint
+> analysis over promise values; refusing the un-awaited call is the same rule everywhere,
+> and **`await` at the inner call site is always the fix**.
+
+A recent lane deliberately made this guard *wider*, not narrower (it now covers promise-typed
+values escaping through parameters and returns). Narrowing it here for one call shape would
+re-open the hole that lane closed, and would make the accept/reject boundary syntactic again.
+
+**(a) is observationally null under bun**, and that is checked rather than argued. `guard`
+awaits whatever the callback returns, so `() => f(…)` and `async () => await f(…)` hand it the
+same promise; a rejection propagates through the async arrow to `guard`'s `catch` identically,
+which is the path that turns an `NTError` into a clean `error[NT….]` line instead of a stack
+trace. Old and new `src/cli.ts` were run side by side on `build`, `run`, `emit`, a program that
+exits 7, and a program that is refused: **identical stdout and identical exit codes** (1, 1, 7,
+0), including the diagnostic text.
+
+| Module | Before | After |
+|---|---|---|
+| `cli.ts` **linked (= stage-1)** | `link` — `NT1020`, its OWN | **`check` — `NT2001`**, checker.ts's `argTys: ["string", null]` |
+| `cli.ts` standalone | `NT2001` `process.stdout is not supported` | **unchanged** |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+The blocker moved to a LATER stage (`link` -> `check`) and back to a dependency's, so stage-1 is
+once again gated on the thing that gates five other modules: an **array of nullable elements**.
+
+**One instrument reports a blocker the compiler does not, and it is worth naming.**
+`test/self-host-coverage.test.ts`'s histogram gained `NT1020` x2 for `cli.ts` — an artifact of
+`coverage`'s statement-at-a-time recovery, which parses the call with no `guard` declaration in
+scope, so `promiseParamsByFn` is empty and the escape check refuses an async arrow that the real
+parser accepts. Measured both ways (declaration+call together parses; the call alone reports it).
+It is the mirror image of the confound this document already records for `lexer.ts`: a clean row
+in that histogram is not evidence a module is clean, and a dirty row is not evidence it is
+blocked.
+
 ---
 
 ## Milestones
