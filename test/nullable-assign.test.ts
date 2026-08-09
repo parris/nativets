@@ -388,6 +388,27 @@ describe("5 — a union MEMBER reaches a `Union | undefined` parameter", () => {
     expectRejected(E + F + `const other = { kind: "B", extra: 1 };\nconsole.log(f(other));\n`, "NT2001", "arg 0");
   });
 
+  /*
+   * THE COMPOSED SHAPE, and the reason this matters beyond one call site: a
+   * RECURSIVE discriminated union walked through an optional child. It needs both
+   * halves — lane-rectype's `unfoldTypeRef`, so the back-edge argument arrives as a
+   * real `?UU<…>` instead of a folded `?U@E`, and this one, so the union member is
+   * then allowed to fit. With only the unfold, the outer literal is refused; with
+   * only this, the refusal moves inward to `depth(e.next)`. This is the shape every
+   * AST walker in `src/` is written in.
+   */
+  test("a recursive union walked through an optional child", async () => {
+    await expectNode(
+      `type N = { kind: "A"; next?: N } | { kind: "B" };\n` +
+      `function depth(e: N | undefined): number {\n` +
+      `  if (e === undefined) return 0;\n` +
+      `  if (e.kind === "A") return 1 + depth(e.next);\n` +
+      `  return 1;\n` +
+      `}\n` +
+      `console.log(depth({ kind: "A", next: { kind: "B" } }));\n` +
+      `console.log(depth({ kind: "B" }), depth(undefined));\n`);
+  });
+
   // The control: the same call against the same union WITHOUT `| undefined`, which
   // always worked. It is here so a future change that breaks both is not mistaken for
   // a regression of this one. (An `if`, not a `?:` — a TAG test in a ternary arm is a
