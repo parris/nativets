@@ -593,6 +593,31 @@ cooperative scheduler). Within that surface, three deliberate rules:
   (`send(pid, x ?? fallback)`). As a *receive annotation* `T | undefined` keeps its A2
   meaning — "a `T`, or a timeout".
 
+### An ARRAY OF FUNCTIONS is `NT1001` — and the reason is the type ENCODING
+
+`((n: number) => number)[]` was already refused in its array-literal spelling ("arrays of X is
+not supported yet"). The ANNOTATION is now refused at the same code, in the type parser, and the
+reason is worth recording because it constrains whoever lifts the refusal.
+
+Types are strings. The function encoding is `(p1,p2)=>ret` and the array encoding is a bare
+`${elem}[]` suffix with **no parentheses**, so:
+
+```
+makeFuncTy(["number"], "number[]")        === "(number)=>number[]"   // (n) => number[]
+makeFuncTy(["number"], "number") + "[]"   === "(number)=>number[]"   // ((n) => number)[]
+```
+
+The two types are **the same string**. `isArrayTy` used to answer *array* for both — including
+for a plain arrow returning an array, which put the closure in the scope's drop set and freed it
+with `nt_arr_free`; `const g = () => arr` died with exit 255 and no diagnostic. It now answers
+*function*, which is correct for the shape that occurs and wrong for the one that does not.
+
+That is safe only while arrays of functions cannot exist, so the ambiguous string is no longer
+constructible from source: the parser refuses the suffix where it would form it. **Implementing
+arrays of functions therefore starts with the encoding** (parenthesize the element, or stop
+encoding types as strings) — not with lifting the refusal. Pinned in
+`test/arrow-returns-array.test.ts`.
+
 ### Modules (SH1) — a whole-program link, and no import cycles
 
 `import`/`export` across `.ts` files are compiled by resolving the graph from the entry file and

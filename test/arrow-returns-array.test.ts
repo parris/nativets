@@ -41,6 +41,17 @@
 import { describe, expect, test } from "bun:test";
 import { compileAndRun, emitIR, runWithNode } from "./harness.ts";
 
+/** Compile-only: the diagnostic a source is rejected with (or null if it compiles). */
+function rejectionOf(source: string): { code: string; message: string; hint?: string } | null {
+  try {
+    emitIR(source);
+    return null;
+  } catch (e) {
+    const d = (e as { diag?: { code: string; message: string; hint?: string } }).diag;
+    return d ?? { code: "?", message: String(e) };
+  }
+}
+
 /** node is the oracle: same stdout AND same exit code. Both, always — a double free
  *  shows itself in the exit code while stdout still looks perfect. */
 async function same(source: string): Promise<void> {
@@ -185,6 +196,86 @@ console.log(g().length);
  * everywhere else. Making the array-returning arrow behave exactly like the
  * number-returning one is the whole of the fix.
  */
+/*
+ * THE ENCODING COLLISION UNDERNEATH ALL OF THIS, and why the fix above is safe rather
+ * than lucky.
+ *
+ *     makeFuncTy(["number"], "number[]")   === "(number)=>number[]"   // fn -> number[]
+ *     makeFuncTy(["number"], "number") + "[]" === "(number)=>number[]" // ((n)=>number)[]
+ *
+ * The two are THE SAME STRING. `Ty` is lossy here: the array suffix is not parenthesized,
+ * so "function returning an array" and "array of functions" are indistinguishable once
+ * encoded. `isArrayTy` and `isFuncTy` BOTH answered true for it before; the fix picks
+ * `isFuncTy`, which is right for the shape that actually occurs and wrong for the one
+ * that does not — arrays of functions are refused (`NT1001`, "arrays need the heap value
+ * model"). Correct today, and a landmine the day that refusal is lifted.
+ *
+ * So the ambiguous string is no longer CONSTRUCTIBLE from source: the type parser refuses
+ * `((n: number) => number)[]` where it forms it, with the same NT1001 the array-literal
+ * spelling has always given. That keeps the two spellings' diagnostics identical (they
+ * were not, briefly: the annotation degraded to "cannot infer the element type of an
+ * empty array literal", which is not what is wrong with the program), and it means
+ * whoever implements arrays of functions must fix the ENCODING — they cannot get a
+ * silently mis-typed program out of the current one.
+ */
+describe("`((n) => number)[]` and `() => number[]` encode identically — so one is refused", () => {
+  test("the annotation is refused where the ambiguity is formed", () => {
+    const r = rejectionOf(`const fs: ((n: number) => number)[] = [];
+console.log(fs.length);
+`);
+    expect(r?.code).toBe("NT1001");
+    expect(r?.message).toContain("arrays of");
+    expect(r?.message).toContain("=>");
+  });
+
+  test("the array-LITERAL spelling gives the same diagnostic", () => {
+    const r = rejectionOf(`const fs = [(n: number) => n + 1];
+console.log(fs.length);
+`);
+    expect(r?.code).toBe("NT1001");
+    expect(r?.message).toContain("arrays of");
+  });
+
+  test("a parameter annotated with it is refused too, not silently mis-typed", () => {
+    const r = rejectionOf(`function h(fs: ((n: number) => number)[]): number { return fs.length; }
+console.log(h([]));
+`);
+    expect(r?.code).toBe("NT1001");
+    expect(r?.message).toContain("arrays of");
+  });
+
+  test("an ARRAY of arrays of functions is caught at the first suffix", () => {
+    const r = rejectionOf(`const fs: ((n: number) => number)[][] = [];
+console.log(fs.length);
+`);
+    expect(r?.code).toBe("NT1001");
+    expect(r?.message).toContain("arrays of");
+  });
+
+  // The neighbours: a function RETURNING an array, and an array of a parenthesized
+  // NON-function type, are both unambiguous and must not be caught by the refusal.
+  test("a function type returning an array is untouched", async () => {
+    const oracle = runWithNode(`const f: (n: number) => number[] = (n: number) => [n];
+console.log(f(1).length);
+`);
+    const ours = await compileAndRun(`const f: (n: number) => number[] = (n: number) => [n];
+console.log(f(1).length);
+`);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  test("`(number)[]` — a parenthesized non-function element — still parses as an array", async () => {
+    const src = `const xs: (number)[] = [1, 2];
+console.log(xs.length);
+`;
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
 describe("the IR itself", () => {
   test("the closure block is never reclaimed as an array", () => {
     const ir = emitIR(`const arr = [1, 2, 3];
