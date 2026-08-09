@@ -2142,12 +2142,99 @@ modules away, and that single collision was blocker #7 above. Fixed: an inner fu
 assignment counts only if it can actually reach an outer binding, i.e. the name is not one of that
 function's parameters or its body's top-level declarations. Tests in `test/narrowing.test.ts`.
 
-**Half of it is still open and is pinned as a refusal rather than left as a surprise.** The
-subtraction covers parameters and TOP-LEVEL body declarations only — exact, because a name declared
-there cannot be reached from outside by any assignment anywhere in that function. A `let a` in an
-inner BLOCK (a `switch` case, say — which is literally `src/checker.ts:2207`) is *not* subtracted
-and still poisons the name program-wide. Closing that means resolving each assignment against a
-real scope chain instead of matching names, which is a bigger change than this one.
+**Half of it was left open** — the subtraction covered parameters and TOP-LEVEL body declarations
+only, so a `let a` in an inner BLOCK (a `switch` case, say — literally `src/checker.ts:2207`) was
+not subtracted and still poisoned the name program-wide. That is now closed, from the other side;
+see the next section.
+
+### THE SAME BUG ONE LEVEL UP: two closure analyses asked their question of the WRONG BODY
+
+The subtraction above attacks the *supply* side — which assignments get into the program-wide set.
+The rest of the over-refusal is on the *demand* side: **who consults it.** Two analyses asked a
+bare-NAME question of the entire program, and after SH1 links a module graph "the entire program"
+is every module at once. `linkProgram` alpha-renames TOP-LEVEL bindings only — all codegen needs —
+so every module's locals and parameters share ONE flat namespace for anything keyed by name.
+
+The symptom is the one this repo has no instrument for: **two files that EACH compile alone and
+cannot be compiled together.** Coverage, the ratchet and the standalone column of the tables in this
+document all measure one module at a time, so per-module is exactly the case that works.
+
+```ts
+// counter.ts — the sanctioned escaping-counter idiom, compiles alone
+export function makeCounter(): () => number { let t = 0; return () => { t = t + 1; return t; }; }
+// tokens.ts — compiles alone; `t` here is a PARAMETER, unreachable from counter.ts
+export function isPunct(t: Tok | undefined, v: string): boolean { return !!t && t.kind === "punct"; }
+// main.ts imports both -> NT1031: "'t' is also used outside the closure"
+```
+
+1. **NT1031** asked `bodyChain.some(body => referencesName(body, name, arrow))`, and `bodyChain[0]`
+   is the whole program.
+2. **The `closureAssigned` filter** on narrowing consulted the program-wide set for every fact,
+   including facts about **the arrow's own parameter** — `src/coverage-preprocess.ts`'s
+   `const isP = (t: Tok | undefined, v: string) => !!t && t.kind === …`, which compiled standalone
+   and did not compile linked, because some other module's arrow assigns a `t`.
+
+Both now ask the body that **declares** the binding. `bodyChain` entries carry the names they bind
+(`ownBindings` — parameters plus top-level declarations), and `bindingFrame` walks the chain
+inward-out to the first binder, falling back to the outermost frame — the old behaviour — whenever
+it cannot place the declaration. A MODULE-LEVEL binding still lands on frame 0 and is judged against
+the whole program, because any arrow in the program can reach one. Every imprecision therefore still
+scans MORE code, never less.
+
+**Measured on the linked stage-1 program**, per-function: **304 -> 298** failing bodies (9 cleared
+of `NT2001`; 3 of those land on a later blocker). NT1031 itself fails 0 functions there, so the
+whole gain is the narrowing filter — but the refusal is real for user code, which is what
+`test/modules/closure-name/` pins.
+
+**Correction to the framing.** This is NOT a cross-module-only bug. The same collision fires inside
+one file — `makeCounter` beside a `widest` with its own `let t = 0` — and always could. Linking
+merely made it *ordinary*, by multiplying the namespace by the number of modules. The tempting
+single fix (have the linker rename locals too) would have hidden both bugs rather than fixed them.
+
+**The instrument, so the class stops being invisible.** `test/modules.test.ts` now re-links every
+fixture that compiles standalone against a module of pure name NOISE — the commonest short
+identifiers as parameters, top-level locals, and block-scoped locals assigned inside an arrow — and
+fails on any that stops compiling. Three canaries go red without the fix. It compares REFUSALS, so
+read a green run as "no new diagnostic crosses the link boundary" and nothing wider: the leak below
+is the same class and this sweep cannot see it.
+
+### ...AND ONCE MORE IN THE OWNERSHIP PASS, where the symptom is a LEAK instead of a diagnostic
+
+`shadowedNames` (`src/ownership.ts`) disqualifies a closure env from being dropped when its name is
+DECLARED more than once, because codegen gives a name one frame slot per **function** and freeing on
+the inner declaration would leave the outer name reading freed memory. It counted every declaring
+occurrence anywhere under the body handed to it — including inside NESTED function bodies, which
+have their own frame and can never share a slot out here. Confirmed against codegen rather than the
+comment asserting it: `collectLocals` has no `FuncDecl` case at all, and `genFunction` calls
+`reset()` first. Its sibling collectors (`collectLinear`, `collectVarTys`, `collectAliases`) are
+kind-by-kind switches with no `FuncDecl` arm and were already right; only `shadowedNames` used a
+reflective walk, which is how it over-reached.
+
+The module frame is analysed with `program.body`, so after linking one `let add = 0` inside another
+file's function deleted the drop for a `const add = …` closure here:
+
+```ts
+// lib.ts
+export function lib(k: number): number { let add = 0; add = add + k; return add; }
+// main.ts — alone: __objLive() is 0.  linked with lib.ts: 1, and the env is never freed.
+const n: number = 3;
+{ const add = (x: number): number => x + n; console.log(add(4)); }
+console.log(__objLive());
+```
+
+A leak, never a wrong answer — which is why it survived, since LeakSanitizer is Linux-only and
+nothing on a laptop notices. `__objLive()` makes it visible locally; `test/modules/closure-drop/`
+reads 1 before and 0 after. Arrow bodies keep counting, deliberately: an inlined HOF callback's
+locals DO land in the enclosing frame, and a mistake in that direction is a use-after-free rather
+than a leak. Six controls in `test/closure-env-drops.test.ts` pin that direction, and the ASan +
+UBSan churn program now exercises the module frame too — measured before and after, exactly one
+count moved.
+
+**One shape, three sites, and deliberately three fixes.** The checker's question is about lexical
+SCOPE (blocks are boundaries); ownership's is about the codegen FRAME (blocks are not, inlined
+arrows are not). A single shared notion of "binding identity" would have to pick one and would be
+wrong for the other. What they do share is the function boundary, which is what all three fixes
+stop at.
 
 ### A SECOND MODULE SELF-COMPILES — and NT1004, the long-flagged WALL, was TWO refusals wearing one code
 
