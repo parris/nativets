@@ -2148,6 +2148,104 @@ there cannot be reached from outside by any assignment anywhere in that function
 inner BLOCK (a `switch` case, say — which is literally `src/checker.ts:2207`) is *not* subtracted
 and still poisons the name program-wide. Closing that means resolving each assignment against a
 real scope chain instead of matching names, which is a bigger change than this one.
+
+### A SECOND MODULE SELF-COMPILES — and NT1004, the long-flagged WALL, was TWO refusals wearing one code
+
+`NT1004` has sat in this document as a potential wall for a long time, for a good reason: the
+compiler's whole error architecture is throw-across-a-call-boundary (`checker.ts` **332**
+`throw`s, `parser.ts` 89, `codegen.ts` 18), while the rule demands a `try` **in the same
+function**. `src/lexer.ts` was the cheapest possible place to find out what that costs, because
+it was the only module whose FIRST blocker was NT1004 and it has only eleven throws.
+
+**Why the rule exists, confirmed at the source.** `codegen.ts`'s `ThrowStmt` lowers a throw as
+`br label %<catch>` — a branch inside one LLVM function. There is no unwinder, no `invoke`, no
+landingpad, no personality function. So "throw across a call boundary" is a **runtime/codegen
+feature, not a checker relaxation**, exactly as suspected. The checker types `throw` fine; the
+refusal is codegen's alone.
+
+**What the FFI's cross-boundary error path actually is, and why it does not generalize for free.**
+`nt_exc_raise_msg` sets a sticky global (`g_exc_set` / `g_exc_msg`, a `const char *`) in
+`runtime/runtime.c`, and `emitExcCheck` polls it INLINE at the call site — thirteen sites, every
+one a *runtime* call. It crosses the **C → compiled-frame** boundary, one level, and the check
+runs in the same frame as the `catch`. When that frame has no handler it calls `nt_exc_abort()`.
+It has never crossed a compiled-function → compiled-function boundary and does not today.
+
+**The finding: the refusal was covering two different programs, and only one needs the unwinder.**
+A throw NOBODY can catch needs nothing at all — it is node's uncaught exception (stdout keeps
+what it printed, stderr gets the error, exit **1**), which is precisely what `nt_exc_raise_msg`
++ `nt_exc_abort` already do. Two shapes are provably in that class:
+
+- the throw is in **module top-level** (`main`) — nothing calls top-level code;
+- the program contains **no `try` at all** — no handler exists in any frame.
+
+Both now compile (`test/uncaught-throw.test.ts`, node-differential on stdout + exit code; the
+stderr text is a documented divergence). `src/lexer.ts` has eleven `throw`s and **zero** `try`s,
+so all eleven are the second kind.
+
+| module | before | after |
+|---|---|---|
+| `lexer.ts` | rung 0 — `NT1004`, a `throw` outside a `try` at 202:5, own | **rung 3** — IR, links, runs, and a non-weak DRIVER differential |
+| `diagnostics.ts` | rung 3 | **rung 3**, IR byte-identical (the new declare is conditional) |
+| every other module | — | **unchanged** — `NT1011`, ast.ts's reflective walker, ten modules |
+
+**NT1004 was lexer.ts's LAST blocker, not its next-to-last** — probed before implementing, with
+the lowering stubbed in a scratch tree, and the module went straight to IR. Rungs 1→3 then cost
+nothing, the same as `diagnostics.ts`. The non-weak evidence is `test/sh6.test.ts`'s new
+`lexer.ts DRIVER`: it tokenizes a small program and prints a per-token digest (type, text,
+line, column) plus two decoded escapes — 292 bytes byte-identical to the bun-run module — and
+then takes the ERROR path deliberately, `lex("const y = #;")`, where the uncaught `LexError`
+stops stdout at the same byte and exits 1 on both sides.
+
+Tree-wide the blocker set drops from `["NT1004","NT1011","NT1606"]` to `["NT1011","NT1606"]`,
+and it is the first time a code has left that set by being **split** rather than implemented.
+
+**THE ESTIMATE for the 332 sites, which is what this lane was really for.** Nothing here helps
+`checker.ts`: its throws are `throw typeError(…)` / `throw nyi(…)` raised deep in the callee and
+caught in `driver.ts`/`cli.ts`, i.e. exactly the cross-frame idiom that is still refused. The
+two options both remain open, and both are owner decisions:
+
+1. **Rewrite the 332 sites to a return-based error channel.** Every function on the path from a
+   `typeError` to `driver.ts` would return `T | Err` and every call site would test it. That is
+   not 332 edits, it is the transitive closure of the frontend's call graph — the checker's
+   entire signature surface — and it changes the source `bun` runs. Not viable.
+2. **Implement propagation** (NOT unwinding — the sticky flag already exists). A throw with no
+   local handler raises and performs a "propagating return"; every user call site polls the flag
+   and either branches to a local catch or propagates again. Four things make this a stage, not
+   a lane: (a) the propagating return needs the set of **live owned locals at an arbitrary call
+   site**, and `ownership.ts` computes drops only per `ReturnStmt` — without it, a leak or a
+   double free; (b) `catch (e)`'s type is inferred by scanning the try block's *syntactic*
+   throws (`Checker.inferThrowType`), so it would have to become interprocedural, or every
+   cross-frame thrown value normalizes to `{message:string}` (the flag carries only a
+   `const char *` today); (c) `finally` must run on the propagation path; (d) a "may throw"
+   transitive closure is needed or every call site pays a poll and every IR snapshot changes.
+   HOF callbacks are inlined, which interacts with all four.
+
+The honest read: the big modules are **not** reachable by relaxing the checker, and they are not
+reachable by rewriting either. They need (2).
+
+**PRE-EXISTING BUG, found on the way, and it is a SILENT WRONG ANSWER at exit 0.**
+
+```ts
+function f(n: number): void {
+  try { switch (n) { case 1: throw new Error("boom"); } } catch (e) { console.log(e); }
+}
+f(1);        // node: `Error: boom`      nativets: `}@`      exit 0 on BOTH
+```
+
+`catch (e)`'s type comes from `Checker.inferThrowType`, which scans the try block for the first
+`throw` — and had no `SwitchStmt` case, so the binding kept its `"string"` default while
+codegen's `ThrowStmt` stored the Error object pointer into it **raw**, with no coercion and no
+check. `console.log(e)` then called `js_print_str` on an object block. It reproduces on `main`
+untouched and predates this lane; a `switch` inside a `try` is ordinary TypeScript.
+
+Fixed on both sides, and deliberately differently. The scan now covers `switch` (that program
+compiles and matches node). The raw store is now a **refusal** when the thrown type is not the
+binding's — which is the backstop that closes the class rather than one missed scan at a time,
+and it caught the second shape immediately: two throws of different types in one block, where
+`e.message` was reading the first eight bytes of a string as a pointer (exit 255, no output,
+where node prints `boom` then `undefined`). See docs/divergences.md. A nested `try` is still
+NOT descended into, which is correct — its throws belong to its own `catch`.
+
 ### STAGE-1 OWNS NOTHING — both of `cli.ts`'s host surfaces grew, and it rejoined the group
 
 `src/cli.ts` had spent one round as the only module in the tree whose first blocker was its

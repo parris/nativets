@@ -304,7 +304,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // type is `string`, the guard is dead, and at end-of-file the PANIC happens one line
   // before the guard could have helped. `.at` is the spelling that means "may be absent"
   // in both toolchains. Behind it: NT1004, a `throw` outside a `try` at 202:5.
-  "lexer.ts": { rung: 0, code: "NT1004", blame: "self" },
+  "lexer.ts": { rung: 3, code: "", blame: "self" },
   // WALKED, not nudged. This module's blocker CHAIN was measured end to end — six
   // distinct blockers between it and rung 1 — and five of them are now cleared:
   //   1. NT1606  `.push` x4 in formatDiagnostic            -> immutable rebind (src)
@@ -651,9 +651,11 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * score identically. Its top rung cannot distinguish success from failure. This
    * ladder's rung 1 is exactly that distinction, which is why it exists.
    */
-  test("exactly TWO modules reach IR — the rest of the ladder is at rung 0", async () => {
+  test("exactly THREE modules reach IR — the rest of the ladder is at rung 0", async () => {
     const rows = await Promise.all(MODULES.map(async (e) => [e.file, (await measure(e)).rung] as const));
-    const reachedIR = rows.filter(([, r]) => r >= 1).map(([f]) => f);
+    // SORTED: the row order is module-iteration order, an artifact. Asserting it
+  // unsorted produced a spurious conflict at the merge.
+  const reachedIR = rows.filter(([, r]) => r >= 1).map(([f]) => f).sort();
     // THE HEADLINE NUMBER CHANGED, for the first time since this file was written. It read
     // `[]` — "ZERO of the twelve modules produce IR" — for every measurement until
     // consuming parameters landed. `diagnostics.ts` is the first, and it did not stop at
@@ -669,7 +671,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     //
     // Two is still not a trend, and the ORDER of the list is a fact worth reading: this is
     // the FILE ORDER of `MODULES`, so a module joining does not reshuffle it.
-    expect(reachedIR).toEqual(["diagnostics.ts", "coverage-preprocess.ts"]);
+    expect(reachedIR).toEqual(["coverage-preprocess.ts", "diagnostics.ts", "lexer.ts"]);
   }, 300_000);
 
   /**
@@ -748,7 +750,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // `coverage-preprocess.ts` is the second, and it makes the same point twice: it has
     // ALSO parsed clean for many rounds (it is in the list above), and the four blockers it
     // then cleared were all post-parse. Ten of twelve parse clean and remain at rung 0.
-    const AT_RUNG_3 = ["diagnostics.ts", "coverage-preprocess.ts"];
+    const AT_RUNG_3 = ["coverage-preprocess.ts", "diagnostics.ts", "lexer.ts"];
     for (const file of parseClean) {
       const m = await measure(MODULES.find((e) => e.file === file)!);
       expect(`${file} rung ${m.rung}`).toBe(`${file} rung ${AT_RUNG_3.includes(file) ? 3 : 0}`);

@@ -1884,7 +1884,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1001 | arrays: empty `[]`, nested/object element types | M1 | (basic `number[]`/`string[]` are ✅ supported; `console.log(arr)` is ✅ node-exact — see the util.inspect section above) |
 | NT1002 | objects: nested object fields, object methods | M1 | (flat objects, `.f`/`o["f"]`, `Object.keys`, `for-in` are ✅ supported) |
 | NT1003 | arrow functions / function values / closures | M2 | captured environments |
-| NT1004 | `try`/`catch`/`throw` | M2 | unwinding |
+| NT1004 | a `throw` that CROSSES A CALL BOUNDARY | M2 | propagation (see below); `try`/`catch`/`throw` within one frame ✅, and an UNCAUGHT `throw` ✅ |
 | NT1005 | `JSON` | M3 | `JSON.stringify` ✅ and `JSON.parse` + `dyn as T` runtime typecheck ✅ (scalars/objects/arrays, nested); code reused to reject un-validatable narrow targets (functions, unions). A compound `Dyn` now PRINTS node-exactly (util.inspect, see above) |
 | NT1006 | spread | M2 | arrays/objects; spreading a VALUE into a call is supported only where the arity is known or the fold has an identity — see below |
 | NT1007 | destructuring | M2 | arrays/objects |
@@ -1894,6 +1894,67 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
 | NT1030 | a recursive type with nowhere to put a back-edge (`type P = Q[]`), a `@@mutable` recursive declaration, or a cycle one of whose members is refused for its own reason | later | self- AND mutually-recursive object/union declarations now COMPILE via the nominal `@Name` back-edge; ordering was never the problem — see below |
+
+### An UNCAUGHT `throw` compiles; a throw that CROSSES A FRAME is still `NT1004`
+
+`throw` is lowered as a **branch to the enclosing `try`'s catch block**, which is why the
+`try` has to be in the same function: there is no unwinder, and an exception has never been
+able to leave a frame. That is still true. What changed is that the single refusal was
+covering two different programs, and only one of them needs the unwinder.
+
+A throw **nobody can catch** needs nothing at all. It is node's uncaught exception: whatever
+was printed stays printed, the error goes to stderr, and the process exits **1**. Two shapes
+are provably in that class, and both are exact rather than heuristic:
+
+- the throw is in **module top-level** (`main`) — nothing calls top-level code, so no
+  ancestor frame exists to unwind to. This covers a rethrow out of a top-level `catch` and a
+  throw out of a top-level `finally`, neither of which its own `try` catches;
+- the program contains **no `try` at all** — then no handler exists in any frame, after any
+  number of calls.
+
+Both lower to `nt_exc_raise_msg(<message>)` + `nt_exc_abort()`, the pending-exception
+protocol the host FFI (SH4) has always used for an uncaught `ENOENT`.
+
+**The divergence is the stderr TEXT, and only that.** node prints
+`Error: boom` plus a stack trace naming source positions; we print one line,
+`nativets: uncaught boom`. stdout and the exit code match node exactly, which is what the
+differential asserts (`test/uncaught-throw.test.ts`). A stack trace needs frame metadata the
+compiled program does not carry.
+
+**Still refused, unchanged:** the ordinary "raise in the callee, handle at the call site"
+idiom — a throw in a function with the `try` one or more frames up. The value would have to
+survive the return, which means a checked error return at every call site of every
+may-throw function, a live-set drop at each of those sites, and an interprocedural type for
+the `catch (e)` binding. Also refused: `throw 42` / `throw { … }` with no `message` string,
+because there is nothing to raise and inventing text would be a wrong answer.
+
+### `catch (e)` takes ONE type — a `try` with throws of two types is `NT1004`
+
+node's `catch` parameter is `any`. Nothing here is, so the binding is given the type of the
+**first `throw` the checker can see in the block** (or `{message:string}` when the block calls
+a host builtin, SH4). A block that throws two different types therefore has no honest binding
+type, and it is refused at the `throw`, naming both types.
+
+This was a **silent wrong answer** before it was a refusal, in two shapes:
+
+```ts
+function f(n: number): void {
+  try { switch (n) { case 1: throw new Error("boom"); } } catch (e) { console.log(e); }
+}
+f(1);        // node: `Error: boom`      nativets: `}@`   — AT EXIT 0
+```
+
+The scan did not descend into a `switch`, so the binding kept its `"string"` default and the
+`throw` stored the object pointer into it raw. That one is **fixed** — the scan now covers
+`switch` — and it is not refused, it compiles and matches node. The second shape:
+
+```ts
+try { if (n > 0) throw new Error("boom"); throw "plain"; } catch (e) { console.log(e.message); }
+```
+
+is the one that is refused: the string would be stored under `{message:string}`, and reading
+`.message` reads the first eight bytes of `"plain"` as a pointer. Deliberately **not**
+descended into: a NESTED `try`, whose throws belong to its own `catch`.
 
 ### Spreading a value INTO a call — the three cases, and why only two compile
 
