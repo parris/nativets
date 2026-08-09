@@ -505,8 +505,7 @@ function specializeDecl(tmpl: FuncDecl, name: string, bindings: Map<string, Ty>)
   // every use site; and `delete` is refused by this very compiler (NT1606), so writing
   // it would plant a self-hosting blocker in the file that emits the diagnostic.
   const spec = structuredClone({ ...tmpl, name, typeParams: undefined }) as FuncDecl;
-  mapTypesDeepStmt(spec, (t) => substTypeParams(t, bindings));
-  return spec;
+  return mapTypesDeepStmt(spec, (t) => substTypeParams(t, bindings)) as FuncDecl;
 }
 
 /**

@@ -495,7 +495,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
   const prefixBase = choosePrefixBase([...sources.values()]);
 
   const mods = new Map<string, ModuleInfo>();
-  const body: Stmt[] = [];
+  let body: Stmt[] = [];
   /** `@@mutable` class names, under their FINAL (post-rename) names. Losing these across
    *  the link would silently downgrade a mutable class to copy-on-write, so they travel
    *  with the merged program (see docs/decorators.md). */
@@ -617,7 +617,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
   };
   scanStatics(body);
   if (staticFields.size) {
-    resolveStaticFieldReads(body, staticFields, (n) => {
+    body = resolveStaticFieldReads(body, staticFields, (n) => {
       throw mutationError(`assignment to the static field '${n}'`,
         "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead");
     });
