@@ -264,3 +264,192 @@ describe("diagnostic spans reach through a unary expression", () => {
     expect(emit(`${FN}f(-1);\n`)).toContain("expects string, got number");
   });
 });
+
+/*
+ * NT1606 — the most-hit refusal in the tree — used to render with NO LOCATION AT ALL.
+ *
+ *     error[NT1606]: arrays are immutable: `.push` would mutate the array in place
+ *       = help: build a new array instead: …
+ *
+ * No line, no column, no gutter, no caret, and no name for the receiver, while every
+ * sibling in its own band (NT1601/NT1603/NT1604/NT1607) rendered a full rustc-style
+ * band. Two self-hosting lanes independently reported it, and BOTH had to patch the
+ * compiler to print the receiver and the line before they could find the one blocking
+ * site — one of them bisected a 442-line file by hand. That is precisely the work a
+ * diagnostic exists to prevent.
+ *
+ * The bar is set SIDE BY SIDE against NT1601 rather than by asserting on a substring:
+ * the two are rendered from the same source and their shapes compared, so a future
+ * change that quietly drops NT1606's span fails here even if the message survives.
+ *
+ * THE TRAP (test/narrowing.test.ts hit it): `formatDiagnostic` takes a `Diagnostic`, not
+ * an `NTError`. Handed the error itself it renders `error[undefined]` and SILENTLY DROPS
+ * THE HINT — and a test asserting the code still passes, because `NTError.message`
+ * embeds `[NT1606]`. So everything below goes through `.diag`, and every case asserts the
+ * hint is present, which is the assertion that catches that class.
+ */
+describe("NT1606 carries a source location", () => {
+  /** Compile and render exactly what the CLI would print. Via `.diag` — see the trap above. */
+  function render(src: string): string {
+    try {
+      sourceToIR(src);
+      return "(compiled)";
+    } catch (e) {
+      if (!(e instanceof NTError)) throw e;
+      return formatDiagnostic(e.diag, src);
+    }
+  }
+
+  test("`.push` renders the same band as NT1601 does — gutter, line, caret, hint", () => {
+    const push = "const xs: number[] = [];\nxs.push(2);\n";
+    const out = render(push);
+    // The head names the receiver, not a bare `.push`, and says where.
+    expect(out).toContain("error[NT1606]: arrays are immutable: `xs.push` would mutate the array in place at 2:1");
+    // ...and the band itself: gutter bar, numbered source line, caret, hint.
+    expect(out).toContain("  2 | xs.push(2);");
+    expect(out).toContain("^^^^^^^^^^^ mutated here");
+    expect(out).toContain("= help: build a new array instead");
+
+    // Side by side with the band NT1606 was missing. Same source shape, same skeleton.
+    const move = "const a: number[] = [1, 2];\nconst b = a;\nconsole.log(a.length);\n";
+    const skeleton = (s: string): string[] =>
+      s.split("\n").map((l) => (l.includes("error[") ? "HEAD" : l.includes("= help:") ? "HELP" : l.trim() === "|" ? "BAR" : l.includes("|") ? "FRAME" : "OTHER"));
+    expect(skeleton(out).slice(0, 4)).toEqual(skeleton(render(move)).slice(0, 4));
+  });
+  /*
+   * The rest of node's in-place array mutators. They are ONE table because the defect was
+   * one: every arm of the `switch (method)` in `inferArrayMethod` built its `mutationError`
+   * with a bare `.<method>` and no position, so the location was missing from all of them
+   * and fixing only the reported one (`.push`) would have left the next lane in exactly the
+   * same place. `.sort` is included even though it is rejected on its own line above the
+   * switch (a FRESH receiver is allowed to sort), because that is the arm a self-hosting
+   * lane hits second.
+   */
+  const MUTATORS: [string, string][] = [
+    ["pop", "xs.pop();"],
+    ["sort", "xs.sort();"],
+    ["fill", "xs.fill(0);"],
+    ["splice", "xs.splice(0, 1);"],
+    ["shift", "xs.shift();"],
+    ["unshift", "xs.unshift(1);"],
+    ["copyWithin", "xs.copyWithin(0, 1);"],
+  ];
+  for (const [method, call] of MUTATORS) {
+    test(`\`.${method}\` names its receiver and points at the line`, () => {
+      const out = render(`const xs: number[] = [1, 2];\n${call}\n`);
+      expect(out).toContain(`\`xs.${method}\``);
+      expect(out).toContain("at 2:1");
+      expect(out).toContain(`  2 | ${call}`);
+      expect(out).toContain("mutated here");
+      expect(out).toContain("= help:");
+    });
+  }
+  /*
+   * The ASSIGNMENT forms. These are the ones `exprLoc` could not have located even if the
+   * call site had asked it to: `FieldAssign`, `AssignExpr` and `UpdateExpr` carry no `loc`
+   * of their own AND had no arm in `exprLoc`'s switch, so `exprLoc(fieldAssign)` was
+   * `undefined` while `exprLoc(fieldAssign.object)` gave a real position. The arms are added
+   * in src/ast.ts (a `FieldAssign` is located by its RECEIVER, which is where the statement
+   * starts and what a reader scans for); the call sites below then get a band like any other.
+   */
+  const ASSIGNS: [string, string, string, string][] = [
+    ["field assign", "const o = { n: 1 };", "o.n = 2;", "`o.n = v`"],
+    ["element assign", "const xs: number[] = [1, 2];", "xs[0] = 9;", "`xs[i] = v`"],
+    ["field update", "const o = { n: 1 };", "o.n++;", "`o.n++`"],
+    ["element update", "const xs: number[] = [1, 2];", "xs[0]++;", "`xs[i]++`"],
+  ];
+  for (const [name, decl, stmt, named] of ASSIGNS) {
+    test(`${name} points at the receiver and names it`, () => {
+      const out = render(`${decl}\n${stmt}\n`);
+      expect(out).toContain("error[NT1606]");
+      expect(out).toContain(named);
+      expect(out).toContain("at 2:1");
+      expect(out).toContain(`  2 | ${stmt}`);
+      expect(out).toContain("mutated here");
+      expect(out).toContain("= help:");
+    });
+  }
+  /*
+   * The `Map`/`Set` variants — and the point of retiring the workaround they were built on.
+   *
+   * These three producers already WANTED a location badly enough to hand-append one into
+   * the message TEXT (`… at 412:97`, assembled from `exprLoc(subject)` at the call site).
+   * That gave the compact form a position and the rendered form nothing: no `spans`, so
+   * `formatDiagnostic` fell through to the one-line branch and never drew a frame. The
+   * suffix now comes from `mutationError`'s `at` parameter, which produces the SAME text
+   * and the source frame as well — so what is asserted here is both halves at once, and
+   * the hand-appended spelling is gone from src/checker.ts (see the guard below).
+   */
+  test("`Map`/`Set` discarded mutator gets a frame, not just an appended `at L:C`", () => {
+    const out = render('const m = new Map<string, number>();\nm.set("a", 1);\n');
+    expect(out).toContain("error[NT1606]");
+    expect(out).toContain("`Map` is persistent");
+    expect(out).toContain("at 2:1");
+    expect(out).toContain('  2 | m.set("a", 1);');
+    expect(out).toContain("mutated here");
+    expect(out).toContain("= help:");
+  });
+
+  test("a vacuous `Map` truthiness test gets a frame too", () => {
+    const out = render('const m = new Map<string, number>();\nif (m) { console.log(1); }\n');
+    expect(out).toContain("error[NT1606]");
+    expect(out).toContain("ALWAYS true");
+    expect(out).toContain("at 2:5");
+    expect(out).toContain("  2 | if (m) { console.log(1); }");
+    expect(out).toContain("mutated here");
+    expect(out).toContain("= help:");
+  });
+
+  test("`Object.assign` points at the target it would mutate", () => {
+    const out = render("const a = { x: 1 };\nconst b = { y: 2 };\nconst c = Object.assign(a, b);\nconsole.log(c.x);\n");
+    expect(out).toContain("error[NT1606]: Object.assign mutates its target object at 3:25");
+    expect(out).toContain("  3 | const c = Object.assign(a, b);");
+    expect(out).toContain("mutated here");
+    expect(out).toContain("= help:");
+  });
+
+  /*
+   * The guard that keeps the workaround retired. A producer that assembles `at L:C` into
+   * the message itself gets the suffix but NOT the frame — which is exactly the defect
+   * this describe block exists to close, and it was reached for once already.
+   */
+  test("no NT1606 producer hand-appends its position into the message", () => {
+    // Scoped to `mutationError(` argument lists, not to the file: other producers append
+    // `at L:C` for reasons of their own (src/parser.ts's NT1017 module refusals name the
+    // `import` keyword's position), and this lane does not speak for them.
+    const offenders: string[] = [];
+    for (const f of ["checker.ts", "parser.ts", "modules.ts"]) {
+      const src = readFileSync(join(HERE, "..", "src", f), "utf8");
+      let i = src.indexOf("mutationError(");
+      while (i >= 0) {
+        let depth = 0, j = i + "mutationError".length;
+        for (; j < src.length; j++) {
+          if (src[j] === "(") depth++;
+          else if (src[j] === ")") { depth--; if (depth === 0) break; }
+        }
+        const call = src.slice(i, j + 1);
+        if (call.includes(".line}:$")) offenders.push(`${f}: ${call.slice(0, 90)}…`);
+        i = src.indexOf("mutationError(", j);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+  /*
+   * The LAST two producers, and the only ones where a location was genuinely NOT available:
+   * the static-field write-back in src/parser.ts and src/modules.ts is raised from a
+   * callback `resolveStaticFieldReads` invokes with a NAME and nothing else, so neither
+   * caller had anything to pass. The AST node IS in hand at the callback's throw site in
+   * src/ast.ts (`e.object` is the class Identifier), so the callback is widened to carry
+   * its position out — which is the difference between "somewhere in this program a static
+   * field is assigned" and a jump to the line, and both spellings of it (single file, and
+   * through the module linker) are covered.
+   */
+  test("assignment to a static field points at the class", () => {
+    const src = "class C {\n  static n = 1;\n  static get(): number { return C.n; }\n}\nC.n = 2;\nconsole.log(C.get());\n";
+    const out = render(src);
+    expect(out).toContain("error[NT1606]: assignment to the static field 'C.n' at 5:1");
+    expect(out).toContain("  5 | C.n = 2;");
+    expect(out).toContain("mutated here");
+    expect(out).toContain("= help:");
+  });
+});

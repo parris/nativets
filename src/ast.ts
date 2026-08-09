@@ -1413,6 +1413,18 @@ export function exprLoc(e: Expr | undefined): Loc | undefined {
     // fixtures stopped masking semantic diagnostics — see tsconfig.src.json.
     case "UnaryExpr": return exprLoc(e.operand);
     case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": return exprLoc(e.expr);
+    // The ASSIGNMENT forms. None of `FieldAssign`/`AssignExpr`/`UpdateExpr` carries a
+    // `loc`, and none had an arm here, so `exprLoc(fieldAssign)` was `undefined` while
+    // `exprLoc(fieldAssign.object)` gave a real position two lines away — which is why
+    // NT1606, the most-hit refusal in the tree, printed no location at all. A store is
+    // located by its RECEIVER: that is where the statement starts and what a reader
+    // scans for (`IndexAssign` already carries the written `[`, so `own` answers it
+    // first and this arm is only its fallback). An `AssignExpr` names its target with a
+    // bare string, so the value is the only child that can carry a position.
+    case "FieldAssign": return exprLoc(e.object) ?? exprLoc(e.value);
+    case "IndexAssign": return exprLoc(e.object) ?? exprLoc(e.index) ?? exprLoc(e.value);
+    case "AssignExpr": return exprLoc(e.value);
+    case "UpdateExpr": return exprLoc(e.targetExpr);
     case "ConditionalExpr": return exprLoc(e.test) ?? exprLoc(e.consequent) ?? exprLoc(e.alternate);
     case "TemplateLiteral": return e.exprs.map((x) => exprLoc(x)).find((l) => l !== undefined);
     case "ArrayLiteral": return e.elements.map((x) => exprLoc(x)).find((l) => l !== undefined);
@@ -1727,12 +1739,26 @@ export function mapTypesDeepExpr(e: Expr, f: (t: Ty) => Ty): Expr { return tyExp
 
 /* ---- pass 2: `C.f` static-field reads → the `C.f` module binding ----------- */
 
-function staticExpr(e: Expr, names: Set<string>, onAssign?: (name: string) => never): Expr {
+function staticExpr(e: Expr, names: Set<string>, onAssign?: (name: string, at: Loc | undefined) => never): Expr {
   // `C.f = v` — a WRITE to a static field. Not a read, so never rewritten; the caller
   // refuses it by name (a static field lowers to a `const`).
+  //
+  // The POSITION goes out with the name. Both callers (src/parser.ts, src/modules.ts)
+  // raise NT1606 from here, and neither had anything to locate it with — the handler took
+  // a name and nothing else, so the most-hit refusal in the tree reported a static-field
+  // write with no line at all. The offending node is right here, and `e.object` is the
+  // class name, which is where the statement starts.
+  //
+  // The handler's type is spelled INLINE, and `at` is `Loc | undefined` rather than
+  // `at?: Loc`: a function TYPE with an OPTIONAL parameter does not parse in the subset
+  // this file must stay inside — `type F = (at?: T) => R` is refused NT2003 "Cannot find
+  // name 'at'", blaming the parameter NAME as an unresolved type, while the identical
+  // optional parameter on a real function declaration compiles. The two spellings are the
+  // same type at every call site here, so this costs nothing and keeps ast.ts parse-clean
+  // (test/sh6.test.ts's twelve-module list).
   if (onAssign !== undefined && e.kind === "FieldAssign" && e.object.kind === "Identifier"
       && names.has(`${e.object.name}.${e.field}`)) {
-    onAssign(`${e.object.name}.${e.field}`);
+    onAssign(`${e.object.name}.${e.field}`, exprLoc(e));
   }
   // A `?.` link is left alone (rewriting it would silently drop the optional; a class name
   // is never nullish, so the read is rejected instead).
@@ -1744,7 +1770,7 @@ function staticExpr(e: Expr, names: Set<string>, onAssign?: (name: string) => ne
   return walkExprChildren(e, (x: Expr): Expr => staticExpr(x, names, onAssign),
     (s: Stmt): Stmt => staticStmt(s, names, onAssign), KEEP_TY);
 }
-function staticStmt(s: Stmt, names: Set<string>, onAssign?: (name: string) => never): Stmt {
+function staticStmt(s: Stmt, names: Set<string>, onAssign?: (name: string, at: Loc | undefined) => never): Stmt {
   return walkStmtChildren(s, (x: Expr): Expr => staticExpr(x, names, onAssign),
     (y: Stmt): Stmt => staticStmt(y, names, onAssign), KEEP_TY);
 }
@@ -1759,7 +1785,7 @@ function staticStmt(s: Stmt, names: Set<string>, onAssign?: (name: string) => ne
  * it does not see the read at all. No source identifier can contain a `.`, so the dotted
  * name is unambiguous.
  */
-export function resolveStaticFieldReads(list: Stmt[], names: Set<string>, onAssign?: (name: string) => never): Stmt[] {
+export function resolveStaticFieldReads(list: Stmt[], names: Set<string>, onAssign?: (name: string, at: Loc | undefined) => never): Stmt[] {
   return list.map((s: Stmt): Stmt => staticStmt(s, names, onAssign));
 }
 

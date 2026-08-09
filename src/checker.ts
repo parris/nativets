@@ -2225,8 +2225,8 @@ class Checker {
               return "number";
             }
             if (isObjectTy(ot))
-              throw mutationError("objects are immutable: `o[k]++` would mutate the object in place", "use `{ ...o, k: o[k] + 1 }` — returns a NEW object; the original is unchanged");
-            throw mutationError("arrays are immutable: `arr[i]++` would mutate the array in place", "use `arr.with(i, arr[i] + 1)` — returns a NEW array; the original is unchanged");
+              throw mutationError(`objects are immutable: \`${exprText(tgt.object) ?? "o"}[k]${e.op}\` would mutate the object in place`, "use `{ ...o, k: o[k] + 1 }` — returns a NEW object; the original is unchanged", exprLoc(tgt.object) ?? exprLoc(tgt));
+            throw mutationError(`arrays are immutable: \`${exprText(tgt.object) ?? "arr"}[i]${e.op}\` would mutate the array in place`, "use `arr.with(i, arr[i] + 1)` — returns a NEW array; the original is unchanged", exprLoc(tgt.object) ?? exprLoc(tgt));
           }
           // A FIELD target (`this.n++`, `cell.n++`). The parser vetted only the `this`
           // case (syntax); mutability of any other receiver is a TYPE question, decided
@@ -2236,9 +2236,10 @@ class Checker {
             const isThis = tgt.object.kind === "Identifier" && tgt.object.name === "this";
             if (!isThis && !this.isMutableTy(ot)) {
               throw mutationError(
-                "objects are immutable: `o.f++` would mutate the object in place",
+                `objects are immutable: \`${exprText(tgt) ?? "o.f"}${e.op}\` would mutate the object in place`,
                 "use `{ ...o, f: o.f + 1 }` — returns a NEW object; the original is unchanged" +
                   (isObjectTy(ot) ? ". To assign in place instead, declare the record `@@mutable` (docs/decorators.md)" : ""),
+                exprLoc(tgt.object) ?? exprLoc(tgt),
               );
             }
           }
@@ -2429,8 +2430,8 @@ class Checker {
           return "number";
         }
         if (isObjectTy(ot))
-          throw mutationError("objects are immutable: `o[i] = v` would mutate the object in place", "use `{ ...o, k: v }` — returns a NEW object; the original is unchanged");
-        throw mutationError("arrays are immutable: `arr[i] = v` would mutate the array in place", "use `arr.with(i, v)` — returns a NEW array; the original is unchanged");
+          throw mutationError(`objects are immutable: \`${exprText(e.object) ?? "o"}[k] = v\` would mutate the object in place`, "use `{ ...o, k: v }` — returns a NEW object; the original is unchanged", exprLoc(e.object) ?? e.loc);
+        throw mutationError(`arrays are immutable: \`${exprText(e.object) ?? "arr"}[i] = v\` would mutate the array in place`, "use `arr.with(i, v)` — returns a NEW array; the original is unchanged", exprLoc(e.object) ?? e.loc);
       }
       case "FieldAssign": {
         // `o.field = expr` — store one slot. Three ways to get here:
@@ -2443,10 +2444,11 @@ class Checker {
         const ot = this.type(e.object, scope);
         if (!e.viaThis && !this.isMutableTy(ot)) {
           throw mutationError(
-            "objects are immutable: `o.f = v` would mutate the object in place",
+            `objects are immutable: \`${exprText(e.object) === undefined ? "o.f" : `${exprText(e.object)}.${e.field}`} = v\` would mutate the object in place`,
             isObjectTy(ot)
               ? "use `{ ...o, f: v }` — returns a NEW object; the original is unchanged. To assign in place instead, declare the record `@@mutable` (docs/decorators.md)"
               : "use `{ ...o, f: v }` — returns a NEW object; the original is unchanged",
+            exprLoc(e.object),
           );
         }
         if (!isObjectTy(ot)) throw typeError(`cannot assign field on non-object type ${ot}`);
@@ -2968,7 +2970,8 @@ class Checker {
       // does not do. Point at the object spread that expresses the same intent.
       if (p === "assign" || p === "defineProperty" || p === "setPrototypeOf")
         throw mutationError(`Object.${p} mutates its target object`,
-          "objects are immutable — build a new one with spread: `const merged = { ...a, ...b }`");
+          "objects are immutable — build a new one with spread: `const merged = { ...a, ...b }`",
+          exprLoc(e.args[0]) ?? e.loc);
       if (p !== "keys" && p !== "values" && p !== "entries" && p !== "getOwnPropertyNames") throw nyi(NYI.OBJECT, `Object.${p}`);
       if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
       const ot = this.type(e.args[0]!, scope);
@@ -3446,7 +3449,6 @@ class Checker {
     // where the statement starts, which is what a reader scans for. Falls back to the
     // call when the receiver carries no position of its own.
     const loc = exprLoc(e.callee.object) ?? e.loc;
-    const at = loc ? ` at ${loc.line}:${loc.col}` : "";
     // Name the receiver in the hint when it HAS a name, so the fix is copy-pasteable —
     // including the member form the compiler's own source uses (`this.generics.set(…)`).
     const name = exprText(e.callee.object);
@@ -3466,12 +3468,13 @@ class Checker {
     const chain = m === "delete" ? "" :
       `, or build it in one chain: \`new ${kind}${isMap ? "<K, V>" : "<T>"}().${m}(…).${m}(…)\``;
     throw mutationError(
-      `\`${kind}\` is persistent: \`.${m}\` returns a NEW ${kind.toLowerCase()} and leaves the receiver unchanged, so discarding the result here does NOTHING${at}`,
+      `\`${kind}\` is persistent: \`.${m}\` returns a NEW ${kind.toLowerCase()} and leaves the receiver unchanged, so discarding the result here does NOTHING`,
       (name !== undefined
         ? `write \`${name} = ${name}.${m}(${args})\` — the result IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. `
         : `keep the result — it IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. `) +
       `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. ` +
       `Unlike node, \`Map\`/\`Set\` here are persistent — node's \`.${m}\` mutates and returns the receiver, so the discarded spelling works there and cannot here (docs/divergences.md §A)`,
+      loc,
     );
   }
 
@@ -3549,15 +3552,15 @@ class Checker {
     }
     const subject = del ? del.object : test;
     const loc = exprLoc(subject) ?? exprLoc(test);
-    const at = loc ? ` at ${loc.line}:${loc.col}` : "";
     const recvText = exprText(subject) ?? lower;
     if (del === undefined)
       throw mutationError(
-        `a non-nullable \`${kind}\` is always truthy, so ${where}${at} is ALWAYS true — ${consequence}`,
+        `a non-nullable \`${kind}\` is always truthy, so ${where} is ALWAYS true — ${consequence}`,
         `\`${recvText}\` is a handle and its type is not \`${kind}<…> | undefined\`, so it can never be absent — ` +
         `node evaluates this test to \`true\` as well, which makes it dead code rather than a check. ` +
         `Did you mean \`${recvText}.size\` (is it empty?) or \`${recvText}.has(k)\` (is the key there?)? ` +
         `A \`${kind}<…> | undefined\` IS worth testing and is still accepted (docs/divergences.md §A)`,
+        loc,
       );
     const arg = delArgs?.[0];
     const argText = arg === undefined ? "k"
@@ -3566,11 +3569,12 @@ class Checker {
       : arg.kind === "BooleanLiteral" ? String(arg.value)
       : exprText(arg) ?? "k";
     throw mutationError(
-      `\`${kind}\` is persistent: \`.delete\` returns a NEW ${lower}, not a boolean, so ${where}${at} is ALWAYS true — ${consequence}`,
+      `\`${kind}\` is persistent: \`.delete\` returns a NEW ${lower}, not a boolean, so ${where} is ALWAYS true — ${consequence}`,
       `node's \`.delete\` returns whether the key was there; ours returns the ${lower} without it. ` +
       `Test with \`${recvText}.has(${argText})\`, and remove with \`${recvText} = ${recvText}.delete(${argText})\` — ` +
       `\`if (${recvText}.has(${argText})) { ${recvText} = ${recvText}.delete(${argText}); }\` says both ` +
       `(docs/divergences.md §A)`,
+      loc,
     );
   }
 
@@ -3696,7 +3700,7 @@ class Checker {
     // still a fresh receiver, while `a.reverse().sort()` is `a` and stays refused.
     if (method === "sort") {
       if (!freshArray(callee.object))
-        throw mutationError("arrays are immutable: `.sort` would sort the array in place", "use `.toSorted()` (ES2023) — it returns a NEW sorted array and leaves the original alone");
+        throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.sort\` would sort the array in place`, "use `.toSorted()` (ES2023) — it returns a NEW sorted array and leaves the original alone", exprLoc(callee.object) ?? callee.loc);
       callee.property = "toSorted";
       return this.inferArrayMethod(recv, callee, args, scope);
     }
@@ -3729,8 +3733,9 @@ class Checker {
     if (method === "push") {
       const acc = this.accumulatorName(callee.object, scope);
       if (acc === null) {
-        throw mutationError("arrays are immutable: `.push` would mutate the array in place",
-          "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage. To append with `.push` instead, declare the binding `@@mutable` (`//@@mutable` on the line above `let acc: T[] = []`) — that works only on a plain local, never on a field, a parameter or an element");
+        throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.push\` would mutate the array in place`,
+          "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage. To append with `.push` instead, declare the binding `@@mutable` (`//@@mutable` on the line above `let acc: T[] = []`) — that works only on a plain local, never on a field, a parameter or an element",
+          exprLoc(callee.object) ?? callee.loc);
       }
       // test262 test/built-ins/Array/prototype/push/: `S15.4.4.7_A2` (the return value is
       // the NEW length), `S15.4.4.7_A1` (0 args is legal and returns the current length),
@@ -3763,14 +3768,14 @@ class Checker {
       // (`.push` is handled above `argTys`, next to the accumulator opt-in.)
       // The rest of node's in-place mutators (stdlib Batch 1): same treatment as
       // .push/.pop — refuse and name the immutable replacement.
-      case "fill": throw mutationError("arrays are immutable: `.fill` would overwrite the array in place", "build a new array instead, e.g. `arr.map(() => v)` for a same-length fill, or `arr.with(i, v)` for one slot");
+      case "fill": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.fill\` would overwrite the array in place`, "build a new array instead, e.g. `arr.map(() => v)` for a same-length fill, or `arr.with(i, v)` for one slot", exprLoc(callee.object) ?? callee.loc);
       // (`.sort` is rejected above, next to `.toSorted` — the ordering primitives are
       // handled together so the hint can point at the implemented copying form.)
-      case "splice": throw mutationError("arrays are immutable: `.splice` would mutate the array in place", "use `.slice(0, i)` / `.slice(j)` plus spread — `[...a.slice(0, i), ...a.slice(j)]`");
-      case "shift": throw mutationError("arrays are immutable: `.shift` would mutate the array in place", "use `arr.slice(1)` for the shorter array, or `arr[0]` for the first element");
-      case "unshift": throw mutationError("arrays are immutable: `.unshift` would mutate the array in place", "build a new array instead: `[x, ...arr]`");
-      case "copyWithin": throw mutationError("arrays are immutable: `.copyWithin` would overwrite the array in place", "build a new array from `.slice` + spread instead");
-      case "pop": throw mutationError("arrays are immutable: `.pop` would mutate the array in place", "use `arr.slice(0, -1)` for the shorter array, or `arr[arr.length - 1]` for the last element");
+      case "splice": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.splice\` would mutate the array in place`, "use `.slice(0, i)` / `.slice(j)` plus spread — `[...a.slice(0, i), ...a.slice(j)]`", exprLoc(callee.object) ?? callee.loc);
+      case "shift": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.shift\` would mutate the array in place`, "use `arr.slice(1)` for the shorter array, or `arr[0]` for the first element", exprLoc(callee.object) ?? callee.loc);
+      case "unshift": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.unshift\` would mutate the array in place`, "build a new array instead: `[x, ...arr]`", exprLoc(callee.object) ?? callee.loc);
+      case "copyWithin": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.copyWithin\` would overwrite the array in place`, "build a new array from `.slice` + spread instead", exprLoc(callee.object) ?? callee.loc);
+      case "pop": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.pop\` would mutate the array in place`, "use `arr.slice(0, -1)` for the shorter array, or `arr[arr.length - 1]` for the last element", exprLoc(callee.object) ?? callee.loc);
       case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
       case "indexOf": need(1); if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`); return "number";
       // ACCEPTED, unlike its in-place siblings above: `.reverse` returns its RECEIVER,

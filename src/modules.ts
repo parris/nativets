@@ -618,9 +618,10 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
   };
   scanStatics(body);
   if (staticFields.size) {
-    body = resolveStaticFieldReads(body, staticFields, (n) => {
+    body = resolveStaticFieldReads(body, staticFields, (n, at) => {
       throw mutationError(`assignment to the static field '${n}'`,
-        "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead");
+        "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead",
+        at);
     });
   }
   const merged: Program = { kind: "Program", body };
