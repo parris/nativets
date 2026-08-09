@@ -62,6 +62,33 @@ async function expectMatches(source: string) {
 }
 
 describe("`.push` on a `@@mutable` accumulator — node is the oracle", () => {
+  /**
+   * PAST THE 32-ELEMENT PERSISTENT-VECTOR THRESHOLD, which every other case here is under.
+   *
+   * Below 32 an array is a flat block and `a->data[i]` is a correct read; at 32 `arr_freeze`
+   * frees the flat block and NULLs `data`, so a routine that did not go through `arr_at`
+   * segfaults on exactly the inputs a small test never reaches — the bug class `lane-stdlib`
+   * found in `.lastIndexOf` / `.concat` / `.flat`. `src/*.ts` now leans on this path for 43
+   * accumulators, and `lex`'s `tokens` reaches ~35,000, so the threshold is pinned here for
+   * BOTH spellings and for both element kinds, with reads on either side of the boundary.
+   */
+  test("500 appends cross the 32-element threshold — `.push` and the spread, numbers and strings", async () => {
+    await expectMatches(`
+//@@mutable
+let a: number[] = [];
+for (let i = 0; i < 500; i++) { a.push(i); }
+//@@mutable
+let c: string[] = [];
+for (let i = 0; i < 500; i++) { c.push(String(i * 3)); }
+let b: string[] = [];
+for (let i = 0; i < 500; i++) { b = [...b, String(i)]; }
+console.log(a.length, a[0], a[31], a[32], a[499]);
+console.log(c.length, c[31], c[32], c[499]);
+console.log(b.length, b[31], b[32], b[499]);
+console.log(a.slice(30, 34).join(","), b.slice(30, 34).join(","), a.indexOf(400), c.join("").length);
+`);
+  });
+
   test("appends in a loop; the pragma is a comment to node", async () => {
     await expectMatches(`
 //@@mutable
