@@ -287,12 +287,28 @@ function classNames(p: Program): Set<string> {
  * A rename prefix guaranteed not to collide with anything the sources already use.
  * We prefer the short, readable `_m` and only escalate if a program literally
  * contains that text.
+ *
+ * The escalation is a PURE FUNCTION OF THE SOURCES. It used to end at
+ * `` `_nts${Date.now().toString(36)}_m` ``, which minted a different set of global
+ * names on every run of the same inputs — and the one file in the tree guaranteed to
+ * contain all three preferred bases is THIS one (they are the candidate list, right
+ * below), so the clock branch was reached by exactly the module the self-hosting
+ * measurement cares most about. That broke three things at once: the message-identity
+ * ratchet in test/selfhost-ratchet.test.ts, the byte-identical-message attribution in
+ * test/sh6.test.ts, and SH7's definition of done ("nativets-2 and nativets-3 are
+ * byte-identical" — a compiler naming globals from the clock cannot reproduce itself).
+ * Counting instead of reading the clock keeps the same no-collision guarantee, and
+ * terminates: each candidate is longer than the last, so a finite source set must
+ * eventually fail to contain one. Pinned in test/modules.test.ts.
  */
 function choosePrefixBase(sources: string[]): string {
   for (const base of ["_m", "_nt_m", "_nativets_module_"]) {
     if (!sources.some((s) => s.includes(base))) return base;
   }
-  return `_nts${Date.now().toString(36)}_m`;
+  for (let n = 0; ; n++) {
+    const base = `_nts${n}_m`;
+    if (!sources.some((s) => s.includes(base))) return base;
+  }
 }
 
 /* -------------------------------------------------------------- resolution */

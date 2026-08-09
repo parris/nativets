@@ -1,20 +1,20 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "eb7c778"
+    "rev": "a3bbe4d"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "1179d151e04fe486",
+      "sha256": "9ae1e358db62ad94",
       "standalone": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] 'HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] 'HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "checker.ts": {
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nt_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "cli.ts": {
@@ -79,8 +79,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nts0_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "diagnostics.ts": {
@@ -124,7 +124,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "701d519336b17d77",
+      "sha256": "a7b78b86b0c1a5f8",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -132,8 +132,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nts0_m2_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "ownership.ts": {
@@ -145,12 +145,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nt_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "parser.ts": {
-      "sha256": "2f6920d06c4a22f3",
+      "sha256": "139ea51377fe7500",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -158,8 +158,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nt_m2_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     }
   }
