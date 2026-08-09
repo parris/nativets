@@ -151,15 +151,23 @@ export function isUrlRefTy(t: Ty): boolean { return t === "URL" || t === "URLSea
  * a Date IS its time value, so it lowers to the identity.
  */
 /* A Map, NOT a Record: a plain object would answer `DATE_GETTERS["toString"]`
- * with `Object.prototype.toString` and accept `d.toString()` as a getter. */
-export const DATE_GETTERS = new Map<string, { which: number; utc: number }>([
-  ["getFullYear", { which: 0, utc: 0 }], ["getMonth", { which: 1, utc: 0 }], ["getDate", { which: 2, utc: 0 }],
-  ["getHours", { which: 3, utc: 0 }], ["getMinutes", { which: 4, utc: 0 }], ["getSeconds", { which: 5, utc: 0 }],
-  ["getMilliseconds", { which: 6, utc: 0 }], ["getDay", { which: 7, utc: 0 }],
-  ["getUTCFullYear", { which: 0, utc: 1 }], ["getUTCMonth", { which: 1, utc: 1 }], ["getUTCDate", { which: 2, utc: 1 }],
-  ["getUTCHours", { which: 3, utc: 1 }], ["getUTCMinutes", { which: 4, utc: 1 }], ["getUTCSeconds", { which: 5, utc: 1 }],
-  ["getUTCMilliseconds", { which: 6, utc: 1 }], ["getUTCDay", { which: 7, utc: 1 }],
-]);
+ * with `Object.prototype.toString` and accept `d.toString()` as a getter.
+ *
+ * A `.set` CHAIN, not the `[[k, v], …]` entries form: the entries form needs a
+ * `[key, value]` tuple type nativets does not have, and this table was the FIRST
+ * blocker for five of the twelve compiler modules (docs/self-hosting.md). The two
+ * spellings are the same program by construction — ES2024 24.1.1.1 step 8 builds
+ * the entries form by calling `set` once per entry in order, and 24.1.3.9 step 8
+ * is "Return M" — so the chain costs nothing extra under bun either (contrast
+ * `.push` -> `xs = [...xs, v]`, measured at 1036x). Pinned against node running
+ * the entries form in `test/collections.test.ts`. */
+export const DATE_GETTERS = new Map<string, { which: number; utc: number }>()
+  .set("getFullYear", { which: 0, utc: 0 }).set("getMonth", { which: 1, utc: 0 }).set("getDate", { which: 2, utc: 0 })
+  .set("getHours", { which: 3, utc: 0 }).set("getMinutes", { which: 4, utc: 0 }).set("getSeconds", { which: 5, utc: 0 })
+  .set("getMilliseconds", { which: 6, utc: 0 }).set("getDay", { which: 7, utc: 0 })
+  .set("getUTCFullYear", { which: 0, utc: 1 }).set("getUTCMonth", { which: 1, utc: 1 }).set("getUTCDate", { which: 2, utc: 1 })
+  .set("getUTCHours", { which: 3, utc: 1 }).set("getUTCMinutes", { which: 4, utc: 1 }).set("getUTCSeconds", { which: 5, utc: 1 })
+  .set("getUTCMilliseconds", { which: 6, utc: 1 }).set("getUTCDay", { which: 7, utc: 1 });
 
 /** `new URL(u)` components, each a plain `string` → one `nt_url_<name>` call. */
 export const URL_COMPONENTS = ["protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"];

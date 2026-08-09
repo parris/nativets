@@ -235,7 +235,16 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // each other for NT1017; they now both blame `parser.ts`, whose `?.[]` they inherit
   // through the link. That is not a regression — they cleared their own blocker and the
   // link surfaced the deepest one they share.
-  "ast.ts": { rung: 0, code: "NT1014", blame: "self" },
+  // ENTRIES-FORM CLEARED, and it was a SOURCE gap, not a compiler one. `DATE_GETTERS`
+  // was written as `new Map([[k, v], …])` — the entries form needs a `[key, value]`
+  // tuple type nativets does not have — and through the link it was the first blocker
+  // for FIVE of the twelve modules. It is now the `.set` chain the diagnostic already
+  // prescribed, which is the same program by construction (ES2024 24.1.1.1 builds the
+  // entries form by calling `set` per entry) and, unlike `.push` -> `xs = [...xs, v]`,
+  // costs nothing under bun because `Map.prototype.set` returns its receiver.
+  // Behind it, in ast.ts's own source: `HOST_MODULES`, a `Record` initialized with an
+  // object literal — the same class as checker.ts's `NUMBER_CONSTS`.
+  "ast.ts": { rung: 0, code: "NT2001", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -282,7 +291,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // problem of its own for several rounds; clearing `?.[]` took its last self-blocker
   // away, and it now inherits ast.ts's forward type reference through the link. The blame
   // column flipping "self" -> "ast.ts" is the real news in this row.
-  "parser.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
+  "parser.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -309,7 +319,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // With it, checker.ts has NO BLOCKER OF ITS OWN for the first time ever — the blame
   // column flips "self" -> "ast.ts" and it lands on the mutually-recursive `Expr` SCC that
   // eight other modules already share. That flip is the news in this row, not the code.
-  "checker.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
+  "checker.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -331,12 +342,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // ...and now NT1030, blaming ast.ts DIRECTLY rather than checker.ts — because checker.ts
   // stopped having a blocker of its own, so the nearest module that still does is ast.ts.
   // Six codes, never once its own.
-  "ownership.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
+  "ownership.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   "driver.ts": { rung: 0, code: "NT1002", blame: "codegen.ts" },
   "cli.ts": { rung: 0, code: "NT1002", blame: "codegen.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
-  "modules.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
+  "modules.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   "coverage-preprocess.ts": { rung: 0, code: "NT1702", blame: "coverage-preprocess.ts" },
 };
 
@@ -598,9 +611,30 @@ async function blameOf(file: string): Promise<string> {
   if (!error) return "self";
   for (const dep of depsOf(file)) {
     const d = MODULES.find((e) => e.file === dep);
-    if (d && (await measure(d)).error === error) return dep;
+    if (d && sameBlocker((await measure(d)).error, error)) return dep;
   }
   return "self";
+}
+
+/**
+ * Two blockers are THE SAME blocker when their messages agree once the linker's
+ * alpha-rename prefix is normalized away.
+ *
+ * Plain string equality was not enough and the failure was silent. `linkProgram`
+ * renames every non-entry module's top-level bindings (`HOST_MODULES` becomes
+ * `_nt_m0_HOST_MODULES`), so the instant a module's blocker is a diagnostic that
+ * NAMES a binding, the dependency's own message and the dependent's differ by that
+ * prefix and blame falls through to `"self"`. It cost nothing while the frontier sat
+ * on NT1014/NT1030, whose messages carry no identifier; the moment `src/ast.ts`'s
+ * `HOST_MODULES` became the shared blocker, four modules were credited with owning a
+ * declaration that is not in them — which is exactly the "aiming the burn-down at the
+ * wrong file" this function exists to prevent.
+ */
+function sameBlocker(a: string | undefined, b: string): boolean {
+  if (a === undefined) return false;
+  // Every base `choosePrefixBase` can pick, followed by the per-module index.
+  const strip = (s: string) => s.replace(/_(?:m|nt_m|nativets_module_|nts\d+_m)\d+_/g, "");
+  return strip(a) === strip(b);
 }
 
 /** Transitive `./x.ts` imports, post-order (deepest first) — the linker's own order. */

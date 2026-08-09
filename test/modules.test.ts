@@ -227,3 +227,66 @@ describe("an unlinked import is reported as an unlinked import", () => {
     expect((err as NTError).diag.message).toContain("function values");
   });
 });
+
+/*
+ * DETERMINISM of the alpha-rename prefix.
+ *
+ * `linkProgram` renames each non-entry module's top-level bindings with a per-module
+ * prefix. `choosePrefixBase` prefers `_m`, escalating to `_nt_m` then
+ * `_nativets_module_` if a source literally contains the shorter one — and if all
+ * three appear it fell back to `` `_nts${Date.now().toString(36)}_m` ``, a CLOCK
+ * read, so the same inputs produced different global names on every run.
+ *
+ * The one file in the tree guaranteed to contain all three strings is
+ * `src/modules.ts` itself (they are the candidate list, spelled in this very
+ * function), so the escalation was reached by exactly the module the self-hosting
+ * measurement cares most about. Three ways that bites, in increasing severity:
+ *
+ *   1. `test/selfhost-ratchet.test.ts` records the blocker MESSAGE as blocker
+ *      identity, and a message naming a renamed binding then differs between two
+ *      measurements IN THE SAME RUN — the ratchet cannot hold.
+ *   2. `test/sh6.test.ts`'s `blameOf` attributes a blocker by byte-identical message,
+ *      so a name-carrying blocker can never be attributed to the dependency it
+ *      actually lives in.
+ *   3. SH7's definition of done is "`nativets-2` and `nativets-3` are BYTE-IDENTICAL".
+ *      A compiler that mints global names from the clock cannot reproduce itself.
+ *
+ * The fix keeps the escalation but derives it from the sources: keep counting until
+ * no source contains the candidate. Same guarantee (no collision), same inputs ->
+ * same answer.
+ */
+describe("the alpha-rename prefix is a function of the sources, never the clock", () => {
+  const readSrc = (f: string) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", f), "utf8");
+
+  test("linking src/modules.ts twice produces identical output", () => {
+    const entry = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "modules.ts");
+    const src = readSrc("modules.ts");
+    const names = () => {
+      // The blocker is what carries the prefix into a user-visible string today.
+      try { sourceToIR(src, entry); return "IR OK"; } catch (e) { return (e as NTError).diag.message; }
+    };
+    const a = names(), b = names();
+    expect(a).toBe(b);
+    // ...and the escalation it lands on is the DETERMINISTIC one. Asserting merely
+    // "no `_nts`" was wrong — `_nts0_m` is the correct answer here, since src/modules.ts
+    // does contain all three preferred bases. What must never appear is a clock, i.e.
+    // anything but the first free counter value.
+    expect(a).toContain("_nts0_m");
+  });
+
+  test("a program containing all three candidate bases still links deterministically", () => {
+    // Every candidate appears as a literal, forcing the escalation path.
+    const dir = join(dirname(fileURLToPath(import.meta.url)), "modules-prefix");
+    const read = (p: string): string =>
+      p.endsWith("dep.ts")
+        ? 'export const bases = ["_m", "_nt_m", "_nativets_module_"];\nexport function two(): number { return 2; }\n'
+        : 'import { two, bases } from "./dep.ts";\nconsole.log(two(), bases.length);\n';
+    const ir = () => {
+      const p = linkProgram(read(join(dir, "main.ts")), join(dir, "main.ts"), read);
+      return p.body.map((s) => ("name" in s ? String((s as { name: unknown }).name) : s.kind)).join(",");
+    };
+    const a = ir();
+    expect(ir()).toBe(a);
+    expect(a).toContain("_nts0_m0_two"); // the first free counter value, not a timestamp
+  });
+});
