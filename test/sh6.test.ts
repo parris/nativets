@@ -304,15 +304,6 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // type is `string`, the guard is dead, and at end-of-file the PANIC happens one line
   // before the guard could have helped. `.at` is the spelling that means "may be absent"
   // in both toolchains. Behind it: NT1004, a `throw` outside a `try` at 202:5.
-  //
-  // THE SECOND MODULE OFF THE FLOOR, and NT1004 was its LAST blocker — rungs 1→3 cost
-  // nothing again, exactly as they did for diagnostics.ts. NT1004 was NOT relaxed in the
-  // direction the diagnostic feared: cross-frame propagation still does not exist and is
-  // still refused. What changed is that the refusal had been covering two different
-  // things, and only one of them needs an unwinder. A `throw` NOBODY can catch — this
-  // frame is module top-level, or the program contains no `try` at all — is just node's
-  // uncaught exception: stderr, exit 1. `src/lexer.ts` has eleven `throw`s and zero
-  // `try`s, so every one of them is that second kind. See test/uncaught-throw.test.ts.
   "lexer.ts": { rung: 3, code: "", blame: "self" },
   // WALKED, not nudged. This module's blocker CHAIN was measured end to end — six
   // distinct blockers between it and rung 1 — and five of them are now cleared:
@@ -489,7 +480,26 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // an owned local is not a capture write. Behind it is `.push`, which the 185-site census
   // predicted and which is refused BY DECISION (commit 1ea7fa2), so this module joins the
   // four already parked there rather than moving a rung. Still `blame: "self"`.
-  "coverage-preprocess.ts": { rung: 0, code: "NT1606", blame: "self" },
+  //
+  // THE SECOND MODULE OFF THE FLOOR, and rung 0 -> 3 in one step. `.push` was never the
+  // whole blocker: the accumulator opt-in (docs/decorators.md) does not cover a CAPTURED
+  // accumulator, and `tokenize`'s array was captured by `const push = (t) => { toks.push(t);
+  // st.prev = t; }`. Inlining that closure at its ten call sites is what made the opt-in
+  // reachable, and the `prev: Tok` it maintained could not survive the move — `.push`
+  // CONSUMES its argument (NT1601 on a second store) and reading it back out is NT1605 — so
+  // it became the one boolean it was ever asked for (`TokState.regexOk`).
+  //
+  // Behind `.push` were three more, in this order, each unmasked by clearing the last:
+  //   NT1606  a persistent `Set` with `.add`'s result discarded (x3) -> `s = s.add(x)`
+  //   NT2001  `group.length && balanced`  (number && boolean)        -> `length > 0 &&`
+  //   NT1605  `const tk = toks[i]!` (x7)  — binding a linear array ELEMENT to a local is a
+  //           move out of the array. Fixed structurally: the statement `group` became an
+  //           index WINDOW into the token array, and every other read indexes in place.
+  //
+  // Rung 3 here is WEAK for the same reason `diagnostics.ts`'s is (caveat 3) — a library
+  // prints nothing. The non-weak evidence is the second driver differential at the end of
+  // this file: 814 bytes of preprocessed statement text over six inputs, byte-identical.
+  "coverage-preprocess.ts": { rung: 3, code: "", blame: "self" },
 };
 
 /*
@@ -641,19 +651,27 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * score identically. Its top rung cannot distinguish success from failure. This
    * ladder's rung 1 is exactly that distinction, which is why it exists.
    */
-  test("exactly TWO modules reach IR — the rest of the ladder is at rung 0", async () => {
+  test("exactly THREE modules reach IR — the rest of the ladder is at rung 0", async () => {
     const rows = await Promise.all(MODULES.map(async (e) => [e.file, (await measure(e)).rung] as const));
-    const reachedIR = rows.filter(([, r]) => r >= 1).map(([f]) => f);
+    // SORTED: the row order is module-iteration order, an artifact. Asserting it
+  // unsorted produced a spurious conflict at the merge.
+  const reachedIR = rows.filter(([, r]) => r >= 1).map(([f]) => f).sort();
     // THE HEADLINE NUMBER CHANGED, for the first time since this file was written. It read
     // `[]` — "ZERO of the twelve modules produce IR" — for every measurement until
     // consuming parameters landed. `diagnostics.ts` is the first, and it did not stop at
     // rung 1: it links and runs. Eleven still sit at rung 0, so this is one module, not a
     // trend; the list is exact so the twelfth cannot arrive unnoticed either way.
-    // TWO, and the second is `lexer.ts` — the first module in the tree to reach rung 3 on
-    // a blocker that was a REFUSAL SPLIT rather than a missing feature (NT1004 was covering
-    // both "throw across a frame", which still needs an unwinder and is still refused, and
-    // "throw nobody catches", which needs nothing). Ten still sit at rung 0.
-    expect(reachedIR.sort()).toEqual(["diagnostics.ts", "lexer.ts"]);
+    //
+    // TWO. `coverage-preprocess.ts` joined, and it is the first row here that got off the
+    // floor by an ORDINARY source rewrite — no new language feature, no new rule. Four
+    // blockers were between it and rung 1 (NT1606 `.push`, NT1606 discarded `Set.add`,
+    // NT2001 `number && boolean`, NT1605 binding a linear array element to a local) and all
+    // four were cleared inside the module, with a 495-file byte-for-byte diff of the old and
+    // new `preprocessForCoverage` as the evidence that nothing observable changed.
+    //
+    // Two is still not a trend, and the ORDER of the list is a fact worth reading: this is
+    // the FILE ORDER of `MODULES`, so a module joining does not reshuffle it.
+    expect(reachedIR).toEqual(["coverage-preprocess.ts", "diagnostics.ts", "lexer.ts"]);
   }, 300_000);
 
   /**
@@ -727,12 +745,15 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // ...and the point SURVIVES the first module getting off the floor, which is the
     // interesting part. `diagnostics.ts` reaching rung 3 did not come from parsing — it
     // has parsed cleanly for many rounds — it came from clearing six blockers, five of
-    // them AFTER parse. `lexer.ts` is the same story with a different count: parse-clean
-    // for many rounds, and what finally moved it was its LAST post-parse blocker.
-    const atRung3 = new Set(["diagnostics.ts", "lexer.ts"]);
+    // them AFTER parse. The other eight parse-clean modules are still at rung 0.
+    //
+    // `coverage-preprocess.ts` is the second, and it makes the same point twice: it has
+    // ALSO parsed clean for many rounds (it is in the list above), and the four blockers it
+    // then cleared were all post-parse. Ten of twelve parse clean and remain at rung 0.
+    const AT_RUNG_3 = ["coverage-preprocess.ts", "diagnostics.ts", "lexer.ts"];
     for (const file of parseClean) {
       const m = await measure(MODULES.find((e) => e.file === file)!);
-      expect(`${file} rung ${m.rung}`).toBe(`${file} rung ${atRung3.has(file) ? 3 : 0}`);
+      expect(`${file} rung ${m.rung}`).toBe(`${file} rung ${AT_RUNG_3.includes(file) ? 3 : 0}`);
     }
   }, 300_000);
 
@@ -939,11 +960,11 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       const m = await measure(e);
       if (m.rung === 3 && !m.weak) strong.push(e.file);
     }
-    // `diagnostics.ts` and `lexer.ts` are at rung 3 and are NOT in this list, which is the
-    // caveat doing its job rather than a contradiction: a library that prints nothing
-    // matched a bun run that printed nothing. The behavioural evidence is the two DRIVER
-    // differentials below — the "per-module EXERCISE entry" this comment has been asking
-    // for since the file was written, now that there are modules to write them for.
+    // `diagnostics.ts` is at rung 3 and is NOT in this list, which is the caveat doing its
+    // job rather than a contradiction: a library that prints nothing matched a bun run that
+    // printed nothing. The behavioural evidence is the DRIVER differential below — the
+    // "per-module EXERCISE entry" this comment has been asking for since the file was
+    // written, now that there is a module to write one for.
     expect(strong).toEqual([]);
   }, 300_000);
 
@@ -1005,37 +1026,55 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
   }, 300_000);
 
   /**
-   * THE SECOND NON-WEAK DIFFERENTIAL — `src/lexer.ts`, compiled by nativets, TOKENIZING.
+   * THE SECOND NON-WEAK DIFFERENTIAL — `src/coverage-preprocess.ts`.
    *
-   * A driver imports `lex` and `decodeEscapeAt` and prints a digest of every token of a
-   * small program (type, text, line, column) plus two decoded escapes. That is the whole
-   * scanner: the `//@@mutable` cursor record, the frame-stack template scanner, the
-   * `tokens` accumulator, `.at`-based lookahead, and the punctuation tables.
+   * A driver imports the module and runs `preprocessForCoverage` over six inputs chosen to
+   * reach the parts of it that a plain source file does not: a shebang, an `import` with an
+   * inline `type` specifier, an erased `type`/`interface` pair, a regex literal next to a
+   * division and a string-divided-by-number, a `//@@` pragma, a class, a `do`/`while`, a
+   * template with a substitution, `export default async`, and radix/exponent/separator
+   * numerals. It prints every emitted statement with its line, the erased-name list and a
+   * character total, so a wrong token boundary anywhere moves the bytes.
    *
-   * And then it takes the ERROR PATH deliberately, because that is what this lane changed:
-   * `lex` on an unexpected character `throw`s a `LexError` nothing catches. bun prints the
-   * lines before it and exits 1; so must the compiled module. Only the stderr TEXT differs
-   * (bun prints a stack trace, we print one line) — docs/divergences.md, "An UNCAUGHT `throw` compiles".
+   * This is the module whose whole job is to make `src/` measurable, so a weak rung 3 for it
+   * would be the least useful green in the file. 814 bytes, byte-identical to `bun run`.
    */
-  test("lexer.ts DRIVER: tokenizes and throws, byte-identical to the bun-run module", async () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nativets-sh6-lex-")));
+  test("coverage-preprocess.ts DRIVER: real output, byte-identical to the bun-run module", async () => {
+    // `realpathSync` for the same reason as the driver above: /var -> /private/var on macOS
+    // breaks the ORACLE's module resolution, not the compiled side, which reads as a diff.
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nativets-sh6-drive2-")));
     try {
       const driver = join(dir, "drive.ts");
-      const spec = relative(dir, realpathSync(pathOf("lexer.ts")));
+      const spec = relative(dir, realpathSync(pathOf("coverage-preprocess.ts")));
       writeFileSync(driver, [
-        `import { lex, decodeEscapeAt } from ${JSON.stringify(spec)};`,
+        `import { preprocessForCoverage } from ${JSON.stringify(spec)};`,
         ``,
-        "const toks = lex(\"const x: number = 1 + 2; // hi\\nconsole.log(`a${x}b`);\\n\");",
-        `console.log(toks.length);`,
-        `for (const t of toks) console.log(t.type + " " + t.value + " @" + t.line + ":" + t.col);`,
-        `const u = decodeEscapeAt("\\\\u0041", 0, 1, 1);`,
-        `console.log(u.text + " " + u.next);`,
-        `const x = decodeEscapeAt("\\\\x1b", 0, 1, 1);`,
-        `console.log(x.text.charCodeAt(0) + " " + x.next);`,
+        // The inputs are real strings here and JSON.stringify'd into the driver, rather
+        // than hand-escaped inside a template — the driver source is itself TypeScript
+        // containing regex literals, backticks and backslashes, and escaping it twice by
+        // hand is how this test first failed to even parse.
+        `const SAMPLES: string[] = [`,
+        ...[
+          "#!/usr/bin/env bun\nimport { parse, type Ty } from './ast.ts';\nexport type Alias = number;\ninterface Shape { x: number; }\nexport function f(n: number): number { return n + 1; }\n",
+          String.raw`const rx = /a\.b/g.test("x"); const d = 6 / 2; const s = "a" / 2;`,
+          "//@@mutable\ninterface St { line: number }\nclass Box { m(): number { return 1; } }",
+          "do { x(); } while (c);\nfunction g() { return `t${1 + 2}u`; }",
+          "export default async function h(a: number[]): Promise<number> { return a[0]!; }",
+          "for (const t of xs) { if (t === 0) continue; }\nconst n = 0xff + 1e3 + 1_0;",
+        ].map((sample) => `  ${JSON.stringify(sample)},`),
+        `];`,
         ``,
-        `// The error path: an uncaught LexError. stdout stops here and the exit code is 1.`,
-        `lex("const y = #;");`,
-        `console.log("unreachable");`,
+        `let total = 0;`,
+        `for (const sample of SAMPLES) {`,
+        `  const pre = preprocessForCoverage(sample);`,
+        `  console.log("=== " + pre.statements.length + " statements, " + pre.erasedNames.length + " erased, " + pre.stripped.length + " stripped");`,
+        `  for (const st of pre.statements) {`,
+        `    console.log(st.line + " | " + st.text);`,
+        `    total = total + st.text.length;`,
+        `  }`,
+        `  console.log("erased: " + pre.erasedNames.join(","));`,
+        `}`,
+        `console.log("total emitted characters: " + total);`,
         ``,
       ].join("\n"));
 
@@ -1044,11 +1083,10 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       const ours = spawnSync(bin, [], { encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL" });
       const oracle = spawnSync("bun", ["run", driver], { encoding: "utf8", timeout: 120_000 });
 
-      expect(oracle.stdout.length).toBeGreaterThan(0);
+      expect(oracle.stdout.length).toBeGreaterThan(0); // the oracle must actually print
       expect(ours.stdout).toBe(oracle.stdout);
-      expect(ours.stdout).not.toContain("unreachable"); // the throw really did stop it
       expect(ours.status).toBe(oracle.status);
-      expect(ours.status).toBe(1); // node/bun's uncaught-exception exit code
+      expect(ours.status).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

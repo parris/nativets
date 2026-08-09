@@ -460,20 +460,23 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT2001 again does not leave the set (cli.ts's `process.stdout` is its own, and
     // depends on none of this), and again it has changed owner: ast.ts's ternary is gone,
     // so the eight modules that reported it now report NT1011 instead.
+    //
+    // ...and NT1606 LEAVES, which empties the code that has been in this set longer than
+    // any other. `coverage-preprocess.ts` was its last holder tree-wide, and the fix is a
+    // SOURCE change with the compiler untouched: its three accumulators are `//@@mutable`
+    // now, which they could not be while `tokenize`'s array was CAPTURED by a
+    // `const push = (t) => { … }` closure — a captured accumulator is NT1607 by decision.
+    // Inlining the closure at its ten call sites is the whole unlock. Nothing takes
+    // NT1606's place, because the module went all the way to rung 3 in the same lane
+    // rather than landing on the next refusal (test/sh6.test.ts); the three blockers it
+    // did pass through on the way — a discarded `Set.add`, `number && boolean`, and
+    // binding a linear array element to a local — were all cleared in the same file.
     expect(Object.keys(byCode).sort()).toEqual(
       // NT1014 IS GONE tree-wide: every LITERAL entries-form site in src/ is a `.set` chain
     // now, and the one DYNAMIC site that was actually blocking (ownership.ts's `clone`,
     // refused for the Map spread) became a `.set` LOOP — which is what the constructor
     // does internally, so no tuple encoding was invented.
-    // ...and NT1004 LEAVES, which is the first time a code has left this set by being
-    // SPLIT rather than implemented. `throw` still cannot cross a call boundary — that
-    // needs propagation the runtime does not have, and it is still NT1004. What the
-    // refusal was ALSO covering is a throw nobody can catch (this frame is module
-    // top-level, or the program has no `try` at all), which is node's uncaught exception:
-    // stderr, exit 1, and the pending-exception protocol already did exactly that for an
-    // uncaught host failure. `src/lexer.ts` has eleven `throw`s and zero `try`s, so all
-    // eleven were the second kind — and it is now the SECOND module at rung 3.
-    ["NT1011", "NT1606"],
+    ["NT1011"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -803,7 +806,21 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // declarations carry the pragma; the rest are mostly shapes
     // the opt-in refuses on purpose (38 `this.<field>`, one parameter, every accumulator
     // pushed from inside a capturing arrow). Expect an eighth turn.
-    expect(byCode["NT1606"]!.sort()).toEqual(["coverage-preprocess.ts"]);
+    //
+    // The eighth turn is DOWN TO ZERO, and it is the first time this bucket has emptied
+    // without a queue behind it. The survivor above was annotated after all — what stood in
+    // the way was not the pragma but the shape: `tokenize`'s accumulator was CAPTURED by
+    // `const push = (t: Tok) => { toks.push(t); st.prev = t; }`, and a captured accumulator
+    // is NT1607 by decision (a closure env holds a pointer the scope cannot null). Inlining
+    // that closure at its ten call sites is what made the opt-in reachable; the `prev: Tok`
+    // it carried became one boolean, because a token cannot be stored in the array AND the
+    // cursor (`.push` consumes its argument).
+    //
+    // Read the emptying as narrowly as the seven notes above ask: the ~205 `.push` sites are
+    // still there and the refused shapes are still refused. What changed is that no module's
+    // FIRST blocker is one of them any more. Expect a ninth turn — this instrument reports
+    // membership, and any module that walks deeper can land here.
+    expect(byCode["NT1606"]).toBeUndefined();
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
