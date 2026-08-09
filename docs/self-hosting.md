@@ -965,6 +965,23 @@ receiver and never bound is never dropped. An ordinary `class P` measures the id
 `__objLive()` 200 for `new P(7).get()` on unmodified `main`, while the bound spelling
 measures 0. Pinned in `test/decorators.test.ts` so it is recorded rather than hidden.
 
+> **A pre-existing bug this lane found, not fixed.** `ROADMAP.md` Phase C records "unbound
+> **array** temporaries freed where the chain consumes them" as ✅ and lists only "temporaries
+> in non-chain positions (call arguments)" as still open. The OBJECT half of that chain rule
+> was never wired, and the asymmetry is exact — same position, same 200-iteration loop, on
+> unmodified `main`:
+>
+> ```ts
+> // arrays: freed.   __arrLive() === 0
+> for (let i = 0; i < 200; i++) { t = t + [1, 2, 3].indexOf(2); }
+> // class instances: LEAKED. __objLive() === 200  (the bound spelling measures 0)
+> for (let i = 0; i < 200; i++) { t = t + new P(7).get(); }
+> ```
+>
+> A leak, never a double free or a dangling pointer — the same class Phase C already accepts.
+> It matters more now that a fresh receiver can be *mutated* in a chain, since that is a shape
+> people will write; the fix belongs with the object-temporary drop, not here.
+
 This one sits directly on the self-hosting path: `src/codegen.ts`'s last line is
 `new ModuleGen(…).build(…)`, and `ModuleGen` has carried `//@@mutable` since the NT1023
 clearance, so `build` is a setter on a fresh receiver. It clears **one** of the two `NT1607`s
