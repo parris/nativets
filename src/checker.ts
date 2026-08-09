@@ -115,6 +115,13 @@ interface Binding {
    *  the narrowing was proved for the OLD value and a new one can carry a different
    *  tag, so honouring it would read the next field access at the wrong slot. */
   narrowedFrom?: Ty;
+  /** SH2 + A2: this is a narrowing shadow of a name whose STORAGE is a nullable
+   *  `[tag,value]` box (`E | undefined`), narrowed to a union member by a tag test that
+   *  followed a nullish guard. The shadow's `ty` is the member — the type — but every
+   *  read still has to unwrap the box first, so reads are stamped `narrowed` exactly as
+   *  a plain nullish narrowing's are. Without this the member layout would be applied to
+   *  the BOX pointer, which is the silent wrong answer, not a diagnostic. */
+  nullBox?: boolean;
 }
 
 /**
@@ -128,6 +135,9 @@ interface NarrowFact { name: string; binding: Binding; path: string; ty: Ty; con
 /** The root binding + dotted suffix an expression reads, and the type at the end of it. */
 interface AccessPath { name: string; binding: Binding; path: string; ty: Ty }
 
+/** How a union field read's receiver was written — see `Checker.recvHint`. */
+interface RecvHint { text: string; plain: boolean; already: boolean }
+
 class Scope {
   private vars = new Map<string, Binding>();
   /** Names of THIS scope's own bindings that some lookup resolved to. Used on the
@@ -137,7 +147,7 @@ class Scope {
   readonly hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
-  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty, mutable?: boolean): void { this.vars.set(name, { ty, constant, len, narrowedFrom, mutable }); }
+  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty, mutable?: boolean, nullBox?: boolean): void { this.vars.set(name, { ty, constant, len, narrowedFrom, mutable, nullBox }); }
   own(name: string): Binding | undefined { return this.vars.get(name); }
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
@@ -1652,10 +1662,20 @@ class Checker {
    * answer this project exists to avoid.
    */
 
-  /** `x.kind` where `x` is a union-typed local and `kind` is its discriminant. */
+  /**
+   * `x.kind` where `x` is a union-typed local and `kind` is its discriminant.
+   *
+   * The union is read through `accessPath`, NOT off the binding directly, so a
+   * CONTROL-FLOW narrowing that already ran counts. That is what makes the two
+   * narrowing mechanisms compose: a nullish guard on an `E | undefined` is a
+   * `NarrowFact` (the binding still says `?UU<…>`), and reading the declared type
+   * here would see a nullable rather than a union and decline — leaving the
+   * "narrow it first" hint asking for the very `if (x.kind === "…")` being typed.
+   * `accessPath` reports the type AT THIS POINT, which is `U<…>` after the guard.
+   */
   private discriminantRead(e: Expr, scope: Scope): { name: string; union: Ty } | undefined {
     if (e.kind !== "MemberExpr" || e.optional || e.object.kind !== "Identifier") return undefined;
-    const u = scope.lookup(e.object.name)?.ty;
+    const u = this.accessPath(e.object, scope)?.ty;
     if (u === undefined || !isUnionTy(u)) return undefined;
     return unionDiscriminant(u)!.key === e.property ? { name: e.object.name, union: u } : undefined;
   }
@@ -1702,6 +1722,18 @@ class Checker {
   }
 
   /**
+   * `narrowTagsInto` with `facts` live. A tag test can only discriminate a value the
+   * facts have already unwrapped from its nullable, so on an `E | undefined` the two
+   * narrowings are ORDERED: nullish first, tag second. Same push/pop shape as
+   * `withFacts` — including the `finally`, so a diagnostic thrown while typing the test
+   * cannot leave a stale frame behind for the next statement.
+   */
+  private narrowTagsWith(facts: NarrowFact[], test: Expr, inner: Scope, positive: boolean): boolean {
+    this.narrowStack.push(facts);
+    try { return this.narrowTagsInto(test, inner, positive); } finally { this.narrowStack.pop(); }
+  }
+
+  /**
    * The type a name gets when its union is restricted to `tags`. One tag ⇒ that
    * member; several ⇒ the sub-union (still discriminated, by construction); none ⇒
    * `undefined`, meaning "leave the binding alone" — TS would say `never`, and the
@@ -1723,7 +1755,13 @@ class Checker {
     // later field access reading the wrong slot. Refusing is the conservative half of
     // reject-don't-miscompile; tracking the invalidation properly (rustc-style flow
     // analysis through loops and nested blocks) is the general fix.
-    if (t !== undefined) inner.declare(name, t, true, undefined, u);
+    if (t === undefined) return;
+    // Does the name's STORAGE hold a nullable box? It does when the declared type is
+    // nullable (a nullish guard proved it present, but the slot is unchanged), and it
+    // stays true through a re-narrowing of an already-shadowed name.
+    const b = inner.lookup(name);
+    const boxed = b !== undefined && (isNullableTy(b.ty) || b.nullBox === true);
+    inner.declare(name, t, true, undefined, u, undefined, boxed);
   }
 
   /**
@@ -1764,7 +1802,7 @@ class Checker {
     if (ot === "Dyn") { this.type(e.index, scope); return "Dyn"; } // dynamic element/field — runtime tag check
     if (isUnionTy(ot)) { // SH2: `u["kind"]` is the same read as `u.kind`
       if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
-      return this.fieldOnBase(ot, e.index.value);
+      return this.fieldOnBase(ot, e.index.value, this.recvHint(e.object, scope));
     }
     if (isObjectTy(ot)) {
       if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
@@ -1781,10 +1819,50 @@ class Checker {
     throw nyi(NYI.ARRAY, `index access on ${ot}`);
   }
 
+  /**
+   * What the receiver of a union field read looks like, for the "narrow it first"
+   * advice. The advice used to be one fixed sentence prescribing `if (x.kind === "…")`,
+   * which was WRONG in three shapes that reach it with a tag test already written: a
+   * receiver that is not a plain name (narrowing tracks names, not paths), a receiver
+   * already narrowed to a SUB-union (several tags survive, so only the tag is shared),
+   * and — before this lane — a nullable union, which is now narrowed properly instead.
+   * A diagnostic that prescribes what the program already does is its own defect.
+   */
+  private recvHint(obj: Expr, scope: Scope): RecvHint {
+    const text = exprText(obj) ?? "x";
+    if (obj.kind !== "Identifier") return { text, plain: false, already: false };
+    const b = scope.lookup(obj.name);
+    return { text, plain: true, already: b !== undefined && b.narrowedFrom !== undefined };
+  }
+
+  /** The truthful half of the union field diagnostic — see `recvHint`. */
+  private narrowAdvice(base: Ty, key: string, recv?: RecvHint): string {
+    const x = recv === undefined ? "x" : recv.text;
+    const values = unionTagValues(base);
+    const tags = values.map((v) => `"${v}"`).join(", ");
+    const one = `"${values[0] ?? "…"}"`; // a concrete tag to show, not a placeholder
+    if (recv !== undefined && !recv.plain) {
+      return `narrowing tracks a plain NAME, and '${x}' is a path — bind it first ` +
+        `(\`const v = ${x};\`) and narrow \`v\` (\`if (v.${key} === ${one})\`)`;
+    }
+    if (recv !== undefined && recv.already) {
+      return `'${x}' is narrowed here to MORE THAN ONE member (${tags}), so only the shared tag ` +
+        `'${key}' is readable — give each tag its own arm (one \`case\` body per tag, or a further ` +
+        `\`if (${x}.${key} === ${one})\`)`;
+    }
+    return `narrow it first (\`if (${x}.${key} === ${one})\` or \`switch (${x}.${key})\`), ` +
+      `then the member's fields are available`;
+  }
+
   /** Resolve `.prop` on a NON-nullable base (object field, or string/array `.length`). */
-  private fieldOnBase(rawBase: Ty, prop: string): Ty {
+  private fieldOnBase(rawBase: Ty, prop: string, recv?: RecvHint): Ty {
     // Unfold for the reason `indexResultTy` above does: the `?.` arms reach here with
     // `baseTy(ot)`, which strips the nullable and exposes a bare `@N`.
+    //
+    // MERGE NOTE: the unfold and the `recv` hint arrived from two lanes at once and are
+    // independent — the unfold decides WHICH shape the fields come from, `recv` decides
+    // what the REFUSAL says when there are none. Keeping only one would have silently
+    // dropped either recursive field reads or the truthful narrowing advice.
     const base = this.unfold(rawBase);
     // SH2: only the DISCRIMINANT is readable on an un-narrowed union — it is the one
     // field guaranteed to exist, at the same slot, in every member. Everything else
@@ -1792,10 +1870,7 @@ class Checker {
     if (isUnionTy(base)) {
       const d = unionDiscriminant(base)!;
       if (prop === d.key) return "string";
-      throw typeError(
-        `Property '${prop}' does not exist on ${showUnion(base)} — narrow it first ` +
-          `(\`if (x.${d.key} === "…")\` or \`switch (x.${d.key})\`), then the member's fields are available`,
-      );
+      throw typeError(`Property '${prop}' does not exist on ${showUnion(base)} — ${this.narrowAdvice(base, d.key, recv)}`);
     }
     if ((base === "string" || isArrayTy(base)) && prop === "length") return "number";
     if (isObjectTy(base)) {
@@ -1877,15 +1952,19 @@ class Checker {
         // The tag test may be one operand of a `&&`/`||` chain rather than the whole
         // condition (`if (s.kind === "label" && s.text.length > 3)`), so the arms take
         // the same De Morgan walk the right operand of a short circuit does.
+        // Composing them is ORDERED, not merely simultaneous: the tag walk runs with the
+        // arm's own facts already live, because on an `E | undefined` there is no union
+        // to discriminate until the nullish fact has unwrapped it
+        // (`if (e !== undefined && e.kind === "A")`).
         const con = scope.child();
         const alt = scope.child();
-        this.narrowTagsInto(s.test, con, true);
-        this.narrowTagsInto(s.test, alt, false);
-        this.withFactsIn(this.factsFor(s.test, scope, true, s.consequent),
-          () => this.checkBlock(s.consequent, con, ret));
+        const conFacts = this.factsFor(s.test, scope, true, s.consequent);
+        const altFacts = s.alternate ? this.factsFor(s.test, scope, false, s.alternate) : [];
+        this.narrowTagsWith(conFacts, s.test, con, true);
+        this.narrowTagsWith(altFacts, s.test, alt, false);
+        this.withFactsIn(conFacts, () => this.checkBlock(s.consequent, con, ret));
         if (s.alternate) {
-          this.withFactsIn(this.factsFor(s.test, scope, false, s.alternate),
-            () => this.checkBlock(s.alternate!, alt, ret));
+          this.withFactsIn(altFacts, () => this.checkBlock(s.alternate!, alt, ret));
         }
         return;
       }
@@ -2175,8 +2254,10 @@ class Checker {
         // Control-flow narrowing: on this path the binding was PROVED non-nullish, so it
         // reads as its base type and codegen unwraps the tagged pair here. Always
         // written, so a `true` stamped by an earlier typing pass cannot go stale.
+        // `nullBox` says the same thing for a TAG-narrowing shadow of a nullable name:
+        // the type is the member, the storage is still the box, so the read unwraps.
         const narrowed = this.narrowedTy(b, "");
-        e.narrowed = narrowed !== undefined;
+        e.narrowed = narrowed !== undefined || b.nullBox === true;
         return narrowed ?? b.ty;
       }
       case "MemberExpr": {
@@ -2218,7 +2299,7 @@ class Checker {
               "this read is not proved non-nullish",
             );
           }
-          const ft = this.fieldOnBase(baseTy(ot), e.property);
+          const ft = this.fieldOnBase(baseTy(ot), e.property, this.recvHint(e.object, scope));
           return makeNullable("undefined", baseTy(ft));
         }
         // fetch's Response: `.status` (number), `.ok` (2xx, computed from the status),
@@ -2241,7 +2322,7 @@ class Checker {
         if ((ot === "string" || isArrayTy(ot) || isBytesTy(ot)) && e.property === "length") return "number";
         if ((isMapTy(ot) || isSetTy(ot)) && e.property === "size") return "number";
         if (ot === "Dyn") return "Dyn"; // dynamic field access — runtime tag check
-        if (isUnionTy(ot)) return this.fieldOnBase(ot, e.property); // SH2: the discriminant, or "narrow it first"
+        if (isUnionTy(ot)) return this.fieldOnBase(ot, e.property, this.recvHint(e.object, scope)); // SH2: the discriminant, or "narrow it first"
         if (isObjectTy(ot)) {
           const ft = fieldType(ot, e.property);
           if (!ft) throw typeError(`Property '${e.property}' does not exist on ${ot}`);
@@ -2420,13 +2501,22 @@ class Checker {
         // the tested tag is proved when the test's own sense matches that branch, and
         // the remaining members are proved otherwise. `??` narrows nothing (its right
         // operand runs when the left is NULLISH, which no tag test decides).
+        //
+        // The two mechanisms also COMPOSE inside one chain, which is why the tag walk
+        // runs with the left's facts already live: in
+        // `e !== undefined && e.kind === "A" && e.left > 3` on an `E | undefined`, the
+        // first operand is a nullish FACT and only after it does `e` read as a `U<…>`
+        // the second operand can discriminate at all. Reading the declared type there
+        // would find `?UU<…>`, decline, and leave the "narrow it first" hint asking for
+        // the tag test standing right next to it.
+        const facts = this.factsFor(e.left, scope, e.op === "&&", exprRegion(e.right), e.op !== "??");
         let rscope = scope;
         if (e.op !== "??") {
           const inner = scope.child();
-          if (this.narrowTagsInto(e.left, inner, e.op === "&&")) rscope = inner;
+          if (this.narrowTagsWith(facts, e.left, inner, e.op === "&&")) rscope = inner;
         }
         const r = this.withFacts(
-          this.factsFor(e.left, scope, e.op === "&&", exprRegion(e.right), e.op !== "??"),
+          facts,
           () => this.type(e.right, rscope, rhint),
         );
         if (e.op === "??") {
@@ -3330,7 +3420,11 @@ class Checker {
         // argument a second time: a second `type()` re-runs inference over it, which for
         // an arrow means a second capture analysis and for a generic call a second
         // instantiation.
-        const arg = e.args[0];
+        // `e.args.length > 0` FIRST. A zero-argument call makes `e.args[0]` a read at
+        // index == length: node answers `undefined`, nativets PANICS by design (Stage 41),
+        // so the `arg?.` guard below could never run under a self-hosted checker. Measured
+        // rather than supposed — 14 files of the fixture corpus reach it.
+        const arg = e.args.length > 0 ? e.args[0] : undefined;
         if (e.callee.name === "String" && arg?.ty) this.checkStringCoercion(arg.ty, "`String(…)`", exprLoc(arg));
         return g.ret;
       }

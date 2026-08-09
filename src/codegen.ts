@@ -1642,7 +1642,12 @@ class FnGen {
     }
     // Everything below is a JS object, and an object is always truthy — including an
     // EMPTY array/object/Map/Set, and including a Date whose time value is NaN.
+    // A DISCRIMINATED union belongs here: its value IS the member object pointer, and
+    // every member is an object type by construction. (A GENERAL union does NOT — it is
+    // a box that can carry `0` or `""`, and reading the box pointer as the value is the
+    // wrong answer it is refused for.)
     if (
+      isUnionTy(val.ty) ||
       isArrayTy(val.ty) || isObjectTy(val.ty) || isFuncTy(val.ty) || isMapTy(val.ty) || isSetTy(val.ty) ||
       isBytesTy(val.ty) || isBytesRefTy(val.ty) || isFetchRefTy(val.ty) || isUrlRefTy(val.ty) ||
       isDateTy(val.ty) || isResponseTy(val.ty) || isHeadersTy(val.ty) || isTextEncoderTy(val.ty) || isTextDecoderTy(val.ty)
@@ -1791,7 +1796,13 @@ class FnGen {
     const base = baseTy(r.ty);
     const slot = this.fresh();
     this.emit(`${slot} = call i64 @nt_nonnull(ptr ${r.v}, ptr ${this.locArg(e.loc) ?? "null"})`);
-    return { v: this.fromSlot(slot, base), ty: base };
+    // The unwrapped value may ALSO have been tag-narrowed (`if (!e) return; if (e.kind
+    // === "A")` on an `E | undefined`). A discriminated union is the member pointer
+    // itself, so that second narrowing is pure retype — the same rule the `Identifier`
+    // case applies to a non-nullable union binding, applied here to what came out of
+    // the box. Representation is `base`'s either way; only the layout name changes.
+    const ty = isUnionTy(base) && e.ty !== undefined && e.ty !== base ? e.ty : base;
+    return { v: this.fromSlot(slot, base), ty };
   }
 
   // ---- nullable tagged pair [tag, value] (A2) ----
@@ -2592,8 +2603,10 @@ class FnGen {
           const csig = this.mod.functions.get(`${cls}.constructor`)!;
           const argVals: string[] = [`ptr ${obj}`];
           for (let i = 1; i < csig.params.length; i++) {
-            const provided = e.args[i - 1];
-            const v = provided ? this.genExpr(provided) : this.genExpr(csig.defaults[i]!);
+            // `i - 1 < e.args.length` FIRST: a defaulted parameter means the read is at
+            // index == length, which nativets PANICS on (Stage 41) — see the census note
+            // in test/no-index-last.test.ts.
+            const v = i - 1 < e.args.length ? this.genExpr(e.args[i - 1]!) : this.genExpr(csig.defaults[i]!);
             argVals.push(`${llvmTy(csig.params[i]!)} ${this.coerce(v, csig.params[i]!).v}`);
           }
           // A DECORATED class's constructor returns the instance (the `@wrapper` sees
@@ -2661,7 +2674,9 @@ class FnGen {
         this.emitExcCheck();
         return { v: t, ty: "Dyn" };
       }
-      return this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args[2]), 0);
+      // `e.args.length > 2` guards the read: `JSON.stringify(v)` is the common call and
+      // `e.args[2]` would be an index == length read, which nativets PANICS on.
+      return this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args.length > 2 ? e.args[2] : undefined), 0);
     }
 
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
@@ -3919,7 +3934,8 @@ class FnGen {
         // NaN through one: the 1-arg call stays exactly the instruction it always was,
         // so no existing `.ll` (or IR snapshot) moves.
         const t = this.fresh();
-        if (a[1]) this.emit(`${t} = call double @js_str_index_of_from(ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1].v})`);
+        // `a.length > 1`, not `a[1]`: the 1-arg form reads index == length, a panic.
+        if (a.length > 1) this.emit(`${t} = call double @js_str_index_of_from(ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1]!.v})`);
         else this.emit(`${t} = call double @js_str_index_of(ptr ${recv.v}, ptr ${a[0]!.v})`);
         return { v: t, ty: "number" };
       }
@@ -4297,7 +4313,8 @@ class FnGen {
       }
       case "slice": {
         const a0 = this.genExpr(args[0]!).v;
-        const a1 = args[1] ? this.genExpr(args[1]).v : POS_INF;
+        // `args.length > 1`, not `args[1]`: `slice(n)` reads index == length, a panic.
+        const a1 = args.length > 1 ? this.genExpr(args[1]!).v : POS_INF;
         const t = this.fresh();
         this.emit(`${t} = call ptr @nt_arr_slice(ptr ${recv.v}, double ${a0}, double ${a1})`);
         return { v: t, ty: recv.ty };
@@ -5196,7 +5213,8 @@ class FnGen {
     switch (name) {
       case "parseInt": {
         const s = this.genExpr(args[0]!).v;
-        const radix = args[1] ? this.genExpr(args[1]).v : llvmDouble(0);
+        // `args.length > 1`, not `args[1]`: `parseInt(s)` reads index == length, a panic.
+        const radix = args.length > 1 ? this.genExpr(args[1]!).v : llvmDouble(0);
         const t = this.fresh();
         this.emit(`${t} = call double @js_parse_int(ptr ${s}, double ${radix})`);
         return { v: t, ty: "number" };
@@ -5612,7 +5630,9 @@ class FnGen {
    *  element of a `Val[]` parameter is a move out of a borrowed array element (NT1605). */
   private argVal(i: number, args: Expr[], preArg0: string, sig: Sig): Val {
     if (i === 0 && preArg0 !== "") return { v: preArg0, ty: args[0]!.ty ?? sig.params[0]! };
-    return this.genExpr(args[i] ?? sig.defaults[i]!);
+    // `i < args.length`, not `args[i] ?? …`: a defaulted parameter reads index == length,
+    // which nativets PANICS on (Stage 41) — the `??` could never see `undefined`.
+    return this.genExpr(i < args.length ? args[i]! : sig.defaults[i]!);
   }
 
   /** `preArg0`, when non-empty, is the SSA value of argument 0 already lowered by the

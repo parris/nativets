@@ -138,7 +138,10 @@ function isNumChar(c: string): boolean {
 function pragmaName(body: string): string {
   let a = 0;
   while (a < body.length && isSpace(body[a]!)) a++;
-  if (body[a] !== "@" || body[a + 1] !== "@") return "";
+  // The bounds test is load-bearing — a bare `//` has an EMPTY body and `body[a]` is then
+  // a read at index == length, which nativets PANICS on. Same defect, same fix, as
+  // `pragmaName` in src/lexer.ts; this module carries a copy of it.
+  if (a + 1 >= body.length || body[a] !== "@" || body[a + 1] !== "@") return "";
   a += 2;
   if (a >= body.length || !isIdentStart(body[a]!)) return "";
   const start = a;
@@ -174,7 +177,10 @@ function tokenize(source: string): Tok[] {
   const nl = (s: string) => { for (const c of s) if (c === "\n") st.line++; };
 
   // Shebang: only meaningful on the very first line.
-  if (source[0] === "#" && source[1] === "!") {
+  // `n >= 2` FIRST: on an EMPTY file `source[0]` is a read at index == length, which
+  // nativets PANICS on (Stage 41) — the compiled preprocessor could not handle an empty
+  // file at all. Same class as `pragmaName` above.
+  if (n >= 2 && source[0] === "#" && source[1] === "!") {
     let j = 0;
     while (j < n && source[j] !== "\n") j++;
     toks.push({ kind: "shebang", value: source.slice(0, j), line: 1 });
@@ -189,7 +195,10 @@ function tokenize(source: string): Tok[] {
     if (c === " " || c === "\t" || c === "\r" || c === "\n") { if (c === "\n") st.line++; i++; continue; }
 
     // comments
-    if (c === "/" && source[i + 1] === "/") {
+    // `i + 1 < n` FIRST, here and at the `/*` opener below: a file whose LAST byte is `/`
+    // reads index == length, which nativets PANICS on (Stage 41). The same six-site class
+    // as src/lexer.ts's — this module carries a copy of that scanner.
+    if (c === "/" && i + 1 < n && source[i + 1] === "/") {
       let j = i + 2;
       while (j < n && source[j] !== "\n") j++;
       // `//@@name` is a PRAGMA, not a comment — the comment spelling of a compile-time
@@ -207,9 +216,11 @@ function tokenize(source: string): Tok[] {
       }
       i = j; continue;
     }
-    if (c === "/" && source[i + 1] === "*") {
+    if (c === "/" && i + 1 < n && source[i + 1] === "*") {
       let j = i + 2;
-      while (j < n && !(source[j] === "*" && source[j + 1] === "/")) j++;
+      // The SECOND read needs its own guard: an unterminated `/*` ending in a lone `*`
+      // puts `j + 1` one past the end.
+      while (j < n && !(source[j] === "*" && j + 1 < n && source[j + 1] === "/")) j++;
       j = Math.min(n, j + 2);
       const raw = source.slice(i, j);
       toks.push({ kind: "comment", value: raw, line: st.line });
@@ -254,7 +265,8 @@ function tokenize(source: string): Tok[] {
         const ch = source[i]!;
         if (ch === "\\") { i += 2; continue; }
         if (ch === "`" && depth === 0) { i++; break; }
-        if (ch === "$" && source[i + 1] === "{") { depth++; i += 2; continue; }
+          // `i + 1 < n` first: a `$` that ENDS the input reads past it.
+        if (ch === "$" && i + 1 < n && source[i + 1] === "{") { depth++; i += 2; continue; }
         if (ch === "}" && depth > 0) { depth--; i++; continue; }
         if (ch === "\n") st.line++;
         i++;

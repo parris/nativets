@@ -135,7 +135,10 @@ function rewriteTags(t: string, tags: Map<string, string>): string {
     let j = i;
     while (j < t.length && isIdentPart(t[j]!)) j++;
     const name = t.slice(i, j);
-    if (t[j] === "{") {
+    // `j < t.length` FIRST: an identifier that ENDS the string leaves `j` at index ==
+    // length, which node answers `undefined` and nativets panics on (Stage 41). The
+    // spelling matches `renameTag` above, which already guards `i + 1 >= t.length`.
+    if (j < t.length && t[j] === "{") {
       out += `${tags.get(name) ?? name}{`;
       i = j + 1;
     } else {

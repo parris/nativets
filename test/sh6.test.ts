@@ -1042,7 +1042,11 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // program over a plain nested union is refused the same way. That is a narrowing
       // lane; probed one deeper, the site behind it is `exprLoc`'s `e.left`, the same
       // construct again.
-      expect(m.error).toContain("narrow it first");
+      // The advice is now the PATH variant, and that is two lanes composing: the type-ref
+      // unfold made the union visible, so narrowAdvice can see the receiver is a PATH
+      // (`e.callee`) rather than a plain name, and says to bind it first. Strictly more
+      // truthful than the generic "narrow it first" this asserted before.
+      expect(m.error).toContain("is a path — bind it first");
       expect(m.error).toContain("Property 'property' does not exist on");
       expect(m.code).toBe("NT2001");
       return;
@@ -1228,4 +1232,117 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       rmSync(dir, { recursive: true, force: true });
     }
   }, 300_000);
+
+  /**
+   * THE THIRD NON-WEAK DIFFERENTIAL — `src/lexer.ts`, the largest of the three modules
+   * that reach IR and the one that had no driver at all, so its rung 3 was empty-vs-empty.
+   *
+   * A driver imports `lex` and `decodeEscapeAt` and prints the FULL token stream — type,
+   * line, column and value — for inputs picked to move every scanner branch: every numeric
+   * form (radix, exponent, separators), a string with escapes, a template with nested
+   * substitutions, a regex literal next to a division (the scanner's one context-sensitive
+   * decision), the maximal-munch punctuators (`>>>=`, `??=`, `?.`, `...`), both comment
+   * forms, and both comment forms. Token counts and a value-character total are printed,
+   * so a single wrong boundary moves the bytes. `decodeEscapeAt` is called directly —
+   * its offsets are not observable through the token stream.
+   */
+  test("lexer.ts DRIVER: real output, byte-identical to the bun-run module", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nativets-sh6-drive3-")));
+    try {
+      const driver = join(dir, "drive.ts");
+      const spec = relative(dir, realpathSync(pathOf("lexer.ts")));
+      writeFileSync(driver, [
+        `import { lex, decodeEscapeAt } from ${JSON.stringify(spec)};`,
+        ``,
+        `const SAMPLES: string[] = [`,
+        ...[
+          "const n = 0xff + 0b1010 + 0o17 + 1e3 + 1.5e-2 + 1_000 + .5;",
+          String.raw`const s = "a\tbA\x41\n" + 'q\'z';`,
+          "const t = `a${1 + `b${2}c`}d`;",
+          String.raw`const r = /a\/b[^/]+/gi.test(x); const d = a / b / c;`,
+          "a >>>= 1; b ??= 2; c ?.d; e = [...f]; g **= 2; h <<= 1; i === j !== k;",
+          "// line comment\n/* block\n   comment */\nlet z = 1; // trailing",
+          "class C { p = 1; static m<T>(a: T[]): T { return a[0]!; } }",
+        ].map((sample) => `  ${JSON.stringify(sample)},`),
+        `];`,
+        ``,
+        `let chars = 0;`,
+        `for (const sample of SAMPLES) {`,
+        `  const ts = lex(sample);`,
+        `  console.log("=== " + ts.length + " tokens for " + sample.length + " source chars");`,
+        `  for (const tk of ts) {`,
+        `    console.log(tk.line + ":" + tk.col + " " + tk.type + " " + JSON.stringify(tk.value));`,
+        `    chars = chars + tk.value.length;`,
+        `  }`,
+        `}`,
+        `console.log("total token-value characters: " + chars);`,
+        ``,
+        // The escape decoder is reachable from `lex` but its offsets are not observable
+        // through the token stream, so exercise it directly.
+        // Each sample carries a trailing `;` so the decoder's LOOKAHEAD never runs off the
+        // end: `raw[i + 2] ?? ""` reads as safe but an out-of-range string index PANICS
+        // (docs/divergences.md, the headline divergence) before the `??` is reached.
+        // `\\0` is left out on purpose — it decodes to a string CONTAINING U+0000, and a
+        // nativets string is NUL-terminated, so the two sides genuinely disagree there.
+        `const ESC: string[] = ["\\\\n;", "\\\\u0041;", "\\\\x41;", "\\\\u{1F600};", "\\\\q;", "\\\\\`;"];`,
+        `for (const e of ESC) {`,
+        `  const d = decodeEscapeAt(e, 0, 1, 1);`,
+        `  console.log("escape " + JSON.stringify(e) + " -> " + JSON.stringify(d.text) + " next=" + d.next);`,
+        `}`,
+        ``,
+        // NOT exercised: the LexError path. Catching it here would be
+        // `try { lex(bad) } catch`, and a throw that crosses a CALL boundary is NT1004 —
+        // an unrelated, already-recorded gap, not something this driver should assert.
+      ].join("\n"));
+
+      const bin = join(dir, "drive");
+      await buildBinary(readFileSync(driver, "utf8"), bin, { target: "host", entryPath: driver });
+      const ours = spawnSync(bin, [], { encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL" });
+      const oracle = spawnSync("bun", ["run", driver], { encoding: "utf8", timeout: 120_000 });
+
+      expect(oracle.stdout.length).toBeGreaterThan(0); // the oracle must actually print
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.status).toBe(oracle.status);
+      expect(ours.status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 300_000);
 });
+
+/* ============================================================
+ * THE CORPUS DRIVERS live in test/sh6-fuzz.test.ts — ONE canonical instrument
+ * ============================================================
+ *
+ * The two drivers above feed their module HAND-WRITTEN SNIPPETS, and that distinction
+ * turned out to decide everything. `lexer.ts` sat at rung 3 in the BASELINE for several
+ * rounds — reported as "the lexer self-compiles" — while a self-compiled `src/lexer.ts`
+ * COULD NOT LEX `src/`. Any file with a bare `//` comment killed it:
+ *
+ *     panic: index out of bounds: the length is 0 but the index is 0
+ *       at src/lexer.ts:95:11
+ *
+ * `pragmaName("")` — the body of a bare `//` — read `body[0]` on an empty string, which
+ * node answers `undefined` and nativets PANICS on by design (Stage 41). 43 lines of the
+ * compiler's own source are bare `//`, five of them in `lexer.ts` itself, and the compiled
+ * lexer aborted on 8 of the 12 modules. It held a green rung-3 row and could not read one
+ * file in the tree it is part of. Six such sites were minimized by the fuzz
+ * lane; a full census of `src/`'s 573 computed index reads found 31, and all 31 are fixed
+ * (see docs/self-hosting.md and test/no-index-last.test.ts).
+ *
+ * NEITHER driver above could have caught it, and neither could a WIDER driver of the same
+ * shape: their inputs are chosen by hand, so none of them contained the input that
+ * mattered. A corpus of REAL SOURCE is not a bigger snippet corpus; it is the only one
+ * that contains what the module will actually be handed.
+ *
+ * THE RULE, now enforced: a module is not at rung 3 in any sense that matters for
+ * self-hosting until the COMPILED module processes `src/*.ts` and agrees with the bun-run
+ * module on stdout AND exit code. That assertion lives in `test/sh6-fuzz.test.ts`
+ * (`corpus: "src"`, pinned at zero divergences over all twelve modules) rather than here,
+ * so there is ONE corpus instrument and not two — it already owns the sweep, the
+ * minimizer and the length/column normalizer this comparison needs.
+ *
+ * The `weak` flag on the BASELINE rows is therefore no longer the whole story: rung 3 for
+ * `lexer.ts`, `diagnostics.ts` and `coverage-preprocess.ts` is now backed by a real-source
+ * differential, and it was NOT before.
+ */
