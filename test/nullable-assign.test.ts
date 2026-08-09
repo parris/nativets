@@ -332,3 +332,69 @@ console.log(new C().get());
     expect(text).not.toContain("narrowing does not reach");
   });
 });
+
+/*
+ * A DISCRIMINATED-UNION MEMBER reaching a `Union | undefined` parameter.
+ *
+ * `fitsParam`'s nullable arm asked whether the argument's type IS the base type. For
+ * `E | undefined` the base is the whole union and the argument is a MEMBER of it, so
+ * the answer was no — and `fitsArg`'s reshape path then bailed as well, because its
+ * guard requires the base to be an object or array and a union is neither. The `|
+ * undefined` was therefore the entire difference between an accepted call and a
+ * refused one:
+ *
+ *     function f(e: E): number { … }              f({ kind: "B" })   compiled
+ *     function f(e: E | undefined): number { … }  f({ kind: "B" })   NT2001
+ *
+ * ...and the reported type made it look like a hint-plumbing failure ("got
+ * {kind:string}"), which it is not: the NON-nullable spelling reports exactly the
+ * same widened type and is accepted, because `assignable`'s union arm compares
+ * against `unionWidenedMembers`. Reported by lane-rectype while working on recursive
+ * types; the shape is every AST walker in `src/` that takes an optional node.
+ *
+ * The rule added is the one the bare-union arm one line above already uses — identity
+ * against the union's widened members, NOT the structural-object relation — so the
+ * layout guard block 3 pins is untouched, and block 5's negatives re-pin it here.
+ *
+ * PROVENANCE: derived, not mined (no `microsoft/TypeScript` checkout on this machine).
+ * `tsc --strict` was used as a second oracle: it accepts every positive below and its
+ * refusals line up with the negatives. node is the oracle for stdout and exit code.
+ */
+describe("5 — a union MEMBER reaches a `Union | undefined` parameter", () => {
+  const E = `type E = { kind: "A"; n: number } | { kind: "B" };\n`;
+  const F = `function f(e: E | undefined): number {\n  if (e === undefined) return -1;\n  if (e.kind === "A") return e.n;\n  return 0;\n}\n`;
+
+  test("an object literal for each member, plus `undefined` and a bound local", async () => {
+    await expectNode(E + F +
+      `console.log(f({ kind: "B" }));\n` +
+      `console.log(f({ kind: "A", n: 7 }));\n` +
+      `console.log(f(undefined));\n` +
+      `const leaf: E = { kind: "A", n: 3 };\n` +
+      `console.log(f(leaf));\n`);
+  });
+
+  /*
+   * The negatives. Widening `fitsParam` is precisely where a bad program slips
+   * through, so both refusals that guard it are pinned as hard as the acceptance.
+   */
+  test("a tag that matches NO member is still refused", () => {
+    expectRejected(E + F + `console.log(f({ kind: "C" }));\n`, "NT2001", "matches no member");
+  });
+
+  test("a structurally-compatible NON-literal is still refused", () => {
+    // `other`'s own declaration fixed its layout (`kind` widened to `string`, plus an
+    // extra slot). There is no literal to reshape, so it stays out — the same guard
+    // block 3 pins for the object case, now re-pinned through the union.
+    expectRejected(E + F + `const other = { kind: "B", extra: 1 };\nconsole.log(f(other));\n`, "NT2001", "arg 0");
+  });
+
+  // The control: the same call against the same union WITHOUT `| undefined`, which
+  // always worked. It is here so a future change that breaks both is not mistaken for
+  // a regression of this one. (An `if`, not a `?:` — a TAG test in a ternary arm is a
+  // separate, still-open narrowing gap and would red this test for the wrong reason.)
+  test("a NON-nullable union parameter is unaffected", async () => {
+    await expectNode(E +
+      `function g(e: E): number {\n  if (e.kind === "A") return e.n;\n  return 0;\n}\n` +
+      `console.log(g({ kind: "B" }), g({ kind: "A", n: 5 }));\n`);
+  });
+});
