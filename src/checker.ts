@@ -3327,17 +3327,92 @@ class Checker {
     this.bodyChain.push(arrowBody(arrow));
     let retTy: Ty;
     try {
-      if (arrow.exprBody) {
-        retTy = this.type(arrow.body as Expr, inner);
-      } else {
-        retTy = this.inferBlockReturn(arrow.body as Stmt[], inner); // first top-level `return`
-        this.checkBlock(arrow.body as Stmt[], inner.child(), retTy); // validate every return against it
-      }
+      retTy = this.typeArrowReturn(arrow, inner, this.arrowRetAnnot(arrow, undefined));
     } finally {
       this.bodyChain.pop();
     }
     arrow.retTy = retTy;
     return retTy;
+  }
+
+  /**
+   * The arrow's DECLARED return type, resolved — or `undefined` when it has none (or has
+   * one the checker cannot resolve, in which case it must not be compared against).
+   *
+   * The only unresolvable case is an arrow's OWN type parameter (`<T>(x: T): T => x`). An
+   * arrow is a value, so there is no instantiation site to specialize (M3 monomorphizes
+   * DECLARATIONS): prefer the contextual return type when the arrow is being passed or
+   * assigned somewhere that supplies one, and otherwise DROP the annotation entirely —
+   * the same "erase to the pre-M3 behavior" choice `typeArrow` makes for parameters,
+   * except that erasing a return marker to `number` would REJECT `id("a")`, so the honest
+   * erasure is "no declared type" rather than "declared `number`". A `#T` must never
+   * reach codegen either way, so the resolution is written back into the AST.
+   */
+  private arrowRetAnnot(arrow: ArrowFunction, expected: Ty | undefined): Ty | undefined {
+    const a = arrow.retAnnot;
+    if (a === undefined) return undefined;
+    if (!hasTypeParam(a)) return a;
+    const ctx = expected && isFuncTy(expected) ? funcRet(expected) : undefined;
+    arrow.retAnnot = ctx && !hasTypeParam(ctx) ? ctx : undefined;
+    return arrow.retAnnot;
+  }
+
+  /**
+   * Type an arrow's body and return the arrow's return type — the ONE place an arrow's
+   * declared return type meets its body.
+   *
+   * With a declaration the shape is a `function`'s: the declared type is the CONTEXT the
+   * body is typed in AND the type every `return` is checked against, so the arrow's return
+   * type IS the declared one. That is also what fixes the block-body case whose only
+   * `return` sits inside a `try`/`if`-`else` — `inferBlockReturn` looks at TOP-LEVEL
+   * returns only, so an unannotated arrow like that infers `number` and then rejects its
+   * own `return "x"`; an annotation says what the body means.
+   *
+   * THREE outcomes, not two, and the middle one is the whole reason this is not a
+   * one-line `fitsParam` call. Adding a check to a construct that had none makes strictly
+   * FEWER programs compile, and an arrow whose annotation is honest but WIDER than the
+   * type codegen can carry must not be one of the casualties:
+   *
+   *   1. the body's type FITS (`fitsParam`, i.e. identity or a union member) — the
+   *      declared type wins, and it is the one recorded for codegen;
+   *   2. the body's type does not fit but IS `assignable` — a legitimate widening
+   *      (`(x): string | null => null`, a structural object supertype) that `fitsParam`
+   *      deliberately excludes because codegen does not box at every one of its sites
+   *      (see `fitsParam`). Keep the INFERRED type: that is exactly the pre-annotation
+   *      behaviour, node erases the annotation too, so nothing is miscompiled and nothing
+   *      that compiled yesterday stops. Widening these is `fitsParam`'s job, not this
+   *      one's, and closing it here would refuse `function`-legal code in arrow spelling;
+   *   3. neither — the annotation is a LIE, and that is the `NT2001` this exists for.
+   *
+   * `void` is treated as "no declared type": a `: void` arrow's body is an expression
+   * whose value node discards, and adopting `void` here would change the emitted
+   * signature rather than catch a lie.
+   */
+  private typeArrowReturn(arrow: ArrowFunction, inner: Scope, annot: Ty | undefined): Ty {
+    const declared = annot === "void" ? undefined : annot;
+    if (arrow.exprBody) {
+      const body = arrow.body as Expr;
+      const t = this.type(body, inner, declared);
+      if (declared === undefined) return t;
+      if (this.fitsParam(declared, t)) {
+        // The expression body IS the arrow's single `return`, so reshape it into the
+        // declared slot layout for the same reason `const x: T = literal` is reshaped.
+        this.retypeLiteral(body, declared);
+        return declared;
+      }
+      if (this.assignable(declared, t)) return t; // (2) honest, wider than codegen carries
+      throw typeError(`return type ${t} does not match declared ${declared}`, exprLoc(body), undefined, "returned here");
+    }
+    const body = arrow.body as Stmt[];
+    const inferred = this.inferBlockReturn(body, inner); // first top-level `return`
+    // (2) again: only a widening `fitsParam` rejects but `assignable` accepts keeps the
+    // inferred type. A body the annotation genuinely contradicts goes to `checkBlock`
+    // against the DECLARED type, so the `NT2001` names the offending `return`'s position.
+    const ret = declared !== undefined && !(!this.fitsParam(declared, inferred) && this.assignable(declared, inferred))
+      ? declared
+      : inferred;
+    this.checkBlock(body, inner.child(), ret); // validate every return against it
+    return ret;
   }
 
   /** Type an arrow used as a VALUE → a function type, with capture analysis. */
@@ -3378,14 +3453,10 @@ class Checker {
     // sees it as one of ITS enclosing bodies (NT1031) — and comes back off before
     // `computeCaptures`, which asks about the bodies OUTSIDE this arrow.
     this.bodyChain.push(arrowBody(arrow));
+    const declared = this.arrowRetAnnot(arrow, expected);
     let retTy: Ty;
     try {
-      retTy = this.inArrow(() => {
-        if (arrow.exprBody) return this.type(arrow.body as Expr, inner);
-        const t = this.inferBlockReturn(arrow.body as Stmt[], inner);
-        this.checkBlock(arrow.body as Stmt[], inner.child(), t);
-        return t;
-      });
+      retTy = this.inArrow(() => this.typeArrowReturn(arrow, inner, declared));
     } finally {
       this.bodyChain.pop();
     }

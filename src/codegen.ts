@@ -1030,7 +1030,11 @@ class FnGen {
     arrow.params.forEach((p, i) => this.emit(`store ${llvmTy(paramTys[i]!)} %${p.name}, ptr ${this.addr(p.name)}`));
     this.emitStrInit();
     if (arrow.exprBody) {
-      const bodyVal = this.genExpr(arrow.body as Expr);
+      // An expression body IS the arrow's `return`, so it needs the same store-boundary
+      // coercion a `return` statement gets (`genStmts`, ReturnStmt) — without it a
+      // declared `T | null` return whose body is the non-null arm emitted a raw scalar
+      // where the signature promises a box.
+      const bodyVal = this.coerce(this.genExpr(arrow.body as Expr), this.retTy);
       this.terminate(`ret ${llvmTy(this.retTy)} ${bodyVal.v}`);
     } else {
       this.genStmts(arrow.body as Stmt[]);
