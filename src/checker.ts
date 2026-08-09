@@ -1109,7 +1109,13 @@ class Checker {
     // Round 1 — plain arguments. An ARROW argument is deferred: it needs the (possibly
     // still-unbound) parameter pattern as its contextual type before it can be typed.
     e.args.forEach((a, i) => {
-      const pat = patterns[Math.min(i, patterns.length - 1)];
+      // The clamp is for a REST parameter — argument `i` past the end takes the last
+      // pattern. On a ZERO-parameter template it clamps to `-1` instead, and that read
+      // is the class test/no-index-last.test.ts bans: `undefined` to node, a PANIC to
+      // nativets. Reached today by `function f<T>(): number {…}; f<number>(1)`, which
+      // must come back NT2001 "expects 0..0 args, got 1" — a self-hosted compiler would
+      // abort here instead of producing that diagnostic.
+      const pat = i < patterns.length ? patterns[i] : patterns.at(-1);
       if (!pat || !hasTypeParam(pat) || a.kind === "ArrowFunction") return;
       bindings = unifyTypeParams(sigParams[i]?.rest ? elemTy(pat) : pat, this.type(a, scope), bindings);
     });

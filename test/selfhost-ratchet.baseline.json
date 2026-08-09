@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "c678128"
+    "rev": "acd57f8"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "ebf8aeb733603335",
+      "sha256": "4eb6a97a7cb73809",
       "standalone": {
         "stage": "check",
         "code": "NT1606",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "49b663bb83f0325a",
+      "sha256": "472b437e1127844f",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -45,7 +45,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "fe3753d5bd04358f",
+      "sha256": "f804752bff33fdfa",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -112,7 +112,7 @@
       }
     },
     "lexer.ts": {
-      "sha256": "4ab63503e3cbd30d",
+      "sha256": "facf7291d796d2ef",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "71f209429b1b53fc",
+      "sha256": "67950bf89fed288c",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
