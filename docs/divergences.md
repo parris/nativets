@@ -538,6 +538,72 @@ with a tag test already written. `Checker.narrowAdvice` now says which one it is
 
 Each of the three workarounds it prescribes was verified to compile and match node.
 
+### `break` is not `return` — one conflation, one false refusal and four wrong answers (closed)
+
+Two passes asked "does this code leave?" and both got `break` wrong, in opposite directions.
+
+**The false refusal.** A BRACED case body — `case "X": { … return …; }` — read as *falling
+through*, so the next case was narrowed to both tags and its member read refused:
+
+```ts
+switch (n.kind) {
+  case "A": { const x = n.a; return "A" + x; }
+  case "B": return "B" + n.b;   // NT2001 — narrowed here to MORE THAN ONE member
+}
+```
+
+`leavesBlock` tested only the KIND of the case body's last statement, and a braced body's last
+statement is a `BlockStmt`. Nothing was ever miscompiled — codegen terminates the block correctly
+— these were refusals of programs node runs. `src/` writes that shape **181 times** (counted with
+our own parser; a line-based grep undercounts it).
+
+**The wrong answers**, all in definite assignment (NT1600), all the same root cause: a `break` or
+`continue` path was treated as *diverging*, so it was dropped from the assignment intersection and
+the code after the construct was never analyzed at all. Each printed the slot's zero where node
+prints `undefined`:
+
+```ts
+switch (c) { case 1: x = 1; break; default: break; }   return x; // 0, not undefined
+switch (c) { default: { if (b) break; x = 1; break; } } return x; // 0, not undefined
+do { if (c) break; n = 7; } while (false);             return n;  // 0, not undefined
+do { continue; } while (false);                        return n;  // 0, not undefined
+```
+
+**What changed** (`src/checker.ts`). The return value now answers only "does control reach the
+statement AFTER this one?" (`DAExit` = `"fall" | "left"`), because a path that leaves by `break`
+or `continue` is not lost — it is RECORDED, with the flow it carries, in a `DAEscapes` collector.
+That split is the fix: a `break` halfway down a body escapes exactly as much as one at the end,
+and no single return value can carry a flow from the middle.
+
+`breaks` land at the enclosing switch-or-loop's EXIT; `conts` land at the enclosing loop's TEST,
+which may then fall out of the loop. Both are live incoming paths to the construct that owns them
+and join its merge. Ownership follows the language: a `switch` shadows `breaks` and passes `conts`
+through to the loop, a loop shadows both — neither carries a label here, so "nearest enclosing" is
+the whole rule. Only `return`/`throw`/`process.exit` truly diverge.
+
+`while`/`for`/`for-of`/`for-in` were never affected: they may run zero times, so they keep nothing
+their body assigns, and the entry flow is already a subset of every escape path's. `do…while` is
+the one loop whose body always runs and whose assignments are therefore kept — which is exactly
+why it is the one loop where the escape paths change the answer.
+
+`leavesBlock` then **delegates** to that same analysis in a shape-only mode (`tracked === null`:
+track nothing, prove nothing, refuse nothing) rather than keeping a second, weaker model of
+control flow. That is what closes the false refusal, and it only became sound once the `break`
+conflation above was fixed: without it, `case "X": { switch (y) { default: break; } }` would have
+read as *leaving*, and the next case's member read would have been wrongly ACCEPTED.
+
+**Oracle.** The TypeScript conformance suite is not on disk, so the cases are derived, not mined;
+but all twelve were run through `tsc --strict` as the same program, and tsc's verdict agrees with
+ours on every one — the six that end (`return`, `throw`, `break`, a nested block, an if/else
+returning on both arms, a `try` whose `finally` cannot rescue it) and the six that fall through
+(an `if` with only one arm returning, a `try` whose `catch` falls out, an inner `switch` whose
+arms only `break`, a side effect with no terminator, an empty braced body, a bare fallthrough).
+
+**Not fixed, and still a gap:** `leavesFunction` — read only by the exhaustive-tail-switch
+diagnostic — is still the shallow last-statement test, so a tail switch whose arms are all braced
+does not get its missing-tag diagnostic. That direction is a MISSED refusal, not a wrong answer,
+so it was left alone rather than widened here.
+
 ### `JSON.stringify` — the default-to-`null` fall-through (closed)
 
 `genJsonStringify` handled number/boolean/string/`Date`/nullable/array/object and then

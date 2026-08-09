@@ -4540,15 +4540,21 @@ function leavesFunction(body: Stmt[]): boolean {
 
 /**
  * Does this statement list always leave its enclosing block? Two SH2 narrowings read
- * it: elimination after a guard clause, and whether a switch case can fall through
- * into the next one. Conservative — a `return` in both arms of an `if` is not
- * recognized — and conservative is the safe direction for both: less elimination,
- * and a WIDER set of tags carried into the next case.
+ * it: elimination after a guard clause, and whether a switch case can fall through into
+ * the next one. In both, "leaves" is the same question the definite-assignment pass
+ * already answers exactly — so this DELEGATES to it in shape-only mode rather than
+ * keeping a second, weaker model of control flow. `"fall"` is the one answer that means
+ * the next statement (or the next `case`) is reachable; `break` and `continue` leave the
+ * block just as much as `return` does.
+ *
+ * It used to read only the KIND of the LAST statement, which made the single most common
+ * shape in our own source wrong: a BRACED case body, `case "X": { … return …; }`, ends in
+ * a `BlockStmt` and so read as "falls through" — narrowing the NEXT case to both tags and
+ * refusing its member read. `src/` writes that shape 181 times. node runs every one of
+ * them; nothing was ever miscompiled, they were simply refused.
  */
 function leavesBlock(body: Stmt[]): boolean {
-  if (body.length === 0) return false; // an empty block — see leavesFunction
-  const last = body[body.length - 1]!;
-  return (last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "BreakStmt" || last.kind === "ContinueStmt");
+  return daBlock(body, null, new Set<string>(), null) !== "fall";
 }
 
 /* ============================================================
@@ -4587,7 +4593,13 @@ function leavesBlock(body: Stmt[]): boolean {
 /** The names PROVEN assigned on the path reaching a given program point. */
 type DAFlow = Set<string>;
 
-/** The bindings this pass must prove, mapped to the declared type the hint names. */
+/** The bindings this pass must prove, mapped to the declared type the hint names.
+ *
+ * `null` is the SHAPE-ONLY mode: track nothing, prove nothing, refuse nothing — just
+ * report how control leaves the statements. `leavesBlock` runs the analysis that way, so
+ * the narrowings share this one control-flow model instead of keeping a second, weaker
+ * copy of it (which is what let a braced `case` body ending in `return` read as
+ * "falls through"). Nothing is tracked, so no diagnostic can be raised from a narrowing. */
 /* The VALUE is only ever rendered into a diagnostic ("`let x: ${ty};` starts with no
  * value"), and a declaration with neither an inferred nor a written type has none to
  * render — hence the `"unknown"` placeholder, which is not a `Ty` and was assigned into
@@ -4624,7 +4636,8 @@ function daReads(node: unknown, out: Map<string, Loc | undefined>): void {
 }
 
 /** Refuse every read in `e` of a tracked binding not yet proven assigned. */
-function daUse(e: unknown, tracked: DATracked, flow: DAFlow): void {
+function daUse(e: unknown, tracked: DATracked | null, flow: DAFlow): void {
+  if (tracked === null) return; // shape-only mode: nothing is tracked, so nothing to refuse
   if (e === null || e === undefined) return;
   const reads = new Map<string, Loc | undefined>();
   daReads(e, reads);
@@ -4655,16 +4668,54 @@ function daMerge(paths: { flow: DAFlow; diverged: boolean }[], fallback: DAFlow)
   return out;
 }
 
-/** Analyze a statement list. Returns true if it always DIVERGES (never falls through). */
-function daBlock(body: Stmt[], tracked: DATracked, flow: DAFlow): boolean {
-  for (const s of body) if (daStmt(s, tracked, flow)) return true;
-  return false;
+/**
+ * Does control reach the statement AFTER this one? That is the only thing a return value
+ * has to answer, because a path that leaves by `break` or `continue` is not lost — it is
+ * RECORDED, with the flow it carries, in the `DAEscapes` collector below. That split is
+ * what makes the analysis correct: a `break` halfway down a body escapes exactly as much
+ * as one at the end, and no single return value can carry a flow from the middle.
+ *
+ * Treating every non-`fall` alike was a MISCOMPILE, not an imprecision. `break` and
+ * `continue` were folded in with `return`, so their paths were dropped from the
+ * assignment INTERSECTION — and a switch whose every arm ended in `break` "diverged", so
+ * the statements after it were never analyzed at all. Four programs printed the slot's
+ * zero where node prints `undefined`; see test/definite-assignment.test.ts, 11b–11d.
+ */
+type DAExit = "fall" | "left";
+
+/**
+ * Where the escaping paths out of a body land, and what they had assigned when they left.
+ *
+ * `breaks` reach the enclosing switch-or-loop's EXIT; `conts` reach the enclosing loop's
+ * TEST, which may then fall out of the loop. Both are therefore live incoming paths to
+ * the construct that owns them and must join its merge.
+ *
+ * Ownership follows the language: `break` binds to the nearest enclosing switch OR loop,
+ * `continue` to the nearest enclosing LOOP — so a `switch` shadows `breaks` and passes
+ * `conts` through, while a loop shadows both. Neither carries a label here (`src/ast.ts`:
+ * `BreakStmt` and `ContinueStmt` have no fields), so "nearest enclosing" is the whole
+ * rule. `null` means neither exists, and `break`/`continue` there is already a checker
+ * error ("'break' outside loop/switch").
+ */
+type DAEscapes = { breaks: DAFlow[]; conts: DAFlow[] } | null;
+
+/** Live incoming paths, in the shape `daMerge` reads. */
+const daLive = (flows: DAFlow[]): { flow: DAFlow; diverged: boolean }[] =>
+  flows.map((flow) => ({ flow, diverged: false }));
+
+/** Analyze a statement list. Returns whether control reaches past its end. */
+function daBlock(body: Stmt[], tracked: DATracked | null, flow: DAFlow, esc: DAEscapes): DAExit {
+  for (const s of body) {
+    if (daStmt(s, tracked, flow, esc) === "left") return "left"; // the rest is unreachable
+  }
+  return "fall";
 }
 
-/** Analyze one statement in place, mutating `flow`. Returns true if it DIVERGES. */
-function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
+/** Analyze one statement in place, mutating `flow`. Returns whether control reaches past it. */
+function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes): DAExit {
   switch (s.kind) {
     case "VarDecl":
+      if (tracked === null) return "fall"; // shape-only: a declaration changes no control flow
       for (const d of s.decls) {
         // This analysis is NAME-based, and so is codegen (one slot per name per
         // function). A redeclaration of a name already being tracked is therefore
@@ -4683,72 +4734,93 @@ function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
         if (d.init) { daUse(d.init, tracked, flow); flow.add(d.name); }
         else { tracked.set(d.name, d.ty ?? d.annot ?? "unknown"); flow.delete(d.name); }
       }
-      return false;
+      return "fall";
 
     case "ExprStmt": {
       const e = s.expr;
       // The one form that ASSIGNS: `x = v` at statement level. The value is evaluated
       // first, so its reads are checked against the state BEFORE the write lands.
-      if (e.kind === "AssignExpr" && e.op === "=" && tracked.has(e.target)) {
+      if (e.kind === "AssignExpr" && e.op === "=" && tracked !== null && tracked.has(e.target)) {
         daUse(e.value, tracked, flow);
         flow.add(e.target);
-        return false;
+        return "fall";
       }
       daUse(e, tracked, flow);
-      return daIsExit(e);
+      return daIsExit(e) ? "left" : "fall";
     }
 
-    case "ReturnStmt": daUse(s.argument, tracked, flow); return true;
-    case "ThrowStmt": daUse(s.argument, tracked, flow); return true;
-    case "BreakStmt": case "ContinueStmt": return true;
+    case "ReturnStmt": daUse(s.argument, tracked, flow); return "left";
+    case "ThrowStmt": daUse(s.argument, tracked, flow); return "left";
+    // These land somewhere ELSE that is still reachable, carrying what they have assigned
+    // SO FAR — so the snapshot has to be taken right here, where the path leaves.
+    case "BreakStmt": if (esc) esc.breaks.push(new Set(flow)); return "left";
+    case "ContinueStmt": if (esc) esc.conts.push(new Set(flow)); return "left";
 
     case "IfStmt": {
       daUse(s.test, tracked, flow);
       const con = new Set(flow);
-      const conDiv = daBlock(s.consequent, tracked, con);
+      const conExit = daBlock(s.consequent, tracked, con, esc);
       const alt = new Set(flow);
-      const altDiv = s.alternate ? daBlock(s.alternate, tracked, alt) : false;
-      const merged = daMerge([{ flow: con, diverged: conDiv }, { flow: alt, diverged: altDiv }], flow);
+      const altExit: DAExit = s.alternate ? daBlock(s.alternate, tracked, alt, esc) : "fall";
+      // Only an arm that reaches THIS point contributes to the intersection; one that
+      // left is already recorded wherever it landed.
+      const merged = daMerge([{ flow: con, diverged: conExit === "left" }, { flow: alt, diverged: altExit === "left" }], flow);
       flow.clear(); for (const n of merged) flow.add(n);
-      return conDiv && altDiv;
+      return conExit === "fall" || altExit === "fall" ? "fall" : "left";
     }
 
+    // A loop that MAY RUN ZERO TIMES keeps nothing its body assigned, so the state after
+    // it is the state before it — and the entry flow is already a subset of every escape
+    // path's flow, so merging those in could only intersect it down to itself. The fresh
+    // collector is still needed, to SHADOW the outer one: a `break` in this body belongs
+    // to this loop and must not be charged to the switch around it.
     case "WhileStmt": {
       daUse(s.test, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow)); // may run zero times — assignments discarded
-      return false;
+      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [] });
+      return "fall";
     }
 
     case "DoWhileStmt": {
+      // ...whereas a `do…while` body ALWAYS runs, so its assignments ARE kept — which is
+      // precisely why its escape paths matter here and nowhere else. Both of these reach
+      // the statement after the loop with `n` still unassigned, and keeping the completed
+      // body's flow alone printed the slot's zero where node prints `undefined`:
+      //     do { if (c) break; n = 7; } while (false);
+      //     do { continue; } while (false);        // `continue` runs the TEST, then exits
+      const mine = { breaks: [] as DAFlow[], conts: [] as DAFlow[] };
       const body = new Set(flow);
-      const div = daBlock(s.body, tracked, body); // always runs once — assignments KEPT
-      flow.clear(); for (const n of body) flow.add(n);
+      const exit = daBlock(s.body, tracked, body, mine);
+      const after = daMerge(
+        [{ flow: body, diverged: exit === "left" }, ...daLive(mine.breaks), ...daLive(mine.conts)],
+        flow);
+      flow.clear(); for (const n of after) flow.add(n);
       daUse(s.test, tracked, flow);
-      return div;
+      // Only a body with no way out at all — every path returns or throws — diverges.
+      return exit === "fall" || mine.breaks.length > 0 || mine.conts.length > 0 ? "fall" : "left";
     }
 
     case "ForStmt": {
       if (s.init) { // the init runs exactly once, so its assignments are kept
-        if ((s.init as Stmt).kind === "VarDecl") daStmt(s.init as Stmt, tracked, flow);
+        if ((s.init as Stmt).kind === "VarDecl") daStmt(s.init as Stmt, tracked, flow, esc);
         else daUse(s.init as Expr, tracked, flow);
       }
       daUse(s.test, tracked, flow);
       const body = new Set(flow);
-      daBlock(s.body, tracked, body); // may run zero times — assignments discarded
+      daBlock(s.body, tracked, body, { breaks: [], conts: [] }); // may run zero times
       daUse(s.update, tracked, body);
-      return false;
+      return "fall";
     }
 
     case "ForOfStmt": {
       daUse(s.iterable, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow)); // may run zero times
-      return false;
+      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [] }); // may run zero times
+      return "fall";
     }
 
     case "ForInStmt": {
       daUse(s.object, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow)); // may run zero times
-      return false;
+      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [] }); // may run zero times
+      return "fall";
     }
 
     case "SwitchStmt": {
@@ -4757,51 +4829,62 @@ function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
       // cases assign can be relied on afterwards. A case body that falls through into
       // the next one is handled by analyzing each from the switch's entry state, which
       // under-approximates what is assigned — the safe direction.
+      // A `break` in a case body is THIS switch's, wherever in the body it sits: the path
+      // lands at the switch's exit, so it is a LIVE incoming path and must join the
+      // intersection. A `continue` is NOT — it jumps to the enclosing loop's head, past
+      // this exit — so `conts` is passed through to the loop that owns it.
+      const mine = { breaks: [] as DAFlow[], conts: esc ? esc.conts : [] };
       const paths = s.cases.map((c) => {
         const f = new Set(flow);
         if (c.test) daUse(c.test, tracked, f);
-        return { flow: f, diverged: daBlock(c.body, tracked, f) };
+        return { flow: f, diverged: daBlock(c.body, tracked, f, mine) === "left" };
       });
       const hasDefault = s.cases.some((c) => c.test === null);
-      const merged = hasDefault ? daMerge(paths, flow) : new Set(flow);
+      const all = [...paths, ...daLive(mine.breaks)];
+      const merged = hasDefault ? daMerge(all, flow) : new Set(flow);
       flow.clear(); for (const n of merged) flow.add(n);
-      return hasDefault && paths.every((p) => p.diverged);
+      // The last case falling out the bottom reaches the exit too — that is `diverged`
+      // being false for it, which `every` already accounts for.
+      return hasDefault && all.every((p) => p.diverged) ? "left" : "fall";
     }
 
     case "TryStmt": {
       const tryFlow = new Set(flow);
-      const tryDiv = daBlock(s.block, tracked, tryFlow);
+      const tryExit = daBlock(s.block, tracked, tryFlow, esc);
       let after: DAFlow;
-      let diverged: boolean;
+      let exit: DAExit;
       if (s.handler) {
         // The handler starts from the try's ENTRY state: the throw may have happened
         // before any assignment in the block landed, so none of them can be assumed.
         const catchFlow = new Set(flow);
-        const catchDiv = daBlock(s.handler, tracked, catchFlow);
-        after = daMerge([{ flow: tryFlow, diverged: tryDiv }, { flow: catchFlow, diverged: catchDiv }], flow);
-        diverged = tryDiv && catchDiv;
+        const catchExit = daBlock(s.handler, tracked, catchFlow, esc);
+        after = daMerge([{ flow: tryFlow, diverged: tryExit === "left" }, { flow: catchFlow, diverged: catchExit === "left" }], flow);
+        exit = tryExit === "fall" || catchExit === "fall" ? "fall" : "left";
       } else {
         // try/finally with no catch: reaching past it means the block COMPLETED.
         after = tryFlow;
-        diverged = tryDiv;
+        exit = tryExit;
       }
       flow.clear(); for (const n of after) flow.add(n);
       if (s.finalizer) { // the finalizer always runs, so its assignments are kept
-        if (daBlock(s.finalizer, tracked, flow)) diverged = true;
+        // ...and it can OVERRIDE how the try left: a `return`/`break` in a `finally`
+        // wins over whatever the block was doing (node agrees — that is why `finally`
+        // can swallow a throw).
+        if (daBlock(s.finalizer, tracked, flow, esc) === "left") exit = "left";
       }
-      return diverged;
+      return exit;
     }
 
-    case "BlockStmt": return daBlock(s.body, tracked, flow);
-    case "MultiStmt": return daBlock(s.stmts, tracked, flow);
-    case "FuncDecl": return false; // its body is analyzed on its own, below
+    case "BlockStmt": return daBlock(s.body, tracked, flow, esc);
+    case "MultiStmt": return daBlock(s.stmts, tracked, flow, esc);
+    case "FuncDecl": return "fall"; // its body is analyzed on its own, below
     // The one `Stmt` kind with no arm. It is SYNTHETIC — inserted after this pass, by the
     // ownership analysis, to mark where a scope's drops go — so it never reaches here in
     // practice; but the switch was silently falling off the end and returning `undefined`
-    // for it, which is neither `true` nor `false` and made the `: boolean` return type a
-    // lie (tsc TS2366). Named explicitly so the switch is exhaustive and the next `Stmt`
-    // kind added is a compile error here rather than an implicit "does not diverge".
-    case "BlockDrops": return false;
+    // for it, which is neither of the `DAExit` values and made the return type a lie
+    // (tsc TS2366). Named explicitly so the switch is exhaustive and the next `Stmt`
+    // kind added is a compile error here rather than an implicit "falls through".
+    case "BlockDrops": return "fall";
   }
 }
 
@@ -4822,7 +4905,7 @@ function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
  * `daUse` is shape-blind and descends into it.
  */
 function checkDefiniteAssignment(body: Stmt[]): void {
-  daBlock(body, new Map<string, Ty | "unknown">(), new Set<string>());
+  daBlock(body, new Map<string, Ty | "unknown">(), new Set<string>(), null);
   const seen = new Set<unknown>();
   const walk = (node: unknown): void => {
     if (Array.isArray(node)) { for (const x of node) walk(x); return; }
@@ -4837,7 +4920,7 @@ function checkDefiniteAssignment(body: Stmt[]): void {
     const n = node as { kind?: string; body?: unknown; stmts?: unknown };
     const nested = n.kind === "FuncDecl" ? n.body : n.kind === "ArrowFunction" ? n.stmts : undefined;
     if (Array.isArray(nested)) {
-      daBlock(nested as Stmt[], new Map<string, Ty | "unknown">(), new Set<string>());
+      daBlock(nested as Stmt[], new Map<string, Ty | "unknown">(), new Set<string>(), null);
     }
     for (const v of Object.values(node)) walk(v);
   };
