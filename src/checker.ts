@@ -116,133 +116,149 @@ const RELATIONAL = new Set(["<", "<=", ">", ">="]);
 const EQUALITY = new Set(["===", "!==", "==", "!="]);
 const BITWISE = new Set(["&", "|", "^", "<<", ">>", ">>>"]);
 
-/** stdlib Batch 1: `Number.*` numeric constants (exact IEEE-754 values, like node). */
-export const NUMBER_CONSTS: Record<string, number> = {
-  MAX_SAFE_INTEGER: 9007199254740991,
-  MIN_SAFE_INTEGER: -9007199254740991,
-  EPSILON: 2.220446049250313e-16,
-  MAX_VALUE: 1.7976931348623157e308,
-  MIN_VALUE: 5e-324,
-  POSITIVE_INFINITY: Infinity,
-  NEGATIVE_INFINITY: -Infinity,
-  NaN: NaN,
-};
+/**
+ * stdlib Batch 1: `Number.*` numeric constants (exact IEEE-754 values, like node).
+ *
+ * A `Map`, not `Record<string, number> = { … }` — and unlike the other tables this one
+ * changes BEHAVIOUR, because an object read with a runtime key falls through to
+ * `Object.prototype`. `NUMBER_CONSTS["constructor"]` was a FUNCTION, so both the guard
+ * here and the fold in codegen took it for a real constant and `console.log(Number.constructor)`
+ * printed `NaN` where node prints `[Function: Function]` — exit 0 on both sides. Six
+ * inherited names did that. A Map has no prototype chain, so `.get` answers `undefined`
+ * and the refusal below fires. See `test/record-dict.test.ts`.
+ */
+export const NUMBER_CONSTS: Map<string, number> = new Map<string, number>()
+  .set("MAX_SAFE_INTEGER", 9007199254740991)
+  .set("MIN_SAFE_INTEGER", -9007199254740991)
+  .set("EPSILON", 2.220446049250313e-16)
+  .set("MAX_VALUE", 1.7976931348623157e308)
+  .set("MIN_VALUE", 5e-324)
+  .set("POSITIVE_INFINITY", Infinity)
+  .set("NEGATIVE_INFINITY", -Infinity)
+  .set("NaN", NaN);
 
-const MATH_METHODS: Record<string, number | "var"> = {
-  floor: 1, ceil: 1, round: 1, abs: 1, sqrt: 1, trunc: 1, pow: 2, max: "var", min: "var",
-};
+/**
+ * `Math.*` arity, split in two rather than carried as `number | "var"`.
+ *
+ * The single table was `Record<string, number | "var">` — a SCALAR union, which is the
+ * `NT1009` this project's self-hosting log has been quoting since SH2, on top of the
+ * `Record`-literal refusal. `max`/`min` are variadic and the others are not; that is a
+ * different QUESTION from "how many arguments", so it gets its own set instead of a
+ * sentinel smuggled into an arity. node runs both spellings identically.
+ */
+const MATH_ARITY: Map<string, number> = new Map<string, number>()
+  .set("floor", 1).set("ceil", 1).set("round", 1).set("abs", 1)
+  .set("sqrt", 1).set("trunc", 1).set("pow", 2);
+const MATH_VARIADIC = new Set(["max", "min"]);
 interface MethodSig { min: number; max: number; argTys: (Ty | null)[]; ret: Ty; }
 /** stdlib Batch 1 (part 2): predicate HOFs — one inline arrow, boolean body. */
 const SEARCH_HOFS = new Set(["some", "every", "find", "findIndex", "findLast", "findLastIndex"]);
-const STRING_METHODS: Record<string, MethodSig> = {
-  toUpperCase: { min: 0, max: 0, argTys: [], ret: "string" },
-  toLowerCase: { min: 0, max: 0, argTys: [], ret: "string" },
-  trim: { min: 0, max: 0, argTys: [], ret: "string" },
-  charAt: { min: 1, max: 1, argTys: ["number"], ret: "string" },
-  slice: { min: 1, max: 2, argTys: ["number", "number"], ret: "string" },
-  substring: { min: 1, max: 2, argTys: ["number", "number"], ret: "string" },
-  repeat: { min: 1, max: 1, argTys: ["number"], ret: "string" },
-  padStart: { min: 1, max: 2, argTys: ["number", "string"], ret: "string" },
-  includes: { min: 1, max: 1, argTys: ["string"], ret: "boolean" },
-  indexOf: { min: 1, max: 1, argTys: ["string"], ret: "number" },
-  split: { min: 1, max: 2, argTys: ["string", "number"], ret: "string[]" }, // 2nd arg = limit (stdlib batch 1)
+const STRING_METHODS: Map<string, MethodSig> = new Map<string, MethodSig>()
+  .set("toUpperCase", { min: 0, max: 0, argTys: [], ret: "string" })
+  .set("toLowerCase", { min: 0, max: 0, argTys: [], ret: "string" })
+  .set("trim", { min: 0, max: 0, argTys: [], ret: "string" })
+  .set("charAt", { min: 1, max: 1, argTys: ["number"], ret: "string" })
+  .set("slice", { min: 1, max: 2, argTys: ["number", "number"], ret: "string" })
+  .set("substring", { min: 1, max: 2, argTys: ["number", "number"], ret: "string" })
+  .set("repeat", { min: 1, max: 1, argTys: ["number"], ret: "string" })
+  .set("padStart", { min: 1, max: 2, argTys: ["number", "string"], ret: "string" })
+  .set("includes", { min: 1, max: 1, argTys: ["string"], ret: "boolean" })
+  .set("indexOf", { min: 1, max: 1, argTys: ["string"], ret: "number" })
+  .set("split", { min: 1, max: 2, argTys: ["string", "number"], ret: "string[]" }) // 2nd arg = limit (stdlib batch 1)
   // --- stdlib Batch 1 (part 2): string fills (byte-oriented, ASCII == node) ---
-  charCodeAt: { min: 0, max: 1, argTys: ["number"], ret: "number" },
-  codePointAt: { min: 0, max: 1, argTys: ["number"], ret: makeNullable("undefined", "number") },
-  at: { min: 1, max: 1, argTys: ["number"], ret: makeNullable("undefined", "string") }, // string | undefined
-  padEnd: { min: 1, max: 2, argTys: ["number", "string"], ret: "string" },
-  replace: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },     // string pattern only (no RegExp)
-  replaceAll: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },  // string pattern only (no RegExp)
-  startsWith: { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" },
-  endsWith: { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" },
-  lastIndexOf: { min: 1, max: 1, argTys: ["string"], ret: "number" }, // number | undefined (node: undefined out of range)
-};
+  .set("charCodeAt", { min: 0, max: 1, argTys: ["number"], ret: "number" })
+  .set("codePointAt", { min: 0, max: 1, argTys: ["number"], ret: makeNullable("undefined", "number") })
+  .set("at", { min: 1, max: 1, argTys: ["number"], ret: makeNullable("undefined", "string") }) // string | undefined
+  .set("padEnd", { min: 1, max: 2, argTys: ["number", "string"], ret: "string" })
+  .set("replace", { min: 2, max: 2, argTys: ["string", "string"], ret: "string" })     // string pattern only (no RegExp)
+  .set("replaceAll", { min: 2, max: 2, argTys: ["string", "string"], ret: "string" })  // string pattern only (no RegExp)
+  .set("startsWith", { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" })
+  .set("endsWith", { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" })
+  .set("lastIndexOf", { min: 1, max: 1, argTys: ["string"], ret: "number" }); // number | undefined (node: undefined out of range)
 /**
  * Host FFI (SH4) — the signatures of the `node:` builtins, keyed by their canonical
  * name. Unlike GLOBAL_FUNCS these are NOT ambient: a name is only in scope when the
  * program imported it (`Program.hostImports`), so node and nativets agree on what is
  * defined. Backed by libc in runtime/runtime.c, so they cross-link unchanged.
  */
-const HOST_FUNCS: Record<string, MethodSig> = {
+const HOST_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
   // node:fs — `readFileSync(path, "utf8")`. The encoding is REQUIRED and must be the
   // literal "utf8": node returns a Buffer without one, and we have no Buffer.
-  readFileSync: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
+  .set("readFileSync", { min: 2, max: 2, argTys: ["string", "string"], ret: "string" })
   // `writeFileSync(path, contents)` — node also takes an options/encoding third
   // argument; the default (utf8, truncate) is the only mode implemented.
-  writeFileSync: { min: 2, max: 2, argTys: ["string", "string"], ret: "void" },
+  .set("writeFileSync", { min: 2, max: 2, argTys: ["string", "string"], ret: "void" })
   // `existsSync(path)` REPORTS rather than throws — it is the guard in front of a read.
-  existsSync: { min: 1, max: 1, argTys: ["string"], ret: "boolean" },
-  mkdtempSync: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  readdirSync: { min: 1, max: 1, argTys: ["string"], ret: "string[]" }, // names only (no withFileTypes)
+  .set("existsSync", { min: 1, max: 1, argTys: ["string"], ret: "boolean" })
+  .set("mkdtempSync", { min: 1, max: 1, argTys: ["string"], ret: "string" })
+  .set("readdirSync", { min: 1, max: 1, argTys: ["string"], ret: "string[]" }) // names only (no withFileTypes)
   // `rmSync(path)` / `rmSync(path, { recursive: true, force: true })`. The options are
   // validated by VALUE (checkHostCall) — they decide what the call removes.
-  rmSync: { min: 1, max: 2, argTys: ["string", null], ret: "void" },
+  .set("rmSync", { min: 1, max: 2, argTys: ["string", null], ret: "void" })
   // node:child_process — `spawnSync(cmd, args, { encoding: "utf8" })`. The options
   // object is validated by VALUE (checkHostCall): every other node option changes what
   // the call does, so an ignored one would be a silent divergence. Field order here IS
   // the slot order codegen writes.
-  spawnSync: { min: 3, max: 3, argTys: ["string", "string[]", null], ret: "{status:number,stdout:string,stderr:string}" },
+  .set("spawnSync", { min: 3, max: 3, argTys: ["string", "string[]", null], ret: "{status:number,stdout:string,stderr:string}" })
   // node:path (POSIX). `join`/`resolve` are variadic in node and are LEFT-FOLDED over
   // the binary runtime primitive here (normalize is idempotent and `..` resolves left
   // to right, so the fold is node's answer — pinned by the differential corpus).
-  join: { min: 1, max: 8, argTys: ["string", "string", "string", "string", "string", "string", "string", "string"], ret: "string" },
-  resolve: { min: 1, max: 8, argTys: ["string", "string", "string", "string", "string", "string", "string", "string"], ret: "string" },
-  dirname: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  .set("join", { min: 1, max: 8, argTys: ["string", "string", "string", "string", "string", "string", "string", "string"], ret: "string" })
+  .set("resolve", { min: 1, max: 8, argTys: ["string", "string", "string", "string", "string", "string", "string", "string"], ret: "string" })
+  .set("dirname", { min: 1, max: 1, argTys: ["string"], ret: "string" })
   // node's 2-arg `basename(p, ext)` strips a suffix; only the 1-arg form is implemented.
-  basename: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  relative: { min: 2, max: 2, argTys: ["string", "string"], ret: "string" },
+  .set("basename", { min: 1, max: 1, argTys: ["string"], ret: "string" })
+  .set("relative", { min: 2, max: 2, argTys: ["string", "string"], ret: "string" })
   // node:os / node:url — the last two the compiler's own source imports.
-  tmpdir: { min: 0, max: 0, argTys: [], ret: "string" },
-  homedir: { min: 0, max: 0, argTys: [], ret: "string" },
-  fileURLToPath: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-};
+  .set("tmpdir", { min: 0, max: 0, argTys: [], ret: "string" })
+  .set("homedir", { min: 0, max: 0, argTys: [], ret: "string" })
+  .set("fileURLToPath", { min: 1, max: 1, argTys: ["string"], ret: "string" });
 
-const GLOBAL_FUNCS: Record<string, MethodSig> = {
-  parseInt: { min: 1, max: 2, argTys: ["string", "number"], ret: "number" },
-  parseFloat: { min: 1, max: 1, argTys: ["string"], ret: "number" },
-  isNaN: { min: 1, max: 1, argTys: ["number"], ret: "boolean" },
-  Number: { min: 1, max: 1, argTys: [null], ret: "number" },
-  String: { min: 1, max: 1, argTys: [null], ret: "string" },
+const GLOBAL_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
+  .set("parseInt", { min: 1, max: 2, argTys: ["string", "number"], ret: "number" })
+  .set("parseFloat", { min: 1, max: 1, argTys: ["string"], ret: "number" })
+  .set("isNaN", { min: 1, max: 1, argTys: ["number"], ret: "boolean" })
+  .set("Number", { min: 1, max: 1, argTys: [null], ret: "number" })
+  .set("String", { min: 1, max: 1, argTys: [null], ret: "string" })
   // --- stdlib (web standards) Batch 1: base64 globals (differential vs node) ---
-  btoa: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  atob: { min: 1, max: 1, argTys: ["string"], ret: "string" },
+  .set("btoa", { min: 1, max: 1, argTys: ["string"], ret: "string" })
+  .set("atob", { min: 1, max: 1, argTys: ["string"], ret: "string" })
   // --- stdlib Batch 3: URI encoding (ECMAScript §19.2, byte-exact vs node) ---
-  encodeURIComponent: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  decodeURIComponent: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  encodeURI: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  decodeURI: { min: 1, max: 1, argTys: ["string"], ret: "string" },
-  __arrLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live array count
-  __objLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live object count
-  __pvNodes: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live persistent-vector nodes
-  __pvAllocs: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: cumulative pvec node allocs
-  __strLive: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: live heap-string count
-  __pvTransients: { min: 0, max: 0, argTys: [], ret: "number" }, // debug: in-place (rc==1) appends
+  .set("encodeURIComponent", { min: 1, max: 1, argTys: ["string"], ret: "string" })
+  .set("decodeURIComponent", { min: 1, max: 1, argTys: ["string"], ret: "string" })
+  .set("encodeURI", { min: 1, max: 1, argTys: ["string"], ret: "string" })
+  .set("decodeURI", { min: 1, max: 1, argTys: ["string"], ret: "string" })
+  .set("__arrLive", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: live array count
+  .set("__objLive", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: live object count
+  .set("__pvNodes", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: live persistent-vector nodes
+  .set("__pvAllocs", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: cumulative pvec node allocs
+  .set("__strLive", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: live heap-string count
+  .set("__pvTransients", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: in-place (rc==1) appends
   // Host I/O FFI (stdin): the node oracle gets these via a harness polyfill prelude.
-  readLine: { min: 0, max: 0, argTys: [], ret: "string" },  // next stdin line (no newline), "" at EOF
-  readStdin: { min: 0, max: 0, argTys: [], ret: "string" }, // all remaining stdin
-  readKey: { min: 0, max: 0, argTys: [], ret: "string" },   // next single keypress (raw), "" at EOF
-  rawMode: { min: 1, max: 1, argTys: ["boolean"], ret: "void" }, // enter/leave terminal raw mode
+  .set("readLine", { min: 0, max: 0, argTys: [], ret: "string" })  // next stdin line (no newline), "" at EOF
+  .set("readStdin", { min: 0, max: 0, argTys: [], ret: "string" }) // all remaining stdin
+  .set("readKey", { min: 0, max: 0, argTys: [], ret: "string" })   // next single keypress (raw), "" at EOF
+  .set("rawMode", { min: 1, max: 1, argTys: ["boolean"], ret: "void" }) // enter/leave terminal raw mode
   // Networking tier (L-d): libcurl-backed HTTP(S) client. `headers` is a newline-joined
   // list of "Name: Value" lines. Returns {status, body}; host/Linux only (see driver.ts).
-  httpGet: { min: 2, max: 2, argTys: ["string", "string"], ret: "{status:number,body:string}" },
-  httpPost: { min: 3, max: 3, argTys: ["string", "string", "string"], ret: "{status:number,body:string}" },
+  .set("httpGet", { min: 2, max: 2, argTys: ["string", "string"], ret: "{status:number,body:string}" })
+  .set("httpPost", { min: 3, max: 3, argTys: ["string", "string", "string"], ret: "{status:number,body:string}" })
   // --- GUI FFI (raylib-backed, north-star C-d): a minimal immediate-mode surface. Host
   // desktop only; nt_gui.c + -lraylib are linked ONLY when one of these is called (see
   // driver.ts), so non-GUI programs / cross-builds stay raylib-free. Colors are a small
   // palette INDEX (number) resolved in the runtime — no raylib `Color` crosses the FFI.
-  initWindow: { min: 3, max: 3, argTys: ["number", "number", "string"], ret: "void" },
-  windowShouldClose: { min: 0, max: 0, argTys: [], ret: "boolean" },
-  beginDraw: { min: 0, max: 0, argTys: [], ret: "void" },
-  endDraw: { min: 0, max: 0, argTys: [], ret: "void" },
-  clearBackground: { min: 1, max: 1, argTys: ["number"], ret: "void" }, // palette index
-  drawText: { min: 5, max: 5, argTys: ["string", "number", "number", "number", "number"], ret: "void" }, // s,x,y,size,color
-  drawRect: { min: 5, max: 5, argTys: ["number", "number", "number", "number", "number"], ret: "void" }, // x,y,w,h,color
-  mouseX: { min: 0, max: 0, argTys: [], ret: "number" },
-  mouseY: { min: 0, max: 0, argTys: [], ret: "number" },
-  mousePressed: { min: 0, max: 0, argTys: [], ret: "boolean" }, // left button pressed this frame
-  pointInRect: { min: 6, max: 6, argTys: ["number", "number", "number", "number", "number", "number"], ret: "boolean" }, // px,py,x,y,w,h
-  setTargetFPS: { min: 1, max: 1, argTys: ["number"], ret: "void" },
-};
+  .set("initWindow", { min: 3, max: 3, argTys: ["number", "number", "string"], ret: "void" })
+  .set("windowShouldClose", { min: 0, max: 0, argTys: [], ret: "boolean" })
+  .set("beginDraw", { min: 0, max: 0, argTys: [], ret: "void" })
+  .set("endDraw", { min: 0, max: 0, argTys: [], ret: "void" })
+  .set("clearBackground", { min: 1, max: 1, argTys: ["number"], ret: "void" }) // palette index
+  .set("drawText", { min: 5, max: 5, argTys: ["string", "number", "number", "number", "number"], ret: "void" }) // s,x,y,size,color
+  .set("drawRect", { min: 5, max: 5, argTys: ["number", "number", "number", "number", "number"], ret: "void" }) // x,y,w,h,color
+  .set("mouseX", { min: 0, max: 0, argTys: [], ret: "number" })
+  .set("mouseY", { min: 0, max: 0, argTys: [], ret: "number" })
+  .set("mousePressed", { min: 0, max: 0, argTys: [], ret: "boolean" }) // left button pressed this frame
+  .set("pointInRect", { min: 6, max: 6, argTys: ["number", "number", "number", "number", "number", "number"], ret: "boolean" }) // px,py,x,y,w,h
+  .set("setTargetFPS", { min: 1, max: 1, argTys: ["number"], ret: "void" });
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 const ACTOR_BUILTINS = new Set([
   "spawn", "send", "receive", "self", "__drain",
@@ -1900,7 +1916,7 @@ class Checker {
         }
         // stdlib Batch 1: the `Number.*` numeric constants (MAX_SAFE_INTEGER, EPSILON, …).
         if (e.object.kind === "Identifier" && e.object.name === "Number" && !scope.lookup("Number")) {
-          if (NUMBER_CONSTS[e.property] === undefined) throw nyi(NYI.OBJECT, `Number.${e.property}`);
+          if (NUMBER_CONSTS.get(e.property) === undefined) throw nyi(NYI.OBJECT, `Number.${e.property}`);
           return "number";
         }
         const ot = this.type(e.object, scope);
@@ -2714,7 +2730,7 @@ class Checker {
       // Number.isNaN / parseInt / parseFloat are the namespaced aliases of the globals
       // (isNaN does NOT coerce — but the argument is already statically a number).
       if (p === "isNaN" || p === "parseInt" || p === "parseFloat") {
-        const g = GLOBAL_FUNCS[p === "isNaN" ? "isNaN" : p]!;
+        const g = GLOBAL_FUNCS.get(p === "isNaN" ? "isNaN" : p)!;
         this.checkArgs(e.args, g, scope, `Number.${p}`);
         return g.ret;
       }
@@ -2772,10 +2788,11 @@ class Checker {
     // Math.X(...)
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Math") {
       const m = e.callee.property;
-      const arity = MATH_METHODS[m];
-      if (arity === undefined) throw typeError(`Math.${m} is not supported`);
+      const variadic = MATH_VARIADIC.has(m);
+      const arity = MATH_ARITY.get(m);
+      if (!variadic && arity === undefined) throw typeError(`Math.${m} is not supported`);
       for (const a of e.args) { if (this.type(a, scope) !== "number") throw typeError(`Math.${m} needs numbers`); }
-      if (arity !== "var" && e.args.length !== arity) throw typeError(`Math.${m} expects ${arity} args`);
+      if (!variadic && e.args.length !== arity) throw typeError(`Math.${m} expects ${arity} args`);
       return "number";
     }
 
@@ -2900,7 +2917,7 @@ class Checker {
           throw nyi(NYI.WEBAPI, "String#normalize (Unicode NFC/NFD normalization needs the Unicode character database, which nativets does not ship — nativets strings are raw UTF-8 bytes)");
         if (e.callee.property === "localeCompare" || e.callee.property.startsWith("toLocale"))
           throw nyi(NYI.WEBAPI, `String#${e.callee.property} (locale-aware ${e.callee.property === "localeCompare" ? "collation" : "formatting"} needs ICU; use ${e.callee.property === "localeCompare" ? "`<` / `>` (code-point order, see docs/divergences.md)" : "the non-locale form"})`);
-        const sig = STRING_METHODS[e.callee.property];
+        const sig = STRING_METHODS.get(e.callee.property);
         if (!sig) throw nyi(NYI.OBJECT, `string method '${e.callee.property}'`);
         this.checkArgs(e.args, sig, scope, `'.${e.callee.property}'`);
         return sig.ret;
@@ -2930,7 +2947,7 @@ class Checker {
 
     // Host FFI (SH4) — in scope only because a `node:` import brought it in.
     if (e.callee.kind === "Identifier" && this.hostImports.has(e.callee.name)) {
-      const h = HOST_FUNCS[e.callee.name]!;
+      const h = HOST_FUNCS.get(e.callee.name)!;
       this.checkHostCall(e.callee.name, e.args);
       this.checkArgs(e.args, h, scope, e.callee.name);
       return h.ret;
@@ -2938,7 +2955,7 @@ class Checker {
 
     // global builtin, function value, or user function
     if (e.callee.kind === "Identifier") {
-      const g = GLOBAL_FUNCS[e.callee.name];
+      const g = GLOBAL_FUNCS.get(e.callee.name);
       if (g) {
         this.checkArgs(e.args, g, scope, e.callee.name);
         // `String(x)` is `"" + x` by another name — same `coerceToString`, same
@@ -3274,11 +3291,23 @@ class Checker {
       return `${method === "keys" ? k : v}[]` as Ty;
     }
     if (method === "forEach") throw nyi(NYI.COLLECTION, "Map .forEach (use `for (const [k, v] of map)` — insertion-ordered, same visit order)");
-    const argTys = args.map((a) => this.type(a, scope));
+    // The declared K/V are the CONTEXT each argument is typed in, via `typeArg` — the same
+    // route every other argument site takes. Without it an empty array literal in a value
+    // field (`{ argTys: [], … }`, four rows of STRING_METHODS below) is `NT1001 cannot infer
+    // the element type`, while the identical `const s: Sig = { argTys: [] }` has always
+    // worked. `.set` is the only method whose second argument is a value; everywhere else
+    // the argument is a key.
+    const argTys = args.map((a, i) => this.typeArg(a, method === "set" && i === 1 ? v : k, scope));
     const needKey = (i: number) => { if (argTys[i] !== k) throw typeError(`.${method} key expects ${k}, got ${argTys[i]}`); };
     switch (method) {
+      // `fitsArg`, not identity. The VALUE is a stored slot, so an object/array literal has
+      // to be rebuilt in the declared layout exactly as `const o: V = {…}` rebuilds it —
+      // otherwise an optional field is fatal whether it is omitted or present (`right: true`
+      // is `boolean`; the slot is `?Uboolean`), which made the sanctioned `.set`-chain idiom
+      // unavailable to `src/parser.ts`'s own `BIN` table. `fitsArg` accepts ONLY a literal it
+      // can actually reshape; a variable of a merely compatible type keeps being refused.
       case "set": if (args.length !== 2) throw typeError(".set expects (key, value)"); needKey(0);
-        if (argTys[1] !== v) throw typeError(`.set value expects ${v}, got ${argTys[1]}`); return recv; // NEW map
+        if (!this.fitsArg(v, argTys[1]!, args[1]!)) throw typeError(`.set value expects ${v}, got ${argTys[1]}`); return recv; // NEW map
       case "get": if (args.length !== 1) throw typeError(".get expects (key)"); needKey(0); return makeNullable("undefined", v); // V | undefined (miss → undefined)
       case "has": if (args.length !== 1) throw typeError(".has expects (key)"); needKey(0); return "boolean";
       case "delete": if (args.length !== 1) throw typeError(".delete expects (key)"); needKey(0); return recv; // NEW map
@@ -3297,6 +3326,10 @@ class Checker {
     }
     if (method === "forEach") throw nyi(NYI.COLLECTION, "Set .forEach (use `for (const v of set)` — insertion-ordered, same visit order)");
     const argTys = args.map((a) => this.type(a, scope));
+    // Identity, deliberately — NOT the `fitsArg` reshape Map's `.set` VALUE now gets. A Set
+    // element here is `string | number` (an object element is NT1014 above), so there is no
+    // literal with a slot layout to rebuild; adding the branch would be unreachable code
+    // dressed as a feature. Revisit it with object elements, not before.
     const needEl = () => { if (args.length !== 1) throw typeError(`.${method} expects (value)`); if (argTys[0] !== el) throw typeError(`.${method} expects ${el}, got ${argTys[0]}`); };
     switch (method) {
       case "add": needEl(); return recv;      // NEW set

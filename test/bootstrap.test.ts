@@ -488,8 +488,20 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // EIGHT now: codegen.ts and driver.ts joined by leaving NT1002. Every one of them is
     // ast.ts's `HOST_MODULES` through the link — a `Record` initialized with an object
     // literal — except codegen.ts, which has four tables of its own with the same shape.
+    //
+    // DOWN TO FIVE, and the construct in the bucket is a DIFFERENT one. The `Record`
+    // family is gone from `src/*.ts` entirely — all ELEVEN declarations across four files
+    // (the CENSUS, not the first-blocker count: ast ×1, parser ×1, checker ×5, codegen ×4),
+    // rewritten as `new Map().set(…)` chains read with `.get`/`.has`. Every one of them was
+    // indexed with a VARIABLE key, so they really were dictionaries and `Record<K,V>` was
+    // the honest TYPE with the wrong CONSTRUCTOR; `test/record-dict.test.ts` holds the
+    // argument, the census, and a lint that keeps `Record<` annotations out of `src/`.
+    // What the five stop on now is `argTys: ["string", null]` in `MethodSig` — an ARRAY OF
+    // NULLABLE elements, which is refused at a plain `const` declaration too, i.e. a real
+    // feature gap and not a `.set` one. Behind it: the five remaining entries-form sites,
+    // then `.push`. Three of the eight (ast, parser, modules) went straight to `.push`.
     expect(byCode["NT2001"]!.sort()).toEqual(
-      ["ast.ts", "checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+      ["checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
@@ -644,7 +656,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // the 185 census sites. Unlike diagnostics.ts's four, these are NOT free to rewrite —
     // `tokens` reaches ~35k elements, where `xs = [...xs, v]` is 1036x slower under bun
     // (measured; test/sh6.test.ts). Same code, same construct, opposite cost.
-    expect(byCode["NT1606"]!.sort()).toEqual(["lexer.ts"]);
+    // ...and a FIFTH time, from one module to FOUR. The `Record` lane cleared the last of
+    // the dictionary-table declarations, and three of the eight modules that were queued
+    // behind them walked straight into `.push` — exactly what the census predicted would
+    // happen "module after module as the current round's lanes land". Nothing here is a
+    // compiler gap: `.push` is refused by DECISION (commit 1ea7fa2).
+    expect(byCode["NT1606"]!.sort()).toEqual(["ast.ts", "lexer.ts", "modules.ts", "parser.ts"]);
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
@@ -686,8 +703,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // EIGHT now: codegen.ts and driver.ts joined by leaving NT1002 when `in` landed.
     // Sorted, because the bucket's ORDER is an artifact of module iteration and asserting
     // it unsorted has produced two spurious conflicts already.
+    // FIVE, and a different construct: the `Record` family is gone from `src/*.ts` (all
+    // eleven declarations — see the census note at the NT1014 clearance above and
+    // test/record-dict.test.ts). ast.ts, parser.ts and modules.ts left for NT1606; the
+    // five that remain share `argTys: ["string", null]`, an ARRAY OF NULLABLE elements.
     expect(byCode["NT2001"]!.sort()).toEqual(
-      ["ast.ts", "checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+      ["checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
     );
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a

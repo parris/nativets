@@ -56,17 +56,21 @@ export interface ParseOpts {
 export class ParseError extends Error {}
 
 interface Op { prec: number; right?: boolean; logical?: boolean; }
-const BIN: Record<string, Op> = {
-  "**": { prec: 14, right: true },
-  "*": { prec: 13 }, "/": { prec: 13 }, "%": { prec: 13 },
-  "+": { prec: 12 }, "-": { prec: 12 },
-  "<<": { prec: 11 }, ">>": { prec: 11 }, ">>>": { prec: 11 },
-  "<": { prec: 10 }, "<=": { prec: 10 }, ">": { prec: 10 }, ">=": { prec: 10 },
-  "===": { prec: 9 }, "!==": { prec: 9 }, "==": { prec: 9 }, "!=": { prec: 9 },
-  "&": { prec: 8 }, "^": { prec: 7 }, "|": { prec: 6 },
-  "&&": { prec: 5, logical: true }, "||": { prec: 4, logical: true },
-  "??": { prec: 3, logical: true },
-};
+/* A `Map`, not `Record<string, Op> = { … }` — the operator is a RUNTIME key
+ * (`BIN.get(t.value)` below), which is the whole reason this table exists, and an object
+ * literal cannot construct a dictionary here (see src/ast.ts HOST_MODULES and
+ * test/record-dict.test.ts). The `.set` chain is free under bun: `Map.prototype.set`
+ * returns its receiver (ES2024 24.1.3.9 step 8). */
+const BIN: Map<string, Op> = new Map<string, Op>()
+  .set("**", { prec: 14, right: true })
+  .set("*", { prec: 13 }).set("/", { prec: 13 }).set("%", { prec: 13 })
+  .set("+", { prec: 12 }).set("-", { prec: 12 })
+  .set("<<", { prec: 11 }).set(">>", { prec: 11 }).set(">>>", { prec: 11 })
+  .set("<", { prec: 10 }).set("<=", { prec: 10 }).set(">", { prec: 10 }).set(">=", { prec: 10 })
+  .set("===", { prec: 9 }).set("!==", { prec: 9 }).set("==", { prec: 9 }).set("!=", { prec: 9 })
+  .set("&", { prec: 8 }).set("^", { prec: 7 }).set("|", { prec: 6 })
+  .set("&&", { prec: 5, logical: true }).set("||", { prec: 4, logical: true })
+  .set("??", { prec: 3, logical: true });
 const ASSIGN_OPS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="]);
 // Access modifiers erased on class members and, on ctor params, promoted to parameter properties.
 const PARAM_ACCESS = new Set(["private", "public", "protected", "readonly"]);
@@ -1599,9 +1603,9 @@ class Parser {
     typeOnly: boolean,
     kw: Token,
   ): void {
-    const members = HOST_MODULES[mod];
+    const members = HOST_MODULES.get(mod);
     if (!members)
-      throw nyi(NYI.HOSTMOD, `the built-in module '${mod}' at ${kw.line}:${kw.col} (implemented: ${Object.keys(HOST_MODULES).map((m) => `'${m}'`).join(", ")})`);
+      throw nyi(NYI.HOSTMOD, `the built-in module '${mod}' at ${kw.line}:${kw.col} (implemented: ${[...HOST_MODULES.keys()].map((m) => `'${m}'`).join(", ")})`);
     for (const c of clause) {
       if (typeOnly || c.typeOnly) continue; // a type-only import binds no value
       if (!members.includes(c.name))
@@ -2860,7 +2864,7 @@ class Parser {
       // operand is a CLASS NAME, not an expression: nativets decides the test from the
       // left operand's static type (see the checker), so a computed constructor has
       // nothing to resolve against and is refused rather than guessed.
-      if (t.type === "ident" && t.value === "instanceof" && BIN["<"]!.prec >= minPrec) {
+      if (t.type === "ident" && t.value === "instanceof" && BIN.get("<")!.prec >= minPrec) {
         this.next();
         const cls = this.peek();
         if (cls.type !== "ident") throw nyi(NYI.INSTANCEOF, `'instanceof' with a computed right operand at ${cls.line}:${cls.col}`);
@@ -2875,14 +2879,14 @@ class Parser {
       // key is a literal, neither of which the parser knows. What it must not do is fall
       // out of the expression parser as `Expected ')'`, which blamed a paren and bucketed
       // a real gap as a syntax error.
-      if (t.type === "ident" && t.value === "in" && BIN["<"]!.prec >= minPrec) {
+      if (t.type === "ident" && t.value === "in" && BIN.get("<")!.prec >= minPrec) {
         this.next();
-        const object = this.parseBinary(BIN["<"]!.prec + 1);
+        const object = this.parseBinary(BIN.get("<")!.prec + 1);
         left = { kind: "InExpr", key: left, object, loc: { line: t.line, col: t.col } };
         continue;
       }
       if (t.type !== "punct") break;
-      const info = BIN[t.value];
+      const info = BIN.get(t.value);
       if (!info || info.prec < minPrec) break;
       const op = this.next().value;
       const right = this.parseBinary(info.right ? info.prec : info.prec + 1);
