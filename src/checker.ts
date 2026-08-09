@@ -16,7 +16,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // Stage 47 (console.log of compound values): the handle-type predicates the
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
-import { isTypeRefTy, containsTypeRef, expandTypeRef, recTypeTable } from "./ast.ts";
+import { isTypeRefTy, containsTypeRef, unfoldTypeRef, recTypeTable } from "./ast.ts";
 // `k in o`: node's prototype chain is the whole reason `"valueOf" in {}` is true.
 import { OBJECT_PROTO_KEYS } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
@@ -781,7 +781,7 @@ class Checker {
    * Layout is untouched either way — a literal-typed field and a `string` field are one slot
    * holding one string pointer.
    */
-  private unfold(t: Ty): Ty { return widenLiteralTys(expandTypeRef(t, this.recTypes)); }
+  private unfold(t: Ty): Ty { return widenLiteralTys(unfoldTypeRef(t, this.recTypes)); }
 
   /**
    * Does class `tag` declare a `toJSON` METHOD? The parser desugars `class C { toJSON() {} }`
@@ -2134,13 +2134,15 @@ class Checker {
    * member access, which matched none of the structural predicates: `NT2001 Property 'kind'
    * does not exist on @Expr`. That single gap was the first blocker for nine modules.
    *
-   * WHY ONE LEVEL TERMINATES. `expandTypeRef` replaces a bare `@N` with `N`'s shape and is
-   * the identity on everything else — including a type that merely CONTAINS a reference. A
-   * shape's own recursive positions stay folded (the parser mints a back-edge exactly there),
-   * so the result is either concrete or another `@N` one access deeper. There is no fixpoint
-   * and no transitive expansion: each unfold is paid for by a real source-level access, and a
-   * program has finitely many. This is the same argument the doc comment already made; it is
-   * now also true of the code.
+   * WHY ONE LEVEL TERMINATES. `unfoldTypeRef` replaces a bare `@N` with `N`'s shape, and
+   * DISTRIBUTES that over the type constructors `?U`/`?N` and `[]` so an optional or listed
+   * back-edge (`next?: N`, `kids: N[]`) is unfolded too — those are constructors applied to
+   * the VALUE, so leaving them folded broke this funnel's own invariant. It stops at a shape:
+   * an object's fields and a union's members are the "nested inside a shape" positions where
+   * a back-edge legitimately stays folded (the parser mints one exactly there), and descending
+   * into them is the fixpoint that would diverge. So the result is either concrete or another
+   * `@N` one access deeper. There is no transitive expansion: each unfold is paid for by a
+   * real source-level access, and a program has finitely many.
    *
    * WHY THE FUNNEL RATHER THAN THE MEMBER ACCESS. Unfolding only at a receiver would leave
    * `const o = e.operand` bound at `@Expr`, and a tag narrowing declares a SHADOW BINDING
