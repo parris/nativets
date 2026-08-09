@@ -430,7 +430,13 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // ...and OFF it again: stage-1 owns its blocker for the second time ever, and this one is
   // not a refusal-by-decision but a missing host surface — `process.stdout`. It is the only
   // module in the tree whose first blocker is not `.push`.
-  "cli.ts": { rung: 0, code: "NT2001", blame: "self" },
+  // ...and OFF again, with BOTH of the host surfaces it owned now grown. `process.stdout`
+  // was one of two: behind it sat `spawnSync(bin, fwd, { stdio: "inherit" })`, the second
+  // options shape, which `nativets run` needs so the compiled program reaches the user's
+  // terminal instead of a captured buffer. With both landed cli.ts has NO blocker of its
+  // own — its standalone column is now the unlinked-import artifact — and it rejoins the
+  // group on ast.ts's ternary. Stage-1's next step is no longer stage-1's to take.
+  "cli.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
@@ -831,7 +837,14 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // on `process.stdout is not supported` — a host surface nativets has simply never
       // grown, not a refusal-by-decision. So stage-1's next step is now independent of the
       // 185-site `.push` rewrite, which is the first time those two have been separable.
-      expect(m.error).toContain("process.stdout is not supported");
+      // NINTH, and the separability was real but SHORT: both of cli.ts's own host-surface
+      // blockers are now implemented — `process.stdout.write` (bytes with no trailing
+      // newline, which is exactly what this `emit` path needs and what `console.log`
+      // cannot do) and `spawnSync(…, { stdio: "inherit" })` (the `run` path). cli.ts owns
+      // nothing now, and is back to inheriting with the other eleven: ast.ts's ternary
+      // whose branches are `string` and `undefined`. Stage-1 cannot move again until a
+      // DEPENDENCY does, which is where it spent every round but two.
+      expect(m.error).toContain("Ternary branches differ");
       return;
     }
 

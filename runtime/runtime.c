@@ -29,6 +29,7 @@
 #if !defined(_WIN32) && !defined(__wasi__)
 #include <sys/wait.h> /* host FFI (SH4): spawnSync — fork/execvp/waitpid + poll */
 #include <poll.h>
+#include <fcntl.h>    /* FD_CLOEXEC — the inherited spawn's exec-failed channel */
 #endif
 #ifndef _WIN32
 #include <unistd.h>   /* read, isatty (POSIX; libc-only, cross-compiles) */
@@ -2267,6 +2268,57 @@ const char *nt_host_spawn(const char *cmd, NtArray *args, double *status_out, co
   *stderr_out = spawn_buf_str(&err);
   return spawn_buf_str(&out);
 }
+
+/* `spawnSync(cmd, args, { stdio: "inherit" })` — the child gets OUR fds, so there are
+ * no pipes to create and nothing to drain: fork, exec, wait. This is what
+ * `nativets run` needs, where the compiled program must reach the user's terminal
+ * (and its stdin) directly rather than through a captured buffer. Only the status
+ * comes back; node's result carries `stdout: null` / `stderr: null` for this mode. */
+void nt_host_spawn_inherit(const char *cmd, NtArray *args, double *status_out) {
+  *status_out = -1.0;                 /* the spawn-failed value; see docs/divergences.md */
+
+  int64_t n = (int64_t)nt_arr_len(args);
+  char **argv = (char **)nativets_alloc(sizeof(char *) * (size_t)(n + 2));
+  argv[0] = (char *)cmd;
+  for (int64_t i = 0; i < n; i++) argv[i + 1] = (char *)(intptr_t)nt_arr_get(args, (double)i);
+  argv[n + 1] = NULL;
+
+  /* The captured form separates "execvp never ran" from a real exit 127 by noticing
+   * that the child produced no output. An inherited child's output went straight to
+   * our fds, so there is nothing to look at — hence the classic close-on-exec pipe:
+   * the child writes its errno into it only if `execvp` RETURNS, and a successful exec
+   * closes the write end for us. Bytes in the parent therefore mean, exactly, "the
+   * program never started" — which is node's `status: null` / our -1. */
+  int fail[2];
+  int have_fail = pipe(fail) == 0;
+  if (have_fail) { fcntl(fail[1], F_SETFD, FD_CLOEXEC); }
+
+  fflush(stdout); fflush(stderr);     /* our buffered output must precede the child's */
+  pid_t pid = fork();
+  if (pid < 0) { if (have_fail) { close(fail[0]); close(fail[1]); } return; }
+  if (pid == 0) {
+    if (have_fail) close(fail[0]);
+    execvp(cmd, argv);
+    if (have_fail) { int e = errno; ssize_t w = write(fail[1], &e, sizeof e); (void)w; }
+    _exit(127);
+  }
+
+  int started = 1;
+  if (have_fail) {
+    close(fail[1]);
+    int e = 0;
+    ssize_t r;
+    while ((r = read(fail[0], &e, sizeof e)) < 0 && errno == EINTR) { /* retry */ }
+    if (r > 0) started = 0;
+    close(fail[0]);
+  }
+
+  int st = 0;
+  while (waitpid(pid, &st, 0) < 0 && errno == EINTR) { /* retry */ }
+  /* Killed by a signal is -1 too — node reports `status: null` + `.signal`, and a
+   * `number` cannot hold null (docs/divergences.md, same as the captured form). */
+  *status_out = (started && WIFEXITED(st)) ? (double)WEXITSTATUS(st) : -1.0;
+}
 #else
 /* Windows / WASI: no fork/exec. Report the spawn failure rather than pretend. */
 const char *nt_host_spawn(const char *cmd, NtArray *args, double *status_out, const char **stderr_out) {
@@ -2274,6 +2326,10 @@ const char *nt_host_spawn(const char *cmd, NtArray *args, double *status_out, co
   *status_out = -1.0;
   *stderr_out = "spawnSync is not available on this platform";
   char *o = alloc_str(0); o[0] = '\0'; return o;
+}
+void nt_host_spawn_inherit(const char *cmd, NtArray *args, double *status_out) {
+  (void)cmd; (void)args;
+  *status_out = -1.0;
 }
 #endif
 

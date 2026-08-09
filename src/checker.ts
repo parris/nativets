@@ -244,6 +244,31 @@ const HOST_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("homedir", { min: 0, max: 0, argTys: [], ret: "string" })
   .set("fileURLToPath", { min: 1, max: 1, argTys: ["string"], ret: "string" });
 
+/**
+ * The result type of `spawnSync(cmd, args, { stdio: "inherit" })`. The child got OUR
+ * file descriptors, so nothing was captured and node's result carries `stdout: null`
+ * / `stderr: null`. Only `status` comes back, and reading `.stdout` off it is a type
+ * error — an empty string there would silently claim the child printed nothing.
+ */
+export const SPAWN_INHERIT_TY = "{status:number}";
+
+/**
+ * Which of `spawnSync`'s two accepted options literals this call spells, or null for
+ * anything else. Read from the SOURCE so the checker (which types the result) and
+ * codegen (which picks the runtime entry point) derive the same answer from the same
+ * function — the `planConsoleFormat` discipline.
+ */
+export function spawnMode(args: Expr[]): "capture" | "inherit" | null {
+  const opts = args[2];
+  const props = opts !== undefined && opts.kind === "ObjectLiteral" ? opts.properties : null;
+  if (props === null || props.length !== 1) return null;
+  const p = props[0]!;
+  if (p.value.kind !== "StringLiteral") return null;
+  if (p.key === "encoding" && p.value.value === "utf8") return "capture";
+  if (p.key === "stdio" && p.value.value === "inherit") return "inherit";
+  return null;
+}
+
 const GLOBAL_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("parseInt", { min: 1, max: 2, argTys: ["string", "number"], ret: "number" })
   .set("parseFloat", { min: 1, max: 1, argTys: ["string"], ret: "number" })
@@ -2667,6 +2692,33 @@ class Checker {
       return "number"; // pid
     }
 
+    // Host I/O: process.stdout.write(s) — the string's bytes on stdout with NO
+    // trailing newline. `console.log` cannot stand in for it: the newline it adds is
+    // exactly what makes it unusable for an `emit` path, and src/cli.ts writes the
+    // whole `.ll` this way (stage-1, docs/self-hosting.md). Not shadowable by a user
+    // `process` binding, like every other `process.*` here.
+    //
+    // Typed `void`, though node returns a boolean: node's answer is `false` when the
+    // stream's internal buffer is backed up, which is a runtime fact about a pipe we
+    // do not model. Returning a constant `true` would be a silent wrong answer, so the
+    // VALUE is refused and the effect is supported.
+    if (
+      e.callee.kind === "MemberExpr" && e.callee.object.kind === "MemberExpr" &&
+      e.callee.object.object.kind === "Identifier" &&
+      e.callee.object.object.name === "process" && e.callee.object.property === "stdout" &&
+      !scope.lookup("process")
+    ) {
+      // Only `process.stdout.*` is claimed here — `process.argv.slice(2)` and friends
+      // are ordinary method calls on a supported value and must reach the paths below.
+      if (e.callee.property !== "write") throw nyi(NYI.HOSTMOD, `process.stdout.${e.callee.property}`);
+      // node's second/third arguments are an encoding and a completion callback; both
+      // only mean something with a real event loop, so name them rather than ignore them.
+      if (e.args.length !== 1) throw nyi(NYI.HOSTMOD, "process.stdout.write(chunk, encoding?, callback?) — only the one-argument string form");
+      // node also takes a Buffer/Uint8Array here; that would need a byte-length write.
+      if (this.type(e.args[0]!, scope) !== "string") throw typeError("process.stdout.write: chunk must be a string");
+      return "void";
+    }
+
     // Host I/O: process.exit(code?) — not shadowable by a user `process` binding.
     if (
       e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" &&
@@ -3005,6 +3057,9 @@ class Checker {
       const h = HOST_FUNCS.get(e.callee.name)!;
       this.checkHostCall(e.callee.name, e.args);
       this.checkArgs(e.args, h, scope, e.callee.name);
+      // The one host builtin whose RESULT SHAPE depends on its options: an inherited
+      // spawn captures nothing, so it yields `{status:number}` (see SPAWN_INHERIT_TY).
+      if (e.callee.name === "spawnSync" && spawnMode(e.args) === "inherit") return SPAWN_INHERIT_TY;
       return h.ret;
     }
 
@@ -4021,18 +4076,11 @@ class Checker {
         throw nyi(NYI.HOSTMOD, `rmSync with options other than literal \`{ recursive: true }\` / \`{ force: true }\` (a \`false\` selects the other behaviour, and the retry options change what the call does)`);
     }
     if (name === "spawnSync") {
-      // Exactly `{ encoding: "utf8" }`. Every other node option (cwd, env, input,
-      // shell, timeout, maxBuffer) CHANGES what the call does, so accepting and
-      // ignoring one would be a silent divergence — refuse instead.
-      const opts = args[2];
-      const props = opts?.kind === "ObjectLiteral" ? opts.properties : null;
-      const bad = !props
-        || props.length !== 1
-        || props[0]!.key !== "encoding"
-        || props[0]!.value.kind !== "StringLiteral"
-        || props[0]!.value.value !== "utf8";
-      if (bad)
-        throw nyi(NYI.HOSTMOD, `spawnSync with options other than the literal \`{ encoding: "utf8" }\` (without it node yields Buffers, and every other option — cwd/env/input/shell/timeout — changes what the call does)`);
+      // Exactly `{ encoding: "utf8" }` or exactly `{ stdio: "inherit" }`. Every other
+      // node option (cwd, env, input, shell, timeout, maxBuffer) CHANGES what the call
+      // does, so accepting and ignoring one would be a silent divergence — refuse.
+      if (spawnMode(args) === null)
+        throw nyi(NYI.HOSTMOD, `spawnSync with options other than the literal \`{ encoding: "utf8" }\` or \`{ stdio: "inherit" }\` (without one of those node yields Buffers, and every other option — cwd/env/input/shell/timeout — changes what the call does)`);
     }
   }
 
