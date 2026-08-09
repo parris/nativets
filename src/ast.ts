@@ -1190,14 +1190,24 @@ export interface ExportTable {
  */
 /* `string[]`, NOT `readonly string[]`: `src/*.ts` must stay inside the subset nativets
  * can compile ITSELF in, and a `readonly` type modifier does not parse — adding one here
- * made this file's first blocker an NT0001 in the self-host histogram. */
-export const HOST_MODULES: Record<string, string[]> = {
-  "node:fs": ["readFileSync", "writeFileSync", "existsSync", "mkdtempSync", "readdirSync", "rmSync"],
-  "node:path": ["join", "dirname", "basename", "resolve", "relative"],
-  "node:os": ["tmpdir", "homedir"],
-  "node:url": ["fileURLToPath"],
-  "node:child_process": ["spawnSync"],
-};
+ * made this file's first blocker an NT0001 in the self-host histogram.
+ *
+ * A `Map` built with the `.set` chain, NOT `const HOST_MODULES: Record<string, string[]>
+ * = { … }`, and the same reason applies to every dictionary table in `src/*.ts` (see
+ * `test/record-dict.test.ts` for the census and the argument). The `Record` ANNOTATION was
+ * always honest — this is a dictionary read with a RUNTIME key (`HOST_MODULES.get(mod)` in
+ * `src/parser.ts`) — but an object literal cannot construct one: an object's fields are
+ * fixed slots named by its TYPE, so nativets erases `Record<K,V>` to `Map<K,V>` and refuses
+ * the literal (NT2001). Annotating the exact shape instead is not available either, because
+ * the key is a variable and node's `o[k]` consults the PROTOTYPE CHAIN.
+ * The chain is free under bun: `Map.prototype.set` returns its receiver (ES2024 24.1.3.9
+ * step 8), so this is the same program the entries form would build. */
+export const HOST_MODULES: Map<string, string[]> = new Map<string, string[]>()
+  .set("node:fs", ["readFileSync", "writeFileSync", "existsSync", "mkdtempSync", "readdirSync", "rmSync"])
+  .set("node:path", ["join", "dirname", "basename", "resolve", "relative"])
+  .set("node:os", ["tmpdir", "homedir"])
+  .set("node:url", ["fileURLToPath"])
+  .set("node:child_process", ["spawnSync"]);
 
 export interface Program {
   kind: "Program";

@@ -1,33 +1,33 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "1d2cda7"
+    "rev": "d89c71a"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "243df5ca986b2b85",
+      "sha256": "46815b294e95718c",
       "standalone": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] 'HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] 'HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       }
     },
     "checker.ts": {
-      "sha256": "5aebe1f2330de97b",
+      "sha256": "46c41c79a1f9ab6e",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] 'NUMBER_CONSTS' declared Record<string,number> but initialized with {MAX_SAFE_INTEGER:number,MIN_SAFE_INTEGER:number,EPSILON:number,MAX_VALUE:number,MIN_VALUE:number,POSITIVE_INFINITY:number,…"
+        "message": "[NT2001] .set value expects {min:number,max:number,argTys:?Nnumber[],ret:number}, got {min:number,max:number,argTys:number[],ret:string}"
       },
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] '_nt_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
+        "message": "[NT2001] array elements must share a type (got string, null)"
       }
     },
     "cli.ts": {
@@ -44,16 +44,16 @@
       }
     },
     "codegen.ts": {
-      "sha256": "52c566ba1531fcf4",
+      "sha256": "8e6b96047a346bfb",
       "standalone": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] 'FCMP' declared Record<string,string> but initialized with {<:string,<=:string,>:string,>=:string,===:string,==:string,!==:string,!=:string}"
+        "code": "NT1012",
+        "message": "[NT1012] new DataView(...) is not supported yet"
       },
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] '_nt_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
+        "message": "[NT2001] array elements must share a type (got string, null)"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,7 +80,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] '_nts0_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
+        "message": "[NT2001] array elements must share a type (got string, null)"
       }
     },
     "diagnostics.ts": {
@@ -107,7 +107,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] '_nts0_m2_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
+        "message": "[NT2001] array elements must share a type (got string, null)"
       }
     },
     "lexer.ts": {
@@ -132,8 +132,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] '_nts0_m2_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       }
     },
     "ownership.ts": {
@@ -146,20 +146,20 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] '_nt_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
+        "message": "[NT2001] array elements must share a type (got string, null)"
       }
     },
     "parser.ts": {
-      "sha256": "67d8498f2bc76722",
+      "sha256": "9d2315ec59a6fb3a",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] 'BIN' declared Record<string,{prec:number,right:?Uboolean,logical:?Uboolean}> but initialized with {**:{prec:number,right:boolean},*:{prec:number},/:{prec:number},%:{prec:number},+:{prec:numb…"
+        "message": "[NT2001] Property 'kind' does not exist on number"
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] '_nt_m2_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       }
     }
   }

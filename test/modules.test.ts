@@ -309,10 +309,15 @@ describe("the alpha-rename prefix is a function of the sources, never the clock"
 
   test("linking src/modules.ts twice produces identical output", () => {
     const entry = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "modules.ts");
-    const src = readSrc("modules.ts");
+    // The RENAMED BINDINGS themselves, not the blocker message. This used to read the
+    // message, on the note that "the blocker is what carries the prefix into a
+    // user-visible string today" — and that stopped being true the moment src/modules.ts
+    // moved onto `.push`, whose diagnostic names no binding. The invariant under test is
+    // that the prefix is a function of the sources, so measure the prefix directly: it
+    // holds whatever the module's current first blocker happens to be.
     const names = () => {
-      // The blocker is what carries the prefix into a user-visible string today.
-      try { sourceToIR(src, entry); return "IR OK"; } catch (e) { return (e as NTError).diag.message; }
+      const p = linkProgram(readSrc("modules.ts"), entry, (f) => readFileSync(f, "utf8"));
+      return p.body.map((s) => ("name" in s ? String((s as { name: unknown }).name) : s.kind)).join(",");
     };
     const a = names(), b = names();
     expect(a).toBe(b);
@@ -321,6 +326,7 @@ describe("the alpha-rename prefix is a function of the sources, never the clock"
     // does contain all three preferred bases. What must never appear is a clock, i.e.
     // anything but the first free counter value.
     expect(a).toContain("_nts0_m");
+    expect(a).not.toContain("_nts1_m"); // one escalation step, deterministically
   });
 
   test("a program containing all three candidate bases still links deterministically", () => {

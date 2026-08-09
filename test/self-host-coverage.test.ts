@@ -255,8 +255,23 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // five; they are left for a lane that can also measure the movement.
     // NT1002 LEFT when `in` landed — decided at compile time for a literal key over a
     // static shape, the same move `instanceof` made.
+    //
+    // THREE CODES ARRIVED AT ONCE when the `Record` lane cleared the dictionary tables,
+    // and none of them is a new gap in the compiler — each is a construct that has been
+    // sitting in `src/*.ts` all along, MASKED in this histogram because the file's
+    // recovered statement stream stopped on the `Record` mismatch first:
+    //   NT1002  ast.ts     — `t.endsWith("[]")` where `t: Ty`. An artifact of THIS tool:
+    //                        coverage strips type declarations, so `Ty` is unknown and
+    //                        erases to `number`, and a `number` has no `.endsWith`.
+    //   NT1012  codegen.ts — `new DataView(new ArrayBuffer(8))` at src/codegen.ts:34,
+    //                        unchanged since it was written.
+    //   NT1001  checker.ts — `argTys: []`, an empty array literal whose element type comes
+    //                        from a context this recovery mode cannot see.
+    // NT1002 refilling is the FOURTH time this file has had an emptied bucket come back;
+    // read the buckets as membership, and read a NEW code as "what was behind the old one",
+    // not as "the compiler got worse".
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1003", "NT1031"],
+      ["NT1001", "NT1002", "NT1003", "NT1012", "NT1031"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the
