@@ -1289,8 +1289,12 @@ class Checker {
    */
   private checkExhaustiveTailSwitch(fn: FuncDecl, ret: Ty): void {
     if (ret === "void") return;
-    const last = fn.body[fn.body.length - 1];
-    if (!last || last.kind !== "SwitchStmt") return;
+    // `length > 0` first, and never index -1: on an empty body node answers `undefined`
+    // and nativets PANICS on the read (docs/divergences.md), so the `!last` arm below
+    // could never have run. See test/tsc.test.ts.
+    if (fn.body.length === 0) return;
+    const last = fn.body[fn.body.length - 1]!;
+    if (last.kind !== "SwitchStmt") return;
     const d = last.discriminant;
     if (d.kind !== "MemberExpr" || d.object.ty === undefined || !isUnionTy(d.object.ty)) return;
     const u = d.object.ty;
@@ -1665,7 +1669,10 @@ class Checker {
             } else {
               d.ty = d.annot;
               this.checkAccumulator(s, d);
-              scope.declare(d.name, d.ty, s.declKind === "const", undefined, undefined, s.mutable);
+              // NOT `s.declKind === "const"`: a `const` with no initializer threw four
+              // lines up, so this arm is reachable only for a `let` and that comparison
+              // was always false (tsc TS2367). Stated as the constant it is.
+              scope.declare(d.name, d.ty, /* isConst */ false, undefined, undefined, s.mutable);
               continue;
             }
           }
@@ -2669,7 +2676,12 @@ class Checker {
           if (child === null) child = et;
           else if (et !== child) throw typeError("supervise: all children must share one ChildSpec shape");
         }
-        childrenArg.ty = makeArrayTy(child); // array node type for codegen (reads e.ty)
+        // `child!`: the loop above ran at least once (the caller refuses an empty children
+        // literal with its own diagnostic), but that is not visible here — tsc read this as
+        // `Ty | null` (TS2345), and `makeArrayTy(null)` would build the type `"null[]"`.
+        // Asserted rather than defaulted, so a future edit that drops the emptiness check
+        // fails loudly at the `fieldType(child!, …)` calls below instead of silently.
+        childrenArg.ty = makeArrayTy(child!); // array node type for codegen (reads e.ty)
         if (fieldType(child!, "id") !== "string") throw typeError("supervise: ChildSpec.id must be a string");
         const startTy = fieldType(child!, "start");
         if (!startTy || !isFuncTy(startTy) || funcParams(startTy).length !== 0 || funcRet(startTy) !== "number")
@@ -2928,7 +2940,11 @@ class Checker {
 
     // receiver.method(...)
     if (e.callee.kind === "MemberExpr") {
-      const recv = this.type(e.callee.object, scope);
+      // Bound to a `const` so the narrowing survives into the `e.args.forEach` callbacks
+      // below: tsc discards a PROPERTY narrowing (`e.callee`) at a function boundary,
+      // because nothing stops the callback from reassigning it. A local const cannot be.
+      const callee = e.callee;
+      const recv = this.type(callee.object, scope);
       // class instance method: `inst.m(args)` → the lowered `C.m(this, …)`.
       const cls = classTag(recv);
       if (cls) {
@@ -2952,7 +2968,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = msig.params[i + 1]!;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${e.callee.property}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument");
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${callee.property}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument");
         });
         return msig.ret;
       }
@@ -3073,6 +3089,10 @@ class Checker {
 
     // global builtin, function value, or user function
     if (e.callee.kind === "Identifier") {
+      // Bound to a `const` for the same reason as the MemberExpr branch above: a property
+      // narrowing does not survive into the `e.args.forEach` callbacks below, so
+      // `e.callee.name` inside them was a property access on a bare `Expr` (tsc TS2339).
+      const callee = e.callee;
       const g = GLOBAL_FUNCS.get(e.callee.name);
       if (g) {
         this.checkArgs(e.args, g, scope, e.callee.name);
@@ -3098,7 +3118,7 @@ class Checker {
           // named function (no union arm, no nullable arm, no literal reshape). Safe because
           // `genCallValueFrom` now coerces each argument to the parameter type, exactly as
           // the direct-call path does.
-          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
+          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
         });
         return funcRet(bound.ty);
       }
@@ -3123,7 +3143,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = i < fixed ? sig.params[i]! : restElem;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsArg(exp, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument");
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument");
         });
         return sig.ret;
       }
@@ -3132,7 +3152,7 @@ class Checker {
       }
       e.args.forEach((a, i) => {
         const at = this.typeArg(a, sig.params[i]!, scope); // contextual: function-typed params type their arrow args
-        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${e.callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
+        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
       });
       return sig.ret;
     }
@@ -3369,10 +3389,16 @@ class Checker {
     const kind = isMapTy(t) ? "Map" : "Set";
     const lower = kind.toLowerCase();
     // A `.delete` call gets the specific diagnostic; anything else gets the vacuity one.
-    const del = test.kind === "CallExpr" && test.callee.kind === "MemberExpr" && test.callee.property === "delete"
-      ? test : undefined;
-    const subject = del ? del.callee.object : test;
-    const loc = exprLoc(subject) ?? test.loc;
+    // BOTH halves are bound here rather than re-derived below: narrowing `test.callee`
+    // does not narrow `test`, so the old `del.callee.object` was an unchecked property
+    // access on a bare `Expr` (tsc TS2339) that happened to be right.
+    let del: MemberExpr | undefined, delArgs: Expr[] | undefined;
+    if (test.kind === "CallExpr" && test.callee.kind === "MemberExpr" && test.callee.property === "delete") {
+      del = test.callee;
+      delArgs = test.args;
+    }
+    const subject = del ? del.object : test;
+    const loc = exprLoc(subject) ?? exprLoc(test);
     const at = loc ? ` at ${loc.line}:${loc.col}` : "";
     const recvText = exprText(subject) ?? lower;
     if (del === undefined)
@@ -3383,7 +3409,7 @@ class Checker {
         `Did you mean \`${recvText}.size\` (is it empty?) or \`${recvText}.has(k)\` (is the key there?)? ` +
         `A \`${kind}<…> | undefined\` IS worth testing and is still accepted (docs/divergences.md §A)`,
       );
-    const arg = del.args[0];
+    const arg = delArgs?.[0];
     const argText = arg === undefined ? "k"
       : arg.kind === "StringLiteral" ? JSON.stringify(arg.value)
       : arg.kind === "NumberLiteral" ? String(arg.value)
@@ -4109,8 +4135,12 @@ class Checker {
  *  leaving the switch, which `break` does)? Conservative in the safe direction: an
  *  unrecognized shape means "not total", so the exhaustiveness check stands down. */
 function leavesFunction(body: Stmt[]): boolean {
-  const last = body[body.length - 1];
-  return last !== undefined && (last.kind === "ReturnStmt" || last.kind === "ThrowStmt");
+  // An EMPTY body is the common case (`function f(): void {}`), and the old spelling
+  // reached it by indexing -1 — undefined under node, a panic under nativets. The
+  // `length` test decides it without ever forming the index. See test/tsc.test.ts.
+  if (body.length === 0) return false;
+  const last = body[body.length - 1]!;
+  return last.kind === "ReturnStmt" || last.kind === "ThrowStmt";
 }
 
 /**
@@ -4121,9 +4151,9 @@ function leavesFunction(body: Stmt[]): boolean {
  * and a WIDER set of tags carried into the next case.
  */
 function leavesBlock(body: Stmt[]): boolean {
-  const last = body[body.length - 1];
-  return last !== undefined &&
-    (last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "BreakStmt" || last.kind === "ContinueStmt");
+  if (body.length === 0) return false; // an empty block — see leavesFunction
+  const last = body[body.length - 1]!;
+  return (last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "BreakStmt" || last.kind === "ContinueStmt");
 }
 
 /* ============================================================
@@ -4163,7 +4193,11 @@ function leavesBlock(body: Stmt[]): boolean {
 type DAFlow = Set<string>;
 
 /** The bindings this pass must prove, mapped to the declared type the hint names. */
-type DATracked = Map<string, Ty>;
+/* The VALUE is only ever rendered into a diagnostic ("`let x: ${ty};` starts with no
+ * value"), and a declaration with neither an inferred nor a written type has none to
+ * render — hence the `"unknown"` placeholder, which is not a `Ty` and was assigned into
+ * a `Map<string, Ty>` (tsc TS2345). Spelled in the type rather than cast away. */
+type DATracked = Map<string, Ty | "unknown">;
 
 /**
  * Every identifier READ inside `node`, with the location of its first occurrence.
@@ -4366,6 +4400,13 @@ function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
     case "BlockStmt": return daBlock(s.body, tracked, flow);
     case "MultiStmt": return daBlock(s.stmts, tracked, flow);
     case "FuncDecl": return false; // its body is analyzed on its own, below
+    // The one `Stmt` kind with no arm. It is SYNTHETIC — inserted after this pass, by the
+    // ownership analysis, to mark where a scope's drops go — so it never reaches here in
+    // practice; but the switch was silently falling off the end and returning `undefined`
+    // for it, which is neither `true` nor `false` and made the `: boolean` return type a
+    // lie (tsc TS2366). Named explicitly so the switch is exhaustive and the next `Stmt`
+    // kind added is a compile error here rather than an implicit "does not diverge".
+    case "BlockDrops": return false;
   }
 }
 
@@ -4386,7 +4427,7 @@ function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
  * `daUse` is shape-blind and descends into it.
  */
 function checkDefiniteAssignment(body: Stmt[]): void {
-  daBlock(body, new Map<string, Ty>(), new Set<string>());
+  daBlock(body, new Map<string, Ty | "unknown">(), new Set<string>());
   const seen = new Set<unknown>();
   const walk = (node: unknown): void => {
     if (Array.isArray(node)) { for (const x of node) walk(x); return; }
@@ -4401,7 +4442,7 @@ function checkDefiniteAssignment(body: Stmt[]): void {
     const n = node as { kind?: string; body?: unknown; stmts?: unknown };
     const nested = n.kind === "FuncDecl" ? n.body : n.kind === "ArrowFunction" ? n.stmts : undefined;
     if (Array.isArray(nested)) {
-      daBlock(nested as Stmt[], new Map<string, Ty>(), new Set<string>());
+      daBlock(nested as Stmt[], new Map<string, Ty | "unknown">(), new Set<string>());
     }
     for (const v of Object.values(node)) walk(v);
   };

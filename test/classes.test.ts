@@ -140,7 +140,11 @@ const p = Point.make();
       sourceToIR(src);
       return null;
     } catch (e) {
-      return e instanceof NTError ? `${e.code}: ${e.message}` : String(e);
+      // `e.diag.code`, not `e.code`: `NTError` has no `code` field (src/diagnostics.ts
+      // carries it on `.diag`), so this rendered "undefined: [NT1015] …" for every case
+      // below. The assertions all match on message text, so nothing failed — the code
+      // half of the label was simply never there. tsc TS2339; see tsconfig.src.json.
+      return e instanceof NTError ? `${e.diag.code}: ${e.message}` : String(e);
     }
   }
 
