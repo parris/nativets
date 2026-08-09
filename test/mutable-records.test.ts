@@ -450,3 +450,145 @@ if (e.kind === "Num") console.log("num", e.n); else console.log("str", e.s);
     await expectMatches(source, await runWithNode(source));
   });
 });
+
+/*
+ * PIECE 2 — a `@@mutable` RECURSIVE record, split at the FIELD.
+ *
+ * `@@mutable` + recursive used to be refused at the DECLARATION (`recursiveMutableError`).
+ * The reason was never memory safety — it is that in-place mutation of a self-containing
+ * value can close a CYCLE, and every walk here assumes a tree. VERIFIED, not taken on
+ * faith, with the declaration refusal neutered:
+ *
+ *     const a: Node = { n: 1, next: null };
+ *     const alias = a;                        // an ALIAS survives the move below
+ *     a.next = a;                             // owned receiver, so nothing refuses it
+ *     console.log(alias);
+ *     node     -> `<ref *1> { n: 1, next: [Circular *1] }`
+ *     nativets -> `Node { n: 1, next: Node { n: 1, next: [Node] } }`, exit 0
+ *
+ * Depth-limited, so NOT a hang — but a silent wrong answer, which is worse than a
+ * refusal. (`JSON.stringify` and `structuredClone` of a recursive type are already
+ * refused, NT1005 / NT1002, so `console.log` is the whole exposure.) Note the obvious
+ * spellings are ALREADY blocked by the value side — `x.next = y` with `y` a parameter is
+ * NT1604, and with `y` an owned local it MOVES `y` — and the ALIAS route above defeats
+ * both, which is exactly why a rule was needed rather than an argument.
+ *
+ * So the declaration is allowed and the refusal moves to the ASSIGNMENT of a
+ * CYCLE-CAPABLE field: one whose type can type-reach the receiver's own tag.
+ */
+describe("a `@@mutable` RECURSIVE record — split at the field (piece 2)", () => {
+  test("a NON-recursive field of a recursive `@@mutable` record may be assigned", async () => {
+    const source = `
+//@@mutable
+interface Node { n: number; label: string; next: Node | null }
+const a: Node = { n: 1, label: "a", next: null };
+a.n = 41;
+a.label = "seen";
+console.log(a.n, a.label);
+`;
+    await expectMatches(source, await runWithNode(source));
+  });
+});
+
+describe("the cycle rule — which field of a recursive `@@mutable` record is refused", () => {
+  test("assigning the RECURSIVE field is refused (this is the write that closes a cycle)", () => {
+    const r = rejectionOf(`
+//@@mutable
+interface Node { n: number; next: Node | null }
+const a: Node = { n: 1, next: null };
+const b: Node = { n: 2, next: null };
+a.next = b;
+console.log(a.n);
+`);
+    expect(r?.code).toBe("NT1030");
+    expect(r?.message).toContain("'next' of '@@mutable Node' is a RECURSIVE field");
+  });
+
+  test("an ARRAY of the recursive type never reaches the cycle rule — NT1001 is nearer", () => {
+    // The reachability scan DOES see through `[]` (`@Node[]` mentions `@Node`), but an
+    // array of a recursive type is refused by a NEARER, pre-existing gate: the heap value
+    // model has no representation for one. Pinned so that a later lane implementing
+    // `@Node[]` finds out here that the cycle rule now has to carry that shape.
+    const r = rejectionOf(`
+//@@mutable
+interface Node { n: number; kids: Node[] }
+const a: Node = { n: 1, kids: [] };
+a.kids = [];
+console.log(a.n);
+`);
+    expect(r?.code).toBe("NT1001");
+    expect(r?.message).toContain("@Node");
+  });
+
+  test("reachability is TRANSITIVE and MUTUAL — B never names A, but reaches it", () => {
+    // `A.b: B` and `B.a: A | null`. Writing `x.b` can close an A -> B -> A cycle, so it is
+    // refused even though `B` is not spelled anywhere in `A`'s own recursion.
+    const r = rejectionOf(`
+//@@mutable
+interface A { tag: string; b: B }
+//@@mutable
+interface B { n: number; a: A | null }
+const y: B = { n: 2, a: null };
+const x: A = { tag: "x", b: y };
+x.b = { n: 3, a: null };
+console.log(x.tag);
+`);
+    expect(r?.code).toBe("NT1030");
+    expect(r?.message).toContain("'b' of '@@mutable A'");
+  });
+
+  test("a NON-recursive `@@mutable` record is completely unaffected (the fixpoint is empty)", async () => {
+    const source = `
+//@@mutable
+interface Cell { n: number }
+const c: Cell = { n: 1 };
+c.n = 41;
+console.log(c.n);
+`;
+    await expectMatches(source, await runWithNode(source));
+  });
+
+  test("mutating a recursive record adds NO leak and NO double free (counts match the control)", async () => {
+    // Measured against a CONTROL rather than against zero. A record with a NULLABLE field
+    // already leaks one block without any mutation at all — the `?N` tag/value box is an
+    // allocation and drop is SHALLOW (the standing Phase-C `array/object ELEMENTS` item in
+    // ROADMAP.md, reproducible on an undecorated `interface P { q: number | null }`). So
+    // zero is the wrong bar here; "identical to not mutating" is the right one, and it is
+    // the statement that actually rules out a double free or a new leak.
+    const body = (mutate: string) => `
+//@@mutable
+interface Node { n: number; label: string; next: Node | null }
+function scope(): string {
+  const a: Node = { n: 1, label: "a", next: null };
+  const alias = a;
+${mutate}
+  return alias.label;
+}
+console.log(scope());
+console.log(__objLive(), __arrLive());
+`;
+    const control = await compileAndRun(body(""));
+    const mutated = await compileAndRun(body(`  a.label = "mutated";\n  a.n = 7;`));
+    expect(control.stdout).toBe("a\n1 0\n");
+    expect(mutated.stdout).toBe("mutated\n1 0\n"); // same counts, mutation observed via the alias
+    expect(mutated.exitCode).toBe(0);
+    expect(control.exitCode).toBe(0);
+  });
+  test("`recursiveMutableError` is NOT a decoy — the CLASS spelling is still refused", () => {
+    // Piece 2 split the RECORD case only. A class's mutation goes through `this.f = v`
+    // inside a method, where the receiver is not a binding this rule can reason about, so
+    // the declaration-level refusal stays and the diagnostic stays reachable.
+    const r = rejectionOf(`
+//@@mutable
+class Node {
+  n: number = 0;
+  next: Node | null = null;
+  bump(): Node { this.n++; return this; }
+}
+const a = new Node();
+console.log(a.bump().n);
+`);
+    expect(r?.code).toBe("NT1030");
+    expect(r?.message).toContain("'@@mutable class Node' is RECURSIVE");
+  });
+});

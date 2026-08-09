@@ -1611,7 +1611,13 @@ class Parser {
    */
   private recordTypeDecl(name: string, shape: Ty, recursive: boolean): Ty {
     if (!recursive) return shape;
-    if (this.mutableRecords.has(name)) throw recursiveMutableError(name, "record");
+    // `@@mutable` + recursive used to be refused HERE, for the whole declaration. It is not
+    // refused any more: the hazard is not the declaration, it is the one ASSIGNMENT that can
+    // close a cycle, and the checker refuses exactly that (`cycleCapableField`). `n.label = s`
+    // on a recursive node cannot make a cycle; `n.next = m` can. Refusing the declaration
+    // refused both — see docs/decorators.md and the note above `recursiveMutableError`,
+    // which is still the CLASS spelling's refusal (`parseClass`), where the receiver is
+    // `this` inside a method and the split has not been made.
     // A DISCRIMINATED UNION is also a legal carrier, and it is the one src/ast.ts's `Expr`
     // needs. It qualifies for exactly the reason an object does: there is no box, so a
     // `U<…>` value IS the member's object block and the reference has a pointer to be.
