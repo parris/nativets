@@ -1534,7 +1534,7 @@ class Checker {
         return;
       case "IfStmt": {
         refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
-        this.rejectDeleteAsCondition(s.test, "this `if` condition", "the `else` arm is unreachable");
+        this.rejectVacuousCollectionTest(s.test, "this `if` condition", "the `else` arm is unreachable");
         // Two INDEPENDENT narrowings apply to the same arms, and a guard can want both
         // (see checkBlock): nullable FACTS from the guard hold in the branch it selects,
         // and a TAG test narrows each arm's union — the tested member in one, the
@@ -1558,13 +1558,13 @@ class Checker {
       }
       case "WhileStmt":
         refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
-        this.rejectDeleteAsCondition(s.test, "this `while` condition", "the loop can never terminate");
+        this.rejectVacuousCollectionTest(s.test, "this `while` condition", "the loop can never terminate");
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
         return;
       case "DoWhileStmt":
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
         refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
-        this.rejectDeleteAsCondition(s.test, "this `do`/`while` condition", "the loop can never terminate");
+        this.rejectVacuousCollectionTest(s.test, "this `do`/`while` condition", "the loop can never terminate");
         return;
       case "ForStmt": {
         const inner = scope.child();
@@ -1572,7 +1572,7 @@ class Checker {
           if ((s.init as VarDecl).kind === "VarDecl") this.checkStmt(s.init as VarDecl, inner, ret);
           else this.type(s.init as Expr, inner);
         }
-        if (s.test) { this.type(s.test, inner); this.rejectDeleteAsCondition(s.test, "this `for` condition", "the loop can never terminate"); }
+        if (s.test) { this.type(s.test, inner); this.rejectVacuousCollectionTest(s.test, "this `for` condition", "the loop can never terminate"); }
         if (s.update) this.type(s.update, inner);
         this.loopDepth++; this.checkBlock(s.body, inner.child(), ret); this.loopDepth--;
         return;
@@ -1895,7 +1895,7 @@ class Checker {
         return "string";
       case "UnaryExpr": {
         const t = this.type(e.operand, scope);
-        if (e.op === "!") { this.rejectDeleteAsCondition(e.operand, "this `!` operand", "the `!` is always `false`"); return "boolean"; }
+        if (e.op === "!") { this.rejectVacuousCollectionTest(e.operand, "this `!` operand", "the `!` is always `false`"); return "boolean"; }
         if (e.op === "void") return "undefined";
         if (e.op === "~") { if (t !== "number") throw typeError(`'~' needs number`); return "number"; }
         if (e.op === "+") return "number"; // numeric coercion of number/string/boolean/null/undefined
@@ -2030,7 +2030,7 @@ class Checker {
       }
       case "ConditionalExpr": {
         refuseUnboxedUnion(this.type(e.test, scope), "a truthiness test");
-        this.rejectDeleteAsCondition(e.test, "this `?:` test", "the `:` arm is unreachable");
+        this.rejectVacuousCollectionTest(e.test, "this `?:` test", "the `:` arm is unreachable");
         // Each arm sees the surrounding context; additionally an empty `[]` arm takes
         // its element type from the OTHER arm (`flag ? [1, 2] : []`), so type the
         // non-empty arm first and feed its type back.
@@ -3045,11 +3045,12 @@ class Checker {
   }
 
   /**
-   * A `Map`/`Set` `.delete(k)` whose result is consumed as a BOOLEAN (NT1606).
+   * A truthiness test on a non-nullable `Map`/`Set` — which is ALWAYS TRUE (NT1606).
    *
    * The sibling of `rejectDiscardedMutator` above: that one covers the call nobody takes
-   * the result of, this one covers the single context in which TAKING the result is
-   * guaranteed to be wrong.
+   * the result of, this one covers the context in which TAKING the result is guaranteed to
+   * be wrong. The motivating case is `.delete`, and the rule ended up wider; both halves
+   * are below.
    *
    *     let m = new Map<string, number>().set("a", 1);
    *     if (m.delete("zz")) { … } else { … }   // node: else.  here, before: THEN.
@@ -3069,41 +3070,70 @@ class Checker {
    * is being rejected. This is the same rule shape as the discarded mutator, and for the
    * same reason: refuse the shape that is wrong independent of what the program does.
    *
-   * IT KEYS ON `.delete`, NOT ON "a Map/Set in a condition". `if (m)` on a plain handle is
-   * always-true under node as well, so it AGREES and must keep compiling; the same goes for
-   * `if (m.size)`, `if (m.has(k))` and `if (m.get(k))` — which are exactly what the hint
-   * points at. A rule written as "reject a collection-typed test" would swallow all four.
+   * ---- IT NO LONGER KEYS ON `.delete` ALONE, AND WHY THAT WIDENING IS AFFORDABLE ----
    *
-   * KNOWN RESIDUAL, deliberately not closed: routing the result through a binding first
-   * (`const gone = m.delete(k); if (gone)`) is still silently wrong. At `if (gone)` the
-   * expression is a plain Map-typed identifier, indistinguishable from the `if (m)` that
-   * must keep working, and `const gone = m.delete(k)` is itself the LEGITIMATE persistent
-   * spelling (it is a pinned test above). Closing it needs either a taint that leaks one
-   * alias later — being partly clever, which trains false confidence — or refusing every
-   * always-true collection test. Recorded in docs/divergences.md §A instead.
+   * A `.delete`-only rule was the first cut, and one `const` escaped it:
+   *
+   *     const gone = m.delete("zz");
+   *     if (gone) { … } else { … }     // node: else.  here: THEN. Exit 0, no diagnostic.
+   *
+   * At `if (gone)` the expression is a plain Map-typed identifier — there is no analysis
+   * that distinguishes it from `if (m)` without a taint that leaks one alias later
+   * (`const g2 = gone; if (g2)`), and being PARTLY clever is worse than not trying: it
+   * trains confidence the rule cannot honour. So the rule is written on the TYPE instead,
+   * and refuses BOTH.
+   *
+   * That is affordable because `if (m)` on a non-nullable handle is not a check in EITHER
+   * language: the value is never `null`/`undefined`, so node evaluates it to `true` too. It
+   * is VACUOUS, not divergent. Refusing it costs a user nothing semantically — no correct
+   * program's behaviour can depend on a condition that cannot be false — while leaving it
+   * open costs a silent wrong answer that survives one binding. Measured before widening:
+   * no non-nullable collection truthiness test exists anywhere in `src/`, `test/fixtures/`
+   * or `examples/`, so the refusal has no real casualty either.
+   *
+   * WHAT MUST KEEP WORKING, and does. `Map | undefined` is a DIFFERENT type and a REAL
+   * check — `if (maybeMap)` decides something, node and we agree on what, and the nullable
+   * box is `?N…`/`?U…`, which `isMapTy`/`isSetTy` do not match. `if (m.size)`,
+   * `if (m.has(k))` and `if (m.get(k))` are `number`/`boolean`/`V | undefined` tests and
+   * never reach this rule at all — they are what the hint points at.
+   *
+   * The two messages are kept distinct on purpose: a `.delete` test is a MISUNDERSTANDING
+   * (the user wanted node's boolean and the fix is `.has`), while a bare handle test is
+   * DEAD CODE (the fix is to delete it or to test `.size`). Same code, different advice.
    */
-  private rejectDeleteAsCondition(test: Expr | undefined, where: string, consequence: string): void {
-    if (test === undefined || test.kind !== "CallExpr" || test.callee.kind !== "MemberExpr") return;
-    if (test.callee.property !== "delete") return;
-    const recv = test.callee.object.ty;
-    if (recv === undefined || (!isMapTy(recv) && !isSetTy(recv))) return;
-    const kind = isMapTy(recv) ? "Map" : "Set";
-    const loc = exprLoc(test.callee.object) ?? test.loc;
+  private rejectVacuousCollectionTest(test: Expr | undefined, where: string, consequence: string): void {
+    if (test === undefined) return;
+    const t = test.ty;
+    if (t === undefined || (!isMapTy(t) && !isSetTy(t))) return; // nullable `?N…`/`?U…` is a REAL check
+    const kind = isMapTy(t) ? "Map" : "Set";
+    const lower = kind.toLowerCase();
+    // A `.delete` call gets the specific diagnostic; anything else gets the vacuity one.
+    const del = test.kind === "CallExpr" && test.callee.kind === "MemberExpr" && test.callee.property === "delete"
+      ? test : undefined;
+    const subject = del ? del.callee.object : test;
+    const loc = exprLoc(subject) ?? test.loc;
     const at = loc ? ` at ${loc.line}:${loc.col}` : "";
-    const name = exprText(test.callee.object);
-    const arg = test.args[0];
+    const recvText = exprText(subject) ?? lower;
+    if (del === undefined)
+      throw mutationError(
+        `a non-nullable \`${kind}\` is always truthy, so ${where}${at} is ALWAYS true — ${consequence}`,
+        `\`${recvText}\` is a handle and its type is not \`${kind}<…> | undefined\`, so it can never be absent — ` +
+        `node evaluates this test to \`true\` as well, which makes it dead code rather than a check. ` +
+        `Did you mean \`${recvText}.size\` (is it empty?) or \`${recvText}.has(k)\` (is the key there?)? ` +
+        `A \`${kind}<…> | undefined\` IS worth testing and is still accepted (docs/divergences.md §A)`,
+      );
+    const arg = del.args[0];
     const argText = arg === undefined ? "k"
       : arg.kind === "StringLiteral" ? JSON.stringify(arg.value)
       : arg.kind === "NumberLiteral" ? String(arg.value)
       : arg.kind === "BooleanLiteral" ? String(arg.value)
       : exprText(arg) ?? "k";
-    const recvText = name ?? "map";
     throw mutationError(
-      `\`${kind}\` is persistent: \`.delete\` returns a NEW ${kind.toLowerCase()}, not a boolean, so ${where}${at} is ALWAYS true — ${consequence}`,
-      `node's \`.delete\` returns whether the key was there; ours returns the ${kind.toLowerCase()} without it. ` +
+      `\`${kind}\` is persistent: \`.delete\` returns a NEW ${lower}, not a boolean, so ${where}${at} is ALWAYS true — ${consequence}`,
+      `node's \`.delete\` returns whether the key was there; ours returns the ${lower} without it. ` +
       `Test with \`${recvText}.has(${argText})\`, and remove with \`${recvText} = ${recvText}.delete(${argText})\` — ` +
-      `\`if (${recvText}.has(${argText})) { ${recvText} = ${recvText}.delete(${argText}); }\` says both. ` +
-      `Testing the handle itself (\`if (${recvText})\`, \`if (${recvText}.size)\`) still works (docs/divergences.md §A)`,
+      `\`if (${recvText}.has(${argText})) { ${recvText} = ${recvText}.delete(${argText}); }\` says both ` +
+      `(docs/divergences.md §A)`,
     );
   }
 
