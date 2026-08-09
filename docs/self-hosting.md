@@ -1439,6 +1439,126 @@ the rename prefix before comparing restores the correct attribution — and the 
 column then needed **no change at all**, which is the proof the fix was right. Recording the
 flip would have aimed four burn-down lanes at files that hold nothing.
 
+### THE `Record`-LITERAL FAMILY IS CLEARED — a SOURCE change, decided by how the tables are READ
+
+`Record<K, V>` declared but initialized with an object literal was the first blocker for
+**eight of the twelve** modules: `src/ast.ts`'s `HOST_MODULES`, inherited through the link by
+parser, checker, codegen, coverage, ownership, driver and modules. Three options, sized first:
+
+| | verdict |
+|---|---|
+| **(a) SOURCE change** — spell the tables as what they are | **TAKEN**, as `new Map().set(…)` + `.get`/`.has` |
+| (b) accept the literal and BUILD a Map from it at the declaration | rejected — it unblocks nothing; see below |
+| (c) stop erasing `Record` to `Map` | dismissed |
+
+**The census, not the first-blocker count.** `readFileSync` over all twelve `src/*.ts` (never
+shell `grep` — project memory records a shimmed `grep` that silently misses matches) found
+**eleven** such declarations in **four** files, not one:
+
+| File | Tables |
+|---|---|
+| `ast.ts` | `HOST_MODULES` |
+| `parser.ts` | `BIN` |
+| `checker.ts` | `NUMBER_CONSTS`, `MATH_METHODS`, `STRING_METHODS`, `HOST_FUNCS`, `GLOBAL_FUNCS` |
+| `codegen.ts` | `FCMP`, `ARITH`, `BITFN`, `MATH_FN1` |
+
+(Five further `x as Record<string, unknown>` sites are type ASSERTIONS over an AST node — they
+never reach a `Ty` and never allocate — so they are not this construct.)
+
+**What decided (a) is the USE, and it is unanimous.** Every one of the eleven is read with a
+**variable key**: `NUMBER_CONSTS[e.property]`, `STRING_METHODS[e.callee.property]`,
+`GLOBAL_FUNCS[e.callee.name]`, `FCMP[op]`, `HOST_MODULES[mod]`, `BIN[t.value]`, … plus
+`op in FCMP` (×3 tables) and `Object.keys(HOST_MODULES)`. `BIN` alone also has three
+LITERAL-key reads (`BIN["<"]`), and it has variable ones too.
+
+So the diagnostic's second escape hatch — *"annotate the exact shape instead, but ONLY if
+every read uses a LITERAL key"* — applies to **none of the eleven**, and this was verified
+rather than assumed: an object indexed by a non-literal key is `NT2001 object must be indexed
+by a string literal`, `k in o` with a non-literal key is `NT1002`, and `{ [k: string]: V }`
+does not even parse (`NT0001`). All three refusals are **correct**, for the reason
+`src/lexer.ts` already records above its `escapeChar` switch: node's `o[k]` consults the
+PROTOTYPE CHAIN, so an own-keys-only lowering answers `undefined` where node answers a
+function.
+
+These tables therefore ARE dictionaries with runtime keys. **`Record<K, V>` was the honest
+TYPE all along; the object literal was the wrong CONSTRUCTOR** — which is why (a) here is the
+`.set` chain the refusal's own hint prescribes, not a re-annotation. It is free under bun for
+the same spec reason the entries-form lane found: `Map.prototype.set` returns its receiver
+(ES2024 24.1.3.9 step 8).
+
+**Why (b) is not merely bigger but ineffective.** Lowering `const m: Record<K,V> = {a:1}` to a
+Map at the declaration leaves every READ unchanged — and the reads are `m[k]` with a variable
+key, which is refused independently of how `m` was built (`Map` indexed by a string is
+`NT2001 index must be number`). To move a single module, (b) would additionally have to lower
+`m[k]` to `.get(k)`, i.e. adopt an own-keys-only semantics for `o[k]` — a documented
+divergence from node on exactly the prototype-chain keys that the bug below proves are live.
+(c) is dismissed on the encoding landmines already recorded here: `Ty` is a flat string whose
+predicates key on suffix, and a new representation must be taught `isLinearTy` or it leaks.
+
+Two adjacent items the same rewrite required or produced:
+
+- **`MATH_METHODS` was `Record<string, number | "var">`** — a SCALAR union, the `NT1009` this
+  document has quoted since SH2, on top of the `Record` refusal. "How many arguments" and "is
+  it variadic" are different questions, so they are now two tables (`MATH_ARITY` +
+  `MATH_VARIADIC`) rather than a sentinel smuggled into an arity.
+- **A COMPILER gap that made the sanctioned idiom unavailable**, found by walking into it:
+  `.set` compared its value by IDENTITY (`argTys[1] !== v`) and typed its arguments with no
+  context, so `new Map<string, Op>().set("*", { prec: 13 })` was `NT2001` on code the
+  identical `const o: Op = { prec: 13 }` had always accepted — an optional field was fatal
+  whether omitted (`logical` absent) or present (`right: true` is `boolean`, the slot is
+  `?Uboolean`), and an empty array literal in a field (`argTys: []`) was `NT1001`. Both halves
+  now route through `typeArg`/`fitsArg`, the same path every other argument site takes, which
+  reshapes a LITERAL into the declared slot layout and still refuses a non-literal of a merely
+  compatible type (widening past that is the dereference-a-double bug). `Set.add` deliberately
+  did NOT get the branch: a Set element here is `string | number`, so there is no literal to
+  rebuild — pinned as a boundary rather than left as an asymmetry.
+
+| module | was (linked) | now |
+|---|---|---|
+| `ast.ts` | `NT2001` — `HOST_MODULES` (its own) | **`NT1606`** — `.push`, its own |
+| `parser.ts`, `modules.ts` | `NT2001` — ast.ts's, through the link | **`NT1606`** — `.push`, lexer.ts's |
+| `checker.ts` | `NT2001` — ast.ts's | **`NT2001`** — `argTys: ["string", null]`, its OWN |
+| `codegen.ts`, `coverage.ts`, `ownership.ts`, `driver.ts` | `NT2001` — ast.ts's | **`NT2001`** — checker.ts's, through the link |
+| `lexer.ts`, `cli.ts`, `coverage-preprocess.ts`, `diagnostics.ts` | — | **unchanged**; `diagnostics.ts` holds rung 3, byte for byte |
+
+**No module reached IR**, and the reason is measured rather than guessed: replacing the
+`null`s with a sentinel in a scratch experiment moves all five `NT2001` modules to `NT1014`
+(the five remaining entries-form sites), and behind THOSE is `.push`. `.push` is the 185-site
+census elephant and is refused by DECISION, so nothing in this lane's reach could have
+produced a second self-compiling module.
+
+**The newly unmasked blocker, stated for whoever takes it next.** `argTys: ["string", null]`
+is an **array of NULLABLE elements**, and it is refused at a plain declaration too —
+`const a: (string|null)[] = ["x", null]` is `NT2001 array elements must share a type (got
+string, null)`, and `[null]` alone is `NT1001 arrays of null`. That is a real feature, not a
+`.set` gap, and it now gates five modules. The cheap-looking source change (a `Ty` sentinel
+for "unconstrained", which `checkArgs` already treats as falsy) was deliberately NOT taken: it
+is the same sentinel-in-a-field this lane rejected for `MATH_METHODS` one paragraph earlier.
+
+**PRE-EXISTING BUG, found on the way, and it is a SILENT WRONG ANSWER.**
+
+```
+console.log(Number.constructor)     node: [Function: Function]     nativets: NaN, exit 0
+```
+
+`NUMBER_CONSTS` was a plain object, so `NUMBER_CONSTS["constructor"]` is
+`Object.prototype.constructor` — a FUNCTION, hence `!== undefined`. The checker's guard
+(`src/checker.ts`) admitted the member as `number` and codegen's fold handed the Function to
+`llvmDouble`. Reproduced for `constructor`, `toString`, `valueOf`, `hasOwnProperty`,
+`isPrototypeOf` and `__proto__` — six inherited names, six `NaN`s, **exit 0 on both sides**,
+which is precisely the class CLAUDE.md calls the worst outcome available. The Map has no
+prototype chain to fall through, so `.get` answers `undefined` and the existing refusal fires;
+pinned in `test/record-dict.test.ts`. The same prototype fall-through also made
+`hasOwnProperty("x")` crash the compiler with an internal stack trace (`sig.min` of a
+`Function`) instead of producing a diagnostic, and gave `Math.constructor(1)` a message
+containing `function Object() { [native code] }`. All three are gone with the rewrite — which
+is the strongest available argument that (a) was the right option and not merely the smallest:
+(b) would have made these programs *compile*, by diverging from node exactly where node is
+observable.
+
+`test/record-dict.test.ts` also carries the lint that keeps the construct out: no `src/*.ts`
+may declare a `Record<` annotation, casts and prose excepted.
+
 ---
 
 ## Milestones

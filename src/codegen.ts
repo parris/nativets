@@ -651,16 +651,22 @@ class ModuleGen {
   }
 }
 
-const FCMP: Record<string, string> = {
-  "<": "olt", "<=": "ole", ">": "ogt", ">=": "oge", "===": "oeq", "==": "oeq", "!==": "une", "!=": "une",
-};
-const ARITH: Record<string, string> = { "+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv", "%": "frem" };
-const BITFN: Record<string, string> = {
-  "&": "js_bit_and", "|": "js_bit_or", "^": "js_bit_xor", "<<": "js_shl", ">>": "js_shr", ">>>": "js_ushr",
-};
-const MATH_FN1: Record<string, string> = {
-  floor: "floor", ceil: "ceil", sqrt: "sqrt", trunc: "trunc", abs: "fabs", round: "js_math_round",
-};
+/* The four opcode tables. `Map`s built with the `.set` chain, not
+ * `Record<string, string> = { … }`: the operator is a RUNTIME key, an object literal cannot
+ * construct a dictionary here, and membership is `.has(op)` rather than `FCMP.has(op)` —
+ * node's `in` walks the PROTOTYPE CHAIN, so `"toString" in FCMP` was TRUE on the object
+ * spelling. See src/ast.ts's HOST_MODULES and test/record-dict.test.ts. */
+const FCMP: Map<string, string> = new Map<string, string>()
+  .set("<", "olt").set("<=", "ole").set(">", "ogt").set(">=", "oge")
+  .set("===", "oeq").set("==", "oeq").set("!==", "une").set("!=", "une");
+const ARITH: Map<string, string> = new Map<string, string>()
+  .set("+", "fadd").set("-", "fsub").set("*", "fmul").set("/", "fdiv").set("%", "frem");
+const BITFN: Map<string, string> = new Map<string, string>()
+  .set("&", "js_bit_and").set("|", "js_bit_or").set("^", "js_bit_xor")
+  .set("<<", "js_shl").set(">>", "js_shr").set(">>>", "js_ushr");
+const MATH_FN1: Map<string, string> = new Map<string, string>()
+  .set("floor", "floor").set("ceil", "ceil").set("sqrt", "sqrt")
+  .set("trunc", "trunc").set("abs", "fabs").set("round", "js_math_round");
 
 // An emitter is an accumulator: `this.blocks` grows, `this.tmp`/`this.lbl` count up. That
 // is in-place mutation of one owned object — `@@mutable`, in the pragma spelling that
@@ -1940,7 +1946,7 @@ class FnGen {
       case "MemberExpr": {
         // stdlib Batch 1: `Number.*` numeric constants — folded to their exact IEEE-754 value.
         if (e.object.kind === "Identifier" && e.object.name === "Number" && !this.isBound("Number")) {
-          const c = NUMBER_CONSTS[e.property];
+          const c = NUMBER_CONSTS.get(e.property);
           if (c !== undefined) return { v: llvmDouble(c), ty: "number" };
         }
         // Host I/O: process.argv (string[]) and process.env.NAME (string). Recognized
@@ -2140,7 +2146,7 @@ class FnGen {
 
       case "BinaryExpr": {
         const op = e.op;
-        if (op in FCMP) {
+        if (FCMP.has(op)) {
           const lt = e.left.ty ?? "number";
           // A2 nullable === undefined / === null: compare the BOX TAG (0=undefined,
           // 1=null, 2=present), never truthiness — so `0` / `""` / `false` are present.
@@ -2160,7 +2166,7 @@ class FnGen {
           const r = this.genExpr(e.right);
           const t = this.fresh();
           if (lt === "number") {
-            this.emit(`${t} = fcmp ${FCMP[op]} double ${l.v}, ${r.v}`);
+            this.emit(`${t} = fcmp ${FCMP.get(op)!} double ${l.v}, ${r.v}`);
           } else if (lt === "boolean") {
             this.emit(`${t} = icmp ${op === "===" || op === "==" ? "eq" : "ne"} i1 ${l.v}, ${r.v}`);
           } else if (isArrayTy(lt) || isObjectTy(lt)) {
@@ -2180,11 +2186,11 @@ class FnGen {
           }
           return { v: t, ty: "boolean" };
         }
-        if (op in BITFN) {
+        if (BITFN.has(op)) {
           const l = this.genExpr(e.left);
           const r = this.genExpr(e.right);
           const t = this.fresh();
-          this.emit(`${t} = call double @${BITFN[op]}(double ${l.v}, double ${r.v})`);
+          this.emit(`${t} = call double @${BITFN.get(op)!}(double ${l.v}, double ${r.v})`);
           return { v: t, ty: "number" };
         }
         if (op === "+" && e.ty === "string") {
@@ -2196,7 +2202,7 @@ class FnGen {
         const r = this.genExpr(e.right);
         const t = this.fresh();
         if (op === "**") this.emit(`${t} = call double @pow(double ${l.v}, double ${r.v})`);
-        else this.emit(`${t} = ${ARITH[op]} double ${l.v}, ${r.v}`);
+        else this.emit(`${t} = ${ARITH.get(op)!} double ${l.v}, ${r.v}`);
         return { v: t, ty: "number" };
       }
 
@@ -2275,8 +2281,8 @@ class FnGen {
           const rv = this.genExpr(e.value);
           const bare0 = e.op.slice(0, -1);
           const t0 = this.fresh();
-          if (bare0 in ARITH) this.emit(`${t0} = ${ARITH[bare0]} double ${cur.v}, ${rv.v}`);
-          else this.emit(`${t0} = call double @${BITFN[bare0]}(double ${cur.v}, double ${rv.v})`);
+          if (ARITH.has(bare0)) this.emit(`${t0} = ${ARITH.get(bare0)!} double ${cur.v}, ${rv.v}`);
+          else this.emit(`${t0} = call double @${BITFN.get(bare0)!}(double ${cur.v}, double ${rv.v})`);
           this.writeCapture(e.target, { v: t0, ty: "number" });
           return { v: t0, ty: "number" };
         }
@@ -2310,8 +2316,8 @@ class FnGen {
         const rv = this.genExpr(e.value);
         const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
         const t = this.fresh();
-        if (bare in ARITH) this.emit(`${t} = ${ARITH[bare]} double ${old}, ${rv.v}`);
-        else this.emit(`${t} = call double @${BITFN[bare]}(double ${old}, double ${rv.v})`);
+        if (ARITH.has(bare)) this.emit(`${t} = ${ARITH.get(bare)!} double ${old}, ${rv.v}`);
+        else this.emit(`${t} = call double @${BITFN.get(bare)!}(double ${old}, double ${rv.v})`);
         this.emit(`store double ${t}, ptr ${this.addr(e.target)}`);
         return { v: t, ty: "number" };
       }
@@ -2377,8 +2383,8 @@ class FnGen {
           const rv = this.genExpr(e.value);
           const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
           out = this.fresh();
-          if (bare in ARITH) this.emit(`${out} = ${ARITH[bare]} double ${cur}, ${rv.v}`);
-          else this.emit(`${out} = call double @${BITFN[bare]}(double ${cur}, double ${rv.v})`);
+          if (ARITH.has(bare)) this.emit(`${out} = ${ARITH.get(bare)!} double ${cur}, ${rv.v}`);
+          else this.emit(`${out} = call double @${BITFN.get(bare)!}(double ${cur}, double ${rv.v})`);
         }
         this.emit(loc
           ? `call void @nt_bytes_index_set(ptr ${obj.v}, double ${idx.v}, double ${out}, ptr ${loc})`
@@ -3633,7 +3639,7 @@ class FnGen {
       this.emit(`${t} = call double @pow(double ${vals[0]}, double ${vals[1]})`);
       return { v: t, ty: "number" };
     }
-    const fn = MATH_FN1[method];
+    const fn = MATH_FN1.get(method);
     if (!fn) throw internalError(`no lowering for Math.${method}, which the checker admitted`);
     const t = this.fresh();
     this.emit(`${t} = call double @${fn}(double ${vals[0]})`);
