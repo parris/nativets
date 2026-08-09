@@ -1481,156 +1481,218 @@ export function exprText(e: Expr): string | undefined {
  *  declarations, so an arrow whose parameter type comes only from such an alias reports
  *  "cannot infer type of arrow parameter" in that tool and nowhere else. */
 const KEEP_TY = (t: Ty): Ty => t;
-/* A child EXPRESSION slot is a REWRITE (the parent stores what comes back) — that is how
+/* EVERY child slot is a REWRITE (the parent stores what comes back), and the walkers
+ * RETURN a new node rather than assigning into the one they were given. That is how
  * `resolveStaticFieldReads` replaces a `MemberExpr` with an `Identifier` without needing
- * the reflective `o[k] = …` it used to do. A child STATEMENT is only ever visited.
+ * the reflective `o[k] = …` it used to do — and it is the only spelling of an AST
+ * rewrite this compiler can compile ITSELF.
+ *
+ * WHY RETURN INSTEAD OF ASSIGN. `walkExprChildren(e: Expr, …)` used to write `e.object =
+ * fe(e.object)` and `e.ty = ft(e.ty)`. Both are `o.f = v` on a PARAMETER, which is
+ * refused twice over: the receiver's type is not `@@mutable` (NT1606 in the checker), and
+ * even tagged it would be a write through a BORROW (NT1607 in the ownership pass). The
+ * tag is not available either — `@@mutable` is nominal, and a tagged member makes the
+ * `Expr`/`Stmt` union `NT1009` (measured, one member tagged and both). Reconstruction
+ * needs no new language rule at all: `{ ...e, kind: "K", f: v }` typechecks, runs, and
+ * gives the right answer today, including through a recursive union.
+ *
+ * NECESSARY, NOT SUFFICIENT: this clears the 45 `o.f = v` sites in these walkers and NONE
+ * of the other ~154 in the tree (`setBlockDrops` right here is one of them). See
+ * docs/self-hosting.md for the census and the general answer.
+ *
+ * COST, stated because it is real: a pass now allocates a node per node instead of
+ * writing a slot, and the old spine is not freed (drop is shallow), so a rewrite leaks
+ * its input. `collectBindingNames` builds a tree it throws away entirely; it is only
+ * reached when the program declares a static field.
  *
  * Spelled INLINE at every position rather than as `type ExprFn = (e: Expr) => Expr`. An
  * alias whose shape mentions a RECURSIVE type is `NT1030` — this compiler refuses it —
  * and `Expr` is a 30-member mutually recursive component, so the alias would have planted
  * a parse-stage blocker in the file this rewrite exists to unblock. */
 
-function walkExprList(list: Expr[], fe: (x: Expr) => Expr): void {
-  for (let i = 0; i < list.length; i++) list[i] = fe(list[i]!);
+/** A `Ty` slot that may be absent: rewrite it where it is present, leave it alone where
+ *  it is not. Spelled as a helper because the shape appears ~40 times below and the
+ *  reconstruction has to keep the ORDER of the `ft` calls (see the header). */
+function mapTy(t: Ty | undefined, ft: (t: Ty) => Ty): Ty | undefined {
+  return t === undefined ? undefined : ft(t);
 }
-function walkStmtList(list: Stmt[], fs: (x: Stmt) => void): void {
-  for (const s of list) fs(s);
+function mapTyList(ts: Ty[] | undefined, ft: (t: Ty) => Ty): Ty[] | undefined {
+  return ts === undefined ? undefined : ts.map((t: Ty): Ty => ft(t));
+}
+function mapExprList(list: Expr[], fe: (x: Expr) => Expr): Expr[] {
+  return list.map((x: Expr): Expr => fe(x));
+}
+function mapStmtList(list: Stmt[], fs: (x: Stmt) => Stmt): Stmt[] {
+  return list.map((x: Stmt): Stmt => fs(x));
 }
 /** A parameter list: `annot` first, then `default` — the old key order. */
-function walkParams(params: Param[], fe: (x: Expr) => Expr, ft: (t: Ty) => Ty): void {
-  for (const p of params) {
-    if (p.annot !== undefined) p.annot = ft(p.annot);
-    if (p.default !== undefined) p.default = fe(p.default);
-  }
+function mapParams(params: Param[], fe: (x: Expr) => Expr, ft: (t: Ty) => Ty): Param[] {
+  return params.map((p: Param): Param => ({
+    ...p,
+    annot: mapTy(p.annot, ft),
+    default: p.default === undefined ? undefined : fe(p.default),
+  }));
 }
 
 /**
- * Every child of an expression, in the order the reflective walk reached them.
+ * Every child of an expression, rewritten — the parent stores what comes back.
  * `default:` binds `never` — add an `Expr` member and this stops compiling.
+ *
+ * Each arm restates its own `kind` even though `...e` already carries it. That is NOT
+ * redundant here: a spread does not carry a string-LITERAL type, so `{ ...e, ty: … }`
+ * on a narrowed union member is "an object literal … must set 'kind' to one of the
+ * literals" (NT2001) under nativets itself. Measured, not assumed.
  */
-function walkExprChildren(e: Expr, fe: (x: Expr) => Expr, fs: (x: Stmt) => void, ft: (t: Ty) => Ty): void {
+function walkExprChildren(e: Expr, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Expr {
   switch (e.kind) {
-    case "NumberLiteral": case "BooleanLiteral": case "StringLiteral":
-    case "UndefinedLiteral": case "NullLiteral": case "Identifier":
-      break; // no child expressions
-    case "TemplateLiteral": walkExprList(e.exprs, fe); break;
-    case "ArrayLiteral": walkExprList(e.elements, fe); break;
-    case "ObjectLiteral": for (const p of e.properties) p.value = fe(p.value); break;
-    case "SpreadExpr": e.argument = fe(e.argument); break;
-    case "MemberExpr": e.object = fe(e.object); break;
-    case "IndexExpr": e.object = fe(e.object); e.index = fe(e.index); break;
-    case "UnaryExpr": case "TypeofExpr": e.operand = fe(e.operand); break;
-    case "UpdateExpr": if (e.targetExpr !== undefined) e.targetExpr = fe(e.targetExpr); break;
-    case "BinaryExpr": case "LogicalExpr": e.left = fe(e.left); e.right = fe(e.right); break;
-    case "SequenceExpr": walkExprList(e.exprs, fe); break;
+    // Leaves: no child expressions. Spelled one arm each rather than sharing a fallthrough
+    // label, because each arm has to name its own tag literal (see the note above).
+    case "NumberLiteral": return { ...e, kind: "NumberLiteral", ty: mapTy(e.ty, ft) };
+    case "BooleanLiteral": return { ...e, kind: "BooleanLiteral", ty: mapTy(e.ty, ft) };
+    case "StringLiteral": return { ...e, kind: "StringLiteral", ty: mapTy(e.ty, ft) };
+    case "UndefinedLiteral": return { ...e, kind: "UndefinedLiteral", ty: mapTy(e.ty, ft) };
+    case "NullLiteral": return { ...e, kind: "NullLiteral", ty: mapTy(e.ty, ft) };
+    case "Identifier": return { ...e, kind: "Identifier", ty: mapTy(e.ty, ft) };
+    case "TemplateLiteral":
+      return { ...e, kind: "TemplateLiteral", exprs: mapExprList(e.exprs, fe), ty: mapTy(e.ty, ft) };
+    case "ArrayLiteral":
+      return { ...e, kind: "ArrayLiteral", elements: mapExprList(e.elements, fe), ty: mapTy(e.ty, ft) };
+    case "ObjectLiteral":
+      return { ...e, kind: "ObjectLiteral",
+        properties: e.properties.map((p: ObjectProperty): ObjectProperty => ({ ...p, value: fe(p.value) })),
+        ty: mapTy(e.ty, ft) };
+    case "SpreadExpr": return { ...e, kind: "SpreadExpr", argument: fe(e.argument), ty: mapTy(e.ty, ft) };
+    case "MemberExpr": return { ...e, kind: "MemberExpr", object: fe(e.object), ty: mapTy(e.ty, ft) };
+    case "IndexExpr": return { ...e, kind: "IndexExpr", object: fe(e.object), index: fe(e.index), ty: mapTy(e.ty, ft) };
+    case "UnaryExpr": return { ...e, kind: "UnaryExpr", operand: fe(e.operand), ty: mapTy(e.ty, ft) };
+    case "TypeofExpr": return { ...e, kind: "TypeofExpr", operand: fe(e.operand), ty: mapTy(e.ty, ft) };
+    case "UpdateExpr":
+      return { ...e, kind: "UpdateExpr",
+        targetExpr: e.targetExpr === undefined ? undefined : fe(e.targetExpr), ty: mapTy(e.ty, ft) };
+    case "BinaryExpr": return { ...e, kind: "BinaryExpr", left: fe(e.left), right: fe(e.right), ty: mapTy(e.ty, ft) };
+    case "LogicalExpr": return { ...e, kind: "LogicalExpr", left: fe(e.left), right: fe(e.right), ty: mapTy(e.ty, ft) };
+    case "SequenceExpr": return { ...e, kind: "SequenceExpr", exprs: mapExprList(e.exprs, fe), ty: mapTy(e.ty, ft) };
     case "ConditionalExpr":
-      e.test = fe(e.test); e.consequent = fe(e.consequent); e.alternate = fe(e.alternate); break;
-    case "AssignExpr": e.value = fe(e.value); break;
-    case "IndexAssign": e.object = fe(e.object); e.index = fe(e.index); e.value = fe(e.value); break;
-    case "FieldAssign": e.object = fe(e.object); e.value = fe(e.value); break;
-    case "InstanceOfExpr": e.object = fe(e.object); break;
-    case "InExpr": e.key = fe(e.key); e.object = fe(e.object); break;
-    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": e.expr = fe(e.expr); break;
+      return { ...e, kind: "ConditionalExpr",
+        test: fe(e.test), consequent: fe(e.consequent), alternate: fe(e.alternate), ty: mapTy(e.ty, ft) };
+    case "AssignExpr": return { ...e, kind: "AssignExpr", value: fe(e.value), ty: mapTy(e.ty, ft) };
+    case "IndexAssign":
+      return { ...e, kind: "IndexAssign", object: fe(e.object), index: fe(e.index), value: fe(e.value), ty: mapTy(e.ty, ft) };
+    case "FieldAssign":
+      return { ...e, kind: "FieldAssign", object: fe(e.object), value: fe(e.value), ty: mapTy(e.ty, ft) };
+    case "InstanceOfExpr": return { ...e, kind: "InstanceOfExpr", object: fe(e.object), ty: mapTy(e.ty, ft) };
+    case "InExpr": return { ...e, kind: "InExpr", key: fe(e.key), object: fe(e.object), ty: mapTy(e.ty, ft) };
+    // `AsExpr.ty`/`SatisfiesExpr.ty` are REQUIRED (`ty: Ty`, not `ty?: Ty`), so the
+    // guarded `mapTy` would widen them to `Ty | undefined`. tsc catches it; the old
+    // `if (e.ty !== undefined)` was simply always true for these two.
+    case "AsExpr": return { ...e, kind: "AsExpr", expr: fe(e.expr), ty: ft(e.ty) };
+    case "SatisfiesExpr": return { ...e, kind: "SatisfiesExpr", expr: fe(e.expr), ty: ft(e.ty) };
+    case "NonNullExpr": return { ...e, kind: "NonNullExpr", expr: fe(e.expr), ty: mapTy(e.ty, ft) };
     case "NewExpr":
-      walkExprList(e.args, fe);
-      if (e.typeArgs !== undefined) e.typeArgs = e.typeArgs.map((t: Ty) => ft(t));
-      break;
+      return { ...e, kind: "NewExpr", args: mapExprList(e.args, fe), typeArgs: mapTyList(e.typeArgs, ft), ty: mapTy(e.ty, ft) };
     case "CallExpr":
-      e.callee = fe(e.callee); walkExprList(e.args, fe);
-      if (e.typeArgs !== undefined) e.typeArgs = e.typeArgs.map((t: Ty) => ft(t));
-      break;
+      return { ...e, kind: "CallExpr",
+        callee: fe(e.callee), args: mapExprList(e.args, fe), typeArgs: mapTyList(e.typeArgs, ft), ty: mapTy(e.ty, ft) };
     case "ArrowFunction":
-      walkParams(e.params, fe, ft);
       // Exactly one of `body`/`stmts` is populated — `exprBody` says which (see the note
       // on the interface: it is two fields rather than a union for a self-hosting reason).
-      if (e.body !== undefined) e.body = fe(e.body);
-      if (e.stmts !== undefined) walkStmtList(e.stmts, fs);
-      if (e.retAnnot !== undefined) e.retAnnot = ft(e.retAnnot);
-      if (e.paramTys !== undefined) e.paramTys = e.paramTys.map((t: Ty) => ft(t));
-      if (e.retTy !== undefined) e.retTy = ft(e.retTy);
-      if (e.captures !== undefined) for (const c of e.captures) c.ty = ft(c.ty);
-      break;
+      return { ...e, kind: "ArrowFunction",
+        params: mapParams(e.params, fe, ft),
+        body: e.body === undefined ? undefined : fe(e.body),
+        stmts: e.stmts === undefined ? undefined : mapStmtList(e.stmts, fs),
+        retAnnot: mapTy(e.retAnnot, ft),
+        paramTys: mapTyList(e.paramTys, ft),
+        retTy: mapTy(e.retTy, ft),
+        captures: e.captures === undefined ? undefined
+          : e.captures.map((c: { name: string; ty: Ty }): { name: string; ty: Ty } => ({ ...c, ty: ft(c.ty) })),
+        ty: mapTy(e.ty, ft) };
     default: { const impossible: never = e; return impossible; }
   }
-  // `ty` is the LAST key on every expression node that carries one — uniformly, across all
-  // thirty kinds. Matching the old key order matters: see the header.
-  if (e.ty !== undefined) e.ty = ft(e.ty);
 }
 
 /**
- * Every child of a statement, in the order the reflective walk reached them.
+ * Every child of a statement, rewritten — the parent stores what comes back.
  * `default:` binds `never` — add a `Stmt` member and this stops compiling.
  */
-function walkStmtChildren(s: Stmt, fe: (x: Expr) => Expr, fs: (x: Stmt) => void, ft: (t: Ty) => Ty): void {
+function walkStmtChildren(s: Stmt, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Stmt {
   switch (s.kind) {
     case "VarDecl":
-      for (const d of s.decls) {
-        if (d.annot !== undefined) d.annot = ft(d.annot);
-        if (d.init !== undefined) d.init = fe(d.init);
-        if (d.ty !== undefined) d.ty = ft(d.ty);
-      }
-      break;
+      return { ...s, kind: "VarDecl",
+        decls: s.decls.map((d: Declarator): Declarator => ({
+          ...d,
+          annot: mapTy(d.annot, ft),
+          init: d.init === undefined ? undefined : fe(d.init),
+          ty: mapTy(d.ty, ft),
+        })) };
     case "FuncDecl":
-      walkParams(s.params, fe, ft);
-      if (s.returnAnnot !== undefined) s.returnAnnot = ft(s.returnAnnot);
-      walkStmtList(s.body, fs);
-      break;
-    case "ReturnStmt": if (s.argument !== null) s.argument = fe(s.argument); break;
+      return { ...s, kind: "FuncDecl",
+        params: mapParams(s.params, fe, ft),
+        returnAnnot: mapTy(s.returnAnnot, ft),
+        body: mapStmtList(s.body, fs) };
+    case "ReturnStmt":
+      return { ...s, kind: "ReturnStmt", argument: s.argument === null ? null : fe(s.argument) };
     case "IfStmt":
-      s.test = fe(s.test); walkStmtList(s.consequent, fs);
-      if (s.alternate !== null) walkStmtList(s.alternate, fs);
-      break;
-    case "WhileStmt": s.test = fe(s.test); walkStmtList(s.body, fs); break;
-    case "DoWhileStmt": walkStmtList(s.body, fs); s.test = fe(s.test); break;
+      return { ...s, kind: "IfStmt",
+        test: fe(s.test),
+        consequent: mapStmtList(s.consequent, fs),
+        alternate: s.alternate === null ? null : mapStmtList(s.alternate, fs) };
+    case "WhileStmt": return { ...s, kind: "WhileStmt", test: fe(s.test), body: mapStmtList(s.body, fs) };
+    case "DoWhileStmt": return { ...s, kind: "DoWhileStmt", body: mapStmtList(s.body, fs), test: fe(s.test) };
     case "ForStmt":
-      if (s.init !== null) { if (s.init.kind === "VarDecl") fs(s.init); else s.init = fe(s.init); }
-      if (s.test !== null) s.test = fe(s.test);
-      if (s.update !== null) s.update = fe(s.update);
-      walkStmtList(s.body, fs);
-      break;
+      return { ...s, kind: "ForStmt",
+        init: s.init === null ? null : s.init.kind === "VarDecl" ? (fs(s.init) as VarDecl) : fe(s.init),
+        test: s.test === null ? null : fe(s.test),
+        update: s.update === null ? null : fe(s.update),
+        body: mapStmtList(s.body, fs) };
     case "ForOfStmt":
-      if (s.annot !== undefined) s.annot = ft(s.annot);
-      s.iterable = fe(s.iterable);
-      walkStmtList(s.body, fs);
-      if (s.elemTy !== undefined) s.elemTy = ft(s.elemTy); // `valTy` is NOT rewritten — see the header
-      break;
-    case "ForInStmt": s.object = fe(s.object); walkStmtList(s.body, fs); break;
+      return { ...s, kind: "ForOfStmt",
+        annot: mapTy(s.annot, ft),
+        iterable: fe(s.iterable),
+        body: mapStmtList(s.body, fs),
+        elemTy: mapTy(s.elemTy, ft) }; // `valTy` is NOT rewritten — see the header
+    case "ForInStmt": return { ...s, kind: "ForInStmt", object: fe(s.object), body: mapStmtList(s.body, fs) };
     case "SwitchStmt":
-      s.discriminant = fe(s.discriminant);
-      for (const c of s.cases) { if (c.test !== null) c.test = fe(c.test); walkStmtList(c.body, fs); }
-      break;
-    case "ThrowStmt": s.argument = fe(s.argument); break;
+      return { ...s, kind: "SwitchStmt",
+        discriminant: fe(s.discriminant),
+        cases: s.cases.map((c: SwitchCase): SwitchCase => ({
+          ...c, test: c.test === null ? null : fe(c.test), body: mapStmtList(c.body, fs),
+        })) };
+    case "ThrowStmt": return { ...s, kind: "ThrowStmt", argument: fe(s.argument) };
     case "TryStmt":
-      walkStmtList(s.block, fs);
-      if (s.handler !== null) walkStmtList(s.handler, fs);
-      if (s.finalizer !== null) walkStmtList(s.finalizer, fs);
-      if (s.catchTy !== undefined) s.catchTy = ft(s.catchTy);
-      break;
-    case "ExprStmt": s.expr = fe(s.expr); break;
-    case "BlockStmt": walkStmtList(s.body, fs); break;
-    case "MultiStmt": walkStmtList(s.stmts, fs); break;
+      return { ...s, kind: "TryStmt",
+        block: mapStmtList(s.block, fs),
+        handler: s.handler === null ? null : mapStmtList(s.handler, fs),
+        finalizer: s.finalizer === null ? null : mapStmtList(s.finalizer, fs),
+        catchTy: mapTy(s.catchTy, ft) };
+    case "ExprStmt": return { ...s, kind: "ExprStmt", expr: fe(s.expr) };
+    case "BlockStmt": return { ...s, kind: "BlockStmt", body: mapStmtList(s.body, fs) };
+    case "MultiStmt": return { ...s, kind: "MultiStmt", stmts: mapStmtList(s.stmts, fs) };
     // No children, and nothing type-bearing. `BlockDrops` is the ownership pass's
     // synthesized scope-exit marker; the other two are leaves.
-    case "BreakStmt": case "ContinueStmt": case "BlockDrops": break;
+    case "BreakStmt": return s;
+    case "ContinueStmt": return s;
+    case "BlockDrops": return s;
     default: { const impossible: never = s; return impossible; }
   }
 }
 
-/* ---- pass 1: rewrite every type-bearing field, in place -------------------- */
+/* ---- pass 1: rewrite every type-bearing field ------------------------------ */
 
 function tyExpr(e: Expr, f: (t: Ty) => Ty): Expr {
-  walkExprChildren(e, (x) => tyExpr(x, f), (s) => tyStmt(s, f), f);
-  return e;
+  return walkExprChildren(e, (x: Expr): Expr => tyExpr(x, f), (s: Stmt): Stmt => tyStmt(s, f), f);
 }
-function tyStmt(s: Stmt, f: (t: Ty) => Ty): void {
-  walkStmtChildren(s, (x) => tyExpr(x, f), (y) => tyStmt(y, f), f);
+function tyStmt(s: Stmt, f: (t: Ty) => Ty): Stmt {
+  return walkStmtChildren(s, (x: Expr): Expr => tyExpr(x, f), (y: Stmt): Stmt => tyStmt(y, f), f);
 }
-/** Deep-rewrite every type-bearing field of a statement LIST, in place. */
-export function mapTypesDeep(list: Stmt[], f: (t: Ty) => Ty): void { for (const s of list) tyStmt(s, f); }
+/** Deep-rewrite every type-bearing field of a statement LIST. Returns the NEW list —
+ *  the caller must rebind (see the header). */
+export function mapTypesDeep(list: Stmt[], f: (t: Ty) => Ty): Stmt[] {
+  return list.map((s: Stmt): Stmt => tyStmt(s, f));
+}
 /** …of one statement (a generic template's specialized `FuncDecl`, in practice). */
-export function mapTypesDeepStmt(s: Stmt, f: (t: Ty) => Ty): void { tyStmt(s, f); }
+export function mapTypesDeepStmt(s: Stmt, f: (t: Ty) => Ty): Stmt { return tyStmt(s, f); }
 /** …of one expression (a generic ARROW, in practice). */
-export function mapTypesDeepExpr(e: Expr, f: (t: Ty) => Ty): void { tyExpr(e, f); }
+export function mapTypesDeepExpr(e: Expr, f: (t: Ty) => Ty): Expr { return tyExpr(e, f); }
 
 /* ---- pass 2: `C.f` static-field reads → the `C.f` module binding ----------- */
 
@@ -1648,15 +1710,17 @@ function staticExpr(e: Expr, names: Set<string>, onAssign?: (name: string) => ne
     const id: Identifier = { kind: "Identifier", name: `${e.object.name}.${e.property}` };
     return id; // rewritten: its only child WAS the class name, so there is nothing below
   }
-  walkExprChildren(e, (x) => staticExpr(x, names, onAssign), (s) => staticStmt(s, names, onAssign), KEEP_TY);
-  return e;
+  return walkExprChildren(e, (x: Expr): Expr => staticExpr(x, names, onAssign),
+    (s: Stmt): Stmt => staticStmt(s, names, onAssign), KEEP_TY);
 }
-function staticStmt(s: Stmt, names: Set<string>, onAssign?: (name: string) => never): void {
-  walkStmtChildren(s, (x) => staticExpr(x, names, onAssign), (y) => staticStmt(y, names, onAssign), KEEP_TY);
+function staticStmt(s: Stmt, names: Set<string>, onAssign?: (name: string) => never): Stmt {
+  return walkStmtChildren(s, (x: Expr): Expr => staticExpr(x, names, onAssign),
+    (y: Stmt): Stmt => staticStmt(y, names, onAssign), KEEP_TY);
 }
 /**
  * Rewrite every read of a STATIC field — `C.f` on a bare class name — into the plain
- * Identifier `C.f`, the module-level `const` the parser lowered it to.
+ * Identifier `C.f`, the module-level `const` the parser lowered it to. Returns the NEW
+ * list; the caller must rebind.
  *
  * This runs at the END of parsing, before any analysis, and that is the point: a static
  * field is not a slot on a receiver, it is a module binding, so every pass that reasons
@@ -1664,18 +1728,17 @@ function staticStmt(s: Stmt, names: Set<string>, onAssign?: (name: string) => ne
  * it does not see the read at all. No source identifier can contain a `.`, so the dotted
  * name is unambiguous.
  */
-export function resolveStaticFieldReads(list: Stmt[], names: Set<string>, onAssign?: (name: string) => never): void {
-  for (const s of list) staticStmt(s, names, onAssign);
+export function resolveStaticFieldReads(list: Stmt[], names: Set<string>, onAssign?: (name: string) => never): Stmt[] {
+  return list.map((s: Stmt): Stmt => staticStmt(s, names, onAssign));
 }
 
 /* ---- pass 3: every name the program binds --------------------------------- */
 
 function bindExpr(e: Expr, out: Set<string>): Expr {
   if (e.kind === "ArrowFunction") for (const p of e.params) if (p.name) out.add(p.name);
-  walkExprChildren(e, (x) => bindExpr(x, out), (s) => bindStmt(s, out), KEEP_TY);
-  return e;
+  return walkExprChildren(e, (x: Expr): Expr => bindExpr(x, out), (s: Stmt): Stmt => bindStmt(s, out), KEEP_TY);
 }
-function bindStmt(s: Stmt, out: Set<string>): void {
+function bindStmt(s: Stmt, out: Set<string>): Stmt {
   switch (s.kind) {
     // Parameters BEFORE the declared name, which is the order the old walk produced.
     case "FuncDecl": for (const p of s.params) if (p.name) out.add(p.name); out.add(s.name); break;
@@ -1692,11 +1755,14 @@ function bindStmt(s: Stmt, out: Set<string>): void {
       break;
     default: { const impossible: never = s; return impossible; }
   }
-  walkStmtChildren(s, (x) => bindExpr(x, out), (y) => bindStmt(y, out), KEEP_TY);
+  return walkStmtChildren(s, (x: Expr): Expr => bindExpr(x, out), (y: Stmt): Stmt => bindStmt(y, out), KEEP_TY);
 }
 /**
  * Every name the program BINDS — declarations, function/arrow parameters, loop and catch
- * bindings. Used to protect the static-field rewrite above: that rewrite is name-based and
+ * bindings. A pure VISITOR: it collects into `out` and the reconstructed tree it builds on
+ * the way is discarded, so no caller has to rebind anything.
+ *
+ * Used to protect the static-field rewrite above: that rewrite is name-based and
  * has no scope, so a binding that shadows a class name would silently redirect `C.f` to
  * the class's static instead of the shadowing value. Collecting the binders lets the
  * parser refuse that program outright rather than answer it wrongly.

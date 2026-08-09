@@ -2704,6 +2704,170 @@ instead. A second, subtler one: `const KEEP_TY: TyFn = (t) => t` typechecks and 
 parameter became uninferable and ast.ts's coverage row changed. Written `(t: Ty): Ty => t`,
 it does not.
 
+### THE WALKERS RETURN NEW NODES — 53 of ast.ts's 54 sites cleared, and NONE of the other 145
+
+The previous re-measurement left two things open: how the walkers should stop mutating, and
+what the general answer is for the rest of the tree. The first is landed here; the second is
+measured and **not** implemented, because it is a language decision.
+
+**What landed.** `walkExprChildren`/`walkStmtChildren` in `src/ast.ts` now RETURN the node the
+parent should store instead of assigning into the one they were handed. Every child slot is a
+rewrite, statements included, so a statement list is rebuilt (`list.map`) rather than visited.
+The three passes follow: `mapTypesDeep`/`mapTypesDeepStmt`/`mapTypesDeepExpr` and
+`resolveStaticFieldReads` return the new tree, and `collectBindingNames` stays `void` — it is a
+pure visitor that discards the tree it builds on the way.
+
+**Seven caller sites, exactly as sized:** `parser.ts` parseProgram (`body` becomes `let`),
+`parser.ts` class lowering (`emitted`/`decorators` become `let`), `parser.ts` generic-arrow
+erasure, `checker.ts:508` (`return mapTypesDeepStmt(spec, …) as FuncDecl`), `checker.ts:473`
+(kept as the pure visit it always was — its `f` is the identity and only throws), and
+`modules.ts:620`. The generic-arrow site needed one extra rewrite: restoring the arrow's own
+parameter annotations used to be `arrow.params.forEach((p, i) => { p.annot = own[i] })`, a write
+through a `forEach` parameter — i.e. the very construct this change exists to remove. It rebuilds
+the parameter list instead.
+
+**RECONSTRUCTION IS EXPRESSIBLE TODAY — measured before writing any of it.** `{ ...e, kind: "K",
+f: v }` typechecks, compiles and runs under nativets, **including through a recursive union**
+(a 2-member `Num | Neg` with `operand: Expr`, rewritten and printed, answer identical to bun).
+Two details are load-bearing and neither is obvious:
+
+- **the tag must be RESTATED in every arm.** A spread does not carry a string-LITERAL type, so
+  `{ ...e, ty: … }` on a narrowed member is `NT2001 an object literal … must set 'kind' to one of
+  the literals`. Adding `kind: "K"` back is what makes it compile. That is why the leaves and the
+  shared fallthrough labels are split into one arm per kind — 30 + 18, not 25.
+- **it LEAKS its input.** Drop is shallow, so the old spine is never freed: a 2-node rewrite
+  measures `__objLive() === 2`. A pass now allocates a node per node. Not unsound, and not new
+  (it is the Phase-C `array/object ELEMENTS` item), but it is a real cost of option (b).
+
+**Evidence.** Old vs new over every parseable `.ts` in `src/`, `test/` and `examples/` at three
+tree stages (parsed / checked / ownership-analyzed): **498 files, 375 parse, 322 check, 1019
+trees, 3057 comparisons, 0 differences** — comparing the tree AND the exact sequence of `Ty`
+callbacks, with a MARKING callback (`t => "#" + t`) rather than the identity, so a skipped
+subtree shows up in the tree and not only in the order. Then **48 mutants** (skip each node kind
+in turn): **45 caught**; the three survivors are `BreakStmt`, `ContinueStmt` and `BlockDrops`,
+which have no children and no type fields, so "skip this kind" *is* the identity. Two of the 48
+(`SequenceExpr`, `InExpr`) are invisible to the 498-file corpus and are killed by four
+hand-built inputs, the same finding the previous walker lane recorded for `SequenceExpr`.
+
+**A REAL DIFFERENCE the marking callback found, and it is a PRE-EXISTING DEFECT — see below.**
+
+| Module | Before | After |
+|---|---|---|
+| `ast.ts` non-`this` `o.f = v` sites | 54 | **1** (`setBlockDrops`) |
+| `ast.ts` (standalone + linked) | `NT1606` — `o.f = v`, `setBlockDrops` `last.names = names` | **unchanged** |
+| the other eight, linked | `NT1606` — inherited | **unchanged** |
+| `lexer.ts`, `coverage-preprocess.ts`, `diagnostics.ts` | rung 3 | **unchanged — rung 3, IR byte-length identical** (161959 / 152886 / 111252) |
+
+**No module moved, and the commit says so on purpose.** ast.ts's FIRST blocker was never one of
+the 45 walker sites — it is `setBlockDrops`, the one site option (b) cannot reach, because that
+function does not rewrite a tree, it appends a marker to a list it was lent. This is option (b)
+being *necessary and not sufficient*, exactly as sized.
+
+### THE GENERAL ANSWER — measured, and it is NOT the parameter annotation
+
+**The census, re-run over the AST instead of over `grep`** (`FieldAssign` nodes with
+`viaThis === false`, receiver classified by what binds it):
+
+| Receiver | Sites | |
+|---|---|---|
+| **PARAM** | 120 | a borrow |
+| OWNED LOCAL | 53 | compiles today, if the type can be tagged |
+| **FOR-OF element** | 20 | a borrow |
+| `o.f.g` / `f()` / capture / `this.f` | 6 | a borrow |
+| | **199** | of which **146 are through a BORROW** |
+
+Excluding `ast.ts` (which this lane cleared) that is **145**: **93 borrow, 52 owned**. Only
+**15** of the 145 write a field that could hold a recursive value — an upper bound, name-based.
+
+**Option (a), an explicit `@@mutable` PARAMETER annotation, does not clear a single one of them,
+and the reason is a gate the brief did not name.** The refusal on the AST is `NT1606` from the
+**checker**, on the TYPE (`!this.isMutableTy(ot)`) — the ownership pass' `NT1607` is never
+reached. Opening the borrow gate is useless while the type gate is shut, and shutting it is
+what tagging an AST node would fix. Tagging is blocked twice:
+
+1. **the union.** `parser.ts`'s `discriminatedUnion` requires `classTag(a) === undefined` of every
+   arm, so a tagged member makes `Expr`/`Stmt` `NT1009` — re-verified here with one member
+   tagged and with both. That clause is ONE line and, removed in a probe, a `@@mutable`
+   discriminated union parses, narrows and runs. It is a conservative guard, not a
+   representation limit: a tagged object block has the same slots.
+2. **recursion + mutability is ALREADY refused, deliberately, and that refusal is the real
+   wall.** `//@@mutable interface Neg { operand: Expr }` is `NT1030` —
+   *"'@@mutable record Neg' is RECURSIVE — it contains itself, and it can be mutated in place"*.
+   The reason is recorded at `recursiveMutableError` and it is not a memory bug: in-place
+   mutation of a self-containing value can close a **cycle**, and every walk here assumes a
+   tree — `console.log` unfolds to util.inspect's depth limit where node prints
+   `[Circular *1]`, and `structuredClone` (which the checker uses to specialize generics) and
+   the actor deep-copy have no seen-set. An AST walker writing `e.object = …` is exactly the
+   cycle-closing operation.
+
+**SOUNDNESS of mutation through a borrow, stated plainly, because it is better than it looks.**
+The question is not "what stops a double free" — nothing had to. Probed by disabling
+`checkOwnedReceiver` and running the program:
+
+```ts
+//@@mutable type Cell = { n: number; tag: string };
+function tick(c: Cell): number { c.n = c.n + 1; return c.n; }
+function retag(c: Cell): void { c.tag = "seen-" + c.tag; }
+const a: Cell = { n: 1, tag: "a" };  tick(a); tick(a); retag(a);   //  3/seen-a  == bun,  exit 0
+```
+
+`__objLive() === 0`. And the storing case — a value the CALLEE owns written into the CALLER's
+block, which is the exact use-after-free `.push` once had — is **already handled**: `b.items =
+local` MOVES `local`, so a later read of it is `NT1601`. With the read removed, the program is
+correct and its live counts (`__objLive() 0`, `__arrLive() 2`) are **byte-identical to the
+control that does the same write through an OWNED receiver** — i.e. the pre-existing shallow-drop
+leak and nothing more.
+
+So the three obligations are:
+
+- **a borrow never frees** — the callee does not drop a parameter, so the caller still frees
+  exactly once. No double free, no use-after-free.
+- **the assigned VALUE is consumed** — already true (`FieldAssign` moves its value), and it is
+  the rule `.push` needed for the same reason.
+- **the OVERWRITTEN value is leaked, not freed** — already true, and required: dropping it would
+  free something an alias may hold.
+
+What is lost is **exclusivity**, and it was never claimed: `docs/decorators.md` Decision 3 says
+every alias observes the mutation, and "What this proves, and what it does not" already
+disclaims `&mut`. The only thing lost that is not already disclaimed is *"mutation has one entry
+point"* — a reasoning guarantee, not a memory one. **What is NOT sound is the cycle**, and that
+is a separate rule, not a consequence of the borrow.
+
+**RECOMMENDATION (not implemented — this is a language decision):** three pieces, in order,
+none of which is the parameter annotation.
+
+1. **Relax `discriminatedUnion`'s `classTag(a) === undefined`** so a tagged member can be a union
+   member. One clause; probed green.
+2. **Split `@@mutable`-on-a-recursive-record into "may assign a NON-recursive field".** Today the
+   whole declaration is refused. Assigning `e.ty`, `s.returnTy`, `last.names` cannot close a
+   cycle; assigning `e.object` can. Keeping the recursive slots refused preserves the tree
+   invariant `console.log`/`structuredClone`/actor-copy depend on, with no runtime change. Cost:
+   at most 15 of the 145 sites stay refused — and `ast.ts`'s 45 recursive-slot writes, which this
+   lane already converted to reconstruction, which is the sound way to rewrite a child slot.
+3. **Drop the parameter/for-of arm of `NT1607` for a `@@mutable` RECORD** — i.e. make the opt-in
+   travel with the (nominal) type, which is where it already lives, rather than requiring a
+   second opt-in at each of the 41 distinct (function × receiver) sites that would need one.
+   The calling convention stays visible at the call site in the sense the inference objection
+   demanded: it is a property of the SIGNATURE's type, not of the body.
+
+Option (b) everywhere was costed and rejected as the general answer: it would turn 93 borrow
+sites into return-and-rebind across four modules' pass signatures, and it allocates and leaks a
+node per node on every pass. It is right *where the slot is recursive* — which is `ast.ts` — and
+wrong as a blanket rule.
+
+**A HIDDEN TERM CONFIRMED, and it is its own lane.** A property read through a recursive-union
+FIELD is refused: with `operand: Expr`, `e.operand.kind` is
+`NT2001 Property 'kind' does not exist on @Expr`. Passing `e.operand` to a function and
+narrowing THERE works, and so does `{ ...e, kind: "Neg", operand: retype(e.operand) }` — so the
+walkers are not blocked by it, but `staticExpr`'s `e.object.kind === "Identifier"` is, and so
+is most of `checker.ts`. Nothing here works around it.
+
+**Probed one deeper, so the next lane knows the size.** Neutering each blocker in turn in a
+scratch tree, `ast.ts`'s chain behind `setBlockDrops` is: `last.names = names` (`NT1606`) →
+`list.push(…)` on a PARAMETER (`NT1606`; the accumulator opt-in is on a `let`/`const` binding and
+cannot reach one) → `new Map(p.recTypes ?? [])` (`NT1014`, the tuple-entries form — a genuine
+feature gap, and the first link in this chain that is not about mutation at all).
+
 ---
 
 ## Milestones

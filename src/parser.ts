@@ -854,7 +854,7 @@ class Parser {
 
   parseProgram(): Program {
     this.hoistTypeDecls();
-    const body: Stmt[] = [];
+    let body: Stmt[] = [];
     while (this.peek().type !== "eof") body.push(this.parseStatement());
     this.checkFloatingAsyncCalls(body);
     this.checkAsyncEscapes();
@@ -874,7 +874,7 @@ class Parser {
         const cls = f.slice(0, f.indexOf("."));
         if (bound.has(cls)) throw nyi(NYI.CLASS_FEATURE, `a binding shadows class '${cls}', which has static fields (\`${f}\`); rename it`);
       }
-      resolveStaticFieldReads(body, this.staticFieldNames, (n) => {
+      body = resolveStaticFieldReads(body, this.staticFieldNames, (n) => {
         throw mutationError(`assignment to the static field '${n}'`,
           "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead");
       });
@@ -2479,9 +2479,9 @@ class Parser {
     if (selfRecursive) this.recTypes.set(name, objTy);
     this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
-    const emitted: FuncDecl[] = [];
+    let emitted: FuncDecl[] = [];
     /** `const __dec_C_m = w(…)` statements — the ONE-TIME decorator applications. */
-    const decorators: Stmt[] = [];
+    let decorators: Stmt[] = [];
     // Constructor → `C.constructor(this, …ctorParams): void` (caller allocates `this`).
     const ctor = {
       kind: "FuncDecl", name: `${name}.constructor`,
@@ -2526,8 +2526,8 @@ class Parser {
     }
     // Substitute the self MARKER for the real instance type, everywhere it reached.
     const unself = (t: Ty): Ty => (t.includes(selfMarker) ? (t.split(selfMarker).join(objTy) as Ty) : t);
-    mapTypesDeep(emitted, unself);
-    mapTypesDeep(decorators, unself);
+    emitted = mapTypesDeep(emitted, unself) as FuncDecl[];
+    decorators = mapTypesDeep(decorators, unself);
     this.hoistedFns.push(...emitted);
     // The decorator applications run WHERE THE CLASS WAS DECLARED (a module-level
     // `const`), so each wrapper is applied exactly ONCE — Python's `m = w(m)`, not a
@@ -2939,9 +2939,19 @@ class Parser {
         // parameter, so the marker must survive the blanket erasure here.
         const own = arrow.params.map((p) => p.annot);
         const ownRet = arrow.retAnnot;
-        mapTypesDeepExpr(arrow, eraseTypeParams);
-        arrow.params.forEach((p, i) => { if (own[i] !== undefined) p.annot = own[i]; });
-        if (ownRet !== undefined) arrow.retAnnot = ownRet;
+        // The rewrite RETURNS a new node (see src/ast.ts), so the erased arrow is rebound
+        // here and the two `own` positions are restored by REBUILDING the params rather
+        // than assigning into them — `p.annot = …` on a `forEach` parameter is a write
+        // through a borrow, which is exactly what this walker rewrite exists to remove.
+        const erased = mapTypesDeepExpr(arrow, eraseTypeParams);
+        if (erased.kind === "ArrowFunction") {
+          arrow = {
+            ...erased, kind: "ArrowFunction",
+            params: erased.params.map((p: Param, i: number): Param =>
+              (own[i] !== undefined ? { ...p, annot: own[i] } : p)),
+            retAnnot: ownRet !== undefined ? ownRet : erased.retAnnot,
+          };
+        } else arrow = erased;
       }
       return arrow;
     }
