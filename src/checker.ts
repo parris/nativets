@@ -75,6 +75,13 @@ export interface CheckedProgram {
 function arrayElementOk(el: Ty, allowDate: boolean): boolean {
   if (isNullableTy(el)) return arrayElementOk(baseTy(el), allowDate);
   return el === "number" || el === "string" || el === "boolean"
+    // A nominal back-edge (`@N`) is an element like any other: it NAMES an object or a
+    // union, both already here, and it occupies the identical slot — one pointer. The
+    // predicate is about the SLOT, not about what the checker can say later, and a read of
+    // `xs[0]` unfolds at `type()` like every other production of a value's type. Without
+    // this arm `interface Call { args: Expr[] }` — src/ast.ts's own shape, and there are 14
+    // more like it — was `NT1001 arrays of @Expr` at the `args: []` that builds one.
+    || isTypeRefTy(el)
     || isObjectTy(el) || isArrayTy(el) || isUnionTy(el) || (allowDate && isDateTy(el));
 }
 
@@ -711,8 +718,25 @@ class Checker {
     private recTypes: Map<string, Ty> = new Map(),
   ) {}
 
-  /** Unfold a nominal back-edge one level (`@N` -> its shape); identity on anything else. */
-  private unfold(t: Ty): Ty { return expandTypeRef(t, this.recTypes); }
+  /**
+   * Unfold a nominal back-edge one level (`@N` -> its shape); identity on anything else.
+   *
+   * WIDENED, because the table and an ANNOTATION are two spellings of one declaration and
+   * only the annotation's is what a value ever has. `recTypes` stores the `parseTypeInner`
+   * form, which KEEPS a string-literal field type (`unionDiscriminant` needs it to prove
+   * every member's tag sits at one slot); an annotation goes through `parseType`, which
+   * widens it. So `interface N { tag: "m"; n: number; next?: N }` declared
+   * `{tag:string,…,next:?U@N}` and unfolded `{tag:"m",…}`, and `const a: N = {tag:"m", n:1,
+   * next:{tag:"m", n:2}}` was refused with both sides printed IDENTICALLY — the widening is
+   * also what the message applies. Widening here makes the recursive field behave exactly as
+   * the same field spelled non-recursively already does.
+   *
+   * Safe for the union case by construction: `widenLiteralTys` does not descend into a
+   * `U<…>`, so a recursive union's members keep the literals its discriminant is read from.
+   * Layout is untouched either way — a literal-typed field and a `string` field are one slot
+   * holding one string pointer.
+   */
+  private unfold(t: Ty): Ty { return widenLiteralTys(expandTypeRef(t, this.recTypes)); }
 
   /**
    * Does class `tag` declare a `toJSON` METHOD? The parser desugars `class C { toJSON() {} }`
@@ -1731,7 +1755,12 @@ class Checker {
    * means. `checkStaticBounds` therefore still runs under `?.`, which is what keeps the
    * Stage 41 out-of-bounds rule independent of the `?.` rule.
    */
-  private indexResultTy(ot: Ty, e: Extract<Expr, { kind: "IndexExpr" }>, scope: Scope): Ty {
+  private indexResultTy(rawOt: Ty, e: Extract<Expr, { kind: "IndexExpr" }>, scope: Scope): Ty {
+    // The RECEIVER may be a folded back-edge even though `type()` unfolds an expression's
+    // own type: `?U@N` is a value type in its own right and `baseTy` of it is the bare `@N`,
+    // which the nullable arms below hand straight to here. One unfold, same argument as
+    // `type()`'s — the shape's own recursive positions stay folded.
+    const ot = this.unfold(rawOt);
     if (ot === "Dyn") { this.type(e.index, scope); return "Dyn"; } // dynamic element/field — runtime tag check
     if (isUnionTy(ot)) { // SH2: `u["kind"]` is the same read as `u.kind`
       if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
@@ -1753,7 +1782,10 @@ class Checker {
   }
 
   /** Resolve `.prop` on a NON-nullable base (object field, or string/array `.length`). */
-  private fieldOnBase(base: Ty, prop: string): Ty {
+  private fieldOnBase(rawBase: Ty, prop: string): Ty {
+    // Unfold for the reason `indexResultTy` above does: the `?.` arms reach here with
+    // `baseTy(ot)`, which strips the nullable and exposes a bare `@N`.
+    const base = this.unfold(rawBase);
     // SH2: only the DISCRIMINANT is readable on an un-narrowed union — it is the one
     // field guaranteed to exist, at the same slot, in every member. Everything else
     // needs a narrowing first; say so instead of guessing a member.
@@ -1889,7 +1921,12 @@ class Checker {
         const iter = this.asIterable(s.iterable, scope, "for-of");
         s.iterable = iter.expr;
         const it = iter.ty;
-        const el: Ty = it === "string" ? "string" : isArrayTy(it) ? elemTy(it) : isBytesTy(it) ? "number" : (() => { throw nyi(NYI.FOR_OF_NONSTRING, `for-of over ${it}`, undefined, exprLoc(s.iterable)); })();
+        // UNFOLD the element type. A loop binding is declared DIRECTLY from `elemTy`, not
+        // through `type()`, so `for (const a of call.args)` over an `@Expr[]` bound `a` at
+        // the bare back-edge — and a tag narrowing reads the BINDING's type through
+        // `restrictUnion`, which needs a real union, so `if (a.kind === "Num") a.value` was
+        // refused while the identical non-recursive loop narrowed fine.
+        const el: Ty = this.unfold(it === "string" ? "string" : isArrayTy(it) ? elemTy(it) : isBytesTy(it) ? "number" : (() => { throw nyi(NYI.FOR_OF_NONSTRING, `for-of over ${it}`, undefined, exprLoc(s.iterable)); })());
         s.elemTy = el;
         const inner = scope.child();
         inner.declare(s.name, el, false);
@@ -1969,7 +2006,36 @@ class Checker {
     }
   }
 
-  type(e: Expr, scope: Scope, hint?: Ty): Ty { const t = this.infer(e, scope, hint); e.ty = t; return t; }
+  /**
+   * The one place an expression's type is produced — and therefore the one place the
+   * nominal back-edge is UNFOLDED.
+   *
+   * ast.ts's `@Name` block states the invariant this enforces: "`@Name` appears only NESTED
+   * inside a shape (a field type, an element type). A value's own static type is always the
+   * expanded shape, so every pass that reasons about a value sees an ordinary object type.
+   * The reference is unfolded on demand — exactly when a field carrying one is read." The
+   * encoding shipped with that promise kept everywhere a shape is CONSUMED (`assignable`,
+   * `reshapable`, `retypeLiteral`, the deep walks) and nowhere it is PRODUCED, so
+   * `e.operand` — whose declared field type is `@Expr` — handed a bare `@Expr` to the next
+   * member access, which matched none of the structural predicates: `NT2001 Property 'kind'
+   * does not exist on @Expr`. That single gap was the first blocker for nine modules.
+   *
+   * WHY ONE LEVEL TERMINATES. `expandTypeRef` replaces a bare `@N` with `N`'s shape and is
+   * the identity on everything else — including a type that merely CONTAINS a reference. A
+   * shape's own recursive positions stay folded (the parser mints a back-edge exactly there),
+   * so the result is either concrete or another `@N` one access deeper. There is no fixpoint
+   * and no transitive expansion: each unfold is paid for by a real source-level access, and a
+   * program has finitely many. This is the same argument the doc comment already made; it is
+   * now also true of the code.
+   *
+   * WHY THE FUNNEL RATHER THAN THE MEMBER ACCESS. Unfolding only at a receiver would leave
+   * `const o = e.operand` bound at `@Expr`, and a tag narrowing declares a SHADOW BINDING
+   * whose type comes from `restrictUnion` — which needs a real union, not a reference. So the
+   * narrowing would not attach and `o.value` would be refused one line later. Unfolding where
+   * the type is produced makes the binding an ordinary union and every downstream pass
+   * (narrowing, drops, codegen's layout) keeps working unchanged.
+   */
+  type(e: Expr, scope: Scope, hint?: Ty): Ty { const t = this.unfold(this.infer(e, scope, hint)); e.ty = t; return t; }
 
   private infer(e: Expr, scope: Scope, hint?: Ty): Ty {
     switch (e.kind) {
@@ -2046,7 +2112,17 @@ class Checker {
         // place a union value is created, and the selection is syntactic (the tag the
         // programmer wrote) rather than structural — two members can be structurally
         // ambiguous, a tag never is.
-        const ctx = hint !== undefined && isUnionTy(hint) ? this.unionMemberForLiteral(e, hint) : hint;
+        // UNFOLD the context, for the reason `reshapable` and `retypeLiteral` already do:
+        // the context for a nested literal is `baseTy(fieldType(…))`, and for a recursive
+        // field that is the bare back-edge `@N` — which `isObjectTy` and `isUnionTy` both
+        // deny, so the inner literal was typed with NO context at all. With a string-literal
+        // discriminant that is a REFUSAL, not a widening: `interface N { tag: "m"; n: number;
+        // next?: N }` typed the inner `{tag:"m",…}` bottom-up, widening `tag` to `string`,
+        // and then `'a' declared {tag:string,…,next:?U@N} but initialized with …` — the
+        // message even prints both sides widened, so the two look identical. That is the
+        // shape of every AST node in src/ast.ts (`kind: "CallExpr"` + a recursive child).
+        const ctxHint = hint === undefined ? undefined : this.unfold(hint);
+        const ctx = ctxHint !== undefined && isUnionTy(ctxHint) ? this.unionMemberForLiteral(e, ctxHint) : ctxHint;
         const fields: { key: string; ty: Ty }[] = [];
         const put = (key: string, ty: Ty) => { const f = fields.find((f) => f.key === key); if (f) f.ty = ty; else fields.push({ key, ty }); };
         for (const p of e.properties) {
@@ -2064,7 +2140,7 @@ class Checker {
         const lit = objectType(fields);
         // The selected member wins as the literal's type, so codegen builds the member's
         // declared slot layout (and any optional field it omitted is still allocated).
-        if (hint !== undefined && isUnionTy(hint) && ctx !== undefined && isObjectTy(ctx) && this.assignable(ctx, lit)) return ctx;
+        if (ctxHint !== undefined && isUnionTy(ctxHint) && ctx !== undefined && isObjectTy(ctx) && this.assignable(ctx, lit)) return ctx;
         // Contextual TAGGING (`@@mutable` records). A record's values come from object
         // literals, and the tag is what makes its mutability nominal — so where the
         // context asks for a tagged record and the literal fits it, the literal IS one.

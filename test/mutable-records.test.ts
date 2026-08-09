@@ -533,11 +533,14 @@ console.log(a.n);
     expect(r?.message).toContain("'next' of '@@mutable Node' is a RECURSIVE field");
   });
 
-  test("an ARRAY of the recursive type never reaches the cycle rule — NT1001 is nearer", () => {
-    // The reachability scan DOES see through `[]` (`@Node[]` mentions `@Node`), but an
-    // array of a recursive type is refused by a NEARER, pre-existing gate: the heap value
-    // model has no representation for one. Pinned so that a later lane implementing
-    // `@Node[]` finds out here that the cycle rule now has to carry that shape.
+  test("an ARRAY of the recursive type IS the cycle rule now, and it names the array type", () => {
+    // This test used to assert `NT1001 arrays of @Node` and said so as a PIN: the
+    // reachability scan already saw through `[]` (`@Node[]` mentions `@Node`), but an array
+    // of a recursive type was refused by a nearer, unrelated gate — `arrayElementOk` had no
+    // `@N` arm — and it asked the lane that implemented `@Node[]` to come back here and
+    // check that the cycle rule carried the shape. It does: with the element arm added
+    // (a back-edge is one pointer slot like every other object element), the NEARER gate is
+    // gone and the refusal is the RIGHT one, naming `@Node[]` as the cycle-capable type.
     const r = rejectionOf(`
 //@@mutable
 interface Node { n: number; kids: Node[] }
@@ -545,8 +548,9 @@ const a: Node = { n: 1, kids: [] };
 a.kids = [];
 console.log(a.n);
 `);
-    expect(r?.code).toBe("NT1001");
-    expect(r?.message).toContain("@Node");
+    expect(r?.code).toBe("NT1030");
+    expect(r?.message).toContain("'kids' of '@@mutable Node' is a RECURSIVE field");
+    expect(r?.message).toContain("'@Node[]'"); // the ARRAY type, not the element
   });
 
   test("reachability is TRANSITIVE and MUTUAL — B never names A, but reaches it", () => {

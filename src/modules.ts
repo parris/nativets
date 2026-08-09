@@ -79,21 +79,49 @@ function isIdentPart(c: string): boolean {
  * identically, so the scan skips the whole run exactly as the engine's own restarts do.
  */
 /**
- * Rewrite the nominal back-edge `@from` to `@to` inside a recursive shape — the `@` twin of
+ * Rewrite every nominal back-edge `@Name` inside a recursive shape — the `@` twin of
  * `rewriteTags`, and needed for the same reason: a non-entry module's declarations are
- * alpha-renamed, so its shape's own self-reference has to follow. A maximal identifier run
- * after an `@` is the whole name, so there is no partial match to worry about.
+ * alpha-renamed, so the references have to follow. A maximal identifier run after an `@` is
+ * the whole name, so there is no partial match to worry about.
+ *
+ * A MAP, not a single from/to pair. This took its own name only, which is right for a
+ * SELF-recursive declaration and wrong for every mutual cycle: `Call.callee: Expr` and
+ * `Expr = Num | Call` are two entries of one SCC, so `Call`'s shape carries `@Expr` — a
+ * reference to a SIBLING, which the single-name form left unrenamed and therefore DANGLING
+ * in the merged table. src/ast.ts is a 46-declaration cycle imported by every other module,
+ * so this was the shape that mattered, and it did not fail loudly: `genInspect` unfolds a
+ * `@N` and re-enters itself, `expandTypeRef` returns an unknown name UNCHANGED, and JSC
+ * makes that tail call a loop — the compiler HUNG. See test/modules/rectypes.
+ *
+ * A name absent from the map is left alone: it is either an entry-module declaration (which
+ * keeps its own name) or a reference this module did not mint, and guessing at it is the one
+ * thing a nominal encoding must not do.
+ *
+ * QUOTED RUNS ARE SKIPPED. `@` is legal inside a string-literal TAG (`kind: "user@host"`) and
+ * inside a property KEY (`{ "x@y": 1 }`), both of which land verbatim in the encoding — the
+ * same trap `hasTypeRef` documents, and it matters more here than it did when this function
+ * only ever saw recursive SHAPES: it now runs over every Ty in a non-entry module, so a tag
+ * that merely spells one of that module's recursive names would otherwise be rewritten into a
+ * different string literal. A `"` is not escaped inside a Ty (`widenLiteralTys` assumes the
+ * same), so the next `"` closes the run.
  */
-function rewriteRefs(t: string, from: string, to: string): string {
-  if (from === to) return t;
+function rewriteRefs(t: string, renames: Map<string, string>): string {
+  if (renames.size === 0) return t;
   let out = "";
   let i = 0;
   while (i < t.length) {
+    if (t[i] === `"`) {
+      const close = t.indexOf(`"`, i + 1);
+      if (close < 0) { out += t.slice(i); break; }
+      out += t.slice(i, close + 1);
+      i = close + 1;
+      continue;
+    }
     if (t[i] !== "@" || i + 1 >= t.length || !isIdentStart(t[i + 1]!)) { out += t[i]; i++; continue; }
     let j = i + 1;
     while (j < t.length && isIdentPart(t[j]!)) j++;
-    const name = t.slice(i + 1, j);
-    out += name === from ? `@${to}` : t.slice(i, j);
+    const to = renames.get(t.slice(i + 1, j));
+    out += to === undefined ? t.slice(i, j) : `@${to}`;
     i = j;
   }
   return out;
@@ -118,12 +146,21 @@ function rewriteTags(t: string, tags: Map<string, string>): string {
   return out;
 }
 
-/** Rewrite class-instance tags inside a Ty (`Point{x:number}` → `_m1_Point{x:number}`). */
-function rewriteTy<T extends Ty | undefined>(t: T, tags: Map<string, string>): T {
-  if (t === undefined || tags.size === 0) return t;
+/**
+ * Rewrite class-instance tags AND nominal back-edges inside a Ty
+ * (`Point{x:number}` → `_m1_Point{x:number}`, `@Expr` → `@_m1_Expr`).
+ *
+ * Both halves are the same job — a NOMINAL name embedded in a structural encoding — and
+ * both must move when a module is alpha-renamed. Doing only the tags left every signature
+ * in a non-entry module carrying the module's own pre-rename `@N`, so an argument typed by
+ * the (correctly renamed) IMPORTED shape was refused against the callee's stale one:
+ * `expects …callee:@Expr…, got …callee:@_m0_Expr…`, two spellings of one type.
+ */
+function rewriteTy<T extends Ty | undefined>(t: T, tags: Map<string, string>, refs: Map<string, string>): T {
+  if (t === undefined || (tags.size === 0 && refs.size === 0)) return t;
   // A tag is an identifier immediately followed by `{`. Field names are followed by
   // `:`, so `{a:{b:number}}` never matches — only genuine class tags do.
-  return rewriteTags(t as string, tags) as T;
+  return rewriteRefs(rewriteTags(t as string, tags), refs) as T;
 }
 
 /**
@@ -132,7 +169,7 @@ function rewriteTy<T extends Ty | undefined>(t: T, tags: Map<string, string>): T
  * (declarations AND uses, at every depth) keeps the module's meaning identical.
  */
 class Renamer {
-  constructor(private names: Map<string, string>, private tags: Map<string, string>) {}
+  constructor(private names: Map<string, string>, private tags: Map<string, string>, private refs: Map<string, string> = new Map()) {}
 
   private n(name: string): string { return this.names.get(name) ?? name; }
   /** A class member lowers to the FuncDecl `C.m` — rename the `C` head only. */
@@ -141,7 +178,7 @@ class Renamer {
     if (i < 0) return this.n(name);
     return `${this.n(name.slice(0, i))}${name.slice(i)}`;
   }
-  private t<T extends Ty | undefined>(t: T): T { return rewriteTy(t, this.tags); }
+  private t<T extends Ty | undefined>(t: T): T { return rewriteTy(t, this.tags, this.refs); }
 
   program(p: Program): void { p.body.forEach((s) => this.stmt(s)); }
 
@@ -574,12 +611,17 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     if (!isEntry) for (const r of program.mutableRecords ?? []) tags.set(r, `${prefixBase}${i}_${r}`);
     for (const c of program.mutableClasses ?? []) mutableClasses.add(names.get(c) ?? c);
     for (const r of program.mutableRecords ?? []) mutableRecords.add(tags.get(r) ?? r);
+    // Every declaration of this module's cycle(s) is renamed FIRST, so a shape's references
+    // to its SIBLINGS are rewritten with the same map its own name is — a mutual cycle is
+    // one unit and renaming half of it leaves the other half dangling. The entry keeps its
+    // own names, so the map is empty there and `rewriteRefs` is the identity.
+    const refRenames = new Map<string, string>();
+    if (!isEntry) for (const e of program.recTypes ?? []) refRenames.set(e.name, `${prefixBase}${i}_${e.name}`);
     for (const e of program.recTypes ?? []) {
-      const to = isEntry ? e.name : `${prefixBase}${i}_${e.name}`;
-      recTypes.set(to, rewriteRefs(rewriteTags(e.ty, tags), e.name, to) as Ty);
+      recTypes.set(refRenames.get(e.name) ?? e.name, rewriteRefs(rewriteTags(e.ty, tags), refRenames) as Ty);
     }
     for (const h of program.hostImports ?? []) hostImports.add(h);
-    new Renamer(names, tags).program(program);
+    new Renamer(names, tags, refRenames).program(program);
 
     // 4. Publish this module's export table under the final names.
     const finalExports = new Map<string, string>();
@@ -598,7 +640,14 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
       // a promise-returning function to whoever imports it from HERE.
       if (dep.asyncExports.has(ref.imported)) asyncExports.add(exported);
     }
-    for (const [exported, ty] of program.exports?.types ?? []) finalTypes.set(exported, rewriteTy(ty, tags));
+    // The back-edges travel with the exported SHAPE too, and under the same map. The
+    // importing module gets this type verbatim through its `typeEnv`, so an unrenamed `@N`
+    // here is a reference that resolves — if at all — against the IMPORTER's names: exactly
+    // the "one module's nodes with the other's layout" hazard `recTypes` is renamed to
+    // prevent, arriving by the other door.
+    for (const [exported, ty] of program.exports?.types ?? []) {
+      finalTypes.set(exported, rewriteTy(ty, tags, refRenames));
+    }
 
     mods.set(path, { path, source, program, finalExports, finalTypes, asyncExports });
     body.push(...program.body);
