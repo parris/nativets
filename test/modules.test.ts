@@ -182,6 +182,55 @@ describe("modules (rejected with a diagnostic)", () => {
 });
 
 /*
+ * A cycle whose closing edge is `import type`.
+ *
+ * node and bun ERASE a type-only import, so at run time that graph is acyclic and both
+ * run it; tsc permits it outright. nativets refuses it anyway, and the reason is
+ * ORDERING, not evaluation: the linker seeds each module's type environment from the
+ * modules linked BEFORE it (src/modules.ts), so a type reachable only by going FORWARD
+ * in the order has nothing to resolve against.
+ *
+ * Dropping type-only edges from the DFS was measured, and it is NOT sound: the name is
+ * then simply never seeded, and an unresolved type falls through src/parser.ts's last
+ * resort (`SCALARS.has(id) ? id : "number"`) and becomes `number`, silently. So this
+ * stays a refusal — a documented divergence (docs/divergences.md) — and the diagnostic's
+ * job is to name the type-only edge, because THAT is the one declaration to move.
+ */
+describe("a type-only import cycle", () => {
+  const entry = join(DIR, "bad-type-cycle", "main.ts");
+  const diagFor = (file: string): { code: string; message: string; hint?: string } => {
+    let err: unknown;
+    try { sourceToIR(readFileSync(file, "utf8"), file); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(NTError);
+    return (err as NTError).diag;
+  };
+
+  test("node runs it — the edge really is erased", () => {
+    const oracle = runWithNodeFile(entry);
+    expect(oracle.stderr).toBe("");
+    expect(oracle.stdout).toBe("42\n");
+  });
+
+  test("we refuse it, naming the cycle IN ORDER and marking the `import type` edge", () => {
+    const diag = diagFor(entry);
+    expect(diag.code).toBe("NT1702");
+    const lines = diag.message.split("\n");
+    expect(lines[1]).toContain("bad-type-cycle/main.ts");
+    expect(lines[2]).toContain("bad-type-cycle/dep.ts");
+    expect(lines[3]).toContain("bad-type-cycle/main.ts");
+    expect(lines[3]).toContain("import type"); // the closing edge, marked
+    expect(diag.hint).toContain("import type");
+  });
+
+  test("a genuine VALUE cycle is unchanged — still refused, still not blamed on types", () => {
+    const diag = diagFor(join(DIR, "bad-cycle", "main.ts"));
+    expect(diag.code).toBe("NT1702");
+    expect(diag.message).not.toContain("import type");
+    expect(diag.hint).not.toContain("import type");
+  });
+});
+
+/*
  * Checking a module WITHOUT linking it first.
  *
  * `check()` on a bare `parse()` result sees `import { parse } from "./parser.ts"` as

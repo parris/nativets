@@ -318,7 +318,21 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // so the source change was the fix rather than a language feature. Behind it, NT1002 —
   // `op in FCMP` at codegen.ts:2078, the key-presence operator, 1300 lines deeper.
   "codegen.ts": { rung: 0, code: "NT1002", blame: "self" },
-  "coverage.ts": { rung: 0, code: "NT1702", blame: "coverage.ts" },
+  // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
+  // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
+  // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
+  // exist at run time and nothing had ever noticed it; it only became visible when the
+  // recursive-type work stopped ast.ts's NT1030 from firing first.
+  //
+  // The fix is one moved declaration — `Blocker` now lives in the LEAF that produces it —
+  // and NOT a linker change: dropping type-only edges from the DFS was measured, and it
+  // leaves the type unseeded, whereupon parser.ts erases it to `number` silently. See
+  // docs/divergences.md and the `bad-type-cycle` case in test/modules.test.ts.
+  //
+  // Both rows moved to their real blockers, and the blame column is the interesting part:
+  // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
+  // below; coverage-preprocess.ts finally has one of its OWN.
+  "coverage.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -337,7 +351,9 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   "modules.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
-  "coverage-preprocess.ts": { rung: 0, code: "NT1702", blame: "coverage-preprocess.ts" },
+  // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
+  // sat on for two rounds. Its own, not inherited: this module is now a true leaf.
+  "coverage-preprocess.ts": { rung: 0, code: "NT1031", blame: "self" },
 };
 
 /*
