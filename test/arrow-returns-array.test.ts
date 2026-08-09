@@ -287,7 +287,13 @@ console.log(g().length);
     expect(main.match(/call void @nt_arr_free/g)?.length ?? 0).toBe(1);
   });
 
-  test("an array-returning arrow leaks its env exactly like a number-returning one", async () => {
+  // Was "…LEAKS its env exactly like a number-returning one" (1 each): the wild free's
+  // fix removed closures from the drop set entirely, so every bound arrow leaked its env.
+  // `test/closure-env-drops.test.ts` put them back — as OBJECTS (`nt_obj_free`), and only
+  // where the binding is provably owned, which both of these are (`f` is only ever
+  // called). The claim this test makes is unchanged: the two shapes behave IDENTICALLY,
+  // an array return being nothing special. Only the shared number moved, 1 → 0.
+  test("an array-returning arrow drops its env exactly like a number-returning one", async () => {
     const withArray = await compileAndRun(`function main(): void {
   const f = (n: number) => [n, n + 1];
   console.log(f(1).length);
@@ -304,9 +310,9 @@ console.log(__objLive());
 `);
     expect(withArray.exitCode).toBe(0);
     expect(withNumber.exitCode).toBe(0);
-    // one leaked env block each — the same number, which is the claim being made.
+    // zero env blocks left each — the same number, which is the claim being made.
     expect(withArray.stdout.trim().split("\n").at(-1)).toBe(withNumber.stdout.trim().split("\n").at(-1));
-    expect(withArray.stdout.trim().split("\n").at(-1)).toBe("1");
+    expect(withArray.stdout.trim().split("\n").at(-1)).toBe("0");
   });
 
   test("the CAPTURED array is still freed, exactly once", async () => {

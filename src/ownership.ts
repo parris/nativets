@@ -24,7 +24,7 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
-import { isArrayTy, isObjectTy, isUnionTy, isTypeRefTy, setBlockDrops, classTag, mutableTags, RETAINS_RECEIVER } from "./ast.ts";
+import { isArrayTy, isObjectTy, isUnionTy, isTypeRefTy, isFuncTy, setBlockDrops, classTag, mutableTags, RETAINS_RECEIVER } from "./ast.ts";
 
 /** The linear (single-owner, move-checked + dropped) types: heap aggregates. A
  *  DISCRIMINATED UNION (SH2) is one of them: its value IS a member's object block, so
@@ -257,11 +257,23 @@ class Analyzer {
     const out: string[] = [];
     for (let i = this.scopes.length - 1; i >= 0; i--) out.push(...this.scopes[i]!.filter((n) => this.droppable(n, state)));
     out.push(...this.ownedTopLevel(state));
+    // A `return` jumps past every block's drop marker, so it frees the enclosing
+    // closure envs too. Never both: reaching the marker means not having returned.
+    for (let i = this.closureScopes.length - 1; i >= 0; i--) out.push(...this.closureScopes[i]!);
+    out.push(...this.topClosures);
     return out;
   }
 
   /** Stack of nested block scopes (their directly-declared linear locals). */
   private scopes: string[][] = [];
+
+  /** The same stack for provably-owned closure envs, plus this scope's own top-level
+   *  ones (`runScope` sets it, and returns the same list as the fall-through drops). */
+  private closureScopes: string[][] = [];
+  topClosures: string[] = [];
+  /** Names with more than one declaration in this scope tree — they share a frame slot,
+   *  so no closure env bound to one can be proved uniquely owned (`shadowedNames`). */
+  shadowed: Set<string> = new Set();
 
   private report(d: OwnDiag): void { if (this.collecting) this.diags.push(d); }
 
@@ -273,11 +285,17 @@ class Analyzer {
    *  `break`/`continue`/`throw` jump past the drop point: a leak, never a double free. */
   private scoped(list: Stmt[], state: State): void {
     const declared = declaredLinear(list, new Set(this.aliasOf.keys())).filter((n) => this.linear.has(n));
-    if (declared.length === 0) { this.seq(list, state); return; }
+    // Closure envs the block provably owns (see `nonEscapingClosures`). Purely
+    // syntactic, so unlike `declared` they need no move state and no `droppable` check —
+    // a name that could be moved anywhere is not a candidate in the first place.
+    const envs = nonEscapingClosures(list, this.shadowed);
+    if (declared.length === 0 && envs.length === 0) { this.seq(list, state); return; }
     this.scopes.push(declared);
+    this.closureScopes.push(envs);
     this.seq(list, state);
     this.scopes.pop();
-    setBlockDrops(list, declared.filter((n) => this.droppable(n, state)));
+    this.closureScopes.pop();
+    setBlockDrops(list, [...declared.filter((n) => this.droppable(n, state)), ...envs]);
   }
 
   /**
@@ -750,6 +768,139 @@ function declaredLinear(list: Stmt[], aliases: Set<string>): string[] {
   return out;
 }
 
+/* ============================================================
+ * CLOSURE ENVIRONMENTS — the drop set function types are NOT in.
+ *
+ * A bound arrow allocates a heap env (`nt_obj_new(1 + caps.length)`, codegen's
+ * ArrowFunction case): a bare slot block `[fn_ptr, cap0, …]` with no header. Nothing
+ * ever freed one, so every evaluated arrow leaked — once per ITERATION inside a loop.
+ *
+ * A function type is deliberately NOT linear (see `isLinearTy`): making it so once made
+ * `isArrayTy("()=>number[]")` answer true, and the scope freed closures with
+ * `nt_arr_free`, which reads the bare block as an `NtArray{len,cap,data,pv}` and frees
+ * two words past its end — a wild free, exit 255. Function types therefore stay out of
+ * the move/borrow machinery entirely, and closure envs get this separate, purely
+ * SYNTACTIC drop rule instead, whose whole job is to prove unique ownership without any
+ * of it. Codegen frees the name with `nt_obj_free` (never `nt_arr_free`), shallowly:
+ * capture slots alias values the enclosing scope still owns and still drops, so walking
+ * them would be the double free this rule exists to avoid.
+ *
+ * A binding qualifies when ALL of:
+ *   - it is declared DIRECTLY in this statement list, and its initializer is an ARROW
+ *     LITERAL — a fresh allocation this scope made, not one a call handed back;
+ *   - its type is a function type;
+ *   - every other mention of the name in the list is the CALLEE of a direct call
+ *     `f(…)`. Anything else — `return f`, `[f]`, `{ f }`, `g(f)`, `const h = f`,
+ *     `f = …`, a mention inside another arrow's body (which would copy the pointer into
+ *     a second env that may outlive this scope) — disqualifies it, and it keeps leaking.
+ *
+ * "Used only by calling it" is exactly the proof needed: the pointer is stored in one
+ * slot, nothing else can name it, and no path takes it out of the scope — so the scope's
+ * exit is the last place it is live. `makeCounter`'s returned closure is disqualified by
+ * `return f`, which is what keeps that sanctioned idiom working.
+ * ============================================================ */
+
+/** Property keys whose STRING values are never a binding mention — type encodings,
+ *  member/field/property names, and the drop lists this pass writes back into the AST
+ *  (`BlockDrops.names`, `ReturnStmt.drops`, `FuncDecl.endDrops`), which would otherwise
+ *  read as mentions of the very names they schedule. Everything NOT listed here
+ *  disqualifies on a match, so the omission of a key is the conservative direction. */
+const NOT_A_MENTION = new Set(["kind", "ty", "elemTy", "retTy", "key", "property", "field", "names", "drops", "endDrops"]);
+
+function isIdentNode(x: unknown): boolean {
+  return typeof x === "object" && x !== null && (x as { kind?: unknown }).kind === "Identifier";
+}
+
+/**
+ * Record every candidate name the subtree mentions in a position other than a direct
+ * call callee. Structural rather than kind-by-kind on purpose: an expression kind this
+ * pass forgot to enumerate would silently hide a mention, and a hidden mention is the
+ * one error direction that frees a live pointer. A key it does not recognize is a
+ * mention; only `NOT_A_MENTION` is exempt.
+ */
+function scanMentions(
+  node: unknown, key: string, cands: Set<string>, ownDecls: Set<object>, inArrow: boolean,
+  seen: Set<object>, out: Set<string>,
+): void {
+  if (typeof node === "string") { if (!NOT_A_MENTION.has(key) && cands.has(node)) out.add(node); return; }
+  if (node === null || typeof node !== "object") return;
+  const obj = node as Record<string, unknown>;
+  if (seen.has(obj)) return;
+  seen.add(obj);
+  if (Array.isArray(node)) { for (const el of node) scanMentions(el, key, cands, ownDecls, inArrow, seen, out); return; }
+  // An arrow BODY copies what it names into a second env that may outlive this scope,
+  // so inside one even a call callee is a mention.
+  const arrow = inArrow || obj["kind"] === "ArrowFunction";
+  const skipCallee = !arrow && obj["kind"] === "CallExpr" && isIdentNode(obj["callee"]);
+  const ownDecl = ownDecls.has(obj);
+  for (const k of Object.keys(obj)) {
+    if (skipCallee && k === "callee") continue;
+    if (ownDecl && k === "name") continue; // the candidate's own declarator, not a use
+    scanMentions(obj[k], k, cands, ownDecls, arrow, seen, out);
+  }
+}
+
+/** The candidate declarators directly in `list` (a `MultiStmt` is a scope-less group). */
+function closureDecls(list: Stmt[], out: Map<string, object>): void {
+  for (const s of list) {
+    if (s.kind === "VarDecl") {
+      for (const d of s.decls) {
+        if (d.init === undefined || d.init === null || d.init.kind !== "ArrowFunction") continue;
+        if (!isFuncTy(d.ty ?? "number")) continue;
+        // A name declared twice in one scope would be freed twice for one live slot.
+        if (out.has(d.name)) { out.set(d.name, {}); continue; } // an unreachable node ⇒ its `name` disqualifies it below
+        out.set(d.name, d as unknown as object);
+      }
+    } else if (s.kind === "MultiStmt") closureDecls(s.stmts, out);
+  }
+}
+
+/**
+ * Names DECLARED more than once anywhere in a scope tree — a shadowing inner block, a
+ * local shadowing a parameter, a same-named function. Codegen gives a name ONE frame
+ * slot per function (`addLocal` returns early if the name is already known), so two
+ * declarations of `f` share storage: the inner one overwrites the outer's env pointer
+ * and the inner block's drop would then free a pointer the outer name still reads.
+ * (That sharing is a pre-existing MISCOMPILE for shadowed closures — the outer `f` reads
+ * the inner arrow after the block — but a wrong answer must not be upgraded into a
+ * use-after-free, so every shadowed name is disqualified here.)
+ *
+ * A DECLARING occurrence is any node carrying a `name` string that is not an
+ * `Identifier` (declarators have no `kind` at all; params, `for-of` bindings and
+ * `FuncDecl`s carry their own). Over-counting only costs a leak.
+ */
+function shadowedNames(node: unknown, seeded: string[]): Set<string> {
+  const count = new Map<string, number>();
+  for (const p of seeded) count.set(p, (count.get(p) ?? 0) + 1);
+  const seen = new Set<object>();
+  const walk = (n: unknown): void => {
+    if (n === null || typeof n !== "object") return;
+    const obj = n as Record<string, unknown>;
+    if (seen.has(obj)) return;
+    seen.add(obj);
+    if (Array.isArray(n)) { for (const el of n) walk(el); return; }
+    const nm = obj["name"];
+    if (typeof nm === "string" && obj["kind"] !== "Identifier") count.set(nm, (count.get(nm) ?? 0) + 1);
+    for (const k of Object.keys(obj)) walk(obj[k]);
+  };
+  walk(node);
+  const out = new Set<string>();
+  for (const [n, c] of count) if (c > 1) out.add(n);
+  return out;
+}
+
+/** Closure-env bindings of `list` that are provably owned by it — its extra drop set.
+ *  `shadowed` names the bindings that share a frame slot with another declaration. */
+function nonEscapingClosures(list: Stmt[], shadowed: Set<string>): string[] {
+  const decls = new Map<string, object>();
+  closureDecls(list, decls);
+  if (decls.size === 0) return [];
+  const cands = new Set(decls.keys());
+  const escaped = new Set<string>();
+  scanMentions(list, "", cands, new Set(decls.values()), false, new Set(), escaped);
+  return [...cands].filter((n) => !escaped.has(n) && !shadowed.has(n));
+}
+
 /**
  * Every binding that NAMES a value someone else owns — an ALIAS, not a move. Recorded
  * as alias → owner. Aliases are excluded from the owned/droppable sets everywhere, so
@@ -921,12 +1072,21 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     // Pass 1 (discard): which names does a closure body mention? Those pointers may be
     // copied into a closure env that outlives the binding, so they are never freed on
     // reassignment. Diagnostics from this pass are dropped — pass 2 is the real one.
+    // Closure envs this scope's TOP level provably owns — the body is walked with
+    // `seq`, not `scoped`, so it has no block marker of its own and they ride along on
+    // the returned end-drop set (and on `ownedInScope`, for an early `return`).
+    const shadowed = shadowedNames(body, params.map((p) => p.name));
+    const topClosures = nonEscapingClosures(body, shadowed);
     const scan = new Analyzer(linear, topLevel, paramBorrows, new Set(), mutable, varTy, aliases, consuming);
+    scan.topClosures = topClosures;
+    scan.shadowed = shadowed;
     scan.seq(body, entry());
     const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames, mutable, varTy, aliases, consuming);
+    a.topClosures = topClosures;
+    a.shadowed = shadowed;
     const st = entry();
     a.seq(body, st);
-    const end = a.ownedTopLevel(st); // computed BEFORE marking: it can add to condDrops
+    const end = [...a.ownedTopLevel(st), ...topClosures]; // computed BEFORE marking: it can add to condDrops
     // Drop flags: a name that is dropped on a path where it MIGHT already have been
     // moved needs its move sites to null the slot, so the drop is a no-op there.
     for (const n of a.condDrops) for (const site of a.moveSites.get(n) ?? []) (site as { nullOnMove?: boolean }).nullOnMove = true;
