@@ -1146,6 +1146,96 @@ shows the key (`{ v: 2, next: undefined }`) where node, which never created it, 
 (`{ v: 2 }`). That one is not recursion-specific — `interface M { v: number; s?: string }` with
 `const m: M = { v: 1 }` reproduces it — and it is a consequence of the optional-class-field fix.
 
+### `NT1030` IS GONE — the SCC encodes, nine modules move, and NOT ONE reaches IR
+
+The four residuals above were a **union** problem, and they took one compiler change and one
+source change. `src/ast.ts` parses clean; `NT1030` is empty tree-wide for the first time.
+
+**1. UNION FLATTENING (compiler, 17 lines in `src/parser.ts`).** TypeScript flattens
+`A | (B | C)` to `A | B | C`; nativets refused it. A nested arm reached
+`arms.every(isObjectTy)` as a `U<…>` — not an object type — so the whole union was
+misreported as "general". `discriminatedUnion` now splices a nested union's MEMBERS into the
+outer member list. The second half: with **three or more** arms a `null`/`undefined` arm is
+still not a union member, it is the `?U`/`?N` encoding's tag, so it is hoisted out and the
+rest built as an ordinary union. `ForStmt.init: VarDecl | Expr | null` needs both.
+
+This **widens what is accepted without weakening the invariant**. The flattened result is an
+ordinary union: `unionDiscriminant` still has to prove the tag sits at the same slot index
+across every *spliced* member, which a nested union guarantees only among its own. Pinned:
+an outer arm that duplicates a nested tag, one that moves the tag to slot 1, and one that
+smuggles in a non-object member are all still `NT1009`; `A | B | null | undefined` is still
+refused, since `?U`/`?N` spells one nullish arm. The two-arm fast path is untouched.
+
+**2. `ArrowFunction.body` becomes TWO FOLDED FIELDS (source, 23 sites across 7 files).**
+`body: Expr | Stmt[]` is a union of a discriminated union and an ARRAY — an array has no tag
+slot. Three shapes were measured; **two of them are wrong in ways that are not obvious**, and
+both are recorded because the second cost a design round:
+
+| shape | verdict |
+|---|---|
+| `body: Expr \| Stmt[]` | no representation. `typeof` cannot separate an object union from an array. |
+| **boxed `G<@Expr\|@Stmt[]>`** | **rejected on MEMORY SAFETY, not expressiveness.** `isGeneralUnionTy` is missing from `isLinearTy` (`ownership.ts:36`) and from the drop selection, so a general union holding an array leaks **both the box and the array** — `__arrLive() === 200` and `__objLive() === 200` against `0` for the identical plain-array local, on unmodified `main`. A box would also not have avoided the source change: all 18 cast sites are guarded by a *separate boolean field*, which no representation can narrow on. |
+| `body: Expr \| Block` | **looks right, DEADLOCKS.** `Expr` selects over `ArrowFunction`, so while the component is being encoded `Expr` is still a bare `@Expr` with no shape — and a union member may not be a bare `@Name`. Flattening cannot help: there is nothing to flatten. Measured on a minimal repro *and* on real `ast.ts` (42 of 46 encoded, still stalled) before it was abandoned. |
+| **`body?: Expr` + `stmts?: Stmt[]`** | **this.** Two folded back-edges, `?U@Expr` and `?U@Stmt[]`, neither needing any shape. No union, no deadlock. `exprBody` stays the discriminator. |
+
+> **The general lesson, since this is the second time the SCC has punished it:** a union's
+> encodability is not a property of its written SHAPE, it is a property of the ORDER the
+> encoder reaches it in. `Expr | Block` and `Expr | Stmt[]` are equally impossible here for
+> completely different reasons, and no amount of staring at the type says which.
+
+**One of the 23 sites was SEMANTIC, and it would have shipped silently.**
+`checkDefiniteAssignment` walks the tree shape-blind and identifies a nested function body by
+asking whether the node's statement-list field is an array. After the rename it finds nothing
+inside a block arrow, runs no analysis, and **accepts** `const f = (): string => { let out:
+string; return out; }`, which must be `NT1600`. Seen RED before it was fixed. The guard is a
+lint (`test/contextual-arrow.test.ts`): no `.body as Stmt[]` may exist in `src/` at all —
+because `arrow.body as Expr` is unchanged *verbatim* by the rename and keeps typechecking, so
+a missed reader compiles fine and merely reads `undefined`. Verified by reverting one site and
+watching it red. (Scanned with `readFileSync`, never shell `grep` — the `grep` on this machine
+is shimmed and silently misses matches, which would make the lint pass by finding nothing.)
+
+**NECESSARY, NOT SUFFICIENT — the queue behind the SCC.** All nine modules moved; none reaches
+IR. `diagnostics.ts` holds rung 3, byte for byte.
+
+| module | was (linked) | now |
+|---|---|---|
+| `ast.ts` | `NT1030` SCC | **`NT1014`** — `new Map([[k, v], …])`, `DATE_GETTERS` (its own; behind it `NT2001` `Record`-literal, then `NT1606` `.push`) |
+| `checker.ts`, `ownership.ts`, `parser.ts`, `modules.ts` | `NT1030` | `NT1014` — ast.ts's, through the link |
+| `cli.ts`, `driver.ts` | `NT1030` | `NT1002` — `` `in` ``, codegen.ts's |
+| `coverage.ts`, `coverage-preprocess.ts` | `NT1030` | **`NT1702` import cycle** |
+| `codegen.ts`, `lexer.ts`, `diagnostics.ts` | — | unchanged (`NT1002`, `NT1606`, rung 3) |
+
+**The `NT1702` is the one to read twice, because it is a different KIND of blocker** — not a
+missing feature but a defect in the module graph, and it has never been visible before because
+ast.ts's refusal fired before the linker got far enough to trip over it. The cycle is
+`coverage.ts → coverage-preprocess.ts → coverage.ts`, and the edge that closes it is
+**type-only**: `coverage-preprocess.ts:34` is `import type { Blocker } from "./coverage.ts"`.
+node and bun erase that import entirely, so there is no cycle at runtime — but `visit` in
+`modules.ts` walks every import including type-only ones. Whether that is an over-refusal or a
+real constraint depends on whether the type-export seeding can be ordered without the edge;
+`spec.typeOnly` already exists at `modules.ts:495`, so the question is answerable. Either way
+the hint's own advice (move `Blocker` to a third module) fixes it in one declaration.
+
+`ast.ts` also joins the parse-clean list, taking it to **eleven of twelve** — and stays at
+rung 0, which is this document's oldest lesson restated: parsing clean has never once
+correlated with being closer to compiling.
+
+**A pre-existing gap this lane found, not fixed, and the sharpest of the three.** A recursive
+type with an array-of-itself field can be **declared but never constructed**:
+
+```ts
+interface N { kind: "N"; v: number; kids: N[] }
+const a: N = { kind: "N", v: 1, kids: [] };   // error[NT1001]: arrays of @N
+```
+
+`checker.ts`'s array element-type allowlist (~1722/1761) admits scalars, objects, arrays and
+unions but not `isTypeRefTy`, so `@N` falls through. It is a refusal rather than a miscompile,
+but it means the recursive types that just landed are write-only for the shape most real trees
+have — and `ast.ts` is full of `Expr[]`/`Stmt[]`. It will bite the moment anyone uses what
+landed. The third finding is smaller: an object **literal** cannot be passed to a
+`Shape | undefined` parameter (`NT2001`, the literal is not retyped against the nullable's
+union base so its tag widens to `string`); reproduces on a plain two-arm union on `main`.
+
 ### Re-measured after `in` — and "the last thing between codegen.ts and IR" was WRONG
 
 `in` is no longer refused. A LITERAL key over an object type with no optional field is
@@ -1175,7 +1265,9 @@ So `codegen.ts` does not reach IR, and clearing `in` was never going to make it.
 | Module | Before | After |
 |---|---|---|
 | `codegen.ts` standalone | `parse` / `NT1002` — `` `in` `` at 2095:16 | **`check` / `NT2001`** — `FCMP` at **636**, the `Record` refusal |
-| `codegen.ts` linked | `parse` / `NT1002` — the same | **`link` / `NT1030`** — `ast.ts`'s SCC: no blocker of its OWN |
+| `codegen.ts` linked | `parse` / `NT1002` — the same | **`check` / `NT1014`** — `ast.ts`'s `new Map([[k,v]])`: no blocker of its OWN |
+| `driver.ts` linked | `link` / `NT1002` — inherited from codegen.ts | **`check` / `NT1014`** — the same, now via `ast.ts` |
+| `cli.ts` linked, i.e. **stage-1** | `NT1002` | **`NT1702`** — an IMPORT CYCLE (`cli.ts` → `coverage.ts` → `coverage-preprocess.ts`) |
 | `diagnostics.ts` | rung 3 | **unchanged, byte for byte** |
 | every other module | — | **unchanged** |
 
@@ -1185,14 +1277,19 @@ unmodified `codegen.ts`**, today's compiler reports the identical `NT2001` at 63
 lane's own edits to that file (the object chain-temporary drop) are blocker-neutral, so the
 move belongs entirely to the `in` change — an unmasking, not a regression. Re-recorded.
 
-`codegen.ts` also **joined the parse-clean set, which is now ELEVEN of twelve**, without its
-rung moving at all. That is the sharpest example `test/sh6.test.ts` has yet had of its own
-standing point: parsing clean has never once correlated with being closer to compiling.
+`codegen.ts` also **joined the parse-clean set, which is now ALL TWELVE**, without its rung
+moving at all. Every module in the tree parses its own source; ONE produces IR. There is no
+stronger statement available of `test/sh6.test.ts`'s standing point — parsing clean has never
+once correlated with being closer to compiling.
 
 `NT1002` is now empty tree-wide in both whole-tree instruments — `op in FCMP` was its only
-site, and it stopped being a blocker rather than moving. With the SCC lane's `FmtPiece` tag
-landing alongside it, **`NT1030` now gates TEN of the twelve modules** and the tree-wide code
-set is down to two (`NT1030`, and `lexer.ts`'s own `NT1606` `.push`).
+site, and it stopped being a blocker rather than moving. Its three modules did not stall,
+they redistributed: `codegen.ts` and `driver.ts` onto `ast.ts`'s `NT1014`
+(`new Map([[k, v], …])`, the entries form), and **`cli.ts` — i.e. stage-1 itself — onto
+`NT1702`, an IMPORT CYCLE** between `coverage.ts` and `coverage-preprocess.ts`. That last one
+is worth stating plainly: with `in` cleared, the compiler's own entry point is gated on the
+SHAPE OF ITS MODULE GRAPH rather than on any missing construct. Three codes now gate the
+whole tree (`NT1014`, `NT1606`, `NT1702`).
 
 **Next for `codegen.ts`: `Record<K, V>` initialized with an object literal**, five tables in
 one file. It is a decision, not a gap — either the source moves to `new Map().set(…)` chains
@@ -1275,6 +1372,15 @@ static slots and a `Record`'s key set is by definition not statically known.
     own `Expr` needs either arena indices or a named-reference in the type encoding.
   - **NT1009 in `checker.ts` did NOT move**: its blocker is `Record<string, number | "var">`, a
     SCALAR union — the next piece of this milestone.
+  - **FLATTENING (done).** `A | (B | C)` splices the nested union's members into the outer
+    member list, and with three or more arms a single `null`/`undefined` arm hoists into the
+    existing `?U`/`?N` encoding. Both are what `src/ast.ts`'s `ForStmt.init: VarDecl | Expr |
+    null` needs, and neither adds a representation. `A | B | null | undefined` stays refused.
+    Tests: `test/unions/flatten-nested.ts` + two refusal-boundary tests in `test/unions.test.ts`.
+  - **The four residuals of ast.ts's SCC are CLOSED and `NT1030` is empty tree-wide** — see
+    "`NT1030` IS GONE" above, including the two candidate shapes for `ArrowFunction.body`
+    that were measured and rejected, and why the boxed `G<…>` was the wrong trade (it is
+    missing from `isLinearTy`, so it leaks both box and payload).
 - **SH3 — De-class (or minimal classes).** Refactor `Checker`/`ModuleGen`/`FnGen`/`Scope` from
   classes into closures + records (nativets closures already carry mutable state), or add minimal
   no-inheritance class support if the refactor proves too invasive. Decide with a spike on `Scope`

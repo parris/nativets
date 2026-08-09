@@ -227,7 +227,7 @@ class Renamer {
         a.params.forEach((p) => this.param(p));
         if (a.paramTys) a.paramTys = a.paramTys.map((t) => this.t(t)!);
         a.retTy = this.t(a.retTy);
-        if (a.exprBody) this.expr(a.body as Expr); else (a.body as Stmt[]).forEach((s) => this.stmt(s));
+        if (a.exprBody) this.expr(a.body as Expr); else (a.stmts as Stmt[]).forEach((s) => this.stmt(s));
         return;
       }
       default: return; // literals

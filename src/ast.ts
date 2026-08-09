@@ -944,11 +944,38 @@ export const OBJECT_PROTO_KEYS: string[] = [
   "__proto__", "toLocaleString",
 ];
 
-/** Arrow function. `captures` (filled by the checker) are free vars closed over. */
+/**
+ * Arrow function. `captures` (filled by the checker) are free vars closed over.
+ *
+ * THE BODY IS TWO FIELDS, NOT A UNION, and that is a self-hosting requirement rather
+ * than a style choice. This used to be `body: Expr | Stmt[]` — a union of a
+ * discriminated union and an ARRAY. An array has no tag slot, so nothing inside the
+ * value tells the arms apart, and it was one of the four residuals holding `ast.ts`'s
+ * 45-member recursive component hostage (`NT1009`, through `NT1030`).
+ *
+ * Three shapes were MEASURED, not argued (see docs/self-hosting.md):
+ *
+ *   body: Expr | Stmt[]   — no representation. `typeof` cannot separate an object union
+ *                           from an array, and the boxed `G<…>` alternative is not
+ *                           linear today, so it would leak both box and payload.
+ *   body: Expr | Block    — LOOKS right, DEADLOCKS. `Expr` selects over `ArrowFunction`,
+ *                           so while the component is being encoded `Expr` is still a
+ *                           bare `@Expr` with no shape, and a union member may not be a
+ *                           bare `@Name` (`unionDiscriminant` needs each member's SHAPE).
+ *                           Flattening cannot help: there is nothing to flatten.
+ *   body? + stmts?        — THIS. Two folded back-edges, `?U@Expr` and `?U@Stmt[]`,
+ *                           neither of which needs any shape. No union, no deadlock.
+ *
+ * `exprBody` remains the discriminator, and it says which field is populated: `true` ⇒
+ * `body`, `false` ⇒ `stmts`. Exactly one is ever set.
+ */
 export interface ArrowFunction {
   kind: "ArrowFunction";
   params: Param[];
-  body: Expr | Stmt[];
+  /** The expression body — set iff `exprBody`. */
+  body?: Expr;
+  /** The block body's statements — set iff NOT `exprBody`. */
+  stmts?: Stmt[];
   exprBody: boolean;
   ty?: Ty;
   paramTys?: Ty[]; // resolved param types (from annotations or context)

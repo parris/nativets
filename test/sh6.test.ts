@@ -235,7 +235,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // each other for NT1017; they now both blame `parser.ts`, whose `?.[]` they inherit
   // through the link. That is not a regression — they cleared their own blocker and the
   // link surfaced the deepest one they share.
-  "ast.ts": { rung: 0, code: "NT1030", blame: "self" },
+  "ast.ts": { rung: 0, code: "NT1014", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -282,7 +282,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // problem of its own for several rounds; clearing `?.[]` took its last self-blocker
   // away, and it now inherits ast.ts's forward type reference through the link. The blame
   // column flipping "self" -> "ast.ts" is the real news in this row.
-  "parser.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
+  "parser.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -309,7 +309,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // With it, checker.ts has NO BLOCKER OF ITS OWN for the first time ever — the blame
   // column flips "self" -> "ast.ts" and it lands on the mutually-recursive `Expr` SCC that
   // eight other modules already share. That flip is the news in this row, not the code.
-  "checker.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
+  "checker.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -319,13 +319,13 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `op in FCMP` at codegen.ts:2078, the key-presence operator, 1300 lines deeper.
   // ...and NT1002 is cleared: `in` is DECIDED at compile time for a literal key over a
   // static shape, so `op in FCMP` stopped being a blocker instead of moving. This module
-  // now has NO blocker of its OWN under the link — it joins the nine on ast.ts's NT1030.
+  // now has NO blocker of its OWN under the link — it inherits ast.ts's `new Map([[k,v]])`.
   // Its own STANDALONE blocker is `const FCMP: Record<string,string> = {…}` (NT2001), the
   // deliberate Record→Map refusal, ~1450 lines EARLIER than the `in` was — which is why
   // "`in` was the last thing between codegen.ts and IR" was wrong: the PARSE-stage refusal
-  // was masking a CHECK-stage one that had been sitting in front of it all along.
-  "codegen.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
-  "coverage.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
+  // was masking a CHECK-stage one that had been in front of it the whole time.
+  "codegen.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  "coverage.ts": { rung: 0, code: "NT1702", blame: "coverage.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -338,13 +338,17 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // ...and now NT1030, blaming ast.ts DIRECTLY rather than checker.ts — because checker.ts
   // stopped having a blocker of its own, so the nearest module that still does is ast.ts.
   // Six codes, never once its own.
-  "ownership.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
-  "driver.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
-  "cli.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
+  "ownership.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  // Both followed codegen.ts off NT1002 when `in` landed, and BOTH stopped blaming it:
+  // driver.ts onto ast.ts's `new Map([[k,v]])`, cli.ts onto coverage.ts. Two more rows for
+  // the attribution trap's collection — a module's recorded blame is a fact about the
+  // import graph's shallowest gap, never about the module.
+  "driver.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  "cli.ts": { rung: 0, code: "NT1702", blame: "coverage.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
-  "modules.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
-  "coverage-preprocess.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
+  "modules.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  "coverage-preprocess.ts": { rung: 0, code: "NT1702", blame: "coverage-preprocess.ts" },
 };
 
 /*
@@ -430,7 +434,7 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // Stage-1 (cli.ts, the whole compiler through its real entry point) left NT1017 when
 // `export async function` landed and now stops on parser.ts's `?.[]` at 1109:66 —
 // inherited through the link, not cli.ts's own code. Still rung 0.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1030" };
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1702" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -542,7 +546,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * CHECKER, after parse is over. A parse-clean module is not an unblocked module, so
    * attribution has to compare what the whole pipeline actually reports.
    */
-  test("parsing clean is not being unblocked — eleven parse, one compiles", async () => {
+  test("parsing clean is not being unblocked — ALL TWELVE parse, one compiles", async () => {
     const { parse } = await import("../src/parser.ts");
     const parseClean: string[] = [];
     for (const e of MODULES) {
@@ -552,16 +556,24 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // generic class methods did; `parser.ts` when optional element access `?.[]` did —
     // `?.[]` was the last construct in the parser's own source that the parser could not
     // read. The point of this test is unchanged and is the uncomfortable one — parsing
-    // clean has never ONCE correlated with being closer to compiling. ELEVEN of twelve
+    // clean has never ONCE correlated with being closer to compiling. TEN of twelve
     // modules parse their own source; ONE produces IR. `checker.ts` joined when the
     // `FmtPiece` union got a `kind` tag, and it is the sharpest illustration this test has
     // ever had: the largest module in the tree parses clean, blames no construct of its
-    // own, and is still at rung 0. `codegen.ts` joined when `in` stopped being refused in
-    // the PARSER — it gained a whole pipeline stage and its rung did not move, because a
-    // `Record` annotation the CHECKER refuses sits 1450 lines in front of it.
+    // own, and is still at rung 0.
+    // ELEVEN now, and the twelfth is `codegen.ts` — `ast.ts` joined when its 45-member
+    // recursive component finally encoded, which was the last module in the tree whose own
+    // TYPE DECLARATIONS the parser could not read. It sharpens the point rather than
+    // softening it: ast.ts went from "the single highest-leverage blocker on the board,
+    // holding nine modules" to parsing clean, and it is STILL at rung 0 — it now stops at
+    // `new Map([[k, v], …])`, one line further on.
+    // ...and TWELVE, i.e. ALL of them: `codegen.ts` joined when `in` stopped being refused
+    // in the PARSER. Every module in the tree now parses its own source and ONE produces
+    // IR. There is no stronger statement of this test's point available.
     expect(parseClean.sort()).toEqual([
-      "checker.ts", "cli.ts", "codegen.ts", "coverage-preprocess.ts", "coverage.ts",
-      "diagnostics.ts", "driver.ts", "lexer.ts", "modules.ts", "ownership.ts", "parser.ts",
+      "ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage-preprocess.ts",
+      "coverage.ts", "diagnostics.ts", "driver.ts", "lexer.ts", "modules.ts",
+      "ownership.ts", "parser.ts",
     ]);
     // ...and the point SURVIVES the first module getting off the floor, which is the
     // interesting part. `diagnostics.ts` reaching rung 3 did not come from parsing — it
@@ -664,10 +676,25 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // can fix. Same code, same rung, DIFFERENT construct: still NT1030, now for the
       // reason that actually gates self-hosting. Lifting it means a nominal, by-reference
       // form in `Ty` (docs/divergences.md), not a parser change.
+      //
+      // RE-MEASURED by the UNION lane, and the mutually-recursive cluster is GONE. It was
+      // 41/45 encoded and the four residuals were not recursion at all — they were unions
+      // (`ArrowFunction.body: Expr | Stmt[]`, `ForStmt.init: VarDecl | Expr | null`, and
+      // the two aliases selecting over them). Union FLATTENING plus splitting the arrow's
+      // body into two folded fields closed all four. Stage-1 is STILL rung 0 and the
+      // construct changed again — now codegen.ts's `op in FCMP`, the key-presence
+      // operator. Nine modules moved and not one of them reached IR, which is this file's
+      // recurring lesson stated a fourth time: the frontier is a CONJUNCTION, and clearing
+      // its largest term reveals the next one rather than finishing it.
+      //
+      // ...a FIFTH time, and this one is the sharpest yet. `in` is now decided at compile
+      // time and `op in FCMP` stopped being a blocker — and stage-1 did not move a rung.
+      // What it reveals is not another missing feature but an IMPORT CYCLE (NT1702)
+      // between `cli.ts` and `coverage.ts`, i.e. a shape of the compiler's own module
+      // graph rather than a construct in any one file.
       expect(`stage-1 rung ${m.rung}, ${m.code}`)
         .toBe(`stage-1 rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}`);
-      expect(m.error).toContain("recursive type");
-      expect(m.error).toContain("contains itself through 'Expr'");
+      expect(m.error).toContain("import cycle");
       return;
     }
 

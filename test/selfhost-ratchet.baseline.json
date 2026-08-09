@@ -1,33 +1,33 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "e515d53"
+    "rev": "e88f360"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "141e23d0b323fa6d",
+      "sha256": "377d30463c463876",
       "standalone": {
-        "stage": "parse",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       },
       "linked": {
-        "stage": "parse",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "checker.ts": {
-      "sha256": "d0b9d6e96de41390",
+      "sha256": "5aebe1f2330de97b",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
         "message": "[NT2001] 'NUMBER_CONSTS' declared Record<string,number> but initialized with {MAX_SAFE_INTEGER:number,MIN_SAFE_INTEGER:number,EPSILON:number,MAX_VALUE:number,MIN_VALUE:number,POSITIVE_INFINITY:number,…"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "cli.ts": {
@@ -39,21 +39,21 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "code": "NT1702",
+        "message": "[NT1702] import cycle:"
       }
     },
     "codegen.ts": {
-      "sha256": "c6e26650b47cad04",
+      "sha256": "52c566ba1531fcf4",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
         "message": "[NT2001] 'FCMP' declared Record<string,string> but initialized with {<:string,<=:string,>:string,>=:string,===:string,==:string,!==:string,!=:string}"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "coverage-preprocess.ts": {
@@ -65,12 +65,12 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "code": "NT1702",
+        "message": "[NT1702] import cycle:"
       }
     },
     "coverage.ts": {
-      "sha256": "0a25e1c846d44da5",
+      "sha256": "e868dc31875f5d6f",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -79,8 +79,8 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "code": "NT1702",
+        "message": "[NT1702] import cycle:"
       }
     },
     "diagnostics.ts": {
@@ -105,9 +105,9 @@
         "artifact": true
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "lexer.ts": {
@@ -124,42 +124,42 @@
       }
     },
     "modules.ts": {
-      "sha256": "81aa9db531ce274b",
+      "sha256": "8ad6d6b87ee5cb98",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
         "message": "[NT2001] Property 'kind' does not exist on number"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "ownership.ts": {
-      "sha256": "fc62a682288cb972",
+      "sha256": "83f7cc48a98c17bd",
       "standalone": {
         "stage": "check",
         "code": "NT1014",
         "message": "[NT1014] spread over a Map (node yields [key, value] pairs — use `for (const [k, v] of m)`, `m.keys()` or `m.values()`) is not supported yet"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "parser.ts": {
-      "sha256": "95ad04b69996aa29",
+      "sha256": "4b44a5a57827a10e",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
         "message": "[NT2001] 'BIN' declared Record<string,{prec:number,right:?Uboolean,logical:?Uboolean}> but initialized with {**:{prec:number,right:boolean},*:{prec:number},/:{prec:number},%:{prec:number},+:{prec:numb…"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1030",
-        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     }
   }

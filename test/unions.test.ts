@@ -361,6 +361,39 @@ describe("what a union may BE — refused, never guessed at", () => {
     expect(codeOf(`type Dir = "n" | "s" | "e" | "w";\nconst d: Dir = "n";\nconsole.log(d.length);\n`)).toBe(null);
   });
 
+  /*
+   * FLATTENING — `A | (B | C)` is `A | B | C`, so a nested `U<…>` arm contributes its
+   * MEMBERS. What matters here is that it widens what is ACCEPTED without weakening the
+   * invariant: `unionDiscriminant` still has to prove the tag sits at the same slot index
+   * across every SPLICED member, which a nested union guarantees only among its own.
+   * `test/unions/flatten-nested.ts` is the runtime half (node-differential).
+   */
+  test("flattening does not launder a union that would otherwise be refused", () => {
+    // The nested arm is fine on its own, and the OUTER arm collides with one of its tags.
+    const dupTag = `type Inner = { kind: "a"; x: number } | { kind: "b"; y: number };\n` +
+      `type T = { kind: "a"; z: number } | Inner;\nconst v: T = { kind: "b", y: 1 };\nconsole.log(v.kind);\n`;
+    expect(codeOf(dupTag)).toBe("NT1009");
+    // The nested arm's tag is at slot 0; the outer arm puts it at slot 1.
+    const moved = `type Inner = { kind: "a"; x: number } | { kind: "b"; y: number };\n` +
+      `type T = { n: number; kind: "c" } | Inner;\nconst v: T = { kind: "a", x: 1 };\nconsole.log(v.kind);\n`;
+    expect(codeOf(moved)).toBe("NT1009");
+    expect(messageOf(moved)).toContain("SAME position");
+    // A nested arm cannot smuggle a NON-object member in either.
+    expect(codeOf(`type Inner = { kind: "a" } | { kind: "b" };\ntype T = number | Inner;\nconst v: T = 1;\nconsole.log(v);\n`)).toBe("NT1009");
+  });
+
+  test("the nullish HOIST takes exactly one arm — `| null | undefined` is still refused", () => {
+    const two = `type A = { kind: "a"; x: number };\ntype B = { kind: "b"; y: number };\n`;
+    // one nullish arm among three: hoisted into the existing `?N` encoding
+    expect(codeOf(`${two}function f(v: A | B | null): number { return v === null ? 0 : 1; }\nconst n: A | B | null = null;\nconsole.log(f(n));\n`)).toBe(null);
+    // ...and `?U` for the undefined arm
+    expect(codeOf(`${two}function f(v: A | B | undefined): number { return v === undefined ? 0 : 1; }\nconst n: A | B | undefined = undefined;\nconsole.log(f(n));\n`)).toBe(null);
+    // BOTH nullish arms: `?U`/`?N` spells one, so this is refused rather than losing one
+    expect(codeOf(`${two}const v: A | B | null | undefined = null;\nconsole.log(v === null);\n`)).toBe("NT1009");
+    // a nullish arm does NOT rescue a union that has no discriminant of its own
+    expect(codeOf(`const v: { a: number } | { b: number } | null = null;\nconsole.log(v === null);\n`)).toBe("NT1009");
+  });
+
   test("constructing a union member: the tag must be a literal the union actually has", () => {
     expect(codeOf(`${SHAPES}const s: Shape = { kind: "hexagon", sides: 6 };\nconsole.log(s.kind);\n`)).toBe("NT2001");
     // a tag that is not a literal expression cannot select a member

@@ -346,12 +346,31 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // while it worked) and main's predated the two buckets this lane emptied. Each branch
     // could see what it had changed and not what the other had.
     //
-    // ...and NT1002 has since gone the same way, by the LANGUAGE this time: `in` is decided
-    // at compile time for a literal key over a static shape, so `op in FCMP` — the only
-    // site in the tree — stopped being a blocker rather than moving. codegen.ts falls onto
-    // ast.ts's NT1030 with the other nine. TWO codes now gate the whole tree.
+    // NT1030 IS NOW EMPTY — the SCC that nine modules shared is encoded. It took a
+    // compiler change (union FLATTENING: a nested `U<…>` arm contributes its members, and
+    // a single nullish arm hoists into `?U`/`?N`) plus one SOURCE change, `ArrowFunction`'s
+    // `body: Expr | Stmt[]` becoming `body?: Expr` + `stmts?: Stmt[]` — a union of a
+    // discriminated union and an ARRAY has no representation, and the obvious repair
+    // (`body: Expr | Block`) DEADLOCKS, since `Expr` selects over `ArrowFunction` so it is
+    // still a shapeless `@Expr` while the component is being encoded.
+    //
+    // NECESSARY, NOT SUFFICIENT, and this is the ordinary shape of the ratchet rather
+    // than a disappointment: clearing NT1030 moved all nine modules and NONE of them
+    // reaches IR. They land on the queue it was masking. TWO buckets refill:
+    //   NT1014 — ast.ts's own `new Map([[k, v], …])` entries form (`DATE_GETTERS`), now
+    //            the linked blocker for checker/ownership/parser/modules as well.
+    //   NT1702 — an IMPORT CYCLE, on coverage.ts and coverage-preprocess.ts. Worth
+    //            calling out separately: it is a different KIND of blocker from every
+    //            other entry here — not a missing feature but a defect in the module
+    //            graph — and it has never been visible before, because ast.ts's refusal
+    //            fired before the linker ever got far enough to trip over it.
+    // ...and NT1002 has since LEFT it, by the LANGUAGE rather than by a source change:
+    // `in` is decided at compile time for a literal key over a static shape, so `op in
+    // FCMP` — the only site in the tree — stopped being a blocker instead of moving. Its
+    // three modules redistribute onto NT1014 (codegen.ts, driver.ts, through ast.ts) and
+    // NT1702 (cli.ts, through coverage.ts). Three codes gate the whole tree.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1030", "NT1606"],
+      ["NT1014", "NT1606", "NT1702"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -406,7 +425,29 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `new Set([...])` for REGEX_AFTER_KEYWORD; `new Set(iterable)` compiles now, so the
     // module walks on to what sat behind it — NT2001, an object literal where a Map is
     // annotated. coverage-preprocess.ts left the same bucket and stops on NT1606.
-    expect(byCode["NT1014"]).toBeUndefined();
+    //
+    // AND IT IS BACK — with a DIFFERENT construct and five modules, which is precisely the
+    // reason the paragraph below this one says to assert MEMBERSHIP and not emptiness.
+    // That advice was written for NT1027 and then not applied here; this is the third
+    // bucket to refute "empty is an invariant". The construct is now the `new Map([[k, v],
+    // …])` ENTRIES form (`ast.ts`'s `DATE_GETTERS`) — a different feature from the
+    // `new Set([...])` that used to fill it, and NOT a regression: it was masked behind
+    // ast.ts's NT1030 until the recursive component was encoded, and four more modules see
+    // it only through the link to ast.ts. So: name the construct, count the modules.
+    // ...and SEVEN, as `codegen.ts` and `driver.ts` arrived from the emptied NT1002 bucket.
+    // Still ONE construct at ONE site in ast.ts; five of the seven only ever see it through
+    // the link. Name the construct, count the modules.
+    expect(byCode["NT1014"]).toEqual(["ast.ts", "parser.ts", "checker.ts", "codegen.ts", "ownership.ts", "driver.ts", "modules.ts"]);
+    // NT1702 — AN IMPORT CYCLE, and the one entry in this table that is not a missing
+    // feature. `coverage.ts` and `coverage-preprocess.ts` import each other (directly or
+    // through a third module), which the linker refuses by design; it never had a chance
+    // to say so while ast.ts's refusal fired first. A cycle is a defect in the module
+    // GRAPH, so it is fixed by moving a declaration, not by building anything.
+    // ...and `cli.ts` joined, which makes this the blocker STAGE-1 ITSELF now reports: it
+    // imports coverage.ts, and with NT1002 cleared the cycle is the first thing the link
+    // hits. The compiler's own entry point is gated on the shape of its module graph
+    // rather than on any missing construct.
+    expect(byCode["NT1702"]).toEqual(["coverage.ts", "cli.ts", "coverage-preprocess.ts"]);
     // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
     // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
     // working, not a regression — the phase table above is what must never go backwards.
@@ -500,13 +541,21 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // the `FmtPiece` tag took away the last blocker checker.ts owned. The tree has never
     // been this concentrated: resolve the 44-declaration mutual cycle and nine rows move
     // at once, which is `?.[]`'s old argument with three more modules behind it.
-    // ...and TEN, as `codegen.ts` joined when `in` stopped blocking it. Every module in
-    // the tree except `lexer.ts` (its own `.push`) and `diagnostics.ts` (rung 3) now waits
-    // on one construct in one file.
-    expect(byCode["NT1030"]!.sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage-preprocess.ts",
-       "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    //
+    // ...AND IT IS EMPTY. All nine moved at once, exactly as this paragraph predicted, and
+    // the leverage argument held. What it took was NOT more recursion work: the component
+    // was 41/45 encoded already, and the four residuals were a UNION problem. Union
+    // FLATTENING (a nested `U<…>` arm contributes its members; a single nullish arm hoists
+    // into `?U`/`?N`) plus ONE source change — `ArrowFunction.body: Expr | Stmt[]` becoming
+    // `body?: Expr` + `stmts?: Stmt[]`, because a union of a discriminated union and an
+    // ARRAY has no representation and the obvious repair `Expr | Block` deadlocks.
+    //
+    // NONE of the nine reaches IR. They land on the queue NT1030 was masking — NT1014
+    // above (five modules), NT1002 `in` (cli.ts, driver.ts, through codegen.ts) and the
+    // NT1702 import cycle. That is the ratchet working, not a shortfall: this file's own
+    // standing note is that clearing a blocker UNMASKS what sat behind it, and the count
+    // going up is the instrument being honest.
+    expect(byCode["NT1030"]).toBeUndefined();
     // NT1015 is empty — the generic-method lane cleared modules.ts's, and codegen.ts's
     // static-member site was cleared earlier. (A fact about today; this file has been
     // wrong three times treating an emptied bucket as an invariant.)
@@ -518,9 +567,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // sometimes a call, which dotted-path narrowing and field linearity both assume it is
     // not) — but the whole-tree construct census found ONE getter and NO setters in
     // `src/*.ts`, so `FnGen`'s became the zero-argument method it already was. Behind it,
-    // NT1002: `op in FCMP` at codegen.ts:2078 — itself now cleared (`in` is decided from
-    // the static type), so this bucket is empty too and codegen.ts inherits ast.ts's NT1030.
+    // NT1002: `op in FCMP` at codegen.ts:2078.
     expect(byCode["NT1015"]).toBeUndefined();
+    // ...and it went from ONE module to THREE without codegen.ts moving: `cli.ts` and
+    // `driver.ts` import codegen.ts, and once ast.ts's NT1030 stopped firing first the
+    // link reached `op in FCMP` through it. Same single construct, same single site — a
+    // bucket's SIZE counts modules that can SEE a blocker, never how much of it there is.
+    // ...and the bucket is EMPTY: that single site is now compiled, not refused. Its three
+    // modules did not stall — they each fell through to the next blocker in their own
+    // import graph, which is the ratchet working and not a bucket disappearing.
     expect(byCode["NT1002"]).toBeUndefined();
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
     // the fresh-receiver lane) -> NT1006 (`Math.max(...)`, cleared by the variadic lane) ->
