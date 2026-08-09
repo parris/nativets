@@ -14,7 +14,7 @@ import {
   isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES,
   makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf,
-  resolveStaticFieldReads, collectBindingNames, typeRefTy,
+  resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -119,6 +119,39 @@ const RECURSIVE_TYPE_HINT =
   "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. " +
   "Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md";
 
+/**
+ * `@@mutable` + RECURSIVE — the one combination that can build a real CYCLE, refused.
+ *
+ * A recursive value is a TREE as long as nobody can write into it: linearity forbids a
+ * second owner, so `a.next = b; b.next = a` is NT1601 and `link(o: N) { this.next = o }` is
+ * NT1604. `@@mutable class N { next?: N; loop() { this.next = this } }` compiled and ran,
+ * and `this` is not a second owner — so the graph closes.
+ *
+ * MEASURED, and the measurement corrected the reason this was written down for. The
+ * predicted cost was a LEAK (drop is shallow, so a cycle is never freed). Against a control
+ * it is not: `__objLive()` is 1 after the identical class WITHOUT the cycle, so that leak is
+ * the pre-existing shallow-drop one and the cycle adds nothing. What a cycle actually costs
+ * is a SILENT WRONG ANSWER, which is worse — `console.log` prints
+ *   node:     <ref *1> N { v: 7, next: [Circular *1] }
+ *   nativets: N { v: 7, next: N { v: 7, next: N { v: 7, next: [N] } } }
+ * because `genInspect` unfolds the back-edge and stops on util.inspect's DEPTH limit, which
+ * is a cap on nesting and not a cycle detector. Every walk over a value assumes a tree.
+ */
+function recursiveMutableError(name: string, what: string): NTError {
+  return nyi(
+    NYI.FORWARD_TYPE,
+    `'@@mutable ${what} ${name}' is RECURSIVE — it contains itself, and it can be mutated in place`,
+    "in-place mutation of a self-containing value can close a CYCLE (`this.next = this`), and every walk over a " +
+    "value here assumes a tree: `console.log` unfolds until util.inspect's depth limit and prints nesting where " +
+    "node prints `[Circular *1]`, and the deep copies (structuredClone, an actor message) have no seen-set either. " +
+    "Drop the `@@mutable` and rebuild the value (`{ ...n, next: x }`), or make the recursive field non-recursive — " +
+    "see docs/divergences.md",
+  );
+}
+
+/** Truncate for a diagnostic: a type dump is unbounded and a hint has to stay readable. */
+function clip(s: string, n: number): string { return s.length <= n ? s : `${s.slice(0, n)}…`; }
+
 /** The shared refusal for `?.` in a write position — one message for all four spellings. */
 function optChainWriteError(what: string): never {
   throw parseError(
@@ -186,6 +219,31 @@ class Parser {
    * exists to end, so `resolveNamed` reports them as recursion instead.
    */
   private cyclicTypes = new Map<string, string>();
+  /**
+   * MUTUAL recursion. `declaringType` mints a back-edge for the ONE name being declared,
+   * which is all self-recursion needs. A cycle spanning several declarations needs every
+   * member of the strongly-connected component to be a back-edge at once — resolving
+   * `interface A { b?: B }` needs B's shape, which needs A's — so `hoistTypeDecls` proves
+   * the component first and then re-parses each member with this set populated.
+   *
+   * A name is in here only once the SCC round has produced a shape for it, so a `@Name`
+   * the table cannot resolve is never minted (see `resolveCycle`).
+   */
+  private cycleNames = new Set<string>();
+  /**
+   * Why the SCC round gave a component back, when it did — the members that never settled
+   * and the reason each one stalled.
+   *
+   * A component is ALL OR NOTHING (see `resolveCycle`), so one member nativets cannot
+   * represent takes the other forty-four down with it and every one of them is reported as
+   * plain recursion. That is true but useless: the recursion is solved, and the thing that
+   * actually blocks the file is the member's own refusal. This carries it into the HINT, so
+   * the real blocker is never masked by the refusal in front of it. Deliberately the hint
+   * and not the message: the message is what `test/selfhost-ratchet.baseline.json` records
+   * as a blocker's identity, and this changes no blocker.
+   */
+  private cycleStall = "";
+  private cycleStallSize: { total: number; left: number } | undefined;
   /** The type name `resolveNamed` last refused on. Read by `hoistTypeDecls` off a
    *  sub-parser to build the dependency edge it needs to tell a cycle from a chain. */
   private blockedOn: string | undefined;
@@ -389,8 +447,100 @@ class Parser {
         const b = blocker.get(name);
         if (b !== undefined && stuck.has(b)) this.cyclicTypes.set(name, b);
       }
+      this.resolveCycle([...this.cyclicTypes.keys()]);
       return;
     }
+  }
+
+  /**
+   * The sentence that stops a big component's ONE unrepresentable member from hiding behind
+   * forty-four recursion refusals. Empty (so the hint is byte-identical to before) unless
+   * the SCC round actually gave a component back.
+   */
+  private cycleStallHint(): string {
+    if (!this.cycleStall) return "";
+    const n = this.cycleStallSize;
+    const scale = n ? `${n.total - n.left} of the ${n.total} declarations in this cycle were encoded; ` : "";
+    return `. NOTE — the recursion itself is not what stopped this file: ${scale}` +
+      `what is left is not recursion but ${this.cycleStall}. ` +
+      `A cycle is encoded all-or-nothing (a back-edge is only minted where it resolves), so fixing that is what unblocks the rest`;
+  }
+
+  /**
+   * The SCC round — MUTUAL recursion (Lane C).
+   *
+   * `hoistTypeDecls` above has proved that `names` are stuck on each other: no ordering
+   * resolves them, because resolving any one of them needs another's shape. That is the
+   * same problem self-recursion has, one declaration wider, and it takes the same answer —
+   * the nominal `@Name` back-edge — applied to the whole component at once: re-parse every
+   * member with EVERY member's name resolving to a reference. Each member then has a finite
+   * shape whose recursive positions are `@Name`, and `recTypes` is the table that resolves
+   * them.
+   *
+   * Still a FIXPOINT, because the members are not independent even with back-edges
+   * available. A union member may not be a bare `@Name` — `unionDiscriminant` needs each
+   * member's SHAPE to find the tag — so `type Expr = TemplateLiteral | …` is expanded ONE
+   * LEVEL at the member boundary (see `discriminatedUnion`), which needs
+   * `interface TemplateLiteral` to have been resolved in an earlier round. Object members
+   * settle first, unions that select over them settle next.
+   *
+   * ALL OR NOTHING. If a round stalls with members left, the whole component is abandoned
+   * and every one of them keeps the NT1030 refusal it had — because a shape carrying a
+   * `@Name` the table cannot resolve is a dangling reference, and this file's rule is that
+   * a `@Name` is minted only where it resolves.
+   */
+  private resolveCycle(names: string[]): void {
+    if (!names.length) return;
+    for (const n of names) this.cycleNames.add(n);
+    const recBefore = new Map(this.recTypes); // restored wholesale if the round stalls
+    const resolved = new Map<string, Ty>();
+    let pending = names;
+    while (pending.length) {
+      const deferred: string[] = [];
+      const why = new Map<string, string>(); // residual member -> the error it stalled with
+      for (const name of pending) {
+        const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
+        sub.pos = this.typeDeclStarts.get(name)!;
+        sub.hoisting = true;
+        sub.cycleNames = this.cycleNames;
+        sub.recTypes = this.recTypes; // shared: an earlier round's shapes are what unions expand through
+        try {
+          sub.parseStatement();
+        } catch (e) {
+          deferred.push(name); // may only need a member that has not settled yet
+          why.set(name, String((e as { message?: string }).message ?? e).split("\n")[0]!);
+          continue;
+        }
+        const ty = sub.typeAliases.get(name);
+        if (ty === undefined) { deferred.push(name); continue; }
+        resolved.set(name, ty);
+      }
+      if (deferred.length === 0) break;
+      if (deferred.length === pending.length) {
+        // Stalled with members left: abandon the component whole (see the note above), and
+        // carry WHY out with it — `cycleStall` explains why this paragraph is not the end
+        // of the story for a big component.
+        // A SAMPLE, not the whole list. The residuals entangle — a union stalls because a
+        // member it selects over stalled — so every one of them restates the others, and
+        // ast.ts's four together run to 2 KB of type dump. Shortest reason first: it is the
+        // least entangled, and therefore the one worth reading.
+        const sample = [...deferred]
+          .sort((a, b) => (why.get(a) ?? "").length - (why.get(b) ?? "").length)
+          .slice(0, 2)
+          .map((n) => `'${n}': ${clip(why.get(n) ?? "no shape was produced", 160)}`);
+        this.cycleStall = sample.join("; ") + (deferred.length > sample.length ? ` (and ${deferred.length - sample.length} more that select over them)` : "");
+        this.cycleStallSize = { total: names.length, left: deferred.length };
+        for (const n of names) this.cycleNames.delete(n);
+        this.recTypes.clear();
+        for (const [n, s] of recBefore) this.recTypes.set(n, s);
+        return;
+      }
+      pending = deferred;
+    }
+    for (const [n, ty] of resolved) this.typeAliases.set(n, ty);
+    // These names are no longer an ordering failure, so the NT1030 the main parse would
+    // report for them is withdrawn.
+    for (const n of names) this.cyclicTypes.delete(n);
   }
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
@@ -427,6 +577,19 @@ class Parser {
       this.declaringTypeIsRecursive = true;
       return typeRefTy(id);
     }
+    // MUTUAL recursion: a member of a cycle, named from INSIDE a type declaration's body.
+    // Same back-edge, and it must come BEFORE the alias lookup for the same reason — a
+    // shape resolved in an earlier round is registered under the name, and unfolding it
+    // here would give one type two spellings.
+    //
+    // `declaringType !== undefined` is the invariant, not a convenience: a `@Name` may only
+    // appear NESTED inside a shape (src/ast.ts), so a value's own static type is always the
+    // expanded shape. Without the guard, `const a: A = …` annotated `@A` and every pass that
+    // reasons about a VALUE saw a reference instead of an object.
+    if (this.declaringType !== undefined && this.cycleNames.has(id)) {
+      this.declaringTypeIsRecursive = true;
+      return typeRefTy(id);
+    }
     const alias = this.typeAliases.get(id);
     if (alias) return alias;
     if (id === "Uint8Array" || id === "TextEncoder" || id === "TextDecoder") return id as Ty; // stdlib batch-2 bytes types
@@ -454,9 +617,8 @@ class Parser {
       // recursive type would be the same kind of misdirection this diagnostic exists to
       // end, so each carries its own hint rather than the catalog's shared one.
       // SELF-recursion never reaches here — it is the back-edge, handled at the top of this
-      // function. What is left is a MUTUAL cycle, still refused: resolving one member needs
-      // the others' shapes, which do not exist yet. That is Lane C, and until it lands the
-      // two cases must stay told apart.
+      // function. So does a MUTUAL cycle whose members `resolveCycle` could encode. What is
+      // left is a cycle the SCC round gave back, and `cycleStall` says why.
       const through = this.cyclicTypes.get(id);
       if (through !== undefined) {
         throw nyi(
@@ -464,7 +626,7 @@ class Parser {
           through === id
             ? `recursive type '${id}' — it refers to itself (declared at line ${declaredAt})`
             : `recursive type '${id}' — it contains itself through '${through}' (declared at line ${declaredAt})`,
-          RECURSIVE_TYPE_HINT,
+          RECURSIVE_TYPE_HINT + this.cycleStallHint(),
         );
       }
       // Not a cycle, so it is genuinely unresolved: either a declaration this file rejects
@@ -672,7 +834,21 @@ class Parser {
    * "you wrote a union of records but I cannot tell them apart" is a different and
    * far more actionable message than "general union".
    */
-  private discriminatedUnion(arms: Ty[]): Ty | null {
+  private discriminatedUnion(rawArms: Ty[]): Ty | null {
+    // THE UNION-MEMBER RULE (Lane C). A member may not be a bare `@Name`. There is no box
+    // (SH2): a union value IS the member's object block, and `unionDiscriminant` proves the
+    // tag sits at the SAME slot index in every member — which needs each member's SHAPE.
+    // So a reference is expanded ONE LEVEL at the member boundary and only references BELOW
+    // it are left folded:
+    //     U<{kind:"Negate",operand:@Expr}|…>     not   U<@Negate|…>
+    // The expansion is one level, not transitive, so it stays finite even when the member's
+    // own fields point back at this very union.
+    //
+    // MEASURED, not argued: `objectFields("@N")` returns `[]`, so `unionDiscriminant` on
+    // `U<@A|@B>` returns undefined and the union is REFUSED (NT1009) rather than silently
+    // built with a phantom tag. Getting this rule wrong costs a refusal, never a
+    // miscompile — see test/forward-type-ref.test.ts.
+    const arms = rawArms.map((a) => expandTypeRef(a, this.recTypes));
     if (!arms.every((a) => isObjectTy(a) && classTag(a) === undefined)) return null;
     const members = [...new Set(arms)];
     const shown = members.map(widenLiteralTys).join(" | ");
@@ -1037,7 +1213,11 @@ class Parser {
    */
   private recordTypeDecl(name: string, shape: Ty, recursive: boolean): Ty {
     if (!recursive) return shape;
-    if (!isObjectTy(shape)) {
+    if (this.mutableRecords.has(name)) throw recursiveMutableError(name, "record");
+    // A DISCRIMINATED UNION is also a legal carrier, and it is the one src/ast.ts's `Expr`
+    // needs. It qualifies for exactly the reason an object does: there is no box, so a
+    // `U<…>` value IS the member's object block and the reference has a pointer to be.
+    if (!isObjectTy(shape) && !isUnionTy(shape)) {
       throw nyi(
         NYI.FORWARD_TYPE,
         `recursive type '${name}' — it refers to itself, and its shape is not an object type (${shape})`,
@@ -1872,6 +2052,7 @@ class Parser {
       f.ty = f.ty.split(selfMarker).join(typeRefTy(name)) as Ty;
     }
     const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
+    if (selfRecursive && isMutable) throw recursiveMutableError(name, "class");
     if (selfRecursive) this.recTypes.set(name, objTy);
     this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
