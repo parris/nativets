@@ -318,4 +318,58 @@ describe("a fresh `new C(…)` receiver is dropped after a chain call", () => {
     expect(r.stdout).toBe("50\n"); // leaked, never freed twice
     expect(r.exitCode).toBe(0);
   });
+
+  /**
+   * BINDING a LINEAR field off a BORROWED receiver — the sibling of the two tests above,
+   * and the one that was a USE-AFTER-FREE rather than a leak.
+   *
+   * `const b = o.lines` was neither a move nor an alias: nothing recorded the binding, so
+   * it became an ordinary linear local and scope exit emitted `nt_arr_free(b)` on storage
+   * the caller's object still points at. The caller's very next read then printed an EMPTY
+   * LINE **at exit 0** — the silent-wrong-answer shape this project ranks worst — and the
+   * same program through a `@@mutable` class field SEGFAULTED (exit 139).
+   *
+   * `collectAliases` now records it as an ALIAS, which is what the model already said the
+   * answer was: the object owns the field, the binding only names it, so nobody frees it
+   * twice. Node is the oracle here, not `__objLive` — the bug was a WRONG ANSWER, and the
+   * assertion that catches it has to be the one node makes.
+   */
+  test("binding a field off a BORROWED receiver does not free it underneath the owner", async () => {
+    const source = `type Box = { lines: string[] };\n`
+      + `function probe(o: Box): string { const b = o.lines; return b.join("|"); }\n`
+      + `const o: Box = { lines: ["a", "b"] };\n`
+      + `console.log(probe(o));\n`
+      + `console.log(o.lines.join("|"));\n`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("a|b\na|b\n"); // we printed "a|b\n\n", exit 0
+  });
+
+  /** The same read off a `for-of` ELEMENT — the array owns it for the loop's extent.
+   *  This one used to SEGFAULT (exit 139) rather than print a wrong answer. */
+  test("binding a field off a for-of ELEMENT does not free it underneath the array", async () => {
+    const source = `type Tok = { parts: string[] };\n`
+      + `const toks: Tok[] = [{ parts: ["a", "b"] }];\n`
+      + `for (const t of toks) { const b = t.parts; console.log(b.join("|")); }\n`
+      + `console.log(toks[0]!.parts.join("|"));\n`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("a|b\na|b\n");
+  });
+
+  /** The same read through a `@@mutable` class field — this one used to SEGFAULT (139). */
+  test("binding a field off `this` does not free it underneath the receiver", async () => {
+    const source = `//@@mutable\nclass Emitter {\n  lines: string[] = ["a", "b"];\n`
+      + `  probe(): string { const b = this.lines; return b.join("|") + " / " + String(b.length); }\n}\n`
+      + `const e = new Emitter();\nconsole.log(e.probe());\nconsole.log(e.lines.join("|"));\n`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("a|b / 2\na|b\n");
+  });
 });

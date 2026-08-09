@@ -863,6 +863,7 @@ class Parser {
 
   parseProgram(): Program {
     this.hoistTypeDecls();
+    //@@mutable
     let body: Stmt[] = [];
     while (this.peek().type !== "eof") body.push(this.parseStatement());
     this.checkFloatingAsyncCalls(body);
@@ -1008,6 +1009,7 @@ class Parser {
   // Anything else is rejected with an NYI code (never miscompiled).
   private parseTypeInner(): Ty {
     if (this.at("|")) this.next(); // leading union bar: `type X = | A | B`
+    //@@mutable
     const arms: Ty[] = [this.parseTypeAtom()];
     let sawIntersect = false;
     while (this.at("|") || this.at("&")) { if (this.at("&")) sawIntersect = true; this.next(); arms.push(this.parseTypeAtom()); }
@@ -1332,6 +1334,7 @@ class Parser {
   // appears (annotations, `new X<..>()`, call-site `f<..>()`); the args are erased.
   private parseTypeArgs(): Ty[] {
     this.eat("<");
+    //@@mutable
     const tys: Ty[] = [];
     if (!this.at(">")) { do { tys.push(this.parseType()); } while (this.at(",") && (this.eat(","), true)); }
     this.eatTypeClose();
@@ -1354,6 +1357,7 @@ class Parser {
   // tuple type `[T, U, ...]` — modeled as an array of the first element type
   private parseTupleType(): Ty {
     this.eat("[");
+    //@@mutable
     const tys: Ty[] = [];
     if (!this.at("]")) { do { tys.push(this.parseType()); } while (this.at(",") && (this.eat(","), true)); }
     this.eat("]");
@@ -1376,6 +1380,7 @@ class Parser {
 
   private parseFuncType(): Ty {
     this.eat("(");
+    //@@mutable
     const params: Ty[] = [];
     if (!this.at(")")) {
       do {
@@ -1404,6 +1409,7 @@ class Parser {
   }
   private parseObjectType(): Ty {
     this.eat("{");
+    //@@mutable
     const fields: string[] = [];
     if (!this.at("}")) {
       do {
@@ -1429,6 +1435,7 @@ class Parser {
   // (`= X`) are erased: monomorphization specializes on the types that actually flow,
   // so a constraint adds no information the instantiation doesn't already carry.
   private parseTypeParamList(): string[] {
+    //@@mutable
     const names: string[] = [];
     this.eat("<");
     let depth = 1;
@@ -1534,6 +1541,7 @@ class Parser {
     // is set: a base naming the interface itself is not the `@Name` back-edge (an interface
     // cannot inherit from itself — there is no field to hold the pointer), so it stays an
     // ordinary unresolved-name failure and `hoistTypeDecls` reports it as recursion.
+    //@@mutable
     const bases: { ty: Ty; spelling: string }[] = [];
     if (this.at("extends")) {
       this.eat("extends");
@@ -1592,6 +1600,7 @@ class Parser {
    */
   private inheritFields(name: string, bases: { ty: Ty; spelling: string }[], own: Ty): Ty {
     if (bases.length === 0) return own;
+    //@@mutable
     const fields: { key: string; ty: Ty }[] = [];
     const put = (f: { key: string; ty: Ty }): void => {
       const i = fields.findIndex((g) => g.key === f.key);
@@ -1671,6 +1680,7 @@ class Parser {
    *  flagged: it binds no value, yet the linker still uses it to seed type aliases. */
   private parseNamedClause(): { name: string; alias: string; typeOnly: boolean }[] {
     this.eat("{");
+    //@@mutable
     const out: { name: string; alias: string; typeOnly: boolean }[] = [];
     while (!this.at("}")) {
       // inline type modifier: `import { type T, x }` / `export { type T }`
@@ -1764,6 +1774,7 @@ class Parser {
    *  strings; every value must be a string literal (the spec allows nothing else). */
   private parseImportAttributes(kw: Token): { key: string; value: string }[] {
     this.eat("{");
+    //@@mutable
     const out: { key: string; value: string }[] = [];
     while (!this.at("}")) {
       const key = this.expectKey();
@@ -1862,7 +1873,9 @@ class Parser {
    * can be decorated at statement level — anything else is NT1023 rather than ignored.
    */
   private parseDecorated(): Stmt {
+    //@@mutable
     const attrs: string[] = [];
+    //@@mutable
     const wrappers: string[] = [];
     while (this.at("@@") || this.at("@")) {
       const sig = this.next();
@@ -2020,6 +2033,7 @@ class Parser {
     const declKind = this.next().value as "let" | "const";
     if (this.at("{")) return this.parseObjectDestructure(declKind);
     if (this.at("[")) return this.parseArrayDestructure(declKind);
+    //@@mutable
     const decls: Declarator[] = [this.parseDeclarator()];
     while (this.at(",")) { this.eat(","); decls.push(this.parseDeclarator()); }
     return { kind: "VarDecl", declKind, decls };
@@ -2028,6 +2042,7 @@ class Parser {
   // `const { name, age: alias } = expr` → __d = expr; name = __d.name; alias = __d.age
   private parseObjectDestructure(declKind: "let" | "const"): VarDecl {
     this.eat("{");
+    //@@mutable
     const props: { key: string; binding: string }[] = [];
     if (!this.at("}")) {
       do {
@@ -2040,6 +2055,7 @@ class Parser {
     this.eat("}"); this.eat("=");
     const init = this.parseAssign();
     const tmp = this.freshTmp();
+    //@@mutable
     const decls: Declarator[] = [{ name: tmp, init }];
     for (const p of props) decls.push({ name: p.binding, init: { kind: "MemberExpr", object: this.ident(tmp), property: p.key } });
     return { kind: "VarDecl", declKind, decls };
@@ -2049,6 +2065,7 @@ class Parser {
   // Elision holes (a bare `,`) advance the positional index without binding.
   private parseArrayDestructure(declKind: "let" | "const"): VarDecl {
     this.eat("[");
+    //@@mutable
     const elems: { name: string | null; rest: boolean }[] = [];
     while (!this.at("]")) {
       if (this.at(",")) { elems.push({ name: null, rest: false }); this.eat(","); continue; } // hole
@@ -2081,6 +2098,7 @@ class Parser {
    */
   private parsePatternParam(): Param {
     const tmp = this.freshTmp();
+    //@@mutable
     const decls: Declarator[] = [];
     if (this.at("[")) {
       this.eat("[");
@@ -2143,6 +2161,7 @@ class Parser {
    *  `parseClass` desugars into a field + a `this.x = x` constructor initialization. */
   private parseParamList(ctor = false): Param[] {
     this.eat("(");
+    //@@mutable
     const params: Param[] = [];
     const promiseIdx = new Set<number>();
     const promiseNames = new Set<string>();
@@ -2774,6 +2793,7 @@ class Parser {
       if (this.at("in")) { this.eat("in"); const object = this.parseExpression(); this.eat(")"); return { kind: "ForInStmt", name, object, body: this.parseControlled() }; }
       let init: Expr | undefined; // `for (let i; …)` — absent, not synthesized (see ast.ts)
       if (this.at("=")) { this.eat("="); init = this.parseAssign(); }
+      //@@mutable
       const decls: Declarator[] = [{ name, annot, init }];
       while (this.at(",")) { this.eat(","); decls.push(this.parseDeclarator()); }
       this.eat(";");
@@ -2792,12 +2812,14 @@ class Parser {
     this.eat("switch"); this.eat("(");
     const discriminant = this.parseExpression();
     this.eat(")"); this.eat("{");
+    //@@mutable
     const cases: SwitchCase[] = [];
     while (!this.at("}")) {
       let test: Expr | null = null;
       if (this.at("case")) { this.eat("case"); test = this.parseExpression(); }
       else this.eat("default");
       this.eat(":");
+      //@@mutable
       const body: Stmt[] = [];
       while (!this.at("case") && !this.at("default") && !this.at("}")) body.push(this.parseStatement());
       cases.push({ test, body });
@@ -2842,6 +2864,7 @@ class Parser {
 
   private parseBlock(): Stmt[] {
     this.eat("{");
+    //@@mutable
     const body: Stmt[] = [];
     while (!this.at("}")) body.push(this.parseStatement());
     this.eat("}");
@@ -2857,6 +2880,7 @@ class Parser {
   private parseSequenceExpr(): Expr {
     const first = this.parseAssign();
     if (!this.at(",")) return first;
+    //@@mutable
     const exprs = [first];
     while (this.at(",")) { this.eat(","); exprs.push(this.parseAssign()); }
     return { kind: "SequenceExpr", exprs };
@@ -2926,6 +2950,7 @@ class Parser {
   }
 
   private parseArrow(): Expr {
+    //@@mutable
     const params: Param[] = [];
     const arrowPromiseIdx = new Set<number>();
     const arrowPromiseNames = new Set<string>();
@@ -3331,6 +3356,7 @@ class Parser {
         expr = { kind: "IndexExpr", object: expr, index, loc: { line: br.line, col: br.col, file: this.file } };
       } else if (this.at("(")) {
         const lp = this.eat("(");
+        //@@mutable
         const args: Expr[] = [];
         if (!this.at(")")) {
           do {
@@ -3444,6 +3470,7 @@ class Parser {
 
   private parseArrayLiteral(): Expr {
     this.eat("[");
+    //@@mutable
     const elements: Expr[] = [];
     if (!this.at("]")) {
       do {
@@ -3458,6 +3485,7 @@ class Parser {
 
   private parseObjectLiteral(): Expr {
     this.eat("{");
+    //@@mutable
     const properties: ObjectProperty[] = [];
     if (!this.at("}")) {
       do {
@@ -3473,6 +3501,7 @@ class Parser {
   }
 
   private buildTemplate(raw: string, tok: Token): Expr {
+    //@@mutable
     const quasis: string[] = [];
     const exprs: Expr[] = [];
     const nul = String.fromCharCode(0);
@@ -3549,6 +3578,7 @@ function skipQuoted(raw: string, i: number): [string, number] {
 /** Every `return <expr>` in a statement list, recursively. Expressions are not walked,
  *  so a nested arrow's own returns (a different function) are correctly ignored. */
 function valueReturns(list: Stmt[]): Expr[] {
+  //@@mutable
   const out: Expr[] = [];
   const walk = (stmts: Stmt[]): void => {
     for (const s of stmts) {

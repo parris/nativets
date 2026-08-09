@@ -177,6 +177,7 @@ export function sourceToIR(source: string, entryPath?: string): string {
     // Multi-span diagnostic (rustc-style): a use-after-move points at BOTH the use and the
     // earlier move; the single-line-location codes point at just their one line. The primary
     // caret is the offending use/move; the secondary "-" underline is the move that caused it.
+    //@@mutable
     const spans: DiagSpan[] = [
       { line: d.line, label: d.movedAt ? "value used here after move" : "occurs here", primary: true },
     ];
@@ -219,6 +220,7 @@ export function androidClang(): string {
  * `share/wasi-sysroot` (wasi-libc). Mirrors how `androidClang` hunts for the NDK.
  */
 function wasiSdkRoots(): string[] {
+  //@@mutable
   const roots: string[] = [];
   const env = process.env.WASI_SDK_PATH;
   if (env) roots.push(env);
@@ -242,6 +244,7 @@ function clangSupportsWasm(cc: string): boolean {
  * standalone Homebrew `wasi-libc` keg. Throws a clear BuildError when none is present.
  */
 export function wasiSysroot(): string {
+  //@@mutable
   const cands: string[] = [];
   for (const r of wasiSdkRoots()) cands.push(join(r, "share", "wasi-sysroot"));
   cands.push(
@@ -258,6 +261,7 @@ export function wasiSysroot(): string {
  * does not). Throws a clear BuildError when nothing can target wasm.
  */
 export function wasiClang(): string {
+  //@@mutable
   const cands: string[] = [];
   for (const r of wasiSdkRoots()) cands.push(join(r, "bin", "clang"));
   cands.push("/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang");
@@ -430,6 +434,7 @@ function writeIR(source: string, entryPath?: string): { dir: string; ll: string;
   writeFileSync(rt, runtimeSource); // embedded runtime → self-contained executable
   // B2 Map/Set: link the HAMT core + scalar-ABI wrappers only when used (codegen
   // emits nt_map_new/nt_set_new exactly then). libc-only, so it cross-links unchanged.
+  //@@mutable
   const extra: string[] = [];
   // Match the CALL site, not the (always-present) `declare` line — collections are
   // reached through the nt_coll_*/nt_map_*_slot/nt_set_*_slot wrappers.

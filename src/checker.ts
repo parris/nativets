@@ -839,7 +839,12 @@ class Checker {
    * that is NOT in `recTypes` is the case we cannot decide.
    */
   private nominalRefs(t: Ty): { folded: string[]; inline: string[] } {
-    const folded: string[] = [], inline: string[] = [];
+    // Split into two declarations, and each marked: `@@mutable` names ONE accumulator
+    // binding, so the comma form it used to be written in is NT1023 (applyVarAttrs).
+    //@@mutable
+    const folded: string[] = [];
+    //@@mutable
+    const inline: string[] = [];
     const s = String(t);
     for (let i = 0; i < s.length; i++) {
       if (s[i] === "@") {
@@ -867,6 +872,8 @@ class Checker {
    */
   private typeReaches(t: Ty, target: string): boolean {
     const seen = new Set<string>();
+    // NOT `//@@mutable`: the worklist is drained with `.pop`, and the opt-in legalizes
+    // `.push` ONLY — the mark would be dead weight, not a fix.
     const front: Ty[] = [t];
     while (front.length) {
       const { folded, inline } = this.nominalRefs(front.pop()!);
@@ -1052,6 +1059,7 @@ class Checker {
    * drops the fact: over-conservative, never wrong.
    */
   private factsFor(test: Expr, scope: Scope, positive: boolean, region: Stmt[], guards = true): NarrowFact[] {
+    //@@mutable
     const out: NarrowFact[] = [];
     if (guards) this.guardFacts(test, scope, positive, out);
     this.assertFacts(test, scope, out);
@@ -4430,6 +4438,7 @@ class Checker {
     const free = new Set<string>();
     if (arrow.exprBody) collectIdents(arrow.body as Expr, free);
     else for (const s of arrow.stmts as Stmt[]) { collectIdentsStmt(s, free); collectBlockLocals(s, locals); }
+    //@@mutable
     const caps: { name: string; ty: Ty }[] = [];
     for (const n of free) {
       if (params.has(n) || locals.has(n) || BUILTIN_NUMBERS.includes(n)) continue;
@@ -5607,6 +5616,11 @@ export function planConsoleFormat(args: Expr[]): FmtPlan | null {
 
 /** node's `formatWithOptionsInternal` scan, transcribed. `argc` counts the format string. */
 export function planFormatString(first: string, argc: number): FmtPlan | null {
+  // DELIBERATELY NOT `//@@mutable`, unlike every other accumulator in this file: the local
+  // `push` arrow below CAPTURES `pieces`, and an append through a capture is NT1607 (the
+  // env holds a second pointer this scope cannot null). Marking it would only trade the
+  // NT1606 for an NT1607 while making the checker-only instrument report this function as
+  // clean — docs/ROADMAP.md, the captured-accumulator item.
   const pieces: FmtPiece[] = [];
   const push = (text: string) => { if (text !== "") pieces.push({ kind: "text", text }); };
   let a = 0;
