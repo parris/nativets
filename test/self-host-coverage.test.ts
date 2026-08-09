@@ -132,7 +132,7 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     }
   });
 
-  test("NT1606 field mutation is DOWN to one: `delete o.k`, the one `@@mutable` refuses", () => {
+  test("NT1606 is ZERO tree-wide — the last `.push` accumulator left coverage-preprocess.ts", () => {
     // Before the mutable-records lane this was the #1 blocker at x8: `o.f = v` / `o.f++`
     // on a value the compiler treats as a plain record (objects are immutable since Stage
     // 29). Three of those were class-field mutations, cleared by putting `@@mutable` on
@@ -162,6 +162,20 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // in-place mutation of an owned named local, which is how the `.reverse` double free
     // happened. It simply no longer appears in the compiler's own source.
     //
+    // ZERO AGAIN, and for the first time by LEGALIZING the construct rather than by moving
+    // it or masking it. The capture-accumulator lane left coverage-preprocess.ts's three
+    // accumulators exactly where they were — `tokenize`'s `toks`, `emit`'s `parts` and
+    // `preprocessForCoverage`'s `statements` — and put `//@@mutable` on each. That opt-in
+    // is only available to them because `tokenize`'s `const push = (t) => { toks.push(t);
+    // st.prev = t; }` closure is gone: a CAPTURED accumulator stays NT1607, deliberately.
+    // The closure was inlined at its ten call sites, and the `prev: Tok` it maintained
+    // became the one BOOLEAN any caller ever wanted (`TokState.regexOk`) — a token cannot
+    // live in both the array and the record, because `.push` CONSUMES its argument (the
+    // second store is NT1601) and reading it back out of the array is NT1605.
+    //
+    // The historical note below is kept: this bucket has refilled four times, and the
+    // shape of the refill is the useful part of the record.
+    //
     // BACK TO ONE, and it is the SAME file and the SAME construct as the "went to TWO"
     // paragraph above — the third time this bucket has refilled from coverage-preprocess.ts
     // alone. Nothing was added to that module: the capture-write lane replaced its
@@ -176,9 +190,7 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // measured at 1036x under bun at real accumulator sizes (docs/self-hosting.md), and
     // `src/*.ts` has to keep RUNNING under bun — so rewriting a tokenizer's per-token
     // accumulator that way is an owner decision, not a lane's.
-    expect(nt1606).toEqual([
-      { file: "coverage-preprocess.ts", feature: "arrays are immutable: `.push` would mutate the array in place" },
-    ]);
+    expect(nt1606).toEqual([]);
   });
 
   test("the re-measured frontier: no single code dominates any more", () => {
@@ -311,19 +323,19 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // is NOT evidence a module is clean"), running in the other direction: a DIRTY row is
     // not evidence a module is blocked either.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1001", "NT1002", "NT1003", "NT1012", "NT1020", "NT1606"],
+      ["NT1001", "NT1002", "NT1003", "NT1012", "NT1020"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the
     // `async`/`await` pair in driver.ts and cli.ts — NT1023's two sites are gone), and
     // every other named code has exactly one site left in the whole tree.
     expect(Math.max(...hist.values())).toBe(2);
-    // NT1606 is BACK, at one site, and it is not a new construct: see the NT1031 -> NT1606
-    // note above. It is asserted by COUNT rather than by absence, because the number is the
-    // thing that would move if a `.push` were added to the compiler's own source, and this
-    // histogram is the only instrument here that counts the construct rather than the
-    // first blocker.
-    expect(hist.get("NT1606")).toBe(1);
+    // NT1606 IS GONE AGAIN, and this time the construct did not move — the three `.push`
+    // accumulators in coverage-preprocess.ts are the same source they were, they are just
+    // `//@@mutable` now and therefore legal. Asserted by absence here AND by the empty
+    // `nt1606` list above, because the two rows say different things: this one is the
+    // census, and it is the one that would move if a NON-accumulator `.push` were added.
+    expect(hist.get("NT1606")).toBeUndefined();
   });
 
   test("every src module reaches analysis (no file dies on the module preamble)", () => {
@@ -361,6 +373,67 @@ describe("SH0 preprocess: strips module/type surface, neutralizes lexer hazards"
     expect(joined).toContain("function f");
     // regex literal was neutralized (no stray backslash reaches the real lexer).
     expect(joined).not.toContain("/a");
+  });
+
+  /*
+   * REGEX-VS-DIVIDE, pinned by hand.
+   *
+   * `tokenize` decides whether a `/` opens a regex literal from the last SIGNIFICANT token
+   * it emitted. That used to be a `Tok` stored in the cursor record by a `push` closure;
+   * the closure had to go (a captured accumulator is NT1607) and the token with it (`.push`
+   * consumes its argument), so the state is now the single boolean `TokState.regexOk`.
+   *
+   * The rewrite is observationally null over all 495 `.ts` files in src/, test/ and
+   * examples/ — byte-for-byte on the full `Preprocessed` — but a null diff over a corpus
+   * proves nothing about states the corpus never reaches, and MOST of these are such
+   * states: mutating "regex allowed after a keyword", "…after a string/template/regex",
+   * "…after a 3-char operator" and "…at offset 0" all leave that 495-file diff EMPTY.
+   * These inputs are what makes those regions visible; each one below kills at least one
+   * such mutation. Expected values are the exact emitted statement text, so a change in
+   * either direction is a failure rather than a silent re-baseline.
+   */
+  const texts = (source: string) => preprocessForCoverage(source).statements.map((st) => st.text);
+
+  test("a `/` after a non-value opens a REGEX (neutralized to `\"\"`)", () => {
+    // after a keyword that yields no value
+    expect(texts("function f() { return /ab+c/gi.source; }")).toEqual([`function f ( ) { return "" . source ; }`]);
+    expect(texts("const t = typeof /x/;")).toEqual([`const t = typeof "" ;`]);
+    // after a 3-char operator (the `regexAllowed("punct", three)` site)
+    expect(texts("const b = a === /x/ ? 1 : 2;")).toEqual([`const b = a === "" ? 1 : 2 ;`]);
+    // at offset 0 — nothing has been emitted yet, so `regexOk` starts TRUE
+    expect(texts("/x/.test(s);")).toEqual([`"" . test ( s ) ;`]);
+    // after a pragma, the ATTRIBUTE NAME is the last significant token; `of` is one of the
+    // regex-prefix keywords, an ordinary name is not
+    expect(texts("//@@of\n/x/;")).toEqual([`@@ of "" ;`]);
+    expect(texts("//@@mutable\n/ 2;")).toEqual(["@@ mutable / 2 ;"]);
+  });
+
+  test("a `/` after a value is DIVISION, for every kind of value", () => {
+    expect(texts(`const x = "a" / 2 + "b" / 3;`)).toEqual([`const x = "a" / 2 + "b" / 3 ;`]);
+    expect(texts("const x = \`a\` / 2 + \`b\` / 3;")).toEqual(["const x = \`a\` / 2 + \`b\` / 3 ;"]);
+    expect(texts("const x = 1 / 2 + 3 / 4;")).toEqual(["const x = 1 / 2 + 3 / 4 ;"]);
+    expect(texts("const x = a / 2 + b / 3;")).toEqual(["const x = a / 2 + b / 3 ;"]);
+    expect(texts("const x = (a) / 2 + [b][0] / 3;")).toEqual(["const x = ( a ) / 2 + [ b ] [ 0 ] / 3 ;"]);
+    // ...including after a regex literal itself
+    expect(texts("const x = /a/ / 2 + /b/ / 3;")).toEqual([`const x = "" / 2 + "" / 3 ;`]);
+    // a shebang is not a value and does not touch the flag
+    expect(texts("#!/usr/bin/env bun\nconst x = 6 / 2;")).toEqual(["const x = 6 / 2 ;"]);
+  });
+
+  test("the statement splitter reads the token window in place", () => {
+    // `emit`'s `prevVal` decides which `!` is a non-null assertion; after a literal it is
+    // one, and is erased. (`group` is now an index window into the token array rather than
+    // a copy — a `Tok` is linear and cannot be moved out of an array element.)
+    expect(texts(`const a = "s"! + 1! + b!;`)).toEqual([`const a = "s" + 1 + b ;`]);
+    // `do { } while (c);` must NOT split at its `while` even though `while` starts
+    // statements and the preceding token is `}`
+    expect(texts("do { x(); } while (c);\nfunction g() {}")).toEqual([
+      "do { x ( ) ; } while ( c ) ;", "function g ( ) { }",
+    ]);
+    // bracket depth suppresses both split rules while inside `[ … ]`
+    expect(texts("const a = [ x; function f() {} ];\nconst b = 1;")).toEqual([
+      "const a = [ x ; function f ( ) { } ] ;", "const b = 1 ;",
+    ]);
   });
 });
 

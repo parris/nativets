@@ -2001,6 +2001,13 @@ two of five table sites.
 `st.prev` derivable so the arrow is unnecessary), which is a tokenizer refactor and an owner
 decision, not a two-line change.
 
+> **SUPERSEDED — that refactor was taken, and the sizing above is the part that held.** Both
+> options named here turned out to be the SAME option: `st.prev` is derivable (it is only ever
+> asked for a predicate, so it became one boolean) and that is what makes inlining the arrow
+> possible at all. `NT1607` never surfaced, because removing the capture is the precondition for
+> the opt-in rather than a step behind it, and the blocker that WAS behind the chain — `NT1605`
+> — is not in this list. See “THE SECOND MODULE SELF-COMPILES” below.
+
 **No second module reached IR, and `ast.ts` was probed one deeper before that was recorded** —
 behind its ternary is `NT1001`, `.find` on an object array, which is an aliasing refusal rather
 than a small gap. `diagnostics.ts` remains the only rung-3 module.
@@ -2207,6 +2214,133 @@ refusal. It reproduces on `main` untouched, applies to every `void`-typed call (
 a user `function f(): void`), and is therefore *not* introduced by `process.stdout.write` —
 though that builtin inherits it, which is how it was found. Not fixed here: the fix is in the
 declaration path in `checker.ts`, which three lanes were live in.
+
+### THE SECOND MODULE SELF-COMPILES — `coverage-preprocess.ts` at rung 3, by REMOVING THE CAPTURE
+
+`src/coverage-preprocess.ts` goes **rung 0 → rung 3** in one lane. It is the second module in the
+tree to reach IR after `diagnostics.ts`, and the first to do it with **no compiler change at all** —
+every one of the five blockers between it and IR was cleared in the module's own source, with the
+old and new `preprocessForCoverage` proved byte-identical over a 495-file corpus.
+
+**The handed-down blocker chain was right about the first three and wrong about the shape of the
+rest.** The previous probe (the "does NOT clear, and the blocking shape is `NT1607`" note above)
+recorded "at least four blockers deep — `.push` ×4, then `Set.add` ×3, then an `NT2001` on `&&`,
+with `NT1607` still waiting behind those". Measured on the real tree by clearing each in turn:
+
+| # | blocker | site | fix |
+|---|---|---|---|
+| 1 | `NT1606` | `.push` on `toks` / `parts` / `statements` | `//@@mutable` on each binding — **once the capture was gone** |
+| 2 | `NT1606` | `erasedNames.add(…)` ×3, result discarded | `erasedNames = erasedNames.add(…)`; a `Set` is persistent |
+| 3 | `NT2001` | `group.length && balanced` ×2 (`number && boolean`) | `group.length > 0 && balanced` |
+| 4 | `NT1605` | `const t = toks[i]!` ×7 | never bind the element — see below |
+| 5 | — | — | **rung 3** |
+
+`NT1607` **never appears**, and that is the correction worth carrying forward: removing the closure
+is not a step *behind* the `.push` refusal, it is the **precondition** for the opt-in. And the
+blocker that was actually behind the chain — `NT1605`, binding a linear array element to a local —
+was not predicted at all. Probing "one deeper" by suppressing a rule in a scratch tree tells you
+what the NEXT diagnostic is; it does not tell you what a real fix unmasks, because a real fix
+changes the code.
+
+**Removing the capture.** `tokenize`'s accumulator was captured by
+
+```ts
+const push = (t: Tok) => { toks.push(t); st.prev = t; };   // 10 call sites
+```
+
+which is the closure-capture hole the accumulator opt-in deliberately keeps (`docs/decorators.md`).
+Inlining it at the ten sites is most of the work, but the `st.prev` half **cannot be inlined as
+written**: a `Tok` cannot live in the array *and* the cursor, because `.push` **consumes** its
+argument (`toks.push(t); st.prev = t` is `NT1601` on the second store, and the reverse order is
+`NT1601` on the push), and reading it back with `st.prev = toks[toks.length - 1]` is `NT1605`.
+Both were measured, not assumed.
+
+The resolution is that `prev` was never wanted as a token. Its only consumer is
+`regexAllowed(prev)`, a predicate — so the cursor now carries the **one boolean** that predicate
+returns (`TokState.regexOk`), set at each append from the kind and text about to be pushed. That is
+the same shape `emit`'s pre-existing `prevVal` already had, and it is what `src/lexer.ts` does when
+it reads `tokens[tokens.length - 1]` rather than shadowing it in the cursor.
+
+**`NT1605` is a structural rule, not a nuisance.** `const tk = toks[i]!` is a *move out of the
+array*; `toks[i]!.kind`, `isP(toks[i], "{")` and `for (const t of xs)` are all borrows and all
+fine. That killed the statement `group: Tok[]`, which was a second array built by copying tokens
+out of the first — replaced by an **index window** `[gStart, i)`, which is exact because the group
+only ever grew by the token at `i` before advancing `i`. `emit` takes `(toks, from, to)`.
+
+**The correctness bar was observational nullity, and a null diff was not accepted as evidence.**
+Old and new `preprocessForCoverage` were run over every `.ts` file in `src/`, `test/` and
+`examples/` — **495 files, 2.67 MB** — diffing the full `Preprocessed` (statements, their lines,
+`stripped`, `erasedNames`) byte for byte: **0 differences**. Then **41 deliberate mutations** of the
+rewritten lines, each re-run against the same corpus:
+
+- **the corpus cannot see 13 of them.** "Regex allowed after a keyword", "…after a
+  string/template/regex", "…after a 3-char operator", "…at offset 0", the `do`/`while` split guard
+  and the bracket-depth guard all leave the 495-file diff **empty**. The compiler's own tree is
+  regex-free by discipline (`test/no-regex.test.ts`) and writes no top-level `do`/`while`, so a
+  corpus made of it is blind to exactly the code this lane rewrote most.
+- 16 hand-built inputs close all 13. They are now `test/self-host-coverage.test.ts`'s three
+  regex-vs-divide tests, asserted as exact emitted text.
+- **4 mutants survive both**, and all four are provably equivalent or dead: one is a control
+  (`word` vs `word + ""`); `emit`'s `kind === "comment"` skip is unreachable because the caller
+  filters comments out before calling it; and the two `|| isP(prev, ";")` alternatives in the split
+  guards cannot fire, because a `;` that did not already end the group implies non-zero depth,
+  which makes `balanced` false at the very next token. All three predate this lane.
+
+**Rung 3 is recorded WEAK and then earned.** A library prints nothing, so the naive rung-3 match is
+empty-vs-empty (caveat 3 in `test/sh6.test.ts`). The non-weak evidence is a second driver
+differential alongside `diagnostics.ts`'s: a driver imports the module and preprocesses six inputs
+chosen to reach a shebang, an inline `type` specifier, erased `type`/`interface`, a regex beside a
+division, a `//@@` pragma, a class, a `do`/`while`, a template substitution, `export default async`,
+and radix/exponent/separator numerals — **814 bytes of statement text, byte-identical to `bun run`,
+exit 0**.
+
+| Module | Before | After |
+|---|---|---|
+| `coverage-preprocess.ts` | rung 0 — `NT1606`, `.push`, own | **rung 3** — IR, links, runs; 814-byte driver differential matches bun |
+| `diagnostics.ts` | rung 3 | **rung 3**, unchanged |
+| every other module | — | **unchanged** |
+
+**`NT1606` is now EMPTY tree-wide as a first blocker** (`test/bootstrap.test.ts`), and empty in the
+`coverage` histogram too (`test/self-host-coverage.test.ts`) — the eighth turn of a bucket that has
+refilled seven times. Read it narrowly, as those notes ask: the ~205 `.push` sites are still there
+and every refused shape is still refused. What changed is that no module's first blocker is one of
+them.
+
+**One thing the `coverage` tool now says about ITSELF is an artifact, and it is the fifth of its
+kind recorded here.** `coverage src/coverage-preprocess.ts` reports `NT2001 .push expects number,
+got {kind,value,line}`. That is the strip talking about the strip: this tool ERASES `interface`
+declarations and hands the names back for the erase-to-`number` fallback, so `const toks: Tok[]`
+reads as `number[]` and pushing a `Tok` into it is a type error that exists nowhere else. It was
+masked while `.push` was refused ahead of argument typing. The real pipeline compiles the same file
+to 152,673 bytes of IR and runs it. The `NT1xxx` histogram — the instrument the ratchets read — is
+**empty** for this module, because it counts feature blockers and not the type-error band, which is
+exactly the confound that design decision exists for.
+
+**PRE-EXISTING BUG — every `NT1606` is reported with NO SOURCE LOCATION.** `mutationError(message,
+hint)` in `src/diagnostics.ts` takes no span and passes none, so all 18 call sites in `checker.ts`
+produce a diagnostic with no line band:
+
+```ts
+function a(): number { return 1; }
+function b(): number { return 2; }
+function c(): number { const xs: number[] = []; xs.push(1); return xs.length; }
+console.log(c());
+```
+
+```
+error[NT1606]: arrays are immutable: `.push` would mutate the array in place
+  = help: build a new array instead: …
+```
+
+No `|` band, no line, no caret — on a 442-line file that is a bisect. The ownership-stage refusals
+in the same band (`NT1605`, `NT1601`) print a full rustc-style band with the line, and the
+`Map`/`Set` variant of `NT1606` three hundred lines earlier in the same file hand-appends `at
+412:97` into its message text, so the inconsistency is visible within one function. The fix is
+available at the site — `checker.ts` already computes `exprLoc(a)` two lines below the `.push`
+throw for its `typeError` — but it is 18 call sites in a shared hot spot, so it is reported rather
+than landed here.
+
+---
 
 ## Milestones
 
