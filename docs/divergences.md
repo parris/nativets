@@ -1788,7 +1788,17 @@ them, because the assignment is not provably on every path:
 | `let s: string; if (c) s = "a"; …s…` | prints `a` | **NT1600** — not assigned on all paths |
 | `let n: number; while (c) { n = 1; } …n…` | prints `1` | **NT1600** — a loop body may run zero times |
 | `let s: string; try { s = f(); } catch {} …s…` | prints the value | **NT1600** — the throw may precede the assignment |
-| `let s: string; { let s: string = "in"; } …s…` | prints `undefined` | **NT1600** — shadowing is name-indistinguishable here |
+| `let s: string; { let s: string = "in"; } …s…` | prints `undefined` | **NT1600** — the OUTER `s` is never assigned on any path |
+
+That last row used to read "shadowing is name-indistinguishable here", and the refusal
+really was about shadowing: this pass is name-based, codegen was too, and an inner
+`let s` looked exactly like an assignment to the outer one. `alphaRenameShadows` gives
+them different names before this pass runs (see *Block scopes get their own storage*
+below), so the two are distinguishable now and the special-cased "redeclared" refusal is
+gone. The program above is still refused, by the ordinary rule and for the true reason —
+the outer `s` genuinely never gets a value. Shadowing an *assigned* binding
+(`let s: string; s = "outer"; { let s = "in"; } …s…`) now compiles and prints node's
+answer, where the old rule rejected it.
 
 A `switch` only counts if it has a `default` **and** every case assigns or diverges. A
 `do…while` body *does* count — it always runs once.
@@ -1801,6 +1811,56 @@ it, and never reaches this check:
 let s: string | undefined;   // starts as undefined — matches node ✅
 console.log(s);              // prints "undefined", like node
 ```
+
+### Block scopes get their own storage
+
+Until `alphaRenameShadows` (`src/checker.ts`), codegen keyed a function's frame slots by
+SOURCE NAME — `addLocal` returned early when the name was already known — so every block
+scope in a function shared storage with every other one, and
+
+```ts
+const a: number = 1;
+if (a > 0) { const a: number = 2; console.log(a); }
+console.log(a);              // node: 2 then 1.  nativets: 2 then 2.
+```
+
+was a silent wrong answer, exit 0 on both sides, on the most basic construct the language
+has. It was never really about *shadowing*: two **sibling** blocks reusing a name collided
+identically, and at different types the first declaration's type won, so the second read a
+string pointer as a double (`2.16e-314`) or crashed the compiler outright. With a linear
+type it was a **double free**, exit 255. Every declaration form was affected — `const`,
+`let`, an `if`/bare/loop/`try`/`catch` block, a `for` head, a `for-of` element, a `switch`
+case, and a block declaration shadowing a **parameter**. Separate frames (an arrow body, a
+nested function body) were always correct and are unchanged.
+
+A declaration in a nested scope whose name is already spoken for in the frame is now
+renamed to `name.N` — a spelling no source identifier can have — and every reference the
+scope chain resolves to it is rewritten. Module-level bindings, parameters, a function
+body's top-level names and `FuncDecl` names deliberately never move, so a program with no
+name reuse inside a frame compiles to byte-identical IR. `test/shadowing.test.ts` has the
+whole measured matrix against node; `var` is a separate matter — it is not supported at
+all (`NT0001`).
+
+**One shape is still wrong**, and it is the pre-existing forward-reference gap rather than
+a scoping one:
+
+```ts
+const g = (): number => 100;
+{ const f = (): number => g() + 1; const g = (): number => 5; console.log(f()); }
+console.log(g());            // node: 6 then 100.  nativets: 101 then 100.
+```
+
+A name is bound where it is DECLARED, not on scope entry, so `f`'s reference resolves to
+the outer `g`. Binding on entry is the correct JS model and resolves it to the inner `g` —
+whose slot is uninitialized at that point, so `f()` called through garbage and the program
+died at 255, which is strictly worse than a wrong answer. Forward-referencing a `const`
+arrow is not supported anyway: the identical program with no outer `g` to absorb the
+reference is `NT1003`.
+
+**Related, and not fixed here:** nativets accepts two declarations of one name in a single
+scope (`const a = 1; const a = 2;` prints `2`), which node rejects as a `SyntaxError`. Those
+are the one case still sharing a frame slot, which is why the ownership pass keeps its
+`shadowedNames` disqualification — it holds that gap to a leak rather than a use-after-free.
 
 ## B. Unimplemented features (we refuse to compile — never miscompile)
 
