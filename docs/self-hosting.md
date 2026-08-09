@@ -915,6 +915,96 @@ The `Analyzer` hazard recorded just above is untouched: `Analyzer` was already `
 the two-instance use-after-move is a parameter-property/move question, not a mutability one, and
 this change neither worsens nor fixes it.
 
+### Re-measured after the `get` ACCESSOR — a SOURCE change, and the NT1607 over-refusal cleared
+
+Two items, one lane, and they are the two halves of "the compiler must stay inside the
+subset it compiles."
+
+**`get` stays REFUSED, and `src/codegen.ts` was rewritten instead.** The construct census
+— counting the construct, not the first blocker, per this document's standing correction —
+finds **one** `get` accessor and **zero** `set` accessors across all twelve `src/*.ts`:
+
+```sh
+grep -nE '^[[:space:]]*(private |public |protected |static |readonly )*get [A-Za-z_$][A-Za-z0-9_$]*\s*\(\s*\)' src/*.ts   # 1
+```
+
+That one site is `src/codegen.ts:747`, `private get terminated(): boolean`, read at 17 use
+sites, all `this.terminated`, all inside `FnGen`. It is a zero-argument method with the
+parens dropped and nothing else, so it is now `private isTerminated()`.
+
+The refusal is the right side of the trade, and the reason is soundness rather than cost. A
+getter makes `o.x` *sometimes* a slot load and *sometimes* a call, and three things
+downstream assume it is always a slot: the checker's **dotted-path narrowing** (a fact about
+`d.spans` is sound only because an undecorated object's field cannot change — a getter body
+can read anything), **linearity** (a field read of an object is `NT1605`; a call result is
+an owned or borrowed value with a drop obligation), and codegen's member lowering. Four
+stages of work with a real silent-wrong-answer surface, against one site of payoff. What
+changed in the compiler is the **hint**: `NT1015` on `get`/`set` now names the mechanical
+rewrite, and `test/classes.test.ts` compiles and runs the rewrite it prescribes, because
+advice a diagnostic gives has to compile.
+
+**The `NT1607` over-refusal on a fresh receiver is fixed.** `new M().bump()` was refused
+with a hint asking for "a local bound to `new C(…)` in this scope" — while
+`const m = new M(); m.bump()` was accepted. The hint refuted itself: a `new C(…)` temporary
+is not a binding, so nothing in this scope or any other can name it, which makes it strictly
+**more** uniquely owned than the local the hint asks for. This is commit `1ea7fa2`'s fact
+with the sign flipped — there "a syntactically-fresh receiver is a temporary nothing can
+name" made `.push` VACUOUS, here it makes the call SAFE. Three lines in `src/ownership.ts`.
+
+Scoped to exactly the safe shapes, measured rather than argued:
+
+| Chain shape | Verdict |
+|---|---|
+| `new C().bump();` (statement), `new C().bump().bump().get()`, `const x = new C().bump()`, `g(new C().bump())` | **accepted** — the temporary never escapes the expression |
+| `return new C().bump()` / `[new C().bump()]` / `move(new C().bump())` | **still `NT1604`** — a `@@mutable` method hands back a BORROW of its receiver, and for a temporary there is no owning binding to return instead |
+
+Memory: **no double free** (exit 0 with correct stdout over 200 iterations — a double free
+here is a *nonzero* exit with *correct* stdout, which is why both are asserted). There **is**
+a leak, and it is **pre-existing and not `@@mutable`-specific**: a `new C(…)` used as a
+receiver and never bound is never dropped. An ordinary `class P` measures the identical
+`__objLive()` 200 for `new P(7).get()` on unmodified `main`, while the bound spelling
+measures 0. Pinned in `test/decorators.test.ts` so it is recorded rather than hidden.
+
+> **A pre-existing bug this lane found, not fixed.** `ROADMAP.md` Phase C records "unbound
+> **array** temporaries freed where the chain consumes them" as ✅ and lists only "temporaries
+> in non-chain positions (call arguments)" as still open. The OBJECT half of that chain rule
+> was never wired, and the asymmetry is exact — same position, same 200-iteration loop, on
+> unmodified `main`:
+>
+> ```ts
+> // arrays: freed.   __arrLive() === 0
+> for (let i = 0; i < 200; i++) { t = t + [1, 2, 3].indexOf(2); }
+> // class instances: LEAKED. __objLive() === 200  (the bound spelling measures 0)
+> for (let i = 0; i < 200; i++) { t = t + new P(7).get(); }
+> ```
+>
+> A leak, never a double free or a dangling pointer — the same class Phase C already accepts.
+> It matters more now that a fresh receiver can be *mutated* in a chain, since that is a shape
+> people will write; the fix belongs with the object-temporary drop, not here.
+
+This one sits directly on the self-hosting path: `src/codegen.ts`'s last line is
+`new ModuleGen(…).build(…)`, and `ModuleGen` has carried `//@@mutable` since the NT1023
+clearance, so `build` is a setter on a fresh receiver. It clears **one** of the two `NT1607`s
+the section above predicted; the other — `this.mod.liftArrow(e)` at codegen.ts:1822, whose
+receiver is a FIELD of `FnGen` — is untouched and correctly refused, since a field is
+reachable through the object and is not unique. That one needs a source change or a real
+field-borrow rule, and both sit behind the `NT1002` below.
+
+| Module | Was | Now |
+|---|---|---|
+| `codegen.ts` | `NT1015` — `get terminated` in `FnGen`, 747:11 | **`NT1002`** — `` `in` (the key-presence operator) `` at 2078:16, `op in FCMP`, ~1300 lines deeper |
+| `diagnostics.ts` | rung 3, 95,851 bytes of IR | **unchanged, byte for byte** |
+| every other module | — | **unchanged** |
+
+`NT1015` is now empty tree-wide in `test/self-host-coverage.ts`'s statement-recovery
+histogram, the same way `NT1023` emptied: not by adding a feature, but because the census
+said there was no second site behind the first.
+
+**Next for `codegen.ts`: the `in` operator.** `op in FCMP` is a key-presence test on a
+`Record`-typed table; the supported spelling of that today is a `Map` plus `.has`, which is a
+source change of the same shape as this one. Not chased here.
+
+
 ---
 
 ## Milestones

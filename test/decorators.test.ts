@@ -291,6 +291,69 @@ console.log(out[0]);
 `)).toBe("NT1607");
   });
 
+  // 9b. The one shape the refusal above got WRONG. A `new C(…)` receiver is a TEMPORARY:
+  // it is not a binding, so nothing in this scope or any other can name it — which makes
+  // it strictly MORE uniquely owned than the "local bound to `new C(…)`" the NT1607 hint
+  // asks for, and that spelling is accepted. Same fact as commit 1ea7fa2 ("a
+  // syntactically-fresh receiver is a temporary nothing can name"); there it made `.push`
+  // vacuous, here it makes the call SAFE. node prints 1.
+  test("a FRESH `new C(…)` receiver may be mutated in place", async () => {
+    const r = await compileAndRun(`${COUNTER}
+console.log(new Counter().bump().get());
+`);
+    expect(r.stdout).toBe("1\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  // The boundary. Legalizing the fresh receiver moves NOTHING about escape: a
+  // `@@mutable` method returns a BORROW of its receiver, and for a temporary there is no
+  // owning binding to return instead — so every shape that hands the chain's result out
+  // of the expression is still NT1604, unchanged.
+  test("a fresh receiver's result still may not ESCAPE (NT1604 ×3)", () => {
+    expect(rejectCode(`${COUNTER}
+function f(): Counter { return new Counter().bump(); }
+console.log(f().get());
+`)).toBe("NT1604");
+    expect(rejectCode(`${COUNTER}
+const a: Counter[] = [new Counter().bump()];
+console.log(a[0].get());
+`)).toBe("NT1604");
+    expect(rejectCode(`${COUNTER}
+const x = move(new Counter().bump());
+console.log(x.get());
+`)).toBe("NT1604");
+  });
+
+  // Memory evidence, since this project has shipped both a leak and a double free. A
+  // double free here would show as a NONZERO exit with CORRECT stdout, so both are
+  // asserted. The bound spelling frees exactly once (`__objLive()` 0); the fresh spelling
+  // LEAKS one object per temporary — which is PRE-EXISTING and not `@@mutable`-specific:
+  // an ordinary `class P { get(): number {…} }` measures the identical 200 for
+  // `new P(7).get()` on the unmodified tree. A `new C(…)` used as a receiver and never
+  // bound is never dropped. This change inherits that accounting; it does not add to it.
+  test("the fresh receiver is never freed TWICE — and leaks exactly like the plain-class temporary", async () => {
+    const r = await compileAndRun(`${COUNTER}
+function bound(k: number): number {
+  let t = 0;
+  for (let i = 0; i < k; i++) { const c = new Counter(); c.bump(); c.bump(); t = t + c.get(); }
+  return t;
+}
+function fresh(k: number): number {
+  let t = 0;
+  for (let i = 0; i < k; i++) { t = t + new Counter().bump().bump().get(); }
+  return t;
+}
+console.log(bound(200));
+console.log(__objLive());
+console.log(fresh(200));
+console.log(__objLive());
+`);
+    // node prints 400 for both loops. 0 = the owned binding is freed exactly once;
+    // 200 = the pre-existing unbound-temporary leak, one per iteration.
+    expect(r.stdout).toBe("400\n0\n400\n200\n");
+    expect(r.exitCode).toBe(0); // a double free is a nonzero exit with correct stdout
+  });
+
   test("reassigning an owner that is still aliased is rejected (NT1602)", () => {
     expect(rejectCode(`${COUNTER}
 let a = new Counter();
