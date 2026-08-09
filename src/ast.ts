@@ -269,7 +269,15 @@ export function objectFields(t: Ty): { key: string; ty: Ty }[] {
   });
 }
 export function fieldIndex(t: Ty, key: string): number { return objectFields(t).findIndex((f) => f.key === key); }
-export function fieldType(t: Ty, key: string): Ty | undefined { return objectFields(t).find((f) => f.key === key)?.ty; }
+// `.find(…)?.ty` is the natural spelling and nativets refuses it (`NT1001`): the
+// element is a HEAP object, so handing it back would alias its owning array. Written
+// as an INDEX search instead — `findIndex` yields a number, and reading one field off
+// `fs[i]` is a borrow, not a handoff. Identical under bun; see docs/self-hosting.md.
+export function fieldType(t: Ty, key: string): Ty | undefined {
+  const fs = objectFields(t);
+  const i = fs.findIndex((f) => f.key === key);
+  return i < 0 ? undefined : fs[i]!.ty;
+}
 export function objectType(fields: { key: string; ty: Ty }[]): Ty {
   return `{${fields.map((f) => `${f.key}:${f.ty}`).join(",")}}`;
 }
@@ -374,12 +382,15 @@ export function unionDiscriminant(t: Ty): { key: string; index: number } | undef
   const first = objectFields(members[0]!);
   for (let i = 0; i < first.length; i++) {
     const key = first[i]!.key;
-    const values = new Set<Ty>();
+    // `values.add(x)` with the result DISCARDED is a no-op here: nativets `Set`s are
+    // persistent (docs/divergences.md §A), so `.add` returns a new set. The rebinding
+    // spelling means the same thing under bun, where `.add` returns the receiver.
+    let values = new Set<Ty>();
     let ok = true;
     for (const m of members) {
       const f = objectFields(m)[i];
       if (!f || f.key !== key || !isStringLitTy(f.ty)) { ok = false; break; }
-      values.add(f.ty);
+      values = values.add(f.ty);
     }
     if (ok && values.size === members.length) return { key, index: i };
   }
@@ -402,7 +413,11 @@ export function unionMemberFor(t: Ty, tag: string): Ty | undefined {
 }
 
 /** Every member of a union as it is seen OUTSIDE it (literal tags widened). */
-export function unionWidenedMembers(t: Ty): Ty[] { return unionMembers(t).map(widenLiteralTys); }
+// Spelled with an INLINE arrow rather than point-free `.map(widenLiteralTys)`: a
+// function VALUE is `NT1003` here (M2, first-class functions). The arrow is also the
+// safer spelling under bun — `.map` passes (element, index, array), so a point-free
+// callback silently receives two extra arguments.
+export function unionWidenedMembers(t: Ty): Ty[] { return unionMembers(t).map((m) => widenLiteralTys(m)); }
 
 /**
  * Replace every string-literal type with `string`, EXCEPT inside a nested `U<…>`
@@ -514,8 +529,8 @@ export function containsTypeRef(t: Ty): boolean {
   if (isTypeRefTy(t)) return true;
   if (isNullableTy(t)) return containsTypeRef(baseTy(t));
   if (isArrayTy(t)) return containsTypeRef(elemTy(t));
-  if (isUnionTy(t)) return unionMembers(t).some(containsTypeRef);
-  if (isGeneralUnionTy(t)) return generalUnionMembers(t).some(containsTypeRef);
+  if (isUnionTy(t)) return unionMembers(t).some((m) => containsTypeRef(m));
+  if (isGeneralUnionTy(t)) return generalUnionMembers(t).some((m) => containsTypeRef(m));
   if (isObjectTy(t)) return objectFields(t).some((f) => containsTypeRef(f.ty));
   return false;
 }
@@ -600,32 +615,48 @@ export function eraseTypeParams(t: Ty): Ty {
  * concrete ARGUMENT type, accumulating bindings. First binding wins (so `pair(a: T, b: T)`
  * called as `pair(1, 2)` binds T=number once); a mismatch simply contributes nothing and
  * is reported later as an ordinary argument type error against the substituted signature.
+ *
+ * RETURNS the accumulated bindings rather than mutating the `out` argument in place. A
+ * nativets `Map` is PERSISTENT (docs/divergences.md §A) — `.set` returns a new map and
+ * leaves the receiver untouched — so an out-parameter accumulator is a silent no-op
+ * here, and the checker refuses the discarded spelling outright (`NT1606`). Threading
+ * the result means the same thing under bun, where `.set` returns the receiver.
  */
-export function unifyTypeParams(pattern: Ty, actual: Ty, out: Map<string, Ty>): void {
-  if (!hasTypeParam(pattern)) return;
+export function unifyTypeParams(pattern: Ty, actual: Ty, out: Map<string, Ty>): Map<string, Ty> {
+  if (!hasTypeParam(pattern)) return out;
   if (isTypeParamTy(pattern)) {
     const name = pattern.slice(1);
-    if (!out.has(name)) out.set(name, actual);
-    return;
+    return out.has(name) ? out : out.set(name, actual); // first binding wins
   }
   if (isArrayTy(pattern) && isArrayTy(actual)) return unifyTypeParams(elemTy(pattern), elemTy(actual), out);
   if (isNullableTy(pattern) && isNullableTy(actual)) return unifyTypeParams(baseTy(pattern), baseTy(actual), out);
   if (isFuncTy(pattern) && isFuncTy(actual)) {
     const pp = funcParams(pattern), ap = funcParams(actual);
-    pp.forEach((p, i) => { if (ap[i] !== undefined) unifyTypeParams(p, ap[i]!, out); });
-    return unifyTypeParams(funcRet(pattern), funcRet(actual), out);
+    // A plain `for`, not `forEach`: the arrow would WRITE a captured binding, which is
+    // its own refusal (`NT1031`) — and the point of returning is to have no writes.
+    let acc = out;
+    // The bound is the SHORTER list, stated rather than discovered by probing `ap[i]`
+    // for `undefined`. That probe is what the old spelling did, and here it would be a
+    // dead guard anyway: an out-of-range `[]` PANICS (Stage 41), so its element type is
+    // `Ty`, never `Ty | undefined`.
+    const n = pp.length < ap.length ? pp.length : ap.length;
+    for (let i = 0; i < n; i++) acc = unifyTypeParams(pp[i]!, ap[i]!, acc);
+    return unifyTypeParams(funcRet(pattern), funcRet(actual), acc);
   }
   if (isMapTy(pattern) && isMapTy(actual)) {
-    unifyTypeParams(mapKeyTy(pattern), mapKeyTy(actual), out);
-    return unifyTypeParams(mapValTy(pattern), mapValTy(actual), out);
+    const acc = unifyTypeParams(mapKeyTy(pattern), mapKeyTy(actual), out);
+    return unifyTypeParams(mapValTy(pattern), mapValTy(actual), acc);
   }
   if (isSetTy(pattern) && isSetTy(actual)) return unifyTypeParams(setElemTy(pattern), setElemTy(actual), out);
   if (isObjectTy(pattern) && isObjectTy(actual)) {
+    let acc = out;
     for (const f of objectFields(pattern)) {
       const af = fieldType(actual, f.key);
-      if (af !== undefined) unifyTypeParams(f.ty, af, out);
+      if (af !== undefined) acc = unifyTypeParams(f.ty, af, acc);
     }
+    return acc;
   }
+  return out;
 }
 
 /* AST fields that hold a `Ty` (or a list of them). Deep rewrites touch exactly these —

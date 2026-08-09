@@ -715,6 +715,22 @@ int32_t js_str_includes(const char *s, const char *sub) { return strstr(s, sub) 
 double js_str_index_of(const char *s, const char *sub) {
   const char *p = strstr(s, sub); return p ? (double)(p - s) : -1.0;
 }
+/* String#indexOf(search, fromIndex) — ECMA-262 22.1.3.9 step 4-5. `fromIndex` is
+ * ToIntegerOrInfinity'd (NaN -> 0) and CLAMPED to [0, len]; the search then starts
+ * there, and the answer is still an index into the WHOLE string. An empty needle
+ * therefore answers the clamped position itself, including at len ("abc".indexOf("",9)
+ * is 3). A separate entry point from the 1-arg form on purpose: the existing
+ * declaration and every `.ll` it appears in stay byte-identical.
+ * Byte indices, like every other string index here (docs/divergences.md A.2). */
+double js_str_index_of_from(const char *s, const char *sub, double fromd) {
+  size_t n = strlen(s);
+  size_t start;
+  if (isnan(fromd) || fromd <= 0.0) start = 0;
+  else if (fromd >= (double)n) start = n;
+  else start = (size_t)fromd;
+  const char *p = strstr(s + start, sub);
+  return p ? (double)(p - s) : -1.0;
+}
 
 /* ============================================================
  * Arrays — generic 8-byte-slot vector on the never-free allocator.

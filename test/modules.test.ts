@@ -61,6 +61,11 @@ const CASES = [
   "async",
   "async-await",      // an exported async function that itself awaits (identity)
   "async-arrow",      // an exported async ARROW — an ordinary exported const
+  // A `!` non-null assertion in a NON-ENTRY module. `ModuleGen.expr` had no
+  // `NonNullExpr` case, so everything under a `!` fell through to the LITERAL default
+  // and was never alpha-renamed — `'table' is not defined` for a module-level const,
+  // `NT1003 unknown callee` for a call. Correct TypeScript that node runs.
+  "nonnull",
 ];
 
 describe("modules (differential vs node)", () => {

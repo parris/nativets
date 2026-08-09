@@ -193,7 +193,7 @@ const STRING_METHODS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("repeat", { min: 1, max: 1, argTys: ["number"], ret: "string" })
   .set("padStart", { min: 1, max: 2, argTys: ["number", "string"], ret: "string" })
   .set("includes", { min: 1, max: 1, argTys: ["string"], ret: "boolean" })
-  .set("indexOf", { min: 1, max: 1, argTys: ["string"], ret: "number" })
+  .set("indexOf", { min: 1, max: 2, argTys: ["string", "number"], ret: "number" }) // 2nd arg = fromIndex
   .set("split", { min: 1, max: 2, argTys: ["string", "number"], ret: "string[]" }) // 2nd arg = limit (stdlib batch 1)
   // --- stdlib Batch 1 (part 2): string fills (byte-oriented, ASCII == node) ---
   .set("charCodeAt", { min: 0, max: 1, argTys: ["number"], ret: "number" })
@@ -1092,7 +1092,7 @@ class Checker {
   private instantiate(name: string, e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope, recvOffset = 0): Sig {
     const tmpl = this.generics.get(name)!;
     const tps = tmpl.typeParams!;
-    const bindings = new Map<string, Ty>();
+    let bindings = new Map<string, Ty>();
     // A generic METHOD is the same template with a leading `this` parameter that no
     // argument corresponds to (`recvOffset` 1). Drop it before matching arguments to
     // parameters so every index below is a plain positional match, exactly as for a
@@ -1103,7 +1103,7 @@ class Checker {
     if (e.typeArgs?.length) {
       // Explicit call-site type args pin the instantiation positionally.
       if (e.typeArgs.length > tps.length) throw typeError(`'${name}' takes ${tps.length} type argument(s), got ${e.typeArgs.length}`);
-      e.typeArgs.forEach((t, i) => bindings.set(tps[i]!, t));
+      e.typeArgs.forEach((t, i) => { bindings = bindings.set(tps[i]!, t); });
     }
     const patterns = sigParams.map((p) => p.annot ?? "number");
     // Round 1 — plain arguments. An ARROW argument is deferred: it needs the (possibly
@@ -1111,7 +1111,7 @@ class Checker {
     e.args.forEach((a, i) => {
       const pat = patterns[Math.min(i, patterns.length - 1)];
       if (!pat || !hasTypeParam(pat) || a.kind === "ArrowFunction") return;
-      unifyTypeParams(sigParams[i]?.rest ? elemTy(pat) : pat, this.type(a, scope), bindings);
+      bindings = unifyTypeParams(sigParams[i]?.rest ? elemTy(pat) : pat, this.type(a, scope), bindings);
     });
     // Round 2 — arrow arguments, now that the other parameters have bound what they can:
     // `mapAll<T, U>(xs: T[], f: (t: T) => U)` learns T from `xs`, types the arrow with
@@ -1121,7 +1121,7 @@ class Checker {
       if (a.kind !== "ArrowFunction" || !pat || !hasTypeParam(pat)) return;
       const ctx = substTypeParams(pat, bindings);
       if (!isFuncTy(ctx) || funcParams(ctx).some(hasTypeParam)) return; // params still unknown → reported below
-      unifyTypeParams(pat, this.typeArrow(a, ctx, scope), bindings);
+      bindings = unifyTypeParams(pat, this.typeArrow(a, ctx, scope), bindings);
     });
 
     const missing = tps.filter((t) => !bindings.has(t));
@@ -1751,7 +1751,7 @@ class Checker {
         const iter = this.asIterable(s.iterable, scope, "for-of");
         s.iterable = iter.expr;
         const it = iter.ty;
-        const el: Ty = it === "string" ? "string" : isArrayTy(it) ? elemTy(it) : isBytesTy(it) ? "number" : (() => { throw nyi(NYI.FOR_OF_NONSTRING, `for-of over ${it}`); })();
+        const el: Ty = it === "string" ? "string" : isArrayTy(it) ? elemTy(it) : isBytesTy(it) ? "number" : (() => { throw nyi(NYI.FOR_OF_NONSTRING, `for-of over ${it}`, undefined, exprLoc(s.iterable)); })();
         s.elemTy = el;
         const inner = scope.child();
         inner.declare(s.name, el, false);
@@ -2147,7 +2147,7 @@ class Checker {
           // A general union is a BOX: `===` on it compared the two boxes' TAGS, so
           // `1 === 2` came out true. Refuse until the arms are compared themselves.
           for (const t of [l, r]) refuseUnboxedUnion(t, "`===`");
-          if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`);
+          if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`, exprLoc(e));
           return "boolean";
         }
         if (BITWISE.has(e.op)) {
@@ -2237,8 +2237,9 @@ class Checker {
           a = yes(() => this.type(e.consequent, scope, hint));
           b = no(() => this.type(e.alternate, scope, hint ?? a));
         }
-        if (a !== b) throw typeError(`Ternary branches differ: ${a} vs ${b}`, exprLoc(e), thisNarrowHint(e, a, b));
-        return a;
+        const j = joinTernary(a, b);
+        if (j === undefined) throw typeError(`Ternary branches differ: ${a} vs ${b}`, exprLoc(e), thisNarrowHint(e, a, b));
+        return j;
       }
       case "AssignExpr": {
         const b = scope.lookup(e.target);
@@ -3106,7 +3107,7 @@ class Checker {
         // unlinked check. Say so, rather than sending the reader at captured environments.
         const from = this.importedFrom.get(e.callee.name);
         if (from !== undefined) throw unlinkedImportError(e.callee.name, from);
-        throw nyi(NYI.CLOSURE, `call to '${e.callee.name}' (function values / unknown callee)`);
+        throw nyi(NYI.CLOSURE, `call to '${e.callee.name}' (function values / unknown callee)`, undefined, exprLoc(e));
       }
       if (sig.rest) {
         const fixed = sig.params.length - 1;
@@ -4484,10 +4485,13 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
     case "UpdateExpr":
       if (e.targetExpr) go(e.targetExpr); else (inArrow ? closure : direct).add(e.target);
       return;
-    case "ArrowFunction":
-      if (e.exprBody) collectAssigned(e.body as Expr, direct, closure, true);
-      else collectAssignedStmts(e.stmts as Stmt[], direct, closure, true);
+    case "ArrowFunction": {
+      const inner = new Set<string>();
+      if (e.exprBody) collectAssigned(e.body as Expr, inner, inner, true);
+      else collectAssignedStmts(e.stmts as Stmt[], inner, inner, true);
+      addCaptured(inner, ownBindings(e.params, e.exprBody ? [] : (e.stmts as Stmt[])), closure);
       return;
+    }
     case "MemberExpr": go(e.object); return;
     case "IndexExpr": go(e.object); go(e.index); return;
     case "UnaryExpr": go(e.operand); return;
@@ -4507,6 +4511,52 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
     case "SpreadExpr": go(e.argument); return;
     default: return;
   }
+}
+
+/**
+ * The names a function BINDS for itself: its parameters, and the `let`/`const`/nested
+ * `function` it declares at the TOP LEVEL of its body. Only the top level, deliberately:
+ * if `a` is declared there then no assignment anywhere inside — however deeply nested,
+ * including inside a further arrow — can reach an `a` outside, so subtracting it is
+ * exact. A `let a` inside an inner BLOCK is not subtracted, because an assignment
+ * elsewhere in the same function could still mean the outer one; that direction stays
+ * conservative.
+ */
+function ownBindings(params: { name: string }[], body: Stmt[]): Set<string> {
+  const out = new Set<string>();
+  for (const p of params) out.add(p.name);
+  for (const s of body) {
+    if (s.kind === "VarDecl") for (const d of s.decls) out.add(d.name);
+    else if (s.kind === "FuncDecl") out.add(s.name);
+  }
+  return out;
+}
+
+/**
+ * Union an inner function's assignments into the enclosing `closure` set, MINUS the
+ * names that function binds itself.
+ *
+ * PRE-EXISTING BUG this closes. `closureAssigned` is keyed by bare NAME and is
+ * program-wide, and every assignment inside every function body went into it — so one
+ * function's private `let a = 0; a++` made the name `a` unnarrowable in every OTHER
+ * function in the program. Eight lines reproduce it, and node runs them:
+ *
+ *     function use(s: string): number { return s.length; }
+ *     function f(xs: string[]): number {
+ *       const a = xs.at(0);
+ *       if (a !== undefined) return use(a);   // NT2001: expects string, got ?Ustring
+ *       return -1;
+ *     }
+ *     function other(): number { let a = 0; a = a + 1; return a; }
+ *
+ * It is an over-REFUSAL, never a wrong answer, which is why it survived: the failure
+ * mode is a diagnostic on correct code, and it gets rarer the shorter your programs
+ * are. On `src/` it is everywhere — `let a = 0` in `src/lexer.ts`'s `pragmaName` was
+ * on its own enough to unnarrow `a` in `src/ast.ts`'s `unifyTypeParams`, and that one
+ * collision was the first blocker for eight of the twelve compiler modules.
+ */
+function addCaptured(inner: Set<string>, own: Set<string>, closure: Set<string>): void {
+  for (const n of inner) if (!own.has(n)) closure.add(n);
 }
 
 function collectAssignedStmts(body: Stmt[], direct: Set<string>, closure: Set<string>, inArrow: boolean): void {
@@ -4534,7 +4584,13 @@ function collectAssignedStmts(body: Stmt[], direct: Set<string>, closure: Set<st
       case "MultiStmt": goS(s.stmts); break;
       // A function/class body is its own flow; its assignments run when it is CALLED,
       // which — like an arrow's — may be any time after the narrowing was established.
-      case "FuncDecl": collectAssignedStmts(s.body, direct, closure, true); break;
+      // Only the names it CAPTURES count, though — see `addCaptured`.
+      case "FuncDecl": {
+        const inner = new Set<string>();
+        collectAssignedStmts(s.body, inner, inner, true);
+        addCaptured(inner, ownBindings(s.params, s.body), closure);
+        break;
+      }
       default: break;
     }
   }
@@ -4574,6 +4630,44 @@ function thisNarrowHint(e: Extract<Expr, { kind: "ConditionalExpr" }>, a: Ty, b:
     `this same method, so no fact is recorded for it. Bind it first: ` +
     `\`const ${f} = this.${f}; return ${f} === ${nullishKind(isNullableTy(a) ? a : b)} ? … : ${f};\``
   );
+}
+
+/**
+ * The `?:` JOIN. TypeScript's rule is that a conditional expression has the UNION of
+ * its two branch types, so `cond ? tag : undefined` is `string | undefined` — the
+ * single most-cited entry in docs/self-hosting.md's frontier table (`src/ast.ts:244`,
+ * `classTag`, which blocked NINE of the twelve compiler modules through the link).
+ * nativets has had a representation for that type since A2 (`?Ustring`, a [tag,value]
+ * box); what was missing was the join, which was type IDENTITY (`if (a !== b) throw`).
+ *
+ * Returns `undefined` when the union has no representation here — refused, never
+ * guessed at, which is the whole point of the identity check that was here before.
+ *
+ * DELIBERATELY NARROW: only a NULLISH LITERAL arm (`undefined` / `null`) joins with a
+ * present arm. `T` and `?U T` are a legal TypeScript union too and stay REFUSED, for a
+ * reason that is not laziness: that pair is exactly what `thisNarrowHint` above
+ * detects, and it is the carrier of the "narrowing does not reach a field of `this`"
+ * diagnostic. Joining it here would silently turn a targeted, actionable refusal into
+ * a return-type mismatch three lines later. Widening to it means relocating that hint
+ * first, which is a separate behavior.
+ *
+ * Sound because codegen's `coerce` can build the box from exactly these two sources —
+ * the matching nullish literal (tag 0/1) and a value of the base type (tag 2) — the
+ * same pair, and the same argument, as the nullable-assignability arm in `fitsParam`.
+ */
+function joinTernary(a: Ty, b: Ty): Ty | undefined {
+  if (a === b) return a;
+  const nullish = (t: Ty) => t === "undefined" || t === "null";
+  // Exactly one arm is a nullish literal; the other is the present arm.
+  if (nullish(a) === nullish(b)) return undefined;      // both, or neither
+  const which: "undefined" | "null" = (nullish(a) ? a : b) === "null" ? "null" : "undefined";
+  const present = nullish(a) ? b : a;
+  if (present === "void" || present === "Dyn") return undefined; // no value / no static box
+  // A present arm that is ALREADY nullable can only absorb its OWN nullish arm:
+  // `?Nstring` joined with `undefined` is `string | null | undefined`, three arms,
+  // which the two-slot encoding cannot carry (parseType refuses the written form too).
+  if (isNullableTy(present) && nullishKind(present) !== which) return undefined;
+  return makeNullable(which, present);
 }
 
 /** An expression as a one-statement region, so `factsFor` takes one shape of region. */

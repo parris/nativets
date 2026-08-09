@@ -215,6 +215,15 @@ class Renamer {
       case "IndexAssign": this.expr(e.object); this.expr(e.index); this.expr(e.value); return;
       case "FieldAssign": this.expr(e.object); this.expr(e.value); return;
       case "AsExpr": case "SatisfiesExpr": e.ty = this.t(e.ty)!; this.expr(e.expr); return;
+      // PRE-EXISTING BUG, and the two kinds that were missing. `NonNullExpr` (`x!`) and
+      // `InExpr` (`k in o`) fell through to `default`, which is the LITERAL case — so
+      // every module-level name underneath one of them kept its unprefixed spelling in a
+      // non-entry module. `export const table = […]` read as `table[0]!` from a second
+      // module was `'table' is not defined`, and `fields(m)[0]!` was `NT1003 unknown
+      // callee`. Both are correct TypeScript that node runs. Found via src/ast.ts:404
+      // (`unionTagValues`), which is why seven modules reported an ast.ts blocker.
+      case "NonNullExpr": this.expr(e.expr); return;
+      case "InExpr": this.expr(e.key); this.expr(e.object); return;
       case "InstanceOfExpr": e.className = this.n(e.className); this.expr(e.object); return;
       case "NewExpr":
         e.callee = this.n(e.callee);
@@ -230,7 +239,19 @@ class Renamer {
         if (a.exprBody) this.expr(a.body as Expr); else (a.stmts as Stmt[]).forEach((s) => this.stmt(s));
         return;
       }
-      default: return; // literals
+      // The kinds with no sub-expressions, listed rather than defaulted. `default: return`
+      // is what let `NonNullExpr` and `InExpr` be silently skipped for as long as they
+      // have existed: a walker whose fall-through means "nothing to do" cannot tell a
+      // leaf from a node someone forgot. The `never` binding below makes a new `Expr`
+      // kind a TYPE error here instead of a missed rename at run time.
+      case "NumberLiteral": case "StringLiteral": case "BooleanLiteral":
+      case "UndefinedLiteral": case "NullLiteral":
+        return;
+      default: {
+        const unhandled: never = e;
+        void unhandled;
+        return;
+      }
     }
   }
 }

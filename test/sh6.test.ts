@@ -262,7 +262,23 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // ternary whose arms are `string` and `undefined` against a `?Ustring` return. Probed
   // one deeper before recording, so the next lane knows the size: behind THAT is NT1001,
   // `.find` on an object array, which is an aliasing refusal rather than a small gap.
-  "ast.ts": { rung: 0, code: "NT2001", blame: "self" },
+  // ...and the ternary is CLEARED: the `?:` join now widens a present arm and a nullish
+  // literal into `?U`/`?N`, which is TypeScript's rule (test/ternary-nullable.test.ts).
+  // Six more fell with it, one per re-measurement, and only the FIRST was a compiler gap:
+  //   NT1001 `.find` on an object array   -> source: index search (aliasing is by design)
+  //   NT1606 `Set.add` result discarded   -> source: `values = values.add(…)` (persistent)
+  //   NT1003 `.map(widenLiteralTys)`      -> source: an inline arrow (point-free is a value)
+  //   NT2001 `.indexOf(x, from)`          -> COMPILER: the 2-arg form did not exist
+  //   NT1606 a `Map` OUT-PARAMETER        -> source: `unifyTypeParams` returns its bindings
+  //   NT2001 a poisoned narrowing         -> COMPILER: see `addCaptured` in src/checker.ts
+  // What ast.ts stops on now is DIFFERENT IN KIND from all of those, and the next lane
+  // should size it before starting: `mapTypesDeep(n: unknown, …)` at src/ast.ts:669 is a
+  // REFLECTIVE walker — `Array.isArray(n)`, `n as Record<string, unknown>`, `Object.keys`,
+  // assigning `o[k]` — over arbitrary AST nodes. Probed one deeper: behind the for-of is
+  // `Object.keys expects an object`. ast.ts has THREE such walkers (this one, the static-
+  // field rewriter, the declared-name collector). That is either a dynamic `unknown` model
+  // or three exhaustive typed traversals of 44 node kinds — not a gap, a design decision.
+  "ast.ts": { rung: 0, code: "NT1011", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -324,7 +340,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. parser.ts's own 18
   // `this.<field>` push sites are NOT cleared — a field names no binding the ownership
   // pass can prove unique, so they stay NT1606 behind this.
-  "parser.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "parser.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -368,7 +384,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `.push` legal on a `@@mutable` accumulator, nothing stops here any more and all four
   // walk through to ast.ts's ONE `trimEnd` site (NT1002). driver.ts goes to lexer.ts's
   // NT2001 instead. Neither lane could have measured this alone.
-  "checker.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "checker.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -379,7 +395,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
   // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
   // fires first through the link. Its own tables are the same shape and sit behind it.
-  "codegen.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "codegen.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
   // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
   // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
   // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
@@ -394,7 +410,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Both rows moved to their real blockers, and the blame column is the interesting part:
   // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
   // below; coverage-preprocess.ts finally has one of its OWN.
-  "coverage.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "coverage.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -411,8 +427,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // The Map spread in `clone` was the one blocker this module ever owned in the STANDALONE
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
-  "ownership.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
-  "driver.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "ownership.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
+  "driver.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
   //
@@ -436,14 +452,19 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // terminal instead of a captured buffer. With both landed cli.ts has NO blocker of its
   // own — its standalone column is now the unlinked-import artifact — and it rejoins the
   // group on ast.ts's ternary. Stage-1's next step is no longer stage-1's to take.
-  "cli.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  // ...and at the MERGE with the ternary lane, that ternary was already gone, so cli.ts
+  // lands two blockers further along than either branch measured: NT1011, ast.ts's
+  // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
+  // and it only ever held it because this lane had not landed yet. Sixth time a merge here
+  // produced a frontier neither side could have computed from its own diff.
+  "cli.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
   // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
   // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
-  "modules.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "modules.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
@@ -550,7 +571,7 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // time stage-1 has ever stopped on its own code — and gave it back when both call sites
 // took the `await` the diagnostic prescribes. Now checker.ts's `argTys: ["string", null]`,
 // an ARRAY OF NULLABLE ELEMENTS, which gates five modules. Still rung 0.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT2001" };
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1011" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -844,7 +865,13 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // nothing now, and is back to inheriting with the other eleven: ast.ts's ternary
       // whose branches are `string` and `undefined`. Stage-1 cannot move again until a
       // DEPENDENCY does, which is where it spent every round but two.
-      expect(m.error).toContain("Ternary branches differ");
+      // TENTH — and the dependency moved in the same merge. The ternary lane cleared the
+      // `?:` join (a present arm and a nullish literal widen to `?U`/`?N`) and then six
+      // more ast.ts blockers behind it, so cli.ts never actually sat on the ternary: it
+      // lands on `mapTypesDeep`, the reflective `unknown` walker at src/ast.ts:669. This is
+      // the first blocker stage-1 has inherited that is a DESIGN decision rather than a
+      // gap — a dynamic object model, or three exhaustive typed AST traversals.
+      expect(m.error).toContain("for-of over number");
       return;
     }
 

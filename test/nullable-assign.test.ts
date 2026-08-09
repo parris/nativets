@@ -216,17 +216,19 @@ console.log(a === undefined ? "none" : a, c === undefined ? "none" : c);
   });
 
   /*
-   * ADJACENT AND NOT TAKEN, pinned so it is a known refusal rather than a surprise.
-   * The same function written with a TERNARY is still refused: the ternary JOIN wants
-   * its two branches to have one type and does not widen `string` + `undefined` into
-   * `?Ustring`. That is a gap in the join, not in assignability — `fitsParam` never
-   * sees it — so it is a separate behavior from this file's three.
+   * WAS "adjacent and not taken", and has since been TAKEN — the ternary lane. The
+   * join now widens `string` + `undefined` into `?Ustring`, which is TypeScript's rule
+   * (a conditional expression has the union of its branch types) and which unblocked
+   * `src/ast.ts:244` and with it nine of the twelve compiler modules. The behavior list
+   * lives in test/ternary-nullable.test.ts; this row stays so the two files' claims
+   * cannot drift apart.
    */
-  test("REFUSED: a ternary does not JOIN a present arm with `undefined`", () => {
-    expectRejected(`
+  test("a ternary JOINS a present arm with `undefined`", async () => {
+    await expectNode(`
 function f(b: boolean): string | undefined { return b ? "yes" : undefined; }
-console.log(f(true));
-`, "NT2001", "Ternary branches differ");
+const a = f(true);
+console.log(a === undefined ? "none" : a);
+`);
   });
 });
 
