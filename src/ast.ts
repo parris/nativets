@@ -13,7 +13,25 @@ export type ScalarTy = "number" | "boolean" | "string" | "void" | "undefined" | 
  */
 export type Ty = ScalarTy | `${string}[]` | `{${string}}`;
 
-export function isArrayTy(t: Ty): boolean { return typeof t === "string" && !isNullableTy(t) && t.endsWith("[]"); }
+/**
+ * The array encoding is a SUFFIX (`${elem}[]`), and it is the only one that is — every
+ * sibling predicate anchors at the front (`{`/`U<`/`@`/`Map<`/`?U`). So `isArrayTy` is
+ * the only one a FUNCTION type can be mistaken for: `() => number[]` is encoded
+ * `()=>number[]`, which ends with `[]`. It did, and the cost was a wild free —
+ * `isLinearTy` (src/ownership.ts) put the closure in the scope's drop set and
+ * `emitDrops` (src/codegen.ts) reclaimed the `nt_obj_new` slot block with
+ * `nt_arr_free`, which reads slots 2 and 3 PAST THE END of it and `free()`s them.
+ * `const g = () => arr` died with exit 255 and no output. See
+ * test/arrow-returns-array.test.ts.
+ *
+ * `isFuncTy` is depth-aware (`topArrow`), so an ARRAY OF FUNCTIONS — `((n)=>number)[]`,
+ * whose `=>` is nested inside the parens — is still an array, and a function returning
+ * one (`()=>((n)=>number)[]`) is still a function. The check only runs for a type that
+ * already ends with `[]`, and short-circuits on the leading `(`.
+ */
+export function isArrayTy(t: Ty): boolean {
+  return typeof t === "string" && t.endsWith("[]") && !isNullableTy(t) && !isFuncTy(t);
+}
 export function elemTy(t: Ty): Ty { return t.slice(0, -2) as Ty; }
 
 /**
