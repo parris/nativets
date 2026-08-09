@@ -107,6 +107,18 @@ function isOptChainTarget(e: Expr): boolean {
   return false;
 }
 
+/**
+ * The hint every RECURSIVE-type refusal carries, in one place. There are two spellings of
+ * the same failure — a `type`/`interface` naming itself (`resolveNamed`) and a class FIELD
+ * naming its own class (`parseClass`) — reached by different code paths, and a reader who
+ * gets different advice for the same cause learns the wrong lesson. Deliberately NOT the
+ * catalog's shared NT1030 hint, which tells you to reorder: reordering fixes a forward
+ * reference and cannot fix a cycle.
+ */
+const RECURSIVE_TYPE_HINT =
+  "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. " +
+  "Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md";
+
 /** The shared refusal for `?.` in a write position — one message for all four spellings. */
 function optChainWriteError(what: string): never {
   throw parseError(
@@ -426,7 +438,7 @@ class Parser {
           through === id
             ? `recursive type '${id}' — it refers to itself (declared at line ${declaredAt})`
             : `recursive type '${id}' — it contains itself through '${through}' (declared at line ${declaredAt})`,
-          "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md",
+          RECURSIVE_TYPE_HINT,
         );
       }
       // Not a cycle, so it is genuinely unresolved: either a declaration this file rejects
@@ -1532,7 +1544,7 @@ class Parser {
   private parseClass(): Stmt {
     const dec = this.pendingDecorators;
     this.pendingDecorators = null;
-    this.eat("class");
+    const classTok = this.eat("class");
     const name = this.expectIdent();
     // `@@mutable` — TRUE in-place mutation: a field-assigning method mutates the receiver
     // and every handle observes it. Without it a field-assigning method is COPY-ON-WRITE
@@ -1744,11 +1756,25 @@ class Parser {
       for (const f of fields) if (!covered.has(f.key)) throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
     }
 
-    // A FIELD naming its own class is a self-referential instance shape, which our
-    // structural object types cannot express — it keeps the pre-existing erasure to
-    // `number` rather than becoming a new rejection (the self marker exists for method
-    // SIGNATURES, which is where a setter needs it).
-    for (const f of fields) if (f.ty.includes(selfMarker)) f.ty = f.ty.split(selfMarker).join("number") as Ty;
+    // A FIELD naming its own class is a self-referential instance shape, which a flat
+    // structural `Ty` cannot express — the same recursion `interface N { next: N }` is
+    // refused for (NT1030), in the other spelling. It used to be ERASED here, silently, to
+    // `number`. That is the worst outcome available: `class N { v: number; next?: N }`
+    // compiled and printed `next: 0` where node prints `next: undefined`, and `kids: N[]`
+    // compiled clean as `number[]`. So it is refused, with the SAME message and hint the
+    // interface spelling gets — one recursion, told one way.
+    //
+    // Only a FIELD. A method may still name its own class in a signature (`bump(): Counter`)
+    // — that is what the self marker exists for, and it is not recursion: the instance shape
+    // does not contain itself, the method merely mentions it.
+    for (const f of fields) {
+      if (!f.ty.includes(selfMarker)) continue;
+      throw nyi(
+        NYI.FORWARD_TYPE,
+        `recursive type '${name}' — its field '${f.key}' refers to itself (declared at line ${classTok.line})`,
+        RECURSIVE_TYPE_HINT,
+      );
+    }
     const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
     this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
