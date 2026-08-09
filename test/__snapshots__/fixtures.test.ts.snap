@@ -65,6 +65,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -453,6 +454,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -773,6 +775,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -1154,6 +1157,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -1567,6 +1571,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -1878,6 +1883,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -2196,6 +2202,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -2568,6 +2575,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -2929,6 +2937,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -3293,6 +3302,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -3706,6 +3716,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -3997,6 +4008,559 @@ L0:
 "
 `;
 
+exports[`fixtures classes/optional-field.ts emits stable LLVM IR (snapshot) 1`] = `
+"; ModuleID = 'nativets'
+declare void @js_print_num(double)
+declare void @js_print_bool(i32)
+declare void @js_print_str(ptr)
+declare void @js_print_sep()
+declare void @js_print_newline()
+declare void @js_eprint_begin()
+declare void @js_eprint_num(double)
+declare void @js_eprint_bool(i32)
+declare void @js_eprint_str(ptr)
+declare void @js_eprint_sep()
+declare void @js_eprint_newline()
+declare void @nt_fmt_guard(ptr, double)
+declare double @pow(double, double)
+declare ptr @js_str_concat(ptr, ptr)
+declare double @js_str_len(ptr)
+declare i32 @js_str_eq(ptr, ptr)
+declare i32 @js_str_cmp(ptr, ptr)
+declare ptr @js_num_to_str(double)
+declare ptr @js_bool_to_str(i32)
+declare double @js_bit_and(double, double)
+declare double @js_bit_or(double, double)
+declare double @js_bit_xor(double, double)
+declare double @js_bit_not(double)
+declare double @js_shl(double, double)
+declare double @js_shr(double, double)
+declare double @js_ushr(double, double)
+declare double @js_str_to_num(ptr)
+declare double @js_math_round(double)
+declare double @js_parse_int(ptr, double)
+declare double @js_parse_float(ptr)
+declare double @floor(double)
+declare double @ceil(double)
+declare double @sqrt(double)
+declare double @trunc(double)
+declare double @fabs(double)
+declare double @js_math_max(double, double)
+declare double @js_math_min(double, double)
+declare double @js_math_fold_arr(ptr, double, i32)
+declare ptr @js_str_upper(ptr)
+declare ptr @js_str_lower(ptr)
+declare ptr @js_str_trim(ptr)
+declare ptr @js_str_char_at(ptr, double)
+declare ptr @js_str_slice(ptr, double, double)
+declare ptr @js_str_substring(ptr, double, double)
+declare ptr @js_str_repeat(ptr, double)
+declare ptr @js_str_pad_start(ptr, double, ptr)
+declare i32 @js_str_includes(ptr, ptr)
+declare double @js_str_index_of(ptr, ptr)
+declare ptr @nt_str_retain(ptr)
+declare void @nt_str_release(ptr)
+declare double @nt_str_live()
+declare ptr @nt_arr_new(double)
+declare double @nt_arr_push(ptr, i64)
+declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_index(ptr, double, ptr)
+declare i64 @nt_nonnull(ptr, ptr)
+declare i64 @nt_union_arm(ptr, double, ptr, ptr)
+declare ptr @nt_str_index(ptr, double, ptr)
+declare void @nt_panic_bounds(ptr, double, double, ptr)
+declare i64 @nt_arr_pop(ptr)
+declare double @nt_arr_len(ptr)
+declare ptr @nt_arr_join_num(ptr, ptr)
+declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
+declare i32 @nt_arr_includes_num(ptr, double)
+declare i32 @nt_arr_includes_str(ptr, ptr)
+declare double @nt_arr_indexof_num(ptr, double)
+declare double @nt_arr_indexof_str(ptr, ptr)
+declare ptr @nt_arr_copy(ptr)
+declare ptr @nt_arr_to_sorted(ptr, i32)
+declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)
+declare ptr @nt_arr_to_reversed(ptr)
+declare ptr @nt_arr_with(ptr, double, i64, ptr)
+declare void @nt_arr_free(ptr)
+declare double @nt_arr_live()
+declare double @nt_arr_nodes()
+declare double @nt_arr_node_allocs()
+declare double @nt_arr_transients()
+declare void @nt_arr_extend_own(ptr, ptr)
+declare ptr @nt_obj_new(double)
+declare void @nt_obj_free(ptr)
+declare double @nt_obj_live()
+declare ptr @nt_str_split(ptr, ptr)
+declare ptr @nt_arr_reverse(ptr)
+declare double @nt_date_now()
+declare ptr @nt_btoa(ptr)
+declare ptr @nt_atob(ptr)
+declare ptr @nt_from_char_code(double)
+declare ptr @nt_from_code_point(double)
+declare i32 @nt_num_is_finite(double)
+declare i32 @nt_num_is_integer(double)
+declare i32 @nt_num_is_safe_integer(double)
+declare ptr @nt_arr_from_str(ptr)
+declare double @js_str_char_code_at(ptr, double)
+declare double @js_str_code_point_at(ptr, double)
+declare ptr @js_str_at(ptr, double)
+declare ptr @js_str_pad_end(ptr, double, ptr)
+declare i32 @js_str_starts_with(ptr, ptr, double)
+declare i32 @js_str_ends_with(ptr, ptr, double)
+declare ptr @js_str_replace(ptr, ptr, ptr, i32)
+declare double @js_str_last_index_of(ptr, ptr)
+declare ptr @nt_str_split_n(ptr, ptr, double)
+declare double @nt_arr_at_index(ptr, double)
+declare double @nt_arr_last_indexof_num(ptr, double)
+declare double @nt_arr_last_indexof_str(ptr, ptr)
+declare ptr @nt_arr_concat(ptr, ptr)
+declare ptr @nt_arr_flat1(ptr)
+declare ptr @js_num_to_fixed(double, double)
+declare ptr @js_num_to_radix_string(double, double)
+declare ptr @nt_url_protocol(ptr)
+declare ptr @nt_url_host(ptr)
+declare ptr @nt_url_hostname(ptr)
+declare ptr @nt_url_pathname(ptr)
+declare ptr @nt_url_search(ptr)
+declare ptr @nt_url_hash(ptr)
+declare double @nt_date_field(double, double, double)
+declare ptr @nt_date_to_iso(double)
+declare double @nt_date_from_ms(double)
+declare double @nt_date_parse(ptr)
+declare ptr @nt_date_inspect(double)
+declare ptr @nt_date_to_json(double)
+declare ptr @nt_url_validate(ptr)
+declare ptr @nt_url_port(ptr)
+declare ptr @nt_url_origin(ptr)
+declare ptr @nt_qs_init(ptr)
+declare ptr @nt_qs_get(ptr, ptr)
+declare ptr @nt_qs_get_all(ptr, ptr)
+declare ptr @nt_qs_to_string(ptr)
+declare ptr @nt_encode_uri_component(ptr)
+declare ptr @nt_decode_uri_component(ptr)
+declare ptr @nt_encode_uri(ptr)
+declare ptr @nt_decode_uri(ptr)
+declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
+declare ptr @nt_http_get(ptr, ptr, ptr)
+declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)
+declare ptr @nt_headers_get(ptr, ptr)
+declare ptr @nt_arr_slice(ptr, double, double)
+declare void @nt_arr_extend(ptr, ptr)
+declare ptr @js_json_quote(ptr)
+declare ptr @nt_json_num(double)
+declare ptr @nt_json_parse(ptr)
+declare double @nt_dyn_as_number(ptr)
+declare i32 @nt_dyn_as_bool(ptr)
+declare i32 @nt_dyn_truthy(ptr)
+declare ptr @nt_dyn_as_string(ptr)
+declare i32 @nt_dyn_require_object(ptr)
+declare ptr @nt_dyn_require_field(ptr, ptr)
+declare i32 @nt_dyn_require_array(ptr)
+declare double @nt_dyn_len(ptr)
+declare ptr @nt_dyn_elem(ptr, double)
+declare ptr @nt_dyn_get_field(ptr, ptr)
+declare void @nt_dyn_print(ptr)
+declare i32 @nt_exc_pending()
+declare ptr @nt_exc_message()
+declare void @nt_exc_clear()
+declare void @nt_exc_abort()
+declare void @nt_init_args(i32, ptr)
+declare ptr @nt_argv()
+declare ptr @nt_getenv(ptr)
+declare ptr @nt_read_line()
+declare ptr @nt_read_stdin()
+declare ptr @nt_read_key()
+declare void @nt_raw_mode(i32)
+declare void @nt_exit(double)
+declare ptr @nt_read_file(ptr)
+declare void @nt_write_file(ptr, ptr)
+declare i32 @nt_path_exists(ptr)
+declare ptr @nt_mkdtemp(ptr)
+declare ptr @nt_readdir(ptr)
+declare void @nt_rm(ptr, i32, i32)
+declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)
+declare ptr @nt_path_join(ptr, ptr)
+declare ptr @nt_path_resolve(ptr, ptr)
+declare ptr @nt_path_dirname(ptr)
+declare ptr @nt_path_basename(ptr)
+declare ptr @nt_path_relative(ptr, ptr)
+declare ptr @nt_os_tmpdir()
+declare ptr @nt_os_homedir()
+declare ptr @nt_file_url_to_path(ptr)
+declare void @nt_gui_init_window(double, double, ptr)
+declare i32 @nt_gui_window_should_close()
+declare void @nt_gui_set_target_fps(double)
+declare void @nt_gui_begin_draw()
+declare void @nt_gui_end_draw()
+declare void @nt_gui_clear_background(double)
+declare void @nt_gui_draw_text(ptr, double, double, double, double)
+declare void @nt_gui_draw_rect(double, double, double, double, double)
+declare double @nt_gui_mouse_x()
+declare double @nt_gui_mouse_y()
+declare i32 @nt_gui_mouse_pressed()
+declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
+declare ptr @nt_coll_map_new()
+declare ptr @nt_coll_map_from_coll(ptr)
+declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
+declare i64 @nt_map_get_slot(ptr, i32, i64)
+declare i32 @nt_map_has_slot(ptr, i32, i64)
+declare ptr @nt_map_remove_slot(ptr, i32, i64)
+declare ptr @nt_coll_set_new()
+declare ptr @nt_coll_set_from_arr(ptr, i32)
+declare ptr @nt_set_add_slot(ptr, i32, i64)
+declare i32 @nt_set_has_slot(ptr, i32, i64)
+declare ptr @nt_set_remove_slot(ptr, i32, i64)
+declare i64 @nt_coll_size(ptr)
+declare ptr @nt_coll_keys(ptr)
+declare ptr @nt_coll_values(ptr)
+declare ptr @nt_bytes_new(double)
+declare ptr @nt_bytes_from_arr(ptr)
+declare double @nt_bytes_get(ptr, double)
+declare void @nt_bytes_set(ptr, double, double)
+declare double @nt_bytes_index(ptr, double, ptr)
+declare void @nt_bytes_index_set(ptr, double, double, ptr)
+declare double @nt_bytes_len(ptr)
+declare ptr @nt_bytes_json(ptr, ptr, double)
+declare ptr @nt_bytes_encode(ptr)
+declare ptr @nt_bytes_decode(ptr)
+declare void @nt_sched_init()
+declare i64 @nt_spawn_closure(ptr, ptr, i64)
+declare void @nt_send_slot(i64, i64)
+declare i64 @nt_receive_slot()
+declare i64 @nt_self()
+declare void @nt_drain()
+declare void @nt_register(ptr, i64)
+declare i64 @nt_whereis(ptr)
+declare void @nt_link(i64)
+declare i64 @nt_monitor(i64)
+declare void @nt_trap_exit(i32)
+declare void @nt_actor_exit(i64, i64)
+declare void @nt_crash(i64)
+declare void @nt_kill(i64)
+declare i64 @nt_sup_new(i64, i64, i64)
+declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
+declare i64 @nt_sup_start(i64)
+declare ptr @nt_insp_new(ptr, ptr, double, double, double)
+declare void @nt_insp_add(ptr, ptr)
+declare ptr @nt_insp_done(ptr)
+declare ptr @nt_insp_num(double)
+declare ptr @nt_insp_str(ptr)
+declare ptr @nt_insp_entry(ptr, ptr)
+declare ptr @nt_insp_pair(ptr, ptr)
+declare ptr @nt_insp_coll_open(ptr, double)
+declare ptr @nt_insp_len_open(ptr, double)
+declare ptr @nt_insp_more(double)
+declare ptr @nt_dyn_inspect(ptr, double)
+declare ptr @nt_dyn_display(ptr, double)
+declare ptr @nt_dyn_str_or_null(ptr)
+
+@.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
+@.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
+@.str.2 = private unnamed_addr constant [7 x i8] c"object\\00"
+@.str.3 = private unnamed_addr constant [7 x i8] c"string\\00"
+@.str.4 = private unnamed_addr constant [4 x i8] c"M {\\00"
+@.str.5 = private unnamed_addr constant [2 x i8] c"}\\00"
+@.str.6 = private unnamed_addr constant [2 x i8] c"v\\00"
+@.str.7 = private unnamed_addr constant [2 x i8] c"s\\00"
+@.str.8 = private unnamed_addr constant [2 x i8] c"n\\00"
+@.str.9 = private unnamed_addr constant [5 x i8] c"here\\00"
+@.str.10 = private unnamed_addr constant [9 x i8] c"Filled {\\00"
+
+define void @M.constructor(ptr %this, double %v) {
+entry:
+  %this.addr = alloca ptr
+  %v.addr = alloca double
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  store double %v, ptr %v.addr
+  %t0 = load ptr, ptr %this.addr
+  %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t2 = getelementptr i64, ptr %t1, i64 0
+  store i64 0, ptr %t2
+  %t3 = getelementptr i64, ptr %t1, i64 1
+  store i64 0, ptr %t3
+  %t4 = ptrtoint ptr %t1 to i64
+  %t5 = getelementptr i64, ptr %t0, i64 1
+  store i64 %t4, ptr %t5
+  %t6 = inttoptr i64 %t4 to ptr
+  %t7 = load ptr, ptr %this.addr
+  %t8 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t9 = getelementptr i64, ptr %t8, i64 0
+  store i64 0, ptr %t9
+  %t10 = getelementptr i64, ptr %t8, i64 1
+  store i64 0, ptr %t10
+  %t11 = ptrtoint ptr %t8 to i64
+  %t12 = getelementptr i64, ptr %t7, i64 2
+  store i64 %t11, ptr %t12
+  %t13 = inttoptr i64 %t11 to ptr
+  %t14 = load ptr, ptr %this.addr
+  %t15 = load double, ptr %v.addr
+  %t16 = bitcast double %t15 to i64
+  %t17 = getelementptr i64, ptr %t14, i64 0
+  store i64 %t16, ptr %t17
+  %t18 = bitcast i64 %t16 to double
+  ret void
+}
+
+define void @Filled.constructor(ptr %this, ptr %s) {
+entry:
+  %this.addr = alloca ptr
+  %s.addr = alloca ptr
+  br label %L0
+L0:
+  store ptr %this, ptr %this.addr
+  store ptr %s, ptr %s.addr
+  %t0 = load ptr, ptr %this.addr
+  %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t2 = getelementptr i64, ptr %t1, i64 0
+  store i64 0, ptr %t2
+  %t3 = getelementptr i64, ptr %t1, i64 1
+  store i64 0, ptr %t3
+  %t4 = ptrtoint ptr %t1 to i64
+  %t5 = getelementptr i64, ptr %t0, i64 0
+  store i64 %t4, ptr %t5
+  %t6 = inttoptr i64 %t4 to ptr
+  %t7 = load ptr, ptr %this.addr
+  %t8 = load ptr, ptr %s.addr
+  %rc9 = call ptr @nt_str_retain(ptr %t8)
+  %t10 = ptrtoint ptr %t8 to i64
+  %t11 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t12 = getelementptr i64, ptr %t11, i64 0
+  store i64 2, ptr %t12
+  %t13 = getelementptr i64, ptr %t11, i64 1
+  store i64 %t10, ptr %t13
+  %t14 = ptrtoint ptr %t11 to i64
+  %t15 = getelementptr i64, ptr %t7, i64 0
+  store i64 %t14, ptr %t15
+  %t16 = inttoptr i64 %t14 to ptr
+  ret void
+}
+
+define i32 @main(i32 %argc, ptr %argv) {
+entry:
+  %a.addr = alloca ptr
+  %f.addr = alloca ptr
+  %s6 = alloca ptr
+  %s17 = alloca ptr
+  %s23 = alloca ptr
+  %s34 = alloca ptr
+  br label %L0
+L0:
+  call void @nt_init_args(i32 %argc, ptr %argv)
+  %t0 = call ptr @nt_obj_new(double 0x4008000000000000)
+  call void @M.constructor(ptr %t0, double 0x3FF0000000000000)
+  store ptr %t0, ptr %a.addr
+  %t1 = load ptr, ptr %a.addr
+  %t2 = getelementptr i64, ptr %t1, i64 1
+  %t3 = load i64, ptr %t2
+  %t4 = inttoptr i64 %t3 to ptr
+  %t5 = getelementptr i64, ptr %t4, i64 0
+  %t6 = load i64, ptr %t5
+  %t7 = icmp eq i64 %t6, 0
+  br i1 %t7, label %pu1, label %pnc2
+pu1:
+  call void @js_print_str(ptr @.str.0)
+  br label %pe5
+pnc2:
+  %t8 = icmp eq i64 %t6, 1
+  br i1 %t8, label %pn3, label %pp4
+pn3:
+  call void @js_print_str(ptr @.str.1)
+  br label %pe5
+pp4:
+  %t9 = getelementptr i64, ptr %t4, i64 1
+  %t10 = load i64, ptr %t9
+  %t11 = inttoptr i64 %t10 to ptr
+  call void @js_print_str(ptr %t11)
+  br label %pe5
+pe5:
+  call void @js_print_newline()
+  %t12 = load ptr, ptr %a.addr
+  %t13 = getelementptr i64, ptr %t12, i64 1
+  %t14 = load i64, ptr %t13
+  %t15 = inttoptr i64 %t14 to ptr
+  %t16 = getelementptr i64, ptr %t15, i64 0
+  %t17 = load i64, ptr %t16
+  %t18 = icmp eq i64 %t17, 0
+  br i1 %t18, label %tu7, label %tnc8
+tu7:
+  store ptr @.str.0, ptr %s6
+  br label %te11
+tnc8:
+  %t19 = icmp eq i64 %t17, 1
+  br i1 %t19, label %tn9, label %tp10
+tn9:
+  store ptr @.str.2, ptr %s6
+  br label %te11
+tp10:
+  store ptr @.str.3, ptr %s6
+  br label %te11
+te11:
+  %t20 = load ptr, ptr %s6
+  call void @js_print_str(ptr %t20)
+  call void @js_print_newline()
+  %t21 = load ptr, ptr %a.addr
+  %t22 = getelementptr i64, ptr %t21, i64 2
+  %t23 = load i64, ptr %t22
+  %t24 = inttoptr i64 %t23 to ptr
+  %t25 = getelementptr i64, ptr %t24, i64 0
+  %t26 = load i64, ptr %t25
+  %t27 = icmp eq i64 %t26, 0
+  br i1 %t27, label %pu12, label %pnc13
+pu12:
+  call void @js_print_str(ptr @.str.0)
+  br label %pe16
+pnc13:
+  %t28 = icmp eq i64 %t26, 1
+  br i1 %t28, label %pn14, label %pp15
+pn14:
+  call void @js_print_str(ptr @.str.1)
+  br label %pe16
+pp15:
+  %t29 = getelementptr i64, ptr %t24, i64 1
+  %t30 = load i64, ptr %t29
+  %t31 = bitcast i64 %t30 to double
+  call void @js_print_num(double %t31)
+  br label %pe16
+pe16:
+  call void @js_print_newline()
+  %t32 = load ptr, ptr %a.addr
+  %t33 = call ptr @nt_insp_new(ptr @.str.4, ptr @.str.5, double 0x0000000000000000, double 0x0000000000000000, double 0x0000000000000000)
+  %t34 = getelementptr i64, ptr %t32, i64 0
+  %t35 = load i64, ptr %t34
+  %t36 = bitcast i64 %t35 to double
+  %t37 = call ptr @nt_insp_num(double %t36)
+  %t38 = call ptr @nt_insp_entry(ptr @.str.6, ptr %t37)
+  call void @nt_insp_add(ptr %t33, ptr %t38)
+  %t39 = getelementptr i64, ptr %t32, i64 1
+  %t40 = load i64, ptr %t39
+  %t41 = inttoptr i64 %t40 to ptr
+  %t42 = getelementptr i64, ptr %t41, i64 0
+  %t43 = load i64, ptr %t42
+  %t44 = icmp eq i64 %t43, 0
+  br i1 %t44, label %iu18, label %inc19
+iu18:
+  store ptr @.str.0, ptr %s17
+  br label %ie22
+inc19:
+  %t45 = icmp eq i64 %t43, 1
+  br i1 %t45, label %in20, label %ip21
+in20:
+  store ptr @.str.1, ptr %s17
+  br label %ie22
+ip21:
+  %t46 = getelementptr i64, ptr %t41, i64 1
+  %t47 = load i64, ptr %t46
+  %t48 = inttoptr i64 %t47 to ptr
+  %t49 = call ptr @nt_insp_str(ptr %t48)
+  store ptr %t49, ptr %s17
+  br label %ie22
+ie22:
+  %t50 = load ptr, ptr %s17
+  %t51 = call ptr @nt_insp_entry(ptr @.str.7, ptr %t50)
+  call void @nt_insp_add(ptr %t33, ptr %t51)
+  %t52 = getelementptr i64, ptr %t32, i64 2
+  %t53 = load i64, ptr %t52
+  %t54 = inttoptr i64 %t53 to ptr
+  %t55 = getelementptr i64, ptr %t54, i64 0
+  %t56 = load i64, ptr %t55
+  %t57 = icmp eq i64 %t56, 0
+  br i1 %t57, label %iu24, label %inc25
+iu24:
+  store ptr @.str.0, ptr %s23
+  br label %ie28
+inc25:
+  %t58 = icmp eq i64 %t56, 1
+  br i1 %t58, label %in26, label %ip27
+in26:
+  store ptr @.str.1, ptr %s23
+  br label %ie28
+ip27:
+  %t59 = getelementptr i64, ptr %t54, i64 1
+  %t60 = load i64, ptr %t59
+  %t61 = bitcast i64 %t60 to double
+  %t62 = call ptr @nt_insp_num(double %t61)
+  store ptr %t62, ptr %s23
+  br label %ie28
+ie28:
+  %t63 = load ptr, ptr %s23
+  %t64 = call ptr @nt_insp_entry(ptr @.str.8, ptr %t63)
+  call void @nt_insp_add(ptr %t33, ptr %t64)
+  %t65 = call ptr @nt_insp_done(ptr %t33)
+  call void @js_print_str(ptr %t65)
+  call void @js_print_newline()
+  %t66 = call ptr @nt_obj_new(double 0x3FF0000000000000)
+  call void @Filled.constructor(ptr %t66, ptr @.str.9)
+  store ptr %t66, ptr %f.addr
+  %t67 = load ptr, ptr %f.addr
+  %t68 = getelementptr i64, ptr %t67, i64 0
+  %t69 = load i64, ptr %t68
+  %t70 = inttoptr i64 %t69 to ptr
+  %t71 = getelementptr i64, ptr %t70, i64 0
+  %t72 = load i64, ptr %t71
+  %t73 = icmp eq i64 %t72, 0
+  br i1 %t73, label %pu29, label %pnc30
+pu29:
+  call void @js_print_str(ptr @.str.0)
+  br label %pe33
+pnc30:
+  %t74 = icmp eq i64 %t72, 1
+  br i1 %t74, label %pn31, label %pp32
+pn31:
+  call void @js_print_str(ptr @.str.1)
+  br label %pe33
+pp32:
+  %t75 = getelementptr i64, ptr %t70, i64 1
+  %t76 = load i64, ptr %t75
+  %t77 = inttoptr i64 %t76 to ptr
+  call void @js_print_str(ptr %t77)
+  br label %pe33
+pe33:
+  call void @js_print_newline()
+  %t78 = load ptr, ptr %f.addr
+  %t79 = call ptr @nt_insp_new(ptr @.str.10, ptr @.str.5, double 0x0000000000000000, double 0x0000000000000000, double 0x0000000000000000)
+  %t80 = getelementptr i64, ptr %t78, i64 0
+  %t81 = load i64, ptr %t80
+  %t82 = inttoptr i64 %t81 to ptr
+  %t83 = getelementptr i64, ptr %t82, i64 0
+  %t84 = load i64, ptr %t83
+  %t85 = icmp eq i64 %t84, 0
+  br i1 %t85, label %iu35, label %inc36
+iu35:
+  store ptr @.str.0, ptr %s34
+  br label %ie39
+inc36:
+  %t86 = icmp eq i64 %t84, 1
+  br i1 %t86, label %in37, label %ip38
+in37:
+  store ptr @.str.1, ptr %s34
+  br label %ie39
+ip38:
+  %t87 = getelementptr i64, ptr %t82, i64 1
+  %t88 = load i64, ptr %t87
+  %t89 = inttoptr i64 %t88 to ptr
+  %t90 = call ptr @nt_insp_str(ptr %t89)
+  store ptr %t90, ptr %s34
+  br label %ie39
+ie39:
+  %t91 = load ptr, ptr %s34
+  %t92 = call ptr @nt_insp_entry(ptr @.str.7, ptr %t91)
+  call void @nt_insp_add(ptr %t79, ptr %t92)
+  %t93 = call ptr @nt_insp_done(ptr %t79)
+  call void @js_print_str(ptr %t93)
+  call void @js_print_newline()
+  %t94 = load ptr, ptr %a.addr
+  call void @nt_obj_free(ptr %t94)
+  %t95 = load ptr, ptr %f.addr
+  call void @nt_obj_free(ptr %t95)
+  ret i32 0
+}
+"
+`;
+
 exports[`fixtures classes/point.ts emits stable LLVM IR (snapshot) 1`] = `
 "; ModuleID = 'nativets'
 declare void @js_print_num(double)
@@ -4062,6 +4626,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -4420,6 +4985,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -4775,6 +5341,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -5133,6 +5700,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -5566,6 +6134,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -5963,6 +6532,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -6263,6 +6833,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -6575,6 +7146,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -6893,6 +7465,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -7183,6 +7756,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -7721,6 +8295,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -8097,6 +8672,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -8462,6 +9038,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -10609,6 +11186,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -10868,6 +11446,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -11131,6 +11710,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -11391,6 +11971,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -11651,6 +12232,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -11912,6 +12494,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -12174,6 +12757,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -12439,6 +13023,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -12713,6 +13298,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -12973,6 +13559,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -13376,6 +13963,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -13708,6 +14296,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -14010,6 +14599,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -14402,6 +14992,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -14784,6 +15375,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -15180,6 +15772,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -15664,6 +16257,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -15999,6 +16593,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -16385,6 +16980,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -16720,6 +17316,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -16993,6 +17590,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -17282,6 +17880,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -17557,6 +18156,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -17853,6 +18453,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -18132,6 +18733,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -18411,6 +19013,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -18893,6 +19496,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -19193,6 +19797,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -19488,6 +20093,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -19841,6 +20447,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -20121,6 +20728,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -20584,6 +21192,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -20854,6 +21463,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -21209,6 +21819,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -21567,6 +22178,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -21866,6 +22478,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -22140,6 +22753,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -22438,6 +23052,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -22737,6 +23352,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -23084,6 +23700,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -23402,6 +24019,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -23770,6 +24388,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -24048,6 +24667,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -24376,6 +24996,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -24698,6 +25319,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -24983,6 +25605,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -25332,6 +25955,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -25726,6 +26350,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -26158,6 +26783,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -26488,6 +27114,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -26822,6 +27449,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -27298,6 +27926,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -27613,6 +28242,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -27923,6 +28553,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -28231,6 +28862,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -28544,6 +29176,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -28877,6 +29510,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -29296,6 +29930,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -29645,6 +30280,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -29947,6 +30583,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -30241,6 +30878,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -30581,6 +31219,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -30902,6 +31541,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -31396,6 +32036,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -31819,6 +32460,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -32198,6 +32840,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -32543,6 +33186,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -32881,6 +33525,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -33146,6 +33791,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -33408,6 +34054,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -33688,6 +34335,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -34066,6 +34714,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -34617,6 +35266,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -35105,6 +35755,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -35469,6 +36120,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -35907,6 +36559,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -36212,6 +36865,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -36591,6 +37245,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -36895,6 +37550,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -37454,6 +38110,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -37850,6 +38507,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -38293,6 +38951,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -38564,6 +39223,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -38845,6 +39505,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -39117,6 +39778,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -39385,6 +40047,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -39672,6 +40335,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -39960,6 +40624,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -40237,6 +40902,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -40602,6 +41268,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -40991,6 +41658,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -41465,6 +42133,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -41854,6 +42523,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -42213,6 +42883,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -42737,6 +43408,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -43178,6 +43850,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -43533,6 +44206,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -43886,6 +44560,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -44283,6 +44958,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -44652,6 +45328,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -44944,6 +45621,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -45295,6 +45973,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -45613,6 +46292,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -45926,6 +46606,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -46250,6 +46931,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -46615,6 +47297,7 @@ declare i64 @nt_arr_pop(ptr)
 declare double @nt_arr_len(ptr)
 declare ptr @nt_arr_join_num(ptr, ptr)
 declare ptr @nt_arr_join_str(ptr, ptr)
+declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
 declare double @nt_arr_indexof_num(ptr, double)
@@ -46966,558 +47649,6 @@ rede5:
   call void @nt_obj_free(ptr %t90)
   %t91 = load ptr, ptr %nv.addr
   call void @nt_arr_free(ptr %t91)
-  ret i32 0
-}
-"
-`;
-
-exports[`fixtures classes/optional-field.ts emits stable LLVM IR (snapshot) 1`] = `
-"; ModuleID = 'nativets'
-declare void @js_print_num(double)
-declare void @js_print_bool(i32)
-declare void @js_print_str(ptr)
-declare void @js_print_sep()
-declare void @js_print_newline()
-declare void @js_eprint_begin()
-declare void @js_eprint_num(double)
-declare void @js_eprint_bool(i32)
-declare void @js_eprint_str(ptr)
-declare void @js_eprint_sep()
-declare void @js_eprint_newline()
-declare void @nt_fmt_guard(ptr, double)
-declare double @pow(double, double)
-declare ptr @js_str_concat(ptr, ptr)
-declare double @js_str_len(ptr)
-declare i32 @js_str_eq(ptr, ptr)
-declare i32 @js_str_cmp(ptr, ptr)
-declare ptr @js_num_to_str(double)
-declare ptr @js_bool_to_str(i32)
-declare double @js_bit_and(double, double)
-declare double @js_bit_or(double, double)
-declare double @js_bit_xor(double, double)
-declare double @js_bit_not(double)
-declare double @js_shl(double, double)
-declare double @js_shr(double, double)
-declare double @js_ushr(double, double)
-declare double @js_str_to_num(ptr)
-declare double @js_math_round(double)
-declare double @js_parse_int(ptr, double)
-declare double @js_parse_float(ptr)
-declare double @floor(double)
-declare double @ceil(double)
-declare double @sqrt(double)
-declare double @trunc(double)
-declare double @fabs(double)
-declare double @js_math_max(double, double)
-declare double @js_math_min(double, double)
-declare double @js_math_fold_arr(ptr, double, i32)
-declare ptr @js_str_upper(ptr)
-declare ptr @js_str_lower(ptr)
-declare ptr @js_str_trim(ptr)
-declare ptr @js_str_char_at(ptr, double)
-declare ptr @js_str_slice(ptr, double, double)
-declare ptr @js_str_substring(ptr, double, double)
-declare ptr @js_str_repeat(ptr, double)
-declare ptr @js_str_pad_start(ptr, double, ptr)
-declare i32 @js_str_includes(ptr, ptr)
-declare double @js_str_index_of(ptr, ptr)
-declare ptr @nt_str_retain(ptr)
-declare void @nt_str_release(ptr)
-declare double @nt_str_live()
-declare ptr @nt_arr_new(double)
-declare double @nt_arr_push(ptr, i64)
-declare i64 @nt_arr_get(ptr, double)
-declare i64 @nt_arr_index(ptr, double, ptr)
-declare i64 @nt_nonnull(ptr, ptr)
-declare i64 @nt_union_arm(ptr, double, ptr, ptr)
-declare ptr @nt_str_index(ptr, double, ptr)
-declare void @nt_panic_bounds(ptr, double, double, ptr)
-declare i64 @nt_arr_pop(ptr)
-declare double @nt_arr_len(ptr)
-declare ptr @nt_arr_join_num(ptr, ptr)
-declare ptr @nt_arr_join_str(ptr, ptr)
-declare i32 @nt_arr_includes_num(ptr, double)
-declare i32 @nt_arr_includes_str(ptr, ptr)
-declare double @nt_arr_indexof_num(ptr, double)
-declare double @nt_arr_indexof_str(ptr, ptr)
-declare ptr @nt_arr_copy(ptr)
-declare ptr @nt_arr_to_sorted(ptr, i32)
-declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)
-declare ptr @nt_arr_to_reversed(ptr)
-declare ptr @nt_arr_with(ptr, double, i64, ptr)
-declare void @nt_arr_free(ptr)
-declare double @nt_arr_live()
-declare double @nt_arr_nodes()
-declare double @nt_arr_node_allocs()
-declare double @nt_arr_transients()
-declare void @nt_arr_extend_own(ptr, ptr)
-declare ptr @nt_obj_new(double)
-declare void @nt_obj_free(ptr)
-declare double @nt_obj_live()
-declare ptr @nt_str_split(ptr, ptr)
-declare ptr @nt_arr_reverse(ptr)
-declare double @nt_date_now()
-declare ptr @nt_btoa(ptr)
-declare ptr @nt_atob(ptr)
-declare ptr @nt_from_char_code(double)
-declare ptr @nt_from_code_point(double)
-declare i32 @nt_num_is_finite(double)
-declare i32 @nt_num_is_integer(double)
-declare i32 @nt_num_is_safe_integer(double)
-declare ptr @nt_arr_from_str(ptr)
-declare double @js_str_char_code_at(ptr, double)
-declare double @js_str_code_point_at(ptr, double)
-declare ptr @js_str_at(ptr, double)
-declare ptr @js_str_pad_end(ptr, double, ptr)
-declare i32 @js_str_starts_with(ptr, ptr, double)
-declare i32 @js_str_ends_with(ptr, ptr, double)
-declare ptr @js_str_replace(ptr, ptr, ptr, i32)
-declare double @js_str_last_index_of(ptr, ptr)
-declare ptr @nt_str_split_n(ptr, ptr, double)
-declare double @nt_arr_at_index(ptr, double)
-declare double @nt_arr_last_indexof_num(ptr, double)
-declare double @nt_arr_last_indexof_str(ptr, ptr)
-declare ptr @nt_arr_concat(ptr, ptr)
-declare ptr @nt_arr_flat1(ptr)
-declare ptr @js_num_to_fixed(double, double)
-declare ptr @js_num_to_radix_string(double, double)
-declare ptr @nt_url_protocol(ptr)
-declare ptr @nt_url_host(ptr)
-declare ptr @nt_url_hostname(ptr)
-declare ptr @nt_url_pathname(ptr)
-declare ptr @nt_url_search(ptr)
-declare ptr @nt_url_hash(ptr)
-declare double @nt_date_field(double, double, double)
-declare ptr @nt_date_to_iso(double)
-declare double @nt_date_from_ms(double)
-declare double @nt_date_parse(ptr)
-declare ptr @nt_date_inspect(double)
-declare ptr @nt_date_to_json(double)
-declare ptr @nt_url_validate(ptr)
-declare ptr @nt_url_port(ptr)
-declare ptr @nt_url_origin(ptr)
-declare ptr @nt_qs_init(ptr)
-declare ptr @nt_qs_get(ptr, ptr)
-declare ptr @nt_qs_get_all(ptr, ptr)
-declare ptr @nt_qs_to_string(ptr)
-declare ptr @nt_encode_uri_component(ptr)
-declare ptr @nt_decode_uri_component(ptr)
-declare ptr @nt_encode_uri(ptr)
-declare ptr @nt_decode_uri(ptr)
-declare ptr @nt_http_post(ptr, ptr, ptr, ptr)
-declare ptr @nt_http_get(ptr, ptr, ptr)
-declare ptr @nt_fetch(ptr, ptr, ptr, ptr, ptr, ptr)
-declare ptr @nt_headers_get(ptr, ptr)
-declare ptr @nt_arr_slice(ptr, double, double)
-declare void @nt_arr_extend(ptr, ptr)
-declare ptr @js_json_quote(ptr)
-declare ptr @nt_json_num(double)
-declare ptr @nt_json_parse(ptr)
-declare double @nt_dyn_as_number(ptr)
-declare i32 @nt_dyn_as_bool(ptr)
-declare i32 @nt_dyn_truthy(ptr)
-declare ptr @nt_dyn_as_string(ptr)
-declare i32 @nt_dyn_require_object(ptr)
-declare ptr @nt_dyn_require_field(ptr, ptr)
-declare i32 @nt_dyn_require_array(ptr)
-declare double @nt_dyn_len(ptr)
-declare ptr @nt_dyn_elem(ptr, double)
-declare ptr @nt_dyn_get_field(ptr, ptr)
-declare void @nt_dyn_print(ptr)
-declare i32 @nt_exc_pending()
-declare ptr @nt_exc_message()
-declare void @nt_exc_clear()
-declare void @nt_exc_abort()
-declare void @nt_init_args(i32, ptr)
-declare ptr @nt_argv()
-declare ptr @nt_getenv(ptr)
-declare ptr @nt_read_line()
-declare ptr @nt_read_stdin()
-declare ptr @nt_read_key()
-declare void @nt_raw_mode(i32)
-declare void @nt_exit(double)
-declare ptr @nt_read_file(ptr)
-declare void @nt_write_file(ptr, ptr)
-declare i32 @nt_path_exists(ptr)
-declare ptr @nt_mkdtemp(ptr)
-declare ptr @nt_readdir(ptr)
-declare void @nt_rm(ptr, i32, i32)
-declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)
-declare ptr @nt_path_join(ptr, ptr)
-declare ptr @nt_path_resolve(ptr, ptr)
-declare ptr @nt_path_dirname(ptr)
-declare ptr @nt_path_basename(ptr)
-declare ptr @nt_path_relative(ptr, ptr)
-declare ptr @nt_os_tmpdir()
-declare ptr @nt_os_homedir()
-declare ptr @nt_file_url_to_path(ptr)
-declare void @nt_gui_init_window(double, double, ptr)
-declare i32 @nt_gui_window_should_close()
-declare void @nt_gui_set_target_fps(double)
-declare void @nt_gui_begin_draw()
-declare void @nt_gui_end_draw()
-declare void @nt_gui_clear_background(double)
-declare void @nt_gui_draw_text(ptr, double, double, double, double)
-declare void @nt_gui_draw_rect(double, double, double, double, double)
-declare double @nt_gui_mouse_x()
-declare double @nt_gui_mouse_y()
-declare i32 @nt_gui_mouse_pressed()
-declare i32 @nt_gui_point_in_rect(double, double, double, double, double, double)
-declare ptr @nt_coll_map_new()
-declare ptr @nt_coll_map_from_coll(ptr)
-declare ptr @nt_map_put_slot(ptr, i32, i64, i64)
-declare i64 @nt_map_get_slot(ptr, i32, i64)
-declare i32 @nt_map_has_slot(ptr, i32, i64)
-declare ptr @nt_map_remove_slot(ptr, i32, i64)
-declare ptr @nt_coll_set_new()
-declare ptr @nt_coll_set_from_arr(ptr, i32)
-declare ptr @nt_set_add_slot(ptr, i32, i64)
-declare i32 @nt_set_has_slot(ptr, i32, i64)
-declare ptr @nt_set_remove_slot(ptr, i32, i64)
-declare i64 @nt_coll_size(ptr)
-declare ptr @nt_coll_keys(ptr)
-declare ptr @nt_coll_values(ptr)
-declare ptr @nt_bytes_new(double)
-declare ptr @nt_bytes_from_arr(ptr)
-declare double @nt_bytes_get(ptr, double)
-declare void @nt_bytes_set(ptr, double, double)
-declare double @nt_bytes_index(ptr, double, ptr)
-declare void @nt_bytes_index_set(ptr, double, double, ptr)
-declare double @nt_bytes_len(ptr)
-declare ptr @nt_bytes_json(ptr, ptr, double)
-declare ptr @nt_bytes_encode(ptr)
-declare ptr @nt_bytes_decode(ptr)
-declare void @nt_sched_init()
-declare i64 @nt_spawn_closure(ptr, ptr, i64)
-declare void @nt_send_slot(i64, i64)
-declare i64 @nt_receive_slot()
-declare i64 @nt_self()
-declare void @nt_drain()
-declare void @nt_register(ptr, i64)
-declare i64 @nt_whereis(ptr)
-declare void @nt_link(i64)
-declare i64 @nt_monitor(i64)
-declare void @nt_trap_exit(i32)
-declare void @nt_actor_exit(i64, i64)
-declare void @nt_crash(i64)
-declare void @nt_kill(i64)
-declare i64 @nt_sup_new(i64, i64, i64)
-declare void @nt_sup_add_child(i64, ptr, ptr, ptr)
-declare i64 @nt_sup_start(i64)
-declare ptr @nt_insp_new(ptr, ptr, double, double, double)
-declare void @nt_insp_add(ptr, ptr)
-declare ptr @nt_insp_done(ptr)
-declare ptr @nt_insp_num(double)
-declare ptr @nt_insp_str(ptr)
-declare ptr @nt_insp_entry(ptr, ptr)
-declare ptr @nt_insp_pair(ptr, ptr)
-declare ptr @nt_insp_coll_open(ptr, double)
-declare ptr @nt_insp_len_open(ptr, double)
-declare ptr @nt_insp_more(double)
-declare ptr @nt_dyn_inspect(ptr, double)
-declare ptr @nt_dyn_display(ptr, double)
-declare ptr @nt_dyn_str_or_null(ptr)
-
-@.str.0 = private unnamed_addr constant [10 x i8] c"undefined\\00"
-@.str.1 = private unnamed_addr constant [5 x i8] c"null\\00"
-@.str.2 = private unnamed_addr constant [7 x i8] c"object\\00"
-@.str.3 = private unnamed_addr constant [7 x i8] c"string\\00"
-@.str.4 = private unnamed_addr constant [4 x i8] c"M {\\00"
-@.str.5 = private unnamed_addr constant [2 x i8] c"}\\00"
-@.str.6 = private unnamed_addr constant [2 x i8] c"v\\00"
-@.str.7 = private unnamed_addr constant [2 x i8] c"s\\00"
-@.str.8 = private unnamed_addr constant [2 x i8] c"n\\00"
-@.str.9 = private unnamed_addr constant [5 x i8] c"here\\00"
-@.str.10 = private unnamed_addr constant [9 x i8] c"Filled {\\00"
-
-define void @M.constructor(ptr %this, double %v) {
-entry:
-  %this.addr = alloca ptr
-  %v.addr = alloca double
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  store double %v, ptr %v.addr
-  %t0 = load ptr, ptr %this.addr
-  %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t2 = getelementptr i64, ptr %t1, i64 0
-  store i64 0, ptr %t2
-  %t3 = getelementptr i64, ptr %t1, i64 1
-  store i64 0, ptr %t3
-  %t4 = ptrtoint ptr %t1 to i64
-  %t5 = getelementptr i64, ptr %t0, i64 1
-  store i64 %t4, ptr %t5
-  %t6 = inttoptr i64 %t4 to ptr
-  %t7 = load ptr, ptr %this.addr
-  %t8 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t9 = getelementptr i64, ptr %t8, i64 0
-  store i64 0, ptr %t9
-  %t10 = getelementptr i64, ptr %t8, i64 1
-  store i64 0, ptr %t10
-  %t11 = ptrtoint ptr %t8 to i64
-  %t12 = getelementptr i64, ptr %t7, i64 2
-  store i64 %t11, ptr %t12
-  %t13 = inttoptr i64 %t11 to ptr
-  %t14 = load ptr, ptr %this.addr
-  %t15 = load double, ptr %v.addr
-  %t16 = bitcast double %t15 to i64
-  %t17 = getelementptr i64, ptr %t14, i64 0
-  store i64 %t16, ptr %t17
-  %t18 = bitcast i64 %t16 to double
-  ret void
-}
-
-define void @Filled.constructor(ptr %this, ptr %s) {
-entry:
-  %this.addr = alloca ptr
-  %s.addr = alloca ptr
-  br label %L0
-L0:
-  store ptr %this, ptr %this.addr
-  store ptr %s, ptr %s.addr
-  %t0 = load ptr, ptr %this.addr
-  %t1 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t2 = getelementptr i64, ptr %t1, i64 0
-  store i64 0, ptr %t2
-  %t3 = getelementptr i64, ptr %t1, i64 1
-  store i64 0, ptr %t3
-  %t4 = ptrtoint ptr %t1 to i64
-  %t5 = getelementptr i64, ptr %t0, i64 0
-  store i64 %t4, ptr %t5
-  %t6 = inttoptr i64 %t4 to ptr
-  %t7 = load ptr, ptr %this.addr
-  %t8 = load ptr, ptr %s.addr
-  %rc9 = call ptr @nt_str_retain(ptr %t8)
-  %t10 = ptrtoint ptr %t8 to i64
-  %t11 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t12 = getelementptr i64, ptr %t11, i64 0
-  store i64 2, ptr %t12
-  %t13 = getelementptr i64, ptr %t11, i64 1
-  store i64 %t10, ptr %t13
-  %t14 = ptrtoint ptr %t11 to i64
-  %t15 = getelementptr i64, ptr %t7, i64 0
-  store i64 %t14, ptr %t15
-  %t16 = inttoptr i64 %t14 to ptr
-  ret void
-}
-
-define i32 @main(i32 %argc, ptr %argv) {
-entry:
-  %a.addr = alloca ptr
-  %f.addr = alloca ptr
-  %s6 = alloca ptr
-  %s17 = alloca ptr
-  %s23 = alloca ptr
-  %s34 = alloca ptr
-  br label %L0
-L0:
-  call void @nt_init_args(i32 %argc, ptr %argv)
-  %t0 = call ptr @nt_obj_new(double 0x4008000000000000)
-  call void @M.constructor(ptr %t0, double 0x3FF0000000000000)
-  store ptr %t0, ptr %a.addr
-  %t1 = load ptr, ptr %a.addr
-  %t2 = getelementptr i64, ptr %t1, i64 1
-  %t3 = load i64, ptr %t2
-  %t4 = inttoptr i64 %t3 to ptr
-  %t5 = getelementptr i64, ptr %t4, i64 0
-  %t6 = load i64, ptr %t5
-  %t7 = icmp eq i64 %t6, 0
-  br i1 %t7, label %pu1, label %pnc2
-pu1:
-  call void @js_print_str(ptr @.str.0)
-  br label %pe5
-pnc2:
-  %t8 = icmp eq i64 %t6, 1
-  br i1 %t8, label %pn3, label %pp4
-pn3:
-  call void @js_print_str(ptr @.str.1)
-  br label %pe5
-pp4:
-  %t9 = getelementptr i64, ptr %t4, i64 1
-  %t10 = load i64, ptr %t9
-  %t11 = inttoptr i64 %t10 to ptr
-  call void @js_print_str(ptr %t11)
-  br label %pe5
-pe5:
-  call void @js_print_newline()
-  %t12 = load ptr, ptr %a.addr
-  %t13 = getelementptr i64, ptr %t12, i64 1
-  %t14 = load i64, ptr %t13
-  %t15 = inttoptr i64 %t14 to ptr
-  %t16 = getelementptr i64, ptr %t15, i64 0
-  %t17 = load i64, ptr %t16
-  %t18 = icmp eq i64 %t17, 0
-  br i1 %t18, label %tu7, label %tnc8
-tu7:
-  store ptr @.str.0, ptr %s6
-  br label %te11
-tnc8:
-  %t19 = icmp eq i64 %t17, 1
-  br i1 %t19, label %tn9, label %tp10
-tn9:
-  store ptr @.str.2, ptr %s6
-  br label %te11
-tp10:
-  store ptr @.str.3, ptr %s6
-  br label %te11
-te11:
-  %t20 = load ptr, ptr %s6
-  call void @js_print_str(ptr %t20)
-  call void @js_print_newline()
-  %t21 = load ptr, ptr %a.addr
-  %t22 = getelementptr i64, ptr %t21, i64 2
-  %t23 = load i64, ptr %t22
-  %t24 = inttoptr i64 %t23 to ptr
-  %t25 = getelementptr i64, ptr %t24, i64 0
-  %t26 = load i64, ptr %t25
-  %t27 = icmp eq i64 %t26, 0
-  br i1 %t27, label %pu12, label %pnc13
-pu12:
-  call void @js_print_str(ptr @.str.0)
-  br label %pe16
-pnc13:
-  %t28 = icmp eq i64 %t26, 1
-  br i1 %t28, label %pn14, label %pp15
-pn14:
-  call void @js_print_str(ptr @.str.1)
-  br label %pe16
-pp15:
-  %t29 = getelementptr i64, ptr %t24, i64 1
-  %t30 = load i64, ptr %t29
-  %t31 = bitcast i64 %t30 to double
-  call void @js_print_num(double %t31)
-  br label %pe16
-pe16:
-  call void @js_print_newline()
-  %t32 = load ptr, ptr %a.addr
-  %t33 = call ptr @nt_insp_new(ptr @.str.4, ptr @.str.5, double 0x0000000000000000, double 0x0000000000000000, double 0x0000000000000000)
-  %t34 = getelementptr i64, ptr %t32, i64 0
-  %t35 = load i64, ptr %t34
-  %t36 = bitcast i64 %t35 to double
-  %t37 = call ptr @nt_insp_num(double %t36)
-  %t38 = call ptr @nt_insp_entry(ptr @.str.6, ptr %t37)
-  call void @nt_insp_add(ptr %t33, ptr %t38)
-  %t39 = getelementptr i64, ptr %t32, i64 1
-  %t40 = load i64, ptr %t39
-  %t41 = inttoptr i64 %t40 to ptr
-  %t42 = getelementptr i64, ptr %t41, i64 0
-  %t43 = load i64, ptr %t42
-  %t44 = icmp eq i64 %t43, 0
-  br i1 %t44, label %iu18, label %inc19
-iu18:
-  store ptr @.str.0, ptr %s17
-  br label %ie22
-inc19:
-  %t45 = icmp eq i64 %t43, 1
-  br i1 %t45, label %in20, label %ip21
-in20:
-  store ptr @.str.1, ptr %s17
-  br label %ie22
-ip21:
-  %t46 = getelementptr i64, ptr %t41, i64 1
-  %t47 = load i64, ptr %t46
-  %t48 = inttoptr i64 %t47 to ptr
-  %t49 = call ptr @nt_insp_str(ptr %t48)
-  store ptr %t49, ptr %s17
-  br label %ie22
-ie22:
-  %t50 = load ptr, ptr %s17
-  %t51 = call ptr @nt_insp_entry(ptr @.str.7, ptr %t50)
-  call void @nt_insp_add(ptr %t33, ptr %t51)
-  %t52 = getelementptr i64, ptr %t32, i64 2
-  %t53 = load i64, ptr %t52
-  %t54 = inttoptr i64 %t53 to ptr
-  %t55 = getelementptr i64, ptr %t54, i64 0
-  %t56 = load i64, ptr %t55
-  %t57 = icmp eq i64 %t56, 0
-  br i1 %t57, label %iu24, label %inc25
-iu24:
-  store ptr @.str.0, ptr %s23
-  br label %ie28
-inc25:
-  %t58 = icmp eq i64 %t56, 1
-  br i1 %t58, label %in26, label %ip27
-in26:
-  store ptr @.str.1, ptr %s23
-  br label %ie28
-ip27:
-  %t59 = getelementptr i64, ptr %t54, i64 1
-  %t60 = load i64, ptr %t59
-  %t61 = bitcast i64 %t60 to double
-  %t62 = call ptr @nt_insp_num(double %t61)
-  store ptr %t62, ptr %s23
-  br label %ie28
-ie28:
-  %t63 = load ptr, ptr %s23
-  %t64 = call ptr @nt_insp_entry(ptr @.str.8, ptr %t63)
-  call void @nt_insp_add(ptr %t33, ptr %t64)
-  %t65 = call ptr @nt_insp_done(ptr %t33)
-  call void @js_print_str(ptr %t65)
-  call void @js_print_newline()
-  %t66 = call ptr @nt_obj_new(double 0x3FF0000000000000)
-  call void @Filled.constructor(ptr %t66, ptr @.str.9)
-  store ptr %t66, ptr %f.addr
-  %t67 = load ptr, ptr %f.addr
-  %t68 = getelementptr i64, ptr %t67, i64 0
-  %t69 = load i64, ptr %t68
-  %t70 = inttoptr i64 %t69 to ptr
-  %t71 = getelementptr i64, ptr %t70, i64 0
-  %t72 = load i64, ptr %t71
-  %t73 = icmp eq i64 %t72, 0
-  br i1 %t73, label %pu29, label %pnc30
-pu29:
-  call void @js_print_str(ptr @.str.0)
-  br label %pe33
-pnc30:
-  %t74 = icmp eq i64 %t72, 1
-  br i1 %t74, label %pn31, label %pp32
-pn31:
-  call void @js_print_str(ptr @.str.1)
-  br label %pe33
-pp32:
-  %t75 = getelementptr i64, ptr %t70, i64 1
-  %t76 = load i64, ptr %t75
-  %t77 = inttoptr i64 %t76 to ptr
-  call void @js_print_str(ptr %t77)
-  br label %pe33
-pe33:
-  call void @js_print_newline()
-  %t78 = load ptr, ptr %f.addr
-  %t79 = call ptr @nt_insp_new(ptr @.str.10, ptr @.str.5, double 0x0000000000000000, double 0x0000000000000000, double 0x0000000000000000)
-  %t80 = getelementptr i64, ptr %t78, i64 0
-  %t81 = load i64, ptr %t80
-  %t82 = inttoptr i64 %t81 to ptr
-  %t83 = getelementptr i64, ptr %t82, i64 0
-  %t84 = load i64, ptr %t83
-  %t85 = icmp eq i64 %t84, 0
-  br i1 %t85, label %iu35, label %inc36
-iu35:
-  store ptr @.str.0, ptr %s34
-  br label %ie39
-inc36:
-  %t86 = icmp eq i64 %t84, 1
-  br i1 %t86, label %in37, label %ip38
-in37:
-  store ptr @.str.1, ptr %s34
-  br label %ie39
-ip38:
-  %t87 = getelementptr i64, ptr %t82, i64 1
-  %t88 = load i64, ptr %t87
-  %t89 = inttoptr i64 %t88 to ptr
-  %t90 = call ptr @nt_insp_str(ptr %t89)
-  store ptr %t90, ptr %s34
-  br label %ie39
-ie39:
-  %t91 = load ptr, ptr %s34
-  %t92 = call ptr @nt_insp_entry(ptr @.str.7, ptr %t91)
-  call void @nt_insp_add(ptr %t79, ptr %t92)
-  %t93 = call ptr @nt_insp_done(ptr %t79)
-  call void @js_print_str(ptr %t93)
-  call void @js_print_newline()
-  %t94 = load ptr, ptr %a.addr
-  call void @nt_obj_free(ptr %t94)
-  %t95 = load ptr, ptr %f.addr
-  call void @nt_obj_free(ptr %t95)
   ret i32 0
 }
 "
