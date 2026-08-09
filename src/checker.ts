@@ -4534,7 +4534,16 @@ export const CONSOLE_STREAMS: ReadonlyMap<string, "out" | "err"> = new Map([
  * ============================================================ */
 
 export type FmtSpec = "s" | "d" | "i" | "f" | "j" | "o" | "O" | "c";
-export type FmtPiece = { text: string; spec?: undefined } | { text?: undefined; spec: FmtSpec; arg: number };
+/**
+ * A literal chunk, or one argument substitution. The `kind` tag is load-bearing
+ * for SELF-HOSTING, not for TypeScript: the optional-field spelling this used to
+ * have (`{text; spec?: undefined} | {text?: undefined; spec; arg}`) is
+ * discriminated by field PRESENCE, and nativets' union representation has no box
+ * — the tag lives in the value, so a union needs a literal-typed discriminant at
+ * the same slot index in every member (docs/self-hosting.md, SH2). Tagged, it is
+ * an ordinary discriminated union to both toolchains.
+ */
+export type FmtPiece = { kind: "text"; text: string } | { kind: "arg"; spec: FmtSpec; arg: number };
 export interface FmtPlan {
   /** The formatted prefix, in order: literal chunks and argument substitutions. */
   pieces: FmtPiece[];
@@ -4564,7 +4573,7 @@ export function planConsoleFormat(args: Expr[]): FmtPlan | null {
 /** node's `formatWithOptionsInternal` scan, transcribed. `argc` counts the format string. */
 export function planFormatString(first: string, argc: number): FmtPlan | null {
   const pieces: FmtPiece[] = [];
-  const push = (text: string) => { if (text !== "") pieces.push({ text }); };
+  const push = (text: string) => { if (text !== "") pieces.push({ kind: "text", text }); };
   let a = 0;
   let lastPos = 0;
   for (let i = 0; i < first.length - 1; i++) {
@@ -4576,7 +4585,7 @@ export function planFormatString(first: string, argc: number): FmtPlan | null {
       if (spec === undefined) continue; // not a placeholder — left literal
       const arg = ++a;
       if (lastPos !== i - 1) push(first.slice(lastPos, i - 1));
-      pieces.push({ spec, arg });
+      pieces.push({ kind: "arg", spec, arg });
       lastPos = i + 1;
     } else if (next === "%") {
       push(first.slice(lastPos, i));
@@ -4591,7 +4600,7 @@ export function planFormatString(first: string, argc: number): FmtPlan | null {
 /** Which specifier consumes each argument index (indices below `restStart`). */
 export function fmtSpecByArg(plan: FmtPlan): Map<number, FmtSpec> {
   const m = new Map<number, FmtSpec>();
-  for (const p of plan.pieces) if (p.spec !== undefined) m.set(p.arg, p.spec);
+  for (const p of plan.pieces) if (p.kind === "arg") m.set(p.arg, p.spec);
   return m;
 }
 

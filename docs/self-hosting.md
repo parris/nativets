@@ -915,6 +915,83 @@ The `Analyzer` hazard recorded just above is untouched: `Analyzer` was already `
 the two-instance use-after-move is a parameter-property/move question, not a mutability one, and
 this change neither worsens nor fixes it.
 
+### `NT1009` AND `NT1031` ARE BOTH GONE — two more SOURCE gaps, and one measured surprise
+
+Three modules moved, none of it by changing the compiler. Both blockers were the compiler's
+own source stepping outside the subset it compiles, which is now the third time in a row
+(`@@mutable` for NT1023, the pragma spelling before it) that the answer was the source.
+
+**`FmtPiece` was not a union nativets can represent, and the refusal is correct as designed.**
+
+```ts
+type FmtPiece = { text: string; spec?: undefined } | { text?: undefined; spec: FmtSpec; arg: number };
+```
+
+is discriminated by field **presence**. SH2's representation has **no box** — a union value IS
+the member's object block and the tag IS a field of it — so a union is accepted only when a
+literal-typed discriminant sits at the same slot index in every member. Presence has no such
+field to read: the two members do not even share a slot layout (`text, spec` vs `text, spec,
+arg`), so supporting it would mean unifying layouts across members and dispatching on whether a
+nullable slot's tag says "absent" — a box by another name, and the property that makes SH2 cheap
+is precisely that there is none. The diagnostic already named the fix (*"a discriminant needs
+`kind: "a"`"*); `FmtPiece` now carries `kind: "text" | "arg"`, which is five lines across the
+declaration, two construction sites and two `switch`-ish sites, and is ordinary TypeScript.
+
+Behaviour-neutrality was **measured, not argued**: `planFormatString` renders an identical plan
+over 47 format strings × 7 argument counts (329 cases — `%%`, unknown specifiers, a trailing
+`%`, exhausted arguments), and `test/console.test.ts`'s 120 node-differential tests hold.
+
+**`lexer.ts` lost its capture write and then lost the recursion behind it.** `advance` and the
+three `scan*` closures moved `i`/`line`/`col`, which are `let`s of the enclosing `lex` — NT1031.
+They become one `//@@mutable interface LexState`: mutating a field of an **owned local** is not
+a capture write, since the binding never changes. Behind it sat `NT1003`, and that one is worth
+recording because it says something general about the subset:
+
+> **nativets supports no nested recursion at all.** A nested `function` declaration, a
+> self-recursive arrow (`const f = (n) => … f(n-1)`) and a forward-referenced one are all
+> `NT1003`. Hoisting to top level does not rescue a stateful one either: a `@@mutable` record
+> and a `@@mutable class` instance are both `NT1607` the moment they arrive as a **parameter**,
+> because a parameter is a borrow. So mutable scanner state can live only in the function that
+> owns it, and any recursion over it has to be made explicit.
+
+`scanTemplateBody`/`scanSubstitution` were mutually recursive; they are now one loop over an
+explicit frame stack (`-1` = template body, `n >= 1` = substitution at brace depth `n`), which
+is faithful because both frames appended to the **same string in source order**.
+
+**Verified by token identity over the real corpus**, which is far stronger than any test that
+could have been written for it: old and new lexer produce byte-identical token streams — type,
+value, line and column of every token — over **480 files** (all twelve `src/*.ts`, 465 files
+under `test/` and `examples/`, and both versions of `lexer.ts` itself, each lexed by both).
+
+| Module | Before | After |
+|---|---|---|
+| `checker.ts` | `NT1009` — `FmtPiece`, line 4385 | **`NT1030`** — ast.ts's `Expr` SCC, *inherited*; standalone it is `NT2001`, `NUMBER_CONSTS` as a `Record` |
+| `ownership.ts` | `NT1009` — the same, through the link | **`NT1030`** — the same, now blaming ast.ts directly |
+| `lexer.ts` | `NT1031` — `line++` in `advance` | **`NT1606`** — `tokens.push` |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+**checker.ts now has NO blocker of its own**, for the first time in this document's history —
+the `blame` column in `test/sh6.test.ts` flips `self` → `ast.ts`. Ten of twelve modules parse
+their own source cleanly and **nine of twelve** stop on ast.ts's 44-declaration mutually
+recursive `Expr`. The tree has never been this concentrated on one thing.
+
+**The surprise, and it revises the `.push` census above.** That census concluded the 145
+plain-local `.push` sites were "the mechanical ones" because `xs = [...xs, v]` is valid
+TypeScript, so *"bun keeps running `src/` unchanged — the two-toolchain constraint is satisfied
+for free"*. **It is not free.** The idiom is O(1) amortized in **nativets** (the transient path)
+and O(n) per append in **bun**, and bun is stage-0. `lex`'s `tokens` is not a small accumulator
+— 34,987 elements on `src/checker.ts` alone:
+
+```
+.push                1.1 ms
+xs = [...xs, v]   1150.9 ms      # 1036x, and quadratic: worse as the array grows
+```
+
+Converting `lex`'s 13 sites would cost ~6 s per full-tree lex and make the test suite, which
+lexes constantly, unusable. `diagnostics.ts` paid nothing for its 4 sites because its
+accumulator is a handful of lines. So the deciding factor is **the size the accumulator
+reaches**, not the shape of the receiver, and the 185-site census needs that second column
+before it is a plan. Not taken here; `lexer.ts` stops at rung 0 on `NT1606`.
 ### Re-measured after the `get` ACCESSOR — a SOURCE change, and the NT1607 over-refusal cleared
 
 Two items, one lane, and they are the two halves of "the compiler must stay inside the

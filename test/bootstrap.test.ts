@@ -328,12 +328,25 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // accumulators, so they now carry `//@@mutable` (the same pragma `Parser`, `FnGen`
     // and `Analyzer` already carried). checker.ts/ownership.ts stop on NT1009 (a
     // discriminant-less object union in diagnostics' `parseTemplate`) and codegen.ts on
-    // NT1002 (`op in FCMP` — the key-presence operator). checker.ts's is `FmtPiece` at line
-    // 4385, an optional-field union with no string-literal discriminant. codegen.ts's own
-    // NT1015 was a `get` accessor, now rewritten as the method it always was — accessors
-    // stay refused, and the tree holds exactly one getter and no setters.
+    // NT1002 (`op in FCMP` — the key-presence operator). codegen.ts's own NT1015 was a
+    // `get` accessor, now rewritten as the method it always was — accessors stay refused,
+    // and the tree holds exactly one getter and no setters.
+    //
+    // NT1009 AND NT1031 ARE NOW BOTH EMPTY, and both emptied the same way — by a SOURCE
+    // change to a supported spelling, not by a compiler change. `FmtPiece` carries a
+    // `kind` tag (SH2's union has no box, so presence-discrimination has no
+    // representation), and `lexer.ts`'s cursor became one `//@@mutable` record instead of
+    // three `let`s that closures wrote through. checker.ts and ownership.ts fall back onto
+    // ast.ts's NT1030, which nine modules now share; lexer.ts refills NT1606 with
+    // `tokens.push` — the 185-site census item, and NOT free for an accumulator this size
+    // (test/sh6.test.ts records the 1036x bun measurement).
+    //
+    // RESOLVED AT THE MERGE BY RE-MEASURING, and for the second time in this file NEITHER
+    // SIDE WAS RIGHT: this lane's list predated NT1002 (codegen.ts's `in`, which landed
+    // while it worked) and main's predated the two buckets this lane emptied. Each branch
+    // could see what it had changed and not what the other had.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1002", "NT1009", "NT1030", "NT1031"],
+      ["NT1002", "NT1030", "NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -449,7 +462,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // DIFFERENT NT1009 from the `?.[]` one — `FmtPiece` (checker.ts:4385), an
     // optional-field object union with no string-literal discriminant. Same code, other
     // feature, which is precisely why selfhost-ratchet compares MESSAGES.
-    expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
+    // ...and EMPTY again, on the FIFTH turn of the same wheel. `FmtPiece` was a source
+    // gap, like the NT1023 before it: SH2's union representation has no box, so a union
+    // is accepted only with a literal-typed discriminant at a common slot, and a
+    // presence-discriminated union has none to find. Tagged with `kind`, the two rows fall
+    // through to ast.ts's NT1030 — where the OTHER seven already were, so this bucket
+    // emptying moved the tree onto ONE shared blocker rather than onto two more.
+    expect(byCode["NT1009"] ?? []).toEqual([]);
     // NEW CODE, and it SPLIT the NT1009 bucket rather than adding to it. NT1030 is the
     // forward-reference / recursive-type refusal: `resolveNamed` used to return `number`
     // for a type name declared later in the same file, silently. ast.ts owns it (all 29
@@ -471,8 +490,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // getting more honest, not the frontier getting worse; the refusal is correct under the
     // prime directive whatever this number says. Note also that the two are not the same
     // problem: ast.ts needs the 44-declaration MUTUAL cycle, Scope needs only SELF-recursion.
+    // NINE of twelve now, and every module in this bucket except ast.ts is here for
+    // ast.ts's SCC through the link — `checker.ts` and `ownership.ts` arrived last, when
+    // the `FmtPiece` tag took away the last blocker checker.ts owned. The tree has never
+    // been this concentrated: resolve the 44-declaration mutual cycle and nine rows move
+    // at once, which is `?.[]`'s old argument with three more modules behind it.
     expect(byCode["NT1030"]!.sort()).toEqual(
-      ["ast.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+      ["ast.ts", "checker.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts",
+       "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
     // NT1015 is empty — the generic-method lane cleared modules.ts's, and codegen.ts's
     // static-member site was cleared earlier. (A fact about today; this file has been
@@ -499,7 +524,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // rung-3 lane cleared the `.push` sites (`lines = [...lines, …]`) plus the four
     // blockers that were queued behind them. A fact about today, not an invariant — this
     // file has been wrong three times treating an emptied bucket as one.
-    expect(byCode["NT1606"]).toBeUndefined();
+    // ...and it was wrong a FOURTH time. `lexer.ts` refilled it the moment its capture
+    // write and its mutually-recursive scanner closures were gone: `tokens.push`, 13 of
+    // the 185 census sites. Unlike diagnostics.ts's four, these are NOT free to rewrite —
+    // `tokens` reaches ~35k elements, where `xs = [...xs, v]` is 1036x slower under bun
+    // (measured; test/sh6.test.ts). Same code, same construct, opposite cost.
+    expect(byCode["NT1606"]!.sort()).toEqual(["lexer.ts"]);
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
@@ -530,7 +560,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT1031, `line++` — a write to a binding captured from `lex`'s scope.
     expect(byCode["NT2001"]).toBeUndefined();
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
-    expect(byCode["NT1031"]!.sort()).toEqual(["lexer.ts"]);
+    // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
+    // captured BINDING (a field of an owned local is not one). NT1031 has never had a
+    // second holder, so this bucket has now been born and emptied without ever growing.
+    expect(byCode["NT1031"]).toBeUndefined();
     // NT1606 changed HANDS entirely: diagnostics.ts left it (above), and checker.ts +
     // ownership.ts arrived from NT1009 once general unions landed. Same bucket, none of
     // the same modules — which is why membership, not size, is the thing to assert.
