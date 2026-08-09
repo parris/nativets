@@ -2699,8 +2699,25 @@ class Checker {
           if (l === "null" || l === "undefined") return r;
           if (isNullableTy(l)) {
             const base = baseTy(l);
-            if (base !== r && !this.assignable(base, r) && !this.assignable(r, base)) throw typeError(`?? branches differ: ${base} vs ${r}`);
-            return base;
+            // `??` consumes the LEFT's nullishness and NOTHING else — the specified type
+            // is `NonNullable<L> | R`. So a still-nullable RIGHT keeps the result
+            // nullable, in the right's own nullish flavour (`x ?? y` on two
+            // `string | undefined`s is `string | undefined`, and `x ?? null` is
+            // `string | null`). Answering `base` here unconditionally was a WRONG
+            // ANSWER, not a refusal: `typeof (f() ?? f())` printed "string" where node
+            // prints "undefined", and codegen then stored the right operand's
+            // [tag,value] BOX into a slot declared to hold the bare base value — so the
+            // ordinary chained cascade `a ?? b ?? "fallback"` reinterpreted that box as
+            // a string pointer, decided the third `??` had a non-nullable left, and
+            // never evaluated the fallback at all. See test/nullish-coalesce.ts.
+            const rbase = r === "null" || r === "undefined" ? base : baseTy(r);
+            if (rbase !== base && !this.assignable(base, rbase) && !this.assignable(rbase, base))
+              throw typeError(`?? branches differ: ${base} vs ${r}`);
+            // The result's base is whichever side is the WIDER of the two (they are
+            // assignable in one direction, proved just above).
+            const j = rbase === base || this.assignable(base, rbase) ? base : rbase;
+            if (r === "null" || r === "undefined") return makeNullable(r, j);
+            return isNullableTy(r) ? makeNullable(nullishKind(r), j) : j;
           }
           if (l !== r) throw typeError(`?? branches differ: ${l} vs ${r}`);
           return l;
@@ -4568,7 +4585,26 @@ class Checker {
     // without being rebuilt, so it is left to `fitsArg`, which accepts it only when it is a
     // literal it can actually reshape. Widening this to the full `assignable` relation is
     // the memory bug (a dereference of a raw double), not the feature.
-    if (isNullableTy(expected)) return actual === nullishKind(expected) || actual === baseTy(expected);
+    if (isNullableTy(expected)) {
+      const nbase = baseTy(expected);
+      if (actual === nullishKind(expected) || actual === nbase) return true;
+      // ...and a nullable UNION takes a MEMBER, for exactly the reason the bare-union
+      // arm at the top of this function does: a union value IS its member's object
+      // block, so boxing one into the `?U` slot is the same tag-2 store as any other
+      // base-typed value. Without this arm the `| undefined` was the whole difference
+      // between an accepted and a refused call —
+      //     f({ kind: "B" })   against  f(e: E)              accepted
+      //     f({ kind: "B" })   against  f(e: E | undefined)  NT2001
+      // — which is why every walker in `src/` that takes an optional node has to bind
+      // its argument to an annotated local first. Reported by lane-rectype.
+      //
+      // Still narrower than `assignable` in the way the comment above insists on: the
+      // union arm of `assignable` is IDENTITY against `unionWidenedMembers`, not the
+      // structural-object rule, so a merely structurally-compatible record with its
+      // own slot layout keeps being refused (test/nullable-assign.test.ts §5).
+      if ((isUnionTy(nbase) || isGeneralUnionTy(nbase)) && this.assignable(nbase, actual)) return true;
+      return false;
+    }
     return false;
   }
 
