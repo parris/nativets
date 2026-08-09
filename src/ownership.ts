@@ -23,7 +23,7 @@
  */
 
 import type { CheckedProgram } from "./checker.ts";
-import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
+import type { Program, Stmt, Expr, FuncDecl, Ty } from "./ast.ts";
 import { isArrayTy, isObjectTy, isUnionTy, isTypeRefTy, isFuncTy, setBlockDrops, classTag, mutableTags, RETAINS_RECEIVER } from "./ast.ts";
 
 /** The linear (single-owner, move-checked + dropped) types: heap aggregates. A
@@ -33,7 +33,7 @@ import { isArrayTy, isObjectTy, isUnionTy, isTypeRefTy, isFuncTy, setBlockDrops,
  * LINEAR. Left out, `isLinearTy` answered false and the whole memory-safety story switched
  * off for the new encoding at once: no move checking, no borrow rules, and — because
  * `declaredLinear` feeds the drop list — no drop emitted either. */
-function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t) || isUnionTy(t) || isTypeRefTy(t); }
+function isLinearTy(t: Ty): boolean { return isArrayTy(t) || isObjectTy(t) || isUnionTy(t) || isTypeRefTy(t); }
 
 export const OWN_CODES = {
   USE_AFTER_MOVE: "NT1601",      // ≈ E0382
@@ -100,6 +100,40 @@ function retainedReceiver(e: Expr): string | null {
   if (!retainsReceiver(e)) return null;
   const base = (e as { callee: { object: Expr } }).callee.object;
   return base.kind === "Identifier" ? base.name : null;
+}
+
+/**
+ * `o.lines` ⇒ `"o"` when `o` is a BORROW — a field read whose result is a second name for
+ * storage the receiver still owns. `this.lines` answers `"this"`, which is a borrow in
+ * every method body (the receiver belongs to the caller).
+ *
+ * A chained root (`p.b.lines`) walks to the outermost binding, exactly as
+ * `checkOwnedReceiver` resolves its receiver, so `p.b.lines` on a borrowed `p` matches.
+ * Anything whose root is not a binding — a call result, an element, a literal — answers
+ * null: the receiver is a temporary nobody else owns, so the read really does take it.
+ *
+ * SPELLING NOTE (docs/self-hosting.md): the walk is RECURSIVE rather than
+ * `while (root.kind === "MemberExpr") root = root.object`, which is how
+ * `checkOwnedReceiver` writes the same thing. The loop form does not survive this
+ * compiler's own narrowing — the discriminant is re-widened at the back edge, so
+ * `root.object` is `Property 'object' does not exist on <the whole Expr union>` — and
+ * `src/` has to stay inside the subset it compiles.
+ */
+function fieldRootName(e: Expr): string | null {
+  if (e.kind === "Identifier") return e.name;
+  if (e.kind === "MemberExpr") return fieldRootName(e.object);
+  return null;
+}
+
+function borrowedFieldRoot(e: Expr, borrowRoots: Set<string>): string | null {
+  if (e.kind !== "MemberExpr") return null;
+  // `?? "number"` rather than an `undefined` guard — the spelling every other
+  // `isLinearTy` call site in this file uses, and the one that stays inside the
+  // self-hosting subset (a narrowed `Ty | undefined` does not reach the parameter).
+  if (!isLinearTy(e.ty ?? "number")) return null;
+  const root = fieldRootName(e.object);
+  if (root === null || !borrowRoots.has(root)) return null;
+  return root;
 }
 
 export interface OwnDiag { code: string; message: string; line: number; movedAt?: number; hint?: string; }
@@ -196,7 +230,7 @@ class Analyzer {
     /** `@@mutable` classes + their setters, and the static type of every tracked name —
      *  what the exclusive-access rule above is decided from. */
     private mutable: MutableInfo = NO_MUTABLE,
-    private varTy: Map<string, import("./ast.ts").Ty> = new Map(),
+    private varTy: Map<string, Ty> = new Map(),
     /** alias name → the binding that OWNS the value (`const b = a` ⇒ b → a). */
     private aliasOf: Map<string, string> = new Map(),
     /** class tag → the ARGUMENT indices its constructor CONSUMES (parameter properties
@@ -216,7 +250,7 @@ class Analyzer {
   private readonly borrowParams = new Set<string>();
 
   /** Is this type an instance of an `@@mutable` class? */
-  private isMutableInstance(ty: import("./ast.ts").Ty): boolean {
+  private isMutableInstance(ty: Ty): boolean {
     if (!this.mutable.classes.size || !isObjectTy(ty)) return false;
     const tag = classTag(ty);
     return tag !== undefined && this.mutable.classes.has(tag);
@@ -1031,12 +1065,43 @@ function nonEscapingClosures(list: Stmt[], shadowed: Set<string>): string[] {
  * double-freed through a second handle; and each is registered as a borrow, so it can
  * never escape the owner's scope (returning one is NT1604).
  *
- * Two sources, sharing that one mechanism:
+ * Three sources, sharing that one mechanism:
  *   - `const b = a` (and `const c = a.bump()`) where the type is an `@@mutable` class
  *     instance — the decorators model (docs/decorators.md);
- *   - `const b = a.reverse()` on ANY linear value — the call returns its receiver.
+ *   - `const b = a.reverse()` on ANY linear value — the call returns its receiver;
+ *   - `const b = o.f` where the FIELD is linear and `o` is a BORROW (`borrowRoots`: a linear
+ *     parameter, a method's `this`, or a `for-of` element) — the object still owns the field.
+ *
+ * THE THIRD ONE CLOSED A USE-AFTER-FREE, and it is the reason this comment says three.
+ * A field read was neither a move nor an alias: nothing recorded it at all, so the
+ * binding was an ordinary linear local and scope exit emitted `nt_arr_free` on storage
+ * the receiver still points at.
+ *
+ *   type Box = { lines: string[] };
+ *   function probe(o: Box): string { const b = o.lines; return b.join("|"); }
+ *   const o: Box = { lines: ["a", "b"] };
+ *   probe(o);
+ *   console.log(o.lines.join("|"));   // node "a|b";  we printed an EMPTY LINE, at exit 0
+ *
+ * The same shape through a `@@mutable` class field SEGFAULTED — exit 139 out of a
+ * memory-safe language. `test/ownership/move-out-of-field.ts` pins both.
+ *
+ * ALIAS, not refusal, is the right answer here and the distinction matters: the READ is
+ * perfectly safe and matches node, and refusing it would reject `const b = o.lines;
+ * b.length` — a shape this compiler's own source is full of. What is unsafe is letting
+ * the handle ESCAPE, and that falls out for free: an alias is a borrow binding, so
+ * `return b` / `move(b)` / storing it in a container is the existing NT1604.
+ *
+ * A LOCALLY-OWNED receiver is deliberately NOT in `borrowRoots` (`const o = { lines: […] };
+ * const b = o.lines`): there the move is genuine, `nt_obj_free` is shallow so nothing is
+ * freed twice, and that shape compiles and matches node today.
+ *
+ * The cost is a LEAK where there used to be a use-after-free — the array-in-object class
+ * `nt_obj_free` already leaks by construction (docs/ROADMAP.md, "Why ELEMENTS is not a
+ * one-line fix"), so this joins a known list rather than opening a new one, and the
+ * project's stated trade is leak-over-dangle.
  */
-function collectAliases(stmts: Stmt[], isMutableTy: (t: import("./ast.ts").Ty) => boolean, out: Map<string, string>): void {
+function collectAliases(stmts: Stmt[], isMutableTy: (t: Ty) => boolean, out: Map<string, string>, borrowRoots: Set<string> = new Set()): void {
   for (const s of stmts) {
     switch (s.kind) {
       case "VarDecl":
@@ -1052,6 +1117,11 @@ function collectAliases(stmts: Stmt[], isMutableTy: (t: import("./ast.ts").Ty) =
           // Independent of `@@mutable`: this applies to plain arrays.
           const retained = retainedReceiver(d.init);
           if (retained !== null) { out.set(d.name, retained); continue; }
+          // `const b = o.f` / `const b = this.f` on a LINEAR field of a BORROWED receiver:
+          // the object owns the field and outlives this scope, so `b` names it rather than
+          // taking it. Not `@@mutable`-gated — it is the plain-array shape that dangled.
+          const fieldRoot = borrowedFieldRoot(d.init, borrowRoots);
+          if (fieldRoot !== null && isLinearTy(d.ty ?? "number")) { out.set(d.name, fieldRoot); continue; }
           if (!isMutableTy(d.ty ?? "number")) continue;
           if (d.init.kind === "Identifier") out.set(d.name, d.init.name);
           else if (d.init.kind === "CallExpr" && d.init.callee.kind === "MemberExpr") {
@@ -1060,19 +1130,29 @@ function collectAliases(stmts: Stmt[], isMutableTy: (t: import("./ast.ts").Ty) =
           }
         }
         break;
-      case "IfStmt": collectAliases(s.consequent, isMutableTy, out); if (s.alternate) collectAliases(s.alternate, isMutableTy, out); break;
-      case "WhileStmt": case "DoWhileStmt": case "ForOfStmt": case "ForInStmt": case "BlockStmt": collectAliases(s.body, isMutableTy, out); break;
-      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectAliases([s.init as Stmt], isMutableTy, out); collectAliases(s.body, isMutableTy, out); break;
-      case "SwitchStmt": for (const c of s.cases) collectAliases(c.body, isMutableTy, out); break;
-      case "TryStmt": collectAliases(s.block, isMutableTy, out); if (s.handler) collectAliases(s.handler, isMutableTy, out); if (s.finalizer) collectAliases(s.finalizer, isMutableTy, out); break;
-      case "MultiStmt": collectAliases(s.stmts, isMutableTy, out); break;
+      case "IfStmt": collectAliases(s.consequent, isMutableTy, out, borrowRoots); if (s.alternate) collectAliases(s.alternate, isMutableTy, out, borrowRoots); break;
+      case "WhileStmt": case "DoWhileStmt": case "ForInStmt": case "BlockStmt": collectAliases(s.body, isMutableTy, out, borrowRoots); break;
+      // A `for-of` ELEMENT over a linear element type is a BORROW for the body's extent —
+      // the array owns it, exactly as `Analyzer.expr` puts the name in `borrowBindings`
+      // there. So `for (const t of toks) { const b = t.parts; }` is the same
+      // use-after-free as the parameter case, and it SEGFAULTED (exit 139) rather than
+      // merely printing a wrong answer. Scoped to the body with a fresh set: the name is
+      // not a borrow outside the loop.
+      case "ForOfStmt":
+        collectAliases(s.body, isMutableTy, out,
+          isLinearTy(s.elemTy ?? "number") ? new Set<string>([...borrowRoots, s.name]) : borrowRoots);
+        break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectAliases([s.init as Stmt], isMutableTy, out, borrowRoots); collectAliases(s.body, isMutableTy, out, borrowRoots); break;
+      case "SwitchStmt": for (const c of s.cases) collectAliases(c.body, isMutableTy, out, borrowRoots); break;
+      case "TryStmt": collectAliases(s.block, isMutableTy, out, borrowRoots); if (s.handler) collectAliases(s.handler, isMutableTy, out, borrowRoots); if (s.finalizer) collectAliases(s.finalizer, isMutableTy, out, borrowRoots); break;
+      case "MultiStmt": collectAliases(s.stmts, isMutableTy, out, borrowRoots); break;
       default: break;
     }
   }
 }
 
 /** Static type of every name bound in a scope — what the `@@mutable` rules read. */
-function collectVarTys(stmts: Stmt[], out: Map<string, import("./ast.ts").Ty>): void {
+function collectVarTys(stmts: Stmt[], out: Map<string, Ty>): void {
   for (const s of stmts) {
     switch (s.kind) {
       case "VarDecl": for (const d of s.decls) if (d.ty !== undefined) out.set(d.name, d.ty); break;
@@ -1155,7 +1235,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     if (idx.size > 0) consuming.set(s.name.slice(0, s.name.length - CTOR.length), idx);
   }
 
-  const isMutableTy = (t: import("./ast.ts").Ty): boolean => {
+  const isMutableTy = (t: Ty): boolean => {
     if (!mutable.classes.size || !isObjectTy(t)) return false;
     const tag = classTag(t);
     return tag !== undefined && mutable.classes.has(tag);
@@ -1206,10 +1286,14 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   };
   collectMutableArgs(checked.program.body);
 
-  const runScope = (body: Stmt[], params: { name: string; ty: import("./ast.ts").Ty }[], untrack: Set<string> = new Set(), mutableNames: Set<string> = new Set()): string[] => {
+  const runScope = (body: Stmt[], params: { name: string; ty: Ty }[], untrack: Set<string> = new Set(), mutableNames: Set<string> = new Set()): string[] => {
     const aliases = new Map<string, string>();
-    collectAliases(body, isMutableTy, aliases); // ALWAYS: the retains-receiver rule is not `@@mutable`-specific
-    const varTy = new Map<string, import("./ast.ts").Ty>();
+    // Receivers whose FIELDS this scope may only borrow: a linear parameter (the caller
+    // owns and drops it) and a method's `this`. `this` is unconditional — it names no
+    // binding in `params`, and it is a borrow in every member body.
+    const borrowRoots = new Set<string>(["this", ...params.filter((p) => isLinearTy(p.ty)).map((p) => p.name)]);
+    collectAliases(body, isMutableTy, aliases, borrowRoots); // ALWAYS: the retains-receiver rule is not `@@mutable`-specific
+    const varTy = new Map<string, Ty>();
     if (mutable.classes.size) {
       for (const p of params) varTy.set(p.name, p.ty);
       collectVarTys(body, varTy);

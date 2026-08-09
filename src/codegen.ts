@@ -1189,6 +1189,7 @@ class FnGen {
   }
 
   private assemble(header: string, firstBlock: number): string {
+    //@@mutable
     const out: string[] = [`${header} {`, "entry:"];
     for (const a of this.entryAllocas) out.push("  " + a);
     out.push(`  br label %${this.blocks[firstBlock]!.label}`);
@@ -3806,6 +3807,8 @@ class FnGen {
     // the node also means the index expression travels UNEVALUATED: it is lowered only
     // inside the continuation block past the guard, which is what makes
     // `a?.[sideEffect()]` skip the side effect when `a` is nullish, as node does.
+    // NOT `//@@mutable`: the chain is built with `.unshift`, and the opt-in legalizes
+    // `.push` ONLY — the mark would be dead weight, not a fix.
     const links: Extract<Expr, { kind: "MemberExpr" | "IndexExpr" }>[] = [];
     let node: Expr = e;
     while (node.kind === "MemberExpr" || node.kind === "IndexExpr") { links.unshift(node); node = node.object; }
@@ -5651,6 +5654,7 @@ class FnGen {
     const sig = this.mod.functions.get(name)!;
     if (sig.rest) {
       const fixed = sig.params.length - 1;
+      //@@mutable
       const argVals: string[] = [];
       // The FIXED parameters coerce just like a non-rest call's do (see below) — this
       // path emitted them raw, so a nullable/general-union fixed parameter of a rest
@@ -5666,6 +5670,7 @@ class FnGen {
       this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
       return { v: t, ty: sig.ret };
     }
+    //@@mutable
     const argVals: string[] = [];
     for (let i = 0; i < sig.params.length; i++) {
       // Coerced to the param type — boxing an `undefined` default into a nullable

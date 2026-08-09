@@ -308,6 +308,7 @@ class Renamer {
  * frame, so its locals cannot collide across modules.
  */
 function topLevelNames(p: Program): string[] {
+  //@@mutable
   const out: string[] = [];
   const walk = (list: Stmt[]): void => {
     for (const s of list) {

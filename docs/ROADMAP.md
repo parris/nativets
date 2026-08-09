@@ -227,13 +227,73 @@ whether the `@@mutable` accumulator should be replaced by a builder type**, and 
 rewrite then, when only one toolchain has to be satisfied. Until that day the opt-in is the
 deliberate, documented trade — an opt-in beside the immutability rule, not a relaxation of it.
 
-**Two smaller items this lane leaves behind**, both refusals rather than gaps:
+#### THE OPT-IN IS NOW APPLIED TO `src/` — and that was the whole "array mutation" blocker
 
-- `.push` on `this.<field>` (38 sites tree-wide, 18 in `src/parser.ts`) — a field names no binding
-  whose ownership the pass can establish. Needs the class-field analogue of the binding attribute.
-- `.push` to a **captured** accumulator (all of `src/modules.ts`'s, shape
-  `const walk = (list) => { out.push(…) }`) — refused because a closure env holds a second pointer
-  this scope cannot null. Needs closure ESCAPE analysis, not a wider attribute.
+The opt-in shipped but nothing in `src/*.ts` carried it except `lex`'s `tokens`. A later probe
+then reported "NT1606 array mutation, 60 functions" as the single largest self-hosting blocker
+bucket and asked for `.push` to be **legalized**. The premise was wrong twice over: the sanctioned
+answer already existed, it was simply **unapplied**, and applying it needs no compiler change at
+all — `//@@mutable` is a comment, so `bun` is unaffected and there is no second toolchain to
+satisfy.
+
+**43 accumulator declarations are now marked** across `parser.ts` (30), `checker.ts` (4),
+`driver.ts` (5), `codegen.ts` (4), `modules.ts` (1) and `coverage.ts` (1), plus one comma
+declaration split in two (`@@mutable` names ONE binding, so `const folded = [], inline = []` was
+`NT1023`). `planFormatString`'s `pieces` is deliberately left UNMARKED — see the captured
+accumulator item below.
+
+**Measured with the per-function instrument** — `check`'s per-function loop over the LINKED
+stage-1 program (`src/cli.ts` + its whole import graph), which is the metric that matters, not the
+per-module rung table. Reproduce it by wrapping that loop (`src/checker.ts`, `for (const s of
+program.body) … c.checkFunction(…)`) in a try/catch that records one row per function, over
+`check(linkProgram(readFileSync("src/cli.ts"), "src/cli.ts"))`:
+
+| | functions | failing their own body check | NT1606 |
+|---|---|---|---|
+| before | 646 | **301** (46.6%) | 115 |
+| after | 648 | **280** (43.2%) | 85 |
+
+**30 of the 115 NT1606s are gone and 21 functions closed outright.** The two numbers differ
+because a first-blocker instrument always overstates what one bucket is worth: clearing the
+NT1606 in a function often just exposes the next code down. The two added functions are
+`fieldRootName` / `borrowedFieldRoot`, both inside the subset.
+
+**Read that "after" NT1606 count carefully.** It is 85, not 115 − 30 = 80: the same run also
+fixed `isLinearTy`'s `import("./ast.ts").Ty` annotation (unresolvable, so the parameter typed as
+`number` and every call was `NT2001`), which unblocked functions whose NEXT blocker is an NT1606
+nobody had ever reached. Bucket totals move under each other; the failing-FUNCTION count is the
+number to track.
+
+**The remaining NT1606 debt, by sub-bucket** — none of it is "`.push` is refused", and each needs
+a different answer:
+
+- **`Map`/`Set` mutator result discarded — 50, now the largest.** Not an array problem at all:
+  `Map`/`Set` here are PERSISTENT (§A), so `m.set(k, v)` as a statement is a no-op and is refused.
+  The rewrite `m = m.set(k, v)` is **free under bun** (node's `.set` returns the receiver, so the
+  reassignment is the identity) and correct under both — but it needs a rebindable `let` for the
+  23 local receivers, and a mutable class FIELD for the other 23 (`this.generics.set(…)`), and
+  `.delete` returns a **boolean** under node so those 3 sites need a real rewrite, not a rebind.
+- **`.push` on `this.<field>` — 14, plus 1 on `b.lines` (a field of a local)** (was 38 sites
+  tree-wide). Unchanged: a field
+  names no binding. `this.f = [...this.f, v]` compiles on a `@@mutable` class and is O(1)
+  amortized here, but it is O(n) per append **under bun**, which is exactly the trade this whole
+  section exists to avoid — `codegen`'s `this.blocks[this.cur].lines.push` runs once per IR line.
+  Still needs the class-field analogue of the binding attribute.
+- **object/element field mutation (`e.ty = v`, `fields[i] = v`) — 12.** The `@@mutable` RECORD
+  lane already measured this one: 81% of field writes expressible, and NO new module compiles.
+- **`.pop` / `.shift` / `.unshift` / a fresh `.sort()` — 4.** The opt-in legalizes `.push` ONLY.
+  (`readdirSync(…).sort()` is in here: a HOST call's result is not `freshArray`, since a plain
+  callee may still own what it returns.)
+- **an accumulator PARAMETER — 3** (`Checker.addFact(…, out: NarrowFact[])`,
+  `directBound(…, out: string[])`, `declaredLinear(…, out)`). The per-parameter `@@mutable` covers
+  the shape; the marker has to travel to every call site, and `addFact`'s `out` is passed from
+  inside an arrow (`const go = (x) => this.assertFacts(x, scope, out)`).
+- **a CAPTURED accumulator — 1 here, and the reason `planFormatString` is left unmarked.**
+  `const push = (text) => { pieces.push(…) }` is `NT1607`, not `NT1606`: an arrow copies the array
+  pointer into an env this scope cannot null. Marking it would trade one refusal for another while
+  making this checker-only instrument report the function as CLEAN — the instrument does not run
+  the ownership pass, so a mark that only moves the blocker downstream is a mark that lies. The
+  same shape is all of `src/modules.ts`'s. Needs closure ESCAPE analysis, not a wider attribute.
 
 ### Why ELEMENTS is not a one-line fix (measured, `test/drops-obj.test.ts`)
 
