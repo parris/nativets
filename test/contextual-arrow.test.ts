@@ -26,9 +26,33 @@
  */
 
 import { test, expect, describe } from "bun:test";
+import { readFileSync, readdirSync } from "node:fs";
 
 import { sourceToIR } from "../src/driver.ts";
+import { parse } from "../src/parser.ts";
+import type { ArrowFunction, Program, Stmt } from "../src/ast.ts";
 import { compileAndRun, runWithNode } from "./harness.ts";
+
+const SRC_DIR = new URL("../src/", import.meta.url);
+
+function parseProgram(source: string): Program { return parse(source); }
+
+/** The first `ArrowFunction` in the program, by a shape-blind walk. */
+function findArrow(prog: Program): ArrowFunction {
+  let found: ArrowFunction | undefined;
+  const seen = new Set<unknown>();
+  const walk = (n: unknown): void => {
+    if (found !== undefined) return;
+    if (Array.isArray(n)) { for (const x of n) walk(x); return; }
+    if (n === null || typeof n !== "object" || seen.has(n)) return;
+    seen.add(n);
+    if ((n as { kind?: string }).kind === "ArrowFunction") { found = n as ArrowFunction; return; }
+    for (const v of Object.values(n)) walk(v);
+  };
+  walk(prog.body as Stmt[]);
+  if (found === undefined) throw new Error("no ArrowFunction in program");
+  return found;
+}
 
 async function same(source: string): Promise<void> {
   const oracle = runWithNode(source);
@@ -134,5 +158,57 @@ describe("a context that cannot type the parameter refuses, never guesses", () =
   test("a non-function annotation supplies no context", () => {
     expect(() => sourceToIR("const f: number = (p) => p;\nconsole.log(f);\n"))
       .toThrow(/cannot infer type of arrow parameter 'p'/);
+  });
+});
+
+/*
+ * THE ARROW BODY IS TWO FIELDS — a lint, because the rename is silent if it is missed.
+ *
+ * `ArrowFunction.body: Expr | Stmt[]` became `body?: Expr` + `stmts?: Stmt[]`. That was
+ * forced by self-hosting — a union of a discriminated union and an ARRAY has no
+ * representation, and it was one of the four residuals holding `src/ast.ts`'s 45-member
+ * recursive component (see the ArrowFunction comment in `src/ast.ts` for the two shapes
+ * that were measured and rejected first).
+ *
+ * WHY THIS LINT EXISTS. `arrow.body as Expr` is unchanged verbatim by that rename — it
+ * still typechecks, because `body` is still `Expr | undefined`. That is convenient and it
+ * is exactly the hazard: a reader that should have moved to `stmts` and did not keeps
+ * compiling, and merely reads `undefined` at runtime. Some of those crash loudly; at
+ * least one did NOT — `checkDefiniteAssignment`'s shape-blind walk simply found no nested
+ * body and ran no analysis, silently ACCEPTING a program it must refuse (pinned as case
+ * 22 in `test/definite-assignment.test.ts`).
+ *
+ * So the guard is textual and total: no `.body as Stmt[]` may exist in `src/` at all.
+ * A block arrow's statements live in `stmts`; the only `Stmt[]`-shaped `body` left is
+ * `FuncDecl.body`/`BlockStmt.body`, neither of which is ever cast.
+ *
+ * Scanned with `readFileSync` + `includes`, never a shell `grep`: the `grep` on this
+ * machine is shimmed and silently misses matches, which would make this lint pass by
+ * finding nothing.
+ */
+describe("ArrowFunction's body/stmts split — the lint that makes a missed site fail", () => {
+  test("no `.body as Stmt[]` survives anywhere in src/", () => {
+    const offenders: string[] = [];
+    for (const f of readdirSync(SRC_DIR).filter((n) => n.endsWith(".ts")).sort()) {
+      const lines = readFileSync(new URL(f, SRC_DIR), "utf8").split("\n");
+      lines.forEach((l, i) => { if (l.includes("body as Stmt[]")) offenders.push(`src/${f}:${i + 1}: ${l.trim()}`); });
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test("the parser puts a block arrow's statements in `stmts` and leaves `body` absent", () => {
+    const prog = parseProgram("const f = (n: number) => { return n + 1; };\nconsole.log(f(1));\n");
+    const arrow = findArrow(prog);
+    expect(arrow.exprBody).toBe(false);
+    expect(arrow.body).toBeUndefined();
+    expect(Array.isArray(arrow.stmts)).toBe(true);
+  });
+
+  test("...and an expression arrow is the mirror image", () => {
+    const prog = parseProgram("const f = (n: number) => n + 1;\nconsole.log(f(1));\n");
+    const arrow = findArrow(prog);
+    expect(arrow.exprBody).toBe(true);
+    expect(arrow.stmts).toBeUndefined();
+    expect(arrow.body).toBeDefined();
   });
 });

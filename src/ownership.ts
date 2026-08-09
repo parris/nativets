@@ -685,7 +685,7 @@ class Analyzer {
       case "ArrowFunction": // captures/params aren't linear here; the BODY is its own scope
         this.arrowDepth++;
         if (e.exprBody) this.expr(e.body as Expr, state, false);
-        else this.arrowScope(e.body as Stmt[], state);
+        else this.arrowScope(e.stmts as Stmt[], state);
         this.arrowDepth--;
         return;
       case "SequenceExpr": for (const x of e.exprs) this.expr(x, state, false); return;

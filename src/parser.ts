@@ -2516,11 +2516,11 @@ class Parser {
     this.returnsAsyncFnStack.push(retAsyncFn);
     this.asyncParamScopes.push(arrowPromiseNames);
     try {
-      if (this.at("{")) return mk({ kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false, retAnnot });
+      if (this.at("{")) return mk({ kind: "ArrowFunction", params, stmts: [...prelude, ...this.parseBlock()], exprBody: false, retAnnot });
       const body = this.parseAssign();
       // A pattern parameter needs statements to bind its names, so an expression body
       // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
-      if (prelude.length) return mk({ kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false, retAnnot });
+      if (prelude.length) return mk({ kind: "ArrowFunction", params, stmts: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false, retAnnot });
       return mk({ kind: "ArrowFunction", params, body, exprBody: true, retAnnot });
     } finally { this.returnsAsyncFnStack.pop(); this.asyncParamScopes.pop(); }
   }

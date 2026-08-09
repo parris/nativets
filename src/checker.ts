@@ -3494,7 +3494,7 @@ class Checker {
       if (this.assignable(declared, t)) return t; // (2) honest, wider than codegen carries
       throw typeError(`return type ${t} does not match declared ${declared}`, exprLoc(body), undefined, "returned here");
     }
-    const body = arrow.body as Stmt[];
+    const body = arrow.stmts as Stmt[];
     const inferred = this.inferBlockReturn(body, inner); // first top-level `return`
     // (2) again: only a widening `fitsParam` rejects but `assignable` accepts keeps the
     // inferred type. A body the annotation genuinely contradicts goes to `checkBlock`
@@ -3592,7 +3592,7 @@ class Checker {
     const locals = new Set<string>();
     const free = new Set<string>();
     if (arrow.exprBody) collectIdents(arrow.body as Expr, free);
-    else for (const s of arrow.body as Stmt[]) { collectIdentsStmt(s, free); collectBlockLocals(s, locals); }
+    else for (const s of arrow.stmts as Stmt[]) { collectIdentsStmt(s, free); collectBlockLocals(s, locals); }
     const caps: { name: string; ty: Ty }[] = [];
     for (const n of free) {
       if (params.has(n) || locals.has(n) || BUILTIN_NUMBERS.includes(n)) continue;
@@ -4104,9 +4104,16 @@ function checkDefiniteAssignment(body: Stmt[]): void {
     if (Array.isArray(node)) { for (const x of node) walk(x); return; }
     if (node === null || typeof node !== "object" || seen.has(node)) return;
     seen.add(node);
-    const n = node as { kind?: string; body?: unknown };
-    if ((n.kind === "FuncDecl" || n.kind === "ArrowFunction") && Array.isArray(n.body)) {
-      daBlock(n.body as Stmt[], new Map<string, Ty>(), new Set<string>());
+    // A nested function body, by the field that HOLDS its statements: `FuncDecl.body`,
+    // and `ArrowFunction.stmts` (an arrow's `body` is the EXPRESSION form — see the
+    // ArrowFunction comment in ast.ts for why those are two fields and not a union).
+    // Naming both explicitly rather than probing `body` for an array is what keeps this
+    // walk honest: a shape it does not recognize runs no analysis and refuses nothing,
+    // so an unrecognized body is a SILENT acceptance, never a loud failure.
+    const n = node as { kind?: string; body?: unknown; stmts?: unknown };
+    const nested = n.kind === "FuncDecl" ? n.body : n.kind === "ArrowFunction" ? n.stmts : undefined;
+    if (Array.isArray(nested)) {
+      daBlock(nested as Stmt[], new Map<string, Ty>(), new Set<string>());
     }
     for (const v of Object.values(node)) walk(v);
   };
@@ -4198,7 +4205,7 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
       return;
     case "ArrowFunction":
       if (e.exprBody) collectAssigned(e.body as Expr, direct, closure, true);
-      else collectAssignedStmts(e.body as Stmt[], direct, closure, true);
+      else collectAssignedStmts(e.stmts as Stmt[], direct, closure, true);
       return;
     case "MemberExpr": go(e.object); return;
     case "IndexExpr": go(e.object); go(e.index); return;
@@ -4322,7 +4329,7 @@ function collectBlockLocals(s: Stmt, out: Set<string>): void {
 function collectEscapingWrites(arrow: ArrowFunction, out: Map<string, string>): void {
   const bound = new Set(arrow.params.map((p) => p.name));
   if (arrow.exprBody) { escapingWritesExpr(arrow.body as Expr, bound, out); return; }
-  const body = arrow.body as Stmt[];
+  const body = arrow.stmts as Stmt[];
   for (const s of body) collectBlockLocals(s, bound);
   escapingWritesStmts(body, bound, out);
 }
@@ -4376,7 +4383,7 @@ function escapingWritesExpr(e: Expr, bound: Set<string>, out: Map<string, string
 
 /** An arrow's body as statements — an expression body as the one statement it is. */
 function arrowBody(arrow: ArrowFunction): Stmt[] {
-  return arrow.exprBody ? exprRegion(arrow.body as Expr) : (arrow.body as Stmt[]);
+  return arrow.exprBody ? exprRegion(arrow.body as Expr) : (arrow.stmts as Stmt[]);
 }
 
 /**

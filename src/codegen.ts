@@ -1051,7 +1051,7 @@ class FnGen {
     const paramTys = arrow.paramTys ?? [];
     this.captures = new Map((arrow.captures ?? []).map((c, i) => [c.name, { index: i, ty: c.ty }]));
     arrow.params.forEach((p, i) => { this.varTypes.set(p.name, paramTys[i]!); this.alloca(p.name, paramTys[i]!); });
-    if (!arrow.exprBody) this.collectLocals(arrow.body as Stmt[]);
+    if (!arrow.exprBody) this.collectLocals(arrow.stmts as Stmt[]);
     const b0 = this.block(this.label("L"));
     this.to(b0);
     arrow.params.forEach((p, i) => this.emit(`store ${llvmTy(paramTys[i]!)} %${p.name}, ptr ${this.addr(p.name)}`));
@@ -1064,7 +1064,7 @@ class FnGen {
       const bodyVal = this.coerce(this.genExpr(arrow.body as Expr), this.retTy);
       this.terminate(`ret ${llvmTy(this.retTy)} ${bodyVal.v}`);
     } else {
-      this.genStmts(arrow.body as Stmt[]);
+      this.genStmts(arrow.stmts as Stmt[]);
       if (!this.isTerminated()) { this.emitStrDrops(); this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`); }
     }
     const params = ["ptr %__clo", ...arrow.params.map((p, i) => `${llvmTy(paramTys[i]!)} %${p.name}`)].join(", ");
@@ -4140,21 +4140,23 @@ class FnGen {
     const suffix = `.h${this.hofSeq++}`;
     const bound = new Set<string>();
     for (const p of arrow.params) bound.add(p.name);
-    if (!arrow.exprBody) this.collectBoundNames(arrow.body as Stmt[], bound);
+    if (!arrow.exprBody) this.collectBoundNames(arrow.stmts as Stmt[], bound);
     if (bound.size === 0) return;
     const map = new Map<string, string>();
     for (const n of bound) map.set(n, n + suffix);
     for (const p of arrow.params) { if (p.default) this.subExpr(p.default, map); p.name = map.get(p.name)!; }
     if (arrow.exprBody) this.subExpr(arrow.body as Expr, map);
-    else this.subStmts(arrow.body as Stmt[], map);
+    else this.subStmts(arrow.stmts as Stmt[], map);
   }
 
   /** The names a nested arrow/function binds — remove from the active rename map for its
    *  subtree so an inner re-binding (shadow) isn't rewritten to the outer's fresh name. */
-  private childRenameMap(params: { name: string }[], body: Expr | Stmt[], exprBody: boolean, map: Map<string, string>): Map<string, string> {
+  private childRenameMap(params: { name: string }[], stmts: Stmt[] | undefined, map: Map<string, string>): Map<string, string> {
     const shadow = new Set<string>();
     for (const p of params) shadow.add(p.name);
-    if (!exprBody) this.collectBoundNames(body as Stmt[], shadow);
+    // An EXPRESSION body binds nothing beyond the parameters, so `stmts` is absent and
+    // there is nothing to collect — which is what `exprBody` used to be passed in to say.
+    if (stmts !== undefined) this.collectBoundNames(stmts, shadow);
     const child = new Map(map);
     for (const n of shadow) child.delete(n);
     return child;
@@ -4189,7 +4191,7 @@ class FnGen {
       case "BlockStmt": this.subStmts(s.body, map); break;
       case "MultiStmt": this.subStmts(s.stmts, map); break;
       case "FuncDecl": {
-        const child = this.childRenameMap(s.params, s.body, false, map);
+        const child = this.childRenameMap(s.params, s.body, map);
         for (const p of s.params) if (p.default) this.subExpr(p.default, child);
         this.subStmts(s.body, child); break;
       }
@@ -4232,10 +4234,10 @@ class FnGen {
       case "NonNullExpr": this.subExpr(e.expr, map); return;
       case "InstanceOfExpr": this.subExpr(e.object, map); return;
       case "ArrowFunction": {
-        const child = this.childRenameMap(e.params, e.body, e.exprBody, map);
+        const child = this.childRenameMap(e.params, e.stmts, map);
         for (const p of e.params) if (p.default) this.subExpr(p.default, child);
         if (e.exprBody) this.subExpr(e.body as Expr, child);
-        else this.subStmts(e.body as Stmt[], child);
+        else this.subStmts(e.stmts as Stmt[], child);
         return;
       }
       default: return; // literals
@@ -4249,7 +4251,7 @@ class FnGen {
   private prepHofLocals(arrow: Extract<Expr, { kind: "ArrowFunction" }>): void {
     if (arrow.exprBody) return;
     const before = new Set(this.strLocals);
-    this.collectLocals(arrow.body as Stmt[]);
+    this.collectLocals(arrow.stmts as Stmt[]);
     for (const n of this.strLocals) if (!before.has(n)) this.emit(`store ptr null, ptr ${this.addr(n)}`);
   }
 
@@ -4261,7 +4263,7 @@ class FnGen {
     const slot = this.slot(retTy);
     const done = this.label("hofr");
     this.hofReturnStack.push({ slot, done, ty: retTy });
-    this.genStmts(arrow.body as Stmt[]);
+    this.genStmts(arrow.stmts as Stmt[]);
     this.hofReturnStack.pop();
     if (!this.isTerminated()) this.terminate(`br label %${done}`); // fall-through (no return hit)
     this.to(this.block(done));
