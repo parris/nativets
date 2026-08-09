@@ -1110,10 +1110,23 @@ export interface BlockDropsStmt { kind: "BlockDrops"; names: string[]; }
  * existing marker rather than appending a second one, because `loop()` re-walks a loop
  * body up to five times to reach its fixpoint and each walk sets the set again. Five
  * appended markers would be five frees of the same value: a double free, not a leak.
+ *
+ * The EMPTINESS test is a `length` check, and that is load-bearing rather than stylistic.
+ * It used to be `const last = list[list.length - 1]; if (last !== undefined && …)`, which
+ * looks like a defensive `undefined` guard and is not one: on an empty list the index is
+ * `-1`, where node answers `undefined` and nativets PANICS by design (Stage 41,
+ * docs/divergences.md). So the old spelling put this file outside the subset it has to
+ * compile — and the guard could never be true anyway, since nativets types the read
+ * `Stmt` and comparing an 18-member union with `undefined` has no overlap (`NT2001`).
+ * Pinned by an out-of-range-throws proxy in test/block-drops.test.ts, because node's own
+ * answer is precisely the one this function must not depend on.
  */
 export function setBlockDrops(list: Stmt[], names: string[]): void {
-  const last = list[list.length - 1];
-  if (last !== undefined && last.kind === "BlockDrops") { last.names = names; return; }
+  const n = list.length;
+  if (n > 0) {
+    const last = list[n - 1];
+    if (last.kind === "BlockDrops") { last.names = names; return; }
+  }
   list.push({ kind: "BlockDrops", names });
 }
 export interface IfStmt { kind: "IfStmt"; test: Expr; consequent: Stmt[]; alternate: Stmt[] | null; }
