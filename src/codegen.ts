@@ -744,7 +744,12 @@ class FnGen {
     const b = this.blocks[this.cur]!;
     if (!b.terminated) { b.lines.push("  " + line); b.terminated = true; }
   }
-  private get terminated(): boolean { return this.blocks[this.cur]!.terminated; }
+  /** Whether the current block already has a terminator.
+   *
+   *  A METHOD, not a `get` accessor: nativets refuses accessors (NT1015), and a getter is
+   *  exactly a zero-argument method with the parens dropped, so the accessor spelling
+   *  bought nothing and cost this module its place on the self-hosting path. */
+  private isTerminated(): boolean { return this.blocks[this.cur]!.terminated; }
 
   /**
    * The interned `file:line:col` a bounds panic reports, or `null` when this index
@@ -810,7 +815,7 @@ class FnGen {
    *  (so code after return/break/continue isn't emitted as unreachable IR). */
   private genStmts(list: Stmt[]): void {
     for (const s of list) {
-      if (this.terminated) break;
+      if (this.isTerminated()) break;
       this.genStmt(s);
     }
   }
@@ -975,7 +980,7 @@ class FnGen {
     if (fn.copyThis) this.emitThisCopy(sig.params[0]!);
     this.emitStrInit();
     this.genStmts(fn.body);
-    if (!this.terminated) {
+    if (!this.isTerminated()) {
       this.emitDrops(fn.endDrops ?? []);
       this.emitStrDrops();
       this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`);
@@ -1016,7 +1021,7 @@ class FnGen {
     if (this.mod.usesActors) this.emit(`call void @nt_sched_init()`);
     this.emitStrInit();
     this.genStmts(body);
-    if (!this.terminated) { this.emitDrops(endDrops); this.emitStrDrops(); this.terminate("ret i32 0"); }
+    if (!this.isTerminated()) { this.emitDrops(endDrops); this.emitStrDrops(); this.terminate("ret i32 0"); }
     return this.assemble("define i32 @main(i32 %argc, ptr %argv)", b0);
   }
 
@@ -1042,7 +1047,7 @@ class FnGen {
       this.terminate(`ret ${llvmTy(this.retTy)} ${bodyVal.v}`);
     } else {
       this.genStmts(arrow.body as Stmt[]);
-      if (!this.terminated) { this.emitStrDrops(); this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`); }
+      if (!this.isTerminated()) { this.emitStrDrops(); this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`); }
     }
     const params = ["ptr %__clo", ...arrow.params.map((p, i) => `${llvmTy(paramTys[i]!)} %${p.name}`)].join(", ");
     return this.assemble(`define ${llvmTy(this.retTy)} @${name}(${params})`, b0);
@@ -1160,12 +1165,12 @@ class FnGen {
         const thenIdx = this.block(thenLbl);
         this.to(thenIdx);
         this.genStmts(s.consequent);
-        if (!this.terminated) this.terminate(`br label %${endLbl}`);
+        if (!this.isTerminated()) this.terminate(`br label %${endLbl}`);
         if (s.alternate) {
           const elseIdx = this.block(elseLbl);
           this.to(elseIdx);
           this.genStmts(s.alternate);
-          if (!this.terminated) this.terminate(`br label %${endLbl}`);
+          if (!this.isTerminated()) this.terminate(`br label %${endLbl}`);
         }
         this.to(this.block(endLbl));
         return;
@@ -1183,7 +1188,7 @@ class FnGen {
         this.loops.push({ brk: endLbl, cont: condLbl });
         this.genStmts(s.body);
         this.loops.pop();
-        if (!this.terminated) this.terminate(`br label %${condLbl}`);
+        if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
         this.to(this.block(endLbl));
         return;
       }
@@ -1209,7 +1214,7 @@ class FnGen {
         this.loops.push({ brk: endLbl, cont: updLbl });
         this.genStmts(s.body);
         this.loops.pop();
-        if (!this.terminated) this.terminate(`br label %${updLbl}`);
+        if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
         this.to(this.block(updLbl));
         if (s.update) this.genExpr(s.update);
         this.terminate(`br label %${condLbl}`);
@@ -1225,7 +1230,7 @@ class FnGen {
         this.loops.push({ brk: endLbl, cont: condLbl });
         this.genStmts(s.body);
         this.loops.pop();
-        if (!this.terminated) this.terminate(`br label %${condLbl}`);
+        if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
         this.to(this.block(condLbl));
         this.emitSafepoint(); // back-edge: preempt on budget exhaustion
         const cond = this.genCond(s.test);
@@ -1284,7 +1289,7 @@ class FnGen {
         this.loops.push({ brk: endLbl, cont: updLbl });
         this.genStmts(s.body);
         this.loops.pop();
-        if (!this.terminated) this.terminate(`br label %${updLbl}`);
+        if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
         this.to(this.block(updLbl));
         const iU = this.fresh();
         this.emit(`${iU} = load double, ptr ${idx}`);
@@ -1331,7 +1336,7 @@ class FnGen {
         for (let i = 0; i < s.cases.length; i++) {
           this.to(this.block(bodyLbls[i]!));
           this.genStmts(s.cases[i]!.body);
-          if (!this.terminated) this.terminate(`br label %${i + 1 < s.cases.length ? bodyLbls[i + 1] : endLbl}`);
+          if (!this.isTerminated()) this.terminate(`br label %${i + 1 < s.cases.length ? bodyLbls[i + 1] : endLbl}`);
         }
         this.loops.pop();
         this.to(this.block(endLbl));
@@ -1365,7 +1370,7 @@ class FnGen {
         this.loops.push({ brk: endLbl, cont: updLbl });
         this.genStmts(s.body);
         this.loops.pop();
-        if (!this.terminated) this.terminate(`br label %${updLbl}`);
+        if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
         this.to(this.block(updLbl));
         const iU = this.fresh();
         this.emit(`${iU} = load double, ptr ${idx}`);
@@ -1408,17 +1413,17 @@ class FnGen {
         if (hasFinally) this.finallyStack.push({ finallyLbl, modeSlot, retSlot: retSlot || null });
         this.genStmts(s.block);
         this.tryHandlers.pop();
-        if (!this.terminated) gotoFinally();
+        if (!this.isTerminated()) gotoFinally();
         if (s.handler) {
           this.to(this.block(catchLbl));
           this.genStmts(s.handler);
-          if (!this.terminated) gotoFinally();
+          if (!this.isTerminated()) gotoFinally();
         }
         if (hasFinally) {
           this.finallyStack.pop();
           this.to(this.block(finallyLbl));
           this.genStmts(s.finalizer!);
-          if (!this.terminated) {
+          if (!this.isTerminated()) {
             const m = this.fresh(); this.emit(`${m} = load double, ptr ${modeSlot}`);
             const isRet = this.fresh(); this.emit(`${isRet} = fcmp oeq double ${m}, ${llvmDouble(1)}`);
             const retLbl = this.label("finret");
@@ -4046,7 +4051,7 @@ class FnGen {
   }
 
   private hofStep(idx: string, upd: string, cond: string): void {
-    if (!this.terminated) this.terminate(`br label %${upd}`);
+    if (!this.isTerminated()) this.terminate(`br label %${upd}`);
     this.to(this.block(upd));
     const iU = this.fresh();
     this.emit(`${iU} = load double, ptr ${idx}`);
@@ -4228,7 +4233,7 @@ class FnGen {
     this.hofReturnStack.push({ slot, done, ty: retTy });
     this.genStmts(arrow.body as Stmt[]);
     this.hofReturnStack.pop();
-    if (!this.terminated) this.terminate(`br label %${done}`); // fall-through (no return hit)
+    if (!this.isTerminated()) this.terminate(`br label %${done}`); // fall-through (no return hit)
     this.to(this.block(done));
     const v = this.fresh();
     this.emit(`${v} = load ${llvmTy(retTy)}, ptr ${slot}`);

@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "2463b52"
+    "rev": "f131d42"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "b138686774c0ce5a",
+      "sha256": "ce9fe875b96041f1",
       "standalone": {
         "stage": "parse",
         "code": "NT1030",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "2f1cd0de97220e89",
+      "sha256": "231b86b958c1e32d",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -44,16 +44,16 @@
       }
     },
     "codegen.ts": {
-      "sha256": "1c884d4af6150a35",
+      "sha256": "4ad0a92b5a1eaf58",
       "standalone": {
         "stage": "parse",
-        "code": "NT1015",
-        "message": "[NT1015] class member modifier/accessor 'get' at L:C is not supported yet"
+        "code": "NT1002",
+        "message": "[NT1002] `in` (the key-presence operator) at L:C is not supported yet"
       },
       "linked": {
         "stage": "parse",
-        "code": "NT1015",
-        "message": "[NT1015] class member modifier/accessor 'get' at L:C is not supported yet"
+        "code": "NT1002",
+        "message": "[NT1002] `in` (the key-presence operator) at L:C is not supported yet"
       }
     },
     "coverage-preprocess.ts": {
@@ -84,7 +84,7 @@
       }
     },
     "diagnostics.ts": {
-      "sha256": "ef42e1d4a8a583ad",
+      "sha256": "97d907a30d6749e3",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -137,7 +137,7 @@
       }
     },
     "ownership.ts": {
-      "sha256": "748e858dfa8c391b",
+      "sha256": "7e1371e69d89cb08",
       "standalone": {
         "stage": "check",
         "code": "NT1014",
@@ -150,7 +150,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "0a6f56ee133fdff6",
+      "sha256": "a3b08cb0d9b4c159",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
