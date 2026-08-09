@@ -2946,7 +2946,7 @@ class FnGen {
       });
     } else {
       for (const piece of plan.pieces) {
-        if (piece.spec === undefined) { this.emit(`call void @${P}_str(ptr ${this.mod.intern(piece.text)})`); continue; }
+        if (piece.kind === "text") { this.emit(`call void @${P}_str(ptr ${this.mod.intern(piece.text)})`); continue; }
         const s = this.genFormatArg(vals[piece.arg]!, piece.spec);
         if (s !== null) this.emit(`call void @${P}_str(ptr ${s.v})`);
       }
@@ -3729,6 +3729,18 @@ class FnGen {
    *  an array becomes a fresh vector with each element cloned in a loop. */
   private genDeepClone(v: Val, copyStrings = false): Val {
     const ty = v.ty;
+    // THE GUARANTEE, not a second opinion. Every arm below falls through to `return v` —
+    // value semantics — for a type it does not recognize, and a `@Name` back-edge is such a
+    // type, so an unrefused recursive value was copied by ALIASING it. Both callers
+    // (`structuredClone`, the actor-message copy) refuse this in the checker; this makes the
+    // safety a property of the WALK rather than of two independent gates staying in place.
+    // A BARE `@N` is the whole test: the walk decomposes fields and elements itself, so a
+    // reference nested anywhere arrives here on its own step. Asking `containsTypeRef` up
+    // front would be the same answer more expensively, and asking `t.includes("@")` would
+    // refuse a record with an `@` in a KEY.
+    if (isTypeRefTy(ty)) {
+      throw internalError(`deep copy of the recursive type ${ty} reached codegen — the walk has no seen-set, so it would alias rather than copy. This must be refused in the checker (structuredClone / actor message)`);
+    }
     // B3 v5: for an actor message the copy must reach STRINGS too — a receiver whose
     // record pointed into the sender's (refcounted, releasable) buffer would not be
     // isolated. structuredClone itself leaves strings alone: they are immutable values
@@ -4435,6 +4447,24 @@ class FnGen {
    */
   private genJsonStringify(val: Val, indent = "", depth = 0): Val {
     const ty = val.ty;
+    // TERMINATION, stated rather than inherited. The serializer is UNROLLED at compile time
+    // from the static type, so it terminates only because the type shrinks at every step —
+    // and a recursive type is exactly the one that does not. Today a bare `@N` falls through
+    // to the exhaustive `internalError` at the bottom, and the checker refuses it (NT1005)
+    // before that; both are true and neither says so, which is the shape of a guarantee that
+    // quietly stops holding. So the back-edge is refused HERE, by name — a BARE `@N`, since
+    // the serializer decomposes fields and elements itself and a nested reference arrives on
+    // its own step.
+    if (isTypeRefTy(ty)) {
+      throw internalError(`JSON.stringify of the recursive type ${ty} reached codegen — the serializer is unrolled from the static type and a back-edge does not shrink, so it has no base case. This must be refused in the checker (checkJsonStringifyArg)`);
+    }
+    // And a ceiling, because the argument above is about the types that exist TODAY. A
+    // static type nests a handful of levels deep; 64 is far past anything a program writes
+    // and far short of a stack overflow, so an unrolling that runs away announces itself
+    // instead of taking the process out.
+    if (depth > 64) {
+      throw internalError(`JSON.stringify unrolled past 64 levels on ${ty} — the generated serializer is not terminating`);
+    }
     // `nt_json_num`, not `js_num_to_str`: JSON has no non-finite number, so node
     // writes `null` for NaN/±Infinity where `String(x)` writes the token.
     if (ty === "number") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_json_num(double ${val.v})`); return { v: t, ty: "string" }; }

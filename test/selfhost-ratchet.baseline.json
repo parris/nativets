@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "983f6c3"
+    "rev": "f131d42"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "b138686774c0ce5a",
+      "sha256": "ce9fe875b96041f1",
       "standalone": {
         "stage": "parse",
         "code": "NT1030",
@@ -18,16 +18,16 @@
       }
     },
     "checker.ts": {
-      "sha256": "d6a88c88b6c5598e",
+      "sha256": "231b86b958c1e32d",
       "standalone": {
-        "stage": "parse",
-        "code": "NT1009",
-        "message": "[NT1009] union of object types '{text:string,spec:?Uundefined} | {text:?Uundefined,spec:string,arg:number}' without a usable discriminant — the shared field(s) text, spec are not string-literal typed …"
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] 'NUMBER_CONSTS' declared Record<string,number> but initialized with {MAX_SAFE_INTEGER:number,MIN_SAFE_INTEGER:number,EPSILON:number,MAX_VALUE:number,MIN_VALUE:number,POSITIVE_INFINITY:number,…"
       },
       "linked": {
-        "stage": "parse",
-        "code": "NT1009",
-        "message": "[NT1009] union of object types '{text:string,spec:?Uundefined} | {text:?Uundefined,spec:string,arg:number}' without a usable discriminant — the shared field(s) text, spec are not string-literal typed …"
+        "stage": "link",
+        "code": "NT1030",
+        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
       }
     },
     "cli.ts": {
@@ -44,7 +44,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "6380538772ae5904",
+      "sha256": "4ad0a92b5a1eaf58",
       "standalone": {
         "stage": "parse",
         "code": "NT1002",
@@ -84,7 +84,7 @@
       }
     },
     "diagnostics.ts": {
-      "sha256": "ef42e1d4a8a583ad",
+      "sha256": "97d907a30d6749e3",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -111,16 +111,16 @@
       }
     },
     "lexer.ts": {
-      "sha256": "d13e2be48a7713e8",
+      "sha256": "f874705d93927d45",
       "standalone": {
         "stage": "check",
-        "code": "NT1031",
-        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1031",
-        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       }
     },
     "modules.ts": {
@@ -145,12 +145,12 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1009",
-        "message": "[NT1009] union of object types '{text:string,spec:?Uundefined} | {text:?Uundefined,spec:string,arg:number}' without a usable discriminant — the shared field(s) text, spec are not string-literal typed …"
+        "code": "NT1030",
+        "message": "[NT1030] recursive type 'TemplateLiteral' — it contains itself through 'Expr' (declared at line N) is not supported yet"
       }
     },
     "parser.ts": {
-      "sha256": "769cdabbd6b31bf7",
+      "sha256": "a3b08cb0d9b4c159",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

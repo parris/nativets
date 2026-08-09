@@ -447,8 +447,38 @@ export function isTypeRefTy(t: Ty): boolean {
 }
 /** The declaration name a reference points at (`@N` -> `N`). */
 export function typeRefName(t: Ty): string { return t.slice(1); }
-/** Does `t` mention a nominal reference anywhere (`?U@N`, `@N[]`, `{a:@N}`)? */
+/**
+ * A cheap PRE-FILTER: could `t` mention a reference at all? `@` never appears in a
+ * structural type, so a `false` here is conclusive and costs one scan.
+ *
+ * A `true` is NOT. `@` is legal inside a string-literal TAG (`kind: "user@host"`) and
+ * inside a property KEY (`{ "x@y": 1 }`), both of which land verbatim in the encoding — so
+ * this said "recursive" about `{x@y:number,b:number}` and structuredClone refused a program
+ * node runs. Ask `containsTypeRef` when the answer decides anything; the same lesson as
+ * `objectFields("@N")` returning a phantom record, which is one line up in this file: a
+ * substring test over a structural encoding is not a structural question.
+ */
 export function hasTypeRef(t: Ty): boolean { return typeof t === "string" && t.includes("@"); }
+/**
+ * Does `t` contain a nominal back-edge in a TYPE position, anywhere (`?U@N`, `@N[]`,
+ * `{a:@N}`, a union member's field)? STRUCTURAL, so a `@` in a key or a tag is not one.
+ *
+ * This is what the deep walks ask before refusing: `structuredClone`, the actor-message
+ * copy and `JSON.stringify` all recurse over the static type, and a back-edge is the one
+ * carrier that does not shrink. Carriers with no walk of their own (`Map`, `Set`, a
+ * function) answer `false` — their contents are unreachable from the encoding, and they are
+ * already refused by the callers on their own terms.
+ */
+export function containsTypeRef(t: Ty): boolean {
+  if (!hasTypeRef(t)) return false;              // the cheap half: conclusive when false
+  if (isTypeRefTy(t)) return true;
+  if (isNullableTy(t)) return containsTypeRef(baseTy(t));
+  if (isArrayTy(t)) return containsTypeRef(elemTy(t));
+  if (isUnionTy(t)) return unionMembers(t).some(containsTypeRef);
+  if (isGeneralUnionTy(t)) return generalUnionMembers(t).some(containsTypeRef);
+  if (isObjectTy(t)) return objectFields(t).some((f) => containsTypeRef(f.ty));
+  return false;
+}
 /**
  * Unfold ONE level: replace a bare `@N` with the shape it names. Identity on everything
  * else, including a type that merely CONTAINS a reference — unfolding those eagerly is what
