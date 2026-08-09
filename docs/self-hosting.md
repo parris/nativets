@@ -706,11 +706,14 @@ entry" `sh6.test.ts` has been asking for since it was written.
 **Leak / double-free accounting, since this project has shipped both.** Zero double frees: the
 value has exactly one owner (`__objLive()` → 0 for the constructed object across a 200-iteration
 loop, and the escaping `return new E(v)` shape now exits 0 rather than 255). There IS a leak, and
-it is **pre-existing and unrelated**: `nt_obj_free` is SHALLOW, so an object field holding another
-object is never freed. Measured identically on the unmodified tree — `const o = { inner: {a:1},
-b:2 }` leaves `__objLive()` at 1, as does `class Box { inner: {x:number}; constructor() {
-this.inner = {x:41}; } }`. Consuming parameters reach the same accounting the already-legal
-spelling had; they do not add a leak class.
+it is **pre-existing, known, and unrelated**: `nt_obj_free` is SHALLOW, so an aggregate reached
+through a field is never freed — the shallow-drop characterization above and `docs/ROADMAP.md`
+Phase C. Measured identically on the unmodified tree before this change landed: `const o = {
+inner: {a:1}, b:2 }` leaves `__objLive()` at 1, as does `class Box { inner: {x:number};
+constructor() { this.inner = {x:41}; } }`. Consuming parameters reach the same accounting the
+already-legal spelling had; they do not add a leak class, and a moved-in field is exactly the
+"an object field can be MOVED OUT while the parent's slot still points at it" shape that
+characterization pins as a precondition for any future recursive free.
 
 **Two costs, stated because the next module will pay them.** The compiler's dominant class idiom
 IS the parameter property — `Scope(private parent)`, `ModuleGen(readonly functions, readonly
