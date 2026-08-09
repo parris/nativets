@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "6caecec"
+    "rev": "fb8a3e7"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "0cb91d4a0772e93a",
+      "sha256": "c9020a7c9e29eef6",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "73aad6bac0e229de",
+      "sha256": "728794e4fa7bf707",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -45,7 +45,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "383bf864561d9e84",
+      "sha256": "8bd05c6d169e1461",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -125,11 +125,11 @@
       }
     },
     "modules.ts": {
-      "sha256": "a1278ab2e0b7465f",
+      "sha256": "71ce215bf3e2ef49",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'kind' does not exist on number"
+        "message": "[NT2001] Property 'kind' does not exist on number at L:C"
       },
       "linked": {
         "stage": "check",
@@ -156,7 +156,7 @@
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'kind' does not exist on number"
+        "message": "[NT2001] Property 'kind' does not exist on number at L:C"
       },
       "linked": {
         "stage": "check",
