@@ -10,10 +10,15 @@
  * Everything shells out through src/driver.ts, the compiler's public API.
  */
 
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync,
+  mkdirSync, renameSync, linkSync, copyFileSync, statSync, existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 import { sourceToIR, buildBinary, buildObject, type Target } from "../src/driver.ts";
 
@@ -25,6 +30,232 @@ export interface RunResult {
 
 function scratch(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `nativets-${prefix}-`));
+}
+
+/* ============================================================
+ * THE BUILD CACHE.
+ *
+ * It lives here, in the harness, and NOT in `src/driver.ts` — deliberately. The compiler's
+ * own source must stay inside the subset it can compile (docs/self-hosting.md), and a cache
+ * needs `node:crypto` plus `mkdirSync`/`renameSync`/`statSync`/`linkSync`, none of which are
+ * in the host FFI (`HOST_FUNCS`, src/checker.ts). An earlier draft put it in the driver and
+ * moved `driver.ts`'s blocker from NT2001-inherited to NT1028-itself, reddening the
+ * self-hosting ratchet. `test/` is outside that surface, so here the imports are free.
+ *
+ * WHAT IT IS ACTUALLY DODGING — not compilation. macOS scans every newly-created Mach-O on
+ * its FIRST execution, and caches the verdict per INODE. Measured on this machine:
+ *
+ *     build a binary                        148 ms
+ *     first execution of a fresh binary    2049 ms
+ *     the same file, re-executed              2.1 ms
+ *     a HARDLINK to it, at a new path         2.1 ms
+ *     a byte-identical COPY, new path      2100 ms
+ *
+ * So the cached artifact is HARDLINKED to the scratch path we then execute. A copy would
+ * pay the scan again and win nothing — the hardlink is the whole mechanism, not an
+ * optimisation detail. Per compiled-and-run test: 2197 ms -> 87 ms.
+ *
+ * WHY A FALSE HIT IS IMPOSSIBLE. A stale artifact would be a silent wrong answer, which
+ * this project ranks as the worst outcome available, so the key is one-directional: a MISS
+ * is always safe, therefore everything that can change the produced bytes is hashed, and
+ * when in doubt we hash MORE.
+ *
+ *   - the generated IR, not the .ts source. That is what makes the cache survive active
+ *     compiler development: a codegen edit changes the IR of the programs it affects and
+ *     only those, so the cache stays warm exactly where behaviour did not move.
+ *   - EVERY file in runtime/, DISCOVERED by readdir rather than listed. A hardcoded list
+ *     would silently fail to invalidate when a lane adds a new runtime .c — the cache would
+ *     then serve binaries built against the old runtime. Discovery also over-invalidates
+ *     (editing nt_gui.c rebuilds everything), which is the safe direction.
+ *   - the target, and the C toolchain's own `--version`.
+ *
+ * `NATIVETS_NO_CACHE=1` disables it entirely, so a suspected cache bug can be ruled out in
+ * one command rather than by argument.
+ * ============================================================ */
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const RUNTIME_DIR = join(HERE, "..", "runtime");
+
+/** The cache root, or `null` when caching is off. Read per call so a test can toggle it. */
+function cacheRoot(): string | null {
+  if (process.env.NATIVETS_NO_CACHE === "1") return null;
+  const explicit = process.env.NATIVETS_CACHE_DIR;
+  if (explicit) return explicit;
+  const xdg = process.env.XDG_CACHE_HOME;
+  return join(xdg && xdg.length ? xdg : join(process.env.HOME ?? tmpdir(), ".cache"), "nativets");
+}
+
+/**
+ * Hash a list of fields UNAMBIGUOUSLY. Length-prefixing is the load-bearing detail: under
+ * plain concatenation `["ab","c"]` and `["a","bc"]` hash alike, and a separator byte can
+ * legitimately occur inside IR text. Prefixing each field with its length makes the
+ * encoding injective, so two different builds cannot collide onto one key by construction.
+ */
+function hashFields(fields: string[]): string {
+  const h = createHash("sha256");
+  h.update(`${fields.length}\n`);
+  for (const f of fields) {
+    h.update(`${f.length}\n`);
+    h.update(f);
+  }
+  return h.digest("hex");
+}
+
+/** Digest of the WHOLE runtime tree, discovered. Memoized: the files cannot change mid-run. */
+let runtimeDigestMemo: string | null = null;
+function runtimeDigest(): string {
+  if (runtimeDigestMemo !== null) return runtimeDigestMemo;
+  const names = readdirSync(RUNTIME_DIR).sort(); // sorted: a stable key across filesystems
+  const parts: string[] = [];
+  for (const n of names) parts.push(n, readFileSync(join(RUNTIME_DIR, n), "utf8"));
+  if (!names.length) throw new Error("runtime/ is empty — the cache key would not cover the runtime");
+  runtimeDigestMemo = hashFields(parts);
+  return runtimeDigestMemo;
+}
+
+/** Identity of the C toolchain, so a clang upgrade cannot serve artifacts the old one built. */
+let ccIdentityMemo: string | null = null;
+function ccIdentity(): string {
+  if (ccIdentityMemo !== null) return ccIdentityMemo;
+  const r = spawnSync("clang", ["--version"], { encoding: "utf8" });
+  ccIdentityMemo = r.status === 0 ? (r.stdout ?? "") : "unknown";
+  return ccIdentityMemo;
+}
+
+let cacheHits = 0;
+let cacheMisses = 0;
+/** Hit/miss counters, so a test can assert a cache hit WITHOUT timing it. */
+export function buildCacheStats(): { hits: number; misses: number } {
+  return { hits: cacheHits, misses: cacheMisses };
+}
+
+/** The key for one artifact. `kind` separates binaries from cross-compiled objects. */
+function cacheKey(kind: string, ir: string, target: Target): string {
+  return hashFields(["nativets-harness-cache-v1", kind, ir, runtimeDigest(), target, ccIdentity()]);
+}
+
+/**
+ * Materialise entry `key` at `dest`. Returns false on any miss OR ANY DOUBT, so the caller
+ * falls back to a real build — a miss is always safe, a false hit never is.
+ *
+ * HARDLINK, not copy: see the measurements above. The copy path is a correctness fallback
+ * for a cache on another filesystem, not an equivalent choice.
+ */
+function cacheFetch(root: string, key: string, dest: string): boolean {
+  try {
+    const src = join(root, key);
+    // Confirm the entry is really present and non-empty rather than trusting an mtime: a
+    // truncated artifact left by a killed run must read as a MISS.
+    const st = statSync(src);
+    if (!st.isFile() || st.size === 0) return false;
+    rmSync(dest, { force: true }); // linkSync will not overwrite
+    try { linkSync(src, dest); } catch { copyFileSync(src, dest); }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Publish `src` into the cache at `key`, atomically: link to a unique temp name in the same
+ * directory, then rename over it. Eight lanes build concurrently, so a half-written file
+ * must never be visible at the final path — rename is what guarantees that.
+ *
+ * An existing entry is KEPT rather than replaced: the bytes are equal by construction, and
+ * the existing inode may already carry a scan verdict that replacing it would discard.
+ * Never throws — a cache that cannot be written degrades to no cache, not to a failed build.
+ */
+function cacheStore(root: string, key: string, src: string): void {
+  try {
+    mkdirSync(root, { recursive: true });
+    const dest = join(root, key);
+    if (existsSync(dest)) return;
+    const tmp = `${dest}.${process.pid}.${Math.random().toString(36).slice(2)}`;
+    try { linkSync(src, tmp); } catch { copyFileSync(src, tmp); }
+    try { renameSync(tmp, dest); } catch { rmSync(tmp, { force: true }); }
+  } catch { /* an optimisation; never fail a test for it */ }
+}
+
+/**
+ * Build `source` to `dest`, reusing a cached artifact when the key matches.
+ *
+ * The IR is computed here so the key can be known before any work happens; on a miss
+ * `buildBinary` recomputes it, which costs ~0.6 ms and keeps the driver's public API
+ * untouched. A refusal throws out of `sourceToIR` exactly as it would have from
+ * `buildBinary`, so tests asserting a refusal are unaffected.
+ */
+async function cachedBuildBinary(source: string, dest: string, entryPath?: string): Promise<void> {
+  reapOnce();
+  const root = cacheRoot();
+  if (!root) { await buildBinary(source, dest, { target: "host", entryPath }); return; }
+  const key = cacheKey("bin-host", sourceToIR(source, entryPath), "host");
+  if (cacheFetch(root, key, dest)) { cacheHits++; return; }
+  cacheMisses++;
+  await buildBinary(source, dest, { target: "host", entryPath });
+  cacheStore(root, key, dest);
+}
+
+/* ------------------------------------------------------------
+ * Scratch-dir reaping.
+ *
+ * Every build and every harness run makes a `nativets-*` temp dir and removes it in a
+ * `finally`. That `finally` cannot run when the process is KILLED, which is routine — a ^C
+ * in the test loop, or an agent lane whose run is cancelled. Thousands of abandoned dirs
+ * had accumulated in one TMPDIR.
+ *
+ * The safety argument is entirely the AGE THRESHOLD, because other lanes are building
+ * concurrently and deleting a live build's dir would look exactly like a compiler bug. A
+ * build dir lives ~0.12 s and a run dir ~1 s, so a dir untouched for hours cannot belong to
+ * a live run. We also require our own `nativets-` prefix, so no foreign scratch is ever a
+ * candidate. Cleanup therefore LAGS by design, and that is the correct trade.
+ * ------------------------------------------------------------ */
+
+const SCRATCH_MAX_AGE_MS = 6 * 3600_000;
+const SCRATCH_REAP_LIMIT = 400; // bounded, so the first run after a big leak cannot stall
+const CACHE_MAX_AGE_MS = 14 * 24 * 3600_000;
+
+/** Remove abandoned scratch dirs / stale cache entries older than `maxAgeMs`. Never throws. */
+export function reapStale(
+  opts: { dir?: string; maxAgeMs?: number; limit?: number; now?: number; kind?: "dir" | "file"; prefix?: string } = {},
+): number {
+  const dir = opts.dir ?? tmpdir();
+  const maxAge = opts.maxAgeMs ?? SCRATCH_MAX_AGE_MS;
+  const limit = opts.limit ?? SCRATCH_REAP_LIMIT;
+  const now = opts.now ?? Date.now();
+  const wantDir = (opts.kind ?? "dir") === "dir";
+  // The trailing `-` matters: it keeps a file or dir literally named `nativets` (the
+  // `bun run compile` output) out of the candidate set.
+  const prefix = opts.prefix ?? "nativets-";
+  let removed = 0;
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return 0; }
+  for (const name of names) {
+    if (removed >= limit) break;
+    if (!name.startsWith(prefix)) continue;
+    const p = join(dir, name);
+    try {
+      const st = statSync(p);
+      if (wantDir !== st.isDirectory()) continue;
+      if (now - st.mtimeMs < maxAge) continue; // too young to PROVE stale. Hands off.
+      rmSync(p, { recursive: true, force: true });
+      removed++;
+    } catch { /* vanished, or not ours to remove — either way, nothing to do */ }
+  }
+  return removed;
+}
+
+/** Reap once per process, lazily. Cheap (a readdir) and never fatal. */
+let reaped = false;
+function reapOnce(): void {
+  if (reaped) return;
+  reaped = true;
+  try { reapStale(); } catch { /* best effort, always */ }
+  // Age out cached artifacts too, so the cache cannot become the leak it replaced.
+  // Evicting a live entry costs a rebuild, never a wrong answer, so a plain age rule is enough.
+  try {
+    const root = cacheRoot();
+    if (root) reapStale({ dir: root, kind: "file", prefix: "", maxAgeMs: CACHE_MAX_AGE_MS, limit: 2000 });
+  } catch { /* best effort, always */ }
 }
 
 /**
@@ -52,7 +283,7 @@ export async function compileAndRun(source: string): Promise<RunResult> {
   const dir = scratch("run");
   try {
     const bin = join(dir, "prog");
-    await buildBinary(source, bin, { target: "host" });
+    await cachedBuildBinary(source, bin);
     const proc = spawnSync(bin, [], { encoding: "utf8", ...BOUNDED });
     return {
       stdout: proc.stdout ?? "",
@@ -93,7 +324,7 @@ export async function compileAndRunFile(entryPath: string, args: string[] = []):
   const dir = scratch("run-mod");
   try {
     const bin = join(dir, "prog");
-    await buildBinary(readFileSync(entryPath, "utf8"), bin, { target: "host", entryPath });
+    await cachedBuildBinary(readFileSync(entryPath, "utf8"), bin, entryPath);
     const proc = spawnSync(bin, args, { encoding: "utf8", ...BOUNDED });
     return { stdout: proc.stdout ?? "", stderr: proc.stderr ?? "", exitCode: proc.status ?? -1 };
   } finally {
@@ -112,7 +343,22 @@ export async function crossObjectArch(source: string, target: Target): Promise<s
   const dir = scratch("cross");
   try {
     const obj = join(dir, "out.o");
-    await buildObject(source, obj, target);
+    // Cached on the SAME key shape as a binary but with the target and a distinct kind, so
+    // an object for `ios` can never be handed to an `android` build.
+    reapOnce();
+    const root = cacheRoot();
+    if (!root) {
+      await buildObject(source, obj, target);
+    } else {
+      const key = cacheKey("obj", sourceToIR(source), target);
+      if (cacheFetch(root, key, obj)) {
+        cacheHits++;
+      } else {
+        cacheMisses++;
+        await buildObject(source, obj, target);
+        cacheStore(root, key, obj);
+      }
+    }
     const proc = spawnSync("file", [obj], { encoding: "utf8" });
     return (proc.stdout ?? "").trim();
   } finally {
@@ -230,7 +476,7 @@ export async function compileAndRunIO(source: string, io: IOInput = {}): Promise
   const dir = scratch("run-io");
   try {
     const bin = join(dir, "prog");
-    await buildBinary(source, bin, { target: "host" });
+    await cachedBuildBinary(source, bin);
     const proc = spawnSync(bin, io.args ?? [], {
       encoding: "utf8",
       input: io.stdin ?? "",

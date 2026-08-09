@@ -425,10 +425,34 @@ export function linkArgv(
   return { args, warning };
 }
 
+/*
+ * THE SCRATCH DIR IS CREATED LAST, AND REMOVED ON EVERY PATH.
+ *
+ * This used to leak. `raylibLinkFlags()` throws when raylib is not installed, and it was
+ * called from HERE, after the dir had already been created — while `buildBinary` called
+ * `writeIR` outside its own `try`/`finally`, so nothing removed it. Every failed GUI build
+ * leaked one directory (measured: 1 per build, now 0), and `ccFor()` throws exactly the
+ * same way for a missing Android NDK or wasi-sdk, so the identical leak was waiting on any
+ * machine that cross-compiles without the full toolchain. Thousands of abandoned dirs had
+ * accumulated in TMPDIR, most from killed runs but this share from ordinary failed builds.
+ *
+ * So the invariant is ORDERING: everything able to throw — the frontend, and the toolchain
+ * probes that hunt for raylib/NDK/wasi-sdk — runs strictly BEFORE `mkdtempSync`, and every
+ * caller opens its `try`/`finally` on the very next statement. `test/buildcache.test.ts`
+ * pins this as a property over three failure modes, rather than as a fix to the one call
+ * that happened to expose it.
+ *
+ * What ordering does NOT cover is a failure between `mkdtempSync` and the caller's `try` —
+ * i.e. a write below failing on a full disk. That is left deliberately: wrapping the body
+ * would re-indent the conditional-link blocks that every runtime lane edits, for a case the
+ * harness's startup reaper already collects. Prefer ordering over a `finally` here.
+ */
 function writeIR(source: string, entryPath?: string): { dir: string; ll: string; rt: string; actor: string | null; extra: string[] } {
+  const ir = sourceToIR(source, entryPath);
+  // Resolved BEFORE the dir exists: this is the call that throws on a raylib-less machine.
+  const guiFlags: string[] | null = irCallsAny(ir, ["@nt_gui_"]) ? raylibLinkFlags() : null;
   const dir = mkdtempSync(join(tmpdir(), "nativets-build-"));
   const ll = join(dir, "module.ll");
-  const ir = sourceToIR(source, entryPath);
   writeFileSync(ll, ir);
   const rt = join(dir, "runtime.c");
   writeFileSync(rt, runtimeSource); // embedded runtime → self-contained executable
@@ -484,10 +508,10 @@ function writeIR(source: string, entryPath?: string): { dir: string; ll: string;
   // (pkg-config / Homebrew / /usr/local / /opt) or throws a clear BuildError. HOST-DESKTOP
   // ONLY: GUI programs are not cross-built (iOS/Android/wasm need platform UI bindings), so
   // non-GUI programs and every cross-build stay entirely raylib-free.
-  if (irCallsAny(ir, ["@nt_gui_"])) {
+  if (guiFlags) {
     const gui = join(dir, "nt_gui.c");
     writeFileSync(gui, guiSource);
-    extra.push(gui, ...raylibLinkFlags());
+    extra.push(gui, ...guiFlags);
   }
   // Link the v0 actor runtime ONLY when the program uses actors (codegen emits the
   // nt_sched_init prologue exactly then). It relies on ucontext (makecontext/
@@ -509,6 +533,9 @@ function run(cc: string, args: string[]): void {
 
 export async function buildBinary(source: string, outPath: string, opts: BuildOpts = {}): Promise<void> {
   const target = opts.target ?? "host";
+  // Resolved BEFORE any scratch dir exists — `ccFor` hunts for the Android NDK / wasi-sdk
+  // and throws when they are absent, which used to leak the dir `writeIR` had just made.
+  const cc = ccFor(target);
   const { dir, ll, rt, actor, extra } = writeIR(source, opts.entryPath);
   // Actors need the ucontext-based cooperative scheduler (nt_actor.c); wasm32-wasi has no
   // ucontext, so gate here with a clear error instead of a cryptic link failure. Ordinary
@@ -517,7 +544,6 @@ export async function buildBinary(source: string, outPath: string, opts: BuildOp
     rmSync(dir, { recursive: true, force: true });
     throw new BuildError("the wasm (WASI) target does not support actors (spawn/send/receive): the actor runtime needs ucontext, which wasm32-wasi lacks");
   }
-  const cc = ccFor(target);
   try {
     const { args, warning } = linkArgv(target, { ll, rt, actor, extra, out: outPath }, { static: opts.static });
     if (warning) console.error(`warning: ${warning}`);
