@@ -2906,7 +2906,7 @@ class FnGen {
       });
     } else {
       for (const piece of plan.pieces) {
-        if (piece.spec === undefined) { this.emit(`call void @${P}_str(ptr ${this.mod.intern(piece.text)})`); continue; }
+        if (piece.kind === "text") { this.emit(`call void @${P}_str(ptr ${this.mod.intern(piece.text)})`); continue; }
         const s = this.genFormatArg(vals[piece.arg]!, piece.spec);
         if (s !== null) this.emit(`call void @${P}_str(ptr ${s.v})`);
       }
