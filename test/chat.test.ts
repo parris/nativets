@@ -47,7 +47,7 @@ function startMock(seen: SeenRequest[]): Promise<number> {
       req.on("data", (c) => (raw += c));
       req.on("end", () => {
         const parsed = JSON.parse(raw) as { messages: { content: string }[] };
-        const userText = parsed.messages[0].content;
+        const userText = parsed.messages[0]?.content ?? "";
         seen.push({
           path: req.url ?? "",
           apiKey: (req.headers["x-api-key"] as string) ?? "",

@@ -1,0 +1,30 @@
+/*
+ * The config that lets `tsc` SEMANTICALLY check this project. See test/tsc.test.ts.
+ *
+ * The root `tsconfig.json` includes `test`, and `test/pipeline/*.ts` use nativets'
+ * pipeline operator `|>`, which is a SYNTAX error to tsc (TS1109). tsc does not
+ * compute semantic diagnostics for a program that has syntactic ones, so those 16
+ * syntax errors masked EVERY type error in `src/` for the life of the project —
+ * `bunx tsc --noEmit` reported 16 errors, all TS1109, and zero semantic. Lifting the
+ * mask found a "reject, never miscompile" hole in `parser.ts` (see the `scanExternalNames`
+ * comment there) and a `Ty` union that omitted eight of its own members.
+ *
+ * `test/**` is split, not dropped: the `*.test.ts` harness files are ordinary
+ * TypeScript and are checked. Everything else under `test/` is a nativets PROGRAM —
+ * a fixture compiled by us and run by node — and is not a TypeScript module at all.
+ * Checking those as one tsc program yields ~950 errors that are all artifacts of the
+ * framing (TS2451 redeclarations, because every fixture declares `main`/`x` in what
+ * tsc sees as one shared script scope; TS2304 for nativets globals like `spawn`,
+ * `send`, `receive`). None of them is a fact about the code.
+ *
+ * `allowImportingTsExtensions` is required, not cosmetic: `src/` imports with the
+ * `.ts` extension (`./parser.ts`) because that is what nativets itself resolves and
+ * what bun runs. Without the flag every such import is a TS5097, 42 of them.
+ */
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src", "types", "test/*.test.ts", "test/harness.ts"]
+}

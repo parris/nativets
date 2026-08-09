@@ -891,7 +891,14 @@ class FnGen {
    *  spread source is the assignment's own dying value, so its storage is MOVED into
    *  the new array instead of copied+retained. `consumeNode` is the exact `...x`
    *  element (identity-compared, so a second `...x` in the same literal still copies);
-   *  `consumedAssign` records that the assignment's `dropOld` is already satisfied. */
+   *  `consumeTaken` is set once the spread actually took the storage, and is what
+   *  `emitDropOld` reads to skip the assignment's `dropOld`.
+   *
+   *  There used to be a second field here, `consumedAssign = e`, described as recording
+   *  the same fact. It was never DECLARED and never READ — a write to a property that
+   *  existed only because bun creates one on assignment, invisible until tsc first
+   *  checked this project (TS2339). `consumeTaken` is the mechanism; that was a vestige
+   *  of an earlier design, and removing it changes no emitted IR. */
   private consumeNode: Expr | null = null;
   private consumeTaken = false;
 
@@ -1903,7 +1910,7 @@ class FnGen {
       case "IndexExpr":
         // `a?.[i]`, or a link trailing one, lowers as ONE guarded unit — same dispatch the
         // MemberExpr case uses, so a chain mixing `.b` and `[i]` stays a single chain.
-        if (isNullableTy(e.ty ?? "") && isOptChainExpr(e)) return this.genOptChain(e);
+        if (e.ty !== undefined && isNullableTy(e.ty) && isOptChainExpr(e)) return this.genOptChain(e);
         return this.genElemRead(this.genExpr(e.object), e);
 
       case "ObjectLiteral": {
@@ -2023,7 +2030,7 @@ class FnGen {
         }
         // An optional chain whose result is nullable is lowered as a unit: guard at
         // each `?.`, short-circuiting the WHOLE rest of the chain to `undefined`.
-        if (isNullableTy(e.ty ?? "") && isOptChainExpr(e)) return this.genOptChain(e);
+        if (e.ty !== undefined && isNullableTy(e.ty) && isOptChainExpr(e)) return this.genOptChain(e);
         let obj = this.genExpr(e.object);
         // SH2 narrowing: the checker may have retyped this receiver from the union to one
         // of its members. The POINTER is identical — only the slot layout the fields are
@@ -2351,7 +2358,7 @@ class FnGen {
         const ty = this.varTypes.get(e.target) ?? "number";
         if (e.op === "=") {
           const consume = this.consumingSpread(e, ty);
-          if (consume) { this.consumeNode = consume; this.consumedAssign = e; }
+          if (consume) { this.consumeNode = consume; }
           const val = this.coerce(this.genExpr(e.value), ty); // box into a nullable slot if needed
           this.consumeNode = null;
           // RC: reassigning a string local. Retain an aliased borrow so the new value
@@ -2536,7 +2543,7 @@ class FnGen {
         }
         // `new C(args)` on a user class: allocate the field slot block, then run the
         // constructor (`C.constructor(this, …args)`), and hand back the instance ptr.
-        const cls = classTag(e.ty ?? "");
+        const cls = e.ty === undefined ? undefined : classTag(e.ty);
         if (cls) {
           const objTy = e.ty!;
           const nfields = objectFields(objTy).length;
@@ -2758,7 +2765,8 @@ class FnGen {
     }
     // class instance method call: `inst.m(args)` → `C.m(inst, …args)` (the lowered fn).
     if (e.callee.kind === "MemberExpr") {
-      const cls = classTag(e.callee.object.ty ?? "");
+      const recvTy = e.callee.object.ty;
+      const cls = recvTy === undefined ? undefined : classTag(recvTy);
       if (cls && this.mod.functions.has(`${cls}.${e.callee.property}`)) {
         // The RECEIVER is lowered HERE rather than inside the call, because the drop
         // below needs its pointer and `genUserCall` would otherwise generate and forget

@@ -31,6 +31,7 @@
  */
 
 import { test, expect, describe } from "bun:test";
+import { parse } from "../src/parser.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { compileAndRun, runWithNode } from "./harness.ts";
 
@@ -709,5 +710,87 @@ console.log(JSON.stringify(t));`);
 const o = { a: { n: 1 }, b: [1, 2] };
 const c = structuredClone(o);
 console.log(c.a.n, c.b[1], o.a === c.a);`);
+  });
+});
+
+/*
+ * THE ESCAPE THAT WAS NOT AN ESCAPE — `scanExternalNames` (src/parser.ts).
+ *
+ * NT2003 above is DECLINED for any name in `externalNames`, which is meant to be
+ * "the identifiers this file's `import`s bind". The scan walks tokens forward from
+ * each `import` keyword and stops at the `from` keyword or at the MODULE SPECIFIER —
+ * except the specifier test was `u.type === "string"` and `TokenType` (src/lexer.ts)
+ * spells that token `"str"`. The comparison could never be true.
+ *
+ * `from` covered it up for every ordinary import. A BARE SIDE-EFFECT import has no
+ * `from`, so the scan ran from the `import` to END OF FILE and put every identifier
+ * in the file into `externalNames` — turning off unknown-type-name rejection for the
+ * whole module. `import "./x.ts";` above `const x: Bogus = 1;` COMPILED.
+ *
+ * That is a "reject, never miscompile" hole, and it also voided evidence: the NT2003
+ * lane's "fires zero times across the corpus" measurement could not have fired in any
+ * file with a bare import. Found by tsc's TS2367 ("the types have no overlap") the
+ * first time this project was semantically type-checked — see tsconfig.src.json.
+ *
+ * Asserted through `parse` rather than `sourceToIR`, deliberately: the scan is purely
+ * lexical and runs before any module resolution, so no file needs to exist on disk and
+ * the test cannot pass for the unrelated reason that a link failed first.
+ */
+describe("import scanning: a bare side-effect import does not disable NT2003", () => {
+  /** The NT code a source is refused with, or "" if the parser accepted it. */
+  function parseCode(source: string): string {
+    try {
+      parse(source);
+      return "";
+    } catch (e) {
+      return (e as { diag?: { code?: string } }).diag?.code ?? "THREW";
+    }
+  }
+
+  test("`import \"./m.ts\";` above an undeclared type name still refuses it", () => {
+    expect(parseCode(`import "./m.ts";\nconst x: Bogus = 1;\nconsole.log(x);\n`)).toBe("NT2003");
+  });
+
+  // The control: the identical program WITHOUT the import. Both must refuse, or the
+  // test above is passing for a reason that has nothing to do with the import.
+  test("...exactly as it does with no import at all", () => {
+    expect(parseCode(`const x: Bogus = 1;\nconsole.log(x);\n`)).toBe("NT2003");
+  });
+
+  // The scan's real job, unchanged: names an import BINDS are legitimately unresolvable
+  // here (the parser's view is file-local), so they must still decline the refusal.
+  test("a named type import still suppresses the refusal for the names it binds", () => {
+    expect(parseCode(`import type { Foo } from "./m.ts";\nconst x: Foo = 1;\n`)).toBe("");
+    expect(parseCode(`import { Foo } from "./m.ts";\nconst x: Foo = 1;\n`)).toBe("");
+    expect(parseCode(`import { Foo as Bar } from "./m.ts";\nconst x: Bar = 1;\n`)).toBe("");
+  });
+
+  // A bare import must not leak the NEXT import's names either — the scan used to run
+  // past every specifier, so an unrelated name below was suppressed just as well.
+  test("a bare import does not suppress a name bound by nothing at all", () => {
+    expect(parseCode(`import "./a.ts";\nimport { Foo } from "./b.ts";\nconst x: Foo = 1;\nconst y: Nope = 2;\n`)).toBe("NT2003");
+  });
+
+  /*
+   * The SECOND trigger for the same hole, and the common one. `import.meta.url` is a META
+   * PROPERTY, not a declaration — it binds nothing — but the scan treated it as an import
+   * and, with neither a `from` nor (usually) a string literal after it, ran to end of file
+   * just the same. 67 of the 496 `.ts` files in this tree contain one, so the NT2003
+   * "fires zero times across the corpus" measurement was taken over a corpus where 13% of
+   * the files structurally could not produce the signal.
+   */
+  test("`import.meta.url` does not disable NT2003 for the rest of the file", () => {
+    expect(parseCode(`const u = import.meta.url;\nconst x: Bogus = 1;\nconsole.log(x, u);\n`)).toBe("NT2003");
+  });
+
+  // ...and the dynamic-import type position, which had its own guard already.
+  test("`import(\"m\").T` still binds nothing", () => {
+    expect(parseCode(`type T = import("./m.ts").Foo;\nconst x: Bogus = 1;\n`)).toBe("NT2003");
+  });
+
+  // The text-import spelling driver.ts uses, which DOES have a `from` and so was never
+  // broken — pinned so the fix cannot narrow it.
+  test("a text import binds its default name", () => {
+    expect(parseCode(`import src from "../runtime/runtime.c" with { type: "text" };\nconsole.log(src);\n`)).toBe("");
   });
 });

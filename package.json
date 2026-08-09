@@ -8,12 +8,14 @@
     "build": "bun run src/cli.ts build",
     "start": "bun run src/cli.ts run",
     "compile": "bun build src/cli.ts --compile --outfile nativets",
-    "test:linux": "scripts/docker-test.sh"
+    "test:linux": "scripts/docker-test.sh",
+    "typecheck": "tsc -p tsconfig.src.json --noEmit"
   },
   "bin": {
     "nativets": "src/cli.ts"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "typescript": "^7.0.2"
   }
 }

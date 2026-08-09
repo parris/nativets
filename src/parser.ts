@@ -478,6 +478,18 @@ class Parser {
    * identifier of each specifier as well as the first — the local binding is what matters,
    * and over-collecting the imported name too is harmless because this set is only ever a
    * reason to DECLINE a refusal.
+   *
+   * "Over-collecting is harmless" holds for ONE EXTRA NAME PER SPECIFIER. It does not hold
+   * for the whole file, which is what this scan used to do. The module-specifier stop was
+   * `u.type === "string"`, and `TokenType` (src/lexer.ts) spells a string token `"str"` —
+   * so the comparison could never be true. The `from` stop hid it for every ordinary
+   * import; a BARE SIDE-EFFECT import (`import "./m.ts";`) has no `from`, so the scan ran
+   * to END OF FILE and declared every identifier in the module external. `externalNames`
+   * is the escape `refuseUnknownName` consults, so a single bare import turned NT2003 off
+   * for the whole file and `const x: Bogus = 1;` COMPILED — a "reject, never miscompile"
+   * hole. See test/forward-type-ref.test.ts ("import scanning"). Found by tsc — TS2367,
+   * "these types have no overlap" — the first time this project was semantically
+   * type-checked (tsconfig.src.json, test/tsc.test.ts).
    */
   private scanExternalNames(toks: Token[]): void {
     for (let i = 0; i < toks.length; i++) {
@@ -485,9 +497,16 @@ class Parser {
       if (t.type !== "ident" || t.value !== "import") continue;
       // `import("m").T` — an inline import TYPE, not a declaration. It binds nothing.
       if (toks[i + 1]?.value === "(") continue;
+      // `import.meta.url` — the META PROPERTY, not a declaration either, and the second
+      // trigger for the same hole as the specifier stop below: there is no `from` and
+      // often no string literal after it, so the scan ran to end of file and declared the
+      // rest of the module external. `import.meta.url` is idiomatic (every fixture that
+      // resolves a sibling file uses it), so this was the COMMON way to lose NT2003 —
+      // 67 of the 496 `.ts` files in the tree could not have reported it.
+      if (toks[i + 1]?.value === ".") continue;
       for (let j = i + 1; j < toks.length; j++) {
         const u = toks[j]!;
-        if (u.type === "string") break;                       // reached the module specifier
+        if (u.type === "str") break;                          // reached the module specifier
         if (u.type === "ident" && u.value === "from") break;
         if (u.type !== "ident") continue;                     // `{` `}` `,` `*` punctuation
         if (u.value === "type" || u.value === "as") continue; // modifier keywords, not bindings

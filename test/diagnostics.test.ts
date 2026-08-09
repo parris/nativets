@@ -218,3 +218,49 @@ describe("lexical errors are NT0001, not a stack trace", () => {
     });
   }
 });
+
+/*
+ * `exprLoc` (src/ast.ts) — the descent that gives a diagnostic its SPAN.
+ *
+ * Most `Expr` nodes carry no `loc` of their own, so `exprLoc` descends to the first
+ * child that does. The `UnaryExpr` arm read `e.argument` — an ESTree field name; the
+ * interface has `operand` — so it was `exprLoc(undefined)` and returned `undefined` for
+ * EVERY unary expression, silently. The error text was unchanged, which is why nothing
+ * caught it: only the `at L:C` suffix and the source frame vanished, and only for
+ * operands under a `-`/`!`/`+`/`~`.
+ *
+ * Found by tsc (TS2339, "property 'argument' does not exist on type 'UnaryExpr'") the
+ * first time this project was semantically type-checked — see tsconfig.src.json.
+ *
+ * The differential oracle cannot see this: node accepts none of these programs, so the
+ * contract is asserted directly, and against a CONTROL — the identical program without
+ * the unary — so a future change that drops the location from both still fails.
+ */
+describe("diagnostic spans reach through a unary expression", () => {
+  const emit = (src: string): string => {
+    try { sourceToIR(src); return "(compiled)"; } catch (e) { return (e as Error).message; }
+  };
+  const FN = "function f(s: string): void { console.log(s); }\nconst n: number = 5;\n";
+
+  test("`f(-n)` locates the argument, exactly as `f(n)` does", () => {
+    // The control first: without the unary, the span has always been there — at the
+    // identifier, column 3.
+    expect(emit(`${FN}f(n);\n`)).toContain("at 3:3");
+    // ...and with it. This was the bug: same error text, NO location at all. The column
+    // is 4, not 3, and that is the contract: `exprLoc` descends to the first child that
+    // carries a location, which is the operand `n` — not the `-` in front of it.
+    expect(emit(`${FN}f(-n);\n`)).toContain("at 3:4");
+  });
+
+  test("every unary operator descends, not just `-`", () => {
+    for (const src of [`${FN}f(-n);\n`, `${FN}f(+n);\n`, `${FN}f(~n);\n`, `${FN}f(!n);\n`]) {
+      expect([src, emit(src).includes("at 3:4")]).toEqual([src, true]);
+    }
+  });
+
+  // A unary whose operand has no location either must still report the error — the
+  // descent returns `undefined` and the caller falls back, as it did before.
+  test("a unary over an unlocated operand still produces the diagnostic", () => {
+    expect(emit(`${FN}f(-1);\n`)).toContain("expects string, got number");
+  });
+});

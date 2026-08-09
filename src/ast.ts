@@ -7,11 +7,34 @@
 
 export type ScalarTy = "number" | "boolean" | "string" | "void" | "undefined" | "null" | "Dyn";
 /**
+ * The NOMINAL builtin types: reserved type names with no structural marker
+ * (`{`/`[]`/`(`/`<`/`?`), so no structural predicate matches them and each is
+ * recognized by plain string equality — `isBytesTy`, `isDateTy`, `isUrlTy`,
+ * `isResponseTy` and friends below.
+ *
+ * These are arms of `Ty` and always were: the checker writes them into `Expr.ty`
+ * and codegen switches on them. They were simply MISSING from the union, and
+ * nothing noticed, because `tsc` had never semantically checked this project (see
+ * `tsconfig.src.json` for why — `test/pipeline/*.ts` masked every type error in the
+ * repo behind 16 syntax errors). With the mask lifted, their absence was 19 of the
+ * 21 "the types have no overlap" errors: `t === "Date"` on a `t: Ty` is provably
+ * false when `Ty` cannot BE "Date", so every one of those predicates read as dead
+ * code and every `e.ty = "Uint8Array"` read as an illegal assignment. The type model
+ * was the lie, not the code.
+ *
+ * Kept as an explicit, closed list rather than widening `Ty` toward `string`: the
+ * narrowness is what makes `tsc` able to find the next dead comparison.
+ */
+export type BuiltinTy =
+  | "Uint8Array" | "TextEncoder" | "TextDecoder"   // bytes value type (stdlib batch 2)
+  | "Response" | "Headers"                          // networking tier (`fetch`)
+  | "Date" | "URL" | "URLSearchParams";             // stdlib batch 3, the web APIs
+/**
  * Array types: `${elem}[]` (e.g. "number[]").
  * Object types: `{k1:t1,k2:t2}` in field-insertion order (e.g. "{name:string,age:number}").
  * Both encodings keep `===` type comparison working as plain string equality.
  */
-export type Ty = ScalarTy | `${string}[]` | `{${string}}`;
+export type Ty = ScalarTy | BuiltinTy | `${string}[]` | `{${string}}`;
 
 /**
  * The array encoding is a SUFFIX (`${elem}[]`), and it is the only one that is — every
@@ -1336,7 +1359,13 @@ export function exprLoc(e: Expr | undefined): Loc | undefined {
   if (own) return own;
   switch (e.kind) {
     case "BinaryExpr": case "LogicalExpr": return exprLoc(e.left) ?? exprLoc(e.right);
-    case "UnaryExpr": return exprLoc(e.argument);
+    // `operand`, NOT `argument` — this read `e.argument` (an ESTree name; the interface
+    // at `UnaryExpr` above has no such field) from the day it was written, so it was
+    // `exprLoc(undefined)` and EVERY unary expression reported no location at all.
+    // `f(-n)` where `f` takes a string got a bare `NT2001 … got number`; `f(n)` got the
+    // same error `at 3:3` with a source frame. Found by tsc (TS2339) once the pipeline
+    // fixtures stopped masking semantic diagnostics — see tsconfig.src.json.
+    case "UnaryExpr": return exprLoc(e.operand);
     case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": return exprLoc(e.expr);
     case "ConditionalExpr": return exprLoc(e.test) ?? exprLoc(e.consequent) ?? exprLoc(e.alternate);
     case "TemplateLiteral": return e.exprs.map((x) => exprLoc(x)).find((l) => l !== undefined);
