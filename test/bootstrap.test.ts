@@ -364,7 +364,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // so this bucket was crediting checker.ts with reaching line 676 past a miscompiled
     // Scope. A bucket can shrink because the frontier RETREATED to the truth. See the
     // "moved shallower is not automatically a regression" rule in selfhost-ratchet.test.ts.
-    expect(byCode["NT1023"]!.sort()).toEqual(["codegen.ts"]);
+    // ...and back to three. Lane B gave `Scope` a real representation (the `@Name`
+    // back-edge), so checker.ts and ownership.ts left NT1030 and returned to this bucket —
+    // this time HONESTLY, past a symbol table that compiles rather than one that was erased.
+    expect(byCode["NT1023"]!.sort()).toEqual(["checker.ts", "codegen.ts", "ownership.ts"]);
     // RATCHET MOVE (collections): NT1014 is now EMPTY. It held lexer.ts on
     // `new Set([...])` for REGEX_AFTER_KEYWORD; `new Set(iterable)` compiles now, so the
     // module walks on to what sat behind it — NT2001, an object literal where a Map is
@@ -448,7 +451,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // prime directive whatever this number says. Note also that the two are not the same
     // problem: ast.ts needs the 44-declaration MUTUAL cycle, Scope needs only SELF-recursion.
     expect(byCode["NT1030"]!.sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+      ["ast.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
     );
     // NT1015 is empty — the generic-method lane cleared modules.ts's, and codegen.ts's
     // static-member site was cleared earlier. (A fact about today; this file has been

@@ -122,8 +122,9 @@ if (m.has("a")) { console.log(m.get("a"), m2.size, s.size, m.size); }`;
 
   /*
    * The rule is STATEMENT position, not "anywhere the value looks unused". A mutator in a
-   * `return`, an argument, a condition or an initializer is consumed by its context and
-   * must stay legal — an over-broad rule here would break the chained form above.
+   * `return`, an argument or an initializer is consumed by its context and must stay legal —
+   * an over-broad rule here would break the chained form above. (A BOOLEAN context is the
+   * one exception, and it is a rule of its own: see the next describe.)
    */
   test("a mutator in a non-statement position is NOT refused", async () => {
     const src = `
@@ -133,6 +134,119 @@ console.log(out.size, out.get("g"));`;
     expect(rejectionOf(src)).toBeNull();
     const r = await compileAndRun(src);
     expect(r.stdout).toBe("1 1\n");
+  });
+});
+
+/*
+ * `.delete` CONSUMED AS A BOOLEAN — the other half of the same divergence.
+ *
+ * The refusal above covers the call whose result is DISCARDED. This one covers the call
+ * whose result is USED, in the one context where using it is guaranteed to be wrong:
+ *
+ *     let m = new Map<string, number>().set("a", 1);
+ *     if (m.delete("zz")) { console.log("deleted"); } else { console.log("absent"); }
+ *     // node: "absent"    nativets, before: "deleted"   — exit 0, wrong branch, no diagnostic
+ *
+ * node's `Map.prototype.delete` / `Set.prototype.delete` return a BOOLEAN — whether the key
+ * was there (test262 `test/built-ins/Map/prototype/delete/returns-{true,false}.js`,
+ * `test/built-ins/Set/prototype/delete/returns-{true,false}.js`; re-measured on node here).
+ * Ours returns the NEW COLLECTION, and a collection handle is `true` for every input. So the
+ * condition is not a condition at all: the `else` arm is unreachable and `while (m.delete(k))`
+ * cannot terminate. That is decided by the REPRESENTATION, not by the data — which is why
+ * this needs no reachability analysis and has no false-positive direction. There is no
+ * program in which `.delete`'s result is a meaningful boolean.
+ *
+ * The rule keys on `.delete`, NOT on "a Map/Set in a condition". `if (m)` on a plain handle
+ * is always-true under node too, so it AGREES and must keep compiling; so must `.size`,
+ * `.has(k)` and `.get(k)`, which are the spellings the hint points at.
+ */
+describe(".delete consumed as a BOOLEAN is refused (node returns a boolean, we return a map)", () => {
+  test("`if (m.delete(k))` is NT1606, not a silently-taken branch", () => {
+    const r = rejectionOf(`let m = new Map<string, number>().set("a", 1);\nif (m.delete("zz")) { console.log("hit"); } else { console.log("miss"); }\n`);
+    expect(r?.code).toBe("NT1606");
+    expect(r?.message).toContain("2:5");
+    expect(r?.hint).toContain(`m.has("zz")`);
+  });
+
+  /*
+   * The worst of the family: `while (m.delete(k))` under node drains the key and stops;
+   * here the test is a handle, so the loop NEVER terminates. Measured before the fix: the
+   * `if` case merely printed the wrong line, this one hangs. Same for `do`/`while` and the
+   * classic `for (;;)` test slot.
+   */
+  test("every LOOP test refuses — `while`, `do/while`, and the `for` test", () => {
+    const w = rejectionOf(`let m = new Map<string, number>().set("a", 1);\nwhile (m.delete("zz")) { console.log("x"); }\n`);
+    expect(w?.code).toBe("NT1606");
+    expect(w?.message).toContain("`while` condition");
+    const d = rejectionOf(`let m = new Map<string, number>().set("a", 1);\ndo { console.log("x"); } while (m.delete("zz"));\n`);
+    expect(d?.code).toBe("NT1606");
+    const f = rejectionOf(`let m = new Map<string, number>().set("a", 1);\nfor (; m.delete("zz"); ) { console.log("x"); }\n`);
+    expect(f?.code).toBe("NT1606");
+  });
+
+  /*
+   * The two expression-level boolean contexts. `!m.delete(k)` is the spelling of "the key
+   * was NOT there", which inverts to a constant `false` here; the ternary test is the `if`
+   * in expression position. `!!` nests, so the `!` case must reject its operand rather than
+   * only the outermost test.
+   */
+  test("the ternary test and `!` refuse too", () => {
+    const t = rejectionOf(`let m = new Map<string, number>().set("a", 1);\nconsole.log(m.delete("zz") ? "hit" : "miss");\n`);
+    expect(t?.code).toBe("NT1606");
+    const n = rejectionOf(`let m = new Map<string, number>().set("a", 1);\nif (!m.delete("zz")) { console.log("miss"); }\n`);
+    expect(n?.code).toBe("NT1606");
+    const nn = rejectionOf(`let m = new Map<string, number>().set("a", 1);\nif (!!m.delete("zz")) { console.log("hit"); }\n`);
+    expect(nn?.code).toBe("NT1606");
+  });
+
+  /* `Set.prototype.delete` has the identical node contract, so it gets the identical rule. */
+  test("Set.delete in a condition refuses, and the hint names the Set spellings", () => {
+    const r = rejectionOf(`let s = new Set<string>().add("a");\nif (s.delete("zz")) { console.log("hit"); } else { console.log("miss"); }\n`);
+    expect(r?.code).toBe("NT1606");
+    expect(r?.message).toContain("`Set` is persistent");
+    expect(r?.hint).toContain(`s.has("zz")`);
+    expect(r?.hint).toContain(`s = s.delete("zz")`);
+  });
+
+  /*
+   * NO OVER-REFUSAL. This is the failure mode that would make the cure worse than the
+   * disease, so every neighbouring spelling is pinned as PASSING — including `if (m)` on a
+   * plain handle, which is always-true under node too and therefore agrees.
+   */
+  test("the truthiness spellings that AGREE with node still compile", async () => {
+    const src = `
+const m = new Map<string, number>().set("a", 1);
+const s = new Set<string>().add("a");
+if (m) { console.log("handle"); }
+if (m.size) { console.log("size"); }
+if (m.has("a")) { console.log("has"); }
+if (m.get("a")) { console.log("get"); }
+if (s.has("a")) { console.log("shas"); }
+if (!m.has("zz")) { console.log("nothas"); }
+console.log(m.has("zz") ? "y" : "n");`;
+    expect(rejectionOf(src)).toBeNull();
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("handle\nsize\nhas\nget\nshas\nnothas\nn\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  /*
+   * And the legitimate `.delete` spellings — the ones §A tells users to write. The refusal
+   * is about the BOOLEAN context only; producing, rebinding and iterating a deleted-from
+   * collection are the supported idioms and must be untouched.
+   */
+  test("the value-consuming `.delete` spellings still compile", async () => {
+    const src = `
+let m = new Map<string, number>().set("a", 1).set("b", 2);
+m = m.delete("a");                                   // rebind
+const m2 = m.delete("b");                            // fresh binding
+const s = new Set<string>().add("x").add("y").delete("x"); // chained
+console.log(m.size, m2.size, s.size, s.has("y"));
+if (m.delete("b").size === 0) { console.log("emptied"); }`;
+    expect(rejectionOf(src)).toBeNull();
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("1 0 1 true\nemptied\n");
+    expect(r.exitCode).toBe(0);
   });
 });
 

@@ -193,7 +193,17 @@ export function isObjectTy(t: Ty): boolean {
 }
 /** Parse an object type into ordered [key, type] fields (nesting-aware; tag-tolerant). */
 export function objectFields(t: Ty): { key: string; ty: Ty }[] {
-  const inner = t.slice(t.indexOf("{") + 1, -1);
+  // A NON-object answers with the empty field list, not with garbage. Without this guard
+  // the slicing below runs on a string that has no `{`: `objectFields("number")` returned
+  // `[{key:"numb", ty:"numbe"}]` and `objectFields("@N")` returned `[{key:"", ty:"@"}]` —
+  // a PHANTOM one-field record. Callers use `.length` as an allocation size and
+  // `fieldIndex` (-1 when the key is absent) as a `getelementptr` offset, so a phantom
+  // field is a one-slot `nt_obj_new` for an N-field record and a gep into the malloc
+  // header. Every caller happens to guard with `isObjectTy` today, which is why this has
+  // never fired; it is a landmine under any new encoding that is not an object type.
+  const open = t.indexOf("{");
+  if (open < 0 || !t.endsWith("}")) return [];
+  const inner = t.slice(open + 1, -1);
   if (inner === "") return [];
   return splitTopLevel(inner, ",").map((part) => {
     const i = part.indexOf(":");
@@ -369,6 +379,66 @@ function matchAngle(s: string, open: number): number {
     else if (s[i] === ">" && --depth === 0) return i;
   }
   return s.length - 1;
+}
+
+/* ============================================================
+ * RECURSIVE types — the nominal back-edge (`@Name`).
+ *
+ * `Ty` is a flat structural string, so a type that contains itself has no finite
+ * structural encoding: substituting the shape for the name never terminates. That is what
+ * NT1030 has been reporting, and it is what gates src/ast.ts (a 44-declaration mutual
+ * cycle) and src/checker.ts (`class Scope { parent: Scope | null }`, self-recursive).
+ *
+ * The encoding is NOMINAL and applies to the recursive POSITION only: a declaration in a
+ * cycle keeps its structural shape at the top level and encodes the back-edge as a
+ * reference, `@Name`, whose shape lives in a table carried on the `Program`.
+ *
+ *     interface N { v: number; next?: N }   ->   {v:number,next:?U@N}
+ *     class Scope { parent: Scope | null }  ->   Scope{parent:?N@Scope}
+ *
+ * Three properties this buys, and they are the whole argument for it over the
+ * alternatives (arena ids; equirecursive mu-types):
+ *
+ *   1. `Ty` stays a STRING and `===` stays type comparison. That assumption is load-bearing
+ *      at ~400 sites and nothing else preserves it.
+ *   2. No `Ty` contained `@` before this, so `@N` matches NONE of the existing structural
+ *      predicates. A type that is not recursive keeps its EXACT previous encoding, so this
+ *      is additive rather than a rewrite — and a `@N` that reaches a site which has not
+ *      been taught about it fails loudly instead of being mistaken for something else.
+ *   3. It is finite and small. A depth-limited structural expansion of src/ast.ts's `Stmt`
+ *      grows ~4x per level (5.8e6 chars by depth 9) and is unsound past the limit; a
+ *      canonical mu-encoding needs DFA minimization to keep `===` correct and still leaves
+ *      a ~40 KB string compared on every type test.
+ *
+ * The cost, stated: recursive types become NOMINAL, so two structurally identical recursive
+ * declarations are not interchangeable the way tsc says they are. That is a refusal, never a
+ * miscompile — see docs/divergences.md.
+ *
+ * INVARIANT: `@Name` appears only NESTED inside a shape (a field type, an element type). A
+ * value's own static type is always the expanded shape, so every pass that reasons about a
+ * value sees an ordinary object type. The reference is unfolded on demand — exactly when a
+ * field carrying one is read — which terminates because each unfold is driven by a real
+ * source-level access.
+ * ============================================================ */
+
+/** The nominal reference for a recursive declaration (`N` -> `@N`). */
+export function typeRefTy(name: string): Ty { return `@${name}` as Ty; }
+/** Is `t` EXACTLY a nominal type reference (`@N`, not `@N[]`)? */
+export function isTypeRefTy(t: Ty): boolean {
+  return typeof t === "string" && t.startsWith("@") && isIdentifier(t.slice(1));
+}
+/** The declaration name a reference points at (`@N` -> `N`). */
+export function typeRefName(t: Ty): string { return t.slice(1); }
+/** Does `t` mention a nominal reference anywhere (`?U@N`, `@N[]`, `{a:@N}`)? */
+export function hasTypeRef(t: Ty): boolean { return typeof t === "string" && t.includes("@"); }
+/**
+ * Unfold ONE level: replace a bare `@N` with the shape it names. Identity on everything
+ * else, including a type that merely CONTAINS a reference — unfolding those eagerly is what
+ * would not terminate. An unknown name is left alone rather than guessed at; it then fails
+ * loudly at whichever site needed the shape, which is the point of property 2 above.
+ */
+export function expandTypeRef(t: Ty, table: Map<string, Ty>): Ty {
+  return isTypeRefTy(t) ? (table.get(typeRefName(t)) ?? t) : t;
 }
 
 /* ============================================================
@@ -1031,6 +1101,25 @@ export interface Program {
    *  tag is what makes mutability nominal rather than structural. Everything downstream
    *  treats these tags exactly like `mutableClasses` — see `mutableTags`. */
   mutableRecords?: string[];
+  /**
+   * RECURSIVE type shapes, by declaration name — the table the `@Name` back-edge resolves
+   * through (see "RECURSIVE types" above). `{ N: "{v:number,next:?U@N}" }`. Present only
+   * when the source declared a recursive type, so every existing Program is byte-identical.
+   *
+   * On the `Program` rather than a module-level registry in this file, deliberately, for
+   * two reasons. A module global would be shared across compilations in one process (the
+   * test suite compiles hundreds), and — the binding one — nativets `Map`s are IMMUTABLE,
+   * so a growing module-level table is not expressible in the subset this compiler must
+   * eventually compile itself with. Putting it here would plant a self-hosting blocker in
+   * the very module being unblocked. Every pass already receives the Program.
+   */
+  recTypes?: [string, Ty][];
+}
+
+/** The recursive-shape table as a lookup. Stored as pairs on the Program (JSON-shaped,
+ *  and linker-mergeable); every consumer wants a Map. */
+export function recTypeTable(p: Program): Map<string, Ty> {
+  return new Map(p.recTypes ?? []);
 }
 
 /** Every tag whose values mutate in place: `@@mutable` classes AND `@@mutable` records.

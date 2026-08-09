@@ -15,6 +15,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // Stage 47 (console.log of compound values): the handle-type predicates the
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
+import { isTypeRefTy, expandTypeRef, recTypeTable } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
 import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
 // The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
@@ -299,7 +300,7 @@ export function check(program: Program): CheckedProgram {
   const importedFrom = new Map<string, string>();
   for (const im of program.imports ?? [])
     for (const s of im.specs ?? []) if (!s.typeOnly) importedFrom.set(s.local, im.source);
-  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []), importedFrom);
+  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []), importedFrom, recTypeTable(program));
   const builtins = () => {
     const s = new Scope();
     for (const n of BUILTIN_NUMBERS) s.declare(n, "number", true);
@@ -551,7 +552,13 @@ class Checker {
      *  been linked. Empty after linking (the linker rewrites the bindings), so this only
      *  ever improves the diagnostic for a single-module check — it never accepts a call. */
     private importedFrom: Map<string, string> = new Map(),
+    /** Recursive-type shapes, the table a `@Name` back-edge resolves through (ast.ts).
+     *  Empty for every program with no recursive type, so nothing else changes. */
+    private recTypes: Map<string, Ty> = new Map(),
   ) {}
+
+  /** Unfold a nominal back-edge one level (`@N` -> its shape); identity on anything else. */
+  private unfold(t: Ty): Ty { return expandTypeRef(t, this.recTypes); }
 
   /**
    * Does class `tag` declare a `toJSON` METHOD? The parser desugars `class C { toJSON() {} }`
@@ -1202,8 +1209,24 @@ class Checker {
    * and every absent target field is optional (nullable). Extra source fields are
    * tolerated (a widening on assignment; excess-property linting is out of scope).
    */
-  private assignable(target: Ty, source: Ty): boolean {
+  private assignable(target: Ty, source: Ty, assumed?: Set<string>): boolean {
     if (target === source) return true;
+    // FOLD/UNFOLD. A `@N` and the shape it names are the SAME type, just written at
+    // different depths — a literal builds the unfolded spelling, an annotation carries the
+    // folded one — so unfold whichever side is a reference and compare again.
+    //
+    // The `assumed` set is what makes that terminate, and it is the standard coinductive
+    // rule for equirecursive types (Amadio-Cardelli): comparing `@N` against `@M` unfolds
+    // both, descends into their fields, and arrives back at `@N` vs `@M`. Assuming a pair
+    // while it is being proved turns that infinite regress into a fixed point. Sound
+    // because the assumption is only ever used to close a cycle it is itself inside.
+    if (isTypeRefTy(target) || isTypeRefTy(source)) {
+      const key = `${target}|${source}`;
+      const seen = assumed ?? new Set<string>();
+      if (seen.has(key)) return true;
+      seen.add(key);
+      return this.assignable(this.unfold(target), this.unfold(source), seen);
+    }
     // SH2: a union value IS one of its members' object blocks — there is no box — so
     // what flows in must have EXACTLY a member's layout. Deliberately identity, not the
     // structural rule below: a record that is merely structurally compatible with a
@@ -1224,14 +1247,14 @@ class Checker {
     if (isNullableTy(target)) {
       const which = nullishKind(target);
       if (source === which) return true;                 // undefined→?U / null→?N
-      if (isNullableTy(source)) return this.assignable(baseTy(target), baseTy(source));
-      return this.assignable(baseTy(target), source);    // a present value of the base type
+      if (isNullableTy(source)) return this.assignable(baseTy(target), baseTy(source), assumed);
+      return this.assignable(baseTy(target), source, assumed);    // a present value of the base type
     }
     if (isObjectTy(target) && isObjectTy(source)) {
       for (const tf of objectFields(target)) {
         const sf = fieldType(source, tf.key);
         if (sf === undefined) { if (!isNullableTy(tf.ty)) return false; continue; } // absent → must be optional
-        if (!this.assignable(tf.ty, sf)) return false;
+        if (!this.assignable(tf.ty, sf, assumed)) return false;
       }
       return true;
     }
@@ -1240,7 +1263,7 @@ class Checker {
     // optional field was refused — while the identical shape at the top level was fine.
     // Sound for the same reason the object arm is: acceptance is gated by `reshapable`,
     // so only a literal whose elements can be rebuilt in the target layout gets through.
-    if (isArrayTy(target) && isArrayTy(source)) return this.assignable(elemTy(target), elemTy(source));
+    if (isArrayTy(target) && isArrayTy(source)) return this.assignable(elemTy(target), elemTy(source), assumed);
     return false;
   }
 
@@ -1511,6 +1534,7 @@ class Checker {
         return;
       case "IfStmt": {
         refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
+        this.rejectDeleteAsCondition(s.test, "this `if` condition", "the `else` arm is unreachable");
         // Two INDEPENDENT narrowings apply to the same arms, and a guard can want both
         // (see checkBlock): nullable FACTS from the guard hold in the branch it selects,
         // and a TAG test narrows each arm's union — the tested member in one, the
@@ -1534,11 +1558,13 @@ class Checker {
       }
       case "WhileStmt":
         refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
+        this.rejectDeleteAsCondition(s.test, "this `while` condition", "the loop can never terminate");
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
         return;
       case "DoWhileStmt":
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
         refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
+        this.rejectDeleteAsCondition(s.test, "this `do`/`while` condition", "the loop can never terminate");
         return;
       case "ForStmt": {
         const inner = scope.child();
@@ -1546,7 +1572,7 @@ class Checker {
           if ((s.init as VarDecl).kind === "VarDecl") this.checkStmt(s.init as VarDecl, inner, ret);
           else this.type(s.init as Expr, inner);
         }
-        if (s.test) this.type(s.test, inner);
+        if (s.test) { this.type(s.test, inner); this.rejectDeleteAsCondition(s.test, "this `for` condition", "the loop can never terminate"); }
         if (s.update) this.type(s.update, inner);
         this.loopDepth++; this.checkBlock(s.body, inner.child(), ret); this.loopDepth--;
         return;
@@ -1869,7 +1895,7 @@ class Checker {
         return "string";
       case "UnaryExpr": {
         const t = this.type(e.operand, scope);
-        if (e.op === "!") return "boolean";
+        if (e.op === "!") { this.rejectDeleteAsCondition(e.operand, "this `!` operand", "the `!` is always `false`"); return "boolean"; }
         if (e.op === "void") return "undefined";
         if (e.op === "~") { if (t !== "number") throw typeError(`'~' needs number`); return "number"; }
         if (e.op === "+") return "number"; // numeric coercion of number/string/boolean/null/undefined
@@ -2004,6 +2030,7 @@ class Checker {
       }
       case "ConditionalExpr": {
         refuseUnboxedUnion(this.type(e.test, scope), "a truthiness test");
+        this.rejectDeleteAsCondition(e.test, "this `?:` test", "the `:` arm is unreachable");
         // Each arm sees the surrounding context; additionally an empty `[]` arm takes
         // its element type from the OTHER arm (`flag ? [1, 2] : []`), so type the
         // non-empty arm first and feed its type back.
@@ -3014,6 +3041,69 @@ class Checker {
         : `keep the result — it IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. `) +
       `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. ` +
       `Unlike node, \`Map\`/\`Set\` here are persistent — node's \`.${m}\` mutates and returns the receiver, so the discarded spelling works there and cannot here (docs/divergences.md §A)`,
+    );
+  }
+
+  /**
+   * A `Map`/`Set` `.delete(k)` whose result is consumed as a BOOLEAN (NT1606).
+   *
+   * The sibling of `rejectDiscardedMutator` above: that one covers the call nobody takes
+   * the result of, this one covers the single context in which TAKING the result is
+   * guaranteed to be wrong.
+   *
+   *     let m = new Map<string, number>().set("a", 1);
+   *     if (m.delete("zz")) { … } else { … }   // node: else.  here, before: THEN.
+   *     while (m.delete(k)) { … }              // node: skipped.  here: never terminates.
+   *
+   * node's `Map.prototype.delete` / `Set.prototype.delete` answer "was the key there?" with
+   * a BOOLEAN (test262 `built-ins/Map/prototype/delete/returns-true.js` / `returns-false.js`
+   * and the `Set` pair). Ours answers with the NEW COLLECTION, because that is what a
+   * persistent collection has to return. §A documented that as a difference of TYPE; in a
+   * condition it stops being a difference of type and becomes a wrong answer, because a
+   * collection handle is truthy for EVERY input.
+   *
+   * WHY THIS NEEDS NO ANALYSIS, and has no false-positive direction: the condition is not a
+   * condition. Its value is decided by the representation, not by the data — the `else` arm
+   * is unreachable and the loop cannot exit, in every execution of every program. There is
+   * no program in which the result of `.delete` is a meaningful boolean, so nothing correct
+   * is being rejected. This is the same rule shape as the discarded mutator, and for the
+   * same reason: refuse the shape that is wrong independent of what the program does.
+   *
+   * IT KEYS ON `.delete`, NOT ON "a Map/Set in a condition". `if (m)` on a plain handle is
+   * always-true under node as well, so it AGREES and must keep compiling; the same goes for
+   * `if (m.size)`, `if (m.has(k))` and `if (m.get(k))` — which are exactly what the hint
+   * points at. A rule written as "reject a collection-typed test" would swallow all four.
+   *
+   * KNOWN RESIDUAL, deliberately not closed: routing the result through a binding first
+   * (`const gone = m.delete(k); if (gone)`) is still silently wrong. At `if (gone)` the
+   * expression is a plain Map-typed identifier, indistinguishable from the `if (m)` that
+   * must keep working, and `const gone = m.delete(k)` is itself the LEGITIMATE persistent
+   * spelling (it is a pinned test above). Closing it needs either a taint that leaks one
+   * alias later — being partly clever, which trains false confidence — or refusing every
+   * always-true collection test. Recorded in docs/divergences.md §A instead.
+   */
+  private rejectDeleteAsCondition(test: Expr | undefined, where: string, consequence: string): void {
+    if (test === undefined || test.kind !== "CallExpr" || test.callee.kind !== "MemberExpr") return;
+    if (test.callee.property !== "delete") return;
+    const recv = test.callee.object.ty;
+    if (recv === undefined || (!isMapTy(recv) && !isSetTy(recv))) return;
+    const kind = isMapTy(recv) ? "Map" : "Set";
+    const loc = exprLoc(test.callee.object) ?? test.loc;
+    const at = loc ? ` at ${loc.line}:${loc.col}` : "";
+    const name = exprText(test.callee.object);
+    const arg = test.args[0];
+    const argText = arg === undefined ? "k"
+      : arg.kind === "StringLiteral" ? JSON.stringify(arg.value)
+      : arg.kind === "NumberLiteral" ? String(arg.value)
+      : arg.kind === "BooleanLiteral" ? String(arg.value)
+      : exprText(arg) ?? "k";
+    const recvText = name ?? "map";
+    throw mutationError(
+      `\`${kind}\` is persistent: \`.delete\` returns a NEW ${kind.toLowerCase()}, not a boolean, so ${where}${at} is ALWAYS true — ${consequence}`,
+      `node's \`.delete\` returns whether the key was there; ours returns the ${kind.toLowerCase()} without it. ` +
+      `Test with \`${recvText}.has(${argText})\`, and remove with \`${recvText} = ${recvText}.delete(${argText})\` — ` +
+      `\`if (${recvText}.has(${argText})) { ${recvText} = ${recvText}.delete(${argText}); }\` says both. ` +
+      `Testing the handle itself (\`if (${recvText})\`, \`if (${recvText}.size)\`) still works (docs/divergences.md §A)`,
     );
   }
 
