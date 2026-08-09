@@ -1066,7 +1066,29 @@ class Parser {
     for (const a of rawArms.map((a) => expandTypeRef(a, this.recTypes))) {
       if (isUnionTy(a)) arms.push(...unionMembers(a)); else arms.push(a);
     }
-    if (!arms.every((a) => isObjectTy(a) && classTag(a) === undefined)) return null;
+    // THE TAG RULE. `classTag(a) === undefined` used to be required of every arm. That
+    // clause dates to SH2 behavior 1, when the only carrier of a tag was a CLASS instance
+    // — and for that subject it is VACUOUS: a class field annotation is parsed with
+    // `parseType`, which WIDENS a string-literal type, so a class instance type can never
+    // hold the literal-typed discriminant `unionDiscriminant` demands. Removed outright,
+    // a union of two classes still fails one step below with "not string-literal typed".
+    //
+    // Its only LIVE effect was to block a `@@mutable` RECORD, which did not exist when it
+    // was written and whose fields ARE parsed with `parseTypeInner` (literals kept). A
+    // tagged record is a sound member for the same reason the whole encoding works: there
+    // is no box, a union value IS the member's object block, and a tagged block has the
+    // same slots as an untagged one — the tag is a NAME the checker reads for mutability
+    // and method resolution, never a runtime word.
+    //
+    // So the relaxation is exactly as wide as the dead guard was: a tag is admitted only
+    // when it names a `@@mutable` record declared here. A CLASS-tagged arm still returns
+    // null, so it keeps the byte-identical general-union refusal it has today rather than
+    // falling through to a different (and, for a class, less accurate) message.
+    const armTagOk = (a: Ty): boolean => {
+      const tag = classTag(a);
+      return tag === undefined || this.mutableRecords.has(tag);
+    };
+    if (!arms.every((a) => isObjectTy(a) && armTagOk(a))) return null;
     const members = [...new Set(arms)];
     const shown = members.map(widenLiteralTys).join(" | ");
     if (members.length < 2) return null;

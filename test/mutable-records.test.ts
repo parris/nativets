@@ -417,3 +417,36 @@ describe("the mechanical desugaring the oracle relies on", () => {
     expect(stripAttributes("@@mutable\ntype C = { n: number };\n")).toBe("type C = { n: number };\n");
   });
 });
+
+/*
+ * PIECE 1 — a `@@mutable` record may be a DISCRIMINATED-UNION member.
+ *
+ * `discriminatedUnion` required `classTag(a) === undefined` of every arm. That clause
+ * dates to SH2 behavior 1, when the only `classTag` carrier was a CLASS instance — and
+ * it is VACUOUS for that subject: a class field annotation goes through `parseType`,
+ * which WIDENS a string-literal type, so a class instance can never carry the
+ * literal-typed discriminant `unionDiscriminant` demands. Removed outright, a union of
+ * two classes still fails one step later with "not string-literal typed".
+ *
+ * Its only LIVE effect was to block a `@@mutable` RECORD, which did not exist when it
+ * was written. Record fields go through `parseTypeInner`, which KEEPS literal types, so
+ * a tagged record is a perfectly good member: there is no box (SH2), a union value IS
+ * the member's object block, and a tagged block has the same slots as an untagged one.
+ *
+ * The relaxation is narrow on purpose — a tag is admitted only when it names a
+ * `@@mutable` record. A CLASS-tagged arm keeps the byte-identical general-union refusal
+ * it has today rather than falling through to a different message.
+ */
+describe("a `@@mutable` record as a discriminated-union member (piece 1)", () => {
+  test("one tagged member: the union declares, narrows and runs", async () => {
+    const source = `
+//@@mutable
+interface Num { kind: "Num"; n: number }
+interface Str { kind: "Str"; s: string }
+type E = Num | Str;
+const e: E = { kind: "Num", n: 41 };
+if (e.kind === "Num") console.log("num", e.n); else console.log("str", e.s);
+`;
+    await expectMatches(source, await runWithNode(source));
+  });
+});
