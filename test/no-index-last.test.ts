@@ -103,6 +103,7 @@ import { readFileSync, readdirSync } from "node:fs";
 
 import { lex } from "../src/lexer.ts";
 import { sourceToIR } from "../src/driver.ts";
+import { preprocessForCoverage } from "../src/coverage-preprocess.ts";
 
 const SRC = new URL("../src/", import.meta.url);
 
@@ -193,9 +194,11 @@ export function lengthIndexReads(source: string): LengthIndexHit[] {
 }
 
 export const FIX =
-  "use `xs.at(-1)` (scalar elements only — `.at` on a heap element is NT1001) or hoist " +
-  "`const n = xs.length` and test it. `xs[xs.length - 1]` reads index -1 on an empty " +
-  "array, which node answers `undefined` and nativets PANICS on by design (Stage 41).";
+  "use `xs.at(-1)` (scalar elements only — `.at` on a heap element is NT1001; a STRING " +
+  "receiver is fine and `src/lexer.ts`'s `source.at(st.i + 1)` proves it, in a module at " +
+  "rung 3) or hoist `const n = xs.length` and test it. `xs[xs.length - 1]` reads index -1 " +
+  "on an empty array, which node answers `undefined` and nativets PANICS on by design " +
+  "(Stage 41).";
 
 describe("src/ never depends on an out-of-range read returning `undefined`", () => {
   function scanSrc(): { unasserted: Record<string, number>; asserted: Record<string, number>; where: string[] } {
@@ -394,4 +397,148 @@ describe("compiling does not read index -1", () => {
       });
     });
   }
+});
+
+/*
+ * ============================================================================
+ * THE OTHER END OF THE ARRAY — `s[i]` where `i` can equal `s.length`
+ * ============================================================================
+ *
+ * Everything above is about index -1: the read BELOW the array. This section is about the
+ * read at index == LENGTH, which panics identically and which the lint above is
+ * structurally blind to — the subscript is a cursor, not `xs.length - 1`, so no source
+ * pattern names it.
+ *
+ * ---- Why it needs its own instrument: it was LIVE, and it was not one site ----
+ * `test/sh6-fuzz.test.ts` found six of them across the three modules recorded at rung 3,
+ * and the headline one is `pragmaName`:
+ *
+ *     let a = 0;
+ *     while (a < body.length && isSpace(body[a]!)) a++;
+ *     if (body[a] !== "@" || body[a + 1] !== "@") return "";     // a === body.length
+ *
+ * A bare `//` has an EMPTY body, so `body[0]` is out of range: `undefined !== "@"` under
+ * node, a PANIC under nativets. 43 lines of `src/` are a bare `//`, five of them in
+ * `src/lexer.ts`, so the self-compiled lexer could not lex the compiler's own source while
+ * its SH6 row read rung 3. THREE of the six sites carried a `?? ""` the panic never
+ * reached — a dead guard, and one tsc reads as live because `noUncheckedIndexedAccess`
+ * types the read `T | undefined`. The same blindness the header above describes for -1.
+ *
+ * ---- The census, measured rather than counted by eye ----
+ * `src/` holds 573 computed index reads. Instrumenting EVERY ONE of them — rewriting
+ * `RECV[SUB]` into a recording helper, driven by the compiler's own lexer, with
+ * byte-identical IR out of the instrumented compiler as the evidence the rewrite was
+ * faithful — and then running lex + preprocess over all of `src/`, lex over all 492 `.ts`
+ * files in the tree, and `sourceToIR` over 169 fixtures and examples, found 15 that
+ * ACTUALLY read out of range on that workload:
+ *
+ *   7 STRING sites  — `pragmaName` x2 (the bare `//`), the three numeric-literal
+ *                     continuation reads at end of file, `modules.ts`'s `t[j] === "{"`
+ *   8 ARRAY sites   — `e.args[0]`, `args[1] ? …`, `args[i] ?? …`, `fn.params[0]?.name`:
+ *                     argument lists that are simply SHORTER than the read, in
+ *                     `checker.ts` (1), `codegen.ts` (6) and `ownership.ts` (1)
+ *
+ * The prefix sweep below and `test/sh6-fuzz.ts` then found SIXTEEN MORE that a
+ * well-formed corpus can never reach — every end-of-input path in both scanners: a file
+ * ending in `/`, in `"`, in `` ` ``, in `\`, in `$`, in `*`, an unterminated `/*`, an empty
+ * file. 31 sites in 7 modules, all fixed, all with a `length` test that never FORMS the
+ * index. Two lessons worth keeping: a real-workload census finds the sites that fire
+ * TODAY and is blind to the error paths, and the error paths are where a compiler spends
+ * its time being wrong.
+ *
+ * ---- What this test is, and what it is NOT ----
+ * It is the FAST gate: pure bun, about a second, run on every suite. The SLOW authority is
+ * `test/sh6-fuzz.test.ts`'s `corpus: "src"` differential, which compiles the modules and
+ * compares them against bun over the compiler's own twelve files (~60 s). This one exists
+ * because a class that took a 553-input spawn-based sweep to find should also have a gate
+ * cheap enough that nobody is tempted to skip it.
+ *
+ * ---- The oracle change, and why the prototype trick works for strings too ----
+ * `"abc"[5]` finds no own property and walks `String.prototype`, exactly as `xs[-1]` walks
+ * `Array.prototype` above. A throwing getter at "0".."31" therefore makes every
+ * out-of-range read at a SMALL index throw, which is nativets' semantics imported into bun
+ * for the length of one test. An IN-RANGE read never consults the prototype, `.at(i)` is a
+ * method call and is untouched, and `.length`/`.slice` are untouched.
+ *
+ * "Small index" is the limitation, and the fix for it is the corpus: reads are driven off
+ * the END of the input, so TRUNCATING every input to 32 bytes puts every end-of-input
+ * index inside the instrumented range. That is why the prefix sweep below exists and why
+ * it is not merely lexing whole files.
+ */
+describe("src/ never depends on a string read at index == length", () => {
+  const LIMIT = 32;
+  const withOverrunFatal = (body: () => void): void => {
+    for (let k = 0; k < LIMIT; k++) {
+      Object.defineProperty(String.prototype, String(k), {
+        configurable: true,
+        get(this: string) {
+          throw new RangeError(`string index out of bounds: the length is ${this.length} but the index is ${k}`);
+        },
+      });
+    }
+    try { body(); } finally {
+      for (let k = 0; k < LIMIT; k++) delete (String.prototype as unknown as Record<string, unknown>)[String(k)];
+    }
+  };
+
+  test("the oracle change is REAL — it fires on the banned shape and not on the fix", () => {
+    withOverrunFatal(() => {
+      const banned = (s: string): boolean => s[0] === "@";
+      expect(() => banned("")).toThrow(RangeError);
+      expect(banned("@x")).toBe(true);                  // an in-range read is untouched
+      const guarded = (s: string): boolean => s.length > 0 && s[0] === "@";
+      expect(guarded("")).toBe(false);
+      expect("".at(0)).toBeUndefined();                 // `.at` is untouched
+      expect("abc".slice(0, 2)).toBe("ab");             // `.slice` is untouched
+      expect("".length).toBe(0);                        // `.length` is untouched
+    });
+  });
+
+  /**
+   * The whole compiler's own source, lexed and preprocessed. This is what the bare `//`
+   * defect broke, and at index 0 the tripwire sees it directly.
+   */
+  test("lex + preprocessForCoverage over every src/*.ts", () => {
+    const files = readdirSync(SRC).filter((n) => n.endsWith(".ts")).sort();
+    expect(files.length).toBeGreaterThan(10);
+    withOverrunFatal(() => {
+      for (const f of files) {
+        const source = readFileSync(new URL(f, SRC), "utf8");
+        [...lex(source)];
+        preprocessForCoverage(source);
+      }
+    });
+  });
+
+  /**
+   * EVERY PREFIX of a set of inputs chosen so that truncation lands mid-construct. This is
+   * the part that reaches the run-off-the-end sites: an unterminated string, comment,
+   * template or escape, and a numeric literal that ends the file. Each of the six sites
+   * the fuzz lane minimized appears here as some prefix of some line.
+   */
+  test("every prefix (1..32 bytes) of inputs that end mid-construct", () => {
+    const SOURCES = [
+      '//\nconst a = 1;\n',                 // a bare line comment — pragmaName
+      '// \t \nconst a = 1;\n',             // whitespace-only comment body — pragmaName
+      '//@@mutable\nconst a = 1;\n',        // a real pragma, so the happy path is covered
+      '/* unterminated comment',            // `advance` past the end
+      'const s = "abc";\n',                 // truncates to an unterminated string at EOF
+      "const s = 'a\\nb';\n",               // ...and truncates mid-ESCAPE
+      'const t = `a${1 + 2}b`;\n',          // an unterminated template
+      'const n = 1234.5e+6;\n',             // a numeric literal that ends the input
+      'const h = 0xff + 1_0;\n',            // radix + separator, truncated
+      '#!/usr/bin/env bun\nconst a = 1;\n', // a shebang, and the EMPTY file at prefix 0
+    ];
+    withOverrunFatal(() => {
+      for (const src of SOURCES) {
+        for (let n = 0; n <= Math.min(LIMIT, src.length); n++) {
+          const head = src.slice(0, n);
+          // A LexError is the CORRECT answer for a truncated input and must not be
+          // confused with the bug. A RangeError is the bug, and it propagates.
+          try { [...lex(head)]; } catch (e) { if (e instanceof RangeError) throw e; }
+          try { preprocessForCoverage(head); } catch (e) { if (e instanceof RangeError) throw e; }
+        }
+      }
+    });
+  });
 });

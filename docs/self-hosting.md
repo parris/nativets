@@ -3241,6 +3241,178 @@ itself should not be built.
 
 ---
 
+### RUNG 3 DIFFERENTIAL-FUZZED — all three modules DIVERGE, and the compiled lexer cannot lex its own source
+
+`test/sh6-fuzz.ts` (script) + `test/sh6-fuzz.test.ts` (ratchet, 8 s).
+
+Rung 3 for `lexer.ts`, `diagnostics.ts` and `coverage-preprocess.ts` rested on ONE driver each
+over a handful of inputs — 466 and 814 bytes of matched output, and for `lexer.ts` not even
+that (its row is `weak`: empty == empty). This lane widened that to a corpus: every `.ts` file
+under `src/`, `test/` and `examples/` (501) plus 52 adversarial inputs, each fed to a
+nativets-COMPILED driver and to `bun run` over the identical driver, comparing stdout byte for
+byte and the exit code. `diagnostics.ts` renders rather than transforms, so it got 85 generated
+`Diagnostic` shapes instead of files.
+
+**84 of 553 inputs diverge for `lexer.ts`; 82 of 553 for `coverage-preprocess.ts`; 6 of 85
+shapes for `diagnostics.ts`.** Not one is a logic difference — the logic is the same text on
+both sides — and they reduce to four causes.
+
+**1. An out-of-range index, four sites, and it ABORTS.** The Stage 41 bounds rule says a string
+or array index out of range PANICS; `noUncheckedIndexedAccess` says the same read is
+`T | undefined`. The compiler's own modules are written to the second rule in four places, and
+three of them wrote a `?? ""` next to it that the panic never lets run:
+
+| site | input | node/bun | nativets |
+|---|---|---|---|
+| `src/lexer.ts:95` / `src/coverage-preprocess.ts:141` `pragmaName` — `body[a]` | `//` | lexes fine, exit 0 | SIGABRT |
+| `src/lexer.ts:193` `decodeEscapeAt` — `raw[i + 1] ?? ""` | `"\` | `LexError`, exit 1 | SIGABRT |
+| `src/lexer.ts:276` `advance` — `source[st.i]` | `/*` | exit 0 | SIGABRT |
+| `src/lexer.ts:463` — `source[st.i] !== quote` | `"` | `LexError`, exit 1 | SIGABRT |
+| `src/coverage-preprocess.ts:177` — `source[0] === "#"` | *(empty file)* | exit 0 | SIGABRT |
+| `src/diagnostics.ts:140` — `srcLines[s.line - 1] ?? ""` | a span past end-of-source | renders a blank line | SIGABRT |
+
+The first row is the one that matters. A line comment with an EMPTY body is not exotic: **71 of
+the 501 `.ts` files in this repo contain one, and 8 of the compiler's own 12 modules do —
+including `src/lexer.ts` itself.** The compiled lexer aborts on `ast.ts`, `checker.ts`,
+`codegen.ts`, `diagnostics.ts`, `lexer.ts`, `modules.ts`, `ownership.ts` and `parser.ts`. Two
+bytes, `//`, and stage-1 could not have got past its own first file. `.at(i)` is the spelling
+that means the same thing in both toolchains — the same fix `lexer.ts`'s `source[st.i + 1]` and
+`ast.ts`'s `list[list.length - 1]` already took, twice, in earlier rounds. **Not fixed here:**
+this lane measures, and each site belongs with its module.
+
+**2. THE ERROR PATH IS SPLIT, and that is the answer to "does `LexError` match".** Where `lex`
+actually reaches its `throw`, the compiled module agrees EXACTLY — same stdout, exit 1 on both
+sides — for all eleven inputs that get there (octal escapes, invalid `\x`/`\u`, an unterminated
+string or template that stops at a NEWLINE, `#`, and four non-ASCII code points). Only the
+stderr TEXT differs, as documented. But where the malformed input runs off the END of the
+source, the index panic above fires ONE STATEMENT BEFORE the throw, and the exit code is
+SIGABRT rather than 1: `"abc\n` matches, `"abc` does not. So the error path is not broken and
+not sound — the LAST CHARACTER of the file decides which.
+
+**3. A COMPILER bug, and a silent wrong answer.** A runtime NON-INTEGER array index is
+truncated instead of missing:
+
+```ts
+const xs: string[] = ["a", "b", "c"];
+let i = 0; i = i + 1.5;
+console.log(xs[i] ?? "undefined");
+// node: undefined     nativets: b     (both exit 0)
+```
+
+With a LITERAL index the checker catches it (`NT2002`), so it only escapes when the index is
+computed — which is exactly how `formatDiagnostic` computes `srcLines[s.line - 1]`. **Not
+fixed.**
+
+**4. The documented divergences, and what they COST.** `String.fromCharCode(0)` being the empty
+string and `readFileSync` truncating at a NUL are already recorded in docs/divergences.md as
+open runtime doors; the sweep shows them changing real output (a `"\0"` in a source file loses
+its NUL, a file with a NUL byte lexes short). The UTF-8-byte string model is subtracted by the
+harness where it only shifts lengths and columns — but it also changes what the code DECIDES,
+and that cannot be subtracted: a BOM is one whitespace code unit to bun and three non-ASCII
+bytes to nativets, so the compiled lexer THROWS on a file bun lexes; and `leadingWhitespace` in
+`diagnostics.ts` open-codes ECMAScript's WhiteSpace table by `charCodeAt`, which on bytes
+matches none of it, so the caret lands in the wrong column of any non-ASCII line.
+
+**5. NOT a correctness divergence, but it would stop a bootstrap anyway.** `lex` accumulates a
+token with `s += source[st.i]`, one character at a time. JavaScriptCore makes that linear with
+ropes; the nativets runtime copies, so it is QUADRATIC — a single identifier at 16 k chars takes
+55 ms and at 32 k takes 194 ms against a flat 22 ms under bun, and the 1 MB case reached 20 GB
+RSS and 54 s of CPU before it was killed. A megabyte-long string literal (a base64 data URI) is
+enough to reach it.
+
+#### What this says about rung 3
+
+Rung 3 as recorded is **necessary and a long way from sufficient**, and this is the concrete
+form of caveat 1 in `test/sh6.test.ts`'s header. All three modules pass their existing driver
+and all three abort on inputs the compiler will certainly hand them. What would settle it is
+not more inputs — it is the four `.at` fixes, the non-integer index fix, and then this sweep
+re-run to zero on the group-A rows; after that, rung 3 for these three modules would mean the
+compiled module behaves like the bun-run module over every file in the repo, which is a claim
+worth the name.
+
+#### PRE-EXISTING BUGS this turned up
+
+- **The non-integer index above** — silent wrong answer, four lines, no self-hosting involved.
+  Undocumented.
+- **`String.fromCharCode(0xD83D) + String.fromCharCode(0xDE00)`** emits CESU-8
+  (`ED A0 BD ED B8 80`) where node emits U+1F600 (`F0 9F 98 80`). Two lines, exit 0, silent.
+  docs/divergences.md records surrogate-pair `\u` escapes as undecoded for `JSON.parse` (D6);
+  the same door on `String.fromCharCode` is not recorded, and it is the one `src/lexer.ts` uses
+  to build every `\uXXXX` escape.
+- The quadratic `+=` above.
+
+
+### GROUP A IS ZERO — the compiled lexer lexes `src/`, and it took 31 sites, not four
+
+`test/sh6-fuzz.test.ts` (`corpus: "src"`, ratcheted), `test/no-index-last.test.ts` (fast gate).
+
+The section above ends by naming what would settle rung 3: "the four `.at` fixes, the
+non-integer index fix, and then this sweep re-run to zero on the group-A rows". That is done,
+and the interesting part is the SIZE — the sweep's four sites were four the sweep's corpus
+could REACH, and the real number is 31.
+
+**The census, and the instrument behind it.** `src/` holds **573 computed index reads**. Every
+one was rewritten into a recording helper (`RECV[SUB]` → `__NTIDX(RECV, SUB, site)`, driven by
+the compiler's own lexer, never a text scan), and the evidence the rewrite was faithful is that
+the instrumented compiler emits byte-identical IR. Running lex + `preprocessForCoverage` over
+all of `src/`, lex over all 492 `.ts` files in the tree, and `sourceToIR` over 169 fixtures and
+examples found **15 reads that actually go out of range on that workload**:
+
+| kind | count | where |
+|---|---|---|
+| STRING | 7 | `pragmaName` ×2 (the bare `//`), the three numeric-literal continuations at end of file, `modules.ts`'s `t[j] === "{"` |
+| ARRAY | 8 | `e.args[0]`, `args[1] ? …`, `args[i] ?? …`, `fn.params[0]?.name` — argument lists shorter than the read: `checker.ts` 1, `codegen.ts` 6, `ownership.ts` 1 |
+
+The eight ARRAY rows are the ones no previous instrument had seen at all, and they are not
+edge cases: `checker.ts`'s fires on 14 of the 169 fixtures and `ownership.ts`'s on 22. A
+self-hosted checker would abort compiling ordinary programs.
+
+**And then the error paths, which a real-workload census is structurally blind to.** A
+well-formed corpus never ends a file in `/`, `"`, `` ` ``, `\`, `$` or `*`, so a census over
+real files cannot reach the code that handles it. Lexing every PREFIX of ten inputs, with a
+throwing getter installed at `String.prototype["0".."31"]` so an out-of-range read at a small
+index throws under bun exactly as it panics under nativets, found **16 more** — every
+end-of-input path in both scanners. Both halves were needed: the census finds what fires today,
+the prefix sweep finds where a compiler spends its time being wrong.
+
+**31 sites, 7 modules, all fixed**, every one with a `length` test that never FORMS the index
+(`.at(i)` is the other sanctioned spelling; see `test/no-index-last.test.ts`). Three of them
+carried a `?? ""` the panic never reached — a dead guard, and one `tsc` reads as LIVE because
+`noUncheckedIndexedAccess` types the read `T | undefined`. That blindness is now recorded
+twice: for index −1 and for index == length.
+
+**What moved as a result:**
+
+- The full 553-input sweep goes **84 / 82 / 6 → 18 total**, and **not one of the 18 is a
+  `src/*.ts` file**. The compiled lexer and the compiled preprocessor process all twelve of
+  the compiler's own modules identically. What is left is four real files
+  (`test/selfhost-ratchet.test.ts`, `test/sh6-fuzz.ts`, `test/textimport.test.ts`) plus the
+  adversarial set, every one a documented NUL or UTF-8-byte door — groups C and D, nothing new.
+- **THE ERROR-PATH SPLIT IS CLOSED.** `"abc` and `"abc\n` now behave identically: two inputs
+  moved out of group A and INTO the error-path agreement set, which is the shape of the result
+  rather than a disappearance. The last character of a file no longer decides whether the
+  lexer raises `LexError` or aborts.
+- Rung 3 for these modules is now backed by a ratcheted **`corpus: "src"`** differential rather
+  than by hand-written snippets. That assertion costs ~60 s today, and the corpus was NOT
+  shrunk to make it cheap: it is quadratic string indexing (see item 5 above), and it drops to
+  seconds when that lands.
+
+**NO MODULE IS DEMOTED, and the reason is the fix rather than the standard.** The standard went
+UP: before this lane the three rung-3 rows rested on snippets, and `lexer.ts`'s rested on
+nothing at all (`weak` — empty stdout matching empty stdout, and no driver). Measured against
+the stronger claim they all failed; measured against it after the 31 fixes they all pass. Had
+they not, the rows would have come down — an honest rung 2 beats a rung 3 that means nothing.
+
+**Group B is NOT fixed and the empty bucket must not be read as such.** `formatDiagnostic` no
+longer REACHES the non-integer index defect (its guard spells out node's own rule with
+`Number.isInteger`), so the row is gone from the ratchet — but a runtime non-integer array
+index still truncates for every other program in the tree. Same four-line repro as above. It
+needs a codegen + runtime change AND a decision (panic, like out-of-range, or refuse at
+compile time), so it is still owed a lane.
+
+
+---
+
 ## Milestones
 
 - **SH0 — Gradient first (highest-value, do first).** Teach `coverage` (and a throwaway
@@ -3383,3 +3555,111 @@ This is deliberately the last item on `ROADMAP.md` ("far horizon"). SH2 (discrim
 SH3 (classes) are each substantial type-system/semantics features; SH4 (host FFI) is a new runtime
 surface. But SH0 is cheap and immediately turns the effort into a measured gradient — the right
 first move, and the one that tells us the *true* remaining cost instead of guessing.
+
+---
+
+## SH7 PRE-FLIGHT: is the compiler DETERMINISTIC? (measured)
+
+SH7's definition of done is "`nativets-2` and `nativets-3` are BYTE-IDENTICAL". That is not
+something clearing blockers gets you: one clock read, PID, address or unordered walk anywhere in
+the pipeline makes the fixed point unreachable *permanently*. It has already happened once —
+`choosePrefixBase` minted the alpha-rename prefix from `Date.now()`. Nobody had looked for the
+rest. This is that look.
+
+**Verdict: the IR pipeline is deterministic.** 262 programs — every `test/fixtures/` case, every
+`test/actors/`/`test/modules/`/`test/hostio/`/`test/examples/` case, and the three `src/*.ts`
+modules that reach IR (`lexer.ts`, `diagnostics.ts`, `coverage-preprocess.ts`) — produce
+byte-identical `.ll` when compiled **twice in one process** and when compiled **in two separate
+processes**. Nothing drifts within a run and nothing is seeded per-process. The IR is also
+insensitive to `TZ`/`LC_ALL`, and to 131 intervening compiles in the same process (no module-level
+state accumulates across `sourceToIR` calls).
+
+A construct census over all twelve `src/*.ts` (read with `readFileSync`, not `grep`) finds **zero**
+`Date.now()`, `new Date`, `Math.random`, `performance.now`, `process.hrtime` or `process.pid` in
+the compile path. The only ambient reads are `process.cwd()` in `modules.ts` `show()` (diagnostic
+text only) and `readdirSync`/`homedir` in `driver.ts`'s Android-NDK discovery (link args, `.sort()`ed,
+never IR). `localeCompare`/`toLocale*` are refused at NT1024, which is what keeps locale out.
+
+**Two things nonetheless stand between here and a byte-identical `nativets-3`, and neither is
+inside the IR pipeline:**
+
+### 1. The ENTRY PATH is an input to the emitted `.ll`
+
+A bounds panic reports `file:line:col`, and `file` is interned into the module
+(`src/codegen.ts` `locArg` → `Loc.file`). `src/modules.ts` sets it **verbatim from `entryPath`**
+for the entry module (line 482) and from the **resolved ABSOLUTE path** for every imported module
+(line 545). Consequences, all reproduced:
+
+- `sourceToIR(src, "src/lexer.ts")` and `sourceToIR(src, "/abs/…/src/lexer.ts")` differ by **5,329
+  bytes** — same file, same content, different spelling of the argument;
+- two **byte-identical source trees at different absolute paths** emit different IR, because an
+  imported module's path is always absolute:
+
+  ```sh
+  # d1/ and d2/ are identical trees
+  @.str.0 = … c"/…/d1/sub/lib.ts:1:66\00"
+  @.str.0 = … c"/…/d2/sub/lib.ts:1:66\00"
+  ```
+
+This is the "IR byte-lengths differing modulo the interned worktree path" a previous lane
+half-observed. **It does not break SH7 as literally defined** — stage-2 and stage-3 compile the
+same tree at the same path with the same argv — but it does mean the compiler is **not reproducible
+across machines or checkout directories**, and any bootstrap that stages sources through a
+`mkdtemp` directory breaks byte-identity outright. It is also **user-visible and inconsistent
+today**: in one program, a panic in the entry module prints a cwd-relative path and a panic in an
+imported module prints an absolute one.
+
+```
+$ nativets run p/main2.ts        # OOB in the ENTRY
+  at .scratch/p/main2.ts:3:15
+$ nativets run p/main.ts         # OOB in an IMPORTED module
+  at /Users/…/.scratch/p/dep.ts:1:69
+```
+
+Not fixed here: "relative to what" is a decision (repo root? a `--source-root` flag?), not a
+one-liner. Pinned as a known hazard in `test/determinism.test.ts` so a future normalization is a
+deliberate change with a test to update.
+
+### 2. On macOS the OUTPUT FILENAME is baked into the binary
+
+The `.ll` is deterministic; the *binary* is not a pure function of the `.ll`. `ld64` ad-hoc-signs
+every executable and uses the **output basename as the CodeDirectory identifier**, which feeds the
+signature hashes and `LC_UUID`:
+
+```sh
+$ nativets build t.ts -o t1 && nativets build t.ts -o t2 && cmp t1 t2
+t1 t2 differ: char 1449          # LC_UUID, then the "t1"/"t2" identifier + its hashes
+$ codesign -dv t1   # Identifier=t1
+$ codesign -dv t2   # Identifier=t2
+# same basename in two directories:
+$ nativets build t.ts -o o1/prog && nativets build t.ts -o o2/prog && cmp o1/prog o2/prog
+# → identical.  The mkdtemp build dir does NOT leak; only the basename does.
+```
+
+So **`nativets-2` and `nativets-3` can never be byte-identical on macOS as literally named.** SH7
+must either build both stages to the **same basename** in different directories
+(`stage2/nativets` vs `stage3/nativets`) or compare with the signature normalized out. This is a
+property of the platform linker, not of nativets, but it is a definition-of-done problem and it is
+better known now than at the finish line.
+
+### The instrument — `test/determinism.test.ts`
+
+Compiles a discovered corpus twice in-process and twice cross-process and asserts byte-identity,
+plus a purpose-built multi-module asset (`test/determinism/`) whose `dep.ts` spells all three
+`choosePrefixBase` candidates as literals, forcing the escalation branch the clock bug lived in
+(a single-file program never reaches `choosePrefixBase` at all — `linkProgram` is a no-op without
+imports, so without that asset the whole prefix hazard is outside what any test measures).
+
+**It was validated by planting the bug back**, twice, because this repo's instruments have
+repeatedly measured something other than what they claim:
+
+| Plant | in-process check | cross-process check |
+|---|---|---|
+| `` return `_nts${Date.now().toString(36)}_m` `` (drifts during a run) | **red** | **red** |
+| `const SEED = Date.now()…` at module scope (seeded ONCE per process) | **green** — blind | **red** |
+
+The second row is why the cross-process half is not a nice-to-have: an in-process "compile it
+twice" cannot see a per-process seed at all, and it is nearly blind to the clock bug too —
+compiling `src/lexer.ts` in-process takes ~20ms, so two `Date.now()` reads around it land in the
+same millisecond often enough to be a coin flip. A vacuity guard asserts the discovered corpus is
+non-empty, so the file cannot quietly become a no-op if every `src` module regresses off IR.

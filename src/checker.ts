@@ -3339,7 +3339,11 @@ class Checker {
         // argument a second time: a second `type()` re-runs inference over it, which for
         // an arrow means a second capture analysis and for a generic call a second
         // instantiation.
-        const arg = e.args[0];
+        // `e.args.length > 0` FIRST. A zero-argument call makes `e.args[0]` a read at
+        // index == length: node answers `undefined`, nativets PANICS by design (Stage 41),
+        // so the `arg?.` guard below could never run under a self-hosted checker. Measured
+        // rather than supposed — 14 files of the fixture corpus reach it.
+        const arg = e.args.length > 0 ? e.args[0] : undefined;
         if (e.callee.name === "String" && arg?.ty) this.checkStringCoercion(arg.ty, "`String(…)`", exprLoc(arg));
         return g.ret;
       }

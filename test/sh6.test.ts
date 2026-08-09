@@ -1292,3 +1292,40 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
     }
   }, 300_000);
 });
+
+/* ============================================================
+ * THE CORPUS DRIVERS live in test/sh6-fuzz.test.ts — ONE canonical instrument
+ * ============================================================
+ *
+ * The two drivers above feed their module HAND-WRITTEN SNIPPETS, and that distinction
+ * turned out to decide everything. `lexer.ts` sat at rung 3 in the BASELINE for several
+ * rounds — reported as "the lexer self-compiles" — while a self-compiled `src/lexer.ts`
+ * COULD NOT LEX `src/`. Any file with a bare `//` comment killed it:
+ *
+ *     panic: index out of bounds: the length is 0 but the index is 0
+ *       at src/lexer.ts:95:11
+ *
+ * `pragmaName("")` — the body of a bare `//` — read `body[0]` on an empty string, which
+ * node answers `undefined` and nativets PANICS on by design (Stage 41). 43 lines of the
+ * compiler's own source are bare `//`, five of them in `lexer.ts` itself, and the compiled
+ * lexer aborted on 8 of the 12 modules. It held a green rung-3 row and could not read one
+ * file in the tree it is part of. Six such sites were minimized by the fuzz
+ * lane; a full census of `src/`'s 573 computed index reads found 31, and all 31 are fixed
+ * (see docs/self-hosting.md and test/no-index-last.test.ts).
+ *
+ * NEITHER driver above could have caught it, and neither could a WIDER driver of the same
+ * shape: their inputs are chosen by hand, so none of them contained the input that
+ * mattered. A corpus of REAL SOURCE is not a bigger snippet corpus; it is the only one
+ * that contains what the module will actually be handed.
+ *
+ * THE RULE, now enforced: a module is not at rung 3 in any sense that matters for
+ * self-hosting until the COMPILED module processes `src/*.ts` and agrees with the bun-run
+ * module on stdout AND exit code. That assertion lives in `test/sh6-fuzz.test.ts`
+ * (`corpus: "src"`, pinned at zero divergences over all twelve modules) rather than here,
+ * so there is ONE corpus instrument and not two — it already owns the sweep, the
+ * minimizer and the length/column normalizer this comparison needs.
+ *
+ * The `weak` flag on the BASELINE rows is therefore no longer the whole story: rung 3 for
+ * `lexer.ts`, `diagnostics.ts` and `coverage-preprocess.ts` is now backed by a real-source
+ * differential, and it was NOT before.
+ */
