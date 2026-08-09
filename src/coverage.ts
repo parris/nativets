@@ -135,7 +135,7 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
       // Arrow functions / closures are supported (Stage 13) — no longer a blocker; walk
       // the body so nested unsupported constructs are still surfaced by the checker.
       case "ArrowFunction":
-        if (e.exprBody) walkExpr(e.body as Expr); else (e.body as Stmt[]).forEach(walkStmt);
+        if (e.exprBody) walkExpr(e.body as Expr); else (e.stmts as Stmt[]).forEach(walkStmt);
         break;
       default: break;
     }

@@ -172,6 +172,18 @@ walking `objectFields()` and recursing only into `isObjectTy`/`isArrayTy`/`isUni
 (strings must `release`, not `free`). It terminates by construction: recursive types have no
 finite `Ty` encoding yet (see self-hosting SH2), so the field tree is finite.
 
+> **THAT TERMINATION ARGUMENT NO LONGER HOLDS, and whoever builds this must not inherit it.**
+> Recursive types now DO have a finite encoding — the nominal `@Name` back-edge — so the field
+> tree is a GRAPH, not a tree: `interface N { next?: N }` walks `N → @N → N` forever. A
+> per-type destructor now needs an explicit cycle guard (a visited set of `@Name`s already on
+> the walk, emitting a call to that type's destructor rather than inlining it) — which is the
+> ordinary shape for this, but it is work the paragraph above assumed away. Two adjacent facts
+> for the same lane: `isGeneralUnionTy` is missing from `isLinearTy` (`ownership.ts:36`) and
+> from the `free` selection in `emitDrops`, so a `G<…>` box leaks both itself and its payload
+> (measured: `__arrLive() === 200` and `__objLive() === 200` for a `number | string[]` local in
+> a 200-iteration loop, against `0` for the identical plain-array local); and a boxed value is
+> the one shape where the destructor must free the payload BEFORE the box.
+
 Two blockers must be cleared **before** that lands, or the leak becomes a double free — silent on
 stdout, visible only as a nonzero exit, the exact signature of the shipped `nt_arr_reverse` bug:
 1. **Spread shallow-copies slots.** `{ ...o1 }` loads o1's slot and stores the *same* pointer into

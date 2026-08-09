@@ -314,4 +314,31 @@ const label = (): string => {
 console.log(label());
 `);
   });
+
+  /*
+   * 22. THE ANALYSIS REACHES A BLOCK ARROW'S STATEMENTS AT ALL.
+   *
+   * `checkDefiniteAssignment` runs `daBlock` on the top-level body and then walks the
+   * whole tree SHAPE-BLIND, re-running it on each nested function body it recognizes.
+   * "Recognizes" is the load-bearing word: it identifies a nested body by asking whether
+   * the node's statement-list field is an array. `ArrowFunction` used to spell that field
+   * `body` (shared with the expression form) and now spells it `stmts`, so a walk still
+   * asking about `body` finds nothing, runs no analysis inside any block arrow, and
+   * SILENTLY ACCEPTS the read this test refuses — the exact silent-wrong-answer class the
+   * prime directive forbids, and invisible to every other test in this file because they
+   * all put the unassigned read at the top level.
+   *
+   * Test 21 above is its twin and does NOT catch it: an arrow that assigns before reading
+   * compiles either way.
+   */
+  test("an unassigned read INSIDE a block-bodied arrow is refused, like one at the top level", () => {
+    const e = expectRefused(`
+const label = (): string => {
+  let out: string;
+  return out;
+};
+console.log(label());
+`, "NT1600");
+    expect(e.diag.message).toContain("'out' is used before being assigned");
+  });
 });

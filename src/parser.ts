@@ -12,7 +12,7 @@ import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral, NTErro
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
   isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
-  tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES,
+  tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf,
   resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef,
 } from "./ast.ts";
@@ -817,6 +817,21 @@ class Parser {
       if (b === "undefined" || b === "null") return makeNullable(b, a);
     }
     if (!sawIntersect) {
+      // NULLISH HOIST. `T | undefined` / `T | null` is the two-arm case just above; with
+      // THREE or more arms the nullish one is still not a union member — it is the
+      // existing `?U`/`?N` encoding's tag — so lift it out and build the rest as an
+      // ordinary discriminated union. `src/ast.ts`'s `ForStmt.init: VarDecl | Expr | null`
+      // is the forcing case. Exactly ONE distinct nullish arm: `?U`/`?N` has room for one
+      // (the runtime tag is 0=undefined / 1=null / 2=present but `Ty` spells only one), so
+      // `A | B | null | undefined` stays refused rather than silently losing an arm.
+      const nullish = [...new Set(uniq.filter((a) => a === "undefined" || a === "null"))];
+      if (nullish.length === 1) {
+        const rest = arms.filter((a) => a !== "undefined" && a !== "null");
+        if (rest.length >= 2) {
+          const inner = this.discriminatedUnion(rest);
+          if (inner) return makeNullable(nullish[0] as "undefined" | "null", inner);
+        }
+      }
       const u = this.discriminatedUnion(arms);
       if (u) return u;
       // A GENERAL union: nothing inside the value distinguishes the arms, so it is
@@ -848,7 +863,21 @@ class Parser {
     // `U<@A|@B>` returns undefined and the union is REFUSED (NT1009) rather than silently
     // built with a phantom tag. Getting this rule wrong costs a refusal, never a
     // miscompile — see test/forward-type-ref.test.ts.
-    const arms = rawArms.map((a) => expandTypeRef(a, this.recTypes));
+    // FLATTENING. TypeScript flattens `A | (B | C)` to `A | B | C`, and so does this: an
+    // arm that is itself a `U<…>` contributes its MEMBERS, not itself. Without it a nested
+    // arm reaches `arms.every(isObjectTy)` as a `U<…>` — not an object type — and the whole
+    // union is misreported as "general". `src/ast.ts` needs it twice over, since `Expr` and
+    // `Stmt` are aliases that other unions select over.
+    //
+    // The flattened result is an ORDINARY union: `unionDiscriminant` below still has to
+    // prove the tag sits at the same slot index in every spliced member, and a nested
+    // union's members already satisfy that among THEMSELVES, never across the splice. So
+    // flattening widens what is ACCEPTED without weakening the invariant — the failure mode
+    // is still the NT1009 refusal below, never a phantom tag.
+    const arms: Ty[] = [];
+    for (const a of rawArms.map((a) => expandTypeRef(a, this.recTypes))) {
+      if (isUnionTy(a)) arms.push(...unionMembers(a)); else arms.push(a);
+    }
     if (!arms.every((a) => isObjectTy(a) && classTag(a) === undefined)) return null;
     const members = [...new Set(arms)];
     const shown = members.map(widenLiteralTys).join(" | ");
@@ -2487,11 +2516,11 @@ class Parser {
     this.returnsAsyncFnStack.push(retAsyncFn);
     this.asyncParamScopes.push(arrowPromiseNames);
     try {
-      if (this.at("{")) return mk({ kind: "ArrowFunction", params, body: [...prelude, ...this.parseBlock()], exprBody: false, retAnnot });
+      if (this.at("{")) return mk({ kind: "ArrowFunction", params, stmts: [...prelude, ...this.parseBlock()], exprBody: false, retAnnot });
       const body = this.parseAssign();
       // A pattern parameter needs statements to bind its names, so an expression body
       // becomes a block: `([a, b]) => a + b` ≡ `(__d0) => { const a = …, b = …; return a + b; }`.
-      if (prelude.length) return mk({ kind: "ArrowFunction", params, body: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false, retAnnot });
+      if (prelude.length) return mk({ kind: "ArrowFunction", params, stmts: [...prelude, { kind: "ReturnStmt", argument: body }], exprBody: false, retAnnot });
       return mk({ kind: "ArrowFunction", params, body, exprBody: true, retAnnot });
     } finally { this.returnsAsyncFnStack.pop(); this.asyncParamScopes.pop(); }
   }
