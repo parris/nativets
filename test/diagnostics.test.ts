@@ -132,15 +132,18 @@ describe("no internal error reaches the user", () => {
   // `throw` outside a `try` IN THE SAME FUNCTION. Every one of these is ordinary
   // TypeScript that node runs; all of them reached `codegen.ts` line 1323's
   // `throw new Error("throw outside a try (unsupported)")`.
+  //
+  // What survives here is the half that genuinely needs cross-frame propagation: the
+  // throw is in a CALLEE and the `try` is at the call site, so the exception has to
+  // leave a frame. The other half — a throw NOBODY can catch — now compiles and is
+  // node-differential in test/uncaught-throw.test.ts (it is just `exit 1`).
   const THROWS: [string, string][] = [
-    ["top-level throw", `console.log("before");\nthrow new Error("boom");\n`],
-    ["function throws, no try anywhere", `function f(): number { throw new Error("boom"); }\nconsole.log(f());\n`],
     // The ordinary idiom: raise in the callee, handle at the call site.
     ["function throws, try at the CALL SITE", `function f(): number { throw new Error("boom"); }\ntry { console.log(f()); } catch (e) { console.log("caught"); }\n`],
     ["method throws, try at the call site", `class C { m(): number { throw new Error("b"); } }\ntry { console.log(new C().m()); } catch (e) { console.log("caught"); }\n`],
-    ["rethrow from a catch block", `try { throw new Error("a"); } catch (e) { throw new Error("b"); }\n`],
     ["throw from an arrow", `const f = (): number => { throw new Error("b"); };\ntry { console.log(f()); } catch (e) { console.log("c"); }\n`],
-    ["throw from a finally block", `try { console.log(1); } finally { throw new Error("b"); }\n`],
+    // A rethrow out of a callee's catch, with the outer handler one frame up.
+    ["rethrow from a callee's catch block", `function f(): number { try { throw new Error("a"); } catch (e) { throw new Error("b"); } }\ntry { console.log(f()); } catch (e) { console.log("c"); }\n`],
   ];
   for (const [name, src] of THROWS) {
     test(`NT1004, not a stack trace: ${name}`, () => {

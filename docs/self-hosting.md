@@ -2001,6 +2001,13 @@ two of five table sites.
 `st.prev` derivable so the arrow is unnecessary), which is a tokenizer refactor and an owner
 decision, not a two-line change.
 
+> **SUPERSEDED — that refactor was taken, and the sizing above is the part that held.** Both
+> options named here turned out to be the SAME option: `st.prev` is derivable (it is only ever
+> asked for a predicate, so it became one boolean) and that is what makes inlining the arrow
+> possible at all. `NT1607` never surfaced, because removing the capture is the precondition for
+> the opt-in rather than a step behind it, and the blocker that WAS behind the chain — `NT1605`
+> — is not in this list. See “THE SECOND MODULE SELF-COMPILES” below.
+
 **No second module reached IR, and `ast.ts` was probed one deeper before that was recorded** —
 behind its ternary is `NT1001`, `.find` on an object array, which is an aliasing refusal rather
 than a small gap. `diagnostics.ts` remains the only rung-3 module.
@@ -2141,6 +2148,104 @@ there cannot be reached from outside by any assignment anywhere in that function
 inner BLOCK (a `switch` case, say — which is literally `src/checker.ts:2207`) is *not* subtracted
 and still poisons the name program-wide. Closing that means resolving each assignment against a
 real scope chain instead of matching names, which is a bigger change than this one.
+
+### A SECOND MODULE SELF-COMPILES — and NT1004, the long-flagged WALL, was TWO refusals wearing one code
+
+`NT1004` has sat in this document as a potential wall for a long time, for a good reason: the
+compiler's whole error architecture is throw-across-a-call-boundary (`checker.ts` **332**
+`throw`s, `parser.ts` 89, `codegen.ts` 18), while the rule demands a `try` **in the same
+function**. `src/lexer.ts` was the cheapest possible place to find out what that costs, because
+it was the only module whose FIRST blocker was NT1004 and it has only eleven throws.
+
+**Why the rule exists, confirmed at the source.** `codegen.ts`'s `ThrowStmt` lowers a throw as
+`br label %<catch>` — a branch inside one LLVM function. There is no unwinder, no `invoke`, no
+landingpad, no personality function. So "throw across a call boundary" is a **runtime/codegen
+feature, not a checker relaxation**, exactly as suspected. The checker types `throw` fine; the
+refusal is codegen's alone.
+
+**What the FFI's cross-boundary error path actually is, and why it does not generalize for free.**
+`nt_exc_raise_msg` sets a sticky global (`g_exc_set` / `g_exc_msg`, a `const char *`) in
+`runtime/runtime.c`, and `emitExcCheck` polls it INLINE at the call site — thirteen sites, every
+one a *runtime* call. It crosses the **C → compiled-frame** boundary, one level, and the check
+runs in the same frame as the `catch`. When that frame has no handler it calls `nt_exc_abort()`.
+It has never crossed a compiled-function → compiled-function boundary and does not today.
+
+**The finding: the refusal was covering two different programs, and only one needs the unwinder.**
+A throw NOBODY can catch needs nothing at all — it is node's uncaught exception (stdout keeps
+what it printed, stderr gets the error, exit **1**), which is precisely what `nt_exc_raise_msg`
++ `nt_exc_abort` already do. Two shapes are provably in that class:
+
+- the throw is in **module top-level** (`main`) — nothing calls top-level code;
+- the program contains **no `try` at all** — no handler exists in any frame.
+
+Both now compile (`test/uncaught-throw.test.ts`, node-differential on stdout + exit code; the
+stderr text is a documented divergence). `src/lexer.ts` has eleven `throw`s and **zero** `try`s,
+so all eleven are the second kind.
+
+| module | before | after |
+|---|---|---|
+| `lexer.ts` | rung 0 — `NT1004`, a `throw` outside a `try` at 202:5, own | **rung 3** — IR, links, runs, and a non-weak DRIVER differential |
+| `diagnostics.ts` | rung 3 | **rung 3**, IR byte-identical (the new declare is conditional) |
+| every other module | — | **unchanged** — `NT1011`, ast.ts's reflective walker, ten modules |
+
+**NT1004 was lexer.ts's LAST blocker, not its next-to-last** — probed before implementing, with
+the lowering stubbed in a scratch tree, and the module went straight to IR. Rungs 1→3 then cost
+nothing, the same as `diagnostics.ts`. The non-weak evidence is `test/sh6.test.ts`'s new
+`lexer.ts DRIVER`: it tokenizes a small program and prints a per-token digest (type, text,
+line, column) plus two decoded escapes — 292 bytes byte-identical to the bun-run module — and
+then takes the ERROR path deliberately, `lex("const y = #;")`, where the uncaught `LexError`
+stops stdout at the same byte and exits 1 on both sides.
+
+Tree-wide the blocker set drops from `["NT1004","NT1011","NT1606"]` to `["NT1011","NT1606"]`,
+and it is the first time a code has left that set by being **split** rather than implemented.
+
+**THE ESTIMATE for the 332 sites, which is what this lane was really for.** Nothing here helps
+`checker.ts`: its throws are `throw typeError(…)` / `throw nyi(…)` raised deep in the callee and
+caught in `driver.ts`/`cli.ts`, i.e. exactly the cross-frame idiom that is still refused. The
+two options both remain open, and both are owner decisions:
+
+1. **Rewrite the 332 sites to a return-based error channel.** Every function on the path from a
+   `typeError` to `driver.ts` would return `T | Err` and every call site would test it. That is
+   not 332 edits, it is the transitive closure of the frontend's call graph — the checker's
+   entire signature surface — and it changes the source `bun` runs. Not viable.
+2. **Implement propagation** (NOT unwinding — the sticky flag already exists). A throw with no
+   local handler raises and performs a "propagating return"; every user call site polls the flag
+   and either branches to a local catch or propagates again. Four things make this a stage, not
+   a lane: (a) the propagating return needs the set of **live owned locals at an arbitrary call
+   site**, and `ownership.ts` computes drops only per `ReturnStmt` — without it, a leak or a
+   double free; (b) `catch (e)`'s type is inferred by scanning the try block's *syntactic*
+   throws (`Checker.inferThrowType`), so it would have to become interprocedural, or every
+   cross-frame thrown value normalizes to `{message:string}` (the flag carries only a
+   `const char *` today); (c) `finally` must run on the propagation path; (d) a "may throw"
+   transitive closure is needed or every call site pays a poll and every IR snapshot changes.
+   HOF callbacks are inlined, which interacts with all four.
+
+The honest read: the big modules are **not** reachable by relaxing the checker, and they are not
+reachable by rewriting either. They need (2).
+
+**PRE-EXISTING BUG, found on the way, and it is a SILENT WRONG ANSWER at exit 0.**
+
+```ts
+function f(n: number): void {
+  try { switch (n) { case 1: throw new Error("boom"); } } catch (e) { console.log(e); }
+}
+f(1);        // node: `Error: boom`      nativets: `}@`      exit 0 on BOTH
+```
+
+`catch (e)`'s type comes from `Checker.inferThrowType`, which scans the try block for the first
+`throw` — and had no `SwitchStmt` case, so the binding kept its `"string"` default while
+codegen's `ThrowStmt` stored the Error object pointer into it **raw**, with no coercion and no
+check. `console.log(e)` then called `js_print_str` on an object block. It reproduces on `main`
+untouched and predates this lane; a `switch` inside a `try` is ordinary TypeScript.
+
+Fixed on both sides, and deliberately differently. The scan now covers `switch` (that program
+compiles and matches node). The raw store is now a **refusal** when the thrown type is not the
+binding's — which is the backstop that closes the class rather than one missed scan at a time,
+and it caught the second shape immediately: two throws of different types in one block, where
+`e.message` was reading the first eight bytes of a string as a pointer (exit 255, no output,
+where node prints `boom` then `undefined`). See docs/divergences.md. A nested `try` is still
+NOT descended into, which is correct — its throws belong to its own `catch`.
+
 ### STAGE-1 OWNS NOTHING — both of `cli.ts`'s host surfaces grew, and it rejoined the group
 
 `src/cli.ts` had spent one round as the only module in the tree whose first blocker was its
@@ -2207,6 +2312,131 @@ refusal. It reproduces on `main` untouched, applies to every `void`-typed call (
 a user `function f(): void`), and is therefore *not* introduced by `process.stdout.write` —
 though that builtin inherits it, which is how it was found. Not fixed here: the fix is in the
 declaration path in `checker.ts`, which three lanes were live in.
+
+### THE SECOND MODULE SELF-COMPILES — `coverage-preprocess.ts` at rung 3, by REMOVING THE CAPTURE
+
+`src/coverage-preprocess.ts` goes **rung 0 → rung 3** in one lane. It is the second module in the
+tree to reach IR after `diagnostics.ts`, and the first to do it with **no compiler change at all** —
+every one of the five blockers between it and IR was cleared in the module's own source, with the
+old and new `preprocessForCoverage` proved byte-identical over a 495-file corpus.
+
+**The handed-down blocker chain was right about the first three and wrong about the shape of the
+rest.** The previous probe (the "does NOT clear, and the blocking shape is `NT1607`" note above)
+recorded "at least four blockers deep — `.push` ×4, then `Set.add` ×3, then an `NT2001` on `&&`,
+with `NT1607` still waiting behind those". Measured on the real tree by clearing each in turn:
+
+| # | blocker | site | fix |
+|---|---|---|---|
+| 1 | `NT1606` | `.push` on `toks` / `parts` / `statements` | `//@@mutable` on each binding — **once the capture was gone** |
+| 2 | `NT1606` | `erasedNames.add(…)` ×3, result discarded | `erasedNames = erasedNames.add(…)`; a `Set` is persistent |
+| 3 | `NT2001` | `group.length && balanced` ×2 (`number && boolean`) | `group.length > 0 && balanced` |
+| 4 | `NT1605` | `const t = toks[i]!` ×7 | never bind the element — see below |
+| 5 | — | — | **rung 3** |
+
+`NT1607` **never appears**, and that is the correction worth carrying forward: removing the closure
+is not a step *behind* the `.push` refusal, it is the **precondition** for the opt-in. And the
+blocker that was actually behind the chain — `NT1605`, binding a linear array element to a local —
+was not predicted at all. Probing "one deeper" by suppressing a rule in a scratch tree tells you
+what the NEXT diagnostic is; it does not tell you what a real fix unmasks, because a real fix
+changes the code.
+
+**Removing the capture.** `tokenize`'s accumulator was captured by
+
+```ts
+const push = (t: Tok) => { toks.push(t); st.prev = t; };   // 10 call sites
+```
+
+which is the closure-capture hole the accumulator opt-in deliberately keeps (`docs/decorators.md`).
+Inlining it at the ten sites is most of the work, but the `st.prev` half **cannot be inlined as
+written**: a `Tok` cannot live in the array *and* the cursor, because `.push` **consumes** its
+argument (`toks.push(t); st.prev = t` is `NT1601` on the second store, and the reverse order is
+`NT1601` on the push), and reading it back with `st.prev = toks[toks.length - 1]` is `NT1605`.
+Both were measured, not assumed.
+
+The resolution is that `prev` was never wanted as a token. Its only consumer is
+`regexAllowed(prev)`, a predicate — so the cursor now carries the **one boolean** that predicate
+returns (`TokState.regexOk`), set at each append from the kind and text about to be pushed. That is
+the same shape `emit`'s pre-existing `prevVal` already had, and it is what `src/lexer.ts` does when
+it reads `tokens[tokens.length - 1]` rather than shadowing it in the cursor.
+
+**`NT1605` is a structural rule, not a nuisance.** `const tk = toks[i]!` is a *move out of the
+array*; `toks[i]!.kind`, `isP(toks[i], "{")` and `for (const t of xs)` are all borrows and all
+fine. That killed the statement `group: Tok[]`, which was a second array built by copying tokens
+out of the first — replaced by an **index window** `[gStart, i)`, which is exact because the group
+only ever grew by the token at `i` before advancing `i`. `emit` takes `(toks, from, to)`.
+
+**The correctness bar was observational nullity, and a null diff was not accepted as evidence.**
+Old and new `preprocessForCoverage` were run over every `.ts` file in `src/`, `test/` and
+`examples/` — **495 files, 2.67 MB** — diffing the full `Preprocessed` (statements, their lines,
+`stripped`, `erasedNames`) byte for byte: **0 differences**. Then **41 deliberate mutations** of the
+rewritten lines, each re-run against the same corpus:
+
+- **the corpus cannot see 13 of them.** "Regex allowed after a keyword", "…after a
+  string/template/regex", "…after a 3-char operator", "…at offset 0", the `do`/`while` split guard
+  and the bracket-depth guard all leave the 495-file diff **empty**. The compiler's own tree is
+  regex-free by discipline (`test/no-regex.test.ts`) and writes no top-level `do`/`while`, so a
+  corpus made of it is blind to exactly the code this lane rewrote most.
+- 16 hand-built inputs close all 13. They are now `test/self-host-coverage.test.ts`'s three
+  regex-vs-divide tests, asserted as exact emitted text.
+- **4 mutants survive both**, and all four are provably equivalent or dead: one is a control
+  (`word` vs `word + ""`); `emit`'s `kind === "comment"` skip is unreachable because the caller
+  filters comments out before calling it; and the two `|| isP(prev, ";")` alternatives in the split
+  guards cannot fire, because a `;` that did not already end the group implies non-zero depth,
+  which makes `balanced` false at the very next token. All three predate this lane.
+
+**Rung 3 is recorded WEAK and then earned.** A library prints nothing, so the naive rung-3 match is
+empty-vs-empty (caveat 3 in `test/sh6.test.ts`). The non-weak evidence is a second driver
+differential alongside `diagnostics.ts`'s: a driver imports the module and preprocesses six inputs
+chosen to reach a shebang, an inline `type` specifier, erased `type`/`interface`, a regex beside a
+division, a `//@@` pragma, a class, a `do`/`while`, a template substitution, `export default async`,
+and radix/exponent/separator numerals — **814 bytes of statement text, byte-identical to `bun run`,
+exit 0**.
+
+| Module | Before | After |
+|---|---|---|
+| `coverage-preprocess.ts` | rung 0 — `NT1606`, `.push`, own | **rung 3** — IR, links, runs; 814-byte driver differential matches bun |
+| `diagnostics.ts` | rung 3 | **rung 3**, unchanged |
+| every other module | — | **unchanged** |
+
+**`NT1606` is now EMPTY tree-wide as a first blocker** (`test/bootstrap.test.ts`), and empty in the
+`coverage` histogram too (`test/self-host-coverage.test.ts`) — the eighth turn of a bucket that has
+refilled seven times. Read it narrowly, as those notes ask: the ~205 `.push` sites are still there
+and every refused shape is still refused. What changed is that no module's first blocker is one of
+them.
+
+**One thing the `coverage` tool now says about ITSELF is an artifact, and it is the fifth of its
+kind recorded here.** `coverage src/coverage-preprocess.ts` reports `NT2001 .push expects number,
+got {kind,value,line}`. That is the strip talking about the strip: this tool ERASES `interface`
+declarations and hands the names back for the erase-to-`number` fallback, so `const toks: Tok[]`
+reads as `number[]` and pushing a `Tok` into it is a type error that exists nowhere else. It was
+masked while `.push` was refused ahead of argument typing. The real pipeline compiles the same file
+to 152,673 bytes of IR and runs it. The `NT1xxx` histogram — the instrument the ratchets read — is
+**empty** for this module, because it counts feature blockers and not the type-error band, which is
+exactly the confound that design decision exists for.
+
+**PRE-EXISTING BUG — every `NT1606` is reported with NO SOURCE LOCATION.** `mutationError(message,
+hint)` in `src/diagnostics.ts` takes no span and passes none, so all 18 call sites in `checker.ts`
+produce a diagnostic with no line band:
+
+```ts
+function a(): number { return 1; }
+function b(): number { return 2; }
+function c(): number { const xs: number[] = []; xs.push(1); return xs.length; }
+console.log(c());
+```
+
+```
+error[NT1606]: arrays are immutable: `.push` would mutate the array in place
+  = help: build a new array instead: …
+```
+
+No `|` band, no line, no caret — on a 442-line file that is a bisect. The ownership-stage refusals
+in the same band (`NT1605`, `NT1601`) print a full rustc-style band with the line, and the
+`Map`/`Set` variant of `NT1606` three hundred lines earlier in the same file hand-appends `at
+412:97` into its message text, so the inconsistency is visible within one function. The fix is
+available at the site — `checker.ts` already computes `exprLoc(a)` two lines below the `.push`
+throw for its `typeError` — but it is 18 call sites in a shared hot spot, so it is reported rather
+than landed here.
 
 ### THE THREE REFLECTIVE AST WALKERS ARE GONE — nine modules move, and the wall behind them is ast.ts's own dead guard
 
@@ -2334,13 +2564,13 @@ carry types, and `for (let a = 0, b = 9; …; a++, b--)`) kills all three.
 |---|---|---|
 | `ast.ts` (standalone + linked) | `NT1011` — `for-of` over `unknown`, `mapTypesDeep`, 669 | **`NT2001`** — `Cannot compare U<…Stmt…> with undefined`, `src/ast.ts:1093` |
 | `parser.ts`, `checker.ts`, `codegen.ts`, `coverage.ts`, `ownership.ts`, `driver.ts`, `modules.ts`, `cli.ts` (linked) | `NT1011` — the same, inherited | **`NT2001`** — the same, inherited |
-| `lexer.ts` | `NT1004` (`throw` outside a `try`) | **unchanged** |
-| `coverage-preprocess.ts` | `NT1606` (`.push`) | **unchanged** |
-| `diagnostics.ts` | **rung 3** | **rung 3, IR byte-identical** |
+| `lexer.ts`, `coverage-preprocess.ts`, `diagnostics.ts` | rung 3 (the first three self-compilers) | **unchanged — rung 3, and `diagnostics.ts` emits BYTE-IDENTICAL IR** |
 
-Nine modules moved, none reached IR, and `diagnostics.ts` — the one module that
-self-compiles — emits **byte-identical** IR before and after, which is the strongest
-statement available that this rewrite is null.
+Nine modules moved and none reached IR. Measured AT THE MERGE, so the rung-3 rows are the
+three modules main landed in the same round (`lexer.ts` and `coverage-preprocess.ts` joined
+`diagnostics.ts`); none of them is affected, and `diagnostics.ts` emits **byte-identical**
+IR before and after this change, which is the strongest statement available that it is null.
+The tree-wide code set is now **one code**, `NT2001`, held by the other nine.
 
 **What is behind it is `src/ast.ts`'s own dead guard**, and it is the *third* time this
 document has recorded that shape:
@@ -2375,6 +2605,8 @@ instead. A second, subtler one: `const KEEP_TY: TyFn = (t) => t` typechecks and 
 `coverage` strips undecorated type declarations, so in *that tool alone* the arrow's
 parameter became uninferable and ast.ts's coverage row changed. Written `(t: Ty): Ty => t`,
 it does not.
+
+---
 
 ## Milestones
 

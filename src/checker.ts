@@ -2481,6 +2481,13 @@ class Checker {
       else if (s.kind === "WhileStmt" || s.kind === "DoWhileStmt" || s.kind === "ForOfStmt" || s.kind === "ForInStmt" || s.kind === "ForStmt") t = this.firstThrowType(s.body, scope);
       else if (s.kind === "BlockStmt") t = this.firstThrowType(s.body, scope);
       else if (s.kind === "MultiStmt") t = this.firstThrowType(s.stmts, scope);
+      // A `switch` was MISSING here, and it was a silent wrong answer rather than a
+      // refusal: `try { switch (n) { case 1: throw new Error("x") } } catch (e)` left the
+      // binding at the `"string"` default, the throw stored the object pointer into it
+      // raw, and `console.log(e)` printed the first bytes of the object block at exit 0.
+      // Note what is deliberately still NOT descended into: a nested `try`, whose throws
+      // belong to ITS catch, not this one.
+      else if (s.kind === "SwitchStmt") { for (const c of s.cases) { t = this.firstThrowType(c.body, scope); if (t) break; } }
       if (t) return t;
     }
     return undefined;

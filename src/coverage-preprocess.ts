@@ -74,18 +74,26 @@ type TokKind = "ident" | "num" | "str" | "template" | "regex" | "punct" | "comme
 interface Tok { kind: TokKind; value: string; line: number }
 
 /**
- * The tokenizer's cursor: the 1-based line it is on, and the last SIGNIFICANT token it
- * emitted (which is what decides regex-vs-divide).
+ * The tokenizer's cursor: the 1-based line it is on, and whether a `/` read next would
+ * begin a REGEX literal rather than a division — which is a function of the last
+ * SIGNIFICANT token emitted.
  *
  * It is a RECORD rather than two `let`s for exactly the reason `src/lexer.ts`'s
- * `LexState` is one: `nl` and `push` are closures that move it, and a write to a binding
- * captured from an enclosing scope is `NT1031` — it was this module's first blocker in
- * the standalone column of `test/selfhost-ratchet.test.ts`. Mutating a FIELD of an owned
+ * `LexState` is one: `nl` is a closure that moves it, and a write to a binding captured
+ * from an enclosing scope is `NT1031` — it was this module's first blocker in the
+ * standalone column of `test/selfhost-ratchet.test.ts`. Mutating a FIELD of an owned
  * local is not a capture write (the binding never changes, the object does), and
  * `//@@mutable` is a comment to TypeScript, so bun runs this file unchanged.
+ *
+ * `regexOk` is a BOOLEAN rather than the previous token itself, which is what it used to
+ * be. Keeping the token meant every append had to store it twice — once into the array
+ * and once into this record — and `.push` CONSUMES its argument (docs/decorators.md), so
+ * the second store is a use-after-move (`NT1601`), while reading it back out of the
+ * array is `NT1605` (cannot move out of an array element). The predicate is all any
+ * caller ever wanted, and a `boolean` copies freely. This mirrors `emit`'s `prevVal`.
  */
 //@@mutable
-interface TokState { line: number; prev: Tok | undefined }
+interface TokState { line: number; regexOk: boolean }
 
 /*
  * Character classes, spelled out — the same discipline as `src/lexer.ts`. nativets has no
@@ -153,9 +161,15 @@ const REGEX_PREFIX_KW = new Set([
  * intentionally separate from `src/lexer.ts` so the real lexer stays untouched.
  */
 function tokenize(source: string): Tok[] {
+  // The token accumulator: an `@@mutable` binding so `.push` appends in place (see
+  // docs/decorators.md). Every append happens HERE, in the function body — the old
+  // `const push = (t) => { toks.push(t); st.prev = t }` closure captured this array, and a
+  // captured accumulator is `NT1607` (a closure env holds a pointer this scope cannot
+  // null). The two lines it saved are written out at each site instead.
+  //@@mutable
   const toks: Tok[] = [];
   let i = 0;
-  const st: TokState = { line: 1, prev: undefined };
+  const st: TokState = { line: 1, regexOk: true };
   const n = source.length;
   const nl = (s: string) => { for (const c of s) if (c === "\n") st.line++; };
 
@@ -167,10 +181,8 @@ function tokenize(source: string): Tok[] {
     i = j;
   }
 
-  // The last significant token governs regex-vs-divide disambiguation; it lives in `st`
-  // because `push` writes it from inside a closure (see `TokState`).
-  const push = (t: Tok) => { toks.push(t); st.prev = t; };
-
+  // The last significant token governs regex-vs-divide disambiguation; `st.regexOk`
+  // carries that one bit forward, and every append below sets it (see `TokState`).
   while (i < n) {
     const c = source[i]!;
 
@@ -186,8 +198,10 @@ function tokenize(source: string): Tok[] {
       // re-emitted as the two tokens the real lexer produces for the bare sigil.
       const attr = pragmaName(source.slice(i + 2, j));
       if (attr !== "") {
-        push({ kind: "punct", value: "@@", line: st.line });
-        push({ kind: "ident", value: attr, line: st.line });
+        // Both tokens land; the SECOND (the attribute name) is what the next `/` sees.
+        st.regexOk = regexAllowed("ident", attr);
+        toks.push({ kind: "punct", value: "@@", line: st.line });
+        toks.push({ kind: "ident", value: attr, line: st.line });
       } else {
         toks.push({ kind: "comment", value: source.slice(i, j), line: st.line });
       }
@@ -203,7 +217,7 @@ function tokenize(source: string): Tok[] {
     }
 
     // regex literal — only where a value can't be (after an operator/keyword/start)
-    if (c === "/" && regexAllowed(st.prev)) {
+    if (c === "/" && st.regexOk) {
       const start = i;
       i++; // past opening /
       let inClass = false;
@@ -217,7 +231,8 @@ function tokenize(source: string): Tok[] {
         i++;
       }
       while (i < n && isIdentPart(source[i]!)) i++; // flags
-      push({ kind: "regex", value: source.slice(start, i), line: st.line });
+      st.regexOk = false; // after a value, the next `/` is division
+      toks.push({ kind: "regex", value: source.slice(start, i), line: st.line });
       continue;
     }
 
@@ -226,7 +241,8 @@ function tokenize(source: string): Tok[] {
       const start = i; const q = c; i++;
       while (i < n && source[i] !== q) { if (source[i] === "\\") i++; i++; }
       i++; // closing quote
-      push({ kind: "str", value: source.slice(start, i), line: st.line });
+      st.regexOk = false;
+      toks.push({ kind: "str", value: source.slice(start, i), line: st.line });
       continue;
     }
 
@@ -243,7 +259,8 @@ function tokenize(source: string): Tok[] {
         if (ch === "\n") st.line++;
         i++;
       }
-      push({ kind: "template", value: source.slice(start, i), line: startLine });
+      st.regexOk = false;
+      toks.push({ kind: "template", value: source.slice(start, i), line: startLine });
       continue;
     }
 
@@ -256,7 +273,8 @@ function tokenize(source: string): Tok[] {
         if ((source[i] === "+" || source[i] === "-") && p !== "e" && p !== "E") break;
         i++;
       }
-      push({ kind: "num", value: source.slice(start, i), line: st.line });
+      st.regexOk = false;
+      toks.push({ kind: "num", value: source.slice(start, i), line: st.line });
       continue;
     }
 
@@ -264,28 +282,38 @@ function tokenize(source: string): Tok[] {
     if (isIdentStart(c)) {
       const start = i;
       while (i < n && isIdentPart(source[i]!)) i++;
-      push({ kind: "ident", value: source.slice(start, i), line: st.line });
+      // The predicate is computed BEFORE the append: `.push` consumes its argument, and
+      // `word` is moved into the token literal there (docs/decorators.md).
+      const word = source.slice(start, i);
+      st.regexOk = regexAllowed("ident", word);
+      toks.push({ kind: "ident", value: word, line: st.line });
       continue;
     }
 
     // punctuation — longest first so multi-char operators stay intact
     const three = source.slice(i, i + 3);
     const two = source.slice(i, i + 2);
-    if (["===", "!==", ">>>", "...", "**=", "<<=", ">>="].includes(three)) { push({ kind: "punct", value: three, line: st.line }); i += 3; continue; }
-    if (["=>", "==", "!=", "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "&=", "|=", "^=", "**", "|>", "@@"].includes(two)) { push({ kind: "punct", value: two, line: st.line }); i += 2; continue; }
+    if (["===", "!==", ">>>", "...", "**=", "<<=", ">>="].includes(three)) { st.regexOk = regexAllowed("punct", three); toks.push({ kind: "punct", value: three, line: st.line }); i += 3; continue; }
+    if (["=>", "==", "!=", "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "&=", "|=", "^=", "**", "|>", "@@"].includes(two)) { st.regexOk = regexAllowed("punct", two); toks.push({ kind: "punct", value: two, line: st.line }); i += 2; continue; }
     // stray characters the real lexer would reject (`#`, `\`, `@`) — keep as punct so
     // the strip/split can still reason about structure; they land in a statement chunk
     // that simply fails to parse (and is reported), never a tokenizer crash.
-    push({ kind: "punct", value: c, line: st.line });
+    st.regexOk = regexAllowed("punct", c);
+    toks.push({ kind: "punct", value: c, line: st.line });
     i++;
   }
   return toks;
 }
 
-function regexAllowed(prev: Tok | undefined): boolean {
-  if (!prev) return true;
-  if (prev.kind === "punct") return prev.value !== ")" && prev.value !== "]" && prev.value !== "}";
-  if (prev.kind === "ident") return REGEX_PREFIX_KW.has(prev.value);
+/**
+ * Whether a `/` read immediately after a token of this kind and text begins a REGEX
+ * literal rather than a division. Takes the two fields rather than the token because the
+ * token itself is consumed by `.push` at every call site (see `TokState.regexOk`); the
+ * answer is unchanged.
+ */
+function regexAllowed(kind: TokKind, value: string): boolean {
+  if (kind === "punct") return value !== ")" && value !== "]" && value !== "}";
+  if (kind === "ident") return REGEX_PREFIX_KW.has(value);
   return false; // after a value (num/str/template/regex) a `/` is division
 }
 
@@ -297,17 +325,31 @@ const NON_VALUE_KW = REGEX_PREFIX_KW;
  * postfix non-null assertion `!` (which TS erases) is dropped so the real parser — which
  * has no `!` postfix — doesn't choke on the pervasive `x!` / `arr[i]!` in the compiler
  * source. A leading `!x` (logical not) is preserved (its predecessor isn't a value).
+ *
+ * The group is a half-open WINDOW `[from, to)` into the caller's token array rather than a
+ * second array of tokens. Copying the tokens out was `NT1605` — a `Tok` is linear, so it
+ * cannot be moved out of an array element — and the window is exact, because the caller
+ * only ever grows a group by one CONSECUTIVE token at a time.
  */
-function emit(toks: Tok[]): string {
+function emit(toks: Tok[], from: number, to: number): string {
+  // An accumulator, appended in place; no arrow in this scope names it, so it is not the
+  // captured shape `NT1607` refuses (docs/decorators.md).
+  //@@mutable
   const parts: string[] = [];
   let prevVal = false; // did the previous emitted token yield a value?
-  for (const t of toks) {
-    if (t.kind === "comment") continue;
-    if (t.kind === "punct" && t.value === "!" && prevVal) continue; // non-null assertion → erase
-    parts.push(t.kind === "regex" ? '""' : t.value);
-    if (t.kind === "ident") prevVal = !NON_VALUE_KW.has(t.value);
-    else if (t.kind === "punct") prevVal = t.value === ")" || t.value === "]";
-    else prevVal = t.kind === "num" || t.kind === "str" || t.kind === "template" || t.kind === "regex";
+  for (let k = from; k < to; k++) {
+    // The fields are read out one at a time; `const t = toks[k]!` would MOVE the token out
+    // of the array (`NT1605`), while a field read copies.
+    const kind = toks[k]!.kind;
+    const value = toks[k]!.value;
+    if (kind === "comment") continue;
+    if (kind === "punct" && value === "!" && prevVal) continue; // non-null assertion → erase
+    // Computed before the append, which CONSUMES `value` (docs/decorators.md).
+    const yieldsValue = kind === "ident" ? !NON_VALUE_KW.has(value)
+      : kind === "punct" ? (value === ")" || value === "]")
+      : (kind === "num" || kind === "str" || kind === "template" || kind === "regex");
+    parts.push(kind === "regex" ? '""' : value);
+    prevVal = yieldsValue;
   }
   return parts.join(" ");
 }
@@ -328,8 +370,12 @@ const STMT_STARTERS = new Set([
 export function preprocessForCoverage(source: string): Preprocessed {
   const toks = tokenize(source).filter((t) => t.kind !== "comment");
   const stripped: Blocker[] = [];
+  //@@mutable
   const statements: PreStatement[] = [];
-  const erasedNames = new Set<string>();
+  // A `Set` is PERSISTENT here: `.add` returns a new set and leaves the receiver alone,
+  // so the result has to be rebound (discarding it is `NT1606`). Under bun the spelling is
+  // a no-op — `Set.prototype.add` returns the same set — so both toolchains agree.
+  let erasedNames = new Set<string>();
 
   let i = 0;
   const n = toks.length;
@@ -353,11 +399,10 @@ export function preprocessForCoverage(source: string): Preprocessed {
   const skipToSemicolon = (from: number): number => {
     let j = from, cur = 0, par = 0, br = 0;
     for (; j < n; j++) {
-      const t = toks[j]!;
-      if (isP(t, "{")) cur++; else if (isP(t, "}")) cur--;
-      else if (isP(t, "(")) par++; else if (isP(t, ")")) par--;
-      else if (isP(t, "[")) br++; else if (isP(t, "]")) br--;
-      else if (isP(t, ";") && cur <= 0 && par <= 0 && br <= 0) return j + 1;
+      if (isP(toks[j], "{")) cur++; else if (isP(toks[j], "}")) cur--;
+      else if (isP(toks[j], "(")) par++; else if (isP(toks[j], ")")) par--;
+      else if (isP(toks[j], "[")) br++; else if (isP(toks[j], "]")) br--;
+      else if (isP(toks[j], ";") && cur <= 0 && par <= 0 && br <= 0) return j + 1;
     }
     return n;
   };
@@ -369,15 +414,13 @@ export function preprocessForCoverage(source: string): Preprocessed {
     // (`export`, `async`, `declare`, …) so the decl keyword after them is analyzed.
     while (i < n && toks[i]!.kind === "ident" && PREFIX_MODIFIERS.has(toks[i]!.value)) i++;
     if (i >= n) break;
-    const t = toks[i]!;
 
-    if (isKw(t, "import")) {
+    if (isKw(toks[i], "import")) {
       const end = skipToSemicolon(i);
       // Keep the NAMES this import bound before dropping it — see `erasedNames`. `from`,
       // `type` and `as` are the clause's own keywords, never bindings.
       for (let j = i + 1; j < end; j++) {
-        const u = toks[j]!;
-        if (u.kind === "ident" && u.value !== "from" && u.value !== "type" && u.value !== "as") erasedNames.add(u.value);
+        if (toks[j]!.kind === "ident" && toks[j]!.value !== "from" && toks[j]!.value !== "type" && toks[j]!.value !== "as") erasedNames = erasedNames.add(toks[j]!.value);
       }
       i = end;
       continue;
@@ -391,9 +434,9 @@ export function preprocessForCoverage(source: string): Preprocessed {
     // Both erasures record the NAME they dropped (`erasedNames`): the annotations that use
     // it survive into the statements below, and a parser that cannot see the declaration
     // would refuse the name outright (NT2003) instead of falling back as it does today.
-    if (isKw(t, "type") && toks[i + 1]?.kind === "ident") { erasedNames.add(toks[i + 1]!.value); i = skipToSemicolon(i); continue; }
-    if (isKw(t, "interface")) {
-      if (toks[i + 1]?.kind === "ident") erasedNames.add(toks[i + 1]!.value);
+    if (isKw(toks[i], "type") && toks[i + 1]?.kind === "ident") { erasedNames = erasedNames.add(toks[i + 1]!.value); i = skipToSemicolon(i); continue; }
+    if (isKw(toks[i], "interface")) {
+      if (toks[i + 1]?.kind === "ident") erasedNames = erasedNames.add(toks[i + 1]!.value);
       i = skipBraceBlock(i);
       continue;
     }
@@ -407,34 +450,42 @@ export function preprocessForCoverage(source: string): Preprocessed {
     // — a point that never lands inside a signature or a type annotation's braces —
     // and AFTER a top-level `;`. Over-grouping is harmless (the parser reads multiple
     // statements per chunk); splitting INSIDE one would fabricate failures, so we don't.
-    const startLine = t.line;
-    const group: Tok[] = [];
+    const startLine = toks[i]!.line;
+    // The group is the half-open window `[gStart, i)` of `toks` — an index pair, not a
+    // second array. It can be, because the group only ever grows by the token at `i` and
+    // then advances `i`; and it has to be, because a `Tok` is linear and copying one out
+    // of `toks` is `NT1605`.
+    const gStart = i;
     let cur = 0, par = 0, br = 0;
     while (i < n) {
-      const tk = toks[i]!;
+      // Every read of the current token indexes `toks` in place. Binding it to a local
+      // (`const tk = toks[i]!`) is a MOVE out of the array, which a linear element type
+      // refuses (`NT1605`); a field read, and passing the element straight to a predicate,
+      // are both borrows.
       const balanced = cur <= 0 && par <= 0 && br <= 0;
-      if (group.length && balanced && tk.kind === "ident" && STMT_STARTERS.has(tk.value)) {
-        const prev = group[group.length - 1]!;
-        const closed = isP(prev, "}") || isP(prev, ";");
-        const doWhile = tk.value === "while" && isKw(group[0], "do");
+      if (i > gStart && balanced && toks[i]!.kind === "ident" && STMT_STARTERS.has(toks[i]!.value)) {
+        const closed = isP(toks[i - 1], "}") || isP(toks[i - 1], ";");
+        const doWhile = toks[i]!.value === "while" && isKw(toks[gStart], "do");
         if (closed && !doWhile) break; // start a fresh statement here
       }
       // A decorator sigil after a completed statement starts a fresh one too, so a
       // decorated declaration is analyzed on its own rather than glued to its predecessor.
-      if (group.length && balanced && (isP(tk, "@@") || isP(tk, "@"))) {
-        const prev = group[group.length - 1]!;
-        if (isP(prev, "}") || isP(prev, ";")) break;
+      if (i > gStart && balanced && (isP(toks[i], "@@") || isP(toks[i], "@"))) {
+        if (isP(toks[i - 1], "}") || isP(toks[i - 1], ";")) break;
       }
-      group.push(tk); i++;
-      if (isP(tk, "{")) cur++;
-      else if (isP(tk, "}")) cur--;
-      else if (isP(tk, "(")) par++;
-      else if (isP(tk, ")")) par--;
-      else if (isP(tk, "[")) br++;
-      else if (isP(tk, "]")) br--;
-      if (cur <= 0 && par <= 0 && br <= 0 && isP(tk, ";")) break; // `;`-terminated statement
+      // The depth updates and the `;` test read the token at `i`, so they are taken BEFORE
+      // `i` advances (they used to read a bound `tk` that outlived the increment).
+      if (isP(toks[i], "{")) cur++;
+      else if (isP(toks[i], "}")) cur--;
+      else if (isP(toks[i], "(")) par++;
+      else if (isP(toks[i], ")")) par--;
+      else if (isP(toks[i], "[")) br++;
+      else if (isP(toks[i], "]")) br--;
+      const semi = isP(toks[i], ";");
+      i++;
+      if (cur <= 0 && par <= 0 && br <= 0 && semi) break; // `;`-terminated statement
     }
-    const text = emit(group).trim();
+    const text = emit(toks, gStart, i).trim();
     if (text) statements.push({ text, line: startLine });
   }
 
