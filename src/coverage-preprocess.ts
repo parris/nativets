@@ -54,6 +54,20 @@ export interface Preprocessed {
   statements: PreStatement[];
   /** Constructs erased during the strip that are real blockers (classes → NT1012). */
   stripped: Blocker[];
+  /**
+   * Every name the strip ERASED a declaration (or an import binding) for, collected as it
+   * was thrown away: `import` specifiers, `type X = …`, `interface X { … }`.
+   *
+   * The strip deletes those but the ANNOTATIONS that use them survive into the statements
+   * below, so without this the parser sees `t: Token` with no `Token` anywhere — an
+   * artifact of the strip, not a property of the program — and refuses it (NT2003,
+   * `refuseUnknownName` in src/parser.ts). Handing the names back keeps those annotations
+   * on the erase-to-`number` fallback they were always on here.
+   *
+   * Collected LEXICALLY rather than from a whole-file parse, because the files this tool
+   * exists for are precisely the ones whose full parse fails.
+   */
+  erasedNames: string[];
 }
 
 type TokKind = "ident" | "num" | "str" | "template" | "regex" | "punct" | "comment" | "shebang";
@@ -301,6 +315,7 @@ export function preprocessForCoverage(source: string): Preprocessed {
   const toks = tokenize(source).filter((t) => t.kind !== "comment");
   const stripped: Blocker[] = [];
   const statements: PreStatement[] = [];
+  const erasedNames = new Set<string>();
 
   let i = 0;
   const n = toks.length;
@@ -342,15 +357,32 @@ export function preprocessForCoverage(source: string): Preprocessed {
     if (i >= n) break;
     const t = toks[i]!;
 
-    if (isKw(t, "import")) { i = skipToSemicolon(i); continue; }
+    if (isKw(t, "import")) {
+      const end = skipToSemicolon(i);
+      // Keep the NAMES this import bound before dropping it — see `erasedNames`. `from`,
+      // `type` and `as` are the clause's own keywords, never bindings.
+      for (let j = i + 1; j < end; j++) {
+        const u = toks[j]!;
+        if (u.kind === "ident" && u.value !== "from" && u.value !== "type" && u.value !== "as") erasedNames.add(u.value);
+      }
+      i = end;
+      continue;
+    }
     // A PLAIN `type`/`interface` is still erased (type-level, legitimately erasable — it
     // is not counted as a blocker). A DECORATED one is not: `@@mutable type Cell = { … }`
     // changes how later statements COMPILE, so erasing it would make `coverage` report an
     // NT1606 the real compiler does not. Those reach the real parser (the decorator sigil
     // is what `t` is here, so neither branch below matches) and their alias travels to the
     // next statement via `ParseOpts.collectTypes`.
-    if (isKw(t, "type") && toks[i + 1]?.kind === "ident") { i = skipToSemicolon(i); continue; }
-    if (isKw(t, "interface")) { i = skipBraceBlock(i); continue; }
+    // Both erasures record the NAME they dropped (`erasedNames`): the annotations that use
+    // it survive into the statements below, and a parser that cannot see the declaration
+    // would refuse the name outright (NT2003) instead of falling back as it does today.
+    if (isKw(t, "type") && toks[i + 1]?.kind === "ident") { erasedNames.add(toks[i + 1]!.value); i = skipToSemicolon(i); continue; }
+    if (isKw(t, "interface")) {
+      if (toks[i + 1]?.kind === "ident") erasedNames.add(toks[i + 1]!.value);
+      i = skipBraceBlock(i);
+      continue;
+    }
     // `class` is no longer erased: minimal classes (fields + constructor + methods) now
     // parse + compile, so the class flows to the real parser as an ordinary statement.
     // A class using a still-deferred feature (inheritance/static/modifiers/field
@@ -392,5 +424,5 @@ export function preprocessForCoverage(source: string): Preprocessed {
     if (text) statements.push({ text, line: startLine });
   }
 
-  return { statements, stripped };
+  return { statements, stripped, erasedNames: [...erasedNames] };
 }

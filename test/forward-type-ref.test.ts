@@ -143,14 +143,117 @@ console.log(get(b));`);
   // "self-recursion" block below. What is still refused is a MUTUAL cycle, two tests down,
   // and that one still has to be told apart from a forward reference.
 
-  // The blast-radius guard: a name that is not declared in this file keeps the old
-  // fallback. Imported types resolve through the linker, and every module in src/ relies
-  // on that path — refusing it here would be a far larger change than this diagnostic.
-  test("a type name not declared in this file still falls back, unrefused", () => {
+  // The blast-radius guard: a name BOUND BY AN IMPORT keeps the old fallback. Imported
+  // types resolve through the linker (modules.ts seeds `typeEnv` before the real parse),
+  // and a name whose seeding failed upstream must still be reported upstream — so the
+  // parser declines to judge any name an import binds, even when nothing seeded it.
+  test("an IMPORTED type name still falls back, unrefused", () => {
     const r = reject(`
+import type { SomeTypeFromElsewhere } from "./nowhere.ts";
 const n: SomeTypeFromElsewhere = 3;
 console.log(n + 1);`);
-    expect(r.code).toBe(""); // compiles, exactly as before
+    expect(r.code).not.toBe("NT2003"); // never blamed on the annotation
+  });
+
+  // THE HOLE THIS BLOCK CLOSES. A name declared NOWHERE — not in this file, not imported,
+  // not a builtin — used to erase to `number` right here, and the program was then refused
+  // downstream by an NT2001 blaming whatever VALUE was annotated with it. `g` is fine;
+  // `{x: 41}` is fine; the typo is `Nope`. tsc says "Cannot find name 'Nope'" and points
+  // at the annotation, and so must we.
+  test("a type name declared nowhere is refused AT THE ANNOTATION, not at the call site", () => {
+    const r = reject(`
+function g(t: Nope): number { return t.x + 1; }
+console.log(g({ x: 41 }));`);
+    expect(r.code).toBe("NT2003");
+    expect(r.message).toContain("Cannot find name 'Nope'");
+    expect(r.message).not.toContain("'g'"); // never the function...
+    expect(r.message).not.toContain("expects number"); // ...and never the value
+  });
+
+  // The SAME erasure, one door over. A CLASS declares a type too, and classes are not part
+  // of the hoisting fixpoint (their instance shape only exists once `parseClass` runs), so
+  // a class named in an annotation ABOVE its declaration found nothing in `typeAliases` and
+  // fell through to `number`. `declaredClassNames` already knew better — it was only
+  // consulted in hoist mode, so the main parse walked straight past it into the erasure.
+  //
+  // Reordering DOES fix this one (the same program with `class MyC` first compiles and
+  // matches node), so it is the ordering diagnostic, not "cannot find name".
+  test("a class named as a type above its declaration is refused on the TYPE, not the value", () => {
+    const r = reject(`
+function f(x: MyC): number { return x.n; }
+class MyC { n: number; constructor(n: number) { this.n = n; } }
+console.log(f(new MyC(7)));`);
+    expect(r.code).toBe("NT1030");
+    expect(r.message).toContain("'MyC'");
+    expect(r.message).toContain("before its declaration");
+    expect(r.message).not.toContain("'f'"); // not the function that used it
+    expect(r.message).not.toContain("expects number"); // not the value it was applied to
+    expect(r.hint).toContain("class");
+  });
+
+  // THE OVER-REFUSAL GUARD. A generic DECLARATION's own parameter is declared right there
+  // in the `<…>`, but `skipGenerics` throws the names away — so `T` in the body reached the
+  // fallback looking exactly like a name that exists nowhere. It compiled before NT2003 and
+  // it has to keep compiling: the parameter erases to `number` as it always did, and only
+  // the false refusal is gone. Caught by probing generic declarations after the fact, not by
+  // the corpus, which happens not to contain one.
+  test("a generic type/interface declaration's own parameter is not a missing name", async () => {
+    await matchesNode(`
+interface Box<T> { v: T }
+const b: Box<number> = { v: 3 };
+console.log(b.v);`);
+    await matchesNode(`
+type Wrap<T> = { inner: T };
+const w: Wrap<number> = { inner: 7 };
+console.log(w.inner);`);
+  });
+
+  // SPECULATION SAFETY, and it is the biggest structural risk in the whole refusal.
+  // `tryCallTypeArgs` parses `<…>` after a primary as a call's type arguments and backtracks
+  // on any throw — so `i < n` speculatively resolves `n` as a TYPE NAME and lands on exactly
+  // the path NT2003 now throws from. It is safe only because the throw is caught: the throw
+  // is what tells the speculation this was not a type. Measured over the corpus, this fires
+  // 199 times, so a refusal that escaped the speculative frame would break every comparison
+  // in the tree at once.
+  test("a comparison whose operands are not types still parses as a comparison", async () => {
+    await matchesNode(`
+const n = 3;
+const s = "abc";
+let i = 0;
+while (i < n) { i = i + 1; }
+console.log(i, i < n, n < s.length, i < s.length);`);
+  });
+
+  // The ambient escape: a name TypeScript's own lib declares is never "declared nowhere".
+  // The list is deliberately generous — a name wrongly out of it is a false refusal on valid
+  // code, which is strictly worse than the erasure NT2003 replaces.
+  test("builtin/ambient type names are not refused", async () => {
+    await matchesNode(`
+function f(x: any, y: unknown, z: Readonly<number>): number { return x + y + z; }
+console.log(f(1, 2, 3));`);
+  });
+
+  // The whole point of the ambient list is to CHANGE NOTHING for the names on it: whatever
+  // a lib-declared name did before — compile, or fail downstream on the erasure — it must
+  // still do. The one thing it must never become is "Cannot find name", because these names
+  // are declared by TypeScript's own lib and no program has to declare them. So the
+  // assertion is only `not NT2003`, deliberately: pinning the specific outcome would make
+  // this test fail whenever an unrelated lane teaches nativets one of these types, which is
+  // exactly what happened to `ReadonlyMap` here.
+  test("an ambient name nativets does not model is never 'Cannot find name'", () => {
+    for (const src of [
+      `const m: ReadonlyMap<string, number> = new Map();\nconsole.log(m.size);`,
+      `const w: WeakMap<string, number> = new Map();\nconsole.log(1);`,
+      `function f(x: ArrayLike<number>): number { return 1; }\nconsole.log(f([1]));`,
+    ]) expect(reject(src).code).not.toBe("NT2003");
+  });
+
+  // ...and the reordered program is the proof that the advice in that hint is true.
+  test("moving the class above its first use compiles and matches node", async () => {
+    await matchesNode(`
+class MyC { n: number; constructor(n: number) { this.n = n; } }
+function f(x: MyC): number { return x.n; }
+console.log(f(new MyC(7)));`);
   });
 
   // MUTUAL recursion. Before hoisting this could only be described as "Q used before its

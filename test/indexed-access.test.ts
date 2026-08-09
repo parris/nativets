@@ -119,14 +119,32 @@ console.log(s);
     );
   });
 
+  // A base that RESOLVES but is not a record — its fields cannot be looked up, and no
+  // reordering or import fixes that, so it is the indexed-access refusal.
   test("a base whose fields this file does not know is refused", () => {
+    expectRejected(
+      `
+type Num = number;
+const s: Num["a"] = "hi";
+console.log(s);
+`,
+      "NT1029",
+      "not a record type whose fields are known in this file",
+    );
+  });
+
+  // A base declared NOWHERE used to land on NT1029 as well, because the name erased to
+  // `number` in `resolveNamed` before this code ever saw it — so a typo was reported as a
+  // missing indexed-access FEATURE. The name is the fault, and NT2003 says so (tsc: "Cannot
+  // find name 'Missing'"). NT1029 keeps the case above, where the base really did resolve.
+  test("a base declared nowhere is a missing NAME, not a missing indexed-access feature", () => {
     expectRejected(
       `
 const s: Missing["a"] = "hi";
 console.log(s);
 `,
-      "NT1029",
-      "not a record type whose fields are known in this file",
+      "NT2003",
+      "Cannot find name 'Missing'",
     );
   });
 
