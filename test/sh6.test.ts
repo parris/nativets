@@ -289,9 +289,17 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // This row was crediting checker.ts with reaching line 676 past a miscompiled Scope. It
   // never did. See the "moved shallower is not automatically a regression" rule in
   // test/selfhost-ratchet.test.ts.
-  "checker.ts": { rung: 0, code: "NT1023", blame: "self" },
+  // ...and moved on again. `Checker` is an accumulator (loop/switch depth counters, a
+  // pushed-and-popped fnStack), not a copy-on-write value, so it carries `//@@mutable`
+  // like `Parser`/`FnGen`/`Analyzer` already did — a SOURCE change, the precedent Stage
+  // 45/49 set, not a language change. What sat behind NT1023 is NT1009: `FmtPiece` at
+  // checker.ts:4385, `{text: string; spec?: undefined} | {text?: undefined; spec: FmtSpec}`
+  // — an optional-field union with no string-literal discriminant.
+  "checker.ts": { rung: 0, code: "NT1009", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
-  "codegen.ts": { rung: 0, code: "NT1023", blame: "self" },
+  // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
+  // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
+  "codegen.ts": { rung: 0, code: "NT1015", blame: "self" },
   "coverage.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
@@ -300,7 +308,9 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // this row to land on NT1014, and it did not — it tracks checker.ts exactly, because the
   // two errors are byte-identical. Always re-measure this column rather than inferring it.
   // Now FOUR codes — NT1009 -> NT1606 -> NT1027 -> NT1023 -> NT1030 — still never its own.
-  "ownership.ts": { rung: 0, code: "NT1023", blame: "checker.ts" },
+  // ...and back to NT1009, still byte-identical to checker.ts's. `Analyzer` has carried
+  // `//@@mutable` since Stage 45, so this module has never had an NT1023 of its own.
+  "ownership.ts": { rung: 0, code: "NT1009", blame: "checker.ts" },
   "driver.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   "cli.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three

@@ -227,13 +227,20 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // NT1030 at once; the first-blocker instruments (sh6, bootstrap, selfhost-ratchet) show
     // it moving from one to the other, because they stop at the first. Two views of one
     // change, and neither is wrong — see the "moved shallower" rule in selfhost-ratchet.
+    // NT1023 IS NOW ZERO TREE-WIDE, and this histogram is the instrument that says so —
+    // it counts the CONSTRUCT (statement-by-statement recovery), not the first blocker,
+    // which is the distinction docs/self-hosting.md's standing correction is about. Two
+    // classes held all of it, `Checker` and `ModuleGen`, and both are accumulators rather
+    // than copy-on-write values, so they now carry `//@@mutable` exactly as
+    // `Parser`/`FnGen`/`Analyzer` already did. There is no third class behind them: this
+    // bucket did not shrink, it emptied.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1003", "NT1014", "NT1015", "NT1023", "NT1031"],
+      ["NT1003", "NT1014", "NT1015", "NT1031"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the
-    // `async`/`await` pair in driver.ts and cli.ts; and NT1023 in checker.ts + codegen.ts),
-    // and every other named code has exactly one site left in the whole tree.
+    // `async`/`await` pair in driver.ts and cli.ts — NT1023's two sites are gone), and
+    // every other named code has exactly one site left in the whole tree.
     expect(Math.max(...hist.values())).toBe(2);
     // NT1606 has LEFT this histogram entirely — coverage-preprocess.ts's `.push` was its
     // last site, and the Record lane's `switch` rewrite moved that module on. The old
