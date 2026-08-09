@@ -445,3 +445,73 @@ function pick(): () => number { return one; }
 console.log(pick()());
 `));
 });
+
+// ---------------------------------------------------------------------------
+// The DELIBERATE OVER-REJECTION, and the fix it prescribes — on the shape the
+// compiler's own CLI is written in.
+//
+// docs/divergences.md: "A promise that is threaded through un-awaited and only awaited
+// further up ... produces node's answer here, but is still refused ... Knowing which of
+// these is safe is a taint analysis over promise values; refusing the un-awaited call is
+// the same rule everywhere, and `await` at the inner call site is always the fix."
+//
+// `src/cli.ts` was written in exactly that shape — `await guard(() => buildBinary(…))`,
+// where `guard` awaits what its callback returns — and it is the FIRST time stage-1
+// stopped on a code of its own rather than a dependency's. The two tests below are the
+// two halves of that policy: the refused spelling stays refused, and the spelling the
+// diagnostic sends people to has to COMPILE and has to match node. Advice a diagnostic
+// gives that does not compile is worse than no advice.
+// ---------------------------------------------------------------------------
+describe("threading a promise through a callback: refused, and the prescribed fix works", () => {
+  // src/cli.ts's own shape, minimized: `guard` declares `() => Promise<T> | T` and awaits
+  // the result, so under node the promise IS awaited — one frame up. Still NT1020.
+  _test("un-awaited call inside a callback whose result the callee awaits", () => {
+    let code: string | null = null;
+    try {
+      sourceToIR(`
+async function work(n: number): Promise<number> { return n + 1; }
+async function guard(fn: () => Promise<number> | number): Promise<number> {
+  try { return await fn(); } catch (e) { console.error("caught"); return -1; }
+}
+console.log(await guard(() => work(1)));
+`);
+    } catch (err) { code = err instanceof NTError ? err.diag.code : `unexpected: ${err}`; }
+    expect(code).toBe("NT1020");
+  });
+
+  // ...and the fix: `await` at the inner call site, which needs the callback to be
+  // `async`. Under node this is the same program — `guard` awaits the arrow's promise
+  // either way, and a rejection propagates through the arrow to `guard`'s catch
+  // identically — so node is a real oracle for it, not a rubber stamp.
+  _test("`async () => await f()` compiles and matches node", async () => {
+    const src = `
+async function work(n: number): Promise<number> { return n + 1; }
+async function guard(fn: () => Promise<number> | number): Promise<number> {
+  try { return await fn(); } catch (e) { console.error("caught"); return -1; }
+}
+console.log(await guard(async () => await work(1)));
+`;
+    const dir = mkdtempSync(join(tmpdir(), "nt-await-"));
+    try {
+      const f = join(dir, "main.ts");
+      writeFileSync(f, src);
+      const bin = join(dir, "prog");
+      await buildBinary(src, bin, { target: "host", entryPath: f });
+      const ours = spawnSync(bin, [], { encoding: "utf8" });
+      const theirs = spawnSync("node", [f], { encoding: "utf8" });
+      expect(ours.stdout).toBe(theirs.stdout);
+      expect(ours.status).toBe(theirs.status);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  // The deliverable: stage-1 — `src/cli.ts` through the whole-program link — is what this
+  // policy was costing. It is a LINKED measurement because that is what stage-1 is.
+  _test("src/cli.ts (stage-1) is not blocked on NT1020", () => {
+    const p = new URL("../src/cli.ts", import.meta.url).pathname;
+    let code: string | null = null;
+    try { sourceToIR(readFileSync(p, "utf8"), p); } catch (err) {
+      code = err instanceof NTError ? err.diag.code : `unexpected: ${err}`;
+    }
+    expect(code).not.toBe("NT1020");
+  });
+});

@@ -376,7 +376,19 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   "driver.ts": { rung: 0, code: "NT1014", blame: "checker.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
-  "cli.ts": { rung: 0, code: "NT1020", blame: "self" },
+  //
+  // ...and it stops owning one again, by the fix the NT1020 diagnostic prescribes. The
+  // refusal is a DELIBERATE over-rejection (docs/divergences.md): `await guard(() =>
+  // buildBinary(…))` IS awaited under node, one frame up, but proving that is a taint
+  // analysis over promise values, so the rule is uniform and `await` at the inner call
+  // site is the fix. Both call sites are now `async () => await buildBinary(…)`, which is
+  // the same program under bun (guard awaits the callback's promise either way, and a
+  // rejection reaches its catch identically — verified by comparing old and new CLI
+  // stdout+exit for build/run/emit and for the NT-diagnostic error path). cli.ts is back
+  // to inheriting, and what it inherits is checker.ts's `argTys: ["string", null]`.
+  // ...and on again with the group when the ARRAY-OF-NULLABLE encoding landed: stage-1's
+  // entry point is gated on checker.ts's two remaining `new Map([[k,v], …])` tables.
+  "cli.ts": { rung: 0, code: "NT1014", blame: "checker.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
@@ -389,7 +401,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // other's. This branch had not seen the type-cycle lane (so it still recorded NT1702 for
   // coverage-preprocess.ts) and main had not seen the entries-form fix (so it still
   // recorded NT1014 for modules.ts). Re-measured on the merged tree rather than picked.
-  "coverage-preprocess.ts": { rung: 0, code: "NT1031", blame: "self" },
+  //
+  // NT1031 -> NT1606, and it is a SOURCE change: the `line`/`prev` cursor `tokenize`'s two
+  // closures moved is now ONE `//@@mutable` record (`TokState`), the same shape
+  // `src/lexer.ts`'s `LexState` used to clear the identical blocker — mutating a FIELD of
+  // an owned local is not a capture write. Behind it is `.push`, which the 185-site census
+  // predicted and which is refused BY DECISION (commit 1ea7fa2), so this module joins the
+  // four already parked there rather than moving a rung. Still `blame: "self"`.
+  "coverage-preprocess.ts": { rung: 0, code: "NT1606", blame: "self" },
 };
 
 /*
@@ -475,7 +494,12 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // Stage-1 (cli.ts, the whole compiler through its real entry point) left NT1017 when
 // `export async function` landed and now stops on parser.ts's `?.[]` at 1109:66 —
 // inherited through the link, not cli.ts's own code. Still rung 0.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1020" };
+//
+// It then briefly owned its blocker (NT1020, the un-awaited `buildBinary`) — the only
+// time stage-1 has ever stopped on its own code — and gave it back when both call sites
+// took the `await` the diagnostic prescribes. Now checker.ts's `argTys: ["string", null]`,
+// an ARRAY OF NULLABLE ELEMENTS, which gates five modules. Still rung 0.
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1014" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -749,9 +773,15 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // its largest term reveals the next one rather than finishing it.
       expect(`stage-1 rung ${m.rung}, ${m.code}`)
         .toBe(`stage-1 rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}`);
-      // FIFTH construct for stage-1, and the first that is cli.ts's OWN rather than a
-      // dependency's: calling the async `buildBinary` without `await`.
-      expect(m.error).toContain("calling async function 'buildBinary' without 'await'");
+      // SIXTH construct for stage-1, and the return to normal service: the FIFTH was the
+      // first blocker cli.ts ever owned (`calling async function 'buildBinary' without
+      // 'await'`), and both of its call sites now take the `await` that diagnostic
+      // prescribes. Back to a dependency's — checker.ts's `argTys: ["string", null]`, an
+      // array of NULLABLE elements, which gates five modules at once.
+      // SEVENTH: the array-of-nullable was an ENCODING ambiguity (`?N` is a prefix, `[]` a
+      // suffix, so `(T|null)[]` and `T[]|null` were one `Ty` string) and is now spelled
+      // `(?Nstring)[]`. Behind it, checker.ts's own two remaining entries-form tables.
+      expect(m.error).toContain("new Map([[key, value]");
       return;
     }
 

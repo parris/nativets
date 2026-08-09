@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "942f48b"
+    "rev": "e843be6"
   },
   "modules": {
     "ast.ts": {
@@ -31,16 +31,16 @@
       }
     },
     "cli.ts": {
-      "sha256": "d43a56e762a1302a",
+      "sha256": "00f3186158a99ba6",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
         "message": "[NT2001] process.stdout is not supported"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1020",
-        "message": "[NT1020] calling async function 'buildBinary' without 'await' at L:C (its value is a Promise under node; nativets runs it to completion immediately) is not supported yet"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "codegen.ts": {
@@ -57,16 +57,16 @@
       }
     },
     "coverage-preprocess.ts": {
-      "sha256": "b09b5deb95e55947",
+      "sha256": "2632d55f8546b8ce",
       "standalone": {
         "stage": "check",
-        "code": "NT1031",
-        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1031",
-        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       }
     },
     "coverage.ts": {
