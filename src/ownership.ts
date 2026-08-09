@@ -68,8 +68,14 @@ export interface MutableInfo {
   /** Just the METHOD names of the above — the conservative check for a receiver whose
    *  type the pass cannot resolve (a container element, a callback parameter). */
   setterProps: Set<string>;
+  /** Just the `@@mutable` RECORD tags — the subset of `classes` that came from a
+   *  `type`/`interface` rather than a `class`. `classes` deliberately mixes the two
+   *  (`mutableTags`), but the NT1607 parameter/`for-of` arm is dropped for records ONLY:
+   *  a record's write is a field store on a receiver named in the signature, whereas a
+   *  class's is a setter CALL whose receiver is `this` inside the method. */
+  records: Set<string>;
 }
-const NO_MUTABLE: MutableInfo = { classes: new Set(), setters: new Set(), setterProps: new Set() };
+const NO_MUTABLE: MutableInfo = { classes: new Set(), setters: new Set(), setterProps: new Set(), records: new Set() };
 
 /** Methods that mutate an array in place (so they conflict with a live borrow). */
 const MUTATING = new Set(["push", "pop"]);
@@ -481,6 +487,30 @@ class Analyzer {
     if (root.kind === "Identifier" && root.name === "this") return; // a method's own receiver
     const owned = root.kind === "Identifier" && this.varTy.has(root.name) && !this.borrowBindings.has(root.name);
     if (owned) return;
+    // THE SIGNATURE ARM (piece 3). A by-borrow PARAMETER or a `for-of` ELEMENT whose type
+    // is a `@@mutable` RECORD may be mutated in place. `borrowBindings` is exactly
+    // {parameters} ∪ {aliases} ∪ {for-of elements}, so subtracting `aliasOf` leaves the two
+    // this arm covers — an ALIAS is still refused, and so is any receiver that is not a
+    // binding (a container element, a call result, a capture), which never gets here.
+    //
+    // WHY THIS IS THE RIGHT PLACE FOR THE OPT-IN: the tag is NOMINAL and therefore part of
+    // the signature, so `function tick(c: Cell)` announces "may mutate" in its own type and
+    // the calling convention stays visible at the call site — the objection that ruled out
+    // inferring it. Requiring a second opt-in per (function × receiver) site would not.
+    //
+    // SOUND, and none of it is new machinery: a borrow never FREES (the caller still drops
+    // exactly once), the assigned VALUE is consumed (`b.items = local` MOVES `local`, which
+    // is what closes the use-after-free `.push` once had), and the OVERWRITTEN value is
+    // leaked rather than freed (required — an alias may still hold it). What is lost is
+    // EXCLUSIVITY, which docs/decorators.md Decision 3 already disclaims.
+    //
+    // Restricted to a receiver that IS the binding: `p.b.n = 1` keeps the refusal, because
+    // the record actually mutated (`p.b`) is a container element and not a binding at all.
+    if (object.kind === "Identifier" && this.borrowBindings.has(object.name) && !this.aliasOf.has(object.name)) {
+      const ty = this.varTy.get(object.name);
+      const tag = ty !== undefined && isObjectTy(ty) ? classTag(ty) : undefined;
+      if (tag !== undefined && this.mutable.records.has(tag)) return;
+    }
     const name = root.kind === "Identifier" ? root.name : null;
     if (name !== null && this.varTy.get(name) !== undefined && !this.isMutableInstance(this.varTy.get(name)!)) {
       // A borrowed binding of a NON-mutable type cannot be the receiver of a legal field
@@ -1011,6 +1041,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     classes: mutableTags(checked.program), // `@@mutable` classes AND `@@mutable` records
     setters: new Set(),
     setterProps: new Set(),
+    records: new Set(checked.program.mutableRecords ?? []),
   };
   for (const s of checked.program.body) {
     if (s.kind !== "FuncDecl" || !s.setter) continue;

@@ -224,15 +224,18 @@ console.log(f.n);
 });
 
 describe("ownership: only the owner may mutate a record (same rule as `@@mutable` classes)", () => {
-  test("NT1607 — assigning a field through a by-borrow PARAMETER", () => {
-    const r = rejectionOf(`
+  // WAS NT1607, now ACCEPTED — see "NT1607's parameter / for-of arm" below. The opt-in is
+  // NOMINAL and therefore part of the signature, so `tick(c: Cell)` announces "may mutate"
+  // at the call site, which is what the arm existed to keep visible.
+  test("a by-borrow PARAMETER of a mutable record is ACCEPTED (piece 3)", async () => {
+    const source = `
 @@mutable
 type Cell = { n: number };
 function tick(c: Cell): number { c.n = c.n + 1; return c.n; }
 const c: Cell = { n: 1 };
 console.log(tick(c));
-`);
-    expect(r?.code).toBe("NT1607");
+`;
+    await expectMatches(source, runWithNodeAttrs(source));
   });
 
   test("NT1607 — assigning a field through an ALIAS", () => {
@@ -247,15 +250,17 @@ console.log(c.n);
     expect(r?.code).toBe("NT1607");
   });
 
-  test("NT1607 — assigning a field of a `for-of` element", () => {
-    const r = rejectionOf(`
+  // WAS NT1607, now ACCEPTED — same arm. The element is still a BORROW (the array owns it
+  // and frees it), so the three obligations are unchanged; only exclusivity is given up.
+  test("a `for-of` element of a mutable record is ACCEPTED (piece 3)", async () => {
+    const source = `
 @@mutable
 type Cell = { n: number };
 const cells: Cell[] = [{ n: 1 }, { n: 2 }];
 for (const c of cells) { c.n = 0; }
 console.log(cells[0].n);
-`);
-    expect(r?.code).toBe("NT1607");
+`;
+    await expectMatches(source, runWithNodeAttrs(source));
   });
 
   test("NT1607 — assigning a field of a CONTAINER ELEMENT", () => {
@@ -590,5 +595,102 @@ console.log(a.bump().n);
 `);
     expect(r?.code).toBe("NT1030");
     expect(r?.message).toContain("'@@mutable class Node' is RECURSIVE");
+  });
+});
+
+/*
+ * PIECE 3 — NT1607's PARAMETER / `for-of` arm is dropped for a `@@mutable` RECORD.
+ *
+ * The opt-in travels with the NOMINAL type, which is part of the signature, so the
+ * calling convention stays visible at the call site — that is the objection that killed
+ * inferring it. `function tick(c: Cell)` says "may mutate" in its own type.
+ *
+ * SOUNDNESS, which is better than it looks. The three obligations all already held:
+ *   - a borrow never FREES, so the caller still drops exactly once (no double free);
+ *   - the assigned VALUE is consumed — storing a value the callee owns into the caller's
+ *     block MOVES it, which is the rule `.push` needed for the same reason;
+ *   - the OVERWRITTEN value is leaked, not freed, which is required — dropping it would
+ *     free something an alias may still hold.
+ * What is lost is EXCLUSIVITY, which docs/decorators.md Decision 3 already disclaims
+ * ("every alias observes the mutation"). An ALIAS receiver is still refused, and so is
+ * any receiver that is not a binding at all.
+ */
+describe("NT1607's parameter / for-of arm, dropped for a `@@mutable` record (piece 3)", () => {
+  test("a by-borrow PARAMETER of a `@@mutable` record may be mutated in place", async () => {
+    const source = `
+//@@mutable
+interface Cell { n: number; tag: string }
+function tick(c: Cell): void { c.n = c.n + 1; }
+function retag(c: Cell): void { c.tag = "seen-" + c.tag; }
+const a: Cell = { n: 1, tag: "a" };
+tick(a);
+tick(a);
+retag(a);
+console.log(a.n, a.tag);
+`;
+    await expectMatches(source, await runWithNode(source));
+  });
+
+  test("a `for-of` ELEMENT of a `@@mutable` record may be mutated in place", async () => {
+    const source = `
+//@@mutable
+interface Cell { n: number }
+const xs: Cell[] = [{ n: 1 }, { n: 2 }, { n: 3 }];
+for (const c of xs) { c.n = c.n * 10; }
+console.log(xs[0].n, xs[1].n, xs[2].n);
+`;
+    await expectMatches(source, await runWithNode(source));
+  });
+
+  test("an ALIAS receiver is STILL NT1607 — the arm dropped is borrow-by-signature, not aliasing", () => {
+    const r = rejectionOf(`
+//@@mutable
+interface Cell { n: number }
+const a: Cell = { n: 1 };
+const b = a;
+b.n = 7;
+console.log(a.n);
+`);
+    expect(r?.code).toBe("NT1607");
+  });
+
+  test("an undecorated record parameter is untouched — still NT1606 at the TYPE gate", () => {
+    const r = rejectionOf(`
+interface Cell { n: number }
+function tick(c: Cell): void { c.n = c.n + 1; }
+const a: Cell = { n: 1 };
+tick(a);
+console.log(a.n);
+`);
+    expect(r?.code).toBe("NT1606");
+  });
+
+  test("a `@@mutable` CLASS parameter is untouched — still NT1607", () => {
+    const r = rejectionOf(`
+//@@mutable
+class Counter { pos: number = 0; bump(): Counter { this.pos++; return this; } get(): number { return this.pos; } }
+function tick(c: Counter): void { c.bump(); }
+const a = new Counter();
+tick(a);
+console.log(a.get());
+`);
+    expect(r?.code).toBe("NT1607");
+  });
+
+  test("mutating through a parameter leaks nothing and frees nothing twice", async () => {
+    const r = await compileAndRun(`
+//@@mutable
+interface Cell { n: number; tag: string }
+function tick(c: Cell): void { c.n = c.n + 1; }
+function scope(): number {
+  const a: Cell = { n: 1, tag: "a" };
+  tick(a); tick(a); tick(a);
+  return a.n;
+}
+console.log(scope());
+console.log(__objLive(), __arrLive());
+`);
+    expect(r.stdout).toBe("4\n0 0\n");
+    expect(r.exitCode).toBe(0);
   });
 });
