@@ -10,11 +10,15 @@
  * for macOS/iOS/Android unchanged).
  */
 
-import { mkdtempSync, writeFileSync, rmSync, readdirSync, existsSync } from "node:fs";
+import {
+  mkdtempSync, writeFileSync, rmSync, readdirSync, existsSync, statSync,
+  mkdirSync, renameSync, copyFileSync, linkSync,
+} from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 import { parse } from "./parser.ts";
 import { linkProgram } from "./modules.ts";
@@ -421,57 +425,239 @@ export function linkArgv(
   return { args, warning };
 }
 
-function writeIR(source: string, entryPath?: string): { dir: string; ll: string; rt: string; actor: string | null; extra: string[] } {
-  const dir = mkdtempSync(join(tmpdir(), "nativets-build-"));
-  const ll = join(dir, "module.ll");
-  const ir = sourceToIR(source, entryPath);
-  writeFileSync(ll, ir);
-  const rt = join(dir, "runtime.c");
-  writeFileSync(rt, runtimeSource); // embedded runtime → self-contained executable
+/* ============================================================
+ * The build cache.
+ *
+ * Two caches share one key: a prebuilt runtime OBJECT (skips recompiling the 3,886-line
+ * runtime.c on every build) and a content-addressed BINARY (skips the build entirely).
+ * The binary cache is the large one, for a reason that is not about compilation at all:
+ * macOS scans every newly-created Mach-O on its FIRST execution, and the scan result is
+ * cached per FILE IDENTITY, not per content. Measured on this machine, with the suite
+ * running: a fresh binary costs ~980ms to execute, the SAME file re-executed from a
+ * later process costs ~2.2ms, and a byte-identical COPY at a fresh path costs ~750ms
+ * again. So the cached artifact must be executed IN PLACE — copying it back to a
+ * caller-chosen path would throw the entire win away.
+ *
+ * CORRECTNESS. A stale hit is a silent wrong answer, the worst outcome this project
+ * recognises, so the key is one-directional by construction: everything that can change
+ * the produced bytes is hashed, and anything unhashed must be incapable of changing
+ * them. Over-invalidating costs a rebuild; under-invalidating costs correctness. When in
+ * doubt this code hashes MORE.
+ *
+ * `NATIVETS_NO_CACHE=1` disables both caches, so a suspected cache bug can be ruled out
+ * in one command.
+ * ============================================================ */
+
+/** Inputs that fully determine a build's output bytes. Every field is hashed. */
+export interface BuildKeyInputs {
+  /** The generated LLVM IR — covers the source AND the whole frontend that produced it. */
+  ir: string;
+  /** Text of every runtime .c/.h that this build links, so a runtime edit invalidates. */
+  sources: string[];
+  /** Every compile/link flag: target triple, sysroot, -static, feature defines, -l libs. */
+  flags: string[];
+  /** Identity of the C toolchain, so a clang upgrade does not serve objects it did not build. */
+  cc: string;
+}
+
+/**
+ * Hash a list of fields UNAMBIGUOUSLY. Length-prefixing is the load-bearing detail: with
+ * a plain separator, `["ab","c"]` and `["a","bc"]` hash alike, and a separator byte can
+ * legitimately occur inside IR text or a link flag. Prefixing each field with its length
+ * makes the encoding injective, so distinct inputs cannot share a key by construction.
+ */
+function hashFields(fields: string[]): string {
+  const h = createHash("sha256");
+  h.update(`${fields.length}\n`);
+  for (const f of fields) {
+    h.update(`${f.length}\n`);
+    h.update(f);
+  }
+  return h.digest("hex");
+}
+
+/** The cache key for a build. Distinct inputs give distinct keys (see `hashFields`). */
+export function buildCacheKey(i: BuildKeyInputs): string {
+  // The field list is itself length-prefixed, so a flag can never be confused for a
+  // source and the section boundaries cannot drift.
+  return hashFields([
+    "nativets-build-cache-v1", // bump to invalidate every entry after a cache-format change
+    i.ir,
+    String(i.sources.length),
+    ...i.sources,
+    String(i.flags.length),
+    ...i.flags,
+    i.cc,
+  ]);
+}
+
+/* ============================================================
+ * Scratch-dir reaping.
+ *
+ * Every build and every harness run makes a `nativets-*` temp dir and removes it in a
+ * `finally`. That `finally` cannot run when the process is KILLED, which is routine —
+ * a ^C in the test loop, or an agent lane whose run is cancelled. The leak was measured
+ * at 5,311 dirs (408 MB) in one TMPDIR, oldest five days.
+ *
+ * The safety argument is entirely the AGE THRESHOLD, because other builds are running
+ * concurrently and deleting a live build's dir would break it in a way that looks like
+ * a compiler bug. A build dir lives ~0.12s and a harness run dir ~1s, so a dir whose
+ * mtime is hours old cannot belong to a live run — that is the "cannot show it is
+ * stale, do not touch it" rule. We also require our own `nativets-` prefix, so a
+ * foreign tool's scratch is never a candidate.
+ * ============================================================ */
+
+/** Default staleness cutoff: orders of magnitude beyond any real build (~0.12s) or run (~1s). */
+const SCRATCH_MAX_AGE_MS = 6 * 3600_000;
+/** Cap per process, so the first run after a large leak drains a slice instead of stalling. */
+const SCRATCH_REAP_LIMIT = 400;
+
+/** Default age bound for cached artifacts. Evicting one costs a rebuild, never a wrong answer. */
+const CACHE_MAX_AGE_MS = 14 * 24 * 3600_000;
+const CACHE_REAP_LIMIT = 2000;
+
+/**
+ * One age-based sweep, shared by both reapers: remove entries of `dir` that `keep`
+ * selects, that are of the wanted kind, and whose mtime is older than `maxAge` — at most
+ * `limit` of them. Never throws; a reaping failure must not fail a build.
+ */
+function sweep(
+  dir: string, want: "dir" | "file", keep: (name: string) => boolean,
+  maxAge: number, limit: number, now: number,
+): number {
+  let removed = 0;
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return 0; }
+  for (const name of names) {
+    if (removed >= limit) break;
+    if (!keep(name)) continue;
+    const p = join(dir, name);
+    try {
+      const st = statSync(p);
+      if ((want === "dir") !== st.isDirectory()) continue;
+      if (now - st.mtimeMs < maxAge) continue; // too young to prove stale. Hands off.
+      rmSync(p, { recursive: true, force: true });
+      removed++;
+    } catch { /* vanished, or not ours to remove — either way, nothing to do */ }
+  }
+  return removed;
+}
+
+/**
+ * Best-effort removal of abandoned `nativets-*` scratch dirs. Returns how many were
+ * removed.
+ */
+export function reapStaleScratchDirs(
+  opts: { dir?: string; maxAgeMs?: number; limit?: number; now?: number } = {},
+): number {
+  return sweep(
+    opts.dir ?? tmpdir(),
+    "dir",
+    // Ours only. The trailing `-` matters: it keeps a file or dir literally named
+    // `nativets` (say, the `bun run compile` output) out of the candidate set.
+    (name) => name.startsWith("nativets-"),
+    opts.maxAgeMs ?? SCRATCH_MAX_AGE_MS,
+    opts.limit ?? SCRATCH_REAP_LIMIT,
+    opts.now ?? Date.now(),
+  );
+}
+
+/**
+ * Age out cached artifacts, so the cache cannot become the disk leak it was built to
+ * replace. Entry mtimes are creation times (a hardlink does not touch them), so this is
+ * "built more than `maxAgeMs` ago", not "unused" — a coarser rule than LRU, and the
+ * right one here because the penalty for evicting a live entry is only a rebuild.
+ */
+export function reapStaleCacheEntries(
+  opts: { dir?: string; maxAgeMs?: number; limit?: number; now?: number } = {},
+): number {
+  const root = opts.dir ?? cacheRoot();
+  if (!root) return 0;
+  const maxAge = opts.maxAgeMs ?? CACHE_MAX_AGE_MS;
+  const limit = opts.limit ?? CACHE_REAP_LIMIT;
+  const now = opts.now ?? Date.now();
+  let removed = 0;
+  for (const kind of ["bin", "obj"]) {
+    removed += sweep(join(root, kind), "file", () => true, maxAge, limit - removed, now);
+  }
+  return removed;
+}
+
+/** Reap once per process, lazily, off the first build. Cheap (a readdir) and never fatal. */
+let reaped = false;
+function reapOnce(): void {
+  if (reaped) return;
+  reaped = true;
+  try { reapStaleScratchDirs(); } catch { /* best effort, always */ }
+  try { reapStaleCacheEntries(); } catch { /* best effort, always */ }
+}
+
+/* ------------------------------------------------------------
+ * The link plan.
+ *
+ * Which runtime units and flags a program needs is decided from the IR ALONE, with no
+ * disk access — that is what lets the cache key be computed before any work happens.
+ * The conditional-link decisions below are exactly the ones that used to live inline in
+ * `writeIR`; only the place they put their answers changed. Each still matches the CALL
+ * site rather than the always-present `declare` line, which is what keeps a runtime
+ * object out of a binary that does not use it.
+ * ------------------------------------------------------------ */
+
+/** One runtime translation unit or header: its filename in the build dir, and its text. */
+interface RuntimeUnit { name: string; text: string }
+
+interface LinkPlan {
+  /** `.c` files to compile and link, in link order (runtime.c first, actor last). */
+  units: RuntimeUnit[];
+  /** `.h` files written alongside so the units' quote-includes resolve. Never on a command line. */
+  headers: RuntimeUnit[];
+  /** COMPILE-time defines. They change how the units compile, so they belong to an object's key. */
+  defines: string[];
+  /** LINK-time library flags. Appended after all objects, which satisfies GNU ld's ordering rule. */
+  libs: string[];
+  /** Whether the actor runtime is in the plan — the wasm gate needs this before building. */
+  actor: boolean;
+}
+
+/** Decide the runtime units + flags for a program, from its IR. Pure apart from `raylibLinkFlags`. */
+function planLink(ir: string): LinkPlan {
+  const units: RuntimeUnit[] = [{ name: "runtime.c", text: runtimeSource }];
+  const headers: RuntimeUnit[] = [];
+  const defines: string[] = [];
+  const libs: string[] = [];
+
   // B2 Map/Set: link the HAMT core + scalar-ABI wrappers only when used (codegen
   // emits nt_map_new/nt_set_new exactly then). libc-only, so it cross-links unchanged.
-  const extra: string[] = [];
   // Match the CALL site, not the (always-present) `declare` line — collections are
   // reached through the nt_coll_*/nt_map_*_slot/nt_set_*_slot wrappers.
   if (irCallsAny(ir, ["@nt_coll_", "@nt_map_", "@nt_set_"])) {
-    writeFileSync(join(dir, "nt_hamt.h"), hamtHeader); // quote-included by both .c files
-    const hamt = join(dir, "nt_hamt.c");
-    writeFileSync(hamt, hamtSource);
-    const mapset = join(dir, "nt_mapset.c");
-    writeFileSync(mapset, mapsetSource);
-    extra.push(hamt, mapset);
+    headers.push({ name: "nt_hamt.h", text: hamtHeader }); // quote-included by both .c files
+    units.push({ name: "nt_hamt.c", text: hamtSource }, { name: "nt_mapset.c", text: mapsetSource });
   }
   // Persistent vector (B2 step 2): link nt_pvec.c + define NT_PVEC ONLY when the program
   // actually uses arrays — matched at a CALL site (`call … @nt_arr_*`), never the
-  // always-present `declare`, exactly like the bytes/curl/gui lanes. `-D` is position-
-  // independent for clang, so it may ride in `extra` with the source files.
+  // always-present `declare`, exactly like the bytes/curl/gui lanes.
   if (irCallsAny(ir, ["@nt_arr_"])) {
-    writeFileSync(join(dir, "nt_pvec.h"), pvecHeader); // quote-included by runtime.c + the .c
-    const pvec = join(dir, "nt_pvec.c");
-    writeFileSync(pvec, pvecSource);
-    extra.push(pvec, "-DNT_PVEC");
+    headers.push({ name: "nt_pvec.h", text: pvecHeader }); // quote-included by runtime.c + the .c
+    units.push({ name: "nt_pvec.c", text: pvecSource });
+    defines.push("-DNT_PVEC");
   }
   // Bytes (stdlib batch 2): link nt_bytes.c ONLY when a program uses Uint8Array /
   // TextEncoder / TextDecoder (codegen emits `call … @nt_bytes_*` exactly then).
   // libc-only, so it cross-links to every target unchanged.
   if (irCallsAny(ir, ["@nt_bytes_"])) {
-    writeFileSync(join(dir, "nt_bytes.h"), bytesHeader); // quote-included by the .c
-    const bytes = join(dir, "nt_bytes.c");
-    writeFileSync(bytes, bytesSource);
-    extra.push(bytes);
+    headers.push({ name: "nt_bytes.h", text: bytesHeader }); // quote-included by the .c
+    units.push({ name: "nt_bytes.c", text: bytesSource });
   }
   // HTTP client (L-d): link nt_http.c + libcurl ONLY when a program calls httpGet/httpPost.
-  // `-lcurl` follows nt_http.c in the link line (the .c references curl symbols), matching
-  // the GNU-ld "library after the object that needs it" ordering. Host/Linux only — libcurl
-  // is present on macOS/Linux CI; the conditional link keeps every other build (incl. the
-  // iOS/Android cross-builds) free of the curl dependency.
+  // Host/Linux only — libcurl is present on macOS/Linux CI; the conditional link keeps every
+  // other build (incl. the iOS/Android cross-builds) free of the curl dependency.
   // Match the CALL site, not the (always-present) `declare` line, so nt_http.c + libcurl
   // are pulled in ONLY when the program actually calls the builtin.
   // `fetch` lives in the same file, so its call site pulls in the same object + libcurl.
   if (ir.includes("call ptr @nt_http_post(") || ir.includes("call ptr @nt_http_get(") || ir.includes("call ptr @nt_fetch(")) {
-    const http = join(dir, "nt_http.c");
-    writeFileSync(http, httpSource);
-    extra.push(http, "-lcurl");
+    units.push({ name: "nt_http.c", text: httpSource });
+    libs.push("-lcurl");
   }
   // GUI (north-star C-d): link nt_gui.c + raylib (+ macOS frameworks) ONLY when the program
   // actually CALLS a GUI builtin — matched at the call site (`call … @nt_gui_*`), never the
@@ -480,21 +666,40 @@ function writeIR(source: string, entryPath?: string): { dir: string; ll: string;
   // ONLY: GUI programs are not cross-built (iOS/Android/wasm need platform UI bindings), so
   // non-GUI programs and every cross-build stay entirely raylib-free.
   if (irCallsAny(ir, ["@nt_gui_"])) {
-    const gui = join(dir, "nt_gui.c");
-    writeFileSync(gui, guiSource);
-    extra.push(gui, ...raylibLinkFlags());
+    units.push({ name: "nt_gui.c", text: guiSource });
+    // In the key as well as the link line: which raylib we linked is part of the artifact.
+    libs.push(...raylibLinkFlags());
   }
   // Link the v0 actor runtime ONLY when the program uses actors (codegen emits the
   // nt_sched_init prologue exactly then). It relies on ucontext (makecontext/
   // swapcontext), which the Android NDK's Bionic does not declare at low API levels,
   // so pulling it into every non-actor binary would break the Android cross-build.
-  let actor: string | null = null;
-  if (ir.includes("call void @nt_sched_init()")) {
-    actor = join(dir, "nt_actor.c");
-    writeFileSync(actor, actorSource);
-    writeFileSync(join(dir, "nt_actor.h"), actorHeader); // its header (quote-included)
+  const actor = ir.includes("call void @nt_sched_init()");
+  if (actor) {
+    headers.push({ name: "nt_actor.h", text: actorHeader }); // its header (quote-included)
+    units.push({ name: "nt_actor.c", text: actorSource });
   }
-  return { dir, ll, rt, actor, extra };
+  return { units, headers, defines, libs, actor };
+}
+
+/** Write the IR and a plan's sources into a fresh scratch dir. The disk half of `planLink`. */
+function materialize(ir: string, plan: LinkPlan): { dir: string; ll: string; sources: string[] } {
+  reapOnce();
+  const dir = mkdtempSync(join(tmpdir(), "nativets-build-"));
+  const ll = join(dir, "module.ll");
+  writeFileSync(ll, ir);
+  for (const h of plan.headers) writeFileSync(join(dir, h.name), h.text);
+  const sources = plan.units.map((u) => {
+    const p = join(dir, u.name);
+    writeFileSync(p, u.text); // embedded runtime → self-contained executable
+    return p;
+  });
+  return { dir, ll, sources };
+}
+
+function writeIR(source: string, entryPath?: string): { dir: string; ll: string } {
+  const ir = sourceToIR(source, entryPath);
+  return materialize(ir, planLink(ir));
 }
 
 function run(cc: string, args: string[]): void {
@@ -502,21 +707,180 @@ function run(cc: string, args: string[]): void {
   if (r.status !== 0) throw new BuildError(`${cc} failed (${r.status}):\n${r.stderr}`);
 }
 
+/* ------------------------------------------------------------
+ * Cache storage.
+ * ------------------------------------------------------------ */
+
+/** The cache root, or `null` when caching is off. Read per call so a test can toggle it. */
+function cacheRoot(): string | null {
+  if (process.env.NATIVETS_NO_CACHE === "1") return null;
+  const explicit = process.env.NATIVETS_CACHE_DIR;
+  if (explicit) return explicit;
+  const xdg = process.env.XDG_CACHE_HOME;
+  return join(xdg && xdg.length ? xdg : join(homedir(), ".cache"), "nativets");
+}
+
+let cacheHits = 0;
+let cacheMisses = 0;
+/** Cache hit/miss counters for this process. Lets a test assert a hit WITHOUT timing it. */
+export function buildCacheStats(): { hits: number; misses: number } {
+  return { hits: cacheHits, misses: cacheMisses };
+}
+
+/**
+ * Identity of a C toolchain: its path plus its own `--version` banner. In the key so a
+ * clang upgrade cannot serve artifacts the old clang produced. Memoized per process —
+ * it is a subprocess, and a cache hit must not pay for one per build.
+ */
+const ccIdentityCache = new Map<string, string>();
+function ccIdentity(cc: string): string {
+  const memo = ccIdentityCache.get(cc);
+  if (memo !== undefined) return memo;
+  const r = spawnSync(cc, ["--version"], { encoding: "utf8" });
+  // A failed probe hashes as "unknown" for THIS cc string. That is safe: it is a
+  // constant, so it can only ever over-share within one unidentifiable compiler, and
+  // the compiler itself would fail the build a moment later anyway.
+  const id = r.status === 0 ? `${cc}\n${r.stdout ?? ""}` : `${cc}\nunknown`;
+  ccIdentityCache.set(cc, id);
+  return id;
+}
+
+/**
+ * Publish `src` into the cache at `key` atomically: link to a unique temp name in the
+ * same directory, then rename over. Never throws — a cache that cannot be written must
+ * degrade to no cache, not to a failed build.
+ *
+ * If an entry already exists we KEEP it rather than replacing it. The bytes are equal by
+ * construction (same key), and the existing inode may already carry a system scan verdict
+ * that replacing it would throw away.
+ */
+function cacheStore(root: string, kind: string, key: string, src: string): void {
+  try {
+    const dir = join(root, kind);
+    mkdirSync(dir, { recursive: true });
+    const dest = join(dir, key);
+    if (existsSync(dest)) return;
+    const tmp = `${dest}.${process.pid}.${Math.random().toString(36).slice(2)}`;
+    // Hardlink rather than copy: same inode, so the cache entry and the build output
+    // share the system's scan verdict instead of each paying for it.
+    try { linkSync(src, tmp); } catch { copyFileSync(src, tmp); }
+    try { renameSync(tmp, dest); } catch { rmSync(tmp, { force: true }); }
+  } catch { /* cache is an optimisation; never fail a build for it */ }
+}
+
+/**
+ * Materialise cache entry `key` at `outPath`. Returns false on any miss or doubt, so the
+ * caller falls back to a real build — a miss is always safe, a false hit never is.
+ *
+ * HARDLINK, not copy. macOS caches its malware-scan verdict per INODE, so a hardlink to
+ * an already-executed artifact runs in ~2ms while a byte-identical copy pays the full
+ * ~1s scan again. That single fact is why this cache is worth having, so the copy path
+ * below is a correctness fallback for a cross-device cache, not an equivalent choice.
+ */
+function cacheFetch(root: string, kind: string, key: string, outPath: string): boolean {
+  try {
+    const src = join(root, kind, key);
+    // Confirm the entry is really there and non-empty rather than trusting an mtime: a
+    // truncated artifact from a killed run must read as a miss.
+    const st = statSync(src);
+    if (!st.isFile() || st.size === 0) return false;
+    rmSync(outPath, { force: true }); // linkSync will not overwrite
+    try { linkSync(src, outPath); } catch { copyFileSync(src, outPath); }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Compile one runtime unit to a cached object. The object's key covers its own text, every
+ * header written beside it, the compile-time defines and target flags, and the compiler
+ * identity — so a runtime `.c` edit (or a `-DNT_PVEC` flip, or a cross target) rebuilds it.
+ * Returns the object path, or `null` to fall back to compiling the `.c` in the link step.
+ */
+function runtimeObject(
+  root: string, unit: RuntimeUnit, plan: LinkPlan, cflags: string[], cc: string, srcPath: string, dir: string,
+): string | null {
+  const key = buildCacheKey({
+    ir: `unit:${unit.name}`, // no IR involved: an object depends only on C inputs
+    sources: [unit.text, ...plan.headers.map((h) => `${h.name}\n${h.text}`)],
+    flags: cflags,
+    cc: ccIdentity(cc),
+  });
+  const objDir = join(root, "obj");
+  const dest = join(objDir, key);
+  try {
+    const st = statSync(dest);
+    if (st.isFile() && st.size > 0) return dest;
+  } catch { /* miss */ }
+  const built = join(dir, `${unit.name}.o`);
+  try {
+    run(cc, [...cflags, "-c", srcPath, "-o", built]);
+  } catch {
+    return null; // let the ordinary link surface the real compiler error
+  }
+  cacheStore(root, "obj", key, built);
+  return built;
+}
+
 export async function buildBinary(source: string, outPath: string, opts: BuildOpts = {}): Promise<void> {
   const target = opts.target ?? "host";
-  const { dir, ll, rt, actor, extra } = writeIR(source, opts.entryPath);
+  const ir = sourceToIR(source, opts.entryPath);
+  const plan = planLink(ir);
   // Actors need the ucontext-based cooperative scheduler (nt_actor.c); wasm32-wasi has no
   // ucontext, so gate here with a clear error instead of a cryptic link failure. Ordinary
   // (non-actor) programs link fine — the actor runtime is only pulled in when used.
-  if (target === "wasm" && actor) {
-    rmSync(dir, { recursive: true, force: true });
+  if (target === "wasm" && plan.actor) {
     throw new BuildError("the wasm (WASI) target does not support actors (spawn/send/receive): the actor runtime needs ucontext, which wasm32-wasi lacks");
   }
   const cc = ccFor(target);
+  const { flags: staticFlags, warning } = resolveStatic(target, opts.static ?? false);
+  // Before the cache lookup, not after: the `--static` fallback warning is part of what a
+  // build TELLS you, so a cache hit must not silence it.
+  if (warning) console.error(`warning: ${warning}`);
+  const tflags = targetFlags(target);
+
+  /*
+   * The binary key. Every input that can change the produced bytes is here: the IR (which
+   * subsumes the source AND the entire frontend that lowered it), the text of every runtime
+   * unit and header linked in, every compile/link flag, and the compiler's identity. The
+   * conditional-link SET is itself a pure function of the IR, so it needs no separate entry.
+   *
+   * Keying on the IR rather than the source is what makes this survive active compiler
+   * development: a codegen edit changes the IR of the programs it affects and only those,
+   * so the cache stays warm everywhere behaviour did not move.
+   */
+  const root = cacheRoot();
+  const key = buildCacheKey({
+    ir,
+    sources: [
+      ...plan.units.map((u) => `${u.name}\n${u.text}`),
+      ...plan.headers.map((h) => `${h.name}\n${h.text}`),
+    ],
+    flags: [...tflags, ...staticFlags, ...plan.defines, ...plan.libs, target],
+    cc: ccIdentity(cc),
+  });
+  if (root && cacheFetch(root, "bin", key, outPath)) {
+    cacheHits++;
+    return;
+  }
+  if (root) cacheMisses++;
+
+  const { dir, ll, sources } = materialize(ir, plan);
   try {
-    const { args, warning } = linkArgv(target, { ll, rt, actor, extra, out: outPath }, { static: opts.static });
-    if (warning) console.error(`warning: ${warning}`);
+    // Win 1: compile each runtime unit ONCE and reuse the object. runtime.c alone is 3,886
+    // lines recompiled on every build today; the objects are keyed and invalidated exactly
+    // like the binaries, so a runtime edit rebuilds them.
+    const cflags = [...tflags, ...plan.defines];
+    const objects = root
+      ? sources.map((p, i) => runtimeObject(root, plan.units[i]!, plan, cflags, cc, p, dir) ?? p)
+      : sources;
+    // Defines still ride the link line when we fell back to compiling `.c` sources there.
+    const compiledFromSource = objects.some((o) => o.endsWith(".c"));
+    const extra = [...objects.slice(1), ...(compiledFromSource ? plan.defines : []), ...plan.libs];
+    const { args } = linkArgv(target, { ll, rt: objects[0]!, actor: null, extra, out: outPath }, { static: opts.static });
     run(cc, args);
+    if (root) cacheStore(root, "bin", key, outPath);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
