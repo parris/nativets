@@ -2145,13 +2145,42 @@ class Parser {
         // Parameter property: consume + record access modifiers. A modifier only counts
         // when another identifier (the param name) follows — `readonly` as a bare param
         // name (`f(readonly: number)`) is left alone (next token is `:`/`,`/`)`).
+        // `@@mutable` before a parameter — the per-parameter append opt-in
+        // (docs/decorators.md). No new lexer syntax was needed: a line comment whose
+        // whole body is `@@name` already lexes to `@@` + `name` at ANY position, so the
+        // pragma spelling works INSIDE a parameter list and the source stays valid
+        // TypeScript. Only `@@mutable` is meaningful here; anything else is NT1023 for
+        // the same reason an unknown attribute always is — an attribute changes how code
+        // compiles, so silently ignoring a misspelled one would change the meaning.
+        let pmutable = false;
+        while (this.at("@@")) {
+          this.eat("@@");
+          const an = this.expectIdent();
+          if (an !== "mutable") {
+            throw decoratorError(
+              `compile-time attribute '@@${an}' on a parameter`,
+              "the only attribute a parameter accepts is `@@mutable`, which marks an array parameter `.push` may append to in place",
+            );
+          }
+          // A CONSTRUCTOR parameter is refused: the call site is `new C(…)`, which the
+          // ownership pass's call-site rules (see `checkMutableArgs`) do not resolve, and
+          // an unchecked marked position is a silent wrong answer, not a missing feature.
+          if (ctor) throw decoratorError("'@@mutable' on a constructor parameter", "mark a plain function's or a method's array parameter instead; a constructor's call site (`new C(…)`) is not checked for iterator invalidation yet");
+          pmutable = true;
+        }
         let paramProp = false;
         if (ctor) {
           while (this.peek().type === "ident" && PARAM_ACCESS.has(this.peek().value) && this.peek(1).type === "ident") {
             paramProp = true; this.next();
           }
         }
-        if (this.at("[") || this.at("{")) { params.push(this.parsePatternParam()); continue; } // `function f([a, b]: T[])`
+        if (this.at("[") || this.at("{")) {
+          // A destructuring pattern binds several names, none of which the user wrote —
+          // the same reason `@@mutable let [a, b] = …` is refused (applyVarAttrs).
+          if (pmutable) throw decoratorError("'@@mutable' on a destructuring parameter", "`@@mutable` marks ONE array parameter — give it a plain name (`out: T[]`)");
+          params.push(this.parsePatternParam());
+          continue; // `function f([a, b]: T[])`
+        }
         let rest = false;
         if (this.at("...")) { this.eat("..."); rest = true; }
         const pname = this.expectIdent();
@@ -2171,6 +2200,7 @@ class Parser {
         if (paramProp && rest) throw nyi(NYI.CLASS_FEATURE, "a rest parameter cannot be a parameter property");
         const p = this.mkParam(pname, annot, def, rest, optional);
         if (paramProp) p.paramProp = true;
+        if (pmutable) p.mutable = true;
         params.push(p);
       } while (this.at(",") && (this.eat(","), true));
     }

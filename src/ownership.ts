@@ -237,11 +237,79 @@ class Analyzer {
    *  loop variables over a LINEAR element (loop body). Moving out of any is E0507 (NT1604). */
   private borrowBindings = new Set<string>();
 
+  /** This scope's parameters carrying the per-parameter `@@mutable` opt-in — the ones a
+   *  callee may append to, and therefore the only ones this scope may hand ON to another
+   *  `@@mutable` position (see `mutableArgs`). */
+  mutableParams = new Set<string>();
+
+  /** Function name → the ARGUMENT indices whose parameter is `@@mutable`, i.e. the
+   *  positions the callee may `.push` to. Empty for every program without one, so both
+   *  rules below are inert. */
+  mutableArgs: Map<string, Set<number>> = new Map();
+
+  /** The same table for a METHOD call, keyed by the method's bare PROPERTY name with the
+   *  implicit `this` parameter already discounted. Name-based, exactly like the
+   *  `setterProps` check for `@@mutable` setters, so an unrelated class's like-named
+   *  method can be over-refused — over-refusal, never a wrong answer. */
+  mutableArgProps: Map<string, Set<number>> = new Map();
+
   /** Arrays currently borrowed by an enclosing for-of (lexical, count for nesting). */
   private borrowed = new Map<string, number>();
   private pushBorrow(n: string): void { this.borrowed.set(n, (this.borrowed.get(n) ?? 0) + 1); }
   private popBorrow(n: string): void { const c = (this.borrowed.get(n) ?? 1) - 1; if (c <= 0) this.borrowed.delete(n); else this.borrowed.set(n, c); }
   private isBorrowed(n: string): boolean { return this.borrowed.has(n); }
+
+  /**
+   * A call that hands an array to a `@@mutable` PARAMETER (docs/decorators.md). The
+   * callee may append to it, so the two things the callee cannot see are checked HERE,
+   * at the one place that can see them — the call site.
+   *
+   * 1. **The marker must TRAVEL.** Passing a plain (unmarked) parameter into a marked
+   *    position is NT1607. This is not decoration: it is what makes rule 2 reachable.
+   *    `outer(xs: T[])` announces nothing, so a caller of `outer` has no reason to think
+   *    its array is about to grow — and rule 2 fires at the call that hands the array
+   *    over, which is the call to `outer`. One unmarked hop would route around every
+   *    announcement and every check below it.
+   * 2. **ITERATOR INVALIDATION.** Growing an array while a `for-of` walks it is NT1603
+   *    for a direct `.push`; through a call it is the same hazard and the same code. It
+   *    is a WRONG-ANSWER hazard rather than a memory one — `nt_arr_get` re-reads `data`
+   *    every step, so nothing dangles, but the loop's length is read ONCE, so nativets
+   *    would walk the old length where node walks the growing array.
+   *
+   * IMPRECISION, stated because it is real: both rules key on an ARGUMENT that is a bare
+   * identifier and a CALLEE that is a bare name. An argument that is a field or element
+   * path (`f(node.body)`) is admitted — it is memory-safe for the reasons above, but a
+   * `for-of` over that same path in this scope is not caught, because `borrowed` is keyed
+   * by binding name. Rule 1 is what bounds the damage: the array reached that call
+   * through an owned binding or a marked parameter somewhere up the chain.
+   */
+  private checkMutableArgs(e: { callee: Expr; args: Expr[] }): void {
+    if (this.mutableArgs.size === 0 && this.mutableArgProps.size === 0) return;
+    const [name, idx] = e.callee.kind === "Identifier"
+      ? [e.callee.name, this.mutableArgs.get(e.callee.name)]
+      : e.callee.kind === "MemberExpr"
+        ? [e.callee.property, this.mutableArgProps.get(e.callee.property)]
+        : ["", undefined];
+    if (idx === undefined) return;
+    for (const i of idx) {
+      const a = e.args[i];
+      if (a === undefined || a.kind !== "Identifier") continue;
+      if (this.borrowParams.has(a.name) && !this.mutableParams.has(a.name)) {
+        this.report({
+          code: OWN_CODES.MUTATE_THROUGH_BORROW,
+          message: `cannot pass \`${a.name}\` to the \`@@mutable\` parameter of \`${name}\`: \`${a.name}\` is a plain parameter, so this signature does not announce that it may be appended to`,
+          line: a.loc?.line ?? 0,
+          hint: `mark it too — put \`//@@mutable\` on the line above \`${a.name}\` in this parameter list — or build a new array here and return it. The opt-in has to travel, or a caller could not see that its array grows`,
+        });
+      } else if (this.isBorrowed(a.name)) {
+        this.report({
+          code: OWN_CODES.MUTATE_WHILE_BORROWED,
+          message: `cannot pass \`${a.name}\` to the \`@@mutable\` parameter of \`${name}\` while it is borrowed (iterator invalidation)`,
+          line: a.loc?.line ?? 0,
+        });
+      }
+    }
+  }
 
   /**
    * DROP DECISION for one name at one program point — the rustc drop-flag question.
@@ -303,7 +371,11 @@ class Analyzer {
    *  (`blockDrops`), so a value that never leaves the block does not wait for the
    *  function to return. Move-aware — a local moved out of the block is not dropped.
    *  `break`/`continue`/`throw` jump past the drop point: a leak, never a double free. */
-  private scoped(list: Stmt[], state: State): void {
+  private scoped(
+    //@@mutable
+    list: Stmt[],
+    state: State,
+  ): void {
     const declared = declaredLinear(list, new Set(this.aliasOf.keys())).filter((n) => this.linear.has(n));
     // Closure envs the block provably owns (see `nonEscapingClosures`). Purely
     // syntactic, so unlike `declared` they need no move state and no `droppable` check —
@@ -574,6 +646,7 @@ class Analyzer {
         return;
       }
       case "CallExpr": {
+        this.checkMutableArgs(e);
         if (isMoveCall(e)) { this.expr(e.args[0]!, state, true); return; }
         if (isIdentityCall(e)) { this.expr(e.args[0]!, state, consume); return; }
         // `a.reverse()` mutates in place and hands the SAME pointer back, so for
@@ -1100,7 +1173,38 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   const untrackedThis = (fn: FuncDecl): boolean =>
     fn.params[0]?.name === "this" && (fn.setter === true || fn.untrackThis === true || mutable.classes.has(fn.name.split(".")[0]!));
 
-  const runScope = (body: Stmt[], params: { name: string; ty: import("./ast.ts").Ty }[], untrack: Set<string> = new Set()): string[] => {
+  // The per-parameter `@@mutable` opt-in, as a call-site table: which argument positions
+  // of which function the callee may `.push` to. Built over every FuncDecl (methods are
+  // lowered to dotted names by now), so a method's marked parameter is covered by the
+  // same two rules a plain function's is.
+  const mutableArgs = new Map<string, Set<number>>();
+  const mutableArgProps = new Map<string, Set<number>>();
+  const collectMutableArgs = (stmts: Stmt[]): void => {
+    for (const s of stmts) {
+      if (s.kind !== "FuncDecl") continue;
+      const idx = new Set<number>();
+      s.params.forEach((p, i) => { if (p.mutable) idx.add(i); });
+      if (idx.size) {
+        mutableArgs.set(s.name, idx);
+        // A lowered METHOD is `C.m` with an implicit `this` at index 0, while its call
+        // site writes `o.m(a)` with no receiver argument — so the property-keyed table
+        // shifts by one. Merged rather than overwritten: the key is a bare name, so two
+        // classes may contribute to it.
+        const dot = s.name.lastIndexOf(".");
+        if (dot >= 0) {
+          const shift = s.params[0]?.name === "this" ? 1 : 0;
+          const prop = s.name.slice(dot + 1);
+          const set = mutableArgProps.get(prop) ?? new Set<number>();
+          for (const i of idx) set.add(i - shift);
+          mutableArgProps.set(prop, set);
+        }
+      }
+      collectMutableArgs(s.body);
+    }
+  };
+  collectMutableArgs(checked.program.body);
+
+  const runScope = (body: Stmt[], params: { name: string; ty: import("./ast.ts").Ty }[], untrack: Set<string> = new Set(), mutableNames: Set<string> = new Set()): string[] => {
     const aliases = new Map<string, string>();
     collectAliases(body, isMutableTy, aliases); // ALWAYS: the retains-receiver rule is not `@@mutable`-specific
     const varTy = new Map<string, import("./ast.ts").Ty>();
@@ -1131,10 +1235,16 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     const scan = new Analyzer(linear, topLevel, paramBorrows, new Set(), mutable, varTy, aliases, consuming);
     scan.topClosures = topClosures;
     scan.shadowed = shadowed;
+    scan.mutableArgs = mutableArgs;
+    scan.mutableArgProps = mutableArgProps;
+    scan.mutableParams = mutableNames;
     scan.seq(body, entry());
     const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames, mutable, varTy, aliases, consuming);
     a.topClosures = topClosures;
     a.shadowed = shadowed;
+    a.mutableArgs = mutableArgs;
+    a.mutableArgProps = mutableArgProps;
+    a.mutableParams = mutableNames;
     const st = entry();
     a.seq(body, st);
     const end = [...a.ownedTopLevel(st), ...topClosures]; // computed BEFORE marking: it can add to condDrops
@@ -1149,7 +1259,12 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   for (const s of checked.program.body) {
     if (s.kind === "FuncDecl") {
       const sig = checked.functions.get(s.name)!;
-      s.endDrops = runScope(s.body, s.params.map((p, i) => ({ name: p.name, ty: sig.params[i]! })), untrackedThis(s) ? new Set(["this"]) : new Set());
+      s.endDrops = runScope(
+        s.body,
+        s.params.map((p, i) => ({ name: p.name, ty: sig.params[i]! })),
+        untrackedThis(s) ? new Set(["this"]) : new Set(),
+        new Set(s.params.filter((p) => p.mutable).map((p) => p.name)),
+      );
     }
   }
   return diags;

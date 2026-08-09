@@ -1275,7 +1275,7 @@ this scope cannot null, and the closure may outlive the binding. A push to a cap
 | receiver | code |
 |---|---|
 | an undecorated local | `NT1606` |
-| a **parameter** | `NT1606` |
+| an **unmarked parameter** | `NT1606` |
 | `this.<field>` | `NT1606` |
 | a container **element** (`g[0].push(v)`) | `NT1606` |
 | a **captured** accumulator | `NT1607` |
@@ -1294,6 +1294,32 @@ name, so a user class's own `.push` still only borrows.
 node's behaviour is matched exactly, mined from test262 `test/built-ins/Array/prototype/push/`: the
 return value is the **new length** (`S15.4.4.7_A2`), `push()` with no arguments is legal and returns
 the current length (`S15.4.4.7_A1`), and multiple arguments append **left to right** (`S15.4.4.7_A3`).
+
+#### …and a SECOND receiver: a parameter carrying its own `@@mutable`
+
+The table's "a parameter" row now reads "an **unmarked** parameter", because a parameter can
+carry the opt-in itself:
+
+```ts
+function collect(
+  //@@mutable
+  out: Token[],
+  s: string,
+): void { out.push(lex(s)); }     // the CALLER observes the append
+```
+
+The accumulator's attribute is on a `let`/`const` and could never reach a parameter; a record's
+is on the nominal TYPE, and an array type is structural, so that answer does not transfer
+either. The marker goes on the parameter, which is still part of the SIGNATURE — the property
+the record answer was chosen for. It needed **no new lexer syntax**: `//@@mutable` already lexes
+to `@@` + `mutable` inside a parameter list, so the source stays valid TypeScript and node stays
+the oracle with no stripping.
+
+Two rules live at the CALL SITE, because the callee cannot see either: passing a **plain
+parameter** into a marked position is `NT1607` (the marker must travel, or an unmarked hop
+launders the mutation past every check below it), and passing a binding a live `for-of`
+**borrows** is `NT1603` — a *wrong-answer* hazard, since a `for-of` reads its length once while
+node re-reads it. `test/push-param.test.ts`; full design in `docs/decorators.md`.
 
 #### The original argument, kept: `.push()` gets NO fresh-receiver permission — unlike `.sort()`
 

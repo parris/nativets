@@ -332,7 +332,15 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `.push` on the `list` PARAMETER in `setBlockDrops` -> NT1014 `new Map(p.recTypes ?? [])`,
   // whose `[string, Ty][]` is a TUPLE type nativets does not have -> NT2001 reading a field
   // off an un-narrowed `Expr`. So ast.ts is several blockers deep, not one.
-  "ast.ts": { rung: 0, code: "NT1606", blame: "self" },
+  //
+  // ...and that probe's FIRST term is now cleared for real: `.push` on a parameter is
+  // legal under the per-parameter `@@mutable` opt-in (docs/decorators.md,
+  // test/push-param.test.ts), and `setBlockDrops`'s `list` carries it. ONE construct at
+  // ONE site gated all nine of these rows — every one of them imports `ast.ts` — so all
+  // nine moved together, NT1606 -> NT1014, exactly as the probe predicted. The lesson
+  // this file keeps restating holds again: the frontier is a CONJUNCTION, and clearing a
+  // term reveals the next one rather than finishing it. Not one module gained a rung.
+  "ast.ts": { rung: 0, code: "NT1014", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -394,7 +402,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. parser.ts's own 18
   // `this.<field>` push sites are NOT cleared — a field names no binding the ownership
   // pass can prove unique, so they stay NT1606 behind this.
-  "parser.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "parser.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -438,7 +446,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `.push` legal on a `@@mutable` accumulator, nothing stops here any more and all four
   // walk through to ast.ts's ONE `trimEnd` site (NT1002). driver.ts goes to lexer.ts's
   // NT2001 instead. Neither lane could have measured this alone.
-  "checker.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "checker.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -449,7 +457,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
   // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
   // fires first through the link. Its own tables are the same shape and sit behind it.
-  "codegen.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "codegen.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
   // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
   // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
   // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
@@ -464,7 +472,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Both rows moved to their real blockers, and the blame column is the interesting part:
   // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
   // below; coverage-preprocess.ts finally has one of its OWN.
-  "coverage.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "coverage.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -481,8 +489,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // The Map spread in `clone` was the one blocker this module ever owned in the STANDALONE
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
-  "ownership.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
-  "driver.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "ownership.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  "driver.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
   //
@@ -511,14 +519,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
   // and it only ever held it because this lane had not landed yet. Sixth time a merge here
   // produced a frontier neither side could have computed from its own diff.
-  "cli.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "cli.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
   // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
   // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
-  "modules.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "modules.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
@@ -647,7 +655,11 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // ...and NT1011 gave way to NT2001 when ast.ts's three reflective AST walkers became one
 // typed traversal: stage-1 inherits ast.ts's `setBlockDrops` union-vs-undefined guard now.
 // Still rung 0, and still nine modules — the frontier is a conjunction, said again.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1606" };
+// ...and NT1606 gave way to NT1014 when the per-parameter `@@mutable` opt-in legalized
+// `setBlockDrops(list, …)`'s `list.push(…)`. That single site in `ast.ts` was the first
+// blocker of all nine remaining modules AND of stage-1; the next term is ast.ts's own
+// `new Map(p.recTypes ?? [])`, the tuple-entries form. Still rung 0, still nine modules.
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1014" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -992,8 +1004,19 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // compiles and all nine modules move one construct deeper — to `list.push(...)` on a
       // PARAMETER, which the accumulator opt-in (on a `let`/`const` BINDING) cannot reach.
       // That is the predicted next term, and it is a different feature, not this one.
-      expect(m.error).toContain("arrays are immutable");
-      expect(m.error).toContain("`.push`");
+      // FOURTEENTH — the predicted next term, cleared. `.push` on a parameter is legal
+      // under a PER-PARAMETER `@@mutable` (docs/decorators.md): an array type is
+      // STRUCTURAL, so the record's nominal-tag answer does not transfer, but a marker on
+      // the parameter satisfies the same criterion — it is part of the SIGNATURE, so the
+      // calling convention stays visible at the call site, and it says WHICH parameter
+      // grows. It needed no new lexer syntax: `//@@mutable` already lexes to `@@` +
+      // `mutable` INSIDE a parameter list. Two marked parameters in the whole tree
+      // (`setBlockDrops`'s `list`, `scoped`'s `list`) moved all nine modules and stage-1
+      // at once, because every one of them imports `ast.ts` and that ONE site was the
+      // first blocker of all of them. Behind it: ast.ts's own `new Map(p.recTypes ?? [])`,
+      // the tuple-entries form (NT1014). A different feature again, with its own lane.
+      expect(m.error).toContain("new Map(");
+      expect(m.code).toBe("NT1014");
       return;
     }
 

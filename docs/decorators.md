@@ -392,6 +392,98 @@ return tokens;                 // handed out by MOVE — an ordinary immutable a
 
 An undecorated binding is unchanged: `xs.push(v)` is still `NT1606` pointing at `[...xs, v]`.
 
+### ...and on a PARAMETER
+
+```ts
+function collect(
+  //@@mutable
+  out: Token[],
+  src: string,
+): void {
+  out.push(lex(src));          // a real in-place append the CALLER observes
+}
+```
+
+An unmarked parameter is unchanged: `xs.push(v)` is still `NT1606`.
+
+**No new syntax was needed.** The lexer already turns a line comment whose whole body is
+`@@name` into the two tokens `@@` + `name` at ANY position, including inside a parameter
+list — so the pragma spelling works here for free, the source stays valid TypeScript, and
+node is the oracle directly with no stripping. (A previous lane established that
+`//@@mutable(c)` mid-list is silently ignored; that is a different spelling — an
+*argument* to the attribute — and it stays unsupported.)
+
+#### Why not the record's answer
+
+The record answer is nominal: `@@mutable` tags a TYPE, the tag travels with the signature,
+so the calling convention stays visible at the call site — the objection that ruled out
+inference. **An array type is STRUCTURAL (`T[]`), so there is no name to tag**, and the
+precedent does not transfer. A marker on the parameter meets the same criterion directly:
+it is part of the signature, and it is *more* precise than a type tag, because it says
+WHICH parameter grows rather than "arrays of this type grow everywhere".
+
+It is also not the accumulator's answer, for the reason that section already gives: the
+attribute on a `let`/`const` describes one binding this scope owns, and a parameter is a
+borrow with no declaration here to hang it on.
+
+#### The two rules that live at the CALL SITE
+
+The callee cannot see either of these, so both are checked where the array is handed over.
+
+| | |
+|---|---|
+| passing a **plain (unmarked) parameter** into a marked position | **`NT1607`** — the marker must TRAVEL |
+| passing a binding a live **`for-of` borrows** into a marked position | **`NT1603`** — iterator invalidation |
+
+The first is not decoration; it is what makes the second reachable. `outer(xs: T[])`
+announces nothing, and the invalidation check fires at the call that hands the array over
+— which is the call to `outer`, not to the marked callee inside it. One unmarked hop would
+route around every announcement and every check below it.
+
+The second is a **wrong-answer** hazard, not a memory one. `nt_arr_get` re-reads `data`
+every step so nothing dangles, but a `for-of` reads the length ONCE — so nativets would
+walk the old length where node walks the growing array. Measured, on the compiler with the
+call-site rules keyed only on a bare-identifier callee: `1 2 3 4` against node's
+`1 2 3 1 4`, exit 0 on both sides. Which is why a **method's** marked parameter is checked
+too, by its bare property NAME with the implicit `this` discounted — the same name-based
+over-approximation `setterProps` already uses (over-refusal, never a wrong answer).
+
+#### Soundness, and what it costs
+
+The runtime append cannot dangle: `NtArray` is a stable header (`{len, cap, data}`) and
+`nt_arr_push` reallocs `data` behind it, so the caller's pointer stays valid and observes
+the growth. A parameter is a **borrow**, so the callee never frees it and the caller still
+drops exactly once. `.push`'s argument is **consumed**, guarded on the receiver's array
+type. Measured against a CONTROL rather than against zero (an array frees its handle, never
+its slots): 200 rounds × 5 pushed objects leave `__arrLive()` 0 and `__objLive()` 1000
+through a parameter — **the same counts the local accumulator leaves**, exit 0 both.
+
+Refused (`NT1023`): the marker on a non-array parameter, on a destructuring parameter, and
+on a **constructor** parameter — `new C(…)` is a call site the two rules above do not
+resolve, and an unchecked marked position is a silent wrong answer, not a missing feature.
+An **arrow** parameter cannot carry it either (the arrow parser does not accept `@@`), so
+it is a parse refusal rather than a silent no-op.
+
+Still refused inside the callee: a marked parameter a **closure captures** is `NT1607`, the
+accumulator's one hole verbatim. Admitted: a **field-path** argument (`f(node.body)`), a
+`for-of` **element**, and a captured local as the *argument* (the append happens during the
+call, with the owner in scope).
+
+**Known imprecision.** Both call-site rules key on an argument that is a bare identifier.
+A field or element path (`f(node.body)`) is admitted — memory-safe for the reasons above —
+but a `for-of` over that same path in this scope is not caught, because `borrowed` is keyed
+by binding name. The travel rule is what bounds it: the array reached that call through an
+owned binding or a marked parameter somewhere up the chain.
+
+**Why it exists.** `src/ast.ts`'s `setBlockDrops(list, names)` appends the ownership pass's
+`BlockDrops` marker to an AST statement list. That is a genuine in-place annotation — the
+list belongs to the AST, so there is no local to return into, and the only source
+alternative was to pre-seed a marker into every block at parse time, which changes every
+program's AST. It is ONE line, and every one of the nine remaining compiler modules imports
+it, so it was the first blocker of all nine. Two marked parameters (`setBlockDrops`'s
+`list`, `ownership.ts`'s `scoped`'s `list`) moved all nine — onto `new Map(p.recTypes ?? [])`,
+the tuple-entries form. See `docs/self-hosting.md`.
+
 ### The attribute is on the BINDING, not the type
 
 This is the one place the three `@@mutable` forms differ, and it is deliberate. A class's
@@ -433,7 +525,7 @@ Only the owner may mutate. For an accumulator the compiler already had everythin
 | | |
 |---|---|
 | `const b = xs` | a **MOVE** — an array is LINEAR, so a second live handle cannot exist; a push after one is `NT1601` |
-| a **parameter** | a borrow, and it cannot carry the attribute (the attribute is on a `let`/`const`) — so `NT1606` |
+| a **parameter** | a borrow, and it cannot carry *this* attribute (this one is on a `let`/`const`) — so `NT1606`, **unless the parameter carries its own `@@mutable`** (see "…and on a PARAMETER" above) |
 | `this.f`, `xs[0]`, `f()` | name **no binding** — never match the opt-in, so `NT1606` |
 | a **captured** accumulator | **`NT1607`** — the one hole the three facts above do not cover |
 | pushing while a `for-of` borrows it | `NT1603` (iterator invalidation), the pre-existing rule |

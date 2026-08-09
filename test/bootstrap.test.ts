@@ -516,7 +516,20 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // measured) and cannot reach a parameter (NT1607 by design), so it is not the answer.
     // Census: 191 non-`this` `o.f = v` sites across 8 of 12 modules, 45 of them in ast.ts's
     // walkers alone. See docs/self-hosting.md.
-    ["NT1606"],
+    //
+    // ...and NT1606 LEAVES AGAIN — the NINTH refill, and the second time its holder was a
+    // single line of `src/ast.ts` that nine modules inherit. `o.f = v` was answered by
+    // `@@mutable` on the record TYPE (the mutable-records lane), which left exactly one
+    // term: `setBlockDrops`'s `list.push(…)` on a PARAMETER. The parenthetical above is
+    // now wrong in its second half as well: `@@mutable` CAN reach a parameter — not by
+    // travelling with the type (an array type is STRUCTURAL, so the record's nominal-tag
+    // answer does not transfer) but as a PER-PARAMETER marker, which is still part of the
+    // signature and therefore still visible at the call site. Two marked parameters in
+    // the whole tree cleared the code. Behind it, held by the same nine modules, is
+    // ast.ts's own `new Map(p.recTypes ?? [])` — the [key, value] entries form, which
+    // needs a tuple type. So NT1014, emptied tree-wide two rounds ago, refills: the
+    // earlier clear was of every LITERAL entries site, and this one is DYNAMIC.
+    ["NT1014"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -603,7 +616,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // EMPTY NOW. Kept as an assertion rather than deleted: this bucket has emptied and
     // refilled before, and the three DYNAMIC sites that remain in src/ still need a real
     // [K,V] tuple, so a refill here means someone wrote the entries form again.
-    expect(byCode["NT1014"]).toBeUndefined();
+    //
+    // ...AND REFILLED, for the fifth time — by one of those three DYNAMIC sites, exactly
+    // as the paragraph above predicted. `ast.ts:1304`'s `new Map(p.recTypes ?? [])` came
+    // into view when the per-parameter `@@mutable` opt-in cleared `setBlockDrops`'s
+    // `list.push(…)`, and it is inherited by all nine modules through the link. Nobody
+    // wrote the entries form again; the frontier moved onto one that was always there.
+    // This site genuinely needs the `[K, V]` tuple TYPE, which is why it is the one the
+    // `.set`-chain rewrite could not reach.
+    expect(byCode["NT1014"]?.slice().sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
@@ -701,9 +724,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // parser 29, modules 28, codegen 13, ownership 9, coverage-preprocess 9, lexer 1),
     // plus 73 `this.f = v` which `@@mutable class` already covers. The same shape as the
     // `.push` census: a first-blocker table never sizes a construct.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    //
+    // ...and it EMPTIES, in two steps taken by two lanes. `@@mutable` on a record TYPE
+    // answered `o.f = v` (both bullets above turned out to be wrong: a tagged member is
+    // fine, because `discriminatedUnion`'s guard against it was vacuous), which left ONE
+    // `.push`-on-a-parameter site — `setBlockDrops` — and a per-parameter `@@mutable`
+    // answered that. The census number stands and is still the right warning: nine
+    // modules moved because they share ONE inherited line, not because 191 sites got
+    // fixed. What they moved onto is NT1014, asserted above.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -907,7 +936,16 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // when ast.ts's `setBlockDrops` dead guard (the NT2001 above) was removed. The
     // membership list and the full argument live on the NT1606 assertion earlier in this
     // test; asserting the list twice would let the two copies drift, so this defers.
-    expect(byCode["NT1606"]).toBeDefined();
+    //
+    // THE TENTH TURN IS BACK DOWN TO ZERO, and — for the first time in this bucket's
+    // history — `.push` on a PARAMETER was the last thing in it. `@@mutable` on the
+    // record type answered `o.f = v`; a PER-PARAMETER `@@mutable` answered the `.push`
+    // that was left. Read it as narrowly as every note above asks: the ~205 `.push` sites
+    // are still there, `this.<field>.push` is still refused, a captured accumulator is
+    // still NT1607, and exactly TWO parameters in the tree carry the new marker. What
+    // changed is that no module's first blocker is a mutation any more. The list this
+    // deferred to is empty now for the same reason.
+    expect(byCode["NT1606"]).toBeUndefined();
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the

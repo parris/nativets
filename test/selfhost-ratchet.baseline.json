@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "8046be7"
+    "rev": "a0da3d0"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "d7b01872b9c3a50d",
+      "sha256": "09d6f3d5be52f8fc",
       "standalone": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1014",
+        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1014",
+        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "checker.ts": {
-      "sha256": "e70a146052a341b5",
+      "sha256": "3ae1b2eef7b141c4",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1014",
+        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "cli.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1014",
+        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "codegen.ts": {
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1014",
+        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1014",
+        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1014",
+        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "lexer.ts": {
@@ -133,12 +133,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1014",
+        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "ownership.ts": {
-      "sha256": "d4f20393303a1c8d",
+      "sha256": "568d724005fb31ab",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1014",
+        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "parser.ts": {
-      "sha256": "42c3d4c9f9c520f5",
+      "sha256": "3c4011490608d416",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
+        "code": "NT1014",
+        "message": "[NT1014] new Map(string[][]) (only another Map is supported — the [key, value] entries form needs a tuple type we do not have yet; use .set) is not supported yet"
       }
     }
   }
