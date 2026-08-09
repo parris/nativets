@@ -14,7 +14,7 @@ import {
   isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf,
-  resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef,
+  resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -1123,7 +1123,11 @@ class Parser {
         // the SAME diagnostic instead of a downstream one about the empty literal.
         // Whoever implements them has to fix the encoding first, which is the point.
         if (isFuncTy((base + suffix) as Ty)) throw nyi(NYI.ARRAY, `arrays of ${base}${suffix}`);
-        suffix += "[]";
+        // `makeArrayTy`, not `+= "[]"` — a NULLABLE element parenthesizes, or the prefix
+        // encoding swallows the suffix and `(T|null)[]` reads as `T[]|null` (see ast.ts).
+        base = makeArrayTy((base + suffix) as Ty);
+        if (baseName !== undefined) baseName = baseName + suffix + "[]"; // keep the lookup diagnostic's spelling
+        suffix = "";
         continue; // T[], T[][]
       }
       base = this.parseIndexedAccessTy((base + suffix) as Ty, (baseName ?? base) + suffix);
@@ -1246,7 +1250,7 @@ class Parser {
       case "Set":
       case "ReadonlySet": return makeSetTy(a[0] ?? "string");
       case "Array":
-      case "ReadonlyArray": return `${a[0] ?? "number"}[]` as Ty;          // Array<T> → T[]
+      case "ReadonlyArray": return makeArrayTy(a[0] ?? "number");          // Array<T> → T[]
       // single-arg wrapper/mapped types erase to their inner type
       case "Promise":
       case "Awaited":
@@ -1294,7 +1298,7 @@ class Parser {
     const tys: Ty[] = [];
     if (!this.at("]")) { do { tys.push(this.parseType()); } while (this.at(",") && (this.eat(","), true)); }
     this.eat("]");
-    return `${tys[0] ?? "number"}[]` as Ty;
+    return makeArrayTy(tys[0] ?? "number");
   }
   /**
    * A leading `(` in type position is either a function type's parameter list

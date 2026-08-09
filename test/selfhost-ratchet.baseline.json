@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "942f48b"
+    "rev": "143326b"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "f68e7fe16a2bb821",
+      "sha256": "e2fccc5970a145a9",
       "standalone": {
         "stage": "check",
         "code": "NT1002",
@@ -18,33 +18,33 @@
       }
     },
     "checker.ts": {
-      "sha256": "7e9502eee55dafe2",
+      "sha256": "d32bae0842ec156e",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] .set value expects {min:number,max:number,argTys:?Nnumber[],ret:number}, got {min:number,max:number,argTys:number[],ret:string}"
+        "message": "[NT2001] .set value expects {min:number,max:number,argTys:(?Nnumber)[],ret:number}, got {min:number,max:number,argTys:(?Nnumber)[],ret:string}"
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] array elements must share a type (got string, null)"
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "cli.ts": {
-      "sha256": "d43a56e762a1302a",
+      "sha256": "00f3186158a99ba6",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
         "message": "[NT2001] process.stdout is not supported"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1020",
-        "message": "[NT1020] calling async function 'buildBinary' without 'await' at L:C (its value is a Promise under node; nativets runs it to completion immediately) is not supported yet"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "codegen.ts": {
-      "sha256": "5f4d2baa36e24841",
+      "sha256": "165380b29099588d",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -52,21 +52,21 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] array elements must share a type (got string, null)"
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "coverage-preprocess.ts": {
-      "sha256": "b09b5deb95e55947",
+      "sha256": "2632d55f8546b8ce",
       "standalone": {
         "stage": "check",
-        "code": "NT1031",
-        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1031",
-        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       }
     },
     "coverage.ts": {
@@ -79,8 +79,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] array elements must share a type (got string, null)"
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "diagnostics.ts": {
@@ -106,8 +106,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] array elements must share a type (got string, null)"
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "lexer.ts": {
@@ -137,7 +137,7 @@
       }
     },
     "ownership.ts": {
-      "sha256": "f447568ef02c9a91",
+      "sha256": "e2400079d31ba649",
       "standalone": {
         "stage": "check",
         "code": "NT1014",
@@ -145,12 +145,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] array elements must share a type (got string, null)"
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "parser.ts": {
-      "sha256": "7dcbeb9825f4d93b",
+      "sha256": "486f6d23fbf52278",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

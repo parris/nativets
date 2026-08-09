@@ -306,6 +306,24 @@ outcome available, traded for the second-worst. `[object Object]` is also never 
 line meant, so the hint points at `JSON.stringify(x)` — and at `console.log(x)` on its own,
 which already renders objects, class instances, `Map`/`Set` byte-identically to node.
 
+**...AND `.join()` ITSELF WAS NEVER GATED ON THIS LIST — a silent wrong answer, now closed.**
+The paragraph above says the checker's allow-list and `coerceToString`'s cases "are one list
+written twice and must stay in step". They were written on ONE of the two paths. `.join()` is
+the same `joinFn` dispatch reached by an explicit method call, and `inferArrayMethod` checked
+only the SEPARATOR argument, never the element type — so the default arm (`nt_arr_join_str`,
+`strlen` on the slot) was reachable directly:
+
+| expression | node | here, before | here, now |
+|---|---|---|---|
+| `[[1],[2]].join(";")` | `1;2` | `\x01;\x01`, **exit 0** | `NT1032` |
+| `[{x:1},{x:2}].join(",")` | `[object Object],…` | `,`, **exit 0** | `NT1032` |
+| `[1,2,3].join("-")` / `["a","b"].join("")` / `[true,false].join(",")` | as node | as node | **unchanged** |
+
+Exit 0 on both sides with different stdout is the class CLAUDE.md calls the worst outcome
+available, and it had nothing to do with the nullable elements that exposed it — it reproduces
+on any array of arrays or objects. `.join()` consults the same allow-list now. Pinned in
+`test/nullable-element.test.ts`.
+
 **`boolean[]` WAS refused, and no longer is.** The reason was never about the coercion: it was
 that `.join` was itself broken for booleans. `genArrayMethod` split array methods on one bit
 (`el === "number"`, number vs "everything else = strings"), so `[true, false].join(",")` went

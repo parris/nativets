@@ -405,20 +405,42 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // shape — the same move `instanceof` made). NT1020 arrives in its place: cli.ts calling
     // an async function without `await`. Re-measured on the merged tree.
     //
-    // NT1606 IS NOW EMPTY, and `.push` was the whole of it. It emptied by an OPT-IN, not by
-    // a relaxation: `//@@mutable` on an accumulator BINDING makes `.push` an in-place
-    // append (docs/decorators.md), and two declarations carry it — `lex`'s `tokens` and
-    // `splitTopLevel`'s `out`. Read that narrowly, exactly as NT1014's absence above must
-    // be: this is a FIRST-blocker set and `.push` is NOT gone from the tree. A
-    // readFileSync census (never shell grep) still finds 183 sites, and the ones that need
-    // more than a comment are the shapes the opt-in deliberately refuses — 38 `this.<field>`
-    // receivers, one parameter (`ast.ts` `setBlockDrops`), and every accumulator pushed
-    // from inside a capturing arrow (all of `modules.ts`'s). They will resurface one at a
-    // time, exactly as this comment says the entries form does.
+    // NT1031 LEAVES AGAIN, and the whole code goes with it: `coverage-preprocess.ts` was
     //
-    // NT1002 refills in its place: ast.ts's `trimEnd`, unmasked by clearing its `.push`.
+    // NT1031 LEAVES AGAIN, and the whole code goes with it: `coverage-preprocess.ts` was
+    // its only site tree-wide, and its `tokenize` cursor is now ONE `//@@mutable` record
+    // (`TokState`) instead of a `line`/`prev` pair two closures wrote — the shape
+    // `src/lexer.ts`'s `LexState` used to clear the identical blocker. The module lands on
+    // `.push`, which NT1606 already covers, so the SET shrinks by one rather than swapping.
+    // A shrinking set is the only movement this tree-wide assertion can show as unambiguous
+    // progress, and it is worth saying that it is a SOURCE change: the compiler is
+    // unchanged, so a re-run against main's `src/coverage-preprocess.ts` still reports
+    // NT1031 (that is the controlled experiment the selfhost-ratchet rules ask for).
+    //
+    // NT1020 LEAVES with it, and for the same kind of reason: cli.ts was its only holder,
+    // and both `guard(() => buildBinary(…))` call sites now spell the callback
+    // `async () => await buildBinary(…)` — the fix docs/divergences.md names for that
+    // deliberate over-rejection. Two codes gone in one lane, both by SOURCE changes, and
+    // the tree-wide set is down to TWO for the first time: `.push` and a type error.
+    //
+    // AND NT2001 LEAVES TOO, at the merge, which is the FOURTH time this file records that
+    // NEITHER SIDE OF A MERGE HAD THE LIST RIGHT. This branch measured
+    // ["NT1014","NT1020","NT1031","NT1606"] (it had not seen main clear NT1031 and NT1020
+    // by source changes); main measured ["NT1606","NT2001"] (it had not seen the
+    // ARRAY-OF-NULLABLE encoding fix, which is what NT2001 was). Re-run on the MERGED tree,
+    // the set is two codes and eleven modules: `.push` and the `new Map` entries form.
+    // The compiler's own frontier is now a 185-site source idiom plus five table sites.
+    //
+    // ...and it is FOUR again, RE-MEASURED on the merged tree for the fifth time this
+    // file records that neither side of a merge had the list right. `.push` is legal on a
+    // `@@mutable` ACCUMULATOR binding now (docs/decorators.md), so NT1606 does not empty
+    // but SHRINKS from five modules to one: `coverage-preprocess.ts`, whose accumulators
+    // this lane did not annotate. In its place come the blockers it unmasked — NT1002
+    // (ast.ts's `trimEnd`) and NT2001 (lexer.ts's own, inherited by parser.ts and
+    // modules.ts through the link). A set growing because the frontier ADVANCED is the
+    // pattern NT1027 and NT0001 already record here.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1002", "NT1020", "NT1031", "NT2001"],
+      ["NT1002", "NT1014", "NT1606", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -494,7 +516,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // entries-form sites remain in the tree, behind other blockers (checker.ts:4524/:4565,
     // modules.ts:431/:574, ast.ts:1204), plus three `.map`-produced pair arrays that need
     // a real tuple TYPE. This bucket has now been emptied and refilled three times.
-    expect(byCode["NT1014"]).toBeUndefined();
+    //
+    // ...AND REFILLED, for the fourth time, with the SAME construct in a different file:
+    // checker.ts's own CONSOLE_STREAMS/FMT_SPECS, two of the five sites the paragraph
+    // above says remain. They became visible when the ARRAY-OF-NULLABLE lane cleared
+    // `argTys: (Ty|null)[]`. Read as MEMBERSHIP, exactly as instructed: the bucket names
+    // the construct, never a count of it.
+    // SIX at the merge, not five: main independently moved `cli.ts` off NT1020 (the
+    // un-awaited `buildBinary`), and it landed in this bucket with the rest.
+    expect(byCode["NT1014"]!.sort()).toEqual(
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
+    );
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
@@ -513,14 +545,23 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NULLABLE elements, which is refused at a plain `const` declaration too, i.e. a real
     // feature gap and not a `.set` one. Behind it: the five remaining entries-form sites,
     // then `.push`. Three of the eight (ast, parser, modules) went straight to `.push`.
-    // ...and it grew from five to eight when `.push` cleared. lexer.ts arrives with a
-    // blocker of its OWN ("Cannot compare string with undefined"); parser.ts and modules.ts
-    // inherit lexer.ts's through the link, which is the same three modules this comment
-    // says "went straight to `.push`" coming back out the other side. A bucket growing
-    // because the frontier ADVANCED is the pattern NT1027 and NT0001 already record here.
-    expect(byCode["NT2001"]!.sort()).toEqual(
-      ["checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "lexer.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    // SIX now: `cli.ts` joins them, coming back from the one blocker it ever owned
+    // (NT1020, the un-awaited `buildBinary`) once both call sites took the `await` that
+    // diagnostic prescribes. Stage-1 is once again gated on a DEPENDENCY, which is where
+    // it has been for every measurement but one.
+    //
+    // ...AND EMPTY. `(string|null)[]` was never a missing element TYPE — it was an
+    // AMBIGUITY: the nullable encoding is a PREFIX (`?N`) and the array encoding a SUFFIX
+    // (`[]`), so `(T|null)[]` and `T[]|null` were the same `Ty` string and the nullable
+    // reading won. A parenthesized element (`(?Nstring)[]`) tells them apart — the fix
+    // `parseTypeAtom` already prescribes for the identical array-of-functions collision.
+    // All SIX moved together onto NT1014; the group stayed a group, cli.ts included.
+    //
+    // ...and it REFILLED with three DIFFERENT modules when `.push` cleared. lexer.ts
+    // arrives with a blocker of its own ("Cannot compare string with undefined");
+    // parser.ts and modules.ts inherit it through the link — the same three that used to
+    // sit on `.push`, coming back out the other side. None of the six above returned.
+    expect(byCode["NT2001"]!.sort()).toEqual(["lexer.ts", "modules.ts", "parser.ts"]);
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -682,20 +723,24 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // behind them walked straight into `.push` — exactly what the census predicted would
     // happen "module after module as the current round's lanes land". Nothing here is a
     // compiler gap: `.push` is refused by DECISION (commit 1ea7fa2).
-    // ...and it is empty AGAIN, for a SIXTH turn of this bucket, and this time by the one
-    // route the five notes above kept ruling out: in-place mutation on an owned NAMED
-    // local. The lane that refused it (`1ea7fa2`) was right about the shape it measured — a
-    // syntactically-FRESH receiver, where the push is unobservable and clears nothing — and
-    // the shape that actually appears in this tree is the opposite one, an accumulator with
-    // a name. What makes it safe is not a new analysis: an array is LINEAR, so `const b =
-    // xs` MOVES and a second live handle cannot exist; a parameter is a borrow and cannot
-    // carry the attribute; a field, an element and a call result name no binding. The one
-    // hole is a CLOSURE, and it is refused (NT1607). See docs/decorators.md.
+    // ...and a SIXTH, to FIVE. `coverage-preprocess.ts` joins on its OWN `.push` (the
+    // accumulators in `tokenize`/`emit`/`preprocessForCoverage`), unmasked by the capture-
+    // write lane's `TokState` rewrite. Same reading as every row above it: the module did
+    // not acquire a `.push`, it stopped reporting something nearer.
+    // ...and a SEVENTH, DOWN to one, by the route the six notes above kept ruling out:
+    // in-place mutation on an owned NAMED local. The lane that refused it (`1ea7fa2`) was
+    // right about the shape it measured — a syntactically-FRESH receiver, where the push is
+    // unobservable and clears nothing — and the shape that actually appears in this tree is
+    // the opposite one, an accumulator with a name. What makes it safe is not a new
+    // analysis: an array is LINEAR, so `const b = xs` MOVES and a second live handle cannot
+    // exist; a parameter is a borrow; a field, an element and a call result name no binding.
+    // The one hole is a CLOSURE, and it is refused (NT1607). docs/decorators.md.
     //
-    // The bucket is empty as a FIRST-blocker set only. 183 of the 185 census sites are
-    // still `.push` and most of them are shapes the opt-in refuses on purpose. Expect a
-    // seventh turn.
-    expect(byCode["NT1606"]).toBeUndefined();
+    // The survivor is `coverage-preprocess.ts`, not annotated by that lane. And read the
+    // shrink NARROWLY: 183 of the 185 census sites are still `.push`, most of them shapes
+    // the opt-in refuses on purpose (38 `this.<field>`, one parameter, every accumulator
+    // pushed from inside a capturing arrow). Expect an eighth turn.
+    expect(byCode["NT1606"]!.sort()).toEqual(["coverage-preprocess.ts"]);
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
@@ -741,12 +786,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // eleven declarations — see the census note at the NT1014 clearance above and
     // test/record-dict.test.ts). ast.ts, parser.ts and modules.ts left for NT1606; the
     // five that remain share `argTys: ["string", null]`, an ARRAY OF NULLABLE elements.
-    // EIGHT again, and the three that come back are the same three: ast.ts, parser.ts and
-    // modules.ts "left for NT1606" and NT1606 is now empty, so lexer.ts arrives with its
-    // own NT2001 and parser.ts + modules.ts inherit it through the link.
-    expect(byCode["NT2001"]!.sort()).toEqual(
-      ["checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "lexer.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    // SIX, with cli.ts back from NT1020 (see the same list above).
+    // ...and EMPTY, for the fourth time in this bucket's life — the ENCODING ambiguity
+    // above. The membership that replaces it is NT1014's, next to its clearance note.
+    // ...and refilled with lexer.ts + its two dependents when `.push` cleared (see above).
+    expect(byCode["NT2001"]!.sort()).toEqual(["lexer.ts", "modules.ts", "parser.ts"]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a
@@ -757,7 +801,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // holder is `coverage-preprocess.ts`, which reached this construct only by clearing
     // NT1702 (above); its `advance` closure writes `line++`, the SAME cursor shape lexer.ts
     // fixed with a `//@@mutable` record. Assert MEMBERSHIP, which names the construct.
-    expect(byCode["NT1031"]).toEqual(["coverage-preprocess.ts"]);
+    //
+    // ...and EMPTY AGAIN, by the fix the previous paragraph names: `coverage-preprocess.ts`
+    // now carries the same `//@@mutable` cursor record (`TokState`) that `src/lexer.ts`
+    // carries, so neither of this tree's two hand-written tokenizers writes a captured
+    // binding any more. The bucket is asserted as ABSENT rather than as `[]` because
+    // `byCode` is built from the codes actually reported. That is the third time this row
+    // has flipped, so read it as membership and expect it to flip again the moment a lane
+    // writes a closure over a `let` — which is exactly what it is here to catch.
+    expect(byCode["NT1031"]).toBeUndefined();
     // NT1606 changed HANDS entirely: diagnostics.ts left it (above), and checker.ts +
     // ownership.ts arrived from NT1009 once general unions landed. Same bucket, none of
     // the same modules — which is why membership, not size, is the thing to assert.

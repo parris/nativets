@@ -1560,6 +1560,239 @@ observable.
 `test/record-dict.test.ts` also carries the lint that keeps the construct out: no `src/*.ts`
 may declare a `Record<` annotation, casts and prose excepted.
 
+### `NT1031` IS GONE FOR THE SECOND AND LAST TIME — the same cursor shape, the other tokenizer
+
+`coverage-preprocess.ts` was the only module in the tree still writing a **captured binding**,
+and it was the same construct, in the same kind of code, as the one `src/lexer.ts` cleared two
+rounds earlier: a scanner cursor moved by closures.
+
+```ts
+let line = 1;
+let prev: Tok | undefined;
+const nl   = (s: string) => { for (const c of s) if (c === "\n") line++; };   // NT1031
+const push = (t: Tok)    => { toks.push(t); prev = t; };                      // NT1031
+```
+
+The fix is `LexState`'s, verbatim: **one `//@@mutable` record** (`TokState { line, prev }`)
+declared at module scope and instantiated as an owned local. Mutating a FIELD of an owned local
+is not a capture write — the binding never changes, the object does — and `//@@mutable` is a
+comment to TypeScript, so bun runs the file unchanged. No compiler change; the compiler still
+refuses main's version of this file, which is the controlled experiment
+`test/selfhost-ratchet.test.ts` asks for and which its advisory printed unprompted.
+
+**The evidence is not the tests, it is the corpus.** A source rewrite inside a tokenizer is
+exactly the shape this document has twice recorded as under-tested by a fixture suite (the regex
+removal: five of six mutations invisible to all 121 fixtures). So old and new
+`preprocessForCoverage` were run over **every `.ts` in `src/`, `test/` and `examples/` — 486
+files, 2.49 MB — and their full output compared byte for byte: ZERO differences.**
+
+And, because a null diff proves nothing about code the corpus never reaches, each rewritten line
+was **mutated in turn** and the diff re-run:
+
+| mutation | files that differ |
+|---|---|
+| `nl`'s newline test `\n` -> `\r` | **133** |
+| `regexAllowed(st.prev)` -> `regexAllowed(undefined)` | **22** |
+| the loop's line counter `\n` -> `\r` | **466** |
+| a template's `startLine` -> `1` | **0** — see below |
+
+Three of four red the corpus, so the null result is known to be *reached*. The fourth is a real
+blind spot and is stated rather than glossed: `startLine` only escapes `tokenize` when a template
+literal is the FIRST token of a top-level statement, which no file in the corpus does. It is
+covered by three hand-built inputs instead, whose statement lines come back `[1,4]` / `[1,4,7]`
+and match old for new.
+
+| Module | Before | After |
+|---|---|---|
+| `coverage-preprocess.ts` | `check` — `NT1031`, `line++` in a closure | **`check` — `NT1606`**, `.push` (its own) |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+**`NT1031` is now empty tree-wide**, and unlike the buckets this document keeps watching refill,
+this one has no second holder to unmask: both of the tree's hand-written tokenizers now carry the
+same cursor record, and they were the only two closures-over-a-`let` in `src/`.
+
+**The rung did not move, and it was never going to.** Behind the capture write is `.push` — the
+185-site census elephant, refused **by decision** (commit `1ea7fa2`), whose sanctioned
+`xs = [...xs, v]` idiom is measured at **1036x** under bun at real accumulator sizes. Rewriting a
+per-token accumulator that way would break the two-toolchain constraint (`src/*.ts` has to keep
+*running* under bun), so it is an owner decision and was deliberately not taken here.
+`coverage-preprocess.ts` joins `ast.ts`, `lexer.ts`, `modules.ts` and `parser.ts` in the `NT1606`
+bucket, which is now **five of twelve** and is the single largest thing between here and SH6.
+
+### STAGE-1 GIVES BACK THE ONLY BLOCKER IT EVER OWNED — `await` at the inner call site
+
+`cli.ts` is stage-1: the real entry point, whose import graph pulls in everything. In every
+measurement in this document but one it has been gated on a *dependency*. The exception was
+its own `NT1020`:
+
+```ts
+await guard(() => buildBinary(source, out, { target, static: isStatic, entryPath: file }));
+//           ^ the arrow's body calls an async function without `await` — NT1020 at 76:21
+```
+
+Under node this promise is **not** dropped: `guard` is `async function guard<T>(fn: () =>
+Promise<T> | T)` and its body is `return await fn()`, so the promise is awaited one frame up.
+Two options were sized:
+
+| | verdict |
+|---|---|
+| **(a) SOURCE change** — `async () => await buildBinary(…)`, the `await` at the inner call site | **TAKEN** |
+| (b) COMPILER — narrow NT1020 for a call whose value is returned rather than discarded | rejected, and the reason is already written down |
+
+**(b) is rejected by a decision this project has already made and recorded.**
+`docs/divergences.md` names this exact shape a **deliberate over-rejection**:
+
+> A promise that is threaded through un-awaited and only awaited further up … produces
+> node's answer here, but is still refused … Knowing which of these is safe is a taint
+> analysis over promise values; refusing the un-awaited call is the same rule everywhere,
+> and **`await` at the inner call site is always the fix**.
+
+A recent lane deliberately made this guard *wider*, not narrower (it now covers promise-typed
+values escaping through parameters and returns). Narrowing it here for one call shape would
+re-open the hole that lane closed, and would make the accept/reject boundary syntactic again.
+
+**(a) is observationally null under bun**, and that is checked rather than argued. `guard`
+awaits whatever the callback returns, so `() => f(…)` and `async () => await f(…)` hand it the
+same promise; a rejection propagates through the async arrow to `guard`'s `catch` identically,
+which is the path that turns an `NTError` into a clean `error[NT….]` line instead of a stack
+trace. Old and new `src/cli.ts` were run side by side on `build`, `run`, `emit`, a program that
+exits 7, and a program that is refused: **identical stdout and identical exit codes** (1, 1, 7,
+0), including the diagnostic text.
+
+| Module | Before | After |
+|---|---|---|
+| `cli.ts` **linked (= stage-1)** | `link` — `NT1020`, its OWN | **`check` — `NT2001`**, checker.ts's `argTys: ["string", null]` |
+| `cli.ts` standalone | `NT2001` `process.stdout is not supported` | **unchanged** |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+The blocker moved to a LATER stage (`link` -> `check`) and back to a dependency's, so stage-1 is
+once again gated on the thing that gates five other modules: an **array of nullable elements**.
+
+**One instrument reports a blocker the compiler does not, and it is worth naming.**
+`test/self-host-coverage.test.ts`'s histogram gained `NT1020` x2 for `cli.ts` — an artifact of
+`coverage`'s statement-at-a-time recovery, which parses the call with no `guard` declaration in
+scope, so `promiseParamsByFn` is empty and the escape check refuses an async arrow that the real
+parser accepts. Measured both ways (declaration+call together parses; the call alone reports it).
+It is the mirror image of the confound this document already records for `lexer.ts`: a clean row
+in that histogram is not evidence a module is clean, and a dirty row is not evidence it is
+blocked.
+
+### THE ARRAY OF NULLABLE ELEMENTS IS CLEARED — and it was an ENCODING AMBIGUITY, not the element rule
+
+`argTys: ["string", null]` in `MethodSig` (src/checker.ts) was the first blocker for **six of
+the twelve** modules — checker.ts's own, inherited through the link by codegen, coverage,
+ownership, driver and cli. It reproduced at a plain declaration, so it was never a `.set`
+artifact:
+
+```ts
+const a: (string | null)[] = ["x", null];   // NT2001 array elements must share a type (got string, null)
+```
+
+**The array element-type allowlist was not the cause, and a lane sent to add a nullable arm to
+it would have found nothing to add.** The cause is an ambiguity in the `Ty` encoding. A nullable
+is a PREFIX (`?U`/`?N`) and an array is a SUFFIX (`[]`), so the two compose to one string:
+
+```
+makeNullable("null", "string")  + "[]"  === "?Nstring[]"    // (string | null)[]
+makeNullable("null", "string[]")        === "?Nstring[]"    // string[] | null
+```
+
+`isNullableTy` anchors at the front and wins, so `(T|null)[]` had **always read as `T[]|null`**.
+The literal error was only the visible half; the sharper symptom is a program with no `null` in
+it at all:
+
+```
+const a: (string|null)[] = ["x","y"]; a.length
+BEFORE: error[NT2001]: 'a' is possibly null — this read is not proved non-nullish
+AFTER:  2
+```
+
+**This is the identical collision the parser already refuses one construct away.**
+`parseTypeAtom` (src/parser.ts) refuses `((n: number) => number)[]` because
+`makeFuncTy(["number"],"number[]")` and `makeFuncTy(["number"],"number") + "[]"` are the same
+string, and its comment ends *"Whoever implements them has to fix the encoding first, which is
+the point."* The nullable case was the same defect with **no refusal in front of it** — it
+silently took the other reading and produced a diagnostic about a type nobody wrote.
+
+The fix is the one that comment prescribes: **parenthesize the element**. `makeArrayTy`
+(src/ast.ts) wraps a nullable element (`(?Nstring)[]`) and is the old concatenation for
+everything else, and `elemTy` strips one balanced pair back off. `(?Nstring)[]` cannot be
+confused with anything: it does not start with `?U`/`?N`, and `isFuncTy` needs a top-level
+`=>` a bare paren group has not got. **`T[] | null` keeps its spelling byte for byte**, which
+is why every existing `Ty` string in the tree is unchanged — 131 IR snapshots and 393 fixtures
+pass untouched.
+
+Four small pieces, in the order they were needed:
+
+1. `makeArrayTy`/`elemTy` in `ast.ts`, and **every** `${el}[]` construction site routed through
+   it (15 of them across checker/codegen/parser). Missing one is not cosmetic: `a.filter(...)`
+   built `?Nstring[]` and the result was reported 'possibly null'.
+2. The parser's `[]` suffix loop, `Array<T>`/`ReadonlyArray<T>`, and the tuple erasure.
+3. `arrayElementOk` — ONE predicate where there were two hand-inlined chains (the
+   empty-with-a-hint path and the inferred path), with a nullable arm that **recurses on the
+   base**, so `(() => number | null)[]` stays refused for the reason its base is refused.
+4. Codegen: an array literal now **coerces each element into the declared element type**, the
+   same store boundary an object literal's field takes. Without it `["x", null]` pushed a raw
+   `ptr` and a raw 0, and reading a slot back as a box loaded the first word as the tag.
+
+**`[null]` alone stays NT1001, and that is the right answer rather than a residual gap.** Its
+type is genuinely unknown (TypeScript infers `null[]`, for which there is no element
+representation). Contextual typing from an annotation is the discriminator, and it works:
+`const b: (string|null)[] = [null]` compiles. `undefined` behaves identically (`?U` for `?N`),
+and the MIXED `(A | null | undefined)[]` stays refused — `Ty` has one nullish slot, so that is
+the existing `A|B|null|undefined` refusal reached through an element, not a new one.
+
+**Soundness: a leak, never a double free, and the leak is not new.** An array of nullables is an
+array of POINTERS to `[tag, value]` boxes. `__arrLive() === 0` after 100 iterations — the
+vectors are freed exactly once, exit 0 — and `__objLive() === 200`, i.e. the boxes leak.
+That is not array-specific and not caused by this change: `isLinearTy` (src/ownership.ts) is
+`isArrayTy || isObjectTy || isUnionTy || isTypeRefTy`, so a **nullable is never in any drop set
+anywhere** — 100 loose `string | null` locals in a loop already measure `__objLive() === 100`
+with no array in sight. Both measurements are pinned in `test/nullable-element.test.ts`, the
+baseline included, so the day nullables become linear the array case is already watched.
+
+| module | was (linked) | now |
+|---|---|---|
+| `checker.ts` | `NT2001` — `argTys: ["string", null]`, its OWN | **`NT1014`** — `new Map([[k,v], …])`, `CONSOLE_STREAMS`/`FMT_SPECS`, its OWN |
+| `codegen.ts`, `coverage.ts`, `ownership.ts`, `driver.ts` | `NT2001` — checker.ts's | **`NT1014`** — checker.ts's, through the link |
+| `cli.ts` (= stage-1) | `NT2001` — checker.ts's | **`NT1014`** — the same |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+**No module reached IR, and what is behind this was MEASURED rather than predicted.** With
+checker.ts's two remaining entries-form tables rewritten as the sanctioned `.set` chain in a
+scratch tree, checker/codegen/coverage land on **`.push`** and ownership/driver on a Map spread.
+`.push` is the 185-site census elephant and is refused **by decision** (commit `1ea7fa2`), so
+nothing in this lane's reach could have produced a second self-compiling module. The scratch
+rewrite was reverted: the five remaining entries-form sites are a decided source change belonging
+to the lane that owns them, and doing two of five would move six modules' blockers for a partial
+answer.
+
+The tree-wide code set is now **two codes and eleven modules**: `NT1606` (`.push` — ast, lexer,
+parser, modules, coverage-preprocess) and `NT1014` (the entries form — the six above). The
+compiler's own frontier is a source idiom and five table sites.
+
+**PRE-EXISTING BUG, found on the way, and it is a SILENT WRONG ANSWER.**
+
+```
+[[1],[2]].join(";")       node `1;2`                nativets `\x01;\x01`   exit 0 on BOTH
+[{x:1},{x:2}].join(",")   node `[object Object],…`  nativets `,`           exit 0 on BOTH
+```
+
+Reproduced on `main` at `942f48b` with no nullable anywhere near it. `joinFn` (src/codegen.ts)
+is a three-way dispatch (`num`/`bool`/`str`) whose **default** is `nt_arr_join_str`, i.e.
+`strlen` on the slot — the exact failure its own comment records for `boolean[]` ("a two-way
+choice written twice is exactly how the third case gets missed twice"). `checkStringCoercion`
+(src/checker.ts) is the allow-list that keeps `${arr}` / `String(arr)` / concatenation off that
+default, and it says in prose that the two lists "must stay in step" — but **`.join()` itself
+never consulted it**. One list, written on one of the two paths. `.join()` consults it now, which
+also covers the nullable element (whose box pointer landed in the same default arm). Pinned in
+`test/nullable-element.test.ts`.
+
+A whole-surface sweep of a nullable-element array against node — 33 operations — produced **zero
+other wrong answers**; everything not node-exact is a named refusal (`.at`, `.find`,
+`.indexOf`/`.includes`/`.lastIndexOf`/`.with` on the argument's type, `.concat`, `.toSorted`
+without a comparator, `.map` producing a nullable).
+
 ---
 
 ### RESOLVED — `.push` is legal on a `@@mutable` ACCUMULATOR, and the rewrite was never taken
