@@ -16,7 +16,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // Stage 47 (console.log of compound values): the handle-type predicates the
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
-import { isTypeRefTy, containsTypeRef, expandTypeRef, recTypeTable } from "./ast.ts";
+import { isTypeRefTy, containsTypeRef, unfoldTypeRef, recTypeTable } from "./ast.ts";
 // `k in o`: node's prototype chain is the whole reason `"valueOf" in {}` is true.
 import { OBJECT_PROTO_KEYS } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
@@ -398,7 +398,29 @@ export function actorSendTy(t: Ty): Ty {
   return actorMsgTy(t);
 }
 
-export function check(program: Program): CheckedProgram {
+/**
+ * One function body the checker refused, collected by the MEASUREMENT mode below.
+ * `fn` is the function's linked (mangled) name, which is what says whose module it is.
+ */
+export interface FnBlocker { fn: string; code: string; message: string }
+
+/**
+ * `collectBlockers` puts `check` in MEASUREMENT mode — see `test/blocker-metric.ts`.
+ *
+ * Normally the first refused function body aborts the whole check, so a program has
+ * exactly one visible blocker no matter how many it holds. Passing an array here makes
+ * the per-function loop record each refusal and carry on, which is the only way to see
+ * the other 300. Two things follow, and both matter:
+ *
+ *  - the returned `CheckedProgram` is NOT a checked program. Bodies that threw are
+ *    half-typed, so it must be DISCARDED, never handed to ownership or codegen. Nothing
+ *    but the metric may pass this argument.
+ *  - `check` will usually still throw somewhere after the loop (the passes below assume
+ *    every body typed). That is expected; the caller keeps the array it already has.
+ *
+ * Omit the argument and this is the pre-existing function, byte for byte.
+ */
+export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedProgram {
   const functions = new Map<string, Sig>();
   // Value bindings this module imports. A linked program has none left (the linker
   // rewrites them to concrete names), so this is populated only for a single-module
@@ -482,7 +504,19 @@ export function check(program: Program): CheckedProgram {
   // Only reads made from INSIDE a function body promote a module binding to a global,
   // so clear the top level's own hits before checking the functions.
   moduleScope.hits.clear();
-  for (const s of program.body) if (s.kind === "FuncDecl" && !s.typeParams?.length) c.checkFunction(s, moduleScope.child());
+  // Deliberately an ARROW inside `check`, not a module-level helper: the metric this
+  // serves counts top-level `FuncDecl`s of the LINKED COMPILER, so a new one here would
+  // move its own denominator (and, since a `catch (e)` binding types as the erased class,
+  // its own numerator too — the tool caught exactly that when this was a `function`).
+  // `check` is already in the failing set, so an arrow in its body costs nothing.
+  const asBlocker = (fn: string, e: unknown): FnBlocker =>
+    e instanceof NTError
+      ? { fn, code: e.diag.code, message: e.diag.message }
+      : { fn, code: `(${(e as Error).name})`, message: (e as Error).message };
+  for (const s of program.body) if (s.kind === "FuncDecl" && !s.typeParams?.length) {
+    if (collectBlockers === undefined) c.checkFunction(s, moduleScope.child());
+    else try { c.checkFunction(s, moduleScope.child()); } catch (e) { collectBlockers.push(asBlocker(s.name, e)); }
+  }
   // M3: check every specialization that got instantiated above (checking one body can
   // instantiate more generics, so drain to a fixpoint), then SPLICE the templates out of
   // the program and the concrete specializations in — from here on the rest of the
@@ -747,7 +781,7 @@ class Checker {
    * Layout is untouched either way — a literal-typed field and a `string` field are one slot
    * holding one string pointer.
    */
-  private unfold(t: Ty): Ty { return widenLiteralTys(expandTypeRef(t, this.recTypes)); }
+  private unfold(t: Ty): Ty { return widenLiteralTys(unfoldTypeRef(t, this.recTypes)); }
 
   /**
    * Does class `tag` declare a `toJSON` METHOD? The parser desugars `class C { toJSON() {} }`
@@ -2108,13 +2142,15 @@ class Checker {
    * member access, which matched none of the structural predicates: `NT2001 Property 'kind'
    * does not exist on @Expr`. That single gap was the first blocker for nine modules.
    *
-   * WHY ONE LEVEL TERMINATES. `expandTypeRef` replaces a bare `@N` with `N`'s shape and is
-   * the identity on everything else — including a type that merely CONTAINS a reference. A
-   * shape's own recursive positions stay folded (the parser mints a back-edge exactly there),
-   * so the result is either concrete or another `@N` one access deeper. There is no fixpoint
-   * and no transitive expansion: each unfold is paid for by a real source-level access, and a
-   * program has finitely many. This is the same argument the doc comment already made; it is
-   * now also true of the code.
+   * WHY ONE LEVEL TERMINATES. `unfoldTypeRef` replaces a bare `@N` with `N`'s shape, and
+   * DISTRIBUTES that over the type constructors `?U`/`?N` and `[]` so an optional or listed
+   * back-edge (`next?: N`, `kids: N[]`) is unfolded too — those are constructors applied to
+   * the VALUE, so leaving them folded broke this funnel's own invariant. It stops at a shape:
+   * an object's fields and a union's members are the "nested inside a shape" positions where
+   * a back-edge legitimately stays folded (the parser mints one exactly there), and descending
+   * into them is the fixpoint that would diverge. So the result is either concrete or another
+   * `@N` one access deeper. There is no transitive expansion: each unfold is paid for by a
+   * real source-level access, and a program has finitely many.
    *
    * WHY THE FUNNEL RATHER THAN THE MEMBER ACCESS. Unfolding only at a receiver would leave
    * `const o = e.operand` bound at `@Expr`, and a tag narrowing declares a SHADOW BINDING

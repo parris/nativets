@@ -20,7 +20,7 @@ import { makeArrayTy } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
-import { isTypeRefTy, expandTypeRef, recTypeTable } from "./ast.ts";
+import { isTypeRefTy, unfoldTypeRef, recTypeTable } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
@@ -770,7 +770,7 @@ class FnGen {
    *  `{ tag: undefined, n: 2 }` where node prints `{ tag: 'm', n: 2 }`.
    *  `widenLiteralTys` does not descend into a `U<…>`, so a recursive union keeps the tags
    *  its dispatch reads, and a literal-typed field is one string slot either way. */
-  private unfold(t: Ty): Ty { return widenLiteralTys(expandTypeRef(t, this.mod.recTypes)); }
+  private unfold(t: Ty): Ty { return widenLiteralTys(unfoldTypeRef(t, this.mod.recTypes)); }
 
   /**
    * The storage address of a variable. Normally its frame alloca `%x.addr`; for a
@@ -1917,10 +1917,18 @@ class FnGen {
    *
    * One level, for the reason `checker.type` states: the shape's own recursive positions
    * stay folded, so this is O(1) and driven by real accesses.
+   *
+   * The guard tests whether unfolding CHANGED the type rather than testing for a bare `@N`,
+   * because `?U@N` — an optional back-edge — is a value type the checker now unfolds too, and
+   * the two halves of this funnel disagreeing is what the funnel exists to prevent. It stays
+   * a guard rather than an unconditional `this.unfold` because `unfold` also WIDENS string
+   * literals, and widening every expression's type here would erase the tags the discriminated
+   * dispatch reads.
    */
   private genExpr(e: Expr): Val {
     const val = this.genExprInner(e);
-    return isTypeRefTy(val.ty) ? { v: val.v, ty: this.unfold(val.ty) } : val;
+    const un = unfoldTypeRef(val.ty, this.mod.recTypes);
+    return un === val.ty ? val : { v: val.v, ty: this.unfold(val.ty) };
   }
 
   private genExprInner(e: Expr): Val {

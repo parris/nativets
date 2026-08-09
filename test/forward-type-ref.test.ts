@@ -392,6 +392,27 @@ console.log(b.kind);`);
   });
 
   /*
+   * THE OPTIONAL BACK-EDGE IN A CONDITION — the unfold did not distribute through `?U`.
+   *
+   * `n.next` is declared `?U@N`, and `expandTypeRef` is the identity on anything that is not
+   * a BARE `@N` — so `Checker.type`'s unfold left the reference folded and `?U@N` became a
+   * VALUE's own static type, which ast.ts:513 says can never happen. Nothing in the checker
+   * noticed (a nullable is a nullable), and codegen's `truthyOf` reached its nullable arm,
+   * unwrapped the box, and asked the truthiness of the bare `@N` inside:
+   *
+   *     InternalError: no truthiness rule for @N — add one rather than defaulting
+   *
+   * An ICE rather than a wrong answer only because that dispatch throws instead of
+   * defaulting. `if (n.next)` on a linked list is the first thing any list walker writes.
+   */
+  test("an optional back-edge is truthy-testable and callable in a recursive walk", async () => {
+    await matchesNode(`
+interface Node { name: string; next?: Node }
+function depth(n: Node): number { return n.next ? 1 + depth(n.next) : 1; }
+console.log(depth({ name: "a", next: { name: "b" } }));`);
+  });
+
+  /*
    * A HEAP OUT-OF-BOUNDS, and it predates this lane — the shape is Lane B's self-recursion.
    *
    *     interface N { v: number; next?: N }
@@ -589,6 +610,114 @@ if (one.kind === "Call") {
   console.log(one.args[0].kind);
   for (const a of one.args) console.log(a.kind);
 }`);
+  });
+
+  /*
+   * THE BACK-EDGE UNDER A CONSTRUCTOR AT A PARAMETER — `?U@E` vs `?UU<…>`.
+   *
+   * The second face of the same root cause as the truthiness ICE above, and the one that is
+   * directly on the self-hosting path: this is the shape EVERY AST walker is written in — an
+   * optional child passed straight back to the recursive function.
+   *
+   * A parameter's annotation `E | undefined` is parsed to the EXPANDED shape (`?UU<…>`), but
+   * the argument `e.next` is read out of a field declared `?U@E`, and `expandTypeRef` was the
+   * identity on it because it is not a bare `@E`. So the two spellings of one type met at the
+   * call and `assignable` compared a reference against a union:
+   *
+   *     error[NT2001]: 'depth' arg 0 expects ?UU<{kind:"A",next:?U@E}|{kind:"B"}>, got ?U@E
+   *
+   * Distributing the unfold through `?U` — rather than adding a THIRD unfold site — is what
+   * closes it, and it closes the `[]` spelling with it.
+   *
+   * The nodes are bound to locals rather than written inline at the call because an object
+   * LITERAL at a nullable-union parameter is refused by a separate, non-recursive bug
+   * (reported to lane-nullable): `f({kind:"B"})` where `f(e: E | undefined)` loses the
+   * contextual hint through the `?U` and widens the tag to `string`. `f(e: E)` is fine.
+   */
+  test("an optional back-edge passes to a parameter annotated with the union itself", async () => {
+    await matchesNode(`
+type E = { kind: "A"; next?: E } | { kind: "B" };
+function depth(e: E | undefined): number {
+  if (e === undefined) return 0;
+  if (e.kind === "A") return 1 + depth(e.next);
+  return 1;
+}
+const leaf: E = { kind: "B" };
+const mid: E = { kind: "A", next: leaf };
+const root: E = { kind: "A", next: mid };
+console.log(depth(root));
+console.log(depth(undefined));
+const lone: E = { kind: "B" };
+console.log(depth(lone));`);
+  });
+
+  /*
+   * THE SAME GAP UNDER `[]` RATHER THAN `?U`, which is why the fix distributes over the
+   * CONSTRUCTOR rather than special-casing the optional field.
+   *
+   * Indexing a back-edge array (`one.args[0].kind`) already worked — the element type comes
+   * out BARE and the existing unfold caught it. PASSING the array whole did not:
+   *
+   *     error[NT2001]: 'total' arg 0 expects U<{kind:"Num",…}|{kind:"Call",args:@Expr[]}>[],
+   *                    got @Expr[]
+   *
+   * A walker that recurses over a child LIST is as common as one that recurses over an
+   * optional child, and src/ast.ts has ~15 fields of this shape.
+   */
+  test("an array of the back-edge passes to a parameter annotated with the element union", async () => {
+    await matchesNode(`
+interface Num { kind: "Num"; value: number; }
+interface Call { kind: "Call"; args: Expr[]; }
+type Expr = Num | Call;
+
+function total(es: Expr[]): number {
+  let s = 0;
+  for (const e of es) s = s + size(e);
+  return s;
+}
+function size(e: Expr): number {
+  if (e.kind === "Call") return 1 + total(e.args);
+  return 1;
+}
+const one: Expr = { kind: "Call", args: [{ kind: "Num", value: 3 }, { kind: "Num", value: 4 }] };
+console.log(size(one));`);
+  });
+
+  /*
+   * THE `?N` + `[]` COLLISION, with a back-edge in it — the highest-risk thing about the
+   * distributing unfold, so it is pinned rather than argued.
+   *
+   * The nullable encoding is a PREFIX and the array encoding is a SUFFIX, so `?N` + `X` + `[]`
+   * is ambiguous: `makeArrayTy`'s doc records `(string|null)[]` having READ as `string[]|null`
+   * and producing a null-safety diagnostic about a program containing no null. Distributing an
+   * unfold through both constructors could re-open exactly that, in either direction.
+   *
+   * It does not, because the two arms REBUILD rather than concatenate: the nullable arm keeps
+   * the original two-character prefix and swaps only the base, and the array arm goes back
+   * through `makeArrayTy`, which parenthesizes a nullable element. Both spellings appear here
+   * on one declaration so a collision would have to merge two fields that behave differently:
+   *
+   *   sibs: N[] | null     ->  ?N@N[]    ->  ?NU<…>[]     (a nullable ARRAY)
+   *   alt:  (N | null)[]   ->  (?N@N)[]  ->  (?NU<…>)[]   (an ARRAY of nullable)
+   *
+   * `sumSibs` reads the whole array as possibly-null and `sumAlt` reads each ELEMENT as
+   * possibly-null; if the encodings merged, one of the two would be refused or would read the
+   * wrong slot. The `?N@N[]` spelling is not hypothetical — it is what stage-1's
+   * `Checker.eliminateAfterEarlyExit` is written in.
+   */
+  test("a back-edge under BOTH nullable-of-array and array-of-nullable stays distinct", async () => {
+    await matchesNode(`
+interface N { kind: "N"; v: number; kids: N[]; sibs: N[] | null; alt: (N | null)[]; }
+
+function sumKids(ks: N[]): number { let s = 0; for (const k of ks) s = s + k.v; return s; }
+function sumSibs(ss: N[] | null): number { if (ss === null) return -1; let s = 0; for (const k of ss) s = s + k.v; return s; }
+function sumAlt(as: (N | null)[]): number { let s = 0; for (const a of as) s = s + (a === null ? 100 : a.v); return s; }
+
+const leaf: N = { kind: "N", v: 5, kids: [], sibs: null, alt: [] };
+const root: N = { kind: "N", v: 1, kids: [leaf], sibs: null, alt: [null] };
+console.log(sumKids(root.kids));
+console.log(sumSibs(root.sibs));
+console.log(sumAlt(root.alt));`);
   });
 
   /*
