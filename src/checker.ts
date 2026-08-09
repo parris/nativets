@@ -135,6 +135,22 @@ interface NarrowFact { name: string; binding: Binding; path: string; ty: Ty; con
 /** The root binding + dotted suffix an expression reads, and the type at the end of it. */
 interface AccessPath { name: string; binding: Binding; path: string; ty: Ty }
 
+/**
+ * One enclosing function-like body on `Checker.bodyChain`.
+ *
+ * `binds` are the names this body introduces itself, so the chain can be walked inward-out
+ * to find WHICH body owns a given name — the scope-aware replacement for asking a
+ * name-keyed, program-wide question. `closureAssigned` is the per-body answer to "which
+ * names does some arrow inside this body assign?", computed on first use because most
+ * bodies are never asked.
+ */
+interface BodyFrame { body: Stmt[]; binds: Set<string>; closureAssigned?: Set<string> }
+
+/** A `bodyChain` frame for a body, recording the names it binds itself. */
+function bodyFrame(params: { name: string }[], body: Stmt[]): BodyFrame {
+  return { body, binds: ownBindings(params, body) };
+}
+
 /** How a union field read's receiver was written — see `Checker.recvHint`. */
 interface RecvHint { text: string; plain: boolean; already: boolean }
 
@@ -477,7 +493,7 @@ export function check(program: Program): CheckedProgram {
     }
   }
 
-  c.bodyChain = [program.body]; // the outermost enclosing body, for NT1031
+  c.bodyChain = [bodyFrame([], program.body)]; // the outermost enclosing body, for NT1031
   c.checkBlock(program.body, moduleScope);
   // Only reads made from INSIDE a function body promote a module binding to a global,
   // so clear the top level's own hits before checking the functions.
@@ -687,9 +703,14 @@ class Checker {
    * `checkCapturedWrites` (NT1031) reads it: deciding whether a closure's write to a
    * capture is observable means asking whether anything OUTSIDE the closure still
    * mentions the binding, and a scope chain records names, not the code that uses them.
+   *
+   * Each entry carries `binds` — the names that body introduces ITSELF (`ownBindings`:
+   * its parameters plus its top-level `let`/`const`/`function`). That is what makes the
+   * question scope-aware instead of name-keyed; see `bindingFrame`.
+   *
    * Public so `check()` can seed it with the module body.
    */
-  bodyChain: Stmt[][] = [];
+  bodyChain: BodyFrame[] = [];
   /**
    * Call nodes allowed to be a Map/Set ITERATOR (`m.keys()/.values()/.entries()`).
    * node returns a lazy Iterator object there; we return a real array, so the two
@@ -894,8 +915,9 @@ class Checker {
    *     an arrow in it), so a loop back-edge can never observe a stale narrowing;
    *   - a `let` fact does not survive into an inner function body — a closure may run
    *     after a later assignment. `const` facts do (they cannot be invalidated).
-   * A name assigned inside ANY arrow in the program is never narrowed at all, which is
-   * TypeScript's rule for the same reason.
+   * A name assigned inside some arrow is never narrowed at all, which is TypeScript's
+   * rule for the same reason — asked of the body that DECLARES the binding, not of the
+   * program (see `closureMayAssign`).
    *
    * When the analysis is nonetheless wrong the read unwraps a nullish box, which PANICS
    * exactly like a false `!` assertion (see codegen's `NonNullExpr`) — never a phantom
@@ -906,8 +928,36 @@ class Checker {
   private narrowStack: NarrowFact[][] = [];
   /** Nesting depth of arrow bodies being typed (a `let` narrowing stops at depth+1). */
   private arrowDepth = 0;
-  /** Names assigned inside SOME arrow body anywhere in the program — never narrowable. */
+  /** Names assigned inside SOME arrow body anywhere in the program — the answer for a
+   *  MODULE-LEVEL binding, which any arrow in the program can reach. */
   private closureAssigned = new Set<string>();
+
+  /**
+   * Can a closure assign the binding this fact is about, and so invalidate it?
+   *
+   * Only code inside the binding's own scope can name it, so the question belongs to the
+   * body that DECLARES it — `bindingFrame`. For a module-level binding that body is the
+   * program and the answer is the program-wide set, unchanged. For a local or a
+   * parameter it is one function or arrow body, and every OTHER function's `let` of the
+   * same name — in this file or, since SH1, in any other module linked into the program —
+   * stops being part of the answer. The arrow's own parameter is the extreme case:
+   * `(t: Tok | undefined) => !!t && t.kind === "punct"` was refused because some
+   * unrelated arrow somewhere assigned a `t` (src/coverage-preprocess.ts, which compiled
+   * standalone and did not compile linked).
+   *
+   * Computed on first use and cached on the frame: most bodies are never asked, and the
+   * expression-bodied arrows that dominate the chain rebuild their `Stmt[]` on each push.
+   */
+  private closureMayAssign(name: string): boolean {
+    const frame = this.bindingFrame(name);
+    if (!this.bodyChain.length || frame === this.bodyChain[0]) return this.closureAssigned.has(name);
+    if (!frame.closureAssigned) {
+      const inArrow = new Set<string>();
+      collectAssignedStmts(frame.body, new Set<string>(), inArrow, false);
+      frame.closureAssigned = inArrow;
+    }
+    return frame.closureAssigned.has(name);
+  }
 
   /** Record the program's closure-assigned names (see the note above). */
   noteClosureAssignments(body: Stmt[]): void {
@@ -1002,7 +1052,7 @@ class Checker {
     const assigned = new Set<string>();
     collectAssignedStmts(exprRegion(test), assigned, assigned, false);
     collectAssignedStmts(region, assigned, assigned, false);
-    return out.filter((f) => !assigned.has(f.name) && !this.closureAssigned.has(f.name));
+    return out.filter((f) => !assigned.has(f.name) && !this.closureMayAssign(f.name));
   }
 
   /**
@@ -1407,7 +1457,7 @@ class Checker {
       this.retypeLiteral(p.default, p.annot);
     }
     this.declareParams(fn, base);
-    this.bodyChain.push(fn.body);
+    this.bodyChain.push(bodyFrame(fn.params, fn.body));
     try { this.checkBlock(fn.body, base, fn.returnTy ?? "number"); } finally { this.bodyChain.pop(); }
     this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
   }
@@ -4062,7 +4112,7 @@ class Checker {
     // Inlined or not, a value-arrow nested inside this callback needs this body in its
     // enclosing chain (NT1031) — the callback's own statements are one of the places an
     // "is the binding used outside the closure?" question has to look.
-    this.bodyChain.push(arrowBody(arrow));
+    this.bodyChain.push(bodyFrame(arrow.params, arrowBody(arrow)));
     let retTy: Ty;
     try {
       retTy = this.typeArrowReturn(arrow, inner, this.arrowRetAnnot(arrow, undefined));
@@ -4189,7 +4239,7 @@ class Checker {
     // The arrow's own body joins `bodyChain` while its body is typed, so a NESTED arrow
     // sees it as one of ITS enclosing bodies (NT1031) — and comes back off before
     // `computeCaptures`, which asks about the bodies OUTSIDE this arrow.
-    this.bodyChain.push(arrowBody(arrow));
+    this.bodyChain.push(bodyFrame(arrow.params, arrowBody(arrow)));
     const declared = this.arrowRetAnnot(arrow, expected);
     let retTy: Ty;
     try {
@@ -4297,7 +4347,40 @@ class Checker {
    * short (the early return-type inference pass runs before it is built) this can only
    * find FEWER references and so allow more, and every such arrow is typed again from
    * `checkBlock` with the full chain, which is the run that decides.
+   *
+   * WHICH enclosing body is `bindingFrame`'s job, and getting that wrong was a bug with
+   * no single-file symptom — see its note.
    */
+  /**
+   * The innermost enclosing body that BINDS `name` — the one whose code is the only code
+   * that can be about this binding.
+   *
+   * THE BUG THIS EXISTS FOR. Both closure analyses used to ask their question of the
+   * whole `bodyChain`, whose outermost frame is the entire program; and after SH1 links a
+   * module graph, "the entire program" is every module at once. The linker alpha-renames
+   * only TOP-LEVEL bindings, so every module's locals and parameters land in one flat
+   * namespace, and a bare-name question over that namespace answers yes for bindings in
+   * files the closure has never heard of. The symptom is a pair of modules that EACH
+   * compile alone and cannot be compiled together (test/modules/closure-name) — invisible
+   * to every per-module measurement we have, because per-module is exactly the case that
+   * works. The same collision inside one file was always possible; linking made it
+   * ordinary.
+   *
+   * Walking inward-out and stopping at the first binder is conservative in the safe
+   * direction at every step. `ownBindings` sees a body's parameters and its TOP-LEVEL
+   * declarations only, so a `let` in a nested block is not placed and the walk continues
+   * outward to a body that encloses it — scanning MORE code, never less. With no binder
+   * anywhere (a builtin, or a shape `ownBindings` does not model) it lands on frame 0,
+   * which is the behaviour this replaced.
+   */
+  private bindingFrame(name: string): BodyFrame {
+    for (let i = this.bodyChain.length - 1; i > 0; i--) if (this.bodyChain[i]!.binds.has(name)) return this.bodyChain[i]!;
+    // The chain is EMPTY during the pre-`check` return-type inference pass, which the
+    // note on `checkCapturedWrites` covers: nothing to scan means nothing observed, and
+    // the arrow is judged again for real once the chain exists.
+    return this.bodyChain[0] ?? { body: [], binds: new Set<string>() };
+  }
+
   private checkCapturedWrites(arrow: ArrowFunction, scope: Scope): void {
     const writes = new Map<string, string>();
     collectEscapingWrites(arrow, writes);
@@ -4307,7 +4390,12 @@ class Checker {
     for (const [name, op] of writes) {
       const b = scope.lookup(name);
       if (!b) continue; // not an enclosing binding at all — not this rule's business
-      const observed = this.bodyChain.some((body) => referencesName(body, name, arrow));
+      // Only the body that DECLARES `name` can mention this binding — an outer body is
+      // not in its scope, and an inner one is a sub-tree of it, so one frame answers the
+      // whole question. Scanning the rest was the pre-link status quo and is what made
+      // this a program-wide, bare-name test; `bindingFrame` falls back to the outermost
+      // frame whenever it cannot place the declaration, which is the old behaviour.
+      const observed = referencesName(this.bindingFrame(name).body, name, arrow);
       if (!observed && b.ty === "number") continue; // the escaping-counter shape: safe
       const why = observed
         ? `'${name}' is also used outside the closure, so it would be read at its stale value`
