@@ -8,7 +8,7 @@
  */
 
 import { lex, LexError, decodeEscapeAt, type Token } from "./lexer.ts";
-import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral, NTError } from "./diagnostics.ts";
+import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral, unknownTypeName, NTError } from "./diagnostics.ts";
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
   isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
@@ -39,6 +39,18 @@ export interface ParseOpts {
    *  statement would be invisible to the next — most visibly a `@@mutable type`, whose
    *  tag is what makes a later `r.f = v` legal. Unused by the normal pipeline. */
   collectTypes?: Map<string, Ty>;
+  /**
+   * Names DECLARED in the original source but stripped before this parse sees it — for a
+   * caller that parses a fragment rather than a file. `coverage` is the only one: it erases
+   * the import preamble AND every `type`/`interface` declaration, then parses what is left
+   * one statement at a time (src/coverage-preprocess.ts).
+   *
+   * Without it the surviving annotations name types nothing declares, and NT2003
+   * ("Cannot find name") fires on a program that is perfectly well formed — a refusal
+   * invented by the stripping, not found in the source. Unused by the normal pipeline,
+   * which parses whole files and reads the imports itself.
+   */
+  externalTypeNames?: string[];
 }
 
 export class ParseError extends Error {}
@@ -67,6 +79,42 @@ const MEMBER_START = new Set(["(", ":", "?", "="]);
 // still land on the deferral rather than silently parsing.)
 const REJECTED_MEMBER_MODS = new Set(["static", "abstract", "declare", "override", "get", "set", "async"]);
 const SCALARS = new Set(["number", "boolean", "string", "void", "undefined", "null"]);
+/**
+ * AMBIENT type names — names TypeScript's own lib declares, so a program may use one
+ * without declaring or importing it. They are NOT all supported: most still erase through
+ * the fallback below exactly as they always did. This set exists only so NT2003 ("Cannot
+ * find name") can tell "you never declared this" from "this is a global you never have to
+ * declare", and a name in here keeps whatever behavior it had.
+ *
+ * DELIBERATELY GENEROUS. The refusal can only make fewer programs compile, so a name
+ * wrongly OUT of this set is a false refusal on valid code — strictly worse than the
+ * silent erasure it replaces — while a name wrongly IN it merely preserves the status quo
+ * for that name. Every doubtful name is therefore listed. Measured against the corpus:
+ * `unknown`, `any`, `never`, `ReadonlyMap` and `this` are the ones that actually occur.
+ */
+const AMBIENT_TYPES = new Set([
+  // TypeScript's own type-system keywords
+  "any", "unknown", "never", "object", "symbol", "bigint", "this", "typeof", "keyof", "infer", "asserts", "is",
+  // ECMAScript globals
+  "Object", "Function", "Array", "ReadonlyArray", "String", "Number", "Boolean", "Symbol", "BigInt",
+  "Math", "JSON", "RegExp", "Map", "Set", "WeakMap", "WeakSet", "WeakRef", "ReadonlyMap", "ReadonlySet",
+  "Promise", "PromiseLike", "Date", "Error", "EvalError", "RangeError", "ReferenceError", "SyntaxError",
+  "TypeError", "URIError", "AggregateError", "Proxy", "Reflect", "Generator", "GeneratorFunction",
+  "AsyncGenerator", "Iterable", "Iterator", "IterableIterator", "AsyncIterable", "AsyncIterator",
+  "AsyncIterableIterator", "ArrayLike", "ConcatArray", "TemplateStringsArray", "IArguments",
+  "ArrayBuffer", "SharedArrayBuffer", "ArrayBufferLike", "ArrayBufferView", "DataView",
+  "Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array",
+  "Uint32Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array",
+  // lib.es5 utility types
+  "Partial", "Required", "Readonly", "Record", "Pick", "Omit", "Exclude", "Extract", "NonNullable",
+  "Parameters", "ConstructorParameters", "ReturnType", "InstanceType", "ThisParameterType",
+  "OmitThisParameter", "ThisType", "Awaited", "NoInfer",
+  "Uppercase", "Lowercase", "Capitalize", "Uncapitalize",
+  // web / host globals a nativets program may name (fetch tier, text encoding, node)
+  "Response", "Request", "Headers", "URL", "URLSearchParams", "TextEncoder", "TextDecoder",
+  "Blob", "File", "FormData", "AbortController", "AbortSignal", "Event", "EventTarget",
+  "ReadableStream", "WritableStream", "TransformStream", "Console", "Buffer", "NodeJS", "globalThis",
+]);
 /**
  * Compile-time class ATTRIBUTES (`@@name`) the checker understands. An attribute changes
  * how a class is CHECKED and COMPILED and has zero runtime footprint — so an unknown one
@@ -251,6 +299,30 @@ class Parser {
    *  registers its instance shape), and classes are NOT hoisted — so the hoisting
    *  fixpoint has to know to keep its hands off a declaration that names one. */
   private declaredClassNames = new Set<string>();
+  /**
+   * Names whose declaration this parse CANNOT SEE — so "I have no shape for it" says
+   * nothing about whether it exists, and NT2003 must not fire. Two sources:
+   *
+   *   1. every identifier an `import` in this file binds, collected lexically from the
+   *      token stream in the constructor (`scanExternalNames`), like `declaredTypeLines`
+   *      and for the same reason: a hoisting sub-parser starts in the MIDDLE of the file
+   *      and never sees the import list at all;
+   *   2. `ParseOpts.externalTypeNames`, for a caller parsing a FRAGMENT of a file whose
+   *      declarations it already stripped — `coverage`, which erases the module preamble
+   *      and every `type`/`interface` and then parses statement by statement.
+   *
+   * The import half is deliberately BLIND to whether the import actually seeded a type.
+   * `modules.ts` seeds `typeEnv` from the exporting module's `finalTypes`, and a type that
+   * module refused for its own reason is simply absent — so an imported name can reach the
+   * fallback while being perfectly well declared one file over. Blaming the annotation
+   * there would move the report AWAY from the real cause. The unseeded-import case is a
+   * separate diagnostic belonging to the linker, which is the only pass that can tell
+   * "your dependency refused this type" from "no such name".
+   *
+   * Over-collects on purpose: every specifier, type-only or not, plus the default and
+   * namespace forms. A name in here is only ever a reason NOT to refuse.
+   */
+  private externalNames = new Set<string>();
   /** True on a sub-parser built by `hoistTypeDecls` — i.e. this parse is resolving ONE
    *  declaration ahead of the file, and may only use what hoisting can actually see. */
   private hoisting = false;
@@ -363,6 +435,7 @@ class Parser {
     if (opts.asyncEnv) for (const n of opts.asyncEnv) this.asyncFns.add(n);
     this.file = opts.file;
     this.collectTypes = opts.collectTypes;
+    if (opts.externalTypeNames) for (const n of opts.externalTypeNames) this.externalNames.add(n);
     // Pre-scan for declared type names. Lexical on purpose: `interface`/`type` followed by
     // an identifier is unambiguous in the token stream, and this has to run BEFORE any
     // parsing so a name's declaration is known no matter where it sits in the file.
@@ -387,6 +460,34 @@ class Parser {
             this.typeDeclStarts.set(n.value, s);
           }
         }
+      }
+    }
+    this.scanExternalNames(toks);
+  }
+
+  /**
+   * Collect every identifier an `import` in this file BINDS (see `externalNames`).
+   *
+   * Lexical, and deliberately crude: from an `import` keyword, take every identifier up to
+   * the `from` (or, for a side-effect / text import, up to the module string), skipping the
+   * punctuation and the `type`/`as` keywords. `as` is handled by simply keeping the LAST
+   * identifier of each specifier as well as the first — the local binding is what matters,
+   * and over-collecting the imported name too is harmless because this set is only ever a
+   * reason to DECLINE a refusal.
+   */
+  private scanExternalNames(toks: Token[]): void {
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i]!;
+      if (t.type !== "ident" || t.value !== "import") continue;
+      // `import("m").T` — an inline import TYPE, not a declaration. It binds nothing.
+      if (toks[i + 1]?.value === "(") continue;
+      for (let j = i + 1; j < toks.length; j++) {
+        const u = toks[j]!;
+        if (u.type === "string") break;                       // reached the module specifier
+        if (u.type === "ident" && u.value === "from") break;
+        if (u.type !== "ident") continue;                     // `{` `}` `,` `*` punctuation
+        if (u.value === "type" || u.value === "as") continue; // modifier keywords, not bindings
+        this.externalNames.add(u.value);
       }
     }
   }
@@ -638,7 +739,69 @@ class Parser {
         "top-level `type`/`interface` declarations are hoisted, so this one is not top-level (a type declared inside a function or block stays in source order) or its own declaration was rejected — move it to the top level, above its first use; see docs/divergences.md",
       );
     }
-    return (id === "Error" ? "{message:string}" : SCALARS.has(id) ? id : "number") as Ty;
+    if (id === "Error") return "{message:string}" as Ty;
+    if (SCALARS.has(id)) return id as Ty;
+    this.refuseUnknownName(id);
+    return "number" as Ty;
+  }
+
+  /**
+   * NT2003 — the name is declared NOWHERE. Everything above this point in `resolveNamed`
+   * has already claimed the name it knows how to resolve; what is left either belongs to
+   * some scope this parser cannot see, or does not exist at all. This separates the two,
+   * and only the second is refused.
+   *
+   * WHY IT HAS TO BE HERE, and not in the checker or a post-link pass: the erasure to
+   * `number` is DESTRUCTIVE. `Ty` (src/ast.ts) is a flat structural string with no
+   * inhabitant meaning "unresolved 'Nope'", so once this line returns `number` the name is
+   * gone from the program and no later pass can recover it — a checker-side rule would be
+   * reasoning about a `number` that is indistinguishable from one the user wrote. The
+   * parser is the last place that still holds the SPELLING.
+   *
+   * The cost of putting it here is that the parser's view is FILE-LOCAL, so the four ways a
+   * name can be legitimately unresolved at this instant each need their own escape, and all
+   * four are checked before the throw:
+   *   - a generic type PARAMETER — `typeParamScopes`, at the top of `resolveNamed`;
+   *   - declared later in this file as a `type`/`interface` — `declaredTypeLines`, above,
+   *     which reports the ordering problem instead;
+   *   - declared later in this file as a CLASS — `declaredClassNames`, below;
+   *   - declared somewhere this parse cannot see — `externalNames`, which is the union of
+   *     what this file IMPORTS and what a fragment-parsing caller stripped before handing
+   *     the text over. The import half is the reason the check cannot simply be
+   *     "not in `typeAliases`": `modules.ts` seeds imported types from the exporting
+   *     module's `finalTypes`, and a type that module refused for its OWN reason never gets
+   *     seeded, so a perfectly well-declared name reaches this line. That case is real and
+   *     live in src/ (`Ty`/`Expr`/`Stmt` from src/ast.ts are unseeded today because their
+   *     declarations are refused there), and blaming the annotation for it would move the
+   *     report one file away from the cause. It stays on the old fallback.
+   *
+   * SPECULATION-SAFE. `tryCallTypeArgs` parses `<…>` after a primary as a type-argument
+   * list and BACKTRACKS on any throw, so `i < n` speculatively resolves `n` as a type name
+   * and lands here — 199 times over the corpus. Throwing is correct in that frame precisely
+   * because it is caught: the throw is what tells the speculation this was not a type. So
+   * this must stay a THROW and must never record the refusal as a side effect.
+   */
+  private refuseUnknownName(id: string): void {
+    if (AMBIENT_TYPES.has(id)) return;      // a global the program never had to declare
+    if (this.externalNames.has(id)) return; // imported, or stripped by a fragment-parsing caller
+    const t = this.toks[this.pos - 1];
+    // Declared in this file as a CLASS, and not yet parsed — the class case of the same
+    // ordering problem `declaredTypeLines` handles for `type`/`interface`, and it needs its
+    // own arm because classes are NOT hoisted: `parseClass` registers the instance shape
+    // (and a self-marker for uses inside the class's own body) only when it runs, so a name
+    // used above it has no shape to substitute. That is an ordering failure, not a missing
+    // name — reordering genuinely fixes it — so it is NT1030 with reordering advice rather
+    // than NT2003. Reaching here at all proves the class is unparsed: once `parseClass` has
+    // run, `typeAliases` answers and `resolveNamed` returns long before this point.
+    if (this.declaredClassNames.has(id)) {
+      this.blockedOn = id;
+      throw nyi(
+        NYI.FORWARD_TYPE,
+        `use of class type '${id}' before its declaration${t === undefined ? "" : ` (used at line ${t.line})`}`,
+        "a class is not hoisted the way `type`/`interface` is — its instance shape only exists once the class body has been parsed, so a class named in an annotation must be declared ABOVE its first use. Move the `class` declaration up; see docs/divergences.md",
+      );
+    }
+    throw unknownTypeName(id, t === undefined ? undefined : { line: t.line, col: t.col });
   }
 
   private peek(o = 0): Token { return this.toks[this.pos + o]!; }
@@ -1014,6 +1177,9 @@ class Parser {
     this.eat(")"); this.eat(".");
     let name = this.expectIdent();
     while (this.at(".")) { this.eat("."); name = this.expectIdent(); } // import("m").Ns.Type
+    // The name belongs to the OTHER module, so "declared nowhere in this file" says nothing
+    // about it — NT2003 would be a false refusal by construction. Keep the old fallback.
+    this.externalNames.add(name);
     return this.resolveNamed(name);
   }
   // A generic type reference `Name<T, U>` in type position. Generics carry no runtime
@@ -1171,7 +1337,20 @@ class Parser {
     return names;
   }
   // Skip an erased generic type-parameter list (names discarded).
-  private skipGenerics(): void { this.parseTypeParamList(); }
+  /**
+   * A generic DECLARATION's own type parameters (`type X<T> = …`, `interface X<T> { … }`).
+   *
+   * They are still ERASED — `T` in the body falls back to `number` exactly as it always
+   * did, and nothing about what the declaration means changes here. What changed is that
+   * "declared nowhere" is now a refusal (NT2003), and `T` IS declared: right there in the
+   * `<…>` this function was throwing away. So the names are kept as a reason NOT to refuse
+   * — the same role an import binding plays — rather than as a reason to resolve, which
+   * would make `T` a `#T` marker and change every generic alias in the tree.
+   *
+   * Not `typeParamScopes` for that reason, and file-wide rather than scoped for the same
+   * one: over-collecting here can only ever preserve today's behavior for a name.
+   */
+  private skipGenerics(): void { for (const p of this.parseTypeParamList()) this.externalNames.add(p); }
 
   // `type X = <type>;` — record the alias, erase the declaration. RHS uses the normal
   // type grammar (so `type Dir = "n" | "s"` collapses to string; a general union throws NYI).

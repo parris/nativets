@@ -419,6 +419,31 @@ export function boundsError(message: string, hint: string): NTError {
 }
 
 /**
+ * An UNRESOLVED TYPE NAME (NT2003) — tsc's "Cannot find name 'X'" (TS2304).
+ *
+ * A name in type position that is declared nowhere used to erase to `number` in
+ * `resolveNamed` (src/parser.ts). The erasure is silent, so the program was refused much
+ * later by an NT2001 blaming the VALUE that carried the annotation — `g({x: 41})` was
+ * reported as "'g' arg 0 expects number, got {x:number}" when the only thing wrong with
+ * the line was the spelling of the type. Every diagnostic derived from an invented type
+ * is misattributed by construction, which is why this is a REFUSAL and not a warning.
+ *
+ * NT2xxx, not the NT1xxx gradient: a name that exists nowhere is a real user error that
+ * tsc rejects too, not TypeScript we have not implemented yet. `coverage` should never
+ * count it as a missing feature.
+ */
+export function unknownTypeName(name: string, at?: { line: number; col: number }): NTError {
+  const hint = `'${name}' is not declared in this file, not imported by it, and not a builtin type — check the spelling, or add a \`type\`/\`interface\`/\`class\` declaration or an \`import type { ${name} } from …\` for it`;
+  if (at === undefined) return new NTError({ code: "NT2003", message: `Cannot find name '${name}'`, hint });
+  return new NTError({
+    code: "NT2003",
+    message: `Cannot find name '${name}' at ${at.line}:${at.col}`,
+    hint,
+    spans: [{ line: at.line, label: "not defined", primary: true }],
+  });
+}
+
+/**
  * In-place mutation of an array/object is rejected (NT1606). nativets' data model
  * is immutable-by-default (Phase B "sharp turn", a deliberate divergence from node):
  * arrays and objects are values that are never mutated in place. `.push`/`.pop`,
