@@ -879,6 +879,12 @@ export async function buildBinary(source: string, outPath: string, opts: BuildOp
     const compiledFromSource = objects.some((o) => o.endsWith(".c"));
     const extra = [...objects.slice(1), ...(compiledFromSource ? plan.defines : []), ...plan.libs];
     const { args } = linkArgv(target, { ll, rt: objects[0]!, actor: null, extra, out: outPath }, { static: opts.static });
+    // Unlink first. `outPath` may still be a hardlink into the cache from an earlier
+    // build, and a linker that truncates in place rather than replacing would write this
+    // program's bytes into THAT program's cache entry — a poisoned entry, i.e. the silent
+    // wrong answer this design exists to make impossible. ld64 replaces, but that is a
+    // per-linker accident we decline to depend on.
+    rmSync(outPath, { force: true });
     run(cc, args);
     if (root) cacheStore(root, "bin", key, outPath);
   } finally {

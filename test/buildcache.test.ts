@@ -246,6 +246,46 @@ describe("binary cache, end to end", () => {
   }, SLOW);
 
   /*
+   * CACHE POISONING THROUGH A HARDLINK — the one way this design could have produced a
+   * silent wrong answer.
+   *
+   * A cache entry and the build output that stored it are the SAME INODE (that is the
+   * whole point). So if a later build writes to a path that is still a hardlink into the
+   * cache, and the linker truncates the file IN PLACE instead of unlinking it first, the
+   * new program's bytes land inside the old program's cache entry. Every later hit on
+   * that key then silently runs the wrong binary.
+   *
+   * ld64 on macOS happens to unlink, so this does not fire here today — which is exactly
+   * why it needs a test rather than a comment. The behaviour is linker- and
+   * platform-specific, and this project builds on Linux CI too, so the driver removes
+   * outPath before linking and this test pins that it stays removed.
+   */
+  test("a rebuild over a path that is a cache hardlink cannot poison the entry", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cache-poison-"));
+    try {
+      const srcA = uniq();
+      const srcB = uniq();
+
+      // 1. Build A. Storing it hardlinks `p` into the cache, so `p` IS the entry.
+      const p = join(dir, "shared");
+      await buildBinary(srcA, p, { target: "host" });
+      const outA = runBin(p);
+
+      // 2. Build B over that very path. A linker that truncates in place writes B's
+      //    bytes straight into A's cache entry.
+      await buildBinary(srcB, p, { target: "host" });
+      expect(runBin(p)).not.toBe(outA);
+
+      // 3. Ask for A again somewhere else. It must still be A.
+      const q = join(dir, "again");
+      await buildBinary(srcA, q, { target: "host" });
+      expect(runBin(q)).toBe(outA);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, SLOW);
+
+  /*
    * The explicit bypass. It exists so a suspected cache bug can be ruled out in ONE
    * command (`NATIVETS_NO_CACHE=1 bun test …`) rather than by reasoning — and it is
    * tested, because an escape hatch nobody exercises is one that has quietly stopped
