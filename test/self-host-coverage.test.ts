@@ -239,8 +239,24 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // all twelve modules. Accessors stay refused (NT1015 with a hint naming the rewrite);
     // `FnGen`'s lone getter became the zero-argument method it already was, and NT1002
     // (`op in FCMP`) is what sat behind it.
+    // NT1014 left this histogram when `src/ast.ts`'s `DATE_GETTERS` stopped being written
+    // as `new Map([[k, v], …])`. **DO NOT READ THAT AS "the entries form is gone from the
+    // tree."** It is not, and this instrument cannot see the difference: unlike the NT1023
+    // and NT1015 rows above — which emptied because a CENSUS said there was no second site
+    // — this row emptied because the entries form is no longer any FILE'S first blocker.
+    // Counted with a readFileSync scan rather than shell grep, five sites remain, each
+    // verified standalone to be reachable and still NT1014:
+    //   src/checker.ts:4524 CONSOLE_STREAMS, :4565 FMT_SPECS  (literal, `as const`)
+    //   src/modules.ts:431, :574                              (literal, one computed pair)
+    //   src/ast.ts:1204  `new Map(p.recTypes ?? [])`          (a [string, Ty][] argument)
+    // plus two `.map`-produced tuple arrays (src/ownership.ts:111, :884) and one in
+    // src/codegen.ts:1052 that need a real tuple TYPE, not the `new Map` argument position.
+    // The sanctioned `.set`-chain rewrite is verified to compile for each of the first
+    // five; they are left for a lane that can also measure the movement.
+    // NT1002 LEFT when `in` landed — decided at compile time for a literal key over a
+    // static shape, the same move `instanceof` made.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1002", "NT1003", "NT1014", "NT1031"],
+      ["NT1003", "NT1031"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the

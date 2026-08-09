@@ -904,6 +904,36 @@ class FnGen {
     this.emit(`call void @nt_arr_free(ptr ${recv.v})`);
   }
 
+  /** The CLASS-INSTANCE half of the rule above — `new P(7).get()`, which leaked 200
+   *  objects in the loop the array shape leaked none in. Stage 41 wired the array branch
+   *  only, and a class call never reaches it: it lowers to `C.m(inst, …)` through
+   *  `genUserCall`, several hundred lines earlier in the dispatch.
+   *
+   *  The array rule's second half — "the method must not hand the receiver back" — is
+   *  checked there by POINTER IDENTITY (`out.v === recv.v`), and that check is blind
+   *  here: a lowered call returns a fresh SSA name whatever it returns. So freshness is
+   *  proved statically instead, from two facts:
+   *
+   *   - `new C(…)` is an allocation nothing else can name, and `this` is PARAMETER 0 —
+   *     a BORROW. Storing it anywhere that outlives the call (`G = this`, `[this]`, a
+   *     container field) is already NT1604, so the pointer cannot escape the body;
+   *   - the one sanctioned way it does leave is `return this`, which a `@@mutable`
+   *     setter does — and a method that returns its receiver has the receiver's CLASS as
+   *     its return type. Gating on `classTag(sig.ret) !== cls` excludes exactly that
+   *     shape. A union/`Dyn` return is excluded too: an arm of it could be the class.
+   *
+   *  `nt_obj_free` frees the receiver's slot array and nothing it points at (the same
+   *  header-only contract `nt_arr_free` has), so a method returning a FIELD is safe —
+   *  the field's pointee is a separate block. Anything not matching just leaks, as
+   *  before: a leak, never a double free. */
+  private freeReceiverObjTemp(objExpr: Expr, recv: string | undefined, cls: string, fn: string): void {
+    if (recv === undefined || objExpr.kind !== "NewExpr" || this.liftedArrow) return;
+    const ret = this.mod.functions.get(fn)?.ret;
+    if (ret === undefined) return;
+    if (classTag(ret) === cls || isUnionTy(ret) || isGeneralUnionTy(ret) || ret === "Dyn") return;
+    this.emit(`call void @nt_obj_free(ptr ${recv})`);
+  }
+
   /** The CONSUMING-APPEND pattern `x = [...x, e1, …]` (B2 step 4). Requires the
    *  ownership pass's `dropOld` proof (x is owned here and no closure captured it),
    *  a LEADING spread of exactly the assignment target, and no other mention of `x`
@@ -2321,6 +2351,13 @@ class FnGen {
         this.genExpr(e.object);
         return { v: e.result ? "true" : "false", ty: "boolean" };
       }
+      case "InExpr": {
+        // Same shape as `instanceof`: the checker decided it from the static type, and
+        // both operands are still evaluated for their side effects (`k() in f()`).
+        this.genExpr(e.key);
+        this.genExpr(e.object);
+        return { v: e.result ? "true" : "false", ty: "boolean" };
+      }
       case "IndexAssign": {
         // Element write `u[i] = v` (+ compound) — only Uint8Array reaches codegen (the
         // checker rejects immutable array/object index-assign with NT1606). The store
@@ -2640,7 +2677,14 @@ class FnGen {
     if (e.callee.kind === "MemberExpr") {
       const cls = classTag(e.callee.object.ty ?? "");
       if (cls && this.mod.functions.has(`${cls}.${e.callee.property}`)) {
-        return this.genUserCall(`${cls}.${e.callee.property}`, [e.callee.object, ...e.args]);
+        // The RECEIVER is lowered HERE rather than inside the call, because the drop
+        // below needs its pointer and `genUserCall` would otherwise generate and forget
+        // it. Passed on as a pre-evaluated argument 0, so it is evaluated exactly once.
+        const fn = `${cls}.${e.callee.property}`;
+        const recv = this.genExpr(e.callee.object);
+        const out = this.genUserCall(fn, [e.callee.object, ...e.args], recv.v);
+        this.freeReceiverObjTemp(e.callee.object, recv.v, cls, fn);
+        return out;
       }
     }
     if (e.callee.kind === "MemberExpr") {
@@ -4233,6 +4277,7 @@ class FnGen {
       case "AsExpr": case "SatisfiesExpr": this.subExpr(e.expr, map); return;
       case "NonNullExpr": this.subExpr(e.expr, map); return;
       case "InstanceOfExpr": this.subExpr(e.object, map); return;
+      case "InExpr": this.subExpr(e.key, map); this.subExpr(e.object, map); return;
       case "ArrowFunction": {
         const child = this.childRenameMap(e.params, e.stmts, map);
         for (const p of e.params) if (p.default) this.subExpr(p.default, child);
@@ -5331,7 +5376,21 @@ class FnGen {
     return { v: this.genTimeoutBox(timedOut, this.slotNoRetain({ v: rv, ty: base }), retTy), ty: retTy };
   }
 
-  private genUserCall(name: string, args: Expr[]): Val {
+  /** Argument `i` of a user call: the caller's pre-lowered argument 0, or the expression
+   *  written at the call site (or the parameter's DEFAULT when the site omitted it).
+   *  Deliberately builds a FRESH `Val` for the pre-lowered case rather than handing back
+   *  one it was given — src/ has to stay inside the subset it compiles, and returning an
+   *  element of a `Val[]` parameter is a move out of a borrowed array element (NT1605). */
+  private argVal(i: number, args: Expr[], preArg0: string, sig: Sig): Val {
+    if (i === 0 && preArg0 !== "") return { v: preArg0, ty: args[0]!.ty ?? sig.params[0]! };
+    return this.genExpr(args[i] ?? sig.defaults[i]!);
+  }
+
+  /** `preArg0`, when non-empty, is the SSA value of argument 0 already lowered by the
+   *  CALLER; `args[0]` is then read for its TYPE only and never generated again. Exactly
+   *  one caller uses it — the class-instance method call, whose chain-temporary drop needs
+   *  the receiver's pointer and must not evaluate the receiver twice. */
+  private genUserCall(name: string, args: Expr[], preArg0 = ""): Val {
     this.emitSafepoint(); // call site: preempt long / deeply-recursive call chains
     const sig = this.mod.functions.get(name)!;
     if (sig.rest) {
@@ -5340,7 +5399,7 @@ class FnGen {
       // The FIXED parameters coerce just like a non-rest call's do (see below) — this
       // path emitted them raw, so a nullable/general-union fixed parameter of a rest
       // function received an unboxed value.
-      for (let i = 0; i < fixed; i++) argVals.push(`${llvmTy(sig.params[i]!)} ${this.coerce(this.genExpr(args[i]!), sig.params[i]!).v}`);
+      for (let i = 0; i < fixed; i++) argVals.push(`${llvmTy(sig.params[i]!)} ${this.coerce(this.argVal(i, args, preArg0, sig), sig.params[i]!).v}`);
       const arr = this.fresh(); // pack trailing args into the rest array
       this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(args.length - fixed, 1))})`);
       for (let i = fixed; i < args.length; i++) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.genExpr(args[i]!))})`);
@@ -5353,12 +5412,11 @@ class FnGen {
     }
     const argVals: string[] = [];
     for (let i = 0; i < sig.params.length; i++) {
-      const provided = args[i];
       // Coerced to the param type — boxing an `undefined` default into a nullable
       // optional param (`f(x?: T)`), and boxing an ARM into a general-union param
       // (`f(v: number | string)`, called as `f(41)`). A no-op when the types already
       // match, so ordinary params are unaffected.
-      argVals.push(this.coerce(this.genExpr(provided ?? sig.defaults[i]!), sig.params[i]!).v);
+      argVals.push(this.coerce(this.argVal(i, args, preArg0, sig), sig.params[i]!).v);
     }
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");
     if (sig.ret === "void") {

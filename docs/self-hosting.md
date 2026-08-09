@@ -1270,6 +1270,175 @@ landed. The third finding is smaller: an object **literal** cannot be passed to 
 `Shape | undefined` parameter (`NT2001`, the literal is not retyped against the nullable's
 union base so its tag widens to `string`); reproduces on a plain two-arm union on `main`.
 
+### Re-measured after `in` — and "the last thing between codegen.ts and IR" was WRONG
+
+`in` is no longer refused. A LITERAL key over an object type with no optional field is
+decided at COMPILE TIME and folded, exactly as `instanceof` is and for the same reason — an
+object's key set here comes from its TYPE. What a static type cannot decide is refused: the
+optional field, a non-literal key (node's `in` walks the PROTOTYPE CHAIN, so a key we cannot
+see cannot be checked against it), a `Map`/`Set` right operand (node tests the Map OBJECT's
+properties, never its entries — `m.set("a",1); "a" in m` is **false**), an array, a
+primitive. Semantics borrowed from tc39/test262 `test/language/expressions/in/`:
+`S8.12.6_A1`, `S8.12.6_A2_T1`, `S8.12.6_A3`, `S11.8.7_A3`.
+
+**The handoff said this was the last blocker standing between `codegen.ts` and IR. It was
+not, and the reason is the oldest failure mode in this document: a PARSE-stage refusal masks
+everything the CHECKER would say.** `in` was refused in `parseBinary`, at line 2095. Behind
+it, at line **636** — 1,450 lines EARLIER — sits
+
+```ts
+const FCMP: Record<string, string> = { "<": "olt", … };
+```
+
+which is `NT2001`, the deliberate `Record` → `Map` erasure (`test/record-dict.test.ts`). Four
+more tables in the same file have the identical shape (`ARITH`, `BITFN`, `MATH_FN1`, and
+`BIN` is `parser.ts`'s), and `FCMP[op]` with a VARIABLE key is refused on top of that — an
+object is indexed by a string literal here, and node's `o[k]` consults the prototype chain.
+So `codegen.ts` does not reach IR, and clearing `in` was never going to make it.
+
+| Module | Before | After |
+|---|---|---|
+| `codegen.ts` standalone | `parse` / `NT1002` — `` `in` `` at 2095:16 | **`check` / `NT2001`** — `FCMP` at **636**, the `Record` refusal |
+| `codegen.ts` linked | `parse` / `NT1002` — the same | **`check` / `NT1014`** — `ast.ts`'s `new Map([[k,v]])`: no blocker of its OWN |
+| `driver.ts` linked | `link` / `NT1002` — inherited from codegen.ts | **`check` / `NT1014`** — the same, now via `ast.ts` |
+| `cli.ts` linked, i.e. **stage-1** | `NT1002` | **`NT1702`** — an IMPORT CYCLE (`cli.ts` → `coverage.ts` → `coverage-preprocess.ts`) |
+| `diagnostics.ts` | rung 3 | **unchanged, byte for byte** |
+| every other module | — | **unchanged** |
+
+Both moves are to a LATER stage, and the `selfhost-ratchet` verdict was settled by a
+controlled experiment rather than by reading the direction of travel: handed **main's
+unmodified `codegen.ts`**, today's compiler reports the identical `NT2001` at 636. The
+lane's own edits to that file (the object chain-temporary drop) are blocker-neutral, so the
+move belongs entirely to the `in` change — an unmasking, not a regression. Re-recorded.
+
+`codegen.ts` also **joined the parse-clean set, which is now ALL TWELVE**, without its rung
+moving at all. Every module in the tree parses its own source; ONE produces IR. There is no
+stronger statement available of `test/sh6.test.ts`'s standing point — parsing clean has never
+once correlated with being closer to compiling.
+
+`NT1002` is now empty tree-wide in both whole-tree instruments — `op in FCMP` was its only
+site, and it stopped being a blocker rather than moving. Its three modules did not stall,
+they redistributed: `codegen.ts` and `driver.ts` onto `ast.ts`'s `NT1014`
+(`new Map([[k, v], …])`, the entries form), and **`cli.ts` — i.e. stage-1 itself — onto
+`NT1702`, an IMPORT CYCLE** between `coverage.ts` and `coverage-preprocess.ts`. That last one
+is worth stating plainly: with `in` cleared, the compiler's own entry point is gated on the
+SHAPE OF ITS MODULE GRAPH rather than on any missing construct. Three codes now gate the
+whole tree (`NT1014`, `NT1606`, `NT1702`).
+
+**Next for `codegen.ts`: `Record<K, V>` initialized with an object literal**, five tables in
+one file. It is a decision, not a gap — either the source moves to `new Map().set(…)` chains
+(and every `FCMP[op]` read to `.get(op)`), or `Record` stops erasing to `Map`. The refusal's
+own hint names the first; the second is a design change, because an object's fields are
+static slots and a `Record`'s key set is by definition not statically known.
+
+### THE ENTRIES FORM IS CLEARED — a SOURCE change, and this time the rewrite is FREE
+
+`new Map([[k, v], …])` was the first blocker for **five of the twelve** modules — `ast.ts`'s
+own `DATE_GETTERS` (src/ast.ts:155), inherited by `parser.ts`, `checker.ts`, `ownership.ts`
+and `modules.ts` through the link. Three options were sized before anything was written:
+
+| | verdict |
+|---|---|
+| **(a) SOURCE change** — build the table with the `.set` chain the diagnostic already prescribes | **TAKEN** |
+| (b) 2-TUPLES as a narrow special form, only in the `new Map` argument position | rejected — see below |
+| (c) GENERAL tuples in `Ty` | dismissed |
+
+**What decided it was a CENSUS, not a preference.** Counting the construct rather than the
+first blocker (this document's standing correction), `src/*.ts` holds **nine** entries-form
+sites, and they split in two:
+
+- **five are literal** `[[k, v], …]` — ast.ts:155, checker.ts:4524/:4565, modules.ts:431/:574;
+- **four are DYNAMIC** — `new Map(p.recTypes ?? [])` against a declared `[string, Ty][]`
+  (ast.ts:1204), and three `.map`-produced pair arrays (ownership.ts:111/:884,
+  codegen.ts:1052).
+
+That is the argument against **(b)**. A special form confined to the `new Map` argument
+position covers the five literal sites and **cannot** cover the other four, which need a pair
+type flowing out of a `.map` callback or off a declared annotation — i.e. option (c). So (b)
+does not remove the source change, it only shrinks it, while adding a construct whose
+accept/reject boundary is *syntactic*: `new Map([["a", 1]])` would compile while the
+`const e = [["a", 1]]` one line above it stays `NT2001`. Paying new compiler surface for a
+partial answer is the worst of the three.
+
+**(c)** is dismissed on the two landmines already recorded here: `Ty` is a flat string whose
+predicates key on suffix (`isArrayTy` once matched function types that way; `objectFields("@N")`
+once returned a phantom record), and a new encoding must be taught to `isLinearTy` and the drop
+selection or it leaks — the boxed `G<…>` measurement above is exactly that failure, at
+`__arrLive() === 200`.
+
+**The finding that makes (a) cheap, and it is a spec fact rather than a measurement:**
+`Map.prototype.set` **returns its receiver** (ES2024 24.1.3.9 step 8), and the Map constructor
+builds the entries form by calling `set` once per entry in order (24.1.1.1 step 8). So the two
+spellings are the same program by construction, and — unlike the `.push` -> `xs = [...xs, v]`
+rewrite this document measured at **1036x** under bun — the chain costs bun nothing. The
+two-toolchain constraint really is satisfied for free here, which is the thing the `.push`
+census discovered was *not* true in general.
+
+Evidence is a node differential in `test/collections.test.ts`: nativets on the `.set` chain is
+compared against **node running the entries form**, so the rewrite is asserted observationally
+null rather than merely runnable. The real `DATE_GETTERS` is lifted out of `src/ast.ts` with
+`readFileSync` and compiled, so writing the entries form back into it goes red. Cases borrowed
+from tc39/test262 `test/built-ins/Map/`: `map-iterable.js`, `empty-iterable.js`,
+`prototype/set/returns-this.js`, `.../does-not-change-size-of-existing-key.js`,
+`.../append-new-values-normalizes-zero.js`. The last two corrected hand-computed expectations
+(a duplicate key does not grow the Map; `-0` and `0` are one key stored as `+0`).
+
+| module | was (linked) | now |
+|---|---|---|
+| `ast.ts` | `NT1014` — `new Map([[k, v], …])`, `DATE_GETTERS` (its own) | **`NT2001`** — `HOST_MODULES`, a `Record` initialized with an object literal (its own) |
+| `parser.ts`, `checker.ts`, `ownership.ts`, `modules.ts` | `NT1014` — ast.ts's, through the link | **`NT2001`** — ast.ts's, through the link |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+**No module reached IR**, and the five moved as a group onto the same next blocker. `NT1014`
+is empty in `test/self-host-coverage.ts`'s histogram — **read that narrowly.** Unlike the
+`NT1023` and `NT1015` clearances, which emptied because a census proved there was no second
+site, this one emptied because the entries form is no longer any file's *first* blocker. Five
+sites remain, each verified reachable and still `NT1014`. The sanctioned `.set` rewrite is
+verified to compile for each of the five literal ones; they are left for a lane that can also
+*measure* the movement, since all of them sit behind `HOST_MODULES` or `.push`.
+
+**Two pre-existing bugs fell out, both fixed, and the second is the one that matters.**
+
+1. **`ReadonlyMap` / `ReadonlySet` erased to `number`.** `parseGenericType` (src/parser.ts)
+   maps `ReadonlyArray<T>` to `T[]` but had no case for the other two, so they fell through
+   `default: resolveNamed(id)` and an unknown named type erases to `number`. The result is a
+   program node runs and we reject, blaming a type nobody wrote:
+   `'m' declared number but initialized with Map<string,number>`. Found while sizing the
+   rewrite of `checker.ts`'s two tables — both are annotated `ReadonlyMap`. `Readonly*` is a
+   compile-time-only distinction and nativets' collections *are* immutable, so they are the
+   same types; two lines.
+
+2. **The alpha-rename prefix was minted from the CLOCK.** `choosePrefixBase` (src/modules.ts)
+   prefers `_m`, escalating to `_nt_m` then `_nativets_module_`, and if all three appear in the
+   sources it fell back to `` `_nts${Date.now().toString(36)}_m` ``. The one file in the tree
+   guaranteed to contain all three is **`src/modules.ts` itself** — they are the candidate list,
+   spelled in that very function — so the clock branch was reached by precisely the module this
+   measurement cares about. Three consequences, in increasing severity:
+
+   - `selfhost-ratchet.test.ts` records the blocker **message** as blocker identity. The moment
+     this lane moved `modules.ts` onto a diagnostic that NAMES a binding, the ratchet started
+     failing against *itself* — two measurements in the **same run** produced
+     `_ntsmsl8somd_m2_HOST_MODULES` and `_ntsmsl8snkl_m2_HOST_MODULES`;
+   - `sh6.test.ts`'s `blameOf` attributes a blocker by byte-identical message, so no
+     name-carrying blocker can ever be attributed to the dependency it lives in;
+   - **SH7's definition of done is "`nativets-2` and `nativets-3` are BYTE-IDENTICAL."** A
+     compiler that names globals from the clock cannot reproduce itself. This one was latent
+     under every measurement ever taken here and would have surfaced as an unexplainable
+     fixed-point failure at the very end.
+
+   The escalation now counts (`_nts0_m`, `_nts1_m`, …) until no source contains the candidate:
+   same no-collision guarantee, pure function of the inputs, and it terminates because each
+   candidate is longer than the last. Pinned in `test/modules.test.ts`.
+
+**One instrument was fixed rather than re-recorded.** `sh6.test.ts`'s blame column flipped
+`ast.ts` -> `self` for four modules, which is **false** — `HOST_MODULES` is declared in
+`src/ast.ts`. `blameOf` compared raw messages and the linker renames the binding
+(`HOST_MODULES` vs `_nt_m0_HOST_MODULES`), so blame fell through to `self`. It cost nothing
+while the frontier sat on `NT1014`/`NT1030`, whose messages carry no identifier. Normalizing
+the rename prefix before comparing restores the correct attribution — and the recorded blame
+column then needed **no change at all**, which is the proof the fix was right. Recording the
+flip would have aimed four burn-down lanes at files that hold nothing.
+
 ---
 
 ## Milestones

@@ -14,6 +14,7 @@ import { test, expect, describe } from "bun:test";
 import { compileAndRun, runWithNode } from "./harness.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { NTError } from "../src/diagnostics.ts";
+import { readFileSync } from "node:fs";
 
 /** Compile+run ours and assert stdout/exit match `node` on the same source. */
 async function matchesNode(src: string): Promise<string> {
@@ -399,6 +400,113 @@ for (const k of b.keys()) console.log(k);`;
     let msg = "";
     try { sourceToIR(`const m = new Map([["a", 1]]);`); } catch (e) { msg = (e as NTError).message; }
     expect(msg).toContain("tuple");
+  });
+
+  /*
+   * The entries form stays REFUSED, so the sanctioned spelling the diagnostic hands
+   * back — a `.set` chain — has to be provably the SAME PROGRAM. It is, and the
+   * reason is a spec fact rather than an accident: ES2024 24.1.3.9 step 8 is
+   * "Return M", so `Map.prototype.set` returns the receiver. That makes
+   * `new Map().set(k, v).set(…)` the exact desugaring the Map constructor itself
+   * performs (24.1.1.1 step 8 calls `adder` = `set` once per entry, in order), and
+   * it makes the rewrite FREE under bun/node — unlike `xs = [...xs, v]`, which this
+   * project measured at 1036x for `.push`.
+   *
+   * Behaviours borrowed from tc39/test262:
+   *   test/built-ins/Map/map-iterable.js                          — entries added in order
+   *   test/built-ins/Map/empty-iterable.js, no-arguments.js       — size 0 both ways
+   *   test/built-ins/Map/prototype/set/returns-this.js            — `set` returns M
+   *   .../set/does-not-change-size-of-existing-key.js             — duplicate key, last wins
+   *   .../set/append-new-values-normalizes-zero.js                — SameValueZero: -0 -> +0
+   */
+  test("the `.set` chain the hint prescribes IS the entries form — node runs both, identically", async () => {
+    const entries = `
+const m = new Map([["a", 1], ["b", 2], ["a", 3]]);
+const z = new Map([[-0, "neg"], [0, "pos"]]);
+console.log(m.size, m.get("a"), m.get("b"), m.has("c"));
+for (const [k, v] of m) console.log(k, v);
+console.log(z.size, z.get(0), 1 / [...z.keys()][0]);
+console.log(new Map([]).size, new Map().size);`;
+    const chained = `
+const m = new Map<string, number>().set("a", 1).set("b", 2).set("a", 3);
+const z = new Map<number, string>().set(-0, "neg").set(0, "pos");
+console.log(m.size, m.get("a"), m.get("b"), m.has("c"));
+for (const [k, v] of m) console.log(k, v);
+console.log(z.size, z.get(0), 1 / [...z.keys()][0]!);
+console.log(new Map<string, number>().size, new Map().size);`;
+    // node on the REFUSED spelling is the oracle for nativets on the SANCTIONED one.
+    const oracle = runWithNode(entries);
+    const ours = await compileAndRun(chained);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    // Hand-computed as `3 3 2 …` / `2 pos …` and node corrected both: a duplicate key
+    // does not grow the Map (test262 does-not-change-size-of-existing-key), and -0 and
+    // 0 are ONE key whose stored form is +0 (append-new-values-normalizes-zero — hence
+    // `1 / k` is Infinity, not -Infinity). The oracle is the specification.
+    expect(oracle.stdout).toBe("2 3 2 false\na 3\nb 2\n1 pos Infinity\n0 0\n");
+  });
+
+  /*
+   * The self-hosting gate. `DATE_GETTERS` in src/ast.ts was the FIRST blocker for five
+   * of the twelve compiler modules (ast, parser, checker, ownership, modules — the last
+   * four through the link). It is lifted verbatim out of the real file, so the day
+   * someone writes the entries form back into it this goes red rather than the frontier
+   * silently regressing. Read with readFileSync, never shell `grep` (project memory: the
+   * shimmed grep on some setups silently misses matches, which would make this vacuous).
+   */
+  test("src/ast.ts's real DATE_GETTERS table compiles, and equals node's entries form", async () => {
+    const src = readFileSync(new URL("../src/ast.ts", import.meta.url), "utf8");
+    const at = src.indexOf("export const DATE_GETTERS");
+    expect(at).toBeGreaterThan(-1);
+    let end = at, depth = 0, seen = false;
+    for (; end < src.length; end++) {
+      const c = src[end]!;
+      if (c === "(" || c === "[" || c === "{") { depth++; seen = true; }
+      else if (c === ")" || c === "]" || c === "}") depth--;
+      else if (c === ";" && depth === 0 && seen) { end++; break; }
+    }
+    const decl = src.slice(at, end).replace("export const", "const");
+    const driver = `
+console.log(DATE_GETTERS.size, DATE_GETTERS.has("toString"), DATE_GETTERS.has("getTime"));
+for (const [k, g] of DATE_GETTERS) console.log(k, g.which, g.utc);`;
+    // The oracle is the ENTRIES form of the same table under node — so this asserts the
+    // rewrite is observationally null, not merely that the new spelling runs.
+    const oracle = runWithNode(`const DATE_GETTERS = new Map<string, { which: number; utc: number }>([
+  ["getFullYear", { which: 0, utc: 0 }], ["getMonth", { which: 1, utc: 0 }], ["getDate", { which: 2, utc: 0 }],
+  ["getHours", { which: 3, utc: 0 }], ["getMinutes", { which: 4, utc: 0 }], ["getSeconds", { which: 5, utc: 0 }],
+  ["getMilliseconds", { which: 6, utc: 0 }], ["getDay", { which: 7, utc: 0 }],
+  ["getUTCFullYear", { which: 0, utc: 1 }], ["getUTCMonth", { which: 1, utc: 1 }], ["getUTCDate", { which: 2, utc: 1 }],
+  ["getUTCHours", { which: 3, utc: 1 }], ["getUTCMinutes", { which: 4, utc: 1 }], ["getUTCSeconds", { which: 5, utc: 1 }],
+  ["getUTCMilliseconds", { which: 6, utc: 1 }], ["getUTCDay", { which: 7, utc: 1 }],
+]);${driver}`);
+    const ours = await compileAndRun(decl + driver);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout.split("\n")[0]).toBe("16 false false");
+  });
+
+  /*
+   * PRE-EXISTING BUG, found while sizing the `.set`-chain rewrite of `src/checker.ts`'s
+   * two entries-form tables — both are annotated `ReadonlyMap<…>`.
+   *
+   * `parseGenericType` (src/parser.ts) maps `ReadonlyArray<T>` to `T[]` but has no case
+   * for `ReadonlyMap`/`ReadonlySet`, so they fall through `default: resolveNamed(id)` and
+   * an unknown named type erases to **`number`**. The result is a program node runs and
+   * we reject, with a diagnostic that names a type nobody wrote:
+   *     'm' declared number but initialized with Map<string,number>
+   * A refusal rather than a miscompile, but the erasure is a guess, and the sibling
+   * `ReadonlyArray` case one line above shows what the intended answer is.
+   */
+  test("ReadonlyMap / ReadonlySet are the Map / Set they say they are (not `number`)", async () => {
+    expect(await matchesNode(`
+const m: ReadonlyMap<string, number> = new Map<string, number>().set("a", 1).set("b", 2);
+const s: ReadonlySet<string> = new Set<string>().add("x").add("y");
+console.log(m.size, m.get("b"), m.has("z"), s.size, s.has("x"));
+for (const [k, v] of m) console.log(k, v);`)).toBe("2 2 false 2 true\na 1\nb 2\n");
+    // The sibling that already worked, pinned so the three stay consistent.
+    expect(await matchesNode(`
+const xs: ReadonlyArray<number> = [3, 1, 2];
+console.log(xs.length, xs.toSorted().join(","));`)).toBe("3 1,2,3\n");
   });
 });
 

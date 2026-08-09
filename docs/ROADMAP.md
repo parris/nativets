@@ -146,11 +146,25 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
   points (`Stmt[].blockDrops`), RAII on reassignment (`AssignExpr.dropOld`), drop flags for
   conditional moves (the move nulls the slot; `free(NULL)` is the flag), and unbound array
   temporaries freed where the chain consumes them.
+- ✅ **…and unbound CLASS-INSTANCE temporaries** — the half Stage 41 never wired, and a
+  correction to the "still open" line below, which read as if chain temporaries were done.
+  They were done for ARRAYS only: a class call takes a different dispatch branch
+  (`C.m(inst, …)` through `genUserCall`), so it never reached `freeReceiverTemp`. Measured on
+  main, same position, same loop: `[1,2,3].indexOf(2)` × 200 → `__arrLive() === 0`;
+  `new P(7).get()` × 200 → `__objLive() === 200`. Now 0. What proves the drop safe is not the
+  array rule's pointer check (`out.v === recv.v` is blind across a lowered call, which returns
+  a fresh SSA name) but the STATIC return type: `this` is parameter 0, i.e. a BORROW, so
+  storing it is already NT1604, and the one sanctioned way it leaves the body is `return this`
+  — which forces the method's return type to be the receiver's class. Still open by the same
+  rule, and named in `test/drops-obj.test.ts`: a method that returns its receiver (every
+  `@@mutable` field-assigning method, *including one declared `: void`*), a union/`Dyn` return,
+  and a receiver that is not syntactically `new C(…)`.
 - ✅ **Move-out-of-borrow / array-element** (`E0507`/`E0508` → NT1604/NT1605, Stage 28).
 - Reconciled with B2/B4: **linear ownership for uniquely-owned handles, refcounting for
   shared-immutable storage** (trie nodes, strings) — and `rc == 1` is what licenses transients.
 - **Still open:** values escaping through a `break`/`continue`/`throw` out of a block, temporaries
-  in non-chain positions (call arguments), array/object ELEMENTS (an array does not recursively
+  in non-chain positions (call arguments), chain temporaries whose method hands the receiver
+  back, array/object ELEMENTS (an array does not recursively
   free what its slots point at), and module-level bindings a function may have aliased. All are
   leaks by construction, never a double free or a dangling pointer.
 
