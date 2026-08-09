@@ -1692,6 +1692,50 @@ miscompile. Pinned in `test/optional-props.test.ts`.
 **Still refused for the same reason:** the same shape in RETURN position
 (`function g(): Opts { return { a: 1 }; }`) — a known gap, not a decision.
 
+**A SCALAR is not an object, and now passes.** The paragraphs above are about slot LAYOUT,
+and that argument never applied to `null`, `undefined`, or a `string` reaching a nullable
+parameter — those box, they do not reshape. `fitsParam` refused them anyway, because it
+was type identity; TypeScript's rule (`null` assignable to `T | null`, `undefined` to
+`T | undefined`, a `T` to either) now holds at a parameter, a constructor argument and a
+return. The widening is deliberately narrower than the `assignable` predicate: exactly the
+matching nullish literal and a value of the base type, which are exactly the two sources
+codegen's `coerce` can build a `[tag,value]` box from. Everything in this section stays
+refused, unchanged, and `test/nullable-assign.test.ts` pins that — including `null` for a
+non-nullable parameter, and each nullish literal for the WRONG arm (`f(null)` where the
+parameter is `string | undefined`).
+
+### Narrowing does not reach `this.<field>` (`NT2001`) — a refusal, with a reason
+
+```ts
+class C { s?: string; get(): string { return this.s === undefined ? "none" : this.s; } }
+```
+
+node prints `none`; we refuse. A narrowing fact is about an access PATH, and a path is
+only eligible when nothing can change it out from under the proof — which holds for
+`d.spans`, since a non-`@@mutable` object's field cannot be written at all. It does **not**
+hold for `this`: `this.s = undefined` is legal inside a method, and the invalidation scan
+is by NAME, so it sees a rebinding of `d` and never a write to `this.s`. No fact is
+recorded rather than a false one proved.
+
+Optional class fields made this far easier to hit the day they started producing real
+nullables, so the diagnostic explains the refusal rather than reporting a bare type
+mismatch, and hands back the fix — bind a local first, after which the value cannot change
+under the guard at all:
+
+```ts
+get(): string { const s = this.s; return s === undefined ? "none" : s; }
+```
+
+Closing it properly needs a synthetic binding for `this` plus a path-aware invalidation
+scan; it is a known gap, not a permanent decision. Pinned in `test/nullable-assign.test.ts`,
+along with the requirement that the hint's own suggested fix compiles and matches node.
+
+**Adjacent, also refused:** a ternary does not JOIN a present arm with `undefined` —
+`function f(b: boolean): string | undefined { return b ? "yes" : undefined; }` is `NT2001`
+("Ternary branches differ"), because the join wants one type for both arms and does not
+widen `string` + `undefined` into `string | undefined`. The `if`/`return` spelling of the
+same function compiles.
+
 ### Host FFI (SH4) — `node:fs` / `node:child_process`
 
 A `node:` import binds a **compiler builtin**, not a file: there is no `node_modules`, no JS to
