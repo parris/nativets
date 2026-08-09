@@ -287,6 +287,26 @@ export const NYI = {
   // BOOLEAN path (`zext i1 <ptr>`) and the user's error was clang's:
   // "'%t4' defined with type 'ptr' but expected 'i1'".
   STRINGIFY: { code: "NT1032", milestone: "later", hint: "`+`/`${…}`/`String(…)` coerce the primitives, a nullable box, and a `number[]`/`string[]`/`boolean[]` (node joins those with `,`). For an object or class instance use `JSON.stringify(x)` — node's `[object Object]` is not what the line meant — and for a Map/Set spread it first (`JSON.stringify([...m])`). `console.log(x)` on its own prints the value exactly like node" },
+  // A TYPE QUERY (`typeof x`) or the `keyof` operator, in TYPE position. Both used to be
+  // absorbed by the `AMBIENT_TYPES` escape in src/parser.ts, which meant the keyword itself
+  // was resolved as if it were a type NAME: `typeof` erased to `number` and its operand was
+  // left in the token stream, where it re-parsed as a stray expression statement. So
+  // `type X = typeof S` silently made `X` mean `number` (exit 0, wrong type), and
+  // `type K = keyof T` produced `'T' is not defined` — a diagnostic blaming a line the user
+  // did not write. Answering either one needs a value environment the parser does not have:
+  // `Ty` is produced at parse time, before any inference has run, so `typeof S` cannot be
+  // resolved to S's type here and `keyof T` has no `Ty` inhabitant meaning "one of these
+  // keys" at all. Refused rather than guessed.
+  TYPE_QUERY: { code: "NT1033", milestone: "later", hint: "write the type directly — `type X = string` instead of `type X = typeof s`, and a string-literal union instead of `keyof T`. A type query is resolved from a VALUE's inferred type, which is not available where annotations are resolved here" },
+  // `interface B extends A` where `A` is not a plain record. Inheritance IS supported —
+  // the base's fields are prepended to the derived declaration's, which is exactly what an
+  // interface means once it is erased structurally — but only for a base this file can
+  // reduce to an untagged field list. A CLASS base (`C{...}`) and a `@@mutable` record
+  // (`Name{...}`) both carry a NOMINAL tag that method resolution and the mutability rules
+  // key on, and merging their fields into an untagged record would drop it silently; an
+  // imported or otherwise unresolved base has no fields here at all, and would silently
+  // inherit nothing. Refused at the `extends` clause, which is where the fault is.
+  IFACE_EXTENDS: { code: "NT1034", milestone: "later", hint: "an interface may extend a `type`/`interface` that resolves to a plain record IN THIS FILE. A class or `@@mutable` base is nominal (its tag drives method resolution and the mutability rules), so its fields cannot be folded into a structural record — write the inherited fields out, or declare the derived shape as a `type` alias" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

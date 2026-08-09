@@ -1791,6 +1791,102 @@ would be a silent wrong answer — the worst outcome available. Before `NT1029` 
 died in the `[]` array-suffix loop as an **anonymous `NT0001 Expected ']'`**, with no code and no
 hint; it was the last unnamed refusal in the tree.
 
+### Type queries — `typeof x` and `keyof T` in TYPE position are `NT1033`
+
+Both are **refused**, and the reason is that neither can be *answered* where annotations are
+resolved. `Ty` (`src/ast.ts`) is produced by the parser, before any inference has run, so
+`typeof S` has no value environment to ask for `S`'s type; and `keyof T` has no `Ty` inhabitant at
+all — "one of these keys" is the same unrepresentable thing `NT1029` already refuses for
+`T[keyof T]`. It has to be the *parser* that says so, for the reason `NT2003` gives: the erasure
+to `number` is destructive, and once it happens no later pass can tell the result from a `number`
+the user wrote.
+
+**`typeof` as an EXPRESSION is untouched** — `typeof s === "string"` is a different parse path
+(`parseUnary`) and compiles exactly as it always did.
+
+**What it replaced was one bug with two faces.** `typeof` and `keyof` both sat in the parser's
+`AMBIENT_TYPES` escape, which resolves a bare *name*. So the KEYWORD was resolved as though it
+were the type — erasing to `number` — and the OPERAND was left in the token stream, where it
+re-parsed as a stray expression statement:
+
+```ts
+const S = "a";
+type X = typeof S;                              // became: type X = number;  then  S;
+function f(v: X): number { return v.length; }
+console.log(f("hello"));   // node: 5   was: error[NT2001] 'f' arg 0 expects number, got string
+```
+
+```ts
+type T = { a: number, b: number };
+type K = keyof T;          // became: type K = number;  then  T;
+                           // node: a   was: error[NT2001] 'T' is not defined
+```
+
+The first is the dangerous one: the stray `S;` is a *legal* statement, so `X` silently meant
+`number` and the program was rejected downstream blaming the CALL for a type nobody wrote. The
+second is merely misattributed — it names a line the user did not write.
+
+**Why not implement the decidable subset.** Resolving `typeof S` where `S` is a `const` with a
+literal initializer *is* possible in the parser, and it was rejected on purpose: it puts the
+accept/reject boundary on the SYNTAX of the initializer — `const S = "a"` would compile while
+`const S = f()` one line below it would keep erasing silently. That is the same trade
+`docs/self-hosting.md` rejected for a `new Map`-argument-position-only entries form. A partial
+answer that keeps the silent case is worse than no answer.
+
+### `interface B extends A` — a field-set UNION, base fields FIRST (`NT1034` otherwise)
+
+An interface is erased **structurally** here: a declaration binds a name to a `Ty` string
+(`{a:number,b:number}`) and nothing else, and the field ORDER in that string *is* the slot order
+codegen geps with. So inheritance is a field-set union at resolution time — the base's fields
+first, in base order, then the derived declaration's own. There is **no runtime divergence**: node
+erases the whole construct, so every supported case is node-differential
+(`test/interface-extends.test.ts`).
+
+**Base fields go first, and that is a decision, not an accident.** It makes a derived interface's
+layout a *prefix-extension* of its base's, so a chain (`C extends B extends A`) puts A's fields at
+the same indices in all three — and the common tagged-union idiom
+
+```ts
+interface Base { kind: string }
+interface Add extends Base { kind: "add"; lhs: number; rhs: number }
+interface Neg extends Base { kind: "neg"; arg: number }
+```
+
+puts `kind` at index 0 in *both* members, which is the same-slot invariant SH2's
+`unionDiscriminant` (`src/ast.ts`) proves before it will build a `U<…>`. Appending the base
+instead would put the tag at index 2 in one member and index 1 in the other, and the union would
+be refused.
+
+A **redeclared** member overrides the base's type and keeps the base's **slot**, which is what
+lets the idiom above narrow `kind` from `string` to `"add"` without moving it. TypeScript
+additionally requires the override to be assignable to the base's member (TS2430) and we do not
+check that — but types are erased before node ever sees the program, so an incompatible override
+cannot change the **answer**, only tsc's opinion of it.
+
+Refused as `NT1034`, at the `extends` clause:
+
+- **A class base.** `interface I extends C` is legal TypeScript, but a class instance type is
+  `C{…}` — *tagged* — and the tag is what method resolution keys on. Folding its fields into an
+  untagged record would silently drop every method.
+- **A `@@mutable` record base** (`docs/decorators.md`), for the same reason: `@@mutable` is
+  deliberately NOMINAL, so that an undecorated record can never become mutable by sharing a shape.
+- **A base with no field list here** — anything that does not resolve to a plain record in *this
+  file*, including an **imported** one. `resolveNamed` erases an unknown named type to `number`,
+  so there are no fields to inherit; see the note under `NT1029` above, which refuses a
+  cross-module `Mod["field"]` for exactly the same reason.
+
+**What this replaced was a silent wrong answer, not a missing feature.** The `extends` clause used
+to be parsed and *discarded*, so `B` meant its own fields alone. Reading an inherited field was an
+`NT2001` blaming the *property* — `Property 'a' does not exist on {b:number}`, pointing at the use
+rather than at the dropped clause — and a program that never read one compiled clean and wrong:
+
+```ts
+interface A { a: number }
+interface B extends A { b: number }
+const x: B = { a: 10, b: 2 };
+console.log(JSON.stringify(x));   // node: {"a":10,"b":2}   was: {"b":2}, exit 0
+```
+
 ### `static` class members — supported, and the four refusals
 
 A static member has no receiver, so it is a **namespaced top-level definition**: `static m(…)`

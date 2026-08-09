@@ -1087,6 +1087,13 @@ class Parser {
     else if (this.at("{")) base = this.parseObjectType();
     else if (this.at("[")) base = this.parseTupleType();
     else if (this.at("import")) base = this.parseImportType();    // inline import type: import("m").T
+    // A TYPE QUERY (`typeof x`) or the `keyof` operator. Refused HERE, before the name
+    // path below can absorb the KEYWORD as if it were a type: both sit in `AMBIENT_TYPES`,
+    // so `resolveNamed("typeof")` used to answer `number` and leave the OPERAND in the
+    // token stream, where it re-parsed as a stray expression statement — silently for
+    // `typeof S` (the stray `S;` is legal, so `X` just quietly meant `number`) and as
+    // `'T' is not defined` for `keyof T`, a diagnostic naming a line nobody wrote.
+    else if (this.at("typeof") || this.at("keyof")) base = this.refuseTypeQuery();
     else {
       const id = this.expectIdent();
       baseName = id;
@@ -1124,6 +1131,41 @@ class Parser {
       baseName = undefined;
     }
     return (base + suffix) as Ty;
+  }
+
+  /**
+   * `typeof x` / `keyof T` in TYPE position — always a refusal, never a `Ty`.
+   *
+   * Neither can be ANSWERED here, and that is the whole argument for refusing rather than
+   * implementing. `Ty` is produced by this parser, before any inference has run, so a type
+   * query has no value environment to ask for `x`'s type; and `keyof T` has no `Ty`
+   * inhabitant at all — "one of these keys" is the same unrepresentable thing `NT1029`
+   * already refuses for `T[keyof T]`.
+   *
+   * It has to be the PARSER that says so, for the reason `refuseUnknownName` gives: the
+   * erasure to `number` is destructive, and once it has happened no later pass can tell the
+   * result from a `number` the user wrote.
+   *
+   * Resolving `typeof S` for the narrow case that IS decidable here — a `const` with a
+   * literal initializer — was considered and rejected. It puts the accept/reject boundary
+   * on the SYNTAX of the initializer (`const S = "a"` would compile, `const S = f()` would
+   * keep erasing silently), which is exactly the trade docs/self-hosting.md rejected for a
+   * `new Map`-position-only entries form: a partial answer that keeps the silent case is
+   * worse than no answer.
+   *
+   * SPECULATION-SAFE, like `refuseUnknownName`: `tryCallTypeArgs` backtracks on any throw,
+   * so this must stay a throw with no side effect.
+   */
+  private refuseTypeQuery(): never {
+    const kw = this.next().value;                  // `typeof` / `keyof`
+    const operand = this.peek();
+    const shown = operand.type === "ident" || operand.type === "str" ? `${kw} ${operand.value}` : kw;
+    throw nyi(
+      NYI.TYPE_QUERY,
+      kw === "typeof"
+        ? `the type query '${shown}' (a \`typeof\` in TYPE position)`
+        : `the type operator '${shown}'`,
+    );
   }
 
   /**
@@ -1425,16 +1467,89 @@ class Parser {
     this.eat("interface");
     const name = this.expectIdent();
     if (this.at("<")) this.skipGenerics();
-    if (this.at("extends")) { this.eat("extends"); this.parseType(); while (this.at(",")) { this.eat(","); this.parseType(); } }
+    // The BASE list is resolved, not discarded. Note it is resolved BEFORE `declaringType`
+    // is set: a base naming the interface itself is not the `@Name` back-edge (an interface
+    // cannot inherit from itself — there is no field to hold the pointer), so it stays an
+    // ordinary unresolved-name failure and `hoistTypeDecls` reports it as recursion.
+    const bases: { ty: Ty; spelling: string }[] = [];
+    if (this.at("extends")) {
+      this.eat("extends");
+      bases.push(this.parseBaseType());
+      while (this.at(",")) { this.eat(","); bases.push(this.parseBaseType()); }
+    }
     const outer = this.declaringType, outerRec = this.declaringTypeIsRecursive;
     this.declaringType = name; // see parseTypeAlias: self-reference here is recursion
     this.declaringTypeIsRecursive = false;
-    const shape = this.parseObjectType();
+    const own = this.parseObjectType();
     const recursive = this.declaringTypeIsRecursive;
     this.declaringType = outer;
     this.declaringTypeIsRecursive = outerRec;
+    const shape = this.inheritFields(name, bases, own);
     this.typeAliases.set(name, this.recordTypeDecl(name, this.applyRecordAttrs(dec, name, shape, "interface"), recursive));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
+  }
+
+  /** One entry of an `extends` list, kept with its SOURCE spelling — `resolveNamed` has
+   *  erased the name away by the time a refusal needs to say what was written. */
+  private parseBaseType(): { ty: Ty; spelling: string } {
+    const t = this.peek();
+    const ty = this.parseType();
+    return { ty, spelling: t.type === "ident" ? t.value : String(ty) };
+  }
+
+  /**
+   * INTERFACE INHERITANCE, as a field-set union.
+   *
+   * An interface is erased structurally — a declaration binds a name to a `Ty` string and
+   * nothing else — so `interface B extends A { b }` simply MEANS the fields of `A` followed
+   * by `b`. Base fields go FIRST, in base order, which is the only ordering that is stable:
+   * it makes a derived interface's layout a PREFIX-extension of its base's, so a chain
+   * (`C extends B extends A`) lays A's fields at the same indices in A, B and C, and the
+   * common tagged-union idiom
+   *
+   *     interface Base { kind: string }
+   *     interface Add extends Base { kind: "add"; lhs: number }
+   *     interface Neg extends Base { kind: "neg"; arg: number }
+   *
+   * puts `kind` at index 0 in every member — the same-slot invariant `unionDiscriminant`
+   * (src/ast.ts) proves before it will build a `U<…>`. Appending instead would put the tag
+   * at a different index in members with different field counts and the union would be
+   * refused.
+   *
+   * A REDECLARED field overrides the base's type and KEEPS the base's slot, which is what
+   * makes the idiom above narrow `kind` from `string` to `"add"` without moving it.
+   * TypeScript additionally requires the override to be assignable to the base's member
+   * (TS2430) and we do not check that — but types are erased before node ever sees the
+   * program, so an incompatible override cannot change the ANSWER, only tsc's opinion of it.
+   *
+   * Slot order is load-bearing everywhere here (`fieldIndex` is a `getelementptr` offset),
+   * and this function is the only thing that decides it for an inheriting interface: the
+   * merged string is what every later use of the name resolves to, so there is exactly one
+   * layout per declaration and no site can disagree about it.
+   */
+  private inheritFields(name: string, bases: { ty: Ty; spelling: string }[], own: Ty): Ty {
+    if (bases.length === 0) return own;
+    const fields: { key: string; ty: Ty }[] = [];
+    const put = (f: { key: string; ty: Ty }): void => {
+      const i = fields.findIndex((g) => g.key === f.key);
+      if (i < 0) fields.push(f); else fields[i] = { key: f.key, ty: f.ty }; // override, base slot
+    };
+    for (const b of bases) {
+      // A base with no field list of its own is the case that must never be silently
+      // accepted: dropping it is precisely the defect this function exists to end, and it
+      // was a WRONG ANSWER rather than a missing one (`JSON.stringify(x)` printed the
+      // derived fields only, exit 0). `classTag` catches both nominal carriers — a class
+      // instance type and a `@@mutable` record — which are tagged `Name{…}`.
+      if (!isObjectTy(b.ty) || classTag(b.ty) !== undefined) {
+        throw nyi(
+          NYI.IFACE_EXTENDS,
+          `'interface ${name} extends ${b.spelling}' — '${b.spelling}' is not a plain record type whose fields are known in this file (it resolves to '${b.ty}')`,
+        );
+      }
+      for (const f of objectFields(b.ty)) put(f);
+    }
+    for (const f of objectFields(own)) put(f);
+    return objectType(fields);
   }
 
   /**
