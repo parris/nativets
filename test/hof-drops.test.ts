@@ -13,6 +13,12 @@
  * correct throughout this bug, so it proves nothing either way. macOS cannot see the
  * leak at all; Linux LeakSanitizer can.
  *
+ * `__arrLive()` ALONE was a measurement hole, and it hid a bigger leak than the one this
+ * file was written for: every arrow BOUND to a value allocates a closure env, which is an
+ * OBJECT (`nt_obj_new`), and none of them were ever freed. Zero arrays, so nothing here
+ * moved. Every counter assertion below now reads BOTH — see
+ * `test/closure-env-drops.test.ts` for the envs themselves.
+ *
  * The mirror-image hazard is worse than the leak, so the CONTROLS come first and are
  * the load-bearing part of this file: a value the callback RETURNS escapes into the
  * result array and must not be freed, a value the callback CAPTURES belongs to the
@@ -49,7 +55,8 @@ function run(): number {
   return mapped.length + kept.length + sum;
 }
 console.log(run());
-console.log(__arrLive());`;
+console.log(__arrLive());
+console.log(__objLive());`;
 
 describe("HOF callback drops", () => {
   // CONTROL. The baseline shape: an expression-bodied callback declares nothing, so
@@ -58,8 +65,9 @@ describe("HOF callback drops", () => {
     const r = await compileAndRun(`
 const r = [1, 2, 3].map((x) => x + 1);
 console.log(r.join(","));
-console.log(__arrLive());`);
-    expect(r.stdout).toBe("2,3,4\n1\n");
+console.log(__arrLive());
+console.log(__objLive());`);
+    expect(r.stdout).toBe("2,3,4\n1\n0\n");
     expect(r.exitCode).toBe(0);
   });
 
@@ -69,8 +77,9 @@ console.log(__arrLive());`);
     const r = await compileAndRun(`
 function f(x: number): number { let n = 0; if (x > 1) { const a: number[] = [x, x]; n = a[0]; } return n; }
 console.log(f(1) + "," + f(2) + "," + f(3));
-console.log(__arrLive());`);
-    expect(r.stdout).toBe("0,2,3\n0\n");
+console.log(__arrLive());
+console.log(__objLive());`);
+    expect(r.stdout).toBe("0,2,3\n0\n0\n");
     expect(r.exitCode).toBe(0);
   });
 
@@ -81,8 +90,9 @@ console.log(__arrLive());`);
     const r = await compileAndRun(`
 const r = [1, 2, 3].map((x) => { const a: number[] = [x, x]; return a; });
 console.log(r.length + "," + r[0][0] + "," + r[2][1]);
-console.log(__arrLive());`);
-    expect(r.stdout).toBe("3,1,3\n4\n");
+console.log(__arrLive());
+console.log(__objLive());`);
+    expect(r.stdout).toBe("3,1,3\n4\n0\n");
     expect(r.exitCode).toBe(0);
   });
 
@@ -101,8 +111,9 @@ console.log(__arrLive());`);
     const r = await compileAndRun(`
 const r = [1, 2, 3].map((x) => { const a: number[] = [x, x]; if (x > 1) { return a; } return [0]; });
 console.log(r.length + "," + r[0][0] + "," + r[1][0] + "," + r[2][1]);
-console.log(__arrLive());`);
-    expect(r.stdout).toBe("3,0,2,3\n5\n");
+console.log(__arrLive());
+console.log(__objLive());`);
+    expect(r.stdout).toBe("3,0,2,3\n5\n0\n");
     expect(r.exitCode).toBe(0);
   });
 
@@ -113,8 +124,9 @@ console.log(__arrLive());`);
 const base: number[] = [10, 20];
 const r = [1, 2].map((x) => { const n = base[0] + x; return n; });
 console.log(r.join(",") + "," + base[1]);
-console.log(__arrLive());`);
-    expect(r.stdout).toBe("11,12,20\n2\n");
+console.log(__arrLive());
+console.log(__objLive());`);
+    expect(r.stdout).toBe("11,12,20\n2\n0\n");
     expect(r.exitCode).toBe(0);
   });
 
@@ -125,8 +137,9 @@ console.log(__arrLive());`);
     const r = await compileAndRun(`
 const r = [1, 2, 3].map((x) => { let n = 0; if (x > 1) { const a: number[] = [x, x]; n = a[0]; } return n; });
 console.log(r.join(","));
-console.log(__arrLive());`);
-    expect(r.stdout).toBe("0,2,3\n1\n");
+console.log(__arrLive());
+console.log(__objLive());`);
+    expect(r.stdout).toBe("0,2,3\n1\n0\n");
     expect(r.exitCode).toBe(0);
   });
 
@@ -135,7 +148,7 @@ console.log(__arrLive());`);
   // live arrays. Was 9 — three from `map`, two from `filter`, four from `reduce`.
   test("map, filter and reduce callbacks all free their nested-block locals", async () => {
     const r = await compileAndRun(HOF_CHURN);
-    expect(r.stdout).toBe("16\n0\n"); // 16 is node's answer for the same file
+    expect(r.stdout).toBe("16\n0\n0\n"); // 16 is node's answer for the same file
     expect(r.exitCode).toBe(0);
   });
 
@@ -183,8 +196,34 @@ console.log(total);`;
     const r = await compileAndRun(`
 const r = [1, 2, 3].map((x) => { const a: number[] = [x, x]; return a[0]; });
 console.log(r.join(","));
-console.log(__arrLive());`);
-    expect(r.stdout).toBe("1,2,3\n4\n");
+console.log(__arrLive());
+console.log(__objLive());`);
+    expect(r.stdout).toBe("1,2,3\n4\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  /*
+   * THE SAME GAP, in the shape the object counter exists to see: an arrow BOUND inside a
+   * callback body. `test/closure-env-drops.test.ts` frees exactly this binding when it is
+   * only ever called — and it is here — but the drop marker sits after the callback's
+   * `return`, so it is never reached and one env leaks per element. Nothing here is an
+   * array, so `__arrLive()` reads 0 and this file could not have seen it before.
+   *
+   * Closing it is the same codegen change the gap above needs (a drop set scoped to the
+   * callback), not a widening of the ownership rule — the ownership pass already marked
+   * this binding droppable.
+   */
+  test("KNOWN GAP: an arrow BOUND inside a callback body leaks one env per element", async () => {
+    const r = await compileAndRun(`
+function run(): number {
+  const src: number[] = [1, 2, 3];
+  const out: number[] = src.map((x) => { const g = (y: number): number => y * 2; return g(x); });
+  return out[2];
+}
+console.log(run());
+console.log(__arrLive());
+console.log(__objLive());`);
+    expect(r.stdout).toBe("6\n0\n3\n"); // node prints 6
     expect(r.exitCode).toBe(0);
   });
 
@@ -195,7 +234,7 @@ console.log(__arrLive());`);
    * test/transients.test.ts: ASan + UBSan, `-fno-sanitize-recover` so every finding is
    * fatal, and LSan left OFF (it does not exist on macOS, and nativets leaks
    * deliberately at the boundaries docs/divergences.md records). The leak half is
-   * gated precisely by `__arrLive()` in the test above.
+   * gated precisely by `__arrLive()` AND `__objLive()` in the tests above.
    */
   test("ASan + UBSan: the callback drop paths are free of double frees and use-after-free", () => {
     const dir = mkdtempSync(join(tmpdir(), "nativets-hofasan-"));
@@ -215,7 +254,7 @@ console.log(__arrLive());`);
       expect(run.stderr).not.toContain("AddressSanitizer");
       expect(run.stderr).not.toContain("runtime error");
       expect(run.status).toBe(0);
-      expect(run.stdout).toBe("16\n0\n");
+      expect(run.stdout).toBe("16\n0\n0\n");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

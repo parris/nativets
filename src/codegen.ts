@@ -872,8 +872,13 @@ class FnGen {
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       // Move-aware RAII: objects free via nt_obj_free, arrays via nt_arr_free.
+      // A CLOSURE ENV is an object too — `nt_obj_new(1 + caps.length)`, a bare slot
+      // block with no `NtArray` header — and freeing one as an array frees two words
+      // past its end (the wild free that made function types non-linear in the first
+      // place; see `nonEscapingClosures` in ownership.ts). Shallow, as everywhere here:
+      // the capture slots alias values their own scope owns and drops.
       const dropTy = this.varTypes.get(n) ?? "number";
-      const free = isObjectTy(dropTy) || isUnionTy(dropTy) || isTypeRefTy(dropTy) ? "nt_obj_free" : "nt_arr_free"; // a union IS an object block (SH2); so is a recursive node
+      const free = isObjectTy(dropTy) || isUnionTy(dropTy) || isTypeRefTy(dropTy) || isFuncTy(dropTy) ? "nt_obj_free" : "nt_arr_free"; // a union IS an object block (SH2); so is a recursive node, and so is a closure env
       this.emit(`call void @${free}(ptr ${p})`);
     }
   }
