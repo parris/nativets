@@ -915,6 +915,71 @@ The `Analyzer` hazard recorded just above is untouched: `Analyzer` was already `
 the two-instance use-after-move is a parameter-property/move question, not a mutability one, and
 this change neither worsens nor fixes it.
 
+### MUTUAL RECURSION LANDED — 41 of ast.ts's 45-member SCC encode, and the last 4 are NOT recursion
+
+Self-recursion (`class Scope { parent: Scope | null }`) needs one back-edge, which the parser can
+mint while parsing the declaration itself. `src/ast.ts` needs a whole **strongly-connected
+component**: 45 of its 64 top-level type declarations are one cycle, closed by
+`TemplateLiteral.exprs: Expr[]` running back through `type Expr`. That is now encoded — when the
+hoisting fixpoint stalls it has *proved* the component, and every member is re-parsed with every
+member's name resolving to `@Name`.
+
+**The union-member rule, which was an argument and is now a measurement.** A union MEMBER may not
+be a bare `@Name`: there is no box (SH2), so a union value IS the member's object block and
+`unionDiscriminant` needs each member's SHAPE to prove the tag sits at the same slot index in
+every one. The encoding expands ONE LEVEL at the member boundary and folds only below it. Both
+halves were measured on the merged tree rather than trusted:
+
+```
+type Expr = Num | Negate;  interface Negate { kind: "Negate"; operand: Expr }
+  ->  U<{kind:"Num",value:number}|{kind:"Negate",operand:@Expr}>
+     unionDiscriminant -> { key: "kind", index: 0 }      # slot 0 in BOTH members
+```
+
+and the failure mode of getting the rule wrong is a **refusal, not a miscompile**:
+`objectFields("@N")` returns `[]`, so `unionDiscriminant("U<@A|@B>")` is `undefined` and the union
+is rejected (`NT1009`) rather than built with a phantom tag.
+
+**`src/ast.ts` did NOT reach IR, and the reason is precise.** A component is encoded all-or-nothing
+— a back-edge is minted only where it resolves — so the four members that do not encode take the
+other 41 with them. The four, and none of them is recursion:
+
+| declaration | what stops it |
+|---|---|
+| `ArrowFunction.body: Expr \| Stmt[]` | a general union of a discriminated union and an ARRAY: an array has no tag slot, so nothing inside the value tells the arms apart |
+| `ForStmt.init: VarDecl \| Expr \| null` | needs union FLATTENING — a nested `U<…>` arm spliced into the outer union's members, which TypeScript does and this does not |
+| `type Expr` | selects over `ArrowFunction` |
+| `type Stmt` | selects over `ForStmt` |
+
+So the next lane on this path is a **union** lane, not a recursion lane. The blocker MESSAGE for
+`ast.ts` is deliberately unchanged (it is what `selfhost-ratchet.baseline.json` records as blocker
+identity, and no blocker moved — all four instruments stay green with no re-record); the NT1030
+**hint** now names these residual members and their own diagnostics, so the real gap is not masked
+by the refusal in front of it.
+
+**Two silent wrong answers fell out of the same work, both pre-existing and both in the recursive
+path that had just landed.**
+
+1. A HEAP OUT-OF-BOUNDS. `const a: N = { v: 1, next: { v: 2 } }` against
+   `interface N { v: number; next?: N }` exited **255 with empty stdout**. `retypeLiteral`
+   rewrites a literal into its target's SLOT LAYOUT and matched on `isObjectTy(baseTy(target))`
+   — false for the back-edge `@N` — so the inner literal kept its own one-field shape while every
+   reader typed the block as two slots. `assignable` DOES unfold, which is exactly why the program
+   was accepted and then miscompiled. Fixed (unfold in `reshapable` and `retypeLiteral` too).
+   Binding the same value to a local first was always fine, which is why nothing caught it.
+2. `structuredClone` of a recursive value **aliased** it: `a.next === b.next` was `true` against
+   node's `false`. Refused, along with the actor-message and `JSON.stringify` walks and
+   `@@mutable` + recursive — see docs/divergences.md for all four and for the measurement that
+   corrected `@@mutable`'s stated reason (the predicted leak is the pre-existing shallow-drop one;
+   the real cost is `console.log` printing nesting where node prints `[Circular *1]`).
+
+**Adjacent, not taken:** `a.next!.v` on a recursive field is `NT2001` ("Property 'v' does not
+exist on @N") — the non-null assertion does not unfold the back-edge, where an ordinary field read
+does. And nativets WRITES `undefined` into an optional field with no initializer, so `console.log`
+shows the key (`{ v: 2, next: undefined }`) where node, which never created it, omits it
+(`{ v: 2 }`). That one is not recursion-specific — `interface M { v: number; s?: string }` with
+`const m: M = { v: 1 }` reproduces it — and it is a consequence of the optional-class-field fix.
+
 ---
 
 ## Milestones
