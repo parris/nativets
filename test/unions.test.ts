@@ -154,12 +154,26 @@ interface Box { inner: E }
 function mkA(n: number): E { return { kind: "A", left: n }; }
 function mkBox(): Box { return { inner: mkA(7) }; }
 `;
-    test("a receiver that is a PATH is told that narrowing tracks a NAME", () => {
-      const bad = `${E}function f(o: Box): number { if (o.inner.kind === "A") return o.inner.left; return 0; }\nconsole.log(f(mkBox()));\n`;
-      expect(messageOf(bad)).toContain("narrowing tracks a plain NAME");
-      expect(messageOf(bad)).toContain("o.inner");
-      // ...and the binding it prescribes actually works
+    /*
+     * This case USED to assert `narrowing tracks a plain NAME, and 'o.inner' is a path`.
+     * A dotted path narrows now (see "narrowing a dotted PATH receiver" below), so that
+     * sentence became the untruthful one and the shape it described compiles. What is
+     * left to assert is the inverse: the hint is GONE because the program works.
+     */
+    test("a receiver that is a stable PATH is narrowed, not lectured about names", () => {
+      const ok = `${E}function f(o: Box): number { if (o.inner.kind === "A") return o.inner.left; return 0; }\nconsole.log(f(mkBox()));\n`;
+      expect(codeOf(ok)).toBe(null);
+      // ...and the `const` binding the old hint prescribed still works, unchanged
       expect(codeOf(`${E}function f(o: Box): number { const v: E = o.inner; if (v.kind === "A") return v.left; return 0; }\nconsole.log(f(mkBox()));\n`)).toBe(null);
+    });
+
+    test("a receiver that is NOT a stable path is told exactly that", () => {
+      // A CALL step is not a stable name for a value — the two calls need not even return
+      // the same object — so `accessPath` declines it and no tag test can ever narrow it.
+      // The `const` prescription is the true advice here, and it compiles.
+      const bad = `${E}function f(): number { if (mkBox().inner.kind === "A") return mkBox().inner.left; return 0; }\nconsole.log(f());\n`;
+      expect(messageOf(bad)).toContain("narrowing needs a STABLE access path");
+      expect(codeOf(`${E}function f(): number { const v: E = mkBox().inner; if (v.kind === "A") return v.left; return 0; }\nconsole.log(f());\n`)).toBe(null);
     });
 
     test("a receiver already narrowed to a SUB-union is told there are several members left", () => {
@@ -577,5 +591,197 @@ f(0); f(1); f(""); f("a");
       expect(ours.stdout).toBe(oracle.stdout);
       expect(ours.exitCode).toBe(oracle.exitCode);
     });
+  });
+});
+
+/*
+ * SH — narrowing a DOTTED PATH, not only a plain name.
+ *
+ * `if (e.callee.kind === "MemberExpr") { e.callee.property }` is the shape the
+ * compiler's own passes are written in (`src/ast.ts` `freshArray`, and 198 further
+ * sites across checker/codegen/ownership/parser/ast). Before this it was refused:
+ * tag narrowing shadow-DECLARED a name, and `e.callee` has no name to shadow.
+ *
+ * Reference: TypeScript `tests/cases/compiler/discriminantPropertyCheck.ts` — the
+ * conformance file for exactly this (narrowing `foo.kind` where `foo` is itself a
+ * property read), and the one `src/checker.ts` already cites for the NULLISH half
+ * of path narrowing.
+ *
+ * SOUNDNESS. A path is narrowable only while it is STABLE between the proof and the
+ * use. The rules are the ones the nullish path facts already run under, unchanged:
+ * every object along the path must be immutable (no `@@mutable`, no `this`), no `?.`
+ * or computed link, and the ROOT NAME must not be assigned in the guard, in the
+ * narrowed region, or inside any arrow anywhere in the program. Anything else keeps
+ * its NT2001. The refusals below are the load-bearing half of this block.
+ */
+describe("narrowing a dotted PATH receiver", () => {
+  const BOX = `interface A { kind: "A"; left: number }
+interface B { kind: "B"; right: string }
+type E = A | B;
+interface Box { name: string; inner: E }
+function mkA(n: number): E { return { kind: "A", left: n }; }
+function mkB(s: string): E { return { kind: "B", right: s }; }
+`;
+  /** Wrap a body that takes a `Box`, and run it against both members. */
+  const prog = (body: string) => `${BOX}function f(o: Box): string { ${body} }
+console.log(f({ name: "p", inner: mkA(7) }));
+console.log(f({ name: "q", inner: mkB("hi") }));
+`;
+
+
+  /** Compile + run the two-member program and assert node agrees byte-for-byte. */
+  const expectMatches = async (src: string) => {
+    expect(codeOf(src)).toBe(null);
+    const ours = await compileAndRun(src);
+    const oracle = runWithNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  };
+
+  test("the ELSE arm of a path tag test narrows to the remaining member", async () => {
+    await expectMatches(prog(`if (o.inner.kind === "B") { return "s" + o.inner.right; } return "n" + o.inner.left;`));
+  });
+
+  test("a path tag test as an `&&` operand narrows the RIGHT operand", async () => {
+    // `src/ast.ts` `freshArray` is written in exactly this shape: an outer tag test on a
+    // NAME proves the receiver, and the `&&` right operand then tests a PATH off it.
+    await expectMatches(prog(`if (o.inner.kind === "A" && o.inner.left > 3) { return "big"; } return "other";`));
+  });
+
+  test("an early-exit guard on a path narrows the REST of the block", async () => {
+    await expectMatches(prog(`if (o.inner.kind === "B") return "s" + o.inner.right;
+  return "n" + o.inner.left;`));
+  });
+
+  test("`switch` on a path discriminant narrows each arm", async () => {
+    await expectMatches(prog(`switch (o.inner.kind) { case "A": return "n" + o.inner.left; case "B": return "s" + o.inner.right; }`));
+  });
+
+  test("a TWO-STEP path narrows (the compiler's own `e.callee.kind` shape)", async () => {
+    const src = `interface Id { kind: "Id"; name: string }
+interface Mem { kind: "Mem"; property: string }
+type Callee = Id | Mem;
+interface Call { kind: "Call"; callee: Callee }
+interface Lit { kind: "Lit"; value: number }
+type Node = Call | Lit;
+function show(e: Node): string {
+  if (e.kind === "Call" && e.callee.kind === "Mem") { return "." + e.callee.property; }
+  return "other";
+}
+console.log(show({ kind: "Call", callee: { kind: "Mem", property: "push" } }));
+console.log(show({ kind: "Call", callee: { kind: "Id", name: "f" } }));
+console.log(show({ kind: "Lit", value: 1 }));
+`;
+    await expectMatches(src);
+  });
+
+  /* ---- the REFUSALS. Each one is a shape where the path is NOT provably stable
+   * between the proof and the read, and each was verified by MUTATION: removing the
+   * corresponding guard from `narrowPathInto`/`accessPath` makes the program compile and
+   * print a wrong answer, not merely a different one. The `o = …` case below prints
+   * `n2.1622591016e-314` without the filter — a string pointer read as a double — where
+   * node prints `nundefined`. ---- */
+
+  test("REFUSED: the root is REASSIGNED between the proof and the read", () => {
+    const src = `${BOX}function f(): string {
+  let o: Box = { name: "p", inner: mkA(1) };
+  if (o.inner.kind === "A") { o = { name: "q", inner: mkB("boom") }; return "n" + o.inner.left; }
+  return "s";
+}
+console.log(f());
+`;
+    expect(codeOf(src)).toBe("NT2001");
+    expect(messageOf(src)).toContain("'o' is assigned between it and this read");
+  });
+
+  test("REFUSED: the root is assigned inside an ARROW anywhere in the program", () => {
+    // `closureAssigned`: the arrow may run at any time, so no region scan can bound it.
+    // It is refused, but as NT1031 — a write to a captured binding is refused OUTRIGHT
+    // and gets there first, so `closureAssigned` is the second lock on this door rather
+    // than the first. Asserted as "refused", not as a code, so this case keeps testing
+    // the property (never narrowed) if the capture rule is ever widened.
+    const src = `${BOX}function f(): string {
+  let o: Box = { name: "p", inner: mkA(1) };
+  const later = (): void => { o = { name: "q", inner: mkB("boom") }; };
+  if (o.inner.kind === "A") { later(); return "n" + o.inner.left; }
+  return "s";
+}
+console.log(f());
+`;
+    expect(codeOf(src)).not.toBe(null);
+  });
+
+  test("REFUSED: an INLINE callback (`map`) writes the root — the one arrow that may", () => {
+    // A `map`/`filter`/`reduce` callback runs inline in the enclosing frame, so NT1031
+    // deliberately permits the write (see its hint). That makes this the shape where
+    // `closureAssigned` is the ONLY thing standing between the proof and a wrong slot.
+    const src = `${BOX}function f(): string {
+  let o: Box = { name: "p", inner: mkA(1) };
+  if (o.inner.kind === "A") {
+    const n = [1].map((x: number): number => { o = { name: "q", inner: mkB("boom") }; return x; });
+    return "n" + o.inner.left + n.length;
+  }
+  return "s";
+}
+console.log(f());
+`;
+    expect(codeOf(src)).toBe("NT2001");
+  });
+
+  test("REFUSED: a `@@mutable` receiver, whose field can be rewritten in place", () => {
+    // The aliased-mutation attribute. `g.swap()` rewrites the very field the tag test
+    // proved, through a second handle on the same object — so the proof is void.
+    const src = `${BOX}@@mutable
+class Holder {
+  inner: E = mkA(1);
+  swap(): Holder { this.inner = mkB("boom"); return this; }
+}
+function f(h: Holder, g: Holder): string {
+  if (h.inner.kind === "A") { g.swap(); return "n" + h.inner.left; }
+  return "s";
+}
+const h = new Holder();
+console.log(f(h, h));
+`;
+    expect(codeOf(src)).toBe("NT2001");
+    expect(messageOf(src)).toContain("STABLE access path");
+  });
+
+  test("REFUSED: an assignment in the LOOP BODY, so the back-edge cannot see a stale proof", () => {
+    const src = `${BOX}function f(): string {
+  let o: Box = { name: "p", inner: mkA(1) };
+  while (true) {
+    if (o.inner.kind === "A") { o = { name: "q", inner: mkB("boom") }; return "n" + o.inner.left; }
+    return "s";
+  }
+}
+console.log(f());
+`;
+    expect(codeOf(src)).toBe("NT2001");
+  });
+
+  test("REFUSED: an OPTIONAL link (`?.`), whose result is a fresh nullable", () => {
+    const src = `${BOX}interface Outer { b?: Box }
+function f(x: Outer): string {
+  if (x.b?.inner.kind === "A") { return "n"; }
+  return "s";
+}
+console.log(f({}));
+`;
+    expect(codeOf(src)).not.toBe(null);
+  });
+
+  test("the narrowing does not leak PAST the arm it was proved in", () => {
+    const src = prog(`if (o.inner.kind === "A") { return "n" + o.inner.left; } return "n" + o.inner.left;`);
+    expect(codeOf(src)).toBe("NT2001");
+  });
+
+  test("a tag test on `o.inner` narrows `o.inner` in the arm", async () => {
+    const src = prog(`if (o.inner.kind === "A") { return "n" + o.inner.left; } return "s" + o.inner.right;`);
+    expect(codeOf(src)).toBe(null);
+    const ours = await compileAndRun(src);
+    const oracle = runWithNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
   });
 });

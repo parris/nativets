@@ -1042,12 +1042,29 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // program over a plain nested union is refused the same way. That is a narrowing
       // lane; probed one deeper, the site behind it is `exprLoc`'s `e.left`, the same
       // construct again.
-      // The advice is now the PATH variant, and that is two lanes composing: the type-ref
-      // unfold made the union visible, so narrowAdvice can see the receiver is a PATH
-      // (`e.callee`) rather than a plain name, and says to bind it first. Strictly more
-      // truthful than the generic "narrow it first" this asserted before.
-      expect(m.error).toContain("is a path — bind it first");
-      expect(m.error).toContain("Property 'property' does not exist on");
+      // SEVENTEENTH — the dotted-path tag test, cleared. A tag narrowing of a plain name
+      // is a shadow BINDING; `e.callee` has no name to shadow, so it now records the same
+      // `NarrowFact` the NULLISH half of narrowing has always used for access paths. What
+      // makes it sound is that it inherits that mechanism's invalidation rules whole: every
+      // object on the path must be immutable (no `@@mutable`, no `this`, no `?.`, nothing
+      // computed), and the ROOT name must not be assigned in the guard, in the region the
+      // fact covers, or inside any arrow in the program. A path failing any of those keeps
+      // its NT2001 — verified by mutation: with the assignment filter removed, the shape
+      // `if (o.inner.kind === "A") { o = other; return o.inner.left; }` compiles and prints
+      // a string pointer reinterpreted as a double.
+      // It also needed ONE more unfold, in `accessPath` itself: `e.callee`'s declared type
+      // is the back-edge `@Expr`, which is not `isObjectTy`, so every step off a recursive
+      // field declined before it could even be considered. That is most of this compiler's
+      // own AST — 199 dotted-path tag tests in five files, counted by this compiler's own
+      // parser (checker 111, codegen 47, ownership 25, parser 10, ast 6).
+      // The next term is NOT the same construct: `exprLoc`'s `case "BinaryExpr": case
+      // "LogicalExpr": return exprLoc(e.left)` narrows to a SUB-union of two members, and
+      // a field present in EVERY member of a sub-union is not readable here even when it
+      // has the same type in each. tsc allows it; we do not, yet. Its own lane — and note
+      // the load-bearing extra condition our representation adds, which tsc does not have
+      // to check: the field must sit at the same SLOT INDEX in every surviving member.
+      expect(m.error).toContain("narrowed here to MORE THAN ONE member");
+      expect(m.error).toContain("Property 'left' does not exist on");
       expect(m.code).toBe("NT2001");
       return;
     }
