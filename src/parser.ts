@@ -1687,7 +1687,13 @@ class Parser {
       // A field type comes from its annotation if present, else is inferred from the initializer
       // (`inferFieldTy`). An initializer is desugared into `this.name = init` prepended to the
       // constructor (after parameter-property inits) — mirroring the TS class-field semantics.
-      if (this.at("?")) this.eat("?");
+      // `f?: T` ≡ `f: T | undefined`, exactly as an interface/object-type field is read
+      // (see parseObjectType). The `?` used to be eaten and DISCARDED here, which typed the
+      // field `T`: an unassigned one then read back as the zero slot — `0` for a number,
+      // a NULL `char*` for a string — instead of `undefined`, and `this.f = undefined` was
+      // rejected on code tsc accepts. A silent wrong answer in both directions.
+      const optional = this.at("?");
+      if (optional) this.eat("?");
       let ty: Ty | undefined;
       if (this.at(":")) { this.eat(":"); ty = this.parseType(); }
       let init: Expr | undefined;
@@ -1697,6 +1703,7 @@ class Parser {
         if (init === undefined) throw nyi(NYI.CLASS_FEATURE, `class field '${member}' needs a type annotation`);
         ty = this.inferFieldTy(init, member);
       }
+      if (optional) ty = makeNullable("undefined", ty);
       // A STATIC field is not a slot on the instance — it is module-level storage under a
       // class-qualified name (`C.f`), initialized where the class is DECLARED, which is
       // exactly a module-level `const C.f = init`. The dotted name cannot collide with any
@@ -1709,6 +1716,11 @@ class Parser {
         continue;
       }
       fields.push({ key: member, ty });
+      // An optional field with no initializer still needs one: a class instance is a heap
+      // block and every field is a real slot, so "absent" has to be WRITTEN as the
+      // `undefined` arm of the nullable box. Without this the slot stays zero and a read
+      // dereferences NULL. A constructor that assigns the field simply overwrites this.
+      if (init === undefined && optional) init = { kind: "UndefinedLiteral" };
       if (init !== undefined) fieldInits.push({ field: member, value: init });
       } finally {
         // `finally` also runs on the `continue`s above, so the scope is popped on every
