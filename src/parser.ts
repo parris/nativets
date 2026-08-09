@@ -1421,16 +1421,89 @@ class Parser {
     this.eat("interface");
     const name = this.expectIdent();
     if (this.at("<")) this.skipGenerics();
-    if (this.at("extends")) { this.eat("extends"); this.parseType(); while (this.at(",")) { this.eat(","); this.parseType(); } }
+    // The BASE list is resolved, not discarded. Note it is resolved BEFORE `declaringType`
+    // is set: a base naming the interface itself is not the `@Name` back-edge (an interface
+    // cannot inherit from itself — there is no field to hold the pointer), so it stays an
+    // ordinary unresolved-name failure and `hoistTypeDecls` reports it as recursion.
+    const bases: { ty: Ty; spelling: string }[] = [];
+    if (this.at("extends")) {
+      this.eat("extends");
+      bases.push(this.parseBaseType());
+      while (this.at(",")) { this.eat(","); bases.push(this.parseBaseType()); }
+    }
     const outer = this.declaringType, outerRec = this.declaringTypeIsRecursive;
     this.declaringType = name; // see parseTypeAlias: self-reference here is recursion
     this.declaringTypeIsRecursive = false;
-    const shape = this.parseObjectType();
+    const own = this.parseObjectType();
     const recursive = this.declaringTypeIsRecursive;
     this.declaringType = outer;
     this.declaringTypeIsRecursive = outerRec;
+    const shape = this.inheritFields(name, bases, own);
     this.typeAliases.set(name, this.recordTypeDecl(name, this.applyRecordAttrs(dec, name, shape, "interface"), recursive));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
+  }
+
+  /** One entry of an `extends` list, kept with its SOURCE spelling — `resolveNamed` has
+   *  erased the name away by the time a refusal needs to say what was written. */
+  private parseBaseType(): { ty: Ty; spelling: string } {
+    const t = this.peek();
+    const ty = this.parseType();
+    return { ty, spelling: t.type === "ident" ? t.value : String(ty) };
+  }
+
+  /**
+   * INTERFACE INHERITANCE, as a field-set union.
+   *
+   * An interface is erased structurally — a declaration binds a name to a `Ty` string and
+   * nothing else — so `interface B extends A { b }` simply MEANS the fields of `A` followed
+   * by `b`. Base fields go FIRST, in base order, which is the only ordering that is stable:
+   * it makes a derived interface's layout a PREFIX-extension of its base's, so a chain
+   * (`C extends B extends A`) lays A's fields at the same indices in A, B and C, and the
+   * common tagged-union idiom
+   *
+   *     interface Base { kind: string }
+   *     interface Add extends Base { kind: "add"; lhs: number }
+   *     interface Neg extends Base { kind: "neg"; arg: number }
+   *
+   * puts `kind` at index 0 in every member — the same-slot invariant `unionDiscriminant`
+   * (src/ast.ts) proves before it will build a `U<…>`. Appending instead would put the tag
+   * at a different index in members with different field counts and the union would be
+   * refused.
+   *
+   * A REDECLARED field overrides the base's type and KEEPS the base's slot, which is what
+   * makes the idiom above narrow `kind` from `string` to `"add"` without moving it.
+   * TypeScript additionally requires the override to be assignable to the base's member
+   * (TS2430) and we do not check that — but types are erased before node ever sees the
+   * program, so an incompatible override cannot change the ANSWER, only tsc's opinion of it.
+   *
+   * Slot order is load-bearing everywhere here (`fieldIndex` is a `getelementptr` offset),
+   * and this function is the only thing that decides it for an inheriting interface: the
+   * merged string is what every later use of the name resolves to, so there is exactly one
+   * layout per declaration and no site can disagree about it.
+   */
+  private inheritFields(name: string, bases: { ty: Ty; spelling: string }[], own: Ty): Ty {
+    if (bases.length === 0) return own;
+    const fields: { key: string; ty: Ty }[] = [];
+    const put = (f: { key: string; ty: Ty }): void => {
+      const i = fields.findIndex((g) => g.key === f.key);
+      if (i < 0) fields.push(f); else fields[i] = { key: f.key, ty: f.ty }; // override, base slot
+    };
+    for (const b of bases) {
+      // A base with no field list of its own is the case that must never be silently
+      // accepted: dropping it is precisely the defect this function exists to end, and it
+      // was a WRONG ANSWER rather than a missing one (`JSON.stringify(x)` printed the
+      // derived fields only, exit 0). `classTag` catches both nominal carriers — a class
+      // instance type and a `@@mutable` record — which are tagged `Name{…}`.
+      if (!isObjectTy(b.ty) || classTag(b.ty) !== undefined) {
+        throw nyi(
+          NYI.IFACE_EXTENDS,
+          `'interface ${name} extends ${b.spelling}' — '${b.spelling}' is not a plain record type whose fields are known in this file (it resolves to '${b.ty}')`,
+        );
+      }
+      for (const f of objectFields(b.ty)) put(f);
+    }
+    for (const f of objectFields(own)) put(f);
+    return objectType(fields);
   }
 
   /**

@@ -287,6 +287,15 @@ export const NYI = {
   // BOOLEAN path (`zext i1 <ptr>`) and the user's error was clang's:
   // "'%t4' defined with type 'ptr' but expected 'i1'".
   STRINGIFY: { code: "NT1032", milestone: "later", hint: "`+`/`${…}`/`String(…)` coerce the primitives, a nullable box, and a `number[]`/`string[]`/`boolean[]` (node joins those with `,`). For an object or class instance use `JSON.stringify(x)` — node's `[object Object]` is not what the line meant — and for a Map/Set spread it first (`JSON.stringify([...m])`). `console.log(x)` on its own prints the value exactly like node" },
+  // `interface B extends A` where `A` is not a plain record. Inheritance IS supported —
+  // the base's fields are prepended to the derived declaration's, which is exactly what an
+  // interface means once it is erased structurally — but only for a base this file can
+  // reduce to an untagged field list. A CLASS base (`C{...}`) and a `@@mutable` record
+  // (`Name{...}`) both carry a NOMINAL tag that method resolution and the mutability rules
+  // key on, and merging their fields into an untagged record would drop it silently; an
+  // imported or otherwise unresolved base has no fields here at all, and would silently
+  // inherit nothing. Refused at the `extends` clause, which is where the fault is.
+  IFACE_EXTENDS: { code: "NT1034", milestone: "later", hint: "an interface may extend a `type`/`interface` that resolves to a plain record IN THIS FILE. A class or `@@mutable` base is nominal (its tag drives method resolution and the mutability rules), so its fields cannot be folded into a structural record — write the inherited fields out, or declare the derived shape as a `type` alias" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

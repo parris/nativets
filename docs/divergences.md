@@ -1791,6 +1791,60 @@ would be a silent wrong answer — the worst outcome available. Before `NT1029` 
 died in the `[]` array-suffix loop as an **anonymous `NT0001 Expected ']'`**, with no code and no
 hint; it was the last unnamed refusal in the tree.
 
+### `interface B extends A` — a field-set UNION, base fields FIRST (`NT1034` otherwise)
+
+An interface is erased **structurally** here: a declaration binds a name to a `Ty` string
+(`{a:number,b:number}`) and nothing else, and the field ORDER in that string *is* the slot order
+codegen geps with. So inheritance is a field-set union at resolution time — the base's fields
+first, in base order, then the derived declaration's own. There is **no runtime divergence**: node
+erases the whole construct, so every supported case is node-differential
+(`test/interface-extends.test.ts`).
+
+**Base fields go first, and that is a decision, not an accident.** It makes a derived interface's
+layout a *prefix-extension* of its base's, so a chain (`C extends B extends A`) puts A's fields at
+the same indices in all three — and the common tagged-union idiom
+
+```ts
+interface Base { kind: string }
+interface Add extends Base { kind: "add"; lhs: number; rhs: number }
+interface Neg extends Base { kind: "neg"; arg: number }
+```
+
+puts `kind` at index 0 in *both* members, which is the same-slot invariant SH2's
+`unionDiscriminant` (`src/ast.ts`) proves before it will build a `U<…>`. Appending the base
+instead would put the tag at index 2 in one member and index 1 in the other, and the union would
+be refused.
+
+A **redeclared** member overrides the base's type and keeps the base's **slot**, which is what
+lets the idiom above narrow `kind` from `string` to `"add"` without moving it. TypeScript
+additionally requires the override to be assignable to the base's member (TS2430) and we do not
+check that — but types are erased before node ever sees the program, so an incompatible override
+cannot change the **answer**, only tsc's opinion of it.
+
+Refused as `NT1034`, at the `extends` clause:
+
+- **A class base.** `interface I extends C` is legal TypeScript, but a class instance type is
+  `C{…}` — *tagged* — and the tag is what method resolution keys on. Folding its fields into an
+  untagged record would silently drop every method.
+- **A `@@mutable` record base** (`docs/decorators.md`), for the same reason: `@@mutable` is
+  deliberately NOMINAL, so that an undecorated record can never become mutable by sharing a shape.
+- **A base with no field list here** — anything that does not resolve to a plain record in *this
+  file*, including an **imported** one. `resolveNamed` erases an unknown named type to `number`,
+  so there are no fields to inherit; see the note under `NT1029` above, which refuses a
+  cross-module `Mod["field"]` for exactly the same reason.
+
+**What this replaced was a silent wrong answer, not a missing feature.** The `extends` clause used
+to be parsed and *discarded*, so `B` meant its own fields alone. Reading an inherited field was an
+`NT2001` blaming the *property* — `Property 'a' does not exist on {b:number}`, pointing at the use
+rather than at the dropped clause — and a program that never read one compiled clean and wrong:
+
+```ts
+interface A { a: number }
+interface B extends A { b: number }
+const x: B = { a: 10, b: 2 };
+console.log(JSON.stringify(x));   // node: {"a":10,"b":2}   was: {"b":2}, exit 0
+```
+
 ### `static` class members — supported, and the four refusals
 
 A static member has no receiver, so it is a **namespaced top-level definition**: `static m(…)`
