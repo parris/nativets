@@ -544,7 +544,19 @@ class Analyzer {
         // field element, an arrow parameter, a capture — is ownership we cannot establish,
         // so it is refused rather than mutated blind. Recognized by the setter's NAME,
         // which is why the whole block is inert unless the program has `@@mutable` classes.
-        if (e.callee.kind === "MemberExpr" && this.mutable.setterProps.has(e.callee.property)) {
+        //
+        // …with ONE root that is not a binding and is owned anyway: a `new C(…)`
+        // TEMPORARY. It is not a binding, so nothing in this scope — or any other — can
+        // name it, which makes it strictly MORE uniquely owned than the "local bound to
+        // `new C(…)`" the refusal's own hint asks for, and that spelling is accepted.
+        // Exclusive access therefore holds BY CONSTRUCTION. (This is commit 1ea7fa2's
+        // "a syntactically-fresh receiver is a temporary nothing can name", with the sign
+        // flipped: there the fact made `.push` VACUOUS, here it makes the call SAFE.)
+        // Handing the result back OUT is still refused by the MOVE_OUT_OF_BORROW rule
+        // above — a `@@mutable` method returns a borrow of its receiver either way, and
+        // for a temporary there is no owning binding to return instead.
+        const freshRecv = e.callee.kind === "MemberExpr" && chainRoot(e.callee.object).kind === "NewExpr";
+        if (e.callee.kind === "MemberExpr" && !freshRecv && this.mutable.setterProps.has(e.callee.property)) {
           const root = chainRoot(e.callee.object);
           const recv = root.kind === "Identifier" && this.varTy.has(root.name) ? root.name : null;
           if (recv === null) {
