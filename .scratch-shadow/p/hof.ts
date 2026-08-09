@@ -1,0 +1,11 @@
+const x: number = 100;
+const ys: number[] = [1, 2, 3].map((n: number): number => { const x: number = n * 2; return x; });
+console.log(ys.join(","));
+console.log(x);
+const acc: string = "A";
+const r: string = ["a", "b"].reduce((acc: string, s: string): string => { const t: string = acc + s; return t; }, "");
+console.log(r);
+console.log(acc);
+const zs: number[] = [1, 2, 3].filter((v: number): boolean => { const x: number = v; return x > 1; });
+console.log(zs.join(","));
+console.log(x);
