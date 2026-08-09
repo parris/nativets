@@ -164,6 +164,119 @@ console.log(n);
 `);
   });
 
+  /*
+   * 11b. `break` LEAVES THE SWITCH — it does not leave the function.
+   *
+   * This was a MISCOMPILE, not a refusal. The pass marked any case body ending in
+   * `break` as "diverged", so a switch whose every arm ended in `break` was itself
+   * "diverging" — the statements after it were never analyzed at all, and every
+   * diverged path was dropped from the assignment INTERSECTION. `f(2)` below took the
+   * `default:` arm, assigned nothing, and read `x` anyway: node prints `undefined`,
+   * we printed the slot's zero, `0`. The refusal is the correct answer here.
+   */
+  test("a switch whose arms all `break` does NOT make the code after it unreachable", () => {
+    expectRefused(`
+function f(c: number): number {
+  let x: number;
+  switch (c) {
+    case 1: x = 1; break;
+    default: break;
+  }
+  return x;
+}
+console.log(f(2));
+`, "NT1600");
+  });
+
+  /*
+   * 11c. …and a `break` from the MIDDLE of a case body lands at the switch's exit too.
+   * The same miscompile, reached the other way: the arm's END was assigned, so the arm
+   * was merged in as if the break path did not exist. `f(1, true)` printed `0`, node
+   * prints `undefined`. This is why the break paths are collected as they are MET and
+   * not inferred from how the body finished.
+   */
+  test("a `break` from the middle of a case body is still a path out of the switch", () => {
+    expectRefused(`
+function f(c: number, b: boolean): number {
+  let x: number;
+  switch (c) {
+    default: {
+      if (b) { break; }
+      x = 1;
+      break;
+    }
+  }
+  return x;
+}
+console.log(f(1, true));
+`, "NT1600");
+  });
+
+  /*
+   * 11d. The `do…while` form of the same defect. Its body always runs, so unlike a
+   * `while` its assignments ARE kept — which is exactly what made the break path matter:
+   * `f(true)` leaves before `n = 7` and read the slot's zero, `0`, where node prints
+   * `undefined`. (The `while`/`for` loops keep nothing, so they never had this hole.)
+   */
+  test("a `break` out of a do-while body skips the rest of it", () => {
+    expectRefused(`
+function f(c: boolean): number {
+  let n: number;
+  do {
+    if (c) { break; }
+    n = 7;
+  } while (false);
+  return n;
+}
+console.log(f(true));
+`, "NT1600");
+  });
+
+  /*
+   * 11e. `continue` runs the TEST, and the test can then end the loop — so it is a way
+   * out of a `do…while` body just as `break` is, and the fourth spelling of the same
+   * wrong answer. `continue` is NOT a way out of a `switch`, though: it jumps past the
+   * switch's exit to the enclosing loop's head, which is why the two are collected
+   * separately and a `switch` passes the `continue` paths through to the loop.
+   */
+  test("a `continue` out of a do-while body is a way out of it too", () => {
+    expectRefused(`
+function f(): number {
+  let n: number;
+  do { continue; } while (false);
+  return n;
+}
+console.log(f());
+`, "NT1600");
+  });
+
+  // ...and the same loop without the escape still compiles — the body ran, so `n` is set.
+  test("a do-while with no escape still proves its body's assignment", async () => {
+    await expectNode(`
+let n: number;
+do { n = 7; break; } while (false);
+console.log(n);
+`);
+  });
+
+  // A `break` inside a NESTED loop belongs to that loop, not to the switch around it.
+  test("a break in a nested loop is not charged to the enclosing switch", async () => {
+    await expectNode(`
+function f(c: number): number {
+  let x: number;
+  switch (c) {
+    default: {
+      x = 0;
+      while (true) { x = 9; break; }
+      break;
+    }
+  }
+  return x;
+}
+console.log(f(1));
+`);
+  });
+
   // 12. THE REGRESSION GUARD. A type that ADMITS `undefined` is genuinely initialized
   //     to `undefined` by a bare declaration — this compiled before the change and must
   //     keep compiling, printing exactly what node prints.

@@ -242,6 +242,117 @@ console.log(f({ kind: "square", size: 1 }));
 `;
     expect(codeOf(broken)).toBe(null);
   });
+
+  /**
+   * A BRACED case body — `case "x": { … return …; }` — is the shape `src/` writes 181
+   * times (counted with our own parser, not grep), because a `case` that needs a local
+   * needs a block to declare it in. The terminator then sits inside the block, and the
+   * old fallthrough test read only the KIND of the case body's last statement, saw a
+   * `BlockStmt`, and concluded "falls through" — so the NEXT case was narrowed to both
+   * tags and its member read refused. node runs all of these; every one is a FALSE
+   * refusal, never a miscompile (codegen already terminates the block correctly).
+   *
+   * ORACLE. The TypeScript conformance suite is not on disk, so these are derived, not
+   * mined — but every shape below was run through `tsc --strict` as the same
+   * `case X: … case "rectangle": return s.width;` program, and tsc's verdict (does the
+   * second arm see `Rectangle` alone, or `Rectangle | Square`?) agrees with ours on all
+   * twelve, the six that end and the six that fall through. The `switch`-with-`break`
+   * one below is the case that separates a correct implementation from a plausible one.
+   */
+  describe("a case body that DIVERGES inside a block does not fall through", () => {
+    const sw = (cases: string) => `${SHAPES}function f(s: Shape): number {
+  switch (s.kind) {
+${cases}
+  }
+  return -1;
+}
+console.log(f({ kind: "square", size: 1 }));
+`;
+    test("a braced body ending in `return` does not carry its tag into the next case", () => {
+      expect(codeOf(sw(`    case "square": { const n = s.size; return n; }
+    case "rectangle": return s.width;`))).toBe(null);
+    });
+
+    test("...and `throw`, `break` and `continue` end a braced body just as `return` does", () => {
+      expect(codeOf(sw(`    case "square": { const n = s.size; throw "" + n; }
+    case "rectangle": return s.width;`))).toBe(null);
+      expect(codeOf(sw(`    case "square": { const n = s.size; console.log(n); break; }
+    case "rectangle": return s.width;`))).toBe(null);
+      // `continue` leaves the switch too — it jumps to the enclosing loop's head.
+      expect(codeOf(`${SHAPES}function f(xs: Shape[]): number {
+  let total = 0;
+  for (const s of xs) {
+    switch (s.kind) {
+      case "square": { continue; }
+      case "rectangle": total = total + s.width;
+    }
+  }
+  return total;
+}
+console.log(f([{ kind: "rectangle", width: 2, height: 3 }]));
+`)).toBe(null);
+    });
+
+    test("nesting the block deeper does not hide the terminator", () => {
+      expect(codeOf(sw(`    case "square": { { const n = s.size; return n; } }
+    case "rectangle": return s.width;`))).toBe(null);
+    });
+
+    test("an if/else that returns on BOTH arms ends the body; only ONE arm does not", () => {
+      expect(codeOf(sw(`    case "square": { if (s.size > 0) { return 1; } else { return 2; } }
+    case "rectangle": return s.width;`))).toBe(null);
+      // Only the `then` arm returns, so the body can reach its end and fall through.
+      expect(codeOf(sw(`    case "square": { if (s.size > 0) { return 1; } }
+    case "rectangle": return s.width;`))).toBe("NT2001");
+    });
+
+    test("a `try` ends the body only when every way out of it does", () => {
+      expect(codeOf(sw(`    case "square": { try { return s.size; } finally { console.log("f"); } }
+    case "rectangle": return s.width;`))).toBe(null);
+      // The handler falls out of the try, so the body falls through.
+      expect(codeOf(sw(`    case "square": { try { return s.size; } catch (e) { console.log("c"); } }
+    case "rectangle": return s.width;`))).toBe("NT2001");
+    });
+
+    /*
+     * THE UNSOUNDNESS THIS FIX HAD TO AVOID. A `break` belonging to an INNER switch
+     * leaves that switch, not the case body — so the body still falls through. Reusing
+     * the definite-assignment walk only became safe once its own `break`/diverge
+     * conflation was fixed (test/definite-assignment.test.ts case 11b); before that,
+     * this program would have been accepted and `s.width` read off a Square.
+     */
+    test("a `break` belonging to an INNER switch does not end the outer case body", () => {
+      expect(codeOf(sw(`    case "square": { switch (s.size) { default: break; } }
+    case "rectangle": return s.width;`))).toBe("NT2001");
+    });
+
+    test("a braced body with a side effect and no terminator still falls through", () => {
+      expect(codeOf(sw(`    case "square": { const n = s.size; console.log(n); }
+    case "rectangle": return s.width;`))).toBe("NT2001");
+      // ...and an EMPTY braced body is the plain fallthrough it looks like
+      expect(codeOf(sw(`    case "square": { }
+    case "rectangle": return s.width;`))).toBe("NT2001");
+    });
+
+    /* The whole point is that these RUN, and run the way node runs them. */
+    test("the widened narrowing agrees with node at runtime", async () => {
+      const src = `${SHAPES}function area(s: Shape): number {
+  switch (s.kind) {
+    case "square": { const n = s.size; return n * n; }
+    case "rectangle": { const w = s.width; return w * s.height; }
+    case "circle": return s.radius;
+  }
+}
+console.log(area({ kind: "square", size: 3 }));
+console.log(area({ kind: "rectangle", width: 2, height: 5 }));
+console.log(area({ kind: "circle", radius: 7 }));
+`;
+      const oracle = runWithNode(src);
+      const ours = await compileAndRun(src);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.exitCode).toBe(oracle.exitCode);
+    });
+  });
 });
 
 describe("exhaustiveness — a missing arm that would silently produce a value is diagnosed", () => {
