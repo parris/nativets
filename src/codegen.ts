@@ -101,6 +101,23 @@ function mentions(node: unknown, name: string): boolean {
 /* `freshArray`/`FRESH_ARRAY_CALLS` and `RETAINS_RECEIVER` all live in ast.ts — the
  * checker and the ownership pass need the same judgments, and copies could drift. */
 
+/**
+ * Which `nt_arr_join_*` an element type takes. THREE-way, and one function rather than
+ * a ternary at each call site: the split used to be `el === "number" ? num : str`, which
+ * sent a `boolean[]` — whose slots hold `zext i1`, i.e. the integers 0 and 1 — into
+ * `nt_arr_join_str`, where `strlen((char *)1)` killed the process with no diagnostic.
+ * A two-way choice written twice is exactly how the third case gets missed twice, so
+ * the callers (`.join`, and `coerceToString` for node's `Array#toString`) share this.
+ *
+ * `checkStringCoercion` in checker.ts is the allow-list that must stay in step with the
+ * element types named here; anything else is still refused (NT1032) rather than joined.
+ */
+function joinFn(el: Ty): string {
+  if (el === "number") return "nt_arr_join_num";
+  if (el === "boolean") return "nt_arr_join_bool";
+  return "nt_arr_join_str";
+}
+
 function llvmTy(ty: Ty): string {
   // A nominal recursive reference IS the object block it names — a pointer, like every
   // other heap value. Placed with the other `ptr` arms rather than left to the `default`,
@@ -232,6 +249,7 @@ const DECLARES = [
   "declare double @nt_arr_len(ptr)",
   "declare ptr @nt_arr_join_num(ptr, ptr)",
   "declare ptr @nt_arr_join_str(ptr, ptr)",
+  "declare ptr @nt_arr_join_bool(ptr, ptr)",
   "declare i32 @nt_arr_includes_num(ptr, double)",
   "declare i32 @nt_arr_includes_str(ptr, ptr)",
   "declare double @nt_arr_indexof_num(ptr, double)",
@@ -1557,12 +1575,12 @@ class FnGen {
       return t;
     }
     // node's `Array#toString` IS `join(",")` — `String([1,2,3])` is `"1,2,3"`, an empty
-    // array is `""` and a one-element array carries no separator. Only the two element
-    // types whose join is node-exact reach here; the checker refuses the rest (NT1032),
-    // so this is not a fallback and must not become one.
+    // array is `""` and a one-element array carries no separator. Only the three element
+    // types `joinFn` knows reach here; the checker refuses the rest (NT1032), so this is
+    // not a fallback and must not become one.
     if (isArrayTy(val.ty)) {
       const t = this.fresh();
-      this.emit(`${t} = call ptr @${elemTy(val.ty) === "number" ? "nt_arr_join_num" : "nt_arr_join_str"}(ptr ${val.v}, ptr ${this.mod.intern(",")})`);
+      this.emit(`${t} = call ptr @${joinFn(elemTy(val.ty))}(ptr ${val.v}, ptr ${this.mod.intern(",")})`);
       return t;
     }
     // `boolean` is the LAST case, not the default one. Everything that is not a type
@@ -3956,7 +3974,7 @@ class FnGen {
       case "join": {
         const sep = args[0] ? this.genExpr(args[0]).v : this.mod.intern(",");
         const t = this.fresh();
-        this.emit(`${t} = call ptr @${numeric ? "nt_arr_join_num" : "nt_arr_join_str"}(ptr ${recv.v}, ptr ${sep})`);
+        this.emit(`${t} = call ptr @${joinFn(el)}(ptr ${recv.v}, ptr ${sep})`);
         return { v: t, ty: "string" };
       }
       case "includes": {

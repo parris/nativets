@@ -11,7 +11,7 @@ import { lex, LexError, decodeEscapeAt, type Token } from "./lexer.ts";
 import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral, NTError } from "./diagnostics.ts";
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
-  isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
+  isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES,
   makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf,
   resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef,
@@ -905,7 +905,24 @@ class Parser {
     let suffix = "";
     while (this.at("[")) {
       this.eat("[");
-      if (this.at("]")) { this.eat("]"); suffix += "[]"; continue; } // T[], T[][]
+      if (this.at("]")) {
+        this.eat("]");
+        // `((n: number) => number)[]` — an ARRAY OF FUNCTIONS. Refused HERE, at the one
+        // place source can form it, because the `Ty` encoding cannot tell it apart from
+        // a function RETURNING an array: the suffix is not parenthesized, so
+        //   makeFuncTy(["number"], "number[]")      === "(number)=>number[]"
+        //   makeFuncTy(["number"], "number") + "[]" === "(number)=>number[]"
+        // are the same string. `isArrayTy` reads it as the function (see ast.ts — the
+        // alternative was a wild free on `const g = () => arr`), so letting the
+        // annotation through would type an array of functions AS a function.
+        // Arrays of functions are already NT1001 in their array-literal spelling
+        // ("arrays of X is not supported yet", checker.ts); this gives the annotation
+        // the SAME diagnostic instead of a downstream one about the empty literal.
+        // Whoever implements them has to fix the encoding first, which is the point.
+        if (isFuncTy((base + suffix) as Ty)) throw nyi(NYI.ARRAY, `arrays of ${base}${suffix}`);
+        suffix += "[]";
+        continue; // T[], T[][]
+      }
       base = this.parseIndexedAccessTy((base + suffix) as Ty, (baseName ?? base) + suffix);
       suffix = "";
       baseName = undefined;
