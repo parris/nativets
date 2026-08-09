@@ -18,7 +18,7 @@ import {
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
-  ImportDecl, TextImport, ExportTable,
+  ImportDecl, TextImport, ExportTable, RecTypeEntry,
 } from "./ast.ts";
 
 /** Options for parsing ONE module of a program (see src/modules.ts). */
@@ -894,7 +894,13 @@ class Parser {
     if (this.mutableClasses.size) program.mutableClasses = [...this.mutableClasses];
     if (this.mutableRecords.size) program.mutableRecords = [...this.mutableRecords];
     // Recursive-type shapes (`@Name` back-edges). Absent unless the source declared one.
-    if (this.recTypes.size) program.recTypes = [...this.recTypes];
+    // A `Map` spread would give `[string, Ty][]`, a TUPLE array — see `Program.recTypes`
+    // for why that is spelled as a record instead.
+    if (this.recTypes.size) {
+      let recs: RecTypeEntry[] = [];
+      for (const [n, shape] of this.recTypes) recs = [...recs, { name: n, ty: shape }];
+      program.recTypes = recs;
+    }
     // Host FFI (SH4) — attached only when the source imported a `node:` builtin.
     if (this.hostImports.size) program.hostImports = [...this.hostImports];
     if (this.collectTypes) for (const [k, v] of this.typeAliases) this.collectTypes.set(k, v);
