@@ -299,7 +299,11 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
-  "codegen.ts": { rung: 0, code: "NT1015", blame: "self" },
+  // That getter is now an ordinary METHOD (`isTerminated()`): accessors stay refused, and
+  // the whole-tree construct census found exactly ONE getter and NO setters in `src/*.ts`,
+  // so the source change was the fix rather than a language feature. Behind it, NT1002 —
+  // `op in FCMP` at codegen.ts:2078, the key-presence operator, 1300 lines deeper.
+  "codegen.ts": { rung: 0, code: "NT1002", blame: "self" },
   "coverage.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
