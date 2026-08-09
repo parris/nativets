@@ -1025,6 +1025,29 @@ function closureDecls(list: Stmt[], out: Map<string, object>): void {
  * A DECLARING occurrence is any node carrying a `name` string that is not an
  * `Identifier` (declarators have no `kind` at all; params, `for-of` bindings and
  * `FuncDecl`s carry their own). Over-counting only costs a leak.
+ *
+ * ...but it costs one, and a NESTED FUNCTION'S BODY is a different frame, so counting it
+ * here is over-counting with nothing bought. Codegen says so directly rather than by
+ * comment: `collectLocals` (src/codegen.ts) has no `FuncDecl` case at all, and
+ * `genFunction` calls `reset()` before it starts — a declaration inside a nested function
+ * gets a slot in THAT function's frame and can never share one out here. The FuncDecl's
+ * OWN name still counts; only its parameters and body are skipped.
+ *
+ * That is a real leak: an ordinary helper's private `let add = 0` deleted the drop for a
+ * `const add = …` closure in the module frame. Worst when modules are LINKED, because
+ * `runScope` analyses that frame with `program.body` and after SH1 that is every module at
+ * once — so the collision arrives from a file the closure has never heard of, which no
+ * per-module measurement can see and no differential test can either (the output is
+ * identical, it just never frees). `test/modules/closure-drop` pins the linked shape with
+ * `__objLive()`, `test/closure-env-drops.test.ts` the single-file one.
+ *
+ * The sibling collectors here — `collectLinear`, `collectVarTys`, `collectAliases` — are
+ * kind-by-kind switches with no `FuncDecl` arm and were already right. Only this one walked
+ * reflectively, which is how it over-reached.
+ *
+ * Arrow bodies keep counting. An inlined HOF callback's locals DO land in the enclosing
+ * frame (`freshenHofArrow` makes them unique first), and that is the direction where a
+ * mistake would be a use-after-free rather than a leak.
  */
 function shadowedNames(node: unknown, seeded: string[]): Set<string> {
   const count = new Map<string, number>();
@@ -1038,6 +1061,8 @@ function shadowedNames(node: unknown, seeded: string[]): Set<string> {
     if (Array.isArray(n)) { for (const el of n) walk(el); return; }
     const nm = obj["name"];
     if (typeof nm === "string" && obj["kind"] !== "Identifier") count.set(nm, (count.get(nm) ?? 0) + 1);
+    // A nested function is its own frame: its name is declared here, its insides are not.
+    if (obj["kind"] === "FuncDecl") return;
     for (const k of Object.keys(obj)) walk(obj[k]);
   };
   walk(node);

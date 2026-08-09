@@ -68,7 +68,19 @@ function run(): number {
   return total;
 }
 console.log(run());
-console.log(build()() + build()());`;
+console.log(build()() + build()());
+// ...and the MODULE frame, whose drop set shadowedNames decides against the whole
+// program body: helper declares m privately, which must not disqualify the
+// per-iteration env below. 100 turns, so a wrongly-freed slot gets reused immediately.
+function helper(k: number): number { let m = 0; m = m + k; return m; }
+let acc = 0;
+let q = 0;
+while (q < 100) {
+  const m = (k: number): number => k + q;
+  acc = acc + m(0) - q;
+  q = q + 1;
+}
+console.log(acc + helper(1));`;
 
 describe("closure environment drops", () => {
   // THE BUG, in its smallest form. The arrow captures NOTHING, so this is not about
@@ -234,6 +246,106 @@ console.log(run());`;
   });
 
   /* --------------------------------------------------------------
+   * A NESTED FUNCTION'S LOCALS ARE A DIFFERENT FRAME.
+   *
+   * `shadowedNames` (src/ownership.ts) disqualifies a closure env whose name is declared
+   * more than once, because codegen gives a name one frame slot per FUNCTION and freeing
+   * on the inner declaration would leave the outer name reading freed memory. It counted
+   * every declaring occurrence anywhere under the body it was handed — including inside
+   * NESTED function bodies, which have their own frame and can never share a slot out
+   * here (`collectLocals` in src/codegen.ts has no `FuncDecl` case, and `genFunction`
+   * resets the frame first). So an ordinary helper's private `let add` deleted the drop
+   * for a module-level `const add = …` closure, and the env leaked.
+   *
+   * Whose real bite is CROSS-MODULE, because the module frame is analysed with
+   * `program.body` and after SH1 that is every linked module at once — see
+   * `test/modules/closure-drop`, where the collision is in another file entirely. The
+   * shape below is the same defect inside one file, which is where it is testable
+   * against node.
+   *
+   * The FIVE controls after it are the point: the disqualification exists to prevent a
+   * use-after-free, so widening it is the dangerous direction, and each of these must
+   * keep behaving EXACTLY as before. Measured that way — one behaviour changed, the
+   * count on this test; every control is byte-identical.
+   * -------------------------------------------------------------- */
+
+  test("a helper function's private local no longer blocks the drop", async () => {
+    const src = `
+function other(k: number): number { let add = 0; add = add + k; return add; }
+const n: number = 3;
+{
+  const add = (x: number): number => x + n;
+  console.log(add(4));
+}
+console.log(other(1));`;
+    const oracle = runWithNode(src);
+    const r = await compileAndRun(`${src}\nconsole.log(__objLive());`);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.split("\n").slice(0, 2).join("\n")).toBe(oracle.stdout.trim()); // 7, 1
+    expect(r.stdout.trim().split("\n").at(-1)).toBe("0"); // the env is freed at the block exit
+  });
+
+  /** The controls: what it is, node's answer, the `__objLive()` count that must not move,
+   *  and the program. Every one of these reads the same before and after the change. */
+  const CONTROLS: [string, string, string, string][] = [
+    ["a closure name colliding with a PARAMETER of its function", "3", "0", `
+function run(f: number): number {
+  const f2 = (k: number): number => k + 1;
+  return f2(1) + f;
+}
+console.log(run(1));`],
+    ["a nested-block local colliding with a PARAMETER", "7", "0", `
+function run(f: number): number {
+  const g = (k: number): number => k + 1;
+  if (f > 0) { const f = 5; return g(1) + f; }
+  return g(2);
+}
+console.log(run(1));`],
+    // ARROW bodies still count, deliberately: an inlined HOF callback's locals DO land in
+    // the enclosing frame, and a mistake in that direction is a use-after-free.
+    ["a name shadowed inside an ARROW (still disqualified — both envs stay alive)", "8", "2", `
+function run(): number {
+  const f = (k: number): number => k + 1;
+  const g = (): number => { const f = (m: number): number => m + 5; return f(1); };
+  return f(1) + g();
+}
+console.log(run());`],
+    ["sibling BLOCKS that each declare the name", "5", "0", `
+function run(n: number): number {
+  let out = 0;
+  if (n > 0) { const f = (k: number): number => k + 1; out = out + f(1); }
+  if (n > 0) { const f = (k: number): number => k + 2; out = out + f(1); }
+  return out;
+}
+console.log(run(1));`],
+    ["a loop body redeclaring it every iteration", "6", "0", `
+function run(n: number): number {
+  let out = 0;
+  for (let i = 0; i < n; i = i + 1) { const f = (k: number): number => k + i; out = out + f(1); }
+  return out;
+}
+console.log(run(3));`],
+  ];
+  for (const [what, answer, live, src] of CONTROLS) {
+    test(`control, unchanged: ${what}`, async () => {
+      const r = await compileAndRun(`${src}\nconsole.log(__objLive());`);
+      expect(r.exitCode).toBe(0); // a double free presents as a nonzero exit with right stdout
+      expect(r.stdout).toBe(`${answer}\n${live}\n`);
+      expect(runWithNode(src).stdout.trim()).toBe(answer); // node is still the spec for the value
+    });
+  }
+
+  test("control, unchanged: an ESCAPING closure is still not dropped", async () => {
+    const r = await compileAndRun(`
+function make(): (k: number) => number { const f = (k: number): number => k + 1; return f; }
+const h = make();
+console.log(h(1));
+console.log(__objLive());`);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("2\n1\n"); // still alive at exit, by design
+  });
+
+  /* --------------------------------------------------------------
    * ANTI-REGRESSION for the WILD FREE this leak was the fix for. Both shapes freed a
    * closure env with `nt_arr_free` when `isArrayTy("()=>number[]")` answered true, which
    * frees `NtArray`'s `data`/`pv` words two slots past a block that has neither. The
@@ -292,7 +404,7 @@ console.log(run());`);
       expect(run.stderr).not.toContain("AddressSanitizer");
       expect(run.stderr).not.toContain("runtime error");
       expect(run.status).toBe(0);
-      expect(run.stdout).toBe("4950\n4\n");
+      expect(run.stdout).toBe("4950\n4\n1\n");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -17,7 +17,7 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -76,6 +76,15 @@ const CASES = [
   // same-named recursive `Node`s, one per module, to pin that the rename keeps their layouts
   // apart rather than giving one module's nodes the other's.
   "rectypes",
+  // A closure's captured LOCAL, versus a same-named local in another module. Each of
+  // these two modules compiles alone; together they did not. NT1031 asks "is this
+  // binding used outside the closure?" of every body in `bodyChain`, and after the link
+  // `bodyChain[0]` is the WHOLE program — so `t` in tokens.ts (a parameter, and a
+  // separate local) answered yes for counter.ts's private `t` and refused the
+  // escaping-counter idiom that compiles fine on its own. The linker alpha-renames only
+  // TOP-LEVEL bindings, so every module's locals and parameters share one flat namespace
+  // for any analysis keyed by bare name.
+  "closure-name",
 ];
 
 describe("modules (differential vs node)", () => {
@@ -407,5 +416,142 @@ describe("the alpha-rename prefix is a function of the sources, never the clock"
     const a = ir();
     expect(ir()).toBe(a);
     expect(a).toContain("_nts0_m0_two"); // the first free counter value, not a timestamp
+  });
+});
+
+/*
+ * THE CROSS-MODULE-ONLY BLOCKER SWEEP.
+ *
+ * The one defect class every other instrument in this repo is structurally blind to: two
+ * files that EACH compile alone and cannot be compiled together. Coverage, the ratchet and
+ * the self-host frontier all measure ONE module at a time, so per-module is exactly the
+ * case that works and the failure appears in no column of any of them.
+ *
+ * The cause is always the same shape. `linkProgram` alpha-renames TOP-LEVEL bindings only,
+ * which is all codegen needs — but it means every module's locals and parameters land in
+ * ONE flat namespace, so any analysis that asks a question by bare NAME over the whole
+ * program starts answering it with another file's code. Two did: NT1031's "is this capture
+ * used outside the closure?", and the `closureAssigned` filter on narrowing.
+ *
+ * So: link every standalone fixture against a module of pure name NOISE — the commonest
+ * short identifiers, bound as parameters, as top-level locals, and as BLOCK-scoped locals
+ * assigned inside an arrow (that last is the shape `ownBindings` deliberately does not
+ * subtract). None of it is reachable from another module. Any fixture that stops compiling
+ * names a name-keyed analysis and locates it.
+ *
+ * The three CANARIES are the point of the whole thing: a sweep reporting zero has to be
+ * able to fail, and each of these did — until both analyses learned to ask their question
+ * of the body that DECLARES the binding rather than of the program.
+ *
+ * WHAT THIS SWEEP DOES NOT COVER: it compares REFUSALS, so it can only see a term whose
+ * symptom is a diagnostic. A cross-module term that merely costs a LEAK is invisible to
+ * it, and there was one — `shadowedNames` in src/ownership.ts, pinned separately by
+ * `test/modules/closure-drop` with a `__objLive()` count rather than a diagnostic. Read a
+ * green run here as "no new REFUSAL crosses the link boundary", nothing wider.
+ */
+const NOISE = `
+export function noise(): number {
+  let a = 0; let b = 0; let i = 0; let j = 0; let k = 0; let n = 0;
+  let s = ""; let t = 0; let v = 0; let x = 0; let out = 0; let last = 0;
+  let init = 0; let test = 0; let ty = 0; let ft = 0; let arrow = 0;
+  const xs: number[] = [1, 2, 3];
+  const ys: number[] = xs.map((e: number) => {
+    a = a + e; b = b + e; i = i + e; j = j + e; k = k + e; n = n + e;
+    t = t + e; v = v + e; x = x + e; out = out + e; last = e; init = e;
+    test = e; ty = e; ft = e; arrow = e; s = "y";
+    return e;
+  });
+  return a + b + i + j + k + n + s.length + t + v + x + out + last + init + test + ty + ft + arrow + ys[0]!;
+}
+export function blocky(k: number): number {
+  if (k > 0) {
+    let a = 0; let t = 0; let s = 0; let n = 0; let b = 0; let i = 0; let v = 0;
+    let x = 0; let last = 0; let init = 0; let test = 0; let ty = 0; let ft = 0; let arrow = 0;
+    const xs: number[] = [1, 2];
+    const ys: number[] = xs.map((e: number) => {
+      a = a + e; t = t + e; s = s + e; n = n + e; b = b + e; i = i + e;
+      v = v + e; x = x + e; last = e; init = e; test = e; ty = e; ft = e; arrow = e;
+      return e;
+    });
+    return a + t + s + n + b + i + v + x + last + init + test + ty + ft + arrow + ys[0]!;
+  }
+  return 0;
+}
+`;
+
+/** Sources whose ONLY blocker was the cross-module term — the sweep's self-test. */
+const CANARIES: [string, string][] = [
+  ["the escaping counter (NT1031)",
+    'function makeCounter(): () => number { let t = 0; return () => { t = t + 1; return t; }; }\nconst c = makeCounter();\nconsole.log(c(), c());\n'],
+  ["a narrowed local (closureAssigned)",
+    'function use(s: string): number { return s.length; }\nfunction f(xs: string[]): number { const a = xs.at(0); if (a !== undefined) return use(a); return -1; }\nconsole.log(f(["hi"]));\n'],
+  ["an arrow's own parameter (closureAssigned)",
+    'interface Tok { kind: string; value: string }\nconst isP = (t: Tok | undefined, v: string): boolean => !!t && t.kind === "punct" && t.value === v;\nconsole.log(isP({ kind: "punct", value: "+" }, "+"));\n'],
+];
+
+describe("no source compiles alone but not linked", () => {
+  const ENTRY = "/xlink/main.ts";
+
+  /** The blocker `source` hits when linked against the noise module, or null. */
+  function linkedAgainstNoise(source: string): string | null {
+    const main = `import { noise, blocky } from "./noise.ts";\nif (noise() < 0) console.log(blocky(1));\n${source}`;
+    const read = (p: string): string => (p === ENTRY ? main : NOISE);
+    try { check(linkProgram(main, ENTRY, read)); return null; } catch (e) {
+      const d = (e as { diag?: { code: string; message: string } }).diag;
+      return d ? `${d.code} ${d.message}` : String(e);
+    }
+  }
+
+  /** Does `source` compile on its own? Only these are the sweep's business. */
+  function compilesAlone(source: string): boolean {
+    try { check(parse(source)); return true; } catch { return false; }
+  }
+
+  for (const [what, src] of CANARIES) {
+    test(`canary — ${what}`, () => {
+      expect(compilesAlone(src)).toBe(true);
+      expect(linkedAgainstNoise(src)).toBeNull();
+    });
+  }
+
+  test("every fixture that compiles standalone also compiles linked", () => {
+    const FIXTURES = join(HERE, "fixtures");
+    const failures: string[] = [];
+    let swept = 0;
+    for (const dir of readdirSync(FIXTURES)) {
+      for (const f of readdirSync(join(FIXTURES, dir))) {
+        if (!f.endsWith(".ts")) continue;
+        const src = readFileSync(join(FIXTURES, dir, f), "utf8");
+        if (!compilesAlone(src)) continue; // already blocked alone
+        swept++;
+        const blocked = linkedAgainstNoise(src);
+        if (blocked) failures.push(`${dir}/${f}: ${blocked}`);
+      }
+    }
+    expect(swept).toBeGreaterThan(100); // the sweep must actually be sweeping
+    expect(failures).toEqual([]);
+  });
+
+  /*
+   * ...and the same class where the symptom is a LEAK rather than a diagnostic, which is
+   * why it needed its own test and its own oracle.
+   *
+   * `shadowedNames` (src/ownership.ts) disqualifies a closure env from being dropped when
+   * its name is DECLARED more than once, because codegen gives a name one frame slot per
+   * function and two declarations would then share storage — freeing on the inner one
+   * would leave the outer name reading freed memory. It counted every declaring
+   * occurrence anywhere under the body it was given, and for the module frame that body is
+   * the whole linked program: one `let add = 0` inside an unrelated module's function was
+   * enough to delete the drop for a `const add = …` closure here.
+   *
+   * A leak, never a wrong answer — which is exactly why it survived, since LeakSanitizer
+   * runs on Linux CI only and nothing on a laptop notices. `__objLive()` makes it local:
+   * the env is allocated in a block it never escapes, so it is freed at the block's exit
+   * and the counter reads 0 on the next line.
+   */
+  test("a closure env is still dropped when another module declares its name", async () => {
+    const ours = await compileAndRunFile(join(DIR, "closure-drop", "main.ts"));
+    expect(ours.exitCode).toBe(0);
+    expect(ours.stdout).toBe("7\n1\n0\n"); // the last line is __objLive(): nothing left alive
   });
 });

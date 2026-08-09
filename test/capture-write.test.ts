@@ -138,16 +138,16 @@ console.log(f());
  * records what each printed. Every one of them exited 0 on both sides — the divergence
  * was in stdout alone, which is what made it invisible.
  * ============================================================ */
-describe("a write to a captured binding is refused", () => {
-  /** Refused with NT1031, and the message names the binding and the operator. */
-  function expectRefused(source: string, op: string, name: string): void {
-    const r = rejectionOf(source);
-    expect(r?.code).toBe("NT1031");
-    expect(r?.message).toContain(op);
-    expect(r?.message).toContain(`'${name}'`);
-    expect(r?.hint).toContain("capture by VALUE");
-  }
+/** Refused with NT1031, and the message names the binding and the operator. */
+function expectRefused(source: string, op: string, name: string): void {
+  const r = rejectionOf(source);
+  expect(r?.code).toBe("NT1031");
+  expect(r?.message).toContain(op);
+  expect(r?.message).toContain(`'${name}'`);
+  expect(r?.hint).toContain("capture by VALUE");
+}
 
+describe("a write to a captured binding is refused", () => {
   test("assignment to a captured number", () => {
     // node: 2   before: 0   (both exit 0)
     expectRefused(`
@@ -477,6 +477,100 @@ const outer = (): number => {
 };
 console.log(outer(), n);
 `);
+  });
+
+  /*
+   * A NAME shared with an unrelated binding elsewhere is not a use of THIS one.
+   *
+   * The question NT1031 asks — "is the captured binding used outside the closure?" — was
+   * asked of the whole program by bare name, so `t` in any other function answered it.
+   * That never mattered much in a single file and became ordinary once SH1 linked module
+   * graphs, where the outermost body is every module at once and the linker renames only
+   * TOP-LEVEL bindings: two modules that each compiled alone would not compile together
+   * (test/modules/closure-name). Only the body that DECLARES the binding is scanned now.
+   */
+  test("an unrelated function's local of the SAME NAME does not make the counter observed", async () => {
+    await matchesNode(`
+function makeCounter(): () => number {
+  let t = 0;
+  return () => { t = t + 1; return t; };
+}
+function widest(xs: string[]): number {
+  let t = 0;
+  for (const s of xs) if (s.length > t) t = s.length;
+  return t;
+}
+const c = makeCounter();
+console.log(c(), c(), widest(["ab", "c", "defg"]));
+`);
+  });
+
+  test("a captured ARROW PARAMETER is the escaping-counter shape too", async () => {
+    // The counter's state is the OUTER ARROW's parameter rather than a `let`. Same
+    // safety argument, and the same one frame to scan: `build`'s body mentions `t`
+    // nowhere outside the closure it returns.
+    await matchesNode(`
+function make(start: number): () => number {
+  const build = (t: number): (() => number) => (() => { t = t + 1; return t; });
+  return build(start);
+}
+const c = make(10);
+console.log(c(), c(), c());
+`);
+  });
+});
+
+/*
+ * ...and the other direction: scanning ONE body must still find every real use of the
+ * binding. These are the negatives that keep the narrowed scan honest — each is a
+ * program node runs and we must refuse, where the observing code sits in exactly the
+ * frame `bindingFrame` picks.
+ */
+describe("the one scanned body still catches a real observation", () => {
+  test("the OUTER ARROW reads the parameter its nested arrow writes", () => {
+    // node: 3 (the write reaches the shared cell). The observing `return t` is in the
+    // outer ARROW's body, not the enclosing function's — so an implementation that
+    // scanned only function bodies, or only the innermost frame, would miss it.
+    expectRefused(`
+function make(): number {
+  const outer = (t: number): number => {
+    const inc = () => { t = t + 1; };
+    inc();
+    return t;
+  };
+  return outer(1);
+}
+console.log(make());
+`, "t = …", "t");
+  });
+
+  test("a SECOND closure over the same binding, where the first is nested deeper", () => {
+    // node: 2. `get` is a sibling of `inc` in the declaring body; both would get their
+    // own env slot and diverge.
+    expectRefused(`
+function make(): number {
+  let t: number = 0;
+  const inc = () => { const bump = () => { t = t + 1; }; bump(); };
+  const get = (): number => t;
+  inc(); inc();
+  return get();
+}
+console.log(make());
+`, "t = …", "t");
+  });
+
+  test("a MODULE-LEVEL binding is still judged against the whole program", () => {
+    // The declaring body is the module top level, so the scan is program-wide exactly as
+    // it always was — and `report`, a function that merely READS `t`, is the observer.
+    // node: 1 then 1.
+    expectRefused(`
+let t: number = 0;
+function report(): number { return t; }
+function make(): () => number { return () => { t = t + 1; return t; }; }
+const c = make();
+console.log(c());
+console.log(report());
+`, "t = …", "t");
   });
 });
 
