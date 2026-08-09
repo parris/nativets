@@ -675,6 +675,101 @@ collection**, where node returns a **boolean**; (3) ~~`.get` of an absent key re
 via the A2 nullable machinery (miss → `undefined`, node-matched byte-for-byte). Fixtures
 use the *use-the-returned-handle* pattern, whose observable output matches node.
 
+#### The discarded mutator is REFUSED (`NT1606`) — it used to be a silent no-op
+
+Everything above describes the **return value**. Nothing described the call whose return
+value nobody takes, and that is the ordinary way to write a `Map` in JavaScript:
+
+```ts
+const m = new Map<string, number>();
+m.set("a", 1);
+m.set("b", 2);
+console.log(m.size, m.get("a"));   // node: "2 1"    nativets, before: "0 undefined"
+```
+
+Exit code `0` on both sides, wrong stdout — the worst outcome this project recognises. It
+is now **rejected** at check time:
+
+```
+error[NT1606]: `Map` is persistent: `.set` returns a NEW map and leaves the receiver
+               unchanged, so discarding the result here does NOTHING at 2:1
+  = help: write `m = m.set("a", 1)` — the result IS the updated map, and dropping it
+          drops the whole operation. Declare the binding `let` …
+```
+
+**Why the trap is shaped this way.** Under node, `Map.prototype.set` and
+`Set.prototype.add` return the **receiver** (test262 `built-ins/Map/prototype/set/returns-this.js`,
+`built-ins/Set/prototype/add/returns-this.js`), so the result carries no information and
+discarding it is the *idiomatic* call. Under a persistent collection the result *is* the
+operation. The two conventions are spelled identically and mean opposite things, so the
+JS-fluent spelling is exactly the one that silently does nothing.
+
+**Affected operations — the complete set,** measured rather than assumed:
+
+| receiver | discarded call | before | now |
+|---|---|---|---|
+| `Map` | `.set(k, v)`, `.delete(k)` | silent no-op | `NT1606` |
+| `Set` | `.add(v)`, `.delete(v)` | silent no-op | `NT1606` |
+| `Map`/`Set` | `.clear()` | — | already `NT1014` (not implemented) |
+| `Array` | `.reverse()` | **matches node** (returns its receiver, reverses in place) | unchanged |
+| `Array` | `.push`/`.pop`/`.splice`/… | already `NT1606` | unchanged |
+| `Array` | `.toSorted()`, `.with()` | no-op under node **too** — not a divergence | unchanged |
+| `string` | `.replace()`, `.slice()`, … | no-op under node **too** — not a divergence | unchanged |
+
+**The rule is "result discarded", with no reachability test** — deliberately, not for lack
+of analysis. A discarded mutator is a guaranteed no-op in *every* execution of *every*
+program, so the refusal has no false-positive direction. The refinement ("…and the receiver
+is read later") does have an **unsound** direction: it must chase aliases, escapes through
+calls and fields, and returns, and any miss silently restores the wrong answer the rule
+exists to remove. It also matches how arrays are already handled — `arr.push(x)` is
+`NT1606` unconditionally, never "only if `arr` is read afterwards".
+
+**Why refuse rather than auto-rebind.** Rewriting `m.set(k, v);` to `m = m.set(k, v);`
+looks like a free fix, and it is not: it repairs the single-binding case while leaving every
+**aliased** case silently wrong, which is strictly worse than a uniform refusal. Aliasing
+here is not hypothetical — it is the divergence in this very section:
+
+```ts
+let m = new Map<string, number>(); const m2 = m; m = m.set("a", 1);
+console.log(m.size, m2.size);      // node: "1 1"   nativets: "1 0"
+```
+
+Under node a mutation is observed through *every* handle; a rebind updates *one*. A user who
+tested the simple case would be trained to trust a construct that breaks as soon as the map
+is passed to a function or stored in a field. Genuine node-compatible mutation needs the
+handle to become a box (one indirection, refcounted, every alias observing the write) — the
+`@@mutable` treatment that classes and records already have (docs/decorators.md). That is a
+runtime-representation change, i.e. a stage of its own, and it is the recommended follow-on.
+Until it exists, the refusal is the honest answer.
+
+#### KNOWN BUG (unfixed): `.delete` in a BOOLEAN position silently inverts control flow
+
+Found while scoping the refusal above; **not fixed by it**, and recorded here so it is not
+rediscovered. Item (2) at the top of this section — "`.delete` returns a new collection,
+where node returns a boolean" — is documented as a *type-level* difference. In a **condition**
+it stops being type-level and becomes a wrong answer, because a collection handle is always
+truthy while node's boolean is not:
+
+```ts
+let m = new Map<string, number>().set("a", 1);
+if (m.delete("a"))  { console.log("deleted");  } else { console.log("absent");  }
+if (m.delete("zz")) { console.log("deleted2"); } else { console.log("absent2"); }
+// node:     deleted / absent2
+// nativets: deleted / deleted2     ← exit 0, wrong branch, no diagnostic
+```
+
+`while (m.delete(k))` is the same fault and loops on an absent key. Binding the result is
+also silently wrong where no annotation forces the check — `const gone = m.delete("zz");`
+prints `Map(1) { 'a' => 1 }` against node's `false` — though an *annotated* binding is caught
+today (`const b: boolean = m.delete(k)` is `NT2001`), and `if (m)` on a plain handle is
+truthy under both and agrees.
+
+The fix is the same shape as the refusal above and deliberately out of that lane's scope: a
+`.delete` call in a boolean position (`if`/`while`/`&&`/`!`/a `boolean` context) should be
+`NT1606`, hinting `m.has(k)` for the test and `m = m.delete(k)` for the removal. Note the
+rule must key on **`.delete`**, not on "a `Map`/`Set` in a condition" — the latter would
+falsely reject `if (m)`, which matches node.
+
 ### `Record<K, V>` is a `Map`, not an object — and an object literal cannot initialize one
 
 In TypeScript `Record<K, V>` is an **object** type, so `const o: Record<string, string> = { a: "1" }`
