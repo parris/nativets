@@ -161,7 +161,24 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // fresh-receiver rule deliberately does not cover it, because permitting it needs
     // in-place mutation of an owned named local, which is how the `.reverse` double free
     // happened. It simply no longer appears in the compiler's own source.
-    expect(nt1606).toEqual([]);
+    //
+    // BACK TO ONE, and it is the SAME file and the SAME construct as the "went to TWO"
+    // paragraph above — the third time this bucket has refilled from coverage-preprocess.ts
+    // alone. Nothing was added to that module: the capture-write lane replaced its
+    // `line`/`prev` cursor with one `//@@mutable` record (`TokState`, mirroring
+    // `src/lexer.ts`'s `LexState`), which cleared its NT1031 and unmasked the `.push`
+    // accumulators that have been in `tokenize`/`emit`/`preprocessForCoverage` since the
+    // file was written. Read this row as membership, not as the compiler getting worse:
+    // an emptied bucket coming back is what "clearing a blocker unmasks the next" looks
+    // like from a census instrument.
+    //
+    // It is left as `.push`, deliberately. The sanctioned idiom `xs = [...xs, v]` is
+    // measured at 1036x under bun at real accumulator sizes (docs/self-hosting.md), and
+    // `src/*.ts` has to keep RUNNING under bun — so rewriting a tokenizer's per-token
+    // accumulator that way is an owner decision, not a lane's.
+    expect(nt1606).toEqual([
+      { file: "coverage-preprocess.ts", feature: "arrays are immutable: `.push` would mutate the array in place" },
+    ]);
   });
 
   test("the re-measured frontier: no single code dominates any more", () => {
@@ -270,18 +287,28 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // NT1002 refilling is the FOURTH time this file has had an emptied bucket come back;
     // read the buckets as membership, and read a NEW code as "what was behind the old one",
     // not as "the compiler got worse".
+    // NT1031 -> NT1606, one swap, one file. `coverage-preprocess.ts`'s `line++`/`prev = t`
+    // capture writes are gone — its `tokenize` cursor is now ONE `//@@mutable` record, the
+    // shape `src/lexer.ts` used to clear the identical blocker — and the `.push`
+    // accumulators that were always behind them are what the histogram sees instead. The
+    // corpus evidence that the rewrite is observationally null is a byte-for-byte diff of
+    // old vs new `preprocessForCoverage` over all 486 `.ts` files in src/, test/ and
+    // examples/ (0 differences), with three mutations of the rewritten lines each redding
+    // it (133/22/466 files) so the null result is known to be reached rather than skipped.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1001", "NT1002", "NT1003", "NT1012", "NT1031"],
+      ["NT1001", "NT1002", "NT1003", "NT1012", "NT1606"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the
     // `async`/`await` pair in driver.ts and cli.ts — NT1023's two sites are gone), and
     // every other named code has exactly one site left in the whole tree.
     expect(Math.max(...hist.values())).toBe(2);
-    // NT1606 has LEFT this histogram entirely — coverage-preprocess.ts's `.push` was its
-    // last site, and the Record lane's `switch` rewrite moved that module on. The old
-    // assertion here compared NT1606 against the max; there is nothing left to compare.
-    expect(hist.get("NT1606")).toBeUndefined();
+    // NT1606 is BACK, at one site, and it is not a new construct: see the NT1031 -> NT1606
+    // note above. It is asserted by COUNT rather than by absence, because the number is the
+    // thing that would move if a `.push` were added to the compiler's own source, and this
+    // histogram is the only instrument here that counts the construct rather than the
+    // first blocker.
+    expect(hist.get("NT1606")).toBe(1);
   });
 
   test("every src module reaches analysis (no file dies on the module preamble)", () => {

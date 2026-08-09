@@ -47,6 +47,7 @@
  */
 
 import { test, expect, describe } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import { compileAndRun, runWithNode, emitIR } from "./harness.ts";
 
@@ -476,5 +477,28 @@ const outer = (): number => {
 };
 console.log(outer(), n);
 `);
+  });
+});
+
+/*
+ * The compiler's OWN source, which is where this refusal costs something real.
+ *
+ * `src/lexer.ts` cleared the identical blocker by making its scanner cursor ONE
+ * `//@@mutable` record (`LexState`) instead of three separate `let`s: mutating a FIELD
+ * of an owned local is not a capture write, because the binding never changes — only
+ * the object does. `src/coverage-preprocess.ts` had the same shape (a `line`/`prev`
+ * cursor moved by two closures inside `tokenize`), and it was that module's FIRST
+ * blocker in the standalone column of `test/selfhost-ratchet.test.ts`.
+ *
+ * This asserts the construct is gone from that module, not that the module compiles —
+ * it does not (its `.push` accumulators are NT1606, refused by decision). A first-
+ * blocker pipeline stops at one error, so "the first blocker is not NT1031" is exactly
+ * the available statement, and it is the one that goes red if the shape comes back.
+ */
+describe("the compiler's own source holds no capture write", () => {
+  test("src/coverage-preprocess.ts is not blocked on NT1031", () => {
+    const src = readFileSync(new URL("../src/coverage-preprocess.ts", import.meta.url), "utf8");
+    const r = rejectionOf(src);
+    expect(r?.code).not.toBe("NT1031");
   });
 });

@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "d89c71a"
+    "rev": "942f48b"
   },
   "modules": {
     "ast.ts": {
@@ -57,20 +57,20 @@
       }
     },
     "coverage-preprocess.ts": {
-      "sha256": "de28999459a7c074",
+      "sha256": "2632d55f8546b8ce",
       "standalone": {
         "stage": "check",
-        "code": "NT1031",
-        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1031",
-        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
+        "code": "NT1606",
+        "message": "[NT1606] arrays are immutable: `.push` would mutate the array in place"
       }
     },
     "coverage.ts": {
-      "sha256": "8cf20add73de7765",
+      "sha256": "756f7d195b4c866e",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -84,7 +84,7 @@
       }
     },
     "diagnostics.ts": {
-      "sha256": "785811865abcc79f",
+      "sha256": "793b1e8f093c9b59",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -150,7 +150,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "9d2315ec59a6fb3a",
+      "sha256": "ffc5d6e79382bbd7",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

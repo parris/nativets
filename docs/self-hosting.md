@@ -1559,6 +1559,65 @@ observable.
 `test/record-dict.test.ts` also carries the lint that keeps the construct out: no `src/*.ts`
 may declare a `Record<` annotation, casts and prose excepted.
 
+### `NT1031` IS GONE FOR THE SECOND AND LAST TIME — the same cursor shape, the other tokenizer
+
+`coverage-preprocess.ts` was the only module in the tree still writing a **captured binding**,
+and it was the same construct, in the same kind of code, as the one `src/lexer.ts` cleared two
+rounds earlier: a scanner cursor moved by closures.
+
+```ts
+let line = 1;
+let prev: Tok | undefined;
+const nl   = (s: string) => { for (const c of s) if (c === "\n") line++; };   // NT1031
+const push = (t: Tok)    => { toks.push(t); prev = t; };                      // NT1031
+```
+
+The fix is `LexState`'s, verbatim: **one `//@@mutable` record** (`TokState { line, prev }`)
+declared at module scope and instantiated as an owned local. Mutating a FIELD of an owned local
+is not a capture write — the binding never changes, the object does — and `//@@mutable` is a
+comment to TypeScript, so bun runs the file unchanged. No compiler change; the compiler still
+refuses main's version of this file, which is the controlled experiment
+`test/selfhost-ratchet.test.ts` asks for and which its advisory printed unprompted.
+
+**The evidence is not the tests, it is the corpus.** A source rewrite inside a tokenizer is
+exactly the shape this document has twice recorded as under-tested by a fixture suite (the regex
+removal: five of six mutations invisible to all 121 fixtures). So old and new
+`preprocessForCoverage` were run over **every `.ts` in `src/`, `test/` and `examples/` — 486
+files, 2.49 MB — and their full output compared byte for byte: ZERO differences.**
+
+And, because a null diff proves nothing about code the corpus never reaches, each rewritten line
+was **mutated in turn** and the diff re-run:
+
+| mutation | files that differ |
+|---|---|
+| `nl`'s newline test `\n` -> `\r` | **133** |
+| `regexAllowed(st.prev)` -> `regexAllowed(undefined)` | **22** |
+| the loop's line counter `\n` -> `\r` | **466** |
+| a template's `startLine` -> `1` | **0** — see below |
+
+Three of four red the corpus, so the null result is known to be *reached*. The fourth is a real
+blind spot and is stated rather than glossed: `startLine` only escapes `tokenize` when a template
+literal is the FIRST token of a top-level statement, which no file in the corpus does. It is
+covered by three hand-built inputs instead, whose statement lines come back `[1,4]` / `[1,4,7]`
+and match old for new.
+
+| Module | Before | After |
+|---|---|---|
+| `coverage-preprocess.ts` | `check` — `NT1031`, `line++` in a closure | **`check` — `NT1606`**, `.push` (its own) |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+**`NT1031` is now empty tree-wide**, and unlike the buckets this document keeps watching refill,
+this one has no second holder to unmask: both of the tree's hand-written tokenizers now carry the
+same cursor record, and they were the only two closures-over-a-`let` in `src/`.
+
+**The rung did not move, and it was never going to.** Behind the capture write is `.push` — the
+185-site census elephant, refused **by decision** (commit `1ea7fa2`), whose sanctioned
+`xs = [...xs, v]` idiom is measured at **1036x** under bun at real accumulator sizes. Rewriting a
+per-token accumulator that way would break the two-toolchain constraint (`src/*.ts` has to keep
+*running* under bun), so it is an owner decision and was deliberately not taken here.
+`coverage-preprocess.ts` joins `ast.ts`, `lexer.ts`, `modules.ts` and `parser.ts` in the `NT1606`
+bucket, which is now **five of twelve** and is the single largest thing between here and SH6.
+
 ---
 
 ## Milestones

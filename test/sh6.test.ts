@@ -383,7 +383,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // other's. This branch had not seen the type-cycle lane (so it still recorded NT1702 for
   // coverage-preprocess.ts) and main had not seen the entries-form fix (so it still
   // recorded NT1014 for modules.ts). Re-measured on the merged tree rather than picked.
-  "coverage-preprocess.ts": { rung: 0, code: "NT1031", blame: "self" },
+  //
+  // NT1031 -> NT1606, and it is a SOURCE change: the `line`/`prev` cursor `tokenize`'s two
+  // closures moved is now ONE `//@@mutable` record (`TokState`), the same shape
+  // `src/lexer.ts`'s `LexState` used to clear the identical blocker — mutating a FIELD of
+  // an owned local is not a capture write. Behind it is `.push`, which the 185-site census
+  // predicted and which is refused BY DECISION (commit 1ea7fa2), so this module joins the
+  // four already parked there rather than moving a rung. Still `blame: "self"`.
+  "coverage-preprocess.ts": { rung: 0, code: "NT1606", blame: "self" },
 };
 
 /*

@@ -73,6 +73,20 @@ export interface Preprocessed {
 type TokKind = "ident" | "num" | "str" | "template" | "regex" | "punct" | "comment" | "shebang";
 interface Tok { kind: TokKind; value: string; line: number }
 
+/**
+ * The tokenizer's cursor: the 1-based line it is on, and the last SIGNIFICANT token it
+ * emitted (which is what decides regex-vs-divide).
+ *
+ * It is a RECORD rather than two `let`s for exactly the reason `src/lexer.ts`'s
+ * `LexState` is one: `nl` and `push` are closures that move it, and a write to a binding
+ * captured from an enclosing scope is `NT1031` — it was this module's first blocker in
+ * the standalone column of `test/selfhost-ratchet.test.ts`. Mutating a FIELD of an owned
+ * local is not a capture write (the binding never changes, the object does), and
+ * `//@@mutable` is a comment to TypeScript, so bun runs this file unchanged.
+ */
+//@@mutable
+interface TokState { line: number; prev: Tok | undefined }
+
 /*
  * Character classes, spelled out — the same discipline as `src/lexer.ts`. nativets has no
  * `RegExp` (docs/divergences.md), so the compiler's own source may not use one; this
@@ -141,9 +155,9 @@ const REGEX_PREFIX_KW = new Set([
 function tokenize(source: string): Tok[] {
   const toks: Tok[] = [];
   let i = 0;
-  let line = 1;
+  const st: TokState = { line: 1, prev: undefined };
   const n = source.length;
-  const nl = (s: string) => { for (const c of s) if (c === "\n") line++; };
+  const nl = (s: string) => { for (const c of s) if (c === "\n") st.line++; };
 
   // Shebang: only meaningful on the very first line.
   if (source[0] === "#" && source[1] === "!") {
@@ -153,14 +167,14 @@ function tokenize(source: string): Tok[] {
     i = j;
   }
 
-  // The last significant token governs regex-vs-divide disambiguation.
-  let prev: Tok | undefined;
-  const push = (t: Tok) => { toks.push(t); prev = t; };
+  // The last significant token governs regex-vs-divide disambiguation; it lives in `st`
+  // because `push` writes it from inside a closure (see `TokState`).
+  const push = (t: Tok) => { toks.push(t); st.prev = t; };
 
   while (i < n) {
     const c = source[i]!;
 
-    if (c === " " || c === "\t" || c === "\r" || c === "\n") { if (c === "\n") line++; i++; continue; }
+    if (c === " " || c === "\t" || c === "\r" || c === "\n") { if (c === "\n") st.line++; i++; continue; }
 
     // comments
     if (c === "/" && source[i + 1] === "/") {
@@ -172,10 +186,10 @@ function tokenize(source: string): Tok[] {
       // re-emitted as the two tokens the real lexer produces for the bare sigil.
       const attr = pragmaName(source.slice(i + 2, j));
       if (attr !== "") {
-        push({ kind: "punct", value: "@@", line });
-        push({ kind: "ident", value: attr, line });
+        push({ kind: "punct", value: "@@", line: st.line });
+        push({ kind: "ident", value: attr, line: st.line });
       } else {
-        toks.push({ kind: "comment", value: source.slice(i, j), line });
+        toks.push({ kind: "comment", value: source.slice(i, j), line: st.line });
       }
       i = j; continue;
     }
@@ -184,12 +198,12 @@ function tokenize(source: string): Tok[] {
       while (j < n && !(source[j] === "*" && source[j + 1] === "/")) j++;
       j = Math.min(n, j + 2);
       const raw = source.slice(i, j);
-      toks.push({ kind: "comment", value: raw, line });
+      toks.push({ kind: "comment", value: raw, line: st.line });
       nl(raw); i = j; continue;
     }
 
     // regex literal — only where a value can't be (after an operator/keyword/start)
-    if (c === "/" && regexAllowed(prev)) {
+    if (c === "/" && regexAllowed(st.prev)) {
       const start = i;
       i++; // past opening /
       let inClass = false;
@@ -203,7 +217,7 @@ function tokenize(source: string): Tok[] {
         i++;
       }
       while (i < n && isIdentPart(source[i]!)) i++; // flags
-      push({ kind: "regex", value: source.slice(start, i), line });
+      push({ kind: "regex", value: source.slice(start, i), line: st.line });
       continue;
     }
 
@@ -212,13 +226,13 @@ function tokenize(source: string): Tok[] {
       const start = i; const q = c; i++;
       while (i < n && source[i] !== q) { if (source[i] === "\\") i++; i++; }
       i++; // closing quote
-      push({ kind: "str", value: source.slice(start, i), line });
+      push({ kind: "str", value: source.slice(start, i), line: st.line });
       continue;
     }
 
     // template literal (with ${…} nesting; treated as one atom)
     if (c === "`") {
-      const start = i; const startLine = line; i++;
+      const start = i; const startLine = st.line; i++;
       let depth = 0;
       while (i < n) {
         const ch = source[i]!;
@@ -226,7 +240,7 @@ function tokenize(source: string): Tok[] {
         if (ch === "`" && depth === 0) { i++; break; }
         if (ch === "$" && source[i + 1] === "{") { depth++; i += 2; continue; }
         if (ch === "}" && depth > 0) { depth--; i++; continue; }
-        if (ch === "\n") line++;
+        if (ch === "\n") st.line++;
         i++;
       }
       push({ kind: "template", value: source.slice(start, i), line: startLine });
@@ -242,7 +256,7 @@ function tokenize(source: string): Tok[] {
         if ((source[i] === "+" || source[i] === "-") && p !== "e" && p !== "E") break;
         i++;
       }
-      push({ kind: "num", value: source.slice(start, i), line });
+      push({ kind: "num", value: source.slice(start, i), line: st.line });
       continue;
     }
 
@@ -250,19 +264,19 @@ function tokenize(source: string): Tok[] {
     if (isIdentStart(c)) {
       const start = i;
       while (i < n && isIdentPart(source[i]!)) i++;
-      push({ kind: "ident", value: source.slice(start, i), line });
+      push({ kind: "ident", value: source.slice(start, i), line: st.line });
       continue;
     }
 
     // punctuation — longest first so multi-char operators stay intact
     const three = source.slice(i, i + 3);
     const two = source.slice(i, i + 2);
-    if (["===", "!==", ">>>", "...", "**=", "<<=", ">>="].includes(three)) { push({ kind: "punct", value: three, line }); i += 3; continue; }
-    if (["=>", "==", "!=", "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "&=", "|=", "^=", "**", "|>", "@@"].includes(two)) { push({ kind: "punct", value: two, line }); i += 2; continue; }
+    if (["===", "!==", ">>>", "...", "**=", "<<=", ">>="].includes(three)) { push({ kind: "punct", value: three, line: st.line }); i += 3; continue; }
+    if (["=>", "==", "!=", "<=", ">=", "&&", "||", "??", "?.", "++", "--", "+=", "-=", "*=", "/=", "%=", "<<", ">>", "&=", "|=", "^=", "**", "|>", "@@"].includes(two)) { push({ kind: "punct", value: two, line: st.line }); i += 2; continue; }
     // stray characters the real lexer would reject (`#`, `\`, `@`) — keep as punct so
     // the strip/split can still reason about structure; they land in a statement chunk
     // that simply fails to parse (and is reported), never a tokenizer crash.
-    push({ kind: "punct", value: c, line });
+    push({ kind: "punct", value: c, line: st.line });
     i++;
   }
   return toks;
