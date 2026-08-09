@@ -115,6 +115,36 @@ function isOptChainTarget(e: Expr): boolean {
  * catalog's shared NT1030 hint, which tells you to reorder: reordering fixes a forward
  * reference and cannot fix a cycle.
  */
+/**
+ * `@@mutable` + RECURSIVE — the one combination that can build a real CYCLE, refused.
+ *
+ * A recursive value is a TREE as long as nobody can write into it: linearity forbids a
+ * second owner, so `a.next = b; b.next = a` is NT1601 and `link(o: N) { this.next = o }` is
+ * NT1604. `@@mutable class N { next?: N; loop() { this.next = this } }` compiled and ran,
+ * and `this` is not a second owner — so the graph closes.
+ *
+ * MEASURED, and the measurement corrected the reason this was written down for. The
+ * predicted cost was a LEAK (drop is shallow, so a cycle is never freed). Against a control
+ * it is not: `__objLive()` is 1 after the identical class WITHOUT the cycle, so that leak is
+ * the pre-existing shallow-drop one and the cycle adds nothing. What a cycle actually costs
+ * is a SILENT WRONG ANSWER, which is worse — `console.log` prints
+ *   node:     <ref *1> N { v: 7, next: [Circular *1] }
+ *   nativets: N { v: 7, next: N { v: 7, next: N { v: 7, next: [N] } } }
+ * because `genInspect` unfolds the back-edge and stops on util.inspect's DEPTH limit, which
+ * is a cap on nesting and not a cycle detector. Every walk over a value assumes a tree.
+ */
+function recursiveMutableError(name: string, what: string): NTError {
+  return nyi(
+    NYI.FORWARD_TYPE,
+    `'@@mutable ${what} ${name}' is RECURSIVE — it contains itself, and it can be mutated in place`,
+    "in-place mutation of a self-containing value can close a CYCLE (`this.next = this`), and every walk over a " +
+    "value here assumes a tree: `console.log` unfolds until util.inspect's depth limit and prints nesting where " +
+    "node prints `[Circular *1]`, and the deep copies (structuredClone, an actor message) have no seen-set either. " +
+    "Drop the `@@mutable` and rebuild the value (`{ ...n, next: x }`), or make the recursive field non-recursive — " +
+    "see docs/divergences.md",
+  );
+}
+
 /** Truncate for a diagnostic: a type dump is unbounded and a hint has to stay readable. */
 function clip(s: string, n: number): string { return s.length <= n ? s : `${s.slice(0, n)}…`; }
 
@@ -1183,6 +1213,7 @@ class Parser {
    */
   private recordTypeDecl(name: string, shape: Ty, recursive: boolean): Ty {
     if (!recursive) return shape;
+    if (this.mutableRecords.has(name)) throw recursiveMutableError(name, "record");
     // A DISCRIMINATED UNION is also a legal carrier, and it is the one src/ast.ts's `Expr`
     // needs. It qualifies for exactly the reason an object does: there is no box, so a
     // `U<…>` value IS the member's object block and the reference has a pointer to be.
@@ -2004,6 +2035,7 @@ class Parser {
       f.ty = f.ty.split(selfMarker).join(typeRefTy(name)) as Ty;
     }
     const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
+    if (selfRecursive && isMutable) throw recursiveMutableError(name, "class");
     if (selfRecursive) this.recTypes.set(name, objTy);
     this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };

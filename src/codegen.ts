@@ -4399,6 +4399,22 @@ class FnGen {
    */
   private genJsonStringify(val: Val, indent = "", depth = 0): Val {
     const ty = val.ty;
+    // TERMINATION, stated rather than inherited. The serializer is UNROLLED at compile time
+    // from the static type, so it terminates only because the type shrinks at every step —
+    // and a recursive type is exactly the one that does not. Today a bare `@N` falls through
+    // to the exhaustive `internalError` at the bottom, and the checker refuses it (NT1005)
+    // before that; both are true and neither says so, which is the shape of a guarantee that
+    // quietly stops holding. So the back-edge is refused HERE, by name.
+    if (hasTypeRef(ty)) {
+      throw internalError(`JSON.stringify of the recursive type ${ty} reached codegen — the serializer is unrolled from the static type and a back-edge does not shrink, so it has no base case. This must be refused in the checker (checkJsonStringifyArg)`);
+    }
+    // And a ceiling, because the argument above is about the types that exist TODAY. A
+    // static type nests a handful of levels deep; 64 is far past anything a program writes
+    // and far short of a stack overflow, so an unrolling that runs away announces itself
+    // instead of taking the process out.
+    if (depth > 64) {
+      throw internalError(`JSON.stringify unrolled past 64 levels on ${ty} — the generated serializer is not terminating`);
+    }
     // `nt_json_num`, not `js_num_to_str`: JSON has no non-finite number, so node
     // writes `null` for NaN/±Infinity where `String(x)` writes the token.
     if (ty === "number") { const t = this.fresh(); this.emit(`${t} = call ptr @nt_json_num(double ${val.v})`); return { v: t, ty: "string" }; }

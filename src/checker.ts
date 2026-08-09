@@ -1298,7 +1298,11 @@ class Checker {
    * type, so `const s: string | undefined = someString` needs no literal and keeps working.
    */
   private reshapable(e: Expr, target: Ty, source: Ty): boolean {
-    const base = baseTy(target);
+    // UNFOLD the back-edge first. `assignable` unfolds (the equirecursive rule above), so a
+    // literal against a recursive field was accepted here — and then `baseTy("?U@N")` is
+    // `@N`, which `isObjectTy` says is not an object, so this guard let it through and
+    // `retypeLiteral` below silently did nothing. See the layout note there.
+    const base = this.unfold(baseTy(target));
     const src = baseTy(source);
     if (src === base) return true;                        // same layout — nothing to rewrite
     // A nullish initializer has no layout to rewrite: `const a: {b:C} | null = null` stores
@@ -1311,7 +1315,12 @@ class Checker {
   }
 
   private retypeLiteral(e: Expr, target: Ty): void {
-    const base = baseTy(target);
+    // UNFOLD, for the reason `reshapable` above unfolds: `baseTy("?U@N")` is the back-edge
+    // `@N`, not an object type, so both arms below missed and the literal kept its OWN
+    // shape while every reader used the declared one. `{ v: 1, next: { v: 2 } }` against
+    // `interface N { v: number; next?: N }` emitted `nt_obj_new(1)` for a two-slot record
+    // and reading `.next` off it walked past the allocation — exit 255, empty stdout.
+    const base = this.unfold(baseTy(target));
     if (e.kind === "ObjectLiteral" && isObjectTy(base)) {
       e.ty = base;
       for (const p of e.properties) {
