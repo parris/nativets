@@ -170,7 +170,11 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   for (const st of linked ? [] : pre.statements) {
     let prog: Program;
     try {
-      prog = parse(st.text, { typeEnv, collectTypes: typeEnv });
+      // `externalTypeNames` — the names the preprocess deleted with the preamble and with
+      // every `type`/`interface`. The annotations that use them survive into these
+      // statements, so without handing them back the parser would refuse a name (NT2003)
+      // the file does declare — a refusal invented by the strip.
+      prog = parse(st.text, { typeEnv, collectTypes: typeEnv, externalTypeNames: pre.erasedNames });
       for (const c of prog.mutableClasses ?? []) mutableClasses.add(c);
       for (const r of prog.mutableRecords ?? []) mutableRecords.add(r);
     } catch (e) {

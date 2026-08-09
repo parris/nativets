@@ -1907,12 +1907,18 @@ that declares it, and order is irrelevant. nativets now matches that for **top-l
 fixpoint before the file proper is parsed, so each round resolves whatever its dependencies
 allow and the declarations settle in dependency order regardless of how they are written.
 
-Two things stay outside it, both refusals rather than miscompiles:
+Three things stay outside it, all refusals rather than miscompiles:
 
 - **A type declared inside a function or block** stays in source order. Its meaning can
   depend on where it sits — a type PARAMETER in scope resolves to a `#T` marker, not to a
   shape — so hoisting it to file scope could change what it resolves to. `NT1030` says so,
   and the hint names the fix (move it to the top level).
+- **A CLASS named above its declaration.** A class declares a type too, but its instance
+  shape only exists once `parseClass` has run, so classes are not part of the fixpoint and
+  cannot be. `function f(x: MyC)` above `class MyC` used to erase `MyC` to `number` and
+  then fail as `'f' arg 0 expects number, got MyC{n:number}` — the value blamed for the
+  ordering. It is now `NT1030` on the annotation, with a hint that says to move the class
+  up. Reordering genuinely fixes it, and the reordered program matches node.
 - **A cycle.** The fixpoint identifies these exactly: what is still unresolved when a round
   makes no progress, and is blocked on something else that is also unresolved, contains
   itself. Those get the *recursion* wording, naming the type the cycle closes through
@@ -1925,9 +1931,14 @@ the annotation was silently erased and the program failed later against the *val
 neither the type nor the cause, and it cost a round of self-hosting work — `ForStmt.init:
 VarDecl | Expr | null` in `src/ast.ts` read as a union-representation bug when in fact
 `Expr` (declared at ast.ts:550, its 29 member interfaces from 621) had already been erased
-to `number` before the union code saw it. Only names declared **in the same file** are
-refused; an imported or stdlib name still falls back, which is what keeps the blast radius
-at one file — measured across all 141 files in `src/` and `test/fixtures/`.
+to `number` before the union code saw it.
+
+**The same erasure had one door left open, and it is now `NT2003`.** `NT1030` only ever
+covered names *declared in this file*; a name declared **nowhere** — a typo — kept the old
+`number` fallback, so `function g(t: Nope)` compiled the annotation away and the program
+was refused at the call site (`'g' arg 0 expects number, got {x:number}`) with the typo
+never mentioned. That is now `Cannot find name 'Nope'`, pointed at the annotation, matching
+tsc's TS2304. See the `NT2003` entry below for exactly which names are still let through.
 
 **Recursion is the harder half, and it is not a parser problem.** `interface N { next: N }`
 cannot be fixed by reordering, and hoisting does not touch it either. The real obstacle is
@@ -1981,6 +1992,43 @@ their own diagnostics. The message is deliberately unchanged: it is what
 Still refused, each with its own message: a cycle with nowhere to put a back-edge
 (`type P = Q[]` / `type Q = P[]` — a reference needs a slot to be a pointer in), and the four
 deep-walk cases below.
+
+### An UNRESOLVED type name is `NT2003` — "Cannot find name" (tsc's TS2304)
+
+A name in type position that resolves to nothing used to become `number`. The erasure is
+silent and DESTRUCTIVE: `Ty` (`src/ast.ts`) is a flat structural string with no inhabitant
+meaning "unresolved `Nope`", so once the parser returns `number` the spelling is gone from
+the program and every later diagnostic derived from it is misattributed by construction.
+That is why the check lives in `resolveNamed` (`src/parser.ts`) and not in the checker or a
+post-link pass — the parser is the last place that still holds the name.
+
+The cost of checking there is that the parser's view is **file-local**, so each way a name
+can be legitimately unresolved *at that instant* needs its own escape. All of them are
+checked before the refusal, and a name matching any of them keeps exactly the behavior it
+had:
+
+| still falls back to `number` | why the parser cannot judge it |
+|---|---|
+| a generic type parameter (`<T>`) | in scope, resolves to a `#T` marker — never reaches the fallback |
+| a `type`/`interface` declared later in the file | the ordering diagnostic (`NT1030`) owns it |
+| a class declared later in the file | likewise `NT1030` — see above |
+| an **imported** name | `modules.ts` seeds imported types from the exporting module's `finalTypes`, and a type that module refused for its own reason is simply *absent*. The name is well declared one file over; blaming the annotation would move the report away from the cause. |
+| an **ambient** name (`any`, `unknown`, `never`, `ReadonlyMap`, `Iterable`, `Partial`, `Buffer`, …) | declared by TypeScript's own lib, so a program never has to declare it. The list (`AMBIENT_TYPES`, `src/parser.ts`) is deliberately generous: a name wrongly *out* of it is a false refusal on valid code, a name wrongly *in* it merely preserves the status quo. |
+
+Two consequences worth knowing:
+
+- **The refusal is speculation-safe by design.** `tryCallTypeArgs` parses `<…>` after a
+  primary as a type-argument list and backtracks on any throw, so `i < n` speculatively
+  resolves `n` as a type name and lands on this path — 199 times across the corpus. Throwing
+  is *correct* there precisely because it is caught: the throw is what tells the speculation
+  this was not a type. So `NT2003` must stay a throw and must never be recorded as a side
+  effect.
+- **The `import` escape is what still leaves the cross-module hole open.** A type its own
+  module refused never gets seeded, so an annotation naming it still erases to `number` —
+  live today for `Ty`/`Expr`/`Stmt` out of `src/ast.ts`. Closing that needs a *linker*
+  diagnostic ("your dependency refused this type"), because the linker is the only pass that
+  can tell it from "no such name". Until then it stays on the fallback rather than becoming
+  a refusal pointed at the wrong file.
 
 ### A recursive value is assumed to be a TREE — the walks that refuse a cycle
 
