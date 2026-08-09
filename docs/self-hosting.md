@@ -1004,6 +1004,58 @@ said there was no second site behind the first.
 `Record`-typed table; the supported spelling of that today is a `Map` plus `.has`, which is a
 source change of the same shape as this one. Not chased here.
 
+### Re-measured after `in` — and "the last thing between codegen.ts and IR" was WRONG
+
+`in` is no longer refused. A LITERAL key over an object type with no optional field is
+decided at COMPILE TIME and folded, exactly as `instanceof` is and for the same reason — an
+object's key set here comes from its TYPE. What a static type cannot decide is refused: the
+optional field, a non-literal key (node's `in` walks the PROTOTYPE CHAIN, so a key we cannot
+see cannot be checked against it), a `Map`/`Set` right operand (node tests the Map OBJECT's
+properties, never its entries — `m.set("a",1); "a" in m` is **false**), an array, a
+primitive. Semantics borrowed from tc39/test262 `test/language/expressions/in/`:
+`S8.12.6_A1`, `S8.12.6_A2_T1`, `S8.12.6_A3`, `S11.8.7_A3`.
+
+**The handoff said this was the last blocker standing between `codegen.ts` and IR. It was
+not, and the reason is the oldest failure mode in this document: a PARSE-stage refusal masks
+everything the CHECKER would say.** `in` was refused in `parseBinary`, at line 2095. Behind
+it, at line **636** — 1,450 lines EARLIER — sits
+
+```ts
+const FCMP: Record<string, string> = { "<": "olt", … };
+```
+
+which is `NT2001`, the deliberate `Record` → `Map` erasure (`test/record-dict.test.ts`). Four
+more tables in the same file have the identical shape (`ARITH`, `BITFN`, `MATH_FN1`, and
+`BIN` is `parser.ts`'s), and `FCMP[op]` with a VARIABLE key is refused on top of that — an
+object is indexed by a string literal here, and node's `o[k]` consults the prototype chain.
+So `codegen.ts` does not reach IR, and clearing `in` was never going to make it.
+
+| Module | Before | After |
+|---|---|---|
+| `codegen.ts` standalone | `parse` / `NT1002` — `` `in` `` at 2095:16 | **`check` / `NT2001`** — `FCMP` at **636**, the `Record` refusal |
+| `codegen.ts` linked | `parse` / `NT1002` — the same | **`link` / `NT1009`** — `checker.ts`'s `FmtPiece` union: no blocker of its OWN |
+| `diagnostics.ts` | rung 3 | **unchanged, byte for byte** |
+| every other module | — | **unchanged** |
+
+Both moves are to a LATER stage, and the `selfhost-ratchet` verdict was settled by a
+controlled experiment rather than by reading the direction of travel: handed **main's
+unmodified `codegen.ts`**, today's compiler reports the identical `NT2001` at 636. The
+lane's own edits to that file (the object chain-temporary drop) are blocker-neutral, so the
+move belongs entirely to the `in` change — an unmasking, not a regression. Re-recorded.
+
+`codegen.ts` also **joined the parse-clean set, which is now TEN of twelve**, without its
+rung moving at all. That is the sharpest example `test/sh6.test.ts` has yet had of its own
+standing point: parsing clean has never once correlated with being closer to compiling.
+
+`NT1002` is now empty tree-wide in the statement-recovery histogram too — `op in FCMP` was
+its only site, and it stopped being a blocker rather than moving.
+
+**Next for `codegen.ts`: `Record<K, V>` initialized with an object literal**, five tables in
+one file. It is a decision, not a gap — either the source moves to `new Map().set(…)` chains
+(and every `FCMP[op]` read to `.get(op)`), or `Record` stops erasing to `Map`. The refusal's
+own hint names the first; the second is a design change, because an object's fields are
+static slots and a `Record`'s key set is by definition not statically known.
+
 
 ---
 

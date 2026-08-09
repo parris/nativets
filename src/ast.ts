@@ -886,12 +886,15 @@ export interface InExpr { kind: "InExpr"; key: Expr; object: Expr; result?: bool
  *
  * Verified against the running oracle, not recalled:
  *   node -e 'console.log(Object.getOwnPropertyNames(Object.prototype))'
+ * Spelled as an ARRAY, not a `Set`: `new Set([…])` is NT1014, and this file has to stay
+ * inside the subset it compiles (the two `new Set([…])` tables further down predate that
+ * rule and sit behind an earlier blocker).
  */
-export const OBJECT_PROTO_KEYS = new Set([
+export const OBJECT_PROTO_KEYS: string[] = [
   "constructor", "__defineGetter__", "__defineSetter__", "hasOwnProperty", "__lookupGetter__",
   "__lookupSetter__", "isPrototypeOf", "propertyIsEnumerable", "toString", "valueOf",
   "__proto__", "toLocaleString",
-]);
+];
 
 /** Arrow function. `captures` (filled by the checker) are free vars closed over. */
 export interface ArrowFunction {

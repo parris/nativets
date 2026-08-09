@@ -332,8 +332,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // 4385, an optional-field union with no string-literal discriminant. codegen.ts's own
     // NT1015 was a `get` accessor, now rewritten as the method it always was — accessors
     // stay refused, and the tree holds exactly one getter and no setters.
+    // ...and NT1002 has since LEFT the set: `in` is now decided at compile time for a
+    // literal key over a static shape, so `op in FCMP` stopped being a blocker rather than
+    // moving. codegen.ts follows checker.ts's NT1009 through the link now — its own
+    // standalone blocker is the deliberate `Record<string,string> = {…}` refusal, which
+    // this linked instrument cannot attribute to it (selfhost-ratchet's standalone can).
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1002", "NT1009", "NT1030", "NT1031"],
+      ["NT1009", "NT1030", "NT1031"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -449,7 +454,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // DIFFERENT NT1009 from the `?.[]` one — `FmtPiece` (checker.ts:4385), an
     // optional-field object union with no string-literal discriminant. Same code, other
     // feature, which is precisely why selfhost-ratchet compares MESSAGES.
-    expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
+    // ...and codegen.ts JOINED it, without codegen.ts getting worse: clearing its NT1002
+    // (`op in FCMP`) let the link reach checker.ts's `FmtPiece` union, the same one the
+    // other two rows carry. A third module inheriting one blocker, not a third blocker.
+    expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "codegen.ts", "ownership.ts"]);
     // NEW CODE, and it SPLIT the NT1009 bucket rather than adding to it. NT1030 is the
     // forward-reference / recursive-type refusal: `resolveNamed` used to return `number`
     // for a type name declared later in the same file, silently. ast.ts owns it (all 29
@@ -485,9 +493,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // sometimes a call, which dotted-path narrowing and field linearity both assume it is
     // not) — but the whole-tree construct census found ONE getter and NO setters in
     // `src/*.ts`, so `FnGen`'s became the zero-argument method it already was. Behind it,
-    // NT1002: `op in FCMP` at codegen.ts:2078.
+    // NT1002: `op in FCMP` at codegen.ts:2078 — itself now cleared (`in` is decided from
+    // the static type), so this bucket is empty too and codegen.ts inherits checker.ts's.
     expect(byCode["NT1015"]).toBeUndefined();
-    expect(byCode["NT1002"]!.sort()).toEqual(["codegen.ts"]);
+    expect(byCode["NT1002"]).toBeUndefined();
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
     // the fresh-receiver lane) -> NT1006 (`Math.max(...)`, cleared by the variadic lane) ->
     // back to NT1606, this time a `.push` on a NAMED accumulator. That last shape is

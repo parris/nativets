@@ -239,8 +239,14 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // all twelve modules. Accessors stay refused (NT1015 with a hint naming the rewrite);
     // `FnGen`'s lone getter became the zero-argument method it already was, and NT1002
     // (`op in FCMP`) is what sat behind it.
+    // NT1002 IS NOW ZERO TREE-WIDE too, and again this instrument is what says so: `in` is
+    // DECIDED at compile time for a literal key over a static shape, so `op in FCMP` — the
+    // only site in the tree — stopped being a blocker rather than moving. (It is not what
+    // codegen.ts stops on now: behind it sits `const FCMP: Record<string,string> = {…}`,
+    // the deliberate Record→Map refusal, which this preprocess-based histogram does not
+    // reach. The standalone column of selfhost-ratchet does.)
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1002", "NT1003", "NT1014", "NT1031"],
+      ["NT1003", "NT1014", "NT1031"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the

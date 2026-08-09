@@ -303,7 +303,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // the whole-tree construct census found exactly ONE getter and NO setters in `src/*.ts`,
   // so the source change was the fix rather than a language feature. Behind it, NT1002 —
   // `op in FCMP` at codegen.ts:2078, the key-presence operator, 1300 lines deeper.
-  "codegen.ts": { rung: 0, code: "NT1002", blame: "self" },
+  // ...and NT1002 is cleared: `in` is DECIDED at compile time for a literal key over a
+  // static shape, so `op in FCMP` stopped being a blocker instead of moving. This module
+  // now has NO blocker of its own under the LINK — it follows checker.ts's `FmtPiece`
+  // union, the attribution trap `ownership.ts` has demonstrated for many rounds. Its own
+  // standalone blocker is `const FCMP: Record<string,string> = {…}` (NT2001), the
+  // deliberate Record→Map refusal, ~1450 lines EARLIER — which is why "`in` was the last
+  // thing between codegen.ts and IR" was wrong: the parse error was masking it.
+  "codegen.ts": { rung: 0, code: "NT1009", blame: "checker.ts" },
   "coverage.ts": { rung: 0, code: "NT1030", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
@@ -501,7 +508,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * CHECKER, after parse is over. A parse-clean module is not an unblocked module, so
    * attribution has to compare what the whole pipeline actually reports.
    */
-  test("parsing clean is not being unblocked — nine parse, one compiles", async () => {
+  test("parsing clean is not being unblocked — ten parse, one compiles", async () => {
     const { parse } = await import("../src/parser.ts");
     const parseClean: string[] = [];
     for (const e of MODULES) {
@@ -511,11 +518,15 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // generic class methods did; `parser.ts` when optional element access `?.[]` did —
     // `?.[]` was the last construct in the parser's own source that the parser could not
     // read. The point of this test is unchanged and is the uncomfortable one — parsing
-    // clean has never ONCE correlated with being closer to compiling. Nine of twelve
+    // clean has never ONCE correlated with being closer to compiling. TEN of twelve
     // modules parse their own source; ONE produces IR.
+    // TEN now: `codegen.ts` joined when `in` stopped being refused in the PARSER. It is
+    // the sharpest illustration this test has had of its own point — the module gained a
+    // whole pipeline stage and its rung did not move, because a `Record` annotation the
+    // checker refuses sits 1450 lines before anything the parser ever objected to.
     expect(parseClean.sort()).toEqual([
-      "cli.ts", "coverage-preprocess.ts", "coverage.ts", "diagnostics.ts", "driver.ts",
-      "lexer.ts", "modules.ts", "ownership.ts", "parser.ts",
+      "cli.ts", "codegen.ts", "coverage-preprocess.ts", "coverage.ts", "diagnostics.ts",
+      "driver.ts", "lexer.ts", "modules.ts", "ownership.ts", "parser.ts",
     ]);
     // ...and the point SURVIVES the first module getting off the floor, which is the
     // interesting part. `diagnostics.ts` reaching rung 3 did not come from parsing — it

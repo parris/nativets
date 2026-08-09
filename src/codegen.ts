@@ -2659,11 +2659,13 @@ class FnGen {
     if (e.callee.kind === "MemberExpr") {
       const cls = classTag(e.callee.object.ty ?? "");
       if (cls && this.mod.functions.has(`${cls}.${e.callee.property}`)) {
-        // `argVals[0]` is the RECEIVER's pointer — the drop below needs the value, and
-        // this is the only branch that can see it (the args are lowered inside the call).
-        const argVals: string[] = [];
-        const out = this.genUserCall(`${cls}.${e.callee.property}`, [e.callee.object, ...e.args], argVals);
-        this.freeReceiverObjTemp(e.callee.object, argVals[0], cls, `${cls}.${e.callee.property}`);
+        // The RECEIVER is lowered HERE rather than inside the call, because the drop
+        // below needs its pointer and `genUserCall` would otherwise generate and forget
+        // it. Passed on as a pre-evaluated argument 0, so it is evaluated exactly once.
+        const fn = `${cls}.${e.callee.property}`;
+        const recv = this.genExpr(e.callee.object);
+        const out = this.genUserCall(fn, [e.callee.object, ...e.args], recv.v);
+        this.freeReceiverObjTemp(e.callee.object, recv.v, cls, fn);
         return out;
       }
     }
@@ -5324,10 +5326,21 @@ class FnGen {
     return { v: this.genTimeoutBox(timedOut, this.slotNoRetain({ v: rv, ty: base }), retTy), ty: retTy };
   }
 
-  /** `argOut`, when given, collects each lowered argument's SSA value in order — the
-   *  chain-temporary drop needs the RECEIVER's pointer, which is argument 0 here and is
-   *  otherwise generated and forgotten inside this function. */
-  private genUserCall(name: string, args: Expr[], argOut?: string[]): Val {
+  /** Argument `i` of a user call: the caller's pre-lowered argument 0, or the expression
+   *  written at the call site (or the parameter's DEFAULT when the site omitted it).
+   *  Deliberately builds a FRESH `Val` for the pre-lowered case rather than handing back
+   *  one it was given — src/ has to stay inside the subset it compiles, and returning an
+   *  element of a `Val[]` parameter is a move out of a borrowed array element (NT1605). */
+  private argVal(i: number, args: Expr[], preArg0: string, sig: Sig): Val {
+    if (i === 0 && preArg0 !== "") return { v: preArg0, ty: args[0]!.ty ?? sig.params[0]! };
+    return this.genExpr(args[i] ?? sig.defaults[i]!);
+  }
+
+  /** `preArg0`, when non-empty, is the SSA value of argument 0 already lowered by the
+   *  CALLER; `args[0]` is then read for its TYPE only and never generated again. Exactly
+   *  one caller uses it — the class-instance method call, whose chain-temporary drop needs
+   *  the receiver's pointer and must not evaluate the receiver twice. */
+  private genUserCall(name: string, args: Expr[], preArg0 = ""): Val {
     this.emitSafepoint(); // call site: preempt long / deeply-recursive call chains
     const sig = this.mod.functions.get(name)!;
     if (sig.rest) {
@@ -5336,11 +5349,7 @@ class FnGen {
       // The FIXED parameters coerce just like a non-rest call's do (see below) — this
       // path emitted them raw, so a nullable/general-union fixed parameter of a rest
       // function received an unboxed value.
-      for (let i = 0; i < fixed; i++) {
-        const av = this.coerce(this.genExpr(args[i]!), sig.params[i]!).v;
-        argOut?.push(av);
-        argVals.push(`${llvmTy(sig.params[i]!)} ${av}`);
-      }
+      for (let i = 0; i < fixed; i++) argVals.push(`${llvmTy(sig.params[i]!)} ${this.coerce(this.argVal(i, args, preArg0, sig), sig.params[i]!).v}`);
       const arr = this.fresh(); // pack trailing args into the rest array
       this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(args.length - fixed, 1))})`);
       for (let i = fixed; i < args.length; i++) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.genExpr(args[i]!))})`);
@@ -5353,14 +5362,11 @@ class FnGen {
     }
     const argVals: string[] = [];
     for (let i = 0; i < sig.params.length; i++) {
-      const provided = args[i];
       // Coerced to the param type — boxing an `undefined` default into a nullable
       // optional param (`f(x?: T)`), and boxing an ARM into a general-union param
       // (`f(v: number | string)`, called as `f(41)`). A no-op when the types already
       // match, so ordinary params are unaffected.
-      const av = this.coerce(this.genExpr(provided ?? sig.defaults[i]!), sig.params[i]!).v;
-      argOut?.push(av);
-      argVals.push(av);
+      argVals.push(this.coerce(this.argVal(i, args, preArg0, sig), sig.params[i]!).v);
     }
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");
     if (sig.ret === "void") {

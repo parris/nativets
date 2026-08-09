@@ -524,7 +524,7 @@ function keyPresence(key: Expr, ot: Ty): boolean {
       `Note that \`${k}: T | undefined\` is encoded exactly like \`${k}?: T\` here, so it is refused too even though its key is always present in node`,
     );
   }
-  return f !== undefined || OBJECT_PROTO_KEYS.has(k);
+  return f !== undefined || OBJECT_PROTO_KEYS.includes(k);
 }
 
 function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
