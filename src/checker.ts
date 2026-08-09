@@ -4315,6 +4315,36 @@ class Checker {
   }
 
   /**
+   * The innermost enclosing body that BINDS `name` — the only code that can be about this
+   * binding, and so the only code either closure analysis should be reading.
+   *
+   * THE BUG THIS EXISTS FOR. Both used to ask their question of the whole `bodyChain`,
+   * whose outermost frame is the entire program, so a bare-name question answered yes for
+   * a binding in a function that has never heard of this one. Two files that EACH compile
+   * alone then do not compile together (test/modules/closure-name): `linkProgram`
+   * alpha-renames TOP-LEVEL bindings only, so after SH1 every module's locals and
+   * parameters share one flat namespace and the odds of a collision are multiplied by the
+   * module count. It is NOT a link-only bug — the same collision inside one file was
+   * always possible; linking made it ordinary. And it is invisible to every per-module
+   * instrument we have, because per-module is exactly the case that works.
+   *
+   * Walking inward-out to the first binder is conservative in the safe direction at every
+   * step. `ownBindings` sees a body's parameters and its TOP-LEVEL declarations only, so a
+   * `let` in a nested block is not placed here and the walk continues outward to a body
+   * that encloses it — scanning MORE code, never less. With no binder anywhere (a builtin,
+   * or a shape `ownBindings` does not model) it lands on frame 0, which is what this
+   * replaced. An intervening frame can never be the WRONG answer: if it binds the name at
+   * its top level then code inside it naming that word resolves to ITS binding.
+   */
+  private bindingFrame(name: string): BodyFrame {
+    for (let i = this.bodyChain.length - 1; i > 0; i--) if (this.bodyChain[i]!.binds.has(name)) return this.bodyChain[i]!;
+    // The chain is EMPTY during the pre-`check` return-type inference pass, which the note
+    // on `checkCapturedWrites` covers: nothing to scan means nothing observed, and the
+    // arrow is judged again for real once the chain exists.
+    return this.bodyChain[0] ?? { body: [], binds: new Set<string>() };
+  }
+
+  /**
    * NT1031 — a closure that WRITES a binding it captured, in a shape where the write
    * would be lost.
    *
@@ -4348,39 +4378,9 @@ class Checker {
    * find FEWER references and so allow more, and every such arrow is typed again from
    * `checkBlock` with the full chain, which is the run that decides.
    *
-   * WHICH enclosing body is `bindingFrame`'s job, and getting that wrong was a bug with
-   * no single-file symptom — see its note.
+   * WHICH enclosing body that is, is `bindingFrame`'s job — and it used to be "all of
+   * them", which is the bug its note describes.
    */
-  /**
-   * The innermost enclosing body that BINDS `name` — the one whose code is the only code
-   * that can be about this binding.
-   *
-   * THE BUG THIS EXISTS FOR. Both closure analyses used to ask their question of the
-   * whole `bodyChain`, whose outermost frame is the entire program; and after SH1 links a
-   * module graph, "the entire program" is every module at once. The linker alpha-renames
-   * only TOP-LEVEL bindings, so every module's locals and parameters land in one flat
-   * namespace, and a bare-name question over that namespace answers yes for bindings in
-   * files the closure has never heard of. The symptom is a pair of modules that EACH
-   * compile alone and cannot be compiled together (test/modules/closure-name) — invisible
-   * to every per-module measurement we have, because per-module is exactly the case that
-   * works. The same collision inside one file was always possible; linking made it
-   * ordinary.
-   *
-   * Walking inward-out and stopping at the first binder is conservative in the safe
-   * direction at every step. `ownBindings` sees a body's parameters and its TOP-LEVEL
-   * declarations only, so a `let` in a nested block is not placed and the walk continues
-   * outward to a body that encloses it — scanning MORE code, never less. With no binder
-   * anywhere (a builtin, or a shape `ownBindings` does not model) it lands on frame 0,
-   * which is the behaviour this replaced.
-   */
-  private bindingFrame(name: string): BodyFrame {
-    for (let i = this.bodyChain.length - 1; i > 0; i--) if (this.bodyChain[i]!.binds.has(name)) return this.bodyChain[i]!;
-    // The chain is EMPTY during the pre-`check` return-type inference pass, which the
-    // note on `checkCapturedWrites` covers: nothing to scan means nothing observed, and
-    // the arrow is judged again for real once the chain exists.
-    return this.bodyChain[0] ?? { body: [], binds: new Set<string>() };
-  }
-
   private checkCapturedWrites(arrow: ArrowFunction, scope: Scope): void {
     const writes = new Map<string, string>();
     collectEscapingWrites(arrow, writes);
