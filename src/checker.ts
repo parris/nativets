@@ -398,7 +398,29 @@ export function actorSendTy(t: Ty): Ty {
   return actorMsgTy(t);
 }
 
-export function check(program: Program): CheckedProgram {
+/**
+ * One function body the checker refused, collected by the MEASUREMENT mode below.
+ * `fn` is the function's linked (mangled) name, which is what says whose module it is.
+ */
+export interface FnBlocker { fn: string; code: string; message: string }
+
+/**
+ * `collectBlockers` puts `check` in MEASUREMENT mode — see `test/blocker-metric.ts`.
+ *
+ * Normally the first refused function body aborts the whole check, so a program has
+ * exactly one visible blocker no matter how many it holds. Passing an array here makes
+ * the per-function loop record each refusal and carry on, which is the only way to see
+ * the other 300. Two things follow, and both matter:
+ *
+ *  - the returned `CheckedProgram` is NOT a checked program. Bodies that threw are
+ *    half-typed, so it must be DISCARDED, never handed to ownership or codegen. Nothing
+ *    but the metric may pass this argument.
+ *  - `check` will usually still throw somewhere after the loop (the passes below assume
+ *    every body typed). That is expected; the caller keeps the array it already has.
+ *
+ * Omit the argument and this is the pre-existing function, byte for byte.
+ */
+export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedProgram {
   const functions = new Map<string, Sig>();
   // Value bindings this module imports. A linked program has none left (the linker
   // rewrites them to concrete names), so this is populated only for a single-module
@@ -482,7 +504,19 @@ export function check(program: Program): CheckedProgram {
   // Only reads made from INSIDE a function body promote a module binding to a global,
   // so clear the top level's own hits before checking the functions.
   moduleScope.hits.clear();
-  for (const s of program.body) if (s.kind === "FuncDecl" && !s.typeParams?.length) c.checkFunction(s, moduleScope.child());
+  // Deliberately an ARROW inside `check`, not a module-level helper: the metric this
+  // serves counts top-level `FuncDecl`s of the LINKED COMPILER, so a new one here would
+  // move its own denominator (and, since a `catch (e)` binding types as the erased class,
+  // its own numerator too — the tool caught exactly that when this was a `function`).
+  // `check` is already in the failing set, so an arrow in its body costs nothing.
+  const asBlocker = (fn: string, e: unknown): FnBlocker =>
+    e instanceof NTError
+      ? { fn, code: e.diag.code, message: e.diag.message }
+      : { fn, code: `(${(e as Error).name})`, message: (e as Error).message };
+  for (const s of program.body) if (s.kind === "FuncDecl" && !s.typeParams?.length) {
+    if (collectBlockers === undefined) c.checkFunction(s, moduleScope.child());
+    else try { c.checkFunction(s, moduleScope.child()); } catch (e) { collectBlockers.push(asBlocker(s.name, e)); }
+  }
   // M3: check every specialization that got instantiated above (checking one body can
   // instantiate more generics, so drain to a fixpoint), then SPLICE the templates out of
   // the program and the concrete specializations in — from here on the rest of the
