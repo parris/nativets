@@ -3485,3 +3485,111 @@ This is deliberately the last item on `ROADMAP.md` ("far horizon"). SH2 (discrim
 SH3 (classes) are each substantial type-system/semantics features; SH4 (host FFI) is a new runtime
 surface. But SH0 is cheap and immediately turns the effort into a measured gradient — the right
 first move, and the one that tells us the *true* remaining cost instead of guessing.
+
+---
+
+## SH7 PRE-FLIGHT: is the compiler DETERMINISTIC? (measured)
+
+SH7's definition of done is "`nativets-2` and `nativets-3` are BYTE-IDENTICAL". That is not
+something clearing blockers gets you: one clock read, PID, address or unordered walk anywhere in
+the pipeline makes the fixed point unreachable *permanently*. It has already happened once —
+`choosePrefixBase` minted the alpha-rename prefix from `Date.now()`. Nobody had looked for the
+rest. This is that look.
+
+**Verdict: the IR pipeline is deterministic.** 262 programs — every `test/fixtures/` case, every
+`test/actors/`/`test/modules/`/`test/hostio/`/`test/examples/` case, and the three `src/*.ts`
+modules that reach IR (`lexer.ts`, `diagnostics.ts`, `coverage-preprocess.ts`) — produce
+byte-identical `.ll` when compiled **twice in one process** and when compiled **in two separate
+processes**. Nothing drifts within a run and nothing is seeded per-process. The IR is also
+insensitive to `TZ`/`LC_ALL`, and to 131 intervening compiles in the same process (no module-level
+state accumulates across `sourceToIR` calls).
+
+A construct census over all twelve `src/*.ts` (read with `readFileSync`, not `grep`) finds **zero**
+`Date.now()`, `new Date`, `Math.random`, `performance.now`, `process.hrtime` or `process.pid` in
+the compile path. The only ambient reads are `process.cwd()` in `modules.ts` `show()` (diagnostic
+text only) and `readdirSync`/`homedir` in `driver.ts`'s Android-NDK discovery (link args, `.sort()`ed,
+never IR). `localeCompare`/`toLocale*` are refused at NT1024, which is what keeps locale out.
+
+**Two things nonetheless stand between here and a byte-identical `nativets-3`, and neither is
+inside the IR pipeline:**
+
+### 1. The ENTRY PATH is an input to the emitted `.ll`
+
+A bounds panic reports `file:line:col`, and `file` is interned into the module
+(`src/codegen.ts` `locArg` → `Loc.file`). `src/modules.ts` sets it **verbatim from `entryPath`**
+for the entry module (line 482) and from the **resolved ABSOLUTE path** for every imported module
+(line 545). Consequences, all reproduced:
+
+- `sourceToIR(src, "src/lexer.ts")` and `sourceToIR(src, "/abs/…/src/lexer.ts")` differ by **5,329
+  bytes** — same file, same content, different spelling of the argument;
+- two **byte-identical source trees at different absolute paths** emit different IR, because an
+  imported module's path is always absolute:
+
+  ```sh
+  # d1/ and d2/ are identical trees
+  @.str.0 = … c"/…/d1/sub/lib.ts:1:66\00"
+  @.str.0 = … c"/…/d2/sub/lib.ts:1:66\00"
+  ```
+
+This is the "IR byte-lengths differing modulo the interned worktree path" a previous lane
+half-observed. **It does not break SH7 as literally defined** — stage-2 and stage-3 compile the
+same tree at the same path with the same argv — but it does mean the compiler is **not reproducible
+across machines or checkout directories**, and any bootstrap that stages sources through a
+`mkdtemp` directory breaks byte-identity outright. It is also **user-visible and inconsistent
+today**: in one program, a panic in the entry module prints a cwd-relative path and a panic in an
+imported module prints an absolute one.
+
+```
+$ nativets run p/main2.ts        # OOB in the ENTRY
+  at .scratch/p/main2.ts:3:15
+$ nativets run p/main.ts         # OOB in an IMPORTED module
+  at /Users/…/.scratch/p/dep.ts:1:69
+```
+
+Not fixed here: "relative to what" is a decision (repo root? a `--source-root` flag?), not a
+one-liner. Pinned as a known hazard in `test/determinism.test.ts` so a future normalization is a
+deliberate change with a test to update.
+
+### 2. On macOS the OUTPUT FILENAME is baked into the binary
+
+The `.ll` is deterministic; the *binary* is not a pure function of the `.ll`. `ld64` ad-hoc-signs
+every executable and uses the **output basename as the CodeDirectory identifier**, which feeds the
+signature hashes and `LC_UUID`:
+
+```sh
+$ nativets build t.ts -o t1 && nativets build t.ts -o t2 && cmp t1 t2
+t1 t2 differ: char 1449          # LC_UUID, then the "t1"/"t2" identifier + its hashes
+$ codesign -dv t1   # Identifier=t1
+$ codesign -dv t2   # Identifier=t2
+# same basename in two directories:
+$ nativets build t.ts -o o1/prog && nativets build t.ts -o o2/prog && cmp o1/prog o2/prog
+# → identical.  The mkdtemp build dir does NOT leak; only the basename does.
+```
+
+So **`nativets-2` and `nativets-3` can never be byte-identical on macOS as literally named.** SH7
+must either build both stages to the **same basename** in different directories
+(`stage2/nativets` vs `stage3/nativets`) or compare with the signature normalized out. This is a
+property of the platform linker, not of nativets, but it is a definition-of-done problem and it is
+better known now than at the finish line.
+
+### The instrument — `test/determinism.test.ts`
+
+Compiles a discovered corpus twice in-process and twice cross-process and asserts byte-identity,
+plus a purpose-built multi-module asset (`test/determinism/`) whose `dep.ts` spells all three
+`choosePrefixBase` candidates as literals, forcing the escalation branch the clock bug lived in
+(a single-file program never reaches `choosePrefixBase` at all — `linkProgram` is a no-op without
+imports, so without that asset the whole prefix hazard is outside what any test measures).
+
+**It was validated by planting the bug back**, twice, because this repo's instruments have
+repeatedly measured something other than what they claim:
+
+| Plant | in-process check | cross-process check |
+|---|---|---|
+| `` return `_nts${Date.now().toString(36)}_m` `` (drifts during a run) | **red** | **red** |
+| `const SEED = Date.now()…` at module scope (seeded ONCE per process) | **green** — blind | **red** |
+
+The second row is why the cross-process half is not a nice-to-have: an in-process "compile it
+twice" cannot see a per-process seed at all, and it is nearly blind to the clock bug too —
+compiling `src/lexer.ts` in-process takes ~20ms, so two `Date.now()` reads around it land in the
+same millisecond often enough to be a coin flip. A vacuity guard asserts the discovered corpus is
+non-empty, so the file cannot quietly become a no-op if every `src` module regresses off IR.
