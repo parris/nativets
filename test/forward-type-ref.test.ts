@@ -233,17 +233,19 @@ function f(x: any, y: unknown, z: Readonly<number>): number { return x + y + z; 
 console.log(f(1, 2, 3));`);
   });
 
-  // An ambient name nativets does NOT model still erases to `number` and is still refused
-  // downstream, exactly as before — `ReadonlyMap` has no case in `parseGenericType`, so it
-  // takes the fallback. Pinned because the point of the ambient list is to CHANGE NOTHING
-  // for these names: whatever they did yesterday they must do today, and what they must not
-  // do is become "Cannot find name".
-  test("an ambient name nativets does not model keeps its old behavior, not NT2003", () => {
-    const r = reject(`
-const m: ReadonlyMap<string, number> = new Map();
-console.log(m.size);`);
-    expect(r.code).toBe("NT2001"); // the pre-existing erasure, unchanged
-    expect(r.code).not.toBe("NT2003");
+  // The whole point of the ambient list is to CHANGE NOTHING for the names on it: whatever
+  // a lib-declared name did before — compile, or fail downstream on the erasure — it must
+  // still do. The one thing it must never become is "Cannot find name", because these names
+  // are declared by TypeScript's own lib and no program has to declare them. So the
+  // assertion is only `not NT2003`, deliberately: pinning the specific outcome would make
+  // this test fail whenever an unrelated lane teaches nativets one of these types, which is
+  // exactly what happened to `ReadonlyMap` here.
+  test("an ambient name nativets does not model is never 'Cannot find name'", () => {
+    for (const src of [
+      `const m: ReadonlyMap<string, number> = new Map();\nconsole.log(m.size);`,
+      `const w: WeakMap<string, number> = new Map();\nconsole.log(1);`,
+      `function f(x: ArrayLike<number>): number { return 1; }\nconsole.log(f([1]));`,
+    ]) expect(reject(src).code).not.toBe("NT2003");
   });
 
   // ...and the reordered program is the proof that the advice in that hint is true.
