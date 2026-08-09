@@ -506,6 +506,12 @@ function mangleTypeArg(t: string): string {
   return out;
 }
 
+// A checker is an accumulator over one program: `this.loopDepth`/`this.switchDepth` count
+// up and down as it descends, `this.fnStack` is pushed and popped. That is in-place
+// mutation of one owned object, not copy-on-write — `@@mutable` (docs/decorators.md), in
+// the pragma spelling that keeps this file runnable by bun (see src/parser.ts's note and
+// src/lexer.ts).
+//@@mutable
 class Checker {
   private loopDepth = 0;
   private switchDepth = 0;

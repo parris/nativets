@@ -321,8 +321,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // parameters (a constructor PARAMETER PROPERTY takes ownership; every `new C(v)` site
     // moves `v`) is what cleared it — see test/sh6.test.ts, where the module reaches
     // rung 3 and its output matches the bun-run module byte for byte.
+    // NT1023 IS NOW EMPTY, and NT1009/NT1015 REFILLED BEHIND IT — the same "a bucket
+    // refills because the frontier ADVANCED" note the NT0001 paragraph below makes.
+    // `NT1023` was "a method assigns a field, so it produces a NEW C, but it does not
+    // return one" on `Checker.inArrow` and `ModuleGen.build`; both classes are ordinary
+    // accumulators, so they now carry `//@@mutable` (the same pragma `Parser`, `FnGen`
+    // and `Analyzer` already carried). checker.ts/ownership.ts stop on NT1009 (a
+    // discriminant-less object union in diagnostics' `parseTemplate`) and codegen.ts on
+    // NT1015 (a `get` accessor in `FnGen`). checker.ts's is `FmtPiece` at line 4385, an
+    // optional-field union with no string-literal discriminant.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1023", "NT1030", "NT1031"],
+      ["NT1009", "NT1015", "NT1030", "NT1031"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -367,7 +376,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and back to three. Lane B gave `Scope` a real representation (the `@Name`
     // back-edge), so checker.ts and ownership.ts left NT1030 and returned to this bucket —
     // this time HONESTLY, past a symbol table that compiles rather than one that was erased.
-    expect(byCode["NT1023"]!.sort()).toEqual(["checker.ts", "codegen.ts", "ownership.ts"]);
+    // ...and it is EMPTY again, this time by all three modules walking PAST it. The two
+    // classes NT1023 named — `Checker` and `ModuleGen` — are accumulators, not
+    // copy-on-write values, so they carry `//@@mutable` like `Parser`/`FnGen`/`Analyzer`
+    // already did. checker.ts and ownership.ts moved on to NT1009 (the `FmtPiece` union),
+    // codegen.ts to NT1015 (a `get` accessor), both deeper in the same `parse` stage.
+    expect(byCode["NT1023"]).toBeUndefined();
     // RATCHET MOVE (collections): NT1014 is now EMPTY. It held lexer.ts on
     // `new Set([...])` for REGEX_AFTER_KEYWORD; `new Set(iterable)` compiles now, so the
     // module walks on to what sat behind it — NT2001, an object literal where a Map is
@@ -428,7 +442,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // twelve rows left it at once, exactly as the note above predicted. Recorded as a fact
     // about today, in the spelling this file has had to learn three times: an empty bucket
     // is never an invariant, because clearing a named blocker lets a module reach further.
-    expect(byCode["NT1009"]).toBeUndefined();
+    // ...and it REFILLED, on the fourth occasion this file has had to learn its own
+    // lesson: `//@@mutable` on `Checker` cleared NT1023, and what sat behind it is a
+    // DIFFERENT NT1009 from the `?.[]` one — `FmtPiece` (checker.ts:4385), an
+    // optional-field object union with no string-literal discriminant. Same code, other
+    // feature, which is precisely why selfhost-ratchet compares MESSAGES.
+    expect(byCode["NT1009"]!.sort()).toEqual(["checker.ts", "ownership.ts"]);
     // NEW CODE, and it SPLIT the NT1009 bucket rather than adding to it. NT1030 is the
     // forward-reference / recursive-type refusal: `resolveNamed` used to return `number`
     // for a type name declared later in the same file, silently. ast.ts owns it (all 29
@@ -456,7 +475,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT1015 is empty — the generic-method lane cleared modules.ts's, and codegen.ts's
     // static-member site was cleared earlier. (A fact about today; this file has been
     // wrong three times treating an emptied bucket as an invariant.)
-    expect(byCode["NT1015"]).toBeUndefined();
+    // ...and it refilled with a THIRD kind of class member: `//@@mutable` on `ModuleGen`
+    // cleared codegen.ts's NT1023, and behind it is a `get` accessor in `FnGen` — neither
+    // the static member nor the generic method this bucket held before.
+    expect(byCode["NT1015"]!.sort()).toEqual(["codegen.ts"]);
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
     // the fresh-receiver lane) -> NT1006 (`Math.max(...)`, cleared by the variadic lane) ->
     // back to NT1606, this time a `.push` on a NAMED accumulator. That last shape is
