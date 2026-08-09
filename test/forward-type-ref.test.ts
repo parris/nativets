@@ -360,4 +360,34 @@ const e: Expr = { kind: "Negate", operand: inner };
 console.log(show(e));
 console.log(e.kind);`);
   });
+
+  /*
+   * A component is encoded ALL OR NOTHING — a back-edge is minted only where it resolves, so
+   * one member nativets cannot represent takes the whole cycle down with it. That is sound
+   * and it is also a MEASUREMENT HAZARD: forty-four correct declarations then report as
+   * plain recursion and the real blocker is invisible behind the refusal in front of it.
+   *
+   * This is not hypothetical — it is exactly what src/ast.ts does today. 41 of its 45
+   * cycle members encode; the four that do not are general unions the subset has no
+   * representation for (`ArrowFunction.body: Expr | Stmt[]`, an array arm next to a
+   * discriminated-union arm). The MESSAGE stays the recursion refusal, deliberately: it is
+   * what `test/selfhost-ratchet.baseline.json` records as this module's blocker identity,
+   * and no blocker moved. The HINT is where the truth goes.
+   */
+  test("a cycle abandoned for one member's own refusal says so, naming that refusal", () => {
+    const r = reject(`
+interface Leaf { kind: "Leaf"; v: number; }
+interface Wrap { kind: "Wrap"; inner: Tree; }
+interface Odd  { kind: "Odd"; body: Tree | number[]; }
+type Tree = Leaf | Wrap | Odd;
+const t: Tree = { kind: "Leaf", v: 1 };
+console.log(t.kind);`);
+    expect(r.code).toBe("NT1030");
+    // The message is the recursion refusal, unchanged — blocker identity does not move.
+    expect(r.message).toContain("recursive type");
+    // The hint names the member that actually stopped it, and its own code.
+    expect(r.hint).toContain("the recursion itself is not what stopped this file");
+    expect(r.hint).toContain("'Odd'");
+    expect(r.hint).toContain("NT1009");
+  });
 });

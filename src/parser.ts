@@ -115,6 +115,9 @@ function isOptChainTarget(e: Expr): boolean {
  * catalog's shared NT1030 hint, which tells you to reorder: reordering fixes a forward
  * reference and cannot fix a cycle.
  */
+/** Truncate for a diagnostic: a type dump is unbounded and a hint has to stay readable. */
+function clip(s: string, n: number): string { return s.length <= n ? s : `${s.slice(0, n)}…`; }
+
 const RECURSIVE_TYPE_HINT =
   "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. " +
   "Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md";
@@ -197,6 +200,20 @@ class Parser {
    * the table cannot resolve is never minted (see `resolveCycle`).
    */
   private cycleNames = new Set<string>();
+  /**
+   * Why the SCC round gave a component back, when it did — the members that never settled
+   * and the reason each one stalled.
+   *
+   * A component is ALL OR NOTHING (see `resolveCycle`), so one member nativets cannot
+   * represent takes the other forty-four down with it and every one of them is reported as
+   * plain recursion. That is true but useless: the recursion is solved, and the thing that
+   * actually blocks the file is the member's own refusal. This carries it into the HINT, so
+   * the real blocker is never masked by the refusal in front of it. Deliberately the hint
+   * and not the message: the message is what `test/selfhost-ratchet.baseline.json` records
+   * as a blocker's identity, and this changes no blocker.
+   */
+  private cycleStall = "";
+  private cycleStallSize: { total: number; left: number } | undefined;
   /** The type name `resolveNamed` last refused on. Read by `hoistTypeDecls` off a
    *  sub-parser to build the dependency edge it needs to tell a cycle from a chain. */
   private blockedOn: string | undefined;
@@ -428,6 +445,20 @@ class Parser {
    * `@Name` the table cannot resolve is a dangling reference, and this file's rule is that
    * a `@Name` is minted only where it resolves.
    */
+  /**
+   * The sentence that stops a big component's ONE unrepresentable member from hiding behind
+   * forty-four recursion refusals. Empty (so the hint is byte-identical to before) unless
+   * the SCC round actually gave a component back.
+   */
+  private cycleStallHint(): string {
+    if (!this.cycleStall) return "";
+    const n = this.cycleStallSize;
+    const scale = n ? `${n.total - n.left} of the ${n.total} declarations in this cycle were encoded; ` : "";
+    return `. NOTE — the recursion itself is not what stopped this file: ${scale}` +
+      `what is left is not recursion but ${this.cycleStall}. ` +
+      `A cycle is encoded all-or-nothing (a back-edge is only minted where it resolves), so fixing that is what unblocks the rest`;
+  }
+
   private resolveCycle(names: string[]): void {
     if (!names.length) return;
     for (const n of names) this.cycleNames.add(n);
@@ -436,6 +467,7 @@ class Parser {
     let pending = names;
     while (pending.length) {
       const deferred: string[] = [];
+      const why = new Map<string, string>(); // residual member -> the error it stalled with
       for (const name of pending) {
         const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
         sub.pos = this.typeDeclStarts.get(name)!;
@@ -444,8 +476,9 @@ class Parser {
         sub.recTypes = this.recTypes; // shared: an earlier round's shapes are what unions expand through
         try {
           sub.parseStatement();
-        } catch {
+        } catch (e) {
           deferred.push(name); // may only need a member that has not settled yet
+          why.set(name, String((e as { message?: string }).message ?? e).split("\n")[0]!);
           continue;
         }
         const ty = sub.typeAliases.get(name);
@@ -454,7 +487,19 @@ class Parser {
       }
       if (deferred.length === 0) break;
       if (deferred.length === pending.length) {
-        // Stalled with members left: abandon the component whole (see the note above).
+        // Stalled with members left: abandon the component whole (see the note above), and
+        // carry WHY out with it — `cycleStall` explains why this paragraph is not the end
+        // of the story for a big component.
+        // A SAMPLE, not the whole list. The residuals entangle — a union stalls because a
+        // member it selects over stalled — so every one of them restates the others, and
+        // ast.ts's four together run to 2 KB of type dump. Shortest reason first: it is the
+        // least entangled, and therefore the one worth reading.
+        const sample = [...deferred]
+          .sort((a, b) => (why.get(a) ?? "").length - (why.get(b) ?? "").length)
+          .slice(0, 2)
+          .map((n) => `'${n}': ${clip(why.get(n) ?? "no shape was produced", 160)}`);
+        this.cycleStall = sample.join("; ") + (deferred.length > sample.length ? ` (and ${deferred.length - sample.length} more that select over them)` : "");
+        this.cycleStallSize = { total: names.length, left: deferred.length };
         for (const n of names) this.cycleNames.delete(n);
         this.recTypes.clear();
         for (const [n, s] of recBefore) this.recTypes.set(n, s);
@@ -542,9 +587,8 @@ class Parser {
       // recursive type would be the same kind of misdirection this diagnostic exists to
       // end, so each carries its own hint rather than the catalog's shared one.
       // SELF-recursion never reaches here — it is the back-edge, handled at the top of this
-      // function. What is left is a MUTUAL cycle, still refused: resolving one member needs
-      // the others' shapes, which do not exist yet. That is Lane C, and until it lands the
-      // two cases must stay told apart.
+      // function. So does a MUTUAL cycle whose members `resolveCycle` could encode. What is
+      // left is a cycle the SCC round gave back, and `cycleStall` says why.
       const through = this.cyclicTypes.get(id);
       if (through !== undefined) {
         throw nyi(
@@ -552,7 +596,7 @@ class Parser {
           through === id
             ? `recursive type '${id}' — it refers to itself (declared at line ${declaredAt})`
             : `recursive type '${id}' — it contains itself through '${through}' (declared at line ${declaredAt})`,
-          RECURSIVE_TYPE_HINT,
+          RECURSIVE_TYPE_HINT + this.cycleStallHint(),
         );
       }
       // Not a cycle, so it is genuinely unresolved: either a declaration this file rejects
