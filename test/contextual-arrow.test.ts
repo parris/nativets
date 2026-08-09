@@ -35,8 +35,6 @@ import { compileAndRun, runWithNode } from "./harness.ts";
 
 const SRC_DIR = new URL("../src/", import.meta.url);
 
-function parseProgram(source: string): Program { return parse(source); }
-
 /** The first `ArrowFunction` in the program, by a shape-blind walk. */
 function findArrow(prog: Program): ArrowFunction {
   let found: ArrowFunction | undefined;
@@ -197,7 +195,7 @@ describe("ArrowFunction's body/stmts split — the lint that makes a missed site
   });
 
   test("the parser puts a block arrow's statements in `stmts` and leaves `body` absent", () => {
-    const prog = parseProgram("const f = (n: number) => { return n + 1; };\nconsole.log(f(1));\n");
+    const prog = parse("const f = (n: number) => { return n + 1; };\nconsole.log(f(1));\n");
     const arrow = findArrow(prog);
     expect(arrow.exprBody).toBe(false);
     expect(arrow.body).toBeUndefined();
@@ -205,7 +203,7 @@ describe("ArrowFunction's body/stmts split — the lint that makes a missed site
   });
 
   test("...and an expression arrow is the mirror image", () => {
-    const prog = parseProgram("const f = (n: number) => n + 1;\nconsole.log(f(1));\n");
+    const prog = parse("const f = (n: number) => n + 1;\nconsole.log(f(1));\n");
     const arrow = findArrow(prog);
     expect(arrow.exprBody).toBe(true);
     expect(arrow.stmts).toBeUndefined();
