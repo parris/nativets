@@ -296,6 +296,7 @@ const GLOBAL_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("__pvNodes", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: live persistent-vector nodes
   .set("__pvAllocs", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: cumulative pvec node allocs
   .set("__strLive", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: live heap-string count
+  .set("__strScanned", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: bytes walked by strlen for .length/s[i]
   .set("__pvTransients", { min: 0, max: 0, argTys: [], ret: "number" }) // debug: in-place (rc==1) appends
   // Host I/O FFI (stdin): the node oracle gets these via a harness polyfill prelude.
   .set("readLine", { min: 0, max: 0, argTys: [], ret: "string" })  // next stdin line (no newline), "" at EOF

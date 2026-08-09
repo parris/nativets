@@ -537,6 +537,11 @@ class ModuleGen {
   /** Set when a frame lowered an UNCAUGHT `throw`. Declared conditionally, exactly like
    *  the actor surface: a program with no uncaught throw emits byte-identical IR. */
   usesUncaughtThrow = false;
+
+  /** Set when the program calls `__strScanned()`, the debug counter for bytes walked by
+   *  `strlen` answering a length query. Declared conditionally for the same reason as the
+   *  two above: every program that does NOT use it emits byte-identical IR. */
+  usesStrScanned = false;
   constructor(readonly functions: Map<string, Sig>, readonly globals: Map<string, Ty> = new Map()) {}
 
   /** `@nt.g.<name>` — the storage symbol of a promoted module-level binding. */
@@ -673,6 +678,7 @@ class ModuleGen {
       // else in the emitted IR ever raises (the runtime raises internally), so this one is
       // declared only where it is used.
       ...(this.usesUncaughtThrow ? ["declare void @nt_exc_raise_msg(ptr)"] : []),
+      ...(this.usesStrScanned ? ["declare double @nt_str_scanned()"] : []),
       "",
       ...this.strDefs,
       this.strDefs.length ? "" : null,
@@ -5188,6 +5194,7 @@ class FnGen {
       case "__pvNodes": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_nodes()`); return { v: t, ty: "number" }; }
       case "__pvAllocs": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_node_allocs()`); return { v: t, ty: "number" }; }
       case "__strLive": { const t = this.fresh(); this.emit(`${t} = call double @nt_str_live()`); return { v: t, ty: "number" }; }
+      case "__strScanned": { this.mod.usesStrScanned = true; const t = this.fresh(); this.emit(`${t} = call double @nt_str_scanned()`); return { v: t, ty: "number" }; }
       case "__pvTransients": { const t = this.fresh(); this.emit(`${t} = call double @nt_arr_transients()`); return { v: t, ty: "number" }; }
       // Networking tier (L-d): HTTP(S) client → {status:number, body:string}.
       case "httpGet": return this.genHttp("nt_http_get", args, false);

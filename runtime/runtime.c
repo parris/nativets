@@ -79,7 +79,12 @@ void (*nt_rt_lock)(int acquire) = 0;
 #define NT_RC_LOCK()   do { if (nt_rt_lock) nt_rt_lock(1); } while (0)
 #define NT_RC_UNLOCK() do { if (nt_rt_lock) nt_rt_lock(0); } while (0)
 
-typedef struct { void *key; long rc; } NtStrEnt;
+/* `len` is the string's BYTE length, memoized: -1 until something asks. Lazy, not
+ * eager, because `alloc_str` REGISTERS the buffer before the producer fills it —
+ * measuring at registration would read uninitialized bytes — and because a string is
+ * immutable once built, so the first answer is the only answer. Re-registering an
+ * address (malloc reuse) resets it to -1. See nt_strlen below. */
+typedef struct { void *key; long rc; long len; } NtStrEnt;
 static NtStrEnt *g_str_tab = NULL;
 static size_t g_str_cap = 0;    /* power of two, or 0 when unallocated */
 static size_t g_str_count = 0;  /* number of live entries */
@@ -106,7 +111,7 @@ static void str_tab_grow(void) {
   NtStrEnt *old = g_str_tab;
   g_str_cap = g_str_cap ? g_str_cap * 2 : 64;
   g_str_tab = (NtStrEnt *)nativets_alloc(g_str_cap * sizeof(NtStrEnt));
-  for (size_t i = 0; i < g_str_cap; i++) { g_str_tab[i].key = NULL; g_str_tab[i].rc = 0; }
+  for (size_t i = 0; i < g_str_cap; i++) { g_str_tab[i].key = NULL; g_str_tab[i].rc = 0; g_str_tab[i].len = -1; }
   g_str_count = 0;
   for (size_t i = 0; i < old_cap; i++) {
     if (old[i].key) { size_t j = str_tab_slot(old[i].key); g_str_tab[j] = old[i]; g_str_count++; }
@@ -118,7 +123,7 @@ static void str_tab_grow(void) {
 static void str_tab_remove_at(size_t i) {
   size_t mask = g_str_cap - 1;
   for (;;) {
-    g_str_tab[i].key = NULL; g_str_tab[i].rc = 0;
+    g_str_tab[i].key = NULL; g_str_tab[i].rc = 0; g_str_tab[i].len = -1;
     size_t j = i;
     for (;;) {
       j = (j + 1) & mask;
@@ -140,6 +145,7 @@ void nt_str_register(void *p) {
   size_t i = str_tab_slot(p);
   if (g_str_tab[i].key == NULL) { g_str_tab[i].key = p; g_str_count++; }
   g_str_tab[i].rc = 1; /* a reused (previously-freed) address starts fresh */
+  g_str_tab[i].len = -1; /* ...and so does its memoized length */
   g_str_allocs++;
   NT_RC_UNLOCK();
 }
@@ -176,6 +182,100 @@ void nt_str_release(void *p) {
 
 /* Live heap-string count (registered - freed), for leak tests (cf. nt_arr_live). */
 double nt_str_live(void) { return (double)(g_str_allocs - g_str_frees); }
+
+/* ============================================================
+ * nt_strlen — the ONE place a string's byte length comes from.
+ *
+ * WHY THIS EXISTS. A nativets string is a bare NUL-terminated `char *`, so every
+ * `.length`, every `s[i]`, every `slice`/`startsWith`/`indexOf` used to call
+ * `strlen` and walk the whole string. The idiom every scanner in this compiler is
+ * written in —
+ *
+ *     while (i < s.length) { const c = s[i]!; … }
+ *
+ * — is therefore TWO full walks per character, i.e. O(n^2) in the input. Measured on
+ * the compiled `src/lexer.ts`: 348 KB of source took 10.2 s (bun: 0.03 s), fitted
+ * exponent 1.98, and `sample` put 100% of the profile in `_platform_strlen`.
+ *
+ * WHY NOT A LENGTH HEADER. The obvious fix — store the length in a header before the
+ * bytes — cannot be applied uniformly, because a string LITERAL is an `@.str` global
+ * in rodata with no header and no way to grow one. The runtime cannot tell a literal
+ * from a heap string without consulting the RC side table... at which point the table
+ * can just hold the length itself. So: no header, no representation change, no new
+ * cost at the FFI boundary (a nativets string is still exactly a `const char *` that
+ * `printf`/`open`/`strcmp` accept), no codegen change. +8 bytes per live heap string.
+ *
+ * Literals still pay one `strlen` per query — they are compile-time constants, short,
+ * and never the 348 KB scannee (a file read from disk is a heap string, registered).
+ *
+ * `.length` STILL COUNTS UTF-8 BYTES. This is a pure caching change: the number
+ * returned is the same number `strlen` returned, so docs/divergences.md §A.2 (we
+ * count bytes; node counts UTF-16 code units) is untouched.
+ * ============================================================ */
+
+/* Bytes actually walked by `strlen` while answering a length query — the
+ * deterministic instrument for this whole change, exposed as `__strScanned()`.
+ * A program that scans an n-byte string once reads ~n^2 when every query walks and
+ * ~n when the length is remembered. Debug-only, like g_str_allocs. */
+static double g_str_scanned = 0;
+double nt_str_scanned(void) { return g_str_scanned; }
+
+size_t nt_strlen(const char *s) {
+  if (!s) return 0;
+  NT_RC_LOCK();
+  if (g_str_cap != 0) {
+    size_t i = str_tab_slot((void *)s);
+    if (g_str_tab[i].key == s) {                 /* a tracked heap string */
+      if (g_str_tab[i].len < 0) {
+        size_t n = strlen(s);
+        g_str_scanned += (double)n;
+        g_str_tab[i].len = (long)n;
+      }
+      size_t r = (size_t)g_str_tab[i].len;
+      NT_RC_UNLOCK();
+      return r;
+    }
+  }
+  /* Literal / untracked: walk it. Outside the lock deliberately — a long literal
+   * would otherwise serialize every scheduler thread — so `g_str_scanned` can lose an
+   * addend under M:N. It is a debug counter; the LENGTH is exact either way. */
+  NT_RC_UNLOCK();
+  { size_t n = strlen(s); g_str_scanned += (double)n; return n; }
+}
+
+/* ------------------------------------------------------------
+ * Interned one-byte strings.
+ *
+ * `s[i]` used to `alloc_str(1)` — a fresh malloc + a fresh RC-table entry PER
+ * CHARACTER. Measured at ~204 bytes retained per loop-local string temp and
+ * 226-263 bytes of RSS per source character; invisible to `__objLive`, `__arrLive`,
+ * `leaks` and LeakSanitizer alike, because those temps are REACHABLE from the RC
+ * table until released.
+ *
+ * There are only 256 possible one-byte strings, so they are statics. Being
+ * untracked they behave EXACTLY like string literals — `nt_str_retain` and
+ * `nt_str_release` are already no-ops for any pointer not in the table, which is the
+ * path literals have always taken — and they are never freed and never allocated.
+ *
+ * Laid out as one flat 512-byte constant (byte b at offset 2*b, its NUL at 2*b+1) so
+ * it needs no initializer function: still libc-only, still valid on wasm/Windows/
+ * Android, still zero startup cost. Index 0 is the interned EMPTY string.
+ * ------------------------------------------------------------ */
+#define NT_C1(i)  (char)(i), 0,
+#define NT_C4(i)  NT_C1(i) NT_C1((i) + 1) NT_C1((i) + 2) NT_C1((i) + 3)
+#define NT_C16(i) NT_C4(i) NT_C4((i) + 4) NT_C4((i) + 8) NT_C4((i) + 12)
+#define NT_C64(i) NT_C16(i) NT_C16((i) + 16) NT_C16((i) + 32) NT_C16((i) + 48)
+static const char g_ch1[512] = { NT_C64(0) NT_C64(64) NT_C64(128) NT_C64(192) };
+#undef NT_C64
+#undef NT_C16
+#undef NT_C4
+#undef NT_C1
+
+/* The interned string for one byte. `b == 0` is the empty string, which is what the
+ * out-of-range / empty-result producers want anyway. */
+static const char *nt_ch1(unsigned char b) { return &g_ch1[(size_t)b * 2]; }
+/* The interned empty string — replaces every `alloc_str(0)`. */
+static const char *nt_empty_str(void) { return &g_ch1[0]; }
 
 /* ============================================================
  * number -> string: ECMAScript §6.1.6.1.20, `Number::toString(x, 10)`.
@@ -470,7 +570,7 @@ refuse:
 /* ---- string operations ---- */
 
 const char *js_str_concat(const char *a, const char *b) {
-  size_t la = strlen(a), lb = strlen(b);
+  size_t la = nt_strlen(a), lb = nt_strlen(b);
   char *out = (char *)nativets_alloc(la + lb + 1);
   memcpy(out, a, la);
   memcpy(out + la, b, lb);
@@ -479,7 +579,7 @@ const char *js_str_concat(const char *a, const char *b) {
   return out;
 }
 
-double js_str_len(const char *s) { return (double)strlen(s); }
+double js_str_len(const char *s) { return (double)nt_strlen(s); }
 
 int32_t js_str_eq(const char *a, const char *b) { return strcmp(a, b) == 0 ? 1 : 0; }
 
@@ -592,30 +692,30 @@ double js_parse_float(const char *s) {
 static char *alloc_str(size_t n) { char *p = (char *)nativets_alloc(n + 1); nt_str_register(p); return p; }
 
 const char *js_str_upper(const char *s) {
-  size_t n = strlen(s); char *o = alloc_str(n);
+  size_t n = nt_strlen(s); char *o = alloc_str(n);
   for (size_t i = 0; i < n; i++) o[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
   o[n] = 0; return o;
 }
 const char *js_str_lower(const char *s) {
-  size_t n = strlen(s); char *o = alloc_str(n);
+  size_t n = nt_strlen(s); char *o = alloc_str(n);
   for (size_t i = 0; i < n; i++) o[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i];
   o[n] = 0; return o;
 }
 const char *js_str_char_at(const char *s, double id) {
-  long n = (long)strlen(s); long i = (long)id;
-  if (i < 0 || i >= n) { char *o = alloc_str(0); o[0] = 0; return o; }
-  char *o = alloc_str(1); o[0] = s[i]; o[1] = 0; return o;
+  long n = (long)nt_strlen(s); long i = (long)id;
+  if (i < 0 || i >= n) return nt_empty_str();
+  return nt_ch1((unsigned char)s[i]);
 }
 /* `s[i]` as WRITTEN — out of range PANICS. `.charAt(i)` above keeps node's semantics
  * (it is DEFINED to return "" out of range, so it is not a defect) and `.at(i)` returns
  * `string | undefined`; only the bracket index, whose node value is `undefined`, panics. */
 const char *nt_str_index(const char *s, double id, const char *loc) {
-  long n = (long)strlen(s); long i = (long)id;
+  long n = (long)nt_strlen(s); long i = (long)id;
   if (!(id == id) || i < 0 || i >= n) nt_panic_bounds("string index", (double)n, id, loc);
-  char *o = alloc_str(1); o[0] = s[i]; o[1] = 0; return o;
+  return nt_ch1((unsigned char)s[i]);
 }
 static const char *slice_impl(const char *s, double startd, double endd, int clampNeg) {
-  long n = (long)strlen(s);
+  long n = (long)nt_strlen(s);
   long start = isinf(startd) ? (startd < 0 ? 0 : n) : (long)startd;
   long end = isinf(endd) ? (endd < 0 ? 0 : n) : (long)endd;
   if (clampNeg) { if (start < 0) start += n; if (end < 0) end += n; }
@@ -690,7 +790,7 @@ static const char *nt_ws_skip_back(const char *start, const char *end) {
   return (const char *)p;
 }
 static const char *nt_trim_impl(const char *s, int front, int back) {
-  const char *end = s + strlen(s);
+  const char *end = s + nt_strlen(s);
   const char *start = front ? nt_ws_skip_fwd(s, end) : s;
   if (back) end = nt_ws_skip_back(start, end);
   long len = end - start; char *o = alloc_str((size_t)len); memcpy(o, start, (size_t)len); o[len] = 0; return o;
@@ -700,12 +800,12 @@ const char *js_str_trim_end(const char *s)   { return nt_trim_impl(s, 0, 1); }
 const char *js_str_trim_start(const char *s) { return nt_trim_impl(s, 1, 0); }
 const char *js_str_repeat(const char *s, double countd) {
   long count = (long)countd; if (count < 0) count = 0;
-  size_t n = strlen(s); char *o = alloc_str(n * (size_t)count);
+  size_t n = nt_strlen(s); char *o = alloc_str(n * (size_t)count);
   for (long i = 0; i < count; i++) memcpy(o + i * n, s, n);
   o[n * count] = 0; return o;
 }
 const char *js_str_pad_start(const char *s, double targetd, const char *pad) {
-  long target = (long)targetd; long n = (long)strlen(s); size_t pn = strlen(pad);
+  long target = (long)targetd; long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
   if (n >= target || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, n); o[n] = 0; return o; }
   long padlen = target - n; char *o = alloc_str((size_t)target);
   for (long i = 0; i < padlen; i++) o[i] = pad[i % pn];
@@ -723,7 +823,7 @@ double js_str_index_of(const char *s, const char *sub) {
  * declaration and every `.ll` it appears in stay byte-identical.
  * Byte indices, like every other string index here (docs/divergences.md A.2). */
 double js_str_index_of_from(const char *s, const char *sub, double fromd) {
-  size_t n = strlen(s);
+  size_t n = nt_strlen(s);
   size_t start;
   if (isnan(fromd) || fromd <= 0.0) start = 0;
   else if (fromd >= (double)n) start = n;
@@ -1050,9 +1150,9 @@ double nt_obj_live(void) { return (double)(NT_STAT_GET(g_obj_allocs) - NT_STAT_G
 
 NtArray *nt_str_split(const char *s, const char *sep) {
   NtArray *a = nt_arr_new(4);
-  size_t seplen = strlen(sep);
-  if (seplen == 0) { /* split into characters */
-    for (size_t i = 0; s[i]; i++) { char *c = alloc_str(1); c[0] = s[i]; c[1] = 0; nt_arr_push(a, (int64_t)(intptr_t)c); }
+  size_t seplen = nt_strlen(sep);
+  if (seplen == 0) { /* split into characters — the interned one-byte strings */
+    for (size_t i = 0; s[i]; i++) nt_arr_push(a, (int64_t)(intptr_t)nt_ch1((unsigned char)s[i]));
     return a;
   }
   const char *start = s, *p;
@@ -1625,7 +1725,7 @@ const char *nt_read_stdin(void) {
 
 const char *nt_read_line(void) {
   stdin_load();
-  if (g_stdin_pos >= g_stdin_len) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  if (g_stdin_pos >= g_stdin_len) return nt_empty_str();
   size_t start = g_stdin_pos, i = start;
   while (i < g_stdin_len && g_stdin[i] != '\n') i++;
   size_t len = i - start;
@@ -1682,16 +1782,14 @@ const char *nt_read_key(void) {
     /* Live terminal: one un-buffered byte straight from fd 0. */
     unsigned char c;
     ssize_t n = read(STDIN_FILENO, &c, 1);
-    if (n <= 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
-    char *o = alloc_str(1); o[0] = (char)c; o[1] = '\0'; return o;
+    if (n <= 0) return nt_empty_str();
+    return nt_ch1(c);
   }
 #endif
   /* Piped (not a tty) or Windows: one byte from the shared slurp buffer + cursor. */
   stdin_load();
-  if (g_stdin_pos >= g_stdin_len) { char *o = alloc_str(0); o[0] = '\0'; return o; }
-  char *o = alloc_str(1); o[0] = g_stdin[g_stdin_pos]; o[1] = '\0';
-  g_stdin_pos++;
-  return o;
+  if (g_stdin_pos >= g_stdin_len) return nt_empty_str();
+  { const char *r = nt_ch1((unsigned char)g_stdin[g_stdin_pos]); g_stdin_pos++; return r; }
 }
 
 /* ============================================================
@@ -2006,7 +2104,7 @@ const char *nt_path_basename(const char *path) {
     if (path[i] == '/') { if (!matchedSlash) { start = i + 1; break; } }
     else if (end == -1) { matchedSlash = 0; end = i + 1; }
   }
-  if (end == -1) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  if (end == -1) return nt_empty_str();
   size_t len = (size_t)(end - start);
   char *o = alloc_str(len);
   memcpy(o, path + start, len); o[len] = '\0';
@@ -2056,10 +2154,10 @@ const char *nt_path_resolve(const char *a, const char *b) {
 /* path.relative(from, to) — both resolved to absolute first, then the longest
  * common SEGMENT prefix decides how many `..` steps precede the remainder. */
 const char *nt_path_relative(const char *from_in, const char *to_in) {
-  if (strcmp(from_in, to_in) == 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  if (strcmp(from_in, to_in) == 0) return nt_empty_str();
   const char *from = nt_path_resolve(from_in, NULL);
   const char *to = nt_path_resolve(to_in, NULL);
-  if (strcmp(from, to) == 0) { char *o = alloc_str(0); o[0] = '\0'; return o; }
+  if (strcmp(from, to) == 0) return nt_empty_str();
 
   size_t fromStart = 1, fromEnd = strlen(from);
   size_t fromLen = fromEnd - fromStart;
@@ -2341,7 +2439,7 @@ const char *nt_host_spawn(const char *cmd, NtArray *args, double *status_out, co
   (void)cmd; (void)args;
   *status_out = -1.0;
   *stderr_out = "spawnSync is not available on this platform";
-  char *o = alloc_str(0); o[0] = '\0'; return o;
+  return nt_empty_str();
 }
 void nt_host_spawn_inherit(const char *cmd, NtArray *args, double *status_out) {
   (void)cmd; (void)args;
@@ -2477,7 +2575,7 @@ int32_t nt_num_is_safe_integer(double x) {
  * generic slot-vector directly via nt_arr_new/nt_arr_push. ---- */
 void *nt_arr_from_str(const char *s) {
   void *a = nt_arr_new(1);
-  size_t i = 0, n = strlen(s);
+  size_t i = 0, n = nt_strlen(s);
   while (i < n) {
     unsigned char c = (unsigned char)s[i];
     size_t len = 1;
@@ -2583,7 +2681,7 @@ static NtUrl url_parse(const char *u) {
   return r;
 }
 
-static const char *url_empty(void) { char *o = alloc_str(0); o[0] = 0; return o; }
+static const char *url_empty(void) { return nt_empty_str(); }
 static const char *url_dup(const char *s) {
   size_t n = strlen(s); char *o = alloc_str(n); memcpy(o, s, n); o[n] = 0; return o;
 }
@@ -2695,7 +2793,7 @@ static const char *url_form_decode(const char *s, size_t n) {
 /* String#charCodeAt(i) — the BYTE at index i (ASCII-identical to node's UTF-16
  * code unit); NaN when out of range, exactly like node. */
 double js_str_char_code_at(const char *s, double id) {
-  long n = (long)strlen(s);
+  long n = (long)nt_strlen(s);
   if (isnan(id)) id = 0;
   long i = (long)id;
   if (i < 0 || i >= n) return NAN;
@@ -2707,7 +2805,7 @@ double js_str_char_code_at(const char *s, double id) {
  * out-of-range sentinel, which codegen turns into node's `undefined`
  * (a code point is never NaN, so the sentinel is unambiguous). */
 double js_str_code_point_at(const char *s, double id) {
-  long n = (long)strlen(s);
+  long n = (long)nt_strlen(s);
   if (isnan(id)) id = 0;
   long i = (long)id;
   if (i < 0 || i >= n) return NAN;
@@ -2723,19 +2821,19 @@ double js_str_code_point_at(const char *s, double id) {
 /* String#at(i) — one BYTE as a string, negative indices count from the end;
  * NULL is the out-of-range sentinel that codegen turns into `undefined`. */
 const char *js_str_at(const char *s, double id) {
-  long n = (long)strlen(s);
+  long n = (long)nt_strlen(s);
   if (isnan(id)) id = 0;
   long i = (long)id;
   if (i < 0) i += n;
   if (i < 0 || i >= n) return NULL;
-  char *o = alloc_str(1); o[0] = s[i]; o[1] = 0; return o;
+  return nt_ch1((unsigned char)s[i]);
 }
 
 /* String#padEnd(target, pad) — pad on the right, truncating the final pad
  * repetition, and a no-op when the string is already long enough or the pad is
  * empty (node's semantics exactly). */
 const char *js_str_pad_end(const char *s, double targetd, const char *pad) {
-  long target = (long)targetd; long n = (long)strlen(s); size_t pn = strlen(pad);
+  long target = (long)targetd; long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
   if (n >= target || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, (size_t)n); o[n] = 0; return o; }
   char *o = alloc_str((size_t)target);
   memcpy(o, s, (size_t)n);
@@ -2746,14 +2844,14 @@ const char *js_str_pad_end(const char *s, double targetd, const char *pad) {
 /* String#startsWith(search, pos) / String#endsWith(search, endPos). `pos` is
  * NaN when omitted: startsWith defaults to 0, endsWith to the length. */
 int32_t js_str_starts_with(const char *s, const char *sub, double posd) {
-  long n = (long)strlen(s), m = (long)strlen(sub);
+  long n = (long)nt_strlen(s), m = (long)nt_strlen(sub);
   long pos = isnan(posd) ? 0 : (long)posd;
   if (pos < 0) pos = 0;
   if (pos > n || pos + m > n) return 0;
   return memcmp(s + pos, sub, (size_t)m) == 0 ? 1 : 0;
 }
 int32_t js_str_ends_with(const char *s, const char *sub, double endd) {
-  long n = (long)strlen(s), m = (long)strlen(sub);
+  long n = (long)nt_strlen(s), m = (long)nt_strlen(sub);
   long end = isnan(endd) ? n : (long)endd;
   if (end > n) end = n;
   if (end < 0) end = 0;
@@ -2770,7 +2868,7 @@ static const char *sb_finish_rc(SB *s) { s->buf[s->len] = 0; nt_str_register(s->
  * `$$` -> "$", `$&` -> the match, "$`" -> prefix, `$'` -> suffix; anything else
  * is literal, exactly like node. */
 static void sb_add_replacement(SB *b, const char *rep, const char *s, size_t mstart, size_t mlen) {
-  size_t n = strlen(s);
+  size_t n = nt_strlen(s);
   for (size_t i = 0; rep[i];) {
     if (rep[i] == '$' && rep[i + 1]) {
       char c = rep[i + 1];
@@ -2787,7 +2885,7 @@ static void sb_add_replacement(SB *b, const char *rep, const char *s, size_t mst
  * literals are rejected by the frontend). `all` = 0 replaces the first match
  * only. An empty pattern matches at every position, like node. */
 const char *js_str_replace(const char *s, const char *pat, const char *rep, int32_t all) {
-  size_t n = strlen(s), m = strlen(pat);
+  size_t n = nt_strlen(s), m = nt_strlen(pat);
   SB b; sb_init(&b);
   size_t i = 0; int done = 0;
   while (i <= n) {
@@ -2808,7 +2906,7 @@ const char *js_str_replace(const char *s, const char *pat, const char *rep, int3
 /* String#lastIndexOf(sub) — last match position, -1 when absent; an empty
  * needle matches at the end (node: "abc".lastIndexOf("") === 3). */
 double js_str_last_index_of(const char *s, const char *sub) {
-  size_t n = strlen(s), m = strlen(sub);
+  size_t n = nt_strlen(s), m = nt_strlen(sub);
   if (m == 0) return (double)n;
   if (m > n) return -1.0;
   for (size_t i = n - m + 1; i-- > 0;) if (memcmp(s + i, sub, m) == 0) return (double)i;
