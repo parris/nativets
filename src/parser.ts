@@ -760,7 +760,21 @@ class Parser {
    * "you wrote a union of records but I cannot tell them apart" is a different and
    * far more actionable message than "general union".
    */
-  private discriminatedUnion(arms: Ty[]): Ty | null {
+  private discriminatedUnion(rawArms: Ty[]): Ty | null {
+    // THE UNION-MEMBER RULE (Lane C). A member may not be a bare `@Name`. There is no box
+    // (SH2): a union value IS the member's object block, and `unionDiscriminant` proves the
+    // tag sits at the SAME slot index in every member — which needs each member's SHAPE.
+    // So a reference is expanded ONE LEVEL at the member boundary and only references BELOW
+    // it are left folded:
+    //     U<{kind:"Negate",operand:@Expr}|…>     not   U<@Negate|…>
+    // The expansion is one level, not transitive, so it stays finite even when the member's
+    // own fields point back at this very union.
+    //
+    // MEASURED, not argued: `objectFields("@N")` returns `[]`, so `unionDiscriminant` on
+    // `U<@A|@B>` returns undefined and the union is REFUSED (NT1009) rather than silently
+    // built with a phantom tag. Getting this rule wrong costs a refusal, never a
+    // miscompile — see test/forward-type-ref.test.ts.
+    const arms = rawArms.map((a) => expandTypeRef(a, this.recTypes));
     if (!arms.every((a) => isObjectTy(a) && classTag(a) === undefined)) return null;
     const members = [...new Set(arms)];
     const shown = members.map(widenLiteralTys).join(" | ");
@@ -1125,7 +1139,10 @@ class Parser {
    */
   private recordTypeDecl(name: string, shape: Ty, recursive: boolean): Ty {
     if (!recursive) return shape;
-    if (!isObjectTy(shape)) {
+    // A DISCRIMINATED UNION is also a legal carrier, and it is the one src/ast.ts's `Expr`
+    // needs. It qualifies for exactly the reason an object does: there is no box, so a
+    // `U<…>` value IS the member's object block and the reference has a pointer to be.
+    if (!isObjectTy(shape) && !isUnionTy(shape)) {
       throw nyi(
         NYI.FORWARD_TYPE,
         `recursive type '${name}' — it refers to itself, and its shape is not an object type (${shape})`,

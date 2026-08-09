@@ -327,4 +327,37 @@ const a: A = { n: 1 };
 console.log(a.n);
 console.log(a.b);`);
   });
+
+  /*
+   * Gate (b) — the shape that actually gates src/ast.ts: a DISCRIMINATED UNION whose member
+   * recurses back through the union. `type Expr = … | Negate`, `interface Negate { operand:
+   * Expr }`. `test/unions/ast-shape.ts` had to hold children as arena INDICES to write this
+   * at all, and said so as a measurement.
+   *
+   * THE UNION-MEMBER RULE. A union member may NOT be a bare `@Name`: the representation has
+   * no box (SH2), so `unionDiscriminant` needs each member's SHAPE to prove the tag sits at
+   * the same slot index in every one. So the encoding expands ONE LEVEL at the member
+   * boundary and references only BELOW it —
+   *     U<{kind:"Negate",operand:@Expr}|…>     not   U<@Negate|…>
+   * — which stays finite because the expansion is one level, not transitive.
+   */
+  test("a discriminated union whose member recurses through the union narrows correctly", async () => {
+    await matchesNode(`
+interface Num { kind: "Num"; value: number; }
+interface Negate { kind: "Negate"; operand: Expr; }
+type Expr = Num | Negate;
+
+function show(e: Expr): string {
+  switch (e.kind) {
+    case "Num": return "" + e.value;
+    case "Negate": return "-(" + show(e.operand) + ")";
+  }
+  return "?";
+}
+
+const inner: Expr = { kind: "Num", value: 7 };
+const e: Expr = { kind: "Negate", operand: inner };
+console.log(show(e));
+console.log(e.kind);`);
+  });
 });
