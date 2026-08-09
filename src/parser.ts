@@ -14,7 +14,7 @@ import {
   isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf,
-  resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy,
+  resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -883,9 +883,10 @@ class Parser {
         const cls = f.slice(0, f.indexOf("."));
         if (bound.has(cls)) throw nyi(NYI.CLASS_FEATURE, `a binding shadows class '${cls}', which has static fields (\`${f}\`); rename it`);
       }
-      body = resolveStaticFieldReads(body, this.staticFieldNames, (n) => {
+      body = resolveStaticFieldReads(body, this.staticFieldNames, (n, at) => {
         throw mutationError(`assignment to the static field '${n}'`,
-          "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead");
+          "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead",
+          at);
       });
     }
     const program: Program = { kind: "Program", body };
@@ -3054,6 +3055,7 @@ class Parser {
           throw mutationError(
             `compound assignment '${op}' to a field of a computed receiver`,
             "the receiver would be evaluated twice; bind it first — `const o = …; o.f = o.f + v`",
+            exprLoc(left.object) ?? left.loc,
           );
         }
         const bin = op.slice(0, -1) as BinaryOp;
@@ -3194,9 +3196,10 @@ class Parser {
       // unhelpful there, it is wrong, since an array has no optional fields to declare.
       if (target.kind === "IndexExpr" && target.index.kind !== "StringLiteral") {
         throw mutationError(
-          `arrays are immutable: \`delete xs[i]\` would punch a hole in place at ${kw.line}:${kw.col}`,
+          `arrays are immutable: \`delete xs[i]\` would punch a hole in place`,
           "node's array `delete` leaves a HOLE — `length` is unchanged and the slot reads `undefined` — which a dense array cannot represent. " +
           "Build a new array without the element: `xs.filter((_, i) => i !== 0)`, or `[...xs.slice(0, i), ...xs.slice(i + 1)]`",
+          kw,
         );
       }
       // NOTE (mutable records): `@@mutable` does NOT make `delete` legal. A record's
@@ -3204,9 +3207,10 @@ class Parser {
       // a key would change the value's type mid-program, which is a different (and much
       // larger) feature than assigning a slot in place. Refused precisely instead.
       throw mutationError(
-        `objects are immutable: \`delete o.k\` would remove a key in place at ${kw.line}:${kw.col}`,
+        `objects are immutable: \`delete o.k\` would remove a key in place`,
         "a record's shape is its TYPE (fields are static slots), so a key cannot be removed at runtime even from a `@@mutable` record. " +
         "Declare the field optional (`k?: T`) and set it to `undefined`, or rebuild without the key",
+        kw,
       );
     }
     if (this.at("new")) {
@@ -3249,6 +3253,7 @@ class Parser {
         throw mutationError(
           "`o.f++` on a computed receiver",
           "the receiver would be evaluated twice; bind it first — `const o = …; o.f++`",
+          exprLoc(target.object) ?? target.loc,
         );
       }
     }

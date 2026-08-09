@@ -470,9 +470,30 @@ export function unknownTypeName(name: string, at?: { line: number; col: number }
  * `arr[i] = v`, and `o.f = v` are refused with an actionable pointer to the
  * immutable replacement — reject-don't-miscompile, surfaced by `coverage`.
  * Sits in the NT16xx ownership/memory-model band alongside the move checker.
+ *
+ * `at` is the position of the mutation, threaded exactly as `typeError` threads it: into
+ * the MESSAGE (so the compact one-line form `coverage` and the self-hosting frontier
+ * print still says where) and into a primary SPAN (so `formatDiagnostic` with the source
+ * draws the rustc band its siblings NT1601/NT1603/NT1604/NT1607 have always drawn).
+ *
+ * It is optional only because two producers genuinely have no position to give — the
+ * static-field write-back callback in src/parser.ts and src/modules.ts is handed a NAME
+ * and nothing else. Everywhere else it is passed, and it should be: this code is the
+ * most-hit refusal in the tree, and without it two self-hosting lanes each had to patch
+ * the compiler to print the offending line before they could find it. One `Map`/`Set`
+ * caller had already reached for the workaround by hand-appending `at L:C` into the
+ * message text; that spelling is retired in favour of this parameter, which produces the
+ * same suffix AND the source frame the hand-rolled one could not.
  */
-export function mutationError(message: string, hint: string): NTError {
-  return new NTError({ code: "NT1606", message, milestone: "later", hint });
+export function mutationError(message: string, hint: string, at?: { line: number; col: number }, label: string = "mutated here"): NTError {
+  if (at === undefined) return new NTError({ code: "NT1606", message, milestone: "later", hint });
+  return new NTError({
+    code: "NT1606",
+    message: `${message} at ${at.line}:${at.col}`,
+    milestone: "later",
+    hint,
+    spans: [{ line: at.line, label, primary: true }],
+  });
 }
 
 /**

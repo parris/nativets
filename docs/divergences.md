@@ -857,8 +857,11 @@ is now **rejected** at check time:
 ```
 error[NT1606]: `Map` is persistent: `.set` returns a NEW map and leaves the receiver
                unchanged, so discarding the result here does NOTHING at 2:1
-  = help: write `m = m.set("a", 1)` — the result IS the updated map, and dropping it
-          drops the whole operation. Declare the binding `let` …
+    |
+  2 | m.set("a", 1);
+    | ^^^^^^^^^^^^^^ mutated here
+    = help: write `m = m.set("a", 1)` — the result IS the updated map, and dropping it
+            drops the whole operation. Declare the binding `let` …
 ```
 
 **Why the trap is shaped this way.** Under node, `Map.prototype.set` and
@@ -926,10 +929,13 @@ now rejected:
 
 ```
 error[NT1606]: `Map` is persistent: `.delete` returns a NEW map, not a boolean, so this
-               `if` condition at 2:5 is ALWAYS true — the `else` arm is unreachable
-  = help: node's `.delete` returns whether the key was there; ours returns the map without
-          it. Test with `m.has("zz")`, and remove with `m = m.delete("zz")` —
-          `if (m.has("zz")) { m = m.delete("zz"); }` says both. …
+               `if` condition is ALWAYS true — the `else` arm is unreachable at 2:5
+    |
+  2 | if (m.delete("zz")) { … } else { … }
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutated here
+    = help: node's `.delete` returns whether the key was there; ours returns the map without
+            it. Test with `m.has("zz")`, and remove with `m = m.delete("zz")` —
+            `if (m.has("zz")) { m = m.delete("zz"); }` says both. …
 ```
 
 **Why this needs no analysis and has no false-positive direction.** The condition is not a
