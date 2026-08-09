@@ -415,7 +415,7 @@ class Parser {
    *  an extension of the class attribute to a `type`/`interface` declaration. The record
    *  is tagged with this name (`Cell{n:number}`), so mutability is NOMINAL rather than
    *  structural; published on the Program for the checker + ownership pass. */
-  private readonly mutableRecords = new Set<string>();
+  private mutableRecords = new Set<string>();
   /** Module surface (SH1): `import` declarations and the export table. Empty for an
    *  ordinary single-file program, in which case `parseProgram` leaves them off the
    *  Program entirely — so every existing single-module path is untouched. */
@@ -546,6 +546,14 @@ class Parser {
         const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
         sub.pos = this.typeDeclStarts.get(name)!;
         sub.hoisting = true;
+        // SHARED, like `recTypes` in `resolveCycle`: each declaration is re-parsed in a
+        // FRESH sub-parser, which has never seen the `//@@mutable` on some OTHER
+        // declaration in this file. `discriminatedUnion` asks this set whether a tagged
+        // arm is a record, so without sharing it, a union with a tagged member resolved
+        // during hoisting (i.e. any RECURSIVE one) fell back to the general-union refusal
+        // and stalled the whole cycle. Shared by reference so a tag the sub-parser
+        // discovers is carried back too.
+        sub.mutableRecords = this.mutableRecords;
         try {
           sub.parseStatement();
         } catch (e) {
@@ -628,6 +636,7 @@ class Parser {
         sub.hoisting = true;
         sub.cycleNames = this.cycleNames;
         sub.recTypes = this.recTypes; // shared: an earlier round's shapes are what unions expand through
+        sub.mutableRecords = this.mutableRecords; // shared, for the same reason (see hoistTypeDecls)
         try {
           sub.parseStatement();
         } catch (e) {

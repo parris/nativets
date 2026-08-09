@@ -982,8 +982,18 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // one member tagged and with all of them) and cannot reach a parameter (NT1607 by
       // design), so the tag is not the answer; returning new nodes is a 48-constructor
       // rewrite that clears 45 of ast.ts's 46 sites and none of the tree's other 145.
-      expect(m.error).toContain("objects are immutable");
-      expect(m.error).toContain("`o.f = v`");
+      // THIRTEENTH — and the TWELFTH's parenthetical was wrong on both counts, which is
+      // why it is worth writing down. `@@mutable` CAN tag a discriminated-union member:
+      // `discriminatedUnion`'s `classTag(a) === undefined` was a guard for CLASS members,
+      // and it is vacuous even for those (a class field annotation widens string-literal
+      // types, so a class can never carry the discriminant). And it CAN reach a parameter:
+      // the NT1607 arm is dropped for a `@@mutable` RECORD, whose opt-in is nominal and so
+      // travels in the SIGNATURE. With `BlockDropsStmt` tagged, `last.names = names`
+      // compiles and all nine modules move one construct deeper — to `list.push(...)` on a
+      // PARAMETER, which the accumulator opt-in (on a `let`/`const` BINDING) cannot reach.
+      // That is the predicted next term, and it is a different feature, not this one.
+      expect(m.error).toContain("arrays are immutable");
+      expect(m.error).toContain("`.push`");
       return;
     }
 

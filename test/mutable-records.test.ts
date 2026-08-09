@@ -454,6 +454,30 @@ if (e.kind === "Num") console.log("num", e.n); else console.log("str", e.s);
 `;
     await expectMatches(source, await runWithNode(source));
   });
+
+  test("a tagged member of a RECURSIVE union — the hoist has to SHARE the tag set", async () => {
+    // The case piece 1 nearly shipped broken, and the one that matters: src/ast.ts's `Expr`
+    // and `Stmt` are RECURSIVE unions, so they are resolved by `hoistTypeDecls`, which
+    // re-parses each declaration in a FRESH sub-Parser. That sub-parser has never seen the
+    // `//@@mutable` on some OTHER declaration in the file, so `discriminatedUnion` asked an
+    // EMPTY `mutableRecords` whether the tagged arm was a record, said no, and fell back to
+    // the general-union refusal — which stalls the whole cycle:
+    //
+    //   NT1030 recursive type 'Expr' ... NOTE ... what is left is not recursion but
+    //   [NT1009] general union type 'Num{kind:string,n:number} | @Neg'
+    //
+    // A NON-recursive union never goes through the hoist, so the test above passes either
+    // way. The set is now shared by reference, exactly as `recTypes` already was.
+    const source = `
+//@@mutable
+interface Num { kind: "Num"; n: number }
+interface Neg { kind: "Neg"; operand: Expr }
+type Expr = Num | Neg;
+const e: Expr = { kind: "Num", n: 1 };
+console.log(e.kind);
+`;
+    await expectMatches(source, await runWithNode(source));
+  });
 });
 
 /*

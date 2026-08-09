@@ -2868,6 +2868,148 @@ scratch tree, `ast.ts`'s chain behind `setBlockDrops` is: `last.names = names` (
 cannot reach one) → `new Map(p.recTypes ?? [])` (`NT1014`, the tuple-entries form — a genuine
 feature gap, and the first link in this chain that is not about mutation at all).
 
+### Re-measured after the THREE-PIECE MUTABLE-AST unblock — nine modules move, none reaches IR
+
+The previous re-measurement ended with a RECOMMENDATION of three pieces and the note that it
+was "a language decision, not implemented". All three are implemented here, and its own
+parenthetical — *"`@@mutable` cannot tag a discriminated-union member and cannot reach a
+parameter, so the tag is not the answer"* — turns out to be **wrong on both counts**.
+
+| # | piece | what it was |
+|---|---|---|
+| 1 | `discriminatedUnion`'s `classTag(a) === undefined` | a guard for CLASS members, **vacuous even for those** |
+| 2 | `@@mutable` + recursive, refused whole | split at the FIELD: only a **cycle-capable** one is refused |
+| 3 | NT1607's parameter / `for-of` arm | dropped for a `@@mutable` **RECORD** |
+
+**1 — what the union clause was guarding: nothing it still guards.** It dates to SH2 behavior 1
+(`82f145b`), when the only carrier of a tag was a class instance. A class field annotation is
+parsed with `parseType`, which **widens** a string-literal type; a record field goes through
+`parseTypeInner`, which keeps it. So a class instance can never carry the literal-typed
+discriminant `unionDiscriminant` demands — probed with the clause removed outright, a two-class
+union still fails one step later with *"the shared field(s) kind are not string-literal typed"*.
+It is relaxed only for a tag naming a `@@mutable` record, so a class arm keeps its exact message
+and no baseline moves for free.
+
+**A gap piece 1 nearly shipped broken, and only a RECURSIVE union shows it.** `hoistTypeDecls`
+re-parses each declaration in a **fresh sub-Parser**, which has never seen the `//@@mutable` on
+some other declaration in the file. A recursive union is resolved through that hoist, so the
+tagged arm was measured against an EMPTY tag set, fell back to the general-union refusal, and
+stalled the cycle — `NT1030 recursive type 'Expr' … what is left is not recursion but [NT1009]
+general union type 'Num{…} | @Neg'`. A non-recursive union never goes through the hoist and
+passed either way. The set is now shared by reference, as `recTypes` already was. This is the
+same shape as every other finding in this document: the test that would have caught it is the one
+built from the construct the compiler's own source actually contains.
+
+**2 — the cycle rule is REAL, and it is a WRONG ANSWER rather than a hang.** Verified with the
+declaration refusal neutered, not taken on faith:
+
+```ts
+const a: Node = { n: 1, next: null };
+const alias = a;      // an ALIAS — it survives the move the next line performs
+a.next = a;           // an OWNED receiver, so nothing refuses it
+console.log(alias);
+// node:     <ref *1> { n: 1, next: [Circular *1] }
+// nativets: Node { n: 1, next: Node { n: 1, next: [Node] } }     exit 0 on BOTH
+```
+
+Depth-limited, so no hang. `JSON.stringify` and `structuredClone` of a recursive type are
+already refused (`NT1005` / `NT1002`), so `console.log` is the whole exposure. The obvious
+spellings are already blocked by the VALUE side (`x.next = y` is `NT1604` for a parameter and a
+MOVE for an owned local) — **the alias route defeats both**, which is why a rule was needed
+rather than an argument. `test/forward-type-ref.test.ts` carried the opposite claim ("a cycle is
+not reachable there today, linearity stops it") and is corrected in place.
+
+The rule: a field is cycle-capable iff the receiver's tag is type-reachable from the field's
+type. `Ty` is flat text and a nominal name has exactly two spellings — folded `@Name` and
+inline `Name{…}` — so one scan covers every depth, through `{…}`, `[]`, `?N`/`?U`, `U<…>`,
+`G<…>` and function types; close over `recTypes` to a fixpoint. Conservative in one direction:
+an `@X` absent from `recTypes` reaches everything (cannot decide ⇒ refuse).
+
+**THE CENSUS, which is what decides whether this is a fix or a moved wall.** All 144 non-`this`
+`o.f = v` sites, taken from real `FieldAssign` nodes via the compiler's own parser rather than
+from `grep`:
+
+| verdict | sites | |
+|---|---|---|
+| **CLEARED** | **117** | checker 46, modules 27, parser 17, codegen 10, coverage-preprocess 9, ownership 5, lexer 1, coverage 1, ast 1 |
+| CYCLE-CAPABLE (refused) | 15 | `body`, `init`, `iterable`, `argument`, `args`, `callee`, `value` — the AST CHILD slots |
+| UNDECIDABLE (refused) | 12 | receivers typed as an ANONYMOUS inline object literal (`st.pos`, `state.shadowed`), which have no named declaration for the attribute to attach to |
+
+Excluding ast.ts: **116 of 143, 81%**. The prediction going in was that an AST pass mostly writes
+CHILD fields and the share would be small. It is not: the compiler's assignments are
+overwhelmingly TYPE AND NAME ANNOTATIONS written onto an already-built node (`ty`, `returnTy`,
+`retTy`, `elemTy`, `annot`, `names`, `captures`, `drops`, `narrowed`). Child-slot REWRITING
+is what ast.ts's walkers did, and the previous lane already converted those 45 to reconstruction
+— so the two halves of this problem have different right answers and each got the one it needed.
+
+Two method notes, since this document is partly a record of measurement mistakes:
+
+- **the first run of this census said 95 of 144 were unclassifiable, and that was a BUG in the
+  census, not a finding.** Prose in doc comments ("…type names…", "…interface for…") produced 209
+  junk declaration matches, and each junk match brace-scanned forward and **swallowed the real
+  declarations after it**. Stripping comments first fixed it. Fourth measurement-that-understates
+  recorded here, and the first caught by its own author before it was acted on.
+- **the 15 is corroborated by two methods with different blind spots** — the earlier grep-based,
+  name-only upper bound in the CONSTRUCT CENSUS section said 15, and this AST-based,
+  receiver-specific count says 15. A single number with one derivation is what this project keeps
+  getting burned by.
+
+The receiver-specific reading is worth 7 sites over the easy one: `Program.imports:
+ImportDecl[]` mentions a record but never reaches `Program`, so it clears; `MemberExpr.object:
+Expr` reaches `MemberExpr`, so it does not.
+
+**3 — the parameter arm.** The opt-in is NOMINAL and therefore part of the SIGNATURE, so
+`function tick(c: Cell)` announces "may mutate" at the call site — the objection that ruled out
+inferring it. Records only (`MutableInfo` grows a `records` set beside the `classes` set that
+`mutableTags` merges). An ALIAS receiver, a container element, a call result, a capture and
+`p.b.n = 1` all stay refused. The three memory obligations already held — a borrow never frees,
+the assigned value is consumed, the overwritten value is leaked not freed — so only EXCLUSIVITY
+is given up, which docs/decorators.md Decision 3 already disclaims.
+
+**Where it landed.** `//@@mutable` on `BlockDropsStmt` — one comment, no other source change —
+exercises all three pieces at once (a tagged member of the recursive `Stmt` union, a
+non-cycle-capable `names: string[]` write, and an element receiver), and `setBlockDrops`'s
+`last.names = names` compiles:
+
+| Module | Before | After |
+|---|---|---|
+| `ast.ts` (standalone + linked) | `NT1606` — `o.f = v`, `setBlockDrops` | **`NT1606` — `.push`**, the next line of the same function |
+| the other eight, linked | `NT1606` — `o.f = v`, inherited | **`NT1606` — `.push`**, inherited |
+| `lexer.ts`, `diagnostics.ts`, `coverage-preprocess.ts` | rung 3 | **unchanged — rung 3, and all three emit BYTE-IDENTICAL IR** (161740 / 111243 / 152673, diffed against the branch base and equal modulo the interned worktree path) |
+
+**Nine modules moved and none reached IR, and that is the honest headline.** What is behind
+`setBlockDrops` is `list.push(…)` on a **PARAMETER** — the accumulator opt-in is on a
+`let`/`const` BINDING and cannot reach one — and behind that `new Map(p.recTypes ?? [])`
+(`NT1014`, the tuple-entries form). Both were predicted, and neither is this feature: the first
+is the array opt-in's equivalent of piece 3 and would need its own decision, the second is a
+plain feature gap. Separately, a property read through a recursive-union field
+(`Property 'kind' does not exist on @Expr`) still blocks most of `checker.ts`.
+
+So the claim this lane can make is bounded and should not be overstated: **the mutable-AST wall
+is down and 81% of the tree's field writes are now expressible, but no new module self-compiles**,
+because ast.ts's chain is at least three deep and the next two links belong to other lanes.
+
+The standalone column, which is the one that says whose gap it is, is unchanged for every module
+except `ast.ts`: `checker.ts` `NT2001` (a `.set` value shape), `parser.ts` and `modules.ts`
+`NT2001` (`Property 'kind' does not exist on number`), `codegen.ts` `NT1012`
+(`new DataView`), and `cli.ts` / `coverage.ts` / `driver.ts` / `ownership.ts` the `NT1003`
+unlinked-import artifact.
+
+**PRE-EXISTING BUG, found in this lane's blast radius and FIXED.** `console.log` of a
+`@@mutable` record printed its TAG:
+
+```
+node:      { n: 1 }          nativets:  Cell { n: 1 }          exit 0 on BOTH
+```
+
+A record reuses the CLASS tag encoding (that is what makes its mutability nominal) and
+`genInspectObject` folds the tag into util.inspect's opening brace — right for a class (node
+really does print `Counter { pos: 0 }`) and wrong for a record, which has no constructor to
+name. It reproduces on an untouched tree on a plain non-recursive record, and it SCALES with this
+lane: tagging the ~48 ast.ts interfaces would have made every `console.log` of an AST node wrong.
+`program.mutableRecords` already distinguishes the two carriers. Both sides are asserted in one
+test, or the fix reads as a regression to the next reader.
+
 ---
 
 ## Milestones
