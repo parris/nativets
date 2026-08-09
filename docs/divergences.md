@@ -2523,6 +2523,27 @@ as recursion. That is sound and it is a measurement hazard — `src/ast.ts` enco
 their own diagnostics. The message is deliberately unchanged: it is what
 `test/selfhost-ratchet.baseline.json` records as a blocker's identity.
 
+**A VALUE never carries the folded spelling.** The invariant is that `@Name` appears only
+NESTED inside a shape; a value's own static type is always the expanded one. That is enforced
+in exactly two places — `Checker.type` and `CodeGen.genExpr`, the single funnels where an
+expression's type is produced — plus the three receivers that do not go through them (a
+nullable base, an array element, a `for-of` binding). One level per access, driven by a real
+source-level read, so it terminates without a fixpoint. Before that, `e.operand.kind` on a
+recursive union was `NT2001 Property 'kind' does not exist on @Expr` while passing the same
+value to a function that annotates the type worked — the information was there, it was just
+not consulted where a value's type is made.
+
+The unfold WIDENS string-literal field types, because the table and an annotation are two
+spellings of one declaration: `recTypes` keeps `tag: "m"` (a recursive union's discriminant
+must survive) and `parseType` widens it to `string`. Widening does not descend into a `U<…>`,
+so a recursive union keeps the tags its dispatch reads.
+
+**Across MODULES the back-edge is renamed with the module.** A non-entry module is
+alpha-renamed, and every `@Name` it mints travels with it — in the shape table, in the
+module's own signatures, and in the shape it exports. Two modules may each declare a
+recursive `Node` and they stay distinct types with distinct layouts. A `@` inside a quoted
+tag or property key (`kind: "user@host"`) is NOT a reference and is left alone.
+
 Still refused, each with its own message: a cycle with nowhere to put a back-edge
 (`type P = Q[]` / `type Q = P[]` — a reference needs a slot to be a pointer in), and the four
 deep-walk cases below.

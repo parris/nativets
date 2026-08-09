@@ -1030,7 +1030,24 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // narrowing is a shadow BINDING and not a `NarrowFact`. With that fixed, all nine
       // land on `Property 'kind' does not exist on @Expr` — the recursive back-edge
       // property read, which has its own lane.
-      expect(m.error).toContain("@Expr");
+      // SIXTEENTH — the back-edge property read, cleared, and it was a MISSING UNFOLD
+      // rather than a representation problem: `@N` was unfolded everywhere a shape is
+      // CONSUMED and nowhere it is PRODUCED, so a field whose declared type is the
+      // back-edge handed a bare `@Expr` to the next access. `Checker.type` and
+      // `CodeGen.genExpr` — the two funnels where a value's type is made — unfold one
+      // level, which is what `ast.ts`'s own invariant already promised.
+      // All nine land on the SAME next term, and it has nothing to do with recursion:
+      // a tag test does not narrow a DOTTED PATH, so `e.callee.kind === "MemberExpr"`
+      // proves nothing about `e.callee.property`. Verified non-recursive — the identical
+      // program over a plain nested union is refused the same way. That is a narrowing
+      // lane; probed one deeper, the site behind it is `exprLoc`'s `e.left`, the same
+      // construct again.
+      // The advice is now the PATH variant, and that is two lanes composing: the type-ref
+      // unfold made the union visible, so narrowAdvice can see the receiver is a PATH
+      // (`e.callee`) rather than a plain name, and says to bind it first. Strictly more
+      // truthful than the generic "narrow it first" this asserted before.
+      expect(m.error).toContain("is a path — bind it first");
+      expect(m.error).toContain("Property 'property' does not exist on");
       expect(m.code).toBe("NT2001");
       return;
     }

@@ -512,6 +512,134 @@ console.log(e.kind);`);
   });
 
   /*
+   * READING THROUGH THE BACK-EDGE. `e.operand` is typed `@Expr` — the FOLDED reference —
+   * and every structural predicate answers "no" to it, so `e.operand.kind` was
+   * `NT2001 Property 'kind' does not exist on @Expr`. The information was never missing:
+   * `recTypes` holds the shape, `assignable` already unfolds, and passing the same value to
+   * a function that annotates `Expr` works. It was simply not consulted where a value's own
+   * type is produced.
+   *
+   * DERIVED, not mined — there is no `microsoft/TypeScript` checkout on this machine (six
+   * lanes have now confirmed it; see docs/self-hosting.md's env notes). The shape is
+   * src/ast.ts:1383 `freshArray`, `e.callee.kind === "MemberExpr"` where
+   * `CallExpr.callee: Expr` is the back-edge, with `operand` for `callee` so it reads
+   * against the union already declared above.
+   *
+   * ast.ts's INVARIANT (the `@Name` block, ast.ts:513) is what this restores: "a value's own
+   * static type is always the expanded shape", so `@N` appears only NESTED inside a shape.
+   */
+  test("a property read through a recursive field unfolds the back-edge", async () => {
+    await matchesNode(`
+interface Num { kind: "Num"; value: number; }
+interface Negate { kind: "Negate"; operand: Expr; }
+type Expr = Num | Negate;
+
+const inner: Expr = { kind: "Num", value: 7 };
+const e: Expr = { kind: "Negate", operand: inner };
+if (e.kind === "Negate") console.log(e.operand.kind);`);
+  });
+
+  /*
+   * NARROWING SURVIVES THE UNFOLD, which is the property that decided WHERE to unfold.
+   *
+   * A tag narrowing is not a fact attached to a type — it declares a CONSTANT SHADOW
+   * BINDING whose type `restrictUnion` computes, and `restrictUnion` needs a real union.
+   * Unfolding only at a member-access RECEIVER would have left `const o = e.operand` bound
+   * at `@Expr`, the narrowing would not have attached, and `o.value` would be refused one
+   * line later with "narrow it first" — a worse message for the same gap. Unfolding where a
+   * value's type is PRODUCED makes the binding an ordinary union, so this is the ordinary
+   * narrowing path with nothing recursive left in it.
+   */
+  test("a value read out of a recursive field narrows like any other union", async () => {
+    await matchesNode(`
+interface Num { kind: "Num"; value: number; }
+interface Negate { kind: "Negate"; operand: Expr; }
+type Expr = Num | Negate;
+
+const inner: Expr = { kind: "Num", value: 7 };
+const e: Expr = { kind: "Negate", operand: inner };
+if (e.kind === "Negate") {
+  const o = e.operand;
+  if (o.kind === "Num") console.log(o.value * 2);
+  switch (o.kind) {
+    case "Num": console.log("num " + o.value); break;
+    case "Negate": console.log("neg"); break;
+  }
+}`);
+  });
+
+  /*
+   * AN ARRAY OF THE BACK-EDGE. `arrayElementOk` is a predicate over the SLOT, and `@N` was
+   * not in its list — so `interface Call { args: Expr[] }` was `NT1001 arrays of @Expr` at
+   * the `args: []` that builds one. src/ast.ts has 15 fields of this shape (`args`,
+   * `elements`, `exprs`, `properties`, `stmts`, …), so it gated the tree as thoroughly as
+   * the property read did.
+   */
+  test("an array whose element type is the back-edge builds, indexes and iterates", async () => {
+    await matchesNode(`
+interface Num { kind: "Num"; value: number; }
+interface Call { kind: "Call"; args: Expr[]; }
+type Expr = Num | Call;
+
+const empty: Expr = { kind: "Call", args: [] };
+const one: Expr = { kind: "Call", args: [{ kind: "Num", value: 3 }] };
+if (empty.kind === "Call") console.log(empty.args.length);
+if (one.kind === "Call") {
+  console.log(one.args.length);
+  console.log(one.args[0].kind);
+  for (const a of one.args) console.log(a.kind);
+}`);
+  });
+
+  /*
+   * A STRING-LITERAL FIELD IN A RECURSIVE DECLARATION — two spellings of one type.
+   *
+   * `recTypes` stores the `parseTypeInner` form, which KEEPS `tag: "m"` (a recursive UNION's
+   * discriminant has to survive, or `unionDiscriminant` cannot prove the tag sits at one
+   * slot in every member); an ANNOTATION goes through `parseType`, which widens it to
+   * `string`. So the declared type and the unfolded back-edge disagreed on a field neither
+   * spelling changes the layout of, and the refusal printed BOTH SIDES IDENTICALLY —
+   * `declared {tag:string,n:number,next:?U@N} but initialized with
+   * {tag:string,n:number,next:{tag:string,n:number}}` — because the message applies the same
+   * widening. Every declaration in src/ast.ts is this shape (`kind: "CallExpr"` beside a
+   * recursive child), so it is not a corner.
+   *
+   * The `next: undefined` in the expected output is a SEPARATE, pre-existing divergence
+   * already recorded two tests up: nativets writes `undefined` into an optional field with
+   * no initializer and node never creates the key. Asserted with `compileAndRun` rather than
+   * differentially so this test states the thing it is about.
+   */
+  test("a string-literal field survives the unfold, and its inner literal gets the layout", async () => {
+    const r = await compileAndRun(`
+interface N { tag: "m"; n: number; next?: N }
+const a: N = { tag: "m", n: 1, next: { tag: "m", n: 2 } };
+console.log(a.tag, a.n);
+console.log(a.next);`);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("m 1\n{ tag: 'm', n: 2, next: undefined }\n"); // was NT2001
+  });
+
+  /*
+   * THE OPTIONAL CHAIN, and it is here because clearing the property read turned this one
+   * from a REFUSAL into a SILENT WRONG ANSWER for the length of one edit.
+   *
+   * `?.` lowers through `genOptChain`, which unboxes with `baseTy(cur.ty)` — the bare `@N`
+   * — and hands it to `genFieldRead`. `objectFields("@N")` is the empty list, so `fieldType`
+   * was `undefined` and `fieldIndex` was a slot number computed from nothing: `a.next?.n`
+   * printed `0` and `a.next?.label` printed `(null)` where node prints `2` and `y`.
+   * `genFieldRead` now REFUSES a folded receiver outright, so the next caller that forgets
+   * to unfold reports itself instead of loading the wrong offset.
+   */
+  test("an optional chain through the back-edge reads the right slots", async () => {
+    await matchesNode(`
+interface N { n: number; label: string; next?: N }
+const a: N = { n: 1, label: "x", next: { n: 2, label: "y" } };
+console.log(a.next?.n);
+console.log(a.next?.label);
+console.log(a.next?.next?.n);`);
+  });
+
+  /*
    * A component is encoded ALL OR NOTHING — a back-edge is minted only where it resolves, so
    * one member nativets cannot represent takes the whole cycle down with it. That is sound
    * and it is also a MEASUREMENT HAZARD: forty-four correct declarations then report as

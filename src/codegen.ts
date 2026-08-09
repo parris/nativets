@@ -26,7 +26,7 @@ import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isF
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
 // SH2 (discriminated unions): a union value IS its member's object block, so every
 // lowering below treats it exactly like an object pointer.
-import { isUnionTy, unionDiscriminant } from "./ast.ts";
+import { isUnionTy, unionDiscriminant, widenLiteralTys } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI, internalError } from "./diagnostics.ts";
@@ -754,8 +754,17 @@ class FnGen {
   constructor(private mod: ModuleGen) {}
 
   /** Unfold a nominal back-edge one level (`@N` -> its shape); identity on anything else.
-   *  Applied wherever a type's SHAPE is needed rather than its identity. */
-  private unfold(t: Ty): Ty { return expandTypeRef(t, this.mod.recTypes); }
+   *  Applied wherever a type's SHAPE is needed rather than its identity.
+   *
+   *  WIDENED, exactly as `checker.unfold` is and for the same reason: `recTypes` stores the
+   *  literal-preserving `parseTypeInner` spelling, and codegen must see the type the checker
+   *  gave the value or the two drift. It showed up as a wrong ANSWER rather than a crash —
+   *  `genInspect` has no arm for a string-LITERAL field type, so it fell through to
+   *  `undefined` and `console.log` of a node through a back-edge printed
+   *  `{ tag: undefined, n: 2 }` where node prints `{ tag: 'm', n: 2 }`.
+   *  `widenLiteralTys` does not descend into a `U<…>`, so a recursive union keeps the tags
+   *  its dispatch reads, and a literal-typed field is one string slot either way. */
+  private unfold(t: Ty): Ty { return widenLiteralTys(expandTypeRef(t, this.mod.recTypes)); }
 
   /**
    * The storage address of a variable. Normally its frame alloca `%x.addr`; for a
@@ -1886,7 +1895,28 @@ class FnGen {
   }
 
   // ---- expressions ----
+  /**
+   * The codegen half of the checker's `type()` funnel: a VALUE never carries the folded
+   * `@Name`, only the shape it names.
+   *
+   * A field whose declared type is the back-edge (`CallExpr.callee: @Expr`) loads a pointer
+   * exactly like the unfolded union does — the encoding is representation-identical, which
+   * is why `isTypeRefTy` and `isUnionTy` already select the same `nt_obj_free` — but every
+   * structural predicate below answers "no" to `@Expr`, so the receiver of the NEXT access
+   * fell through to `no member lowering for .kind on @Expr`. Unfolding here keeps codegen's
+   * view of a value in step with the checker's, which is the property the narrowing hand-off
+   * at the `MemberExpr` case depends on (it compares `obj.ty` against the checker's
+   * `e.object.ty`).
+   *
+   * One level, for the reason `checker.type` states: the shape's own recursive positions
+   * stay folded, so this is O(1) and driven by real accesses.
+   */
   private genExpr(e: Expr): Val {
+    const val = this.genExprInner(e);
+    return isTypeRefTy(val.ty) ? { v: val.v, ty: this.unfold(val.ty) } : val;
+  }
+
+  private genExprInner(e: Expr): Val {
     switch (e.kind) {
       case "NumberLiteral": return { v: llvmDouble(e.value), ty: "number" };
       case "BooleanLiteral": return { v: e.value ? "true" : "false", ty: "boolean" };
@@ -3346,7 +3376,17 @@ class FnGen {
     // A recursive node renders as the object it names. Safe against a cycle for the same
     // reason nesting is: `genInspectObject` cuts at INSPECT_DEPTH, which is node's own
     // depth-2 `[Object]` rule, so the unfolding is bounded by the printer, not by the type.
-    if (isTypeRefTy(ty)) return this.genInspect({ v: val.v, ty: this.unfold(ty) }, depth, indent);
+    if (isTypeRefTy(ty)) {
+      // `expandTypeRef` returns an UNKNOWN name unchanged — the deliberate "cannot decide,
+      // do not guess" rule — and this line re-enters itself with it. JSC makes that tail
+      // call a loop, so a dangling `@N` HUNG the compiler with no diagnostic and no exit
+      // (see src/modules.ts `rewriteRefs`, which is where one used to come from). A `@N`
+      // the table cannot resolve must fail LOUDLY, which is what property 2 of the
+      // encoding promises (ast.ts).
+      const shape = this.unfold(ty);
+      if (isTypeRefTy(shape)) throw internalError(`no shape for the recursive type ${ty} — its back-edge resolves to nothing in the merged program`);
+      return this.genInspect({ v: val.v, ty: shape }, depth, indent);
+    }
     if (isObjectTy(ty)) return this.genInspectObject(val, depth, indent);
     if (isBytesTy(ty)) return this.genInspectBytes(val, depth, indent);
     if (isArrayTy(ty)) return this.genInspectArray(val, depth, indent);
@@ -3677,6 +3717,13 @@ class FnGen {
       else this.emit(`${t} = call double @nt_arr_len(ptr ${obj.v})`);
       return { v: t, ty: "number" };
     }
+    // A FOLDED receiver has no fields — `objectFields("@N")` is the empty list, so
+    // `fieldType` is `undefined` and `fieldIndex` is a slot number computed from nothing.
+    // Every caller is required to unfold first (they read the SHAPE, not the reference);
+    // saying so here turns the one that forgets into a compiler bug report instead of a
+    // load from the wrong offset. This is the `objectFields("@N")` phantom-record trap,
+    // and it has now cost this project two silent wrong answers.
+    if (isTypeRefTy(obj.ty)) throw internalError(`field read '.${prop}' on the folded reference ${obj.ty} — the receiver must be unfolded first`);
     const ft = fieldType(obj.ty, prop)!;
     const gep = this.fresh();
     this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, prop)}`);
@@ -3766,7 +3813,13 @@ class FnGen {
         const contLbl = this.label("occ");
         this.terminate(`br i1 ${isN}, label %${nullJoin}, label %${contLbl}`);
         this.to(this.block(contLbl));
-        const base = baseTy(cur.ty);
+        // UNFOLD, as `emitPrintNullable` does one screen up: `baseTy("?U@N")` is the bare
+        // back-edge, and handing that to `genFieldRead` asks `fieldIndex("@N", …)` — where
+        // `objectFields` returns the empty list, so the read silently took slot 0 of the
+        // wrong shape. `a.next?.n` printed `0` and `a.next?.label` printed `(null)` where
+        // node prints `2` and `y`: a SILENT WRONG ANSWER, which is the one outcome this
+        // compiler refuses to have.
+        const base = this.unfold(baseTy(cur.ty));
         cur = { v: this.fromSlot(this.nullVal(cur.v), base), ty: base }; // unbox the present value
       }
       cur = link.kind === "MemberExpr" ? this.genFieldRead(cur, link.property) : this.genElemRead(cur, link);
