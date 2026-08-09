@@ -15,7 +15,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // Stage 47 (console.log of compound values): the handle-type predicates the
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
-import { isTypeRefTy, expandTypeRef, recTypeTable } from "./ast.ts";
+import { isTypeRefTy, hasTypeRef, expandTypeRef, recTypeTable } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
 import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
 // The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
@@ -262,6 +262,13 @@ export function isStructMsgTy(t: Ty): boolean { return isObjectTy(t) || isArrayT
  *  reference handles (Map/Set, Uint8Array, Response, Dyn, nullable boxes) have no
  *  deep-copy walk — so they are refused, never shipped as a raw pointer. */
 function msgLeafOk(t: Ty): boolean {
+  // A RECURSIVE leaf, refused DELIBERATELY. It was already refused before this line existed,
+  // but only incidentally — `isObjectTy("@N")` is false, so a back-edge fell off the end of
+  // this function. That is two bugs cancelling rather than a guarantee, and the identical
+  // walk reached through `structuredClone` (which has no leaf check at all) shipped a real
+  // silent wrong answer. Same reason as there: the copy is type-directed with no seen-set,
+  // so a cyclic message would alias the SENDER's block and break isolation.
+  if (hasTypeRef(t)) return false;
   if (t === "number" || t === "string" || t === "boolean") return true;
   if (isObjectTy(t)) return objectFields(t).every((f) => msgLeafOk(f.ty));
   if (isArrayTy(t)) return msgLeafOk(elemTy(t));
@@ -2809,6 +2816,16 @@ class Checker {
       const t = this.type(e.args[0]!, scope);
       if (!(t === "number" || t === "string" || t === "boolean" || isObjectTy(t) || isArrayTy(t)))
         throw nyi(NYI.OBJECT, `structuredClone of ${t} (only scalars, objects and arrays are cloneable — node throws DataCloneError for functions)`);
+      // A RECURSIVE value. The clone is a walk over the STATIC type, and a recursive type is
+      // the one shape whose type is finite while the value it describes need not be: the walk
+      // has no case for the `@Name` back-edge, so it hit `genDeepClone`'s value-semantics
+      // fallthrough and stored the SOURCE's pointer into the clone. `a.next === b.next` was
+      // `true` where node says `false` — a silent wrong answer, not a crash. Refused until
+      // the walk carries a seen-set, which is what node's structured-clone algorithm has and
+      // a type-directed walk does not.
+      if (hasTypeRef(t))
+        throw nyi(NYI.OBJECT, `structuredClone of the recursive type ${t} (a recursive value may be CYCLIC, and this deep copy is a walk over the static type with no seen-set — it would alias the recursive field instead of copying it)`,
+          "copy the fields you need by hand — an object literal spelling out the levels you want is an ordinary deep copy and node agrees with it");
       return t;
     }
 

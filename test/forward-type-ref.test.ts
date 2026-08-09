@@ -391,3 +391,67 @@ console.log(t.kind);`);
     expect(r.hint).toContain("NT1009");
   });
 });
+
+/*
+ * RECURSIVE TYPES, step 3 (Lane C): the DEEP-WALK refusals.
+ *
+ * Three passes walk a value by its STATIC type: `structuredClone`, the actor-message deep
+ * copy, and `JSON.stringify`. All three are type-directed, and a recursive type is the one
+ * shape where the type is finite but the value it describes need not be — so the walk has to
+ * be told to stop, or it aliases (an unhandled `@N` returned unchanged) or unrolls forever.
+ *
+ * Each one is closed here with its OWN gate rather than by relying on a neighbour's. The
+ * actor path was ALREADY refused before this, but incidentally: `msgLeafOk` fell through on
+ * `@N` because `isObjectTy("@N")` is false. That is two bugs cancelling, not a guarantee —
+ * and the same walk reached by `structuredClone`, which has no leaf check, produced a real
+ * silent wrong answer (see the first test).
+ */
+describe("recursive types — the deep-walk refusals", () => {
+  /*
+   * THE BUG THIS CLOSES, reproduced. On the tree before this lane:
+   *
+   *     interface N { v: number; next?: N }
+   *     const inner: N = { v: 2 };
+   *     const a: N = { v: 1, next: inner };
+   *     const b = structuredClone(a);
+   *     console.log(a.next === b.next);   // node: false     nativets: TRUE
+   *
+   * `genDeepClone` is a type-directed walk with no case for `@N`, so it hit the final
+   * `return v` — value semantics — and stored the SENDER's pointer into the clone. Not a
+   * crash and not a leak: a silent wrong answer, which CLAUDE.md calls the worst outcome
+   * available. Refused now, since a correct deep copy of a possibly-cyclic value needs a
+   * seen-set the type-directed walk does not have.
+   */
+  test("structuredClone of a recursive value is refused, not aliased", () => {
+    const r = reject(`
+interface N { v: number; next?: N }
+const inner: N = { v: 2 };
+const a: N = { v: 1, next: inner };
+const b = structuredClone(a);
+console.log(b.v);`);
+    expect(r.code).not.toBe("");        // must not compile
+    expect(r.message).toContain("structuredClone");
+    expect(r.message).toContain("recursive");
+  });
+
+  // The ACTOR half of the same walk, pinned as a DELIBERATE refusal. It was already
+  // rejected before this lane, but only because `isObjectTy("@N")` is false and a back-edge
+  // fell off the end of `msgLeafOk` — the refusal had no author and no test, so nothing
+  // stopped a later lane from teaching `msgLeafOk` about `@N` and reopening the alias.
+  test("an actor message of a recursive type is refused, deliberately", () => {
+    const r = reject(`
+interface N { v: number; next?: N }
+const a: N = { v: 1 };
+send(1, a);`);
+    expect(r.code).toBe("NT1021");
+  });
+
+  // Non-recursive structuredClone is untouched — the refusal is about the back-edge, not
+  // about deep copying.
+  test("structuredClone of a NON-recursive nested value still deep-copies", async () => {
+    await matchesNode(`
+const o = { a: { n: 1 }, b: [1, 2] };
+const c = structuredClone(o);
+console.log(c.a.n, c.b[1], o.a === c.a);`);
+  });
+});

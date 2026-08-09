@@ -19,7 +19,7 @@ import { freshArray, RETAINS_RECEIVER } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
-import { isTypeRefTy, expandTypeRef, recTypeTable } from "./ast.ts";
+import { isTypeRefTy, hasTypeRef, expandTypeRef, recTypeTable } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
@@ -3685,6 +3685,14 @@ class FnGen {
    *  an array becomes a fresh vector with each element cloned in a loop. */
   private genDeepClone(v: Val, copyStrings = false): Val {
     const ty = v.ty;
+    // THE GUARANTEE, not a second opinion. Every arm below falls through to `return v` —
+    // value semantics — for a type it does not recognize, and a `@Name` back-edge is such a
+    // type, so an unrefused recursive value was copied by ALIASING it. Both callers
+    // (`structuredClone`, the actor-message copy) refuse this in the checker; this makes the
+    // safety a property of the WALK rather than of two independent gates staying in place.
+    if (hasTypeRef(ty)) {
+      throw internalError(`deep copy of the recursive type ${ty} reached codegen — the walk has no seen-set, so it would alias rather than copy. This must be refused in the checker (structuredClone / actor message)`);
+    }
     // B3 v5: for an actor message the copy must reach STRINGS too — a receiver whose
     // record pointed into the sender's (refcounted, releasable) buffer would not be
     // isolated. structuredClone itself leaves strings alone: they are immutable values
