@@ -2562,8 +2562,10 @@ class FnGen {
           const csig = this.mod.functions.get(`${cls}.constructor`)!;
           const argVals: string[] = [`ptr ${obj}`];
           for (let i = 1; i < csig.params.length; i++) {
-            const provided = e.args[i - 1];
-            const v = provided ? this.genExpr(provided) : this.genExpr(csig.defaults[i]!);
+            // `i - 1 < e.args.length` FIRST: a defaulted parameter means the read is at
+            // index == length, which nativets PANICS on (Stage 41) — see the census note
+            // in test/no-index-last.test.ts.
+            const v = i - 1 < e.args.length ? this.genExpr(e.args[i - 1]!) : this.genExpr(csig.defaults[i]!);
             argVals.push(`${llvmTy(csig.params[i]!)} ${this.coerce(v, csig.params[i]!).v}`);
           }
           // A DECORATED class's constructor returns the instance (the `@wrapper` sees
@@ -2631,7 +2633,9 @@ class FnGen {
         this.emitExcCheck();
         return { v: t, ty: "Dyn" };
       }
-      return this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args[2]), 0);
+      // `e.args.length > 2` guards the read: `JSON.stringify(v)` is the common call and
+      // `e.args[2]` would be an index == length read, which nativets PANICS on.
+      return this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args.length > 2 ? e.args[2] : undefined), 0);
     }
 
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
@@ -3866,7 +3870,8 @@ class FnGen {
         // NaN through one: the 1-arg call stays exactly the instruction it always was,
         // so no existing `.ll` (or IR snapshot) moves.
         const t = this.fresh();
-        if (a[1]) this.emit(`${t} = call double @js_str_index_of_from(ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1].v})`);
+        // `a.length > 1`, not `a[1]`: the 1-arg form reads index == length, a panic.
+        if (a.length > 1) this.emit(`${t} = call double @js_str_index_of_from(ptr ${recv.v}, ptr ${a[0]!.v}, double ${a[1]!.v})`);
         else this.emit(`${t} = call double @js_str_index_of(ptr ${recv.v}, ptr ${a[0]!.v})`);
         return { v: t, ty: "number" };
       }
@@ -4244,7 +4249,8 @@ class FnGen {
       }
       case "slice": {
         const a0 = this.genExpr(args[0]!).v;
-        const a1 = args[1] ? this.genExpr(args[1]).v : POS_INF;
+        // `args.length > 1`, not `args[1]`: `slice(n)` reads index == length, a panic.
+        const a1 = args.length > 1 ? this.genExpr(args[1]!).v : POS_INF;
         const t = this.fresh();
         this.emit(`${t} = call ptr @nt_arr_slice(ptr ${recv.v}, double ${a0}, double ${a1})`);
         return { v: t, ty: recv.ty };
@@ -5143,7 +5149,8 @@ class FnGen {
     switch (name) {
       case "parseInt": {
         const s = this.genExpr(args[0]!).v;
-        const radix = args[1] ? this.genExpr(args[1]).v : llvmDouble(0);
+        // `args.length > 1`, not `args[1]`: `parseInt(s)` reads index == length, a panic.
+        const radix = args.length > 1 ? this.genExpr(args[1]!).v : llvmDouble(0);
         const t = this.fresh();
         this.emit(`${t} = call double @js_parse_int(ptr ${s}, double ${radix})`);
         return { v: t, ty: "number" };
@@ -5559,7 +5566,9 @@ class FnGen {
    *  element of a `Val[]` parameter is a move out of a borrowed array element (NT1605). */
   private argVal(i: number, args: Expr[], preArg0: string, sig: Sig): Val {
     if (i === 0 && preArg0 !== "") return { v: preArg0, ty: args[0]!.ty ?? sig.params[0]! };
-    return this.genExpr(args[i] ?? sig.defaults[i]!);
+    // `i < args.length`, not `args[i] ?? …`: a defaulted parameter reads index == length,
+    // which nativets PANICS on (Stage 41) — the `??` could never see `undefined`.
+    return this.genExpr(i < args.length ? args[i]! : sig.defaults[i]!);
   }
 
   /** `preArg0`, when non-empty, is the SSA value of argument 0 already lowered by the

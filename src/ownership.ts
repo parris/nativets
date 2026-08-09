@@ -1171,7 +1171,9 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
    *     returning it is a legitimate transfer, not a move out of the caller's value.
    */
   const untrackedThis = (fn: FuncDecl): boolean =>
-    fn.params[0]?.name === "this" && (fn.setter === true || fn.untrackThis === true || mutable.classes.has(fn.name.split(".")[0]!));
+    // `fn.params.length > 0` FIRST: a nullary function makes `fn.params[0]` a read at
+    // index == length, which nativets PANICS on (Stage 41), so `?.` never sees `undefined`.
+    fn.params.length > 0 && fn.params[0]!.name === "this" && (fn.setter === true || fn.untrackThis === true || mutable.classes.has(fn.name.split(".")[0]!));
 
   // The per-parameter `@@mutable` opt-in, as a call-site table: which argument positions
   // of which function the callee may `.push` to. Built over every FuncDecl (methods are

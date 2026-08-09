@@ -3341,6 +3341,76 @@ worth the name.
   to build every `\uXXXX` escape.
 - The quadratic `+=` above.
 
+
+### GROUP A IS ZERO — the compiled lexer lexes `src/`, and it took 31 sites, not four
+
+`test/sh6-fuzz.test.ts` (`corpus: "src"`, ratcheted), `test/no-index-last.test.ts` (fast gate).
+
+The section above ends by naming what would settle rung 3: "the four `.at` fixes, the
+non-integer index fix, and then this sweep re-run to zero on the group-A rows". That is done,
+and the interesting part is the SIZE — the sweep's four sites were four the sweep's corpus
+could REACH, and the real number is 31.
+
+**The census, and the instrument behind it.** `src/` holds **573 computed index reads**. Every
+one was rewritten into a recording helper (`RECV[SUB]` → `__NTIDX(RECV, SUB, site)`, driven by
+the compiler's own lexer, never a text scan), and the evidence the rewrite was faithful is that
+the instrumented compiler emits byte-identical IR. Running lex + `preprocessForCoverage` over
+all of `src/`, lex over all 492 `.ts` files in the tree, and `sourceToIR` over 169 fixtures and
+examples found **15 reads that actually go out of range on that workload**:
+
+| kind | count | where |
+|---|---|---|
+| STRING | 7 | `pragmaName` ×2 (the bare `//`), the three numeric-literal continuations at end of file, `modules.ts`'s `t[j] === "{"` |
+| ARRAY | 8 | `e.args[0]`, `args[1] ? …`, `args[i] ?? …`, `fn.params[0]?.name` — argument lists shorter than the read: `checker.ts` 1, `codegen.ts` 6, `ownership.ts` 1 |
+
+The eight ARRAY rows are the ones no previous instrument had seen at all, and they are not
+edge cases: `checker.ts`'s fires on 14 of the 169 fixtures and `ownership.ts`'s on 22. A
+self-hosted checker would abort compiling ordinary programs.
+
+**And then the error paths, which a real-workload census is structurally blind to.** A
+well-formed corpus never ends a file in `/`, `"`, `` ` ``, `\`, `$` or `*`, so a census over
+real files cannot reach the code that handles it. Lexing every PREFIX of ten inputs, with a
+throwing getter installed at `String.prototype["0".."31"]` so an out-of-range read at a small
+index throws under bun exactly as it panics under nativets, found **16 more** — every
+end-of-input path in both scanners. Both halves were needed: the census finds what fires today,
+the prefix sweep finds where a compiler spends its time being wrong.
+
+**31 sites, 7 modules, all fixed**, every one with a `length` test that never FORMS the index
+(`.at(i)` is the other sanctioned spelling; see `test/no-index-last.test.ts`). Three of them
+carried a `?? ""` the panic never reached — a dead guard, and one `tsc` reads as LIVE because
+`noUncheckedIndexedAccess` types the read `T | undefined`. That blindness is now recorded
+twice: for index −1 and for index == length.
+
+**What moved as a result:**
+
+- The full 553-input sweep goes **84 / 82 / 6 → 18 total**, and **not one of the 18 is a
+  `src/*.ts` file**. The compiled lexer and the compiled preprocessor process all twelve of
+  the compiler's own modules identically. What is left is four real files
+  (`test/selfhost-ratchet.test.ts`, `test/sh6-fuzz.ts`, `test/textimport.test.ts`) plus the
+  adversarial set, every one a documented NUL or UTF-8-byte door — groups C and D, nothing new.
+- **THE ERROR-PATH SPLIT IS CLOSED.** `"abc` and `"abc\n` now behave identically: two inputs
+  moved out of group A and INTO the error-path agreement set, which is the shape of the result
+  rather than a disappearance. The last character of a file no longer decides whether the
+  lexer raises `LexError` or aborts.
+- Rung 3 for these modules is now backed by a ratcheted **`corpus: "src"`** differential rather
+  than by hand-written snippets. That assertion costs ~60 s today, and the corpus was NOT
+  shrunk to make it cheap: it is quadratic string indexing (see item 5 above), and it drops to
+  seconds when that lands.
+
+**NO MODULE IS DEMOTED, and the reason is the fix rather than the standard.** The standard went
+UP: before this lane the three rung-3 rows rested on snippets, and `lexer.ts`'s rested on
+nothing at all (`weak` — empty stdout matching empty stdout, and no driver). Measured against
+the stronger claim they all failed; measured against it after the 31 fixes they all pass. Had
+they not, the rows would have come down — an honest rung 2 beats a rung 3 that means nothing.
+
+**Group B is NOT fixed and the empty bucket must not be read as such.** `formatDiagnostic` no
+longer REACHES the non-integer index defect (its guard spells out node's own rule with
+`Number.isInteger`), so the row is gone from the ratchet — but a runtime non-integer array
+index still truncates for every other program in the tree. Same four-line repro as above. It
+needs a codegen + runtime change AND a decision (panic, like out-of-range, or refuse at
+compile time), so it is still owed a lane.
+
+
 ---
 
 ## Milestones

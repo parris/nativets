@@ -92,7 +92,13 @@ function isSpace(c: string): boolean {
 function pragmaName(body: string): string {
   let a = 0;
   while (a < body.length && isSpace(body[a]!)) a++;
-  if (body[a] !== "@" || body[a + 1] !== "@") return "";
+  // `a + 1 < body.length` FIRST, and it is not defensive padding. A bare `//` has an
+  // EMPTY body, so `body[a]` is a read at index == length, which node answers `undefined`
+  // and nativets PANICS on by design (Stage 41, docs/divergences.md). A self-compiled
+  // lexer therefore died on any file holding a bare `//` — 43 lines of `src/` itself. The
+  // guard is exactly equivalent under bun: reaching the `@@` test at all needs two more
+  // characters. Pinned by test/no-index-last.test.ts and test/sh6-fuzz.test.ts.
+  if (a + 1 >= body.length || body[a] !== "@" || body[a + 1] !== "@") return "";
   a += 2;
   if (a >= body.length || !isIdentStart(body[a]!)) return "";
   const start = a;
@@ -190,7 +196,10 @@ function escapeChar(e: string): string {
 export interface DecodedEscape { text: string; next: number; }
 
 export function decodeEscapeAt(raw: string, i: number, line: number, col: number): DecodedEscape {
-  const e = raw[i + 1] ?? "";
+  // `i + 1 < raw.length`, not `raw[i + 1] ?? ""`. The `??` was a DEAD GUARD: a trailing
+  // `"\` puts `i + 1` at index == length, and nativets PANICS on that read (Stage 41)
+  // before the `??` can answer. Same class as `pragmaName` above.
+  const e = i + 1 < raw.length ? raw[i + 1]! : "";
   // LegacyOctalEscapeSequence (ECMAScript Annex B.1.2). `\1`…`\7`, and `\0` when a
   // DECIMAL DIGIT follows it — that combination is octal, not the NUL escape: node reads
   // `"\01"` as U+0001, while we used to read `\0` as NUL and then append a literal "1",
@@ -273,7 +282,9 @@ export function lex(source: string): Token[] {
 
   const advance = (n: number) => {
     for (let k = 0; k < n; k++) {
-      if (source[st.i] === "\n") { st.line++; st.col = 1; } else { st.col++; }
+      // `st.i < source.length` first: an unterminated `/*` walks the cursor one past the
+      // end, and that read PANICS under nativets (Stage 41) where node answers `undefined`.
+      if (st.i < source.length && source[st.i] === "\n") { st.line++; st.col = 1; } else { st.col++; }
       st.i++;
     }
   };
@@ -305,10 +316,15 @@ export function lex(source: string): Token[] {
     advance(1);
     while (st.i < source.length && source[st.i] !== q) {
       if (source[st.i] === "\\") { out += source[st.i]; advance(1); }
+      // The escape branch just advanced, so the cursor may now be AT the end: a trailing
+      // `"\` makes this read out of range, which nativets PANICS on (Stage 41).
+      if (st.i >= source.length) break;
       out += source[st.i];
       advance(1);
     }
-    if (source[st.i] !== q) throw new LexError(`Unterminated string at ${sl}:${sc}`);
+    // `st.i >= source.length ||` FIRST — at end of input the read panicked one statement
+    // BEFORE the `LexError` it was written to raise, so this is the ERROR PATH breaking.
+    if (st.i >= source.length || source[st.i] !== q) throw new LexError(`Unterminated string at ${sl}:${sc}`);
     advance(1);
     return out + q;
   };
@@ -341,7 +357,7 @@ export function lex(source: string): Token[] {
           ? `Unterminated template at ${sl}:${sc}`
           : `Unterminated template substitution at ${sl}:${sc}`);
       const ch = source[st.i]!;
-      if (ch === "\\") { raw += ch; advance(1); raw += source[st.i] ?? ""; advance(1); continue; }
+      if (ch === "\\") { raw += ch; advance(1); raw += st.i < source.length ? source[st.i]! : ""; advance(1); continue; }
       if (top === -1) {
         // a template body: `${` opens a substitution, a backtick closes the body
         if (ch === "`") {
@@ -350,7 +366,7 @@ export function lex(source: string): Token[] {
           if (frames.length > 0) { raw += "`"; advance(1); }
           continue;
         }
-        if (ch === "$" && source[st.i + 1] === "{") { raw += "${"; advance(2); frames = [...frames, 1]; continue; }
+        if (ch === "$" && st.i + 1 < source.length && source[st.i + 1] === "{") { raw += "${"; advance(2); frames = [...frames, 1]; continue; }
         raw += ch;
         advance(1);
         continue;
@@ -373,7 +389,10 @@ export function lex(source: string): Token[] {
     const c = source[st.i]!;
 
     if (c === " " || c === "\t" || c === "\r" || c === "\n") { advance(1); continue; }
-    if (c === "/" && source[st.i + 1] === "/") {
+    // `st.i + 1 < source.length` FIRST, here and at the `/*` opener below: a file whose
+    // LAST byte is `/` reads index == length, which nativets PANICS on (Stage 41). Found
+    // by the prefix sweep in test/no-index-last.test.ts, not by eye.
+    if (c === "/" && st.i + 1 < source.length && source[st.i + 1] === "/") {
       // PRAGMA COMMENT `//@@name` — the comment spelling of a compile-time attribute.
       //
       // `@@mutable` is not valid TypeScript, so a file carrying the bare sigil cannot
@@ -395,9 +414,11 @@ export function lex(source: string): Token[] {
       while (st.i < source.length && source[st.i] !== "\n") advance(1);
       continue;
     }
-    if (c === "/" && source[st.i + 1] === "*") {
+    if (c === "/" && st.i + 1 < source.length && source[st.i + 1] === "*") {
       advance(2);
-      while (st.i < source.length && !(source[st.i] === "*" && source[st.i + 1] === "/")) advance(1);
+      // The SECOND read needs its own guard: an unterminated `/*` ending in a lone `*`
+      // puts `st.i + 1` one past the end.
+      while (st.i < source.length && !(source[st.i] === "*" && st.i + 1 < source.length && source[st.i + 1] === "/")) advance(1);
       advance(2);
       continue;
     }
@@ -426,10 +447,14 @@ export function lex(source: string): Token[] {
       let s = "";
       // `_` is a numeric SEPARATOR (`1_000_000`) — legal between digits, dropped here.
       while (st.i < source.length && ((source[st.i]! >= "0" && source[st.i]! <= "9") || source[st.i] === "_")) { if (source[st.i] !== "_") s += source[st.i]; advance(1); }
-      if (source[st.i] === ".") { s += "."; advance(1); while (st.i < source.length && source[st.i]! >= "0" && source[st.i]! <= "9") { s += source[st.i]; advance(1); } }
-      if (source[st.i] === "e" || source[st.i] === "E") {
+      // Each `st.i < source.length` is the same Stage 41 bounds rule as `pragmaName`'s: a
+      // numeric literal that ENDS the file leaves the cursor at index == length, which
+      // node answers `undefined` and nativets panics on. `1` as the last byte of a file
+      // reached all three of these.
+      if (st.i < source.length && source[st.i] === ".") { s += "."; advance(1); while (st.i < source.length && source[st.i]! >= "0" && source[st.i]! <= "9") { s += source[st.i]; advance(1); } }
+      if (st.i < source.length && (source[st.i] === "e" || source[st.i] === "E")) {
         s += source[st.i]; advance(1);
-        if (source[st.i] === "+" || source[st.i] === "-") { s += source[st.i]; advance(1); }
+        if (st.i < source.length && (source[st.i] === "+" || source[st.i] === "-")) { s += source[st.i]; advance(1); }
         while (st.i < source.length && source[st.i]! >= "0" && source[st.i]! <= "9") { s += source[st.i]; advance(1); }
       }
       tokens.push({ type: "num", value: s, line: sl, col: sc });
@@ -460,7 +485,11 @@ export function lex(source: string): Token[] {
           advance(1);
         }
       }
-      if (source[st.i] !== quote) throw new LexError(`Unterminated string at ${sl}:${sc}`);
+      // `st.i >= source.length ||` FIRST — and this one is the ERROR PATH breaking, not
+      // just a divergence: at end of input the read panics one statement BEFORE the
+      // `LexError` it was written to raise, so `"abc` aborted where `"abc\n` threw
+      // correctly. See test/sh6-fuzz.test.ts's split of the error path.
+      if (st.i >= source.length || source[st.i] !== quote) throw new LexError(`Unterminated string at ${sl}:${sc}`);
       advance(1); // closing quote
       tokens.push({ type: "str", value: s, line: sl, col: sc });
       continue;
@@ -499,7 +528,9 @@ export function lex(source: string): Token[] {
         // A RegularExpressionBackslashSequence may NOT contain a LineTerminator
         // (test262 language/literals/regexp/7.8.5-1). Skipping the escaped character
         // blindly would scan straight past the newline and swallow the next line.
-        if (ch === "\\") { if (source[j + 1] === "\n") { closed = false; break; } j++; continue; }
+        // `j + 1 >= source.length ||` first: a regex body ending in a lone `\` reads past
+          // the end, and "not closed" is the same answer node reaches there anyway.
+          if (ch === "\\") { if (j + 1 >= source.length || source[j + 1] === "\n") { closed = false; break; } j++; continue; }
         if (ch === "[") inClass = true;
         else if (ch === "]") inClass = false;
         else if (ch === "/" && !inClass) { closed = true; break; }
