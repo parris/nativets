@@ -154,6 +154,34 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
   free what its slots point at), and module-level bindings a function may have aliased. All are
   leaks by construction, never a double free or a dangling pointer.
 
+### Why ELEMENTS is not a one-line fix (measured, `test/drops-obj.test.ts`)
+
+Shapes that leak today, all by the same mechanism — `nt_obj_free` is `free(o)` and never walks
+the slots: object-in-object (`__objLive() === 1`), object-in-array (`objLive 1`, and **`__arrLive`
+reports 0** — it counts headers, so it cannot see this class at all), array-in-object (`arrLive 1`),
+a discriminated-union member's object field, and a `@@mutable` record's object field. Nesting
+depth 3 leaks 2. Refcounted string slots do *not* leak this way.
+
+A **generic** recursive free is impossible, not merely unsafe: `nt_obj_new` returns a bare
+`int64_t*` of n slots with **no header**, so at the free site the runtime knows neither the slot
+count nor whether a given 64-bit word is a bit-punned double, a refcounted `char*`, a linear
+object, or an `NtArray*`. Nothing in the value can tell them apart, and `nt_obj_new` also backs
+**closures** (`1 + caps.length`), whose captures deliberately alias outer values. So the fix is a
+codegen-emitted **per-type destructor** keyed off the `dropTy` already in hand at `emitDrops`,
+walking `objectFields()` and recursing only into `isObjectTy`/`isArrayTy`/`isUnionTy` slots
+(strings must `release`, not `free`). It terminates by construction: recursive types have no
+finite `Ty` encoding yet (see self-hosting SH2), so the field tree is finite.
+
+Two blockers must be cleared **before** that lands, or the leak becomes a double free — silent on
+stdout, visible only as a nonzero exit, the exact signature of the shipped `nt_arr_reverse` bug:
+1. **Spread shallow-copies slots.** `{ ...o1 }` loads o1's slot and stores the *same* pointer into
+   o2, then both are dropped — one `inner`, two owners.
+2. **A field can be moved out** (`const taken = outer.a`, or `return outer.a`) while the parent's
+   slot still points at it. Unlike an array element (`NT1605`), this is currently allowed.
+
+Each needs to be consumed-and-invalidated or refused first. Both are pinned as passing tests so
+the hazard cannot be rediscovered by accident.
+
 ---
 
 ## Example apps (north-star targets — drive the roadmap)

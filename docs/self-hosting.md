@@ -776,9 +776,15 @@ remaining work, and it is the same Path-B grind the `.push` census found.
   - **String-literal types** (`"square"`) exist only to carry those tags. The parser keeps them
     (`parseTypeInner`) and `parseType` widens them back to `string` for every type that is not a
     union, so `type Dir = "n" | "s"` still collapses and nothing past the checker sees one.
-  - **Linear, like the record it is** — move-checked (`NT1601`) and dropped once (`nt_obj_free`,
-    `__objLive()` → 0). Consequently `const n = nodes[i]` on a union array is `NT1605`, exactly as
-    for an object element (Stage 28); pass it by value instead.
+  - **Linear, like the record it is** — move-checked (`NT1601`) and dropped once (`nt_obj_free`).
+    Consequently `const n = nodes[i]` on a union array is `NT1605`, exactly as for an object
+    element (Stage 28); pass it by value instead.
+    **The drop is SHALLOW, exactly like every other object's**, so `__objLive() → 0` holds only
+    for a member whose fields are all scalars. A member with an object or array field leaks that
+    field — `type Sq = { kind: "sq"; inner: { n: number } }` measures `__objLive() === 1`. This is
+    not union-specific and is not a union regression: it is the `array/object ELEMENTS` item under
+    **Still open** in [`ROADMAP.md`](ROADMAP.md)'s Phase C, inherited unchanged because a union
+    *is* the ordinary object machinery. Pinned in `test/drops-obj.test.ts`.
   - **Refused, never guessed at (`NT1009`):** a union of object types with no usable discriminant
     (no shared field / not literal-typed / duplicated tag value / tag at a different position in
     different members — each with its own message), and any union that is not all object types,
