@@ -228,7 +228,7 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     // it moving from one to the other, because they stop at the first. Two views of one
     // change, and neither is wrong — see the "moved shallower" rule in selfhost-ratchet.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1003", "NT1014", "NT1015", "NT1023", "NT1030", "NT1031"],
+      ["NT1003", "NT1014", "NT1015", "NT1023", "NT1031"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the

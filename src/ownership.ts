@@ -24,12 +24,16 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl } from "./ast.ts";
-import { isArrayTy, isObjectTy, isUnionTy, setBlockDrops, classTag, mutableTags, RETAINS_RECEIVER } from "./ast.ts";
+import { isArrayTy, isObjectTy, isUnionTy, isTypeRefTy, setBlockDrops, classTag, mutableTags, RETAINS_RECEIVER } from "./ast.ts";
 
 /** The linear (single-owner, move-checked + dropped) types: heap aggregates. A
  *  DISCRIMINATED UNION (SH2) is one of them: its value IS a member's object block, so
  *  it is owned, moved and freed exactly like the record it is. */
-function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t) || isUnionTy(t); }
+/* A recursive node (`@N`) is an owned heap object exactly like the shape it names, so it is
+ * LINEAR. Left out, `isLinearTy` answered false and the whole memory-safety story switched
+ * off for the new encoding at once: no move checking, no borrow rules, and — because
+ * `declaredLinear` feeds the drop list — no drop emitted either. */
+function isLinearTy(t: import("./ast.ts").Ty): boolean { return isArrayTy(t) || isObjectTy(t) || isUnionTy(t) || isTypeRefTy(t); }
 
 export const OWN_CODES = {
   USE_AFTER_MOVE: "NT1601",      // ≈ E0382

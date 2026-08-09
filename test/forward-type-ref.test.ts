@@ -137,23 +137,11 @@ console.log(get(b));`);
     expect(r.message).not.toContain("'get'"); // ...never the value that used it
   });
 
-  // `interface N { next: N | null }` — a linked list. The self-reference resolves while
-  // N itself is still being parsed, so it can never be registered in time. Reordering
-  // cannot fix this one, which is why it gets its own wording.
-  test("a self-recursive type is refused as recursive, not as a forward reference", () => {
-    const r = reject(`
-interface N { kind: "N"; v: number; next: N | null; }
-const b: N = { kind: "N", v: 2, next: null };
-console.log(b.v);`);
-    expect(r.code).toBe("NT1030");
-    expect(r.message).toContain("'N'");
-    expect(r.message).toContain("itself"); // named as recursion, not as ordering
-    expect(r.message).not.toContain("'b'");
-    // ...and it must NOT be told to reorder, which cannot work here. Sharing the
-    // forward-reference hint would be the same misdirection in a new place.
-    expect(r.hint).toContain("Reordering cannot help");
-    expect(r.hint).not.toContain("move the declaration");
-  });
+  // `interface N { next: N | null }` — a linked list — USED to be refused here, and the
+  // assertion was that it was named as recursion rather than as an ordering problem. It now
+  // COMPILES, via the nominal `@Name` back-edge; the positive case is in the
+  // "self-recursion" block below. What is still refused is a MUTUAL cycle, two tests down,
+  // and that one still has to be told apart from a forward reference.
 
   // The blast-radius guard: a name that is not declared in this file keeps the old
   // fallback. Imported types resolve through the linker, and every module in src/ relies
@@ -190,25 +178,24 @@ console.log(p.kind);`);
   // itself — so the marker was rewritten to `number` instead, unconditionally and with no
   // diagnostic. That is the same recursion `interface N { next: N }` is refused for, in the
   // other spelling, and it must be told the same way.
-  test("a self-recursive CLASS field is refused as recursive, not erased to number", () => {
-    const r = reject(`
-class N {
-  v: number;
-  next: N;
-  constructor(v: number, next: N) { this.v = v; this.next = next; }
+  // These two USED to assert a refusal. The class spelling was routed through the same
+  // `@Name` back-edge as the interface spelling — one shape must not have two
+  // representations — so they now assert the behaviour, differentially against node.
+  test("a self-recursive CLASS field compiles and matches node", async () => {
+    await matchesNode(`
+class Scope {
+  depth: number;
+  parent?: Scope;
+  constructor(depth: number) { this.depth = depth; }
 }
-console.log(1);`);
-    expect(r.code).toBe("NT1030");
-    expect(r.message).toContain("'N'");
-    expect(r.message).toContain("itself");
-    expect(r.message).toContain("next"); // names the FIELD, which is where the cycle closes
-    expect(r.hint).toContain("Reordering cannot help");
+const root = new Scope(0);
+console.log(root.depth);
+console.log(root.parent);`);
   });
 
-  // The erasure was not only in a bare field: it fired on any field type CONTAINING the
-  // marker, so an array/Map/optional/function-typed field erased its inner reference the
-  // same silent way (`kids: N[]` became `number[]`). Each is still recursion.
-  test("a class field that contains itself indirectly is refused too", () => {
+  // Every CARRIER of a back-edge declares: a bare field, an array, a Map value, a function
+  // return. The reference is just a field type, so the carrier is the existing machinery.
+  test("a class field carries the back-edge through array/Map/optional/function forms", () => {
     for (const field of ["kids: N[];", "next?: N;", "by: Map<string, N>;", "self: () => N;"]) {
       const r = reject(`
 class N {
@@ -217,8 +204,7 @@ class N {
   constructor(v: number) { this.v = v; }
 }
 console.log(1);`);
-      expect({ field, code: r.code }).toEqual({ field, code: "NT1030" });
-      expect(r.message).toContain("itself");
+      expect({ field, code: r.code }).toEqual({ field, code: "" });
     }
   });
 
@@ -244,5 +230,66 @@ type E = A | B;
 const x: E = { kind: "A", a: 7 };
 console.log(x.kind);`);
     expect(r.code).toBe("");
+  });
+});
+
+/*
+ * RECURSIVE TYPES, step 1 (Lane B): SELF-recursion via the nominal `@Name` encoding.
+ *
+ * `Ty` is a flat string, so a self-containing type has no finite STRUCTURAL encoding —
+ * that is what NT1030 has been saying. The fix is a nominal back-edge: a type that
+ * contains itself keeps its structural shape at the top level and encodes the recursive
+ * position as a REFERENCE, `@N`, whose shape lives in a table on the Program. So
+ * `interface N { v: number; next?: N }` is `{v:number,next:?U@N}` — finite, and still a
+ * plain string, so `===` remains type comparison at every one of the ~400 sites that
+ * assume it.
+ *
+ * Only declarations in a CYCLE get a reference; every non-recursive type keeps its exact
+ * previous encoding, which is what makes this additive.
+ *
+ * Cases are DERIVED (no microsoft/TypeScript checkout on this machine — re-verified).
+ * The shapes are the compiler's own: `interface N { next?: N }` is the linked-list shape
+ * behind src/ast.ts's cycle, and `class Scope { parent: Scope | null }` is literally
+ * src/checker.ts:93, the compiler's symbol table.
+ */
+describe("recursive types — self-recursion (@Name)", () => {
+  test("a self-recursive interface compiles when the recursive field is absent", async () => {
+    await matchesNode(`
+interface N { v: number; next?: N }
+const a: N = { v: 1 };
+console.log(a.v);
+console.log(a.next);`);
+  });
+
+  // One level DEEP: the recursive field actually holds a node. This is the case the flat
+  // encoding could not express at all — `next` is a pointer back to the same shape.
+  test("a self-recursive interface holds a node in its recursive field", async () => {
+    await matchesNode(`
+interface N { v: number; next?: N }
+const inner: N = { v: 2, next: undefined };
+const a: N = { v: 1, next: inner };
+console.log(a.v);
+console.log(a.next);`);
+  });
+
+  // `T | null` rather than `T | undefined` — the `?N` arm, and the spelling src/checker.ts's
+  // `class Scope { parent: Scope | null }` uses.
+  test("a self-recursive interface with a `| null` back-edge compiles", async () => {
+    await matchesNode(`
+interface N { kind: "N"; v: number; next: N | null; }
+const b: N = { kind: "N", v: 2, next: null };
+console.log(b.v);
+console.log(b.kind);`);
+  });
+
+  // The back-edge must have a POINTER to live in. A self-referential alias with no object
+  // to hang the reference off is refused rather than encoded into a guess.
+  test("a self-recursive alias that is not an object type is refused", () => {
+    const r = reject(`
+type L = L[];
+const x: L = [];
+console.log(1);`);
+    expect(r.code).toBe("NT1030");
+    expect(r.message).toContain("not an object type");
   });
 });
