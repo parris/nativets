@@ -1637,6 +1637,7 @@ class Checker {
         return;
       case "ExprStmt":
         this.type(s.expr, scope);
+        this.rejectDiscardedMutator(s.expr);
         return;
     }
   }
@@ -2931,6 +2932,84 @@ class Checker {
     if (args.length !== 1 || this.type(args[0]!, scope) !== "string") throw typeError(`URLSearchParams.${method}(name: string)`);
     if (method === "has") return "boolean";
     return method === "getAll" ? "string[]" : makeNullable("null", "string");
+  }
+
+  /**
+   * A `Map`/`Set` mutator called in STATEMENT position with its result discarded (NT1606).
+   *
+   * This is the single most common Map idiom in JavaScript and it was a SILENT NO-OP:
+   *
+   *     const m = new Map<string, number>();
+   *     m.set("a", 1);                    // node: m gains "a".  here: nothing happens.
+   *     console.log(m.size, m.get("a"));  // node "2 1"; we printed "0 undefined", exit 0
+   *
+   * Wrong stdout with a zero exit status is the worst shape this project recognises, so it
+   * is refused. The §A "sharp turn" divergence documented `.set`/`.add`/`.delete` returning
+   * a NEW handle, but only ever as a statement about the RETURN VALUE; nothing looked at
+   * the call whose return value nobody takes. Every existing fixture happens to use the
+   * chained (`new Map().set(…).set(…)`) or reassigned (`m = m.set(…)`) form, so the suite
+   * never exercised the discarding one.
+   *
+   * WHY the JS spelling is the discarding one, and why that makes this a trap rather than
+   * an ordinary divergence: under node these methods return the RECEIVER
+   * (test262 `built-ins/Map/prototype/set/returns-this.js`,
+   * `built-ins/Set/prototype/add/returns-this.js`), so the result carries no information
+   * and throwing it away is the idiomatic call. Under a persistent collection the result
+   * IS the operation. The two conventions look identical and mean opposite things.
+   *
+   * THE RULE IS "RESULT DISCARDED", with no "is the receiver read afterwards?" test.
+   * A discarded mutator is a guaranteed no-op in EVERY execution of EVERY program, so the
+   * refusal has no false-positive direction. The reachability refinement does have an
+   * UNSOUND direction — it must chase aliases (`const m2 = m;`), escapes through calls and
+   * fields, and returns, and any miss silently restores the wrong answer this rule exists
+   * to remove. It is also exactly how arrays are already handled one screen down:
+   * `arr.push(x)` is NT1606 unconditionally, never "NT1606 only if `arr` is read later".
+   *
+   * Scope note: `.clear` needs no case here — it is not implemented for either collection
+   * and already refuses as NT1014. Array `.reverse` is NOT affected: it returns its own
+   * receiver and genuinely reverses in place, so `a.reverse();` as a statement matches node
+   * (measured). Non-mutating methods (`.toSorted`, `.with`, string methods) are no-ops as
+   * statements under node too, so discarding them is not a divergence.
+   */
+  private rejectDiscardedMutator(e: Expr): void {
+    if (e.kind !== "CallExpr" || e.callee.kind !== "MemberExpr") return;
+    const m = e.callee.property;
+    const recv = e.callee.object.ty;
+    const isMap = recv !== undefined && isMapTy(recv) && (m === "set" || m === "delete");
+    const isSet = recv !== undefined && isSetTy(recv) && (m === "add" || m === "delete");
+    if (!isMap && !isSet) return;
+    const kind = isMap ? "Map" : "Set";
+    // Point at the RECEIVER, not at `e.loc` (the argument list's `(`): the receiver is
+    // where the statement starts, which is what a reader scans for. Falls back to the
+    // call when the receiver carries no position of its own.
+    const loc = exprLoc(e.callee.object) ?? e.loc;
+    const at = loc ? ` at ${loc.line}:${loc.col}` : "";
+    // Name the receiver in the hint when it HAS a name, so the fix is copy-pasteable —
+    // including the member form the compiler's own source uses (`this.generics.set(…)`).
+    const name = exprText(e.callee.object);
+    // `exprText` only names identifier/member/index paths, so a LITERAL argument — which
+    // is what almost every real call passes — would render as `…` and make the suggested
+    // line uncopyable. Spell the literals out here rather than widening `exprText`, which
+    // is shared with other diagnostics.
+    const argText = (a: Expr): string =>
+      a.kind === "StringLiteral" ? JSON.stringify(a.value)
+      : a.kind === "NumberLiteral" ? String(a.value)
+      : a.kind === "BooleanLiteral" ? String(a.value)
+      : exprText(a) ?? "…";
+    const args = e.args.map(argText).join(", ");
+    // The one-chain suggestion is only sane for the ADDING methods — you cannot build a
+    // collection out of `.delete` calls, so offering `new Map().delete(…).delete(…)` there
+    // would be advice that does not typecheck as a fix for anything.
+    const chain = m === "delete" ? "" :
+      `, or build it in one chain: \`new ${kind}${isMap ? "<K, V>" : "<T>"}().${m}(…).${m}(…)\``;
+    throw mutationError(
+      `\`${kind}\` is persistent: \`.${m}\` returns a NEW ${kind.toLowerCase()} and leaves the receiver unchanged, so discarding the result here does NOTHING${at}`,
+      (name !== undefined
+        ? `write \`${name} = ${name}.${m}(${args})\` — the result IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. `
+        : `keep the result — it IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. `) +
+      `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. ` +
+      `Unlike node, \`Map\`/\`Set\` here are persistent — node's \`.${m}\` mutates and returns the receiver, so the discarded spelling works there and cannot here (docs/divergences.md §A)`,
+    );
   }
 
   private inferMapMethod(recv: Ty, method: string, args: Expr[], scope: Scope, node: Expr): Ty {
