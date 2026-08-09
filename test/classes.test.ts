@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 
 import { buildBinary, sourceToIR } from "../src/driver.ts";
 import { NTError } from "../src/diagnostics.ts";
+import type { Diagnostic } from "../src/diagnostics.ts";
 
 async function run(source: string): Promise<{ stdout: string; status: number | null }> {
   const dir = mkdtempSync(join(tmpdir(), "classes-"));
@@ -182,6 +183,81 @@ console.log(Sym.width);
 `);
     expect(msg).toContain("Sym.width");
     expect(msg).not.toContain("'Sym' is not defined");
+  });
+});
+
+/*
+ * ACCESSORS (`get` / `set`). Deliberately REFUSED, not deferred-by-accident.
+ *
+ * A getter would make `o.x` sometimes a slot load and sometimes a CALL, and three things
+ * downstream assume it is always a slot: the checker's dotted-path narrowing (a fact about
+ * `d.spans` is sound only because an undecorated object's field cannot change), linearity
+ * (a field read of an object is `NT1605`, a call result is an owned or borrowed value), and
+ * codegen's member lowering. That is four stages of work with a real silent-wrong-answer
+ * surface, and the CONSTRUCT CENSUS over all twelve `src/*.ts` — counting the construct, not
+ * the first blocker, per docs/self-hosting.md's standing correction — finds exactly **one**
+ * getter and **zero** setters in the compiler's entire source. So the refusal stands and the
+ * one site is rewritten as the method it already is.
+ *
+ * What has to be true for that to be an honest refusal: the hint must name a rewrite, and
+ * the rewrite it names must COMPILE. (docs/self-hosting.md: "advice a diagnostic gives has
+ * to compile.")
+ */
+describe("get / set accessors are refused with a rewrite that compiles", () => {
+  // NOTE: the diagnostic lives on `e.diag`. `NTError` has no `.code`/`.hint` of its own —
+  // the `${e.code}` in the "static members" helper above renders `undefined` and passes
+  // only because its assertions look at the message half.
+  function reject(src: string): Diagnostic {
+    try {
+      sourceToIR(src);
+      throw new Error("expected a rejection");
+    } catch (e) {
+      if (!(e instanceof NTError)) throw e;
+      return e.diag;
+    }
+  }
+
+  test("a `get` accessor is NT1015 and the hint names the method rewrite", () => {
+    const e = reject(`
+class B {
+  private n: number = 0;
+  private get doubled(): number { return this.n * 2; }
+  show(): number { return this.doubled; }
+}
+console.log(new B().show());
+`);
+    expect(e.code).toBe("NT1015");
+    expect(e.message).toContain("'get'");
+    expect(e.hint).toContain("method");
+    expect(e.hint).toContain("()");
+  });
+
+  test("a `set` accessor is NT1015 with the same hint", () => {
+    const e = reject(`
+class B {
+  private n: number = 0;
+  set v(x: number) { this.n = x; }
+}
+console.log(1);
+`);
+    expect(e.code).toBe("NT1015");
+    expect(e.hint).toContain("method");
+  });
+
+  // The rewrite the hint prescribes, compiled and run. This is the exact shape of
+  // `src/codegen.ts`'s sole getter (`private get terminated()` → `private isTerminated()`),
+  // and node is the oracle for the value.
+  test("the prescribed rewrite compiles and runs (node prints 84)", async () => {
+    const r = await run(`
+class B {
+  private n: number = 42;
+  private doubled(): number { return this.n * 2; }
+  show(): number { return this.doubled(); }
+}
+console.log(new B().show());
+`);
+    expect(r.stdout).toBe("84\n");
+    expect(r.status).toBe(0);
   });
 });
 

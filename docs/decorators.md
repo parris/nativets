@@ -125,6 +125,18 @@ Concretely, three adjustments, all inert in a program with no `@@mutable` class:
      receiver that is not a binding whose ownership this scope can establish.
 
    The receiver is resolved through a method chain, so `a.bump().bump()` is still `a`.
+
+   **One receiver is not a binding and is owned anyway: a fresh `new C(…)` TEMPORARY.**
+   `new Counter().bump().get()` is accepted. Nothing in this scope — or any other — can
+   name the temporary, which makes it strictly *more* uniquely owned than the "local bound
+   to `new C(…)`" the NT1607 hint asks for, so exclusive access holds by construction. This
+   is the same fact commit `1ea7fa2` used to keep `.push` refused ("a syntactically-fresh
+   receiver is a temporary nothing can name"), with the sign flipped: there it made the
+   rule vacuous, here it makes the call safe. Rule 2 is untouched — a fresh chain's *result*
+   still may not escape (`return new C().bump()`, `[new C().bump()]`, `move(…)` are all
+   `NT1604`), because a method still hands back a borrow and there is no owning binding to
+   return instead. A fresh receiver is subject to the pre-existing unbound-temporary leak:
+   the object is never dropped, exactly as for an ordinary class's `new P(7).get()`.
 4. **Reassigning an aliased owner is `NT1602`** (≈ rustc E0506): `let b = a; a = new C();` would
    free the old value out from under `b`.
 
@@ -240,7 +252,8 @@ instead of a setter call:
 |---|---|
 | `const b = c` | an **alias** (a borrow), not a move — every handle observes the mutation, and the value is still dropped exactly once, by the owner (`__objLive()` → 0) |
 | `b.n = 1` through an alias, a **parameter**, a `for-of` element, a **container element** (`cells[0].n = 1`), a capture | **`NT1607`** (≈ rustc E0596) — the receiver is not a binding whose ownership this scope can establish |
-| letting an alias **escape** (`return b`) | **`NT1604`** (≈ E0507) |
+| a setter on a **fresh** `new C(…)` receiver (`new Counter().bump().get()`) | **accepted** — a temporary nothing can name is uniquely owned by construction |
+| letting an alias **escape** (`return b`) | **`NT1604`** (≈ E0507) — including a *fresh* chain's result |
 | reassigning an owner that is still aliased | **`NT1602`** (≈ E0506) |
 | **reading** through any handle | always fine |
 
