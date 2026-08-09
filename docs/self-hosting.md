@@ -3730,6 +3730,82 @@ specialization). Its footprint on its own numbers is **zero**: the collection ho
 arrow inside `check`, not a new top-level function, because the first cut *was* a
 top-level `function` and the tool immediately counted it as a 302nd blocker.
 
+### THE DOTTED-PATH TAG TEST IS CLEARED — 199 sites, and the soundness rules were already written
+
+`if (e.callee.kind === "MemberExpr") { e.callee.property }` — the shape nine modules'
+linked blocker had converged on, and the shape most of this compiler's own passes are
+written in. Counted with **this compiler's own parser** (not `grep`, which misses
+multi-line spellings): **199 dotted-path tag tests in five files** — `checker.ts` 111,
+`codegen.ts` 47, `ownership.ts` 25, `parser.ts` 10, `ast.ts` 6.
+
+**Why it was refused.** A tag narrowing is a constant shadow **BINDING** declared in the
+arm's scope (`narrowInto`) — the mechanism every later pass already reads. `e.callee` has
+no name to shadow, so `discriminantRead` required `e.object.kind === "Identifier"` and the
+test proved nothing.
+
+**What it is now.** A dotted path records a `NarrowFact` instead — the *same* structure the
+NULLISH half of narrowing has tracked access paths with since `discriminantPropertyCheck.ts`
+landed. Nothing new was invented for the invalidation model, which is the point: the rules
+that make a nullish path fact sound are exactly the rules a tag path fact needs.
+
+| rule | enforced by | what it stops |
+|---|---|---|
+| every object on the path is IMMUTABLE (no `@@mutable`), and not `this` | `accessPath` | `g.swap()` rewriting the very field the tag test proved, through a second handle |
+| no `?.`, no index, no call step | `accessPath` | a receiver that is not a stable NAME for a value (two calls need not return the same object) |
+| the ROOT is not assigned in the guard or in the region the fact covers | `unstableNames`, shared verbatim with `factsFor` | `if (o.inner.kind==="A") { o = other; … o.inner.left }`, and a loop back-edge (the body IS the region) |
+| the ROOT is not assigned inside ANY arrow in the program | `closureAssigned` | an inline `map`/`filter`/`reduce` callback, the one arrow `NT1031` permits to write |
+| a `let` root's fact stops at an arrow boundary | `constant` / `arrowDepth` | a closure running after a later assignment |
+
+**Verified by MUTATION, not by argument.** With the assignment filter removed,
+`if (o.inner.kind === "A") { o = other; return "n" + o.inner.left; }` compiles and prints
+`n2.1622591016e-314` — a string pointer reinterpreted as a double — where node prints
+`nundefined`. That is the silent wrong answer this project exists to avoid, and it is one
+`if` away from the accepting path.
+
+**One more unfold was needed, in `accessPath` itself.** The previous section cleared `@N` at
+the two funnels where a value's type is PRODUCED; `accessPath` is a third producer and was
+missed, so `e.callee`'s declared type came back as the folded `@Expr`, which is not
+`isObjectTy` — every step off a recursive field declined before the narrowing was even
+considered. That is most of an AST walker. The `@@mutable` test moved onto the UNFOLDED type
+in the same change, because a `@N` is never `isObjectTy` and so answered "not mutable" for a
+`@@mutable` class reached through a type reference.
+
+**Frontier delta, measured (`test/selfhost-ratchet.baseline.json`).** Nine linked columns
+plus `ast.ts`'s standalone column moved off `Property 'property' does not exist on …`. That
+is nine first-blockers cleared, **not** nine modules unlocked: a parallel probe measuring
+ALL function-body blockers at once finds 301 of 649 functions in the linked stage-1 program
+still failing, across 129 distinct shapes.
+
+| Module (linked) | Before | After |
+|---|---|---|
+| `ast.ts` (also standalone), `checker.ts`, `cli.ts`, `codegen.ts`, `coverage.ts`, `driver.ts`, `modules.ts`, `ownership.ts`, `parser.ts` | `NT2001 Property 'property' does not exist on {…Expr…}` — the path tag test | `NT2001 Property 'left' does not exist on {BinaryExpr} \| {LogicalExpr} — narrowed here to MORE THAN ONE member` |
+
+**The next term, and it is NOT the same construct.** `ast.ts`'s `exprLoc`:
+
+```ts
+case "BinaryExpr": case "LogicalExpr": return exprLoc(e.left) ?? exprLoc(e.right);
+```
+
+Two `case` labels share a body, so the receiver narrows to a two-member SUB-union. `tsc`
+allows `.left` because every surviving member has it at the same type; we do not, yet. Note
+the extra condition our representation adds that `tsc` never has to check: **the field must
+sit at the same SLOT INDEX in every surviving member**, or the load is wrong. Its own lane.
+
+**And that blocker now SELF-LOCATES.** `fieldOnBase` was the one diagnostic site calling
+`typeError(msg)` with no position while every sibling passed one, so the single most common
+self-host blocker printed with no `L:C` — on a 4000-line file. `ast.ts`'s own `exprLoc`
+carries the note that this "cost a lane an instrumented build of the compiler to find the
+line"; this lane paid it again, writing a throwaway AST walker to learn the site was line
+1384. The location was available at all three call sites the whole time. It now prints:
+
+```
+error[NT2001]: Property 'left' does not exist on … at 1407:60
+       |
+  1407 |     case "BinaryExpr": case "LogicalExpr": return exprLoc(e.left) ?? exprLoc(e.right);
+       |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this read
+```
+
+
 ---
 
 ## Milestones

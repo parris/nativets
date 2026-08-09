@@ -2806,6 +2806,39 @@ share one cell. That is a real feature, not a patch, and it is what would let co
 
 | NT1029 | a closure writing a binding it captured, where the write would be observable (or the binding is not a `number`) | later | by-reference capture: box the captured cell so every closure and the declaring frame share one |
 
+### STRICTER THAN `tsc` ON PURPOSE — a dotted-path narrowing an inline callback invalidates
+
+A dotted path narrows now (`if (o.inner.kind === "A") { o.inner.left }`, `docs/self-hosting.md`),
+and its stability rules are `tsc`'s — with **one place where we deliberately refuse a program
+`tsc` accepts**, because `tsc` is wrong there and we would miscompile it.
+
+```ts
+let o: Box = { name: "p", inner: { kind: "A", left: 1 } };
+if (o.inner.kind === "A") {
+  [1].map((x: number): number => { o = { name: "q", inner: { kind: "B", right: "boom" } }; return x; });
+  return "n" + o.inner.left;      // tsc: fine. node: "nundefined".
+}
+```
+
+`tsc --strict` reports no error: it does not invalidate the narrowing for an assignment inside a
+callback. node runs the callback inline, so by the read `o.inner` is the `B` member and `.left`
+is `undefined`. For `tsc` that is a type-level lie with a benign runtime result; for us the same
+lie is a **slot layout**, and the read would return a string pointer reinterpreted as a double.
+
+So `closureAssigned` drops the fact and the read keeps its `NT2001`. Same input, three answers:
+
+| | `tsc --strict` | node | nativets |
+|---|---|---|---|
+| the narrowed read above | accepted | `nundefined` | **refused**, `NT2001`, naming the assignment |
+
+The *neighbouring* case needs no special pleading — `tsc` refuses a plain `o = other;` between
+the proof and the read exactly as we do (`TS2339`, verified against `typescript@7.0.2`). Only the
+callback shape diverges, and it diverges toward refusing.
+
+| refusal | why | lift it by |
+|---|---|---|
+| a dotted-path tag narrowing whose root is assigned inside any arrow in the program | the arrow may run between the proof and the read, and unlike `tsc` we would emit the wrong slot layout rather than a merely-wrong type | tracking WHERE each arrow can run (an effect/order analysis), not by matching `tsc` |
+
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
 
