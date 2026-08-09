@@ -999,12 +999,17 @@ function closureDecls(list: Stmt[], out: Map<string, object>): void {
  * gets a slot in THAT function's frame and can never share one out here. The FuncDecl's
  * OWN name still counts; only its parameters and body are skipped.
  *
- * That is a real leak, and it is a CROSS-MODULE one: `runScope` analyses the module frame
- * with `program.body`, which after SH1 is every linked module at once, so one `let add = 0`
- * inside some other file's function deleted the drop for a `const add = …` closure here.
- * Per-module measurement cannot see it and neither can a differential test — the program's
- * output is identical, it just never frees. `test/modules/closure-drop` pins it with
- * `__objLive()`.
+ * That is a real leak: an ordinary helper's private `let add = 0` deleted the drop for a
+ * `const add = …` closure in the module frame. Worst when modules are LINKED, because
+ * `runScope` analyses that frame with `program.body` and after SH1 that is every module at
+ * once — so the collision arrives from a file the closure has never heard of, which no
+ * per-module measurement can see and no differential test can either (the output is
+ * identical, it just never frees). `test/modules/closure-drop` pins the linked shape with
+ * `__objLive()`, `test/closure-env-drops.test.ts` the single-file one.
+ *
+ * The sibling collectors here — `collectLinear`, `collectVarTys`, `collectAliases` — are
+ * kind-by-kind switches with no `FuncDecl` arm and were already right. Only this one walked
+ * reflectively, which is how it over-reached.
  *
  * Arrow bodies keep counting. An inlined HOF callback's locals DO land in the enclosing
  * frame (`freshenHofArrow` makes them unique first), and that is the direction where a
