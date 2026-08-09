@@ -1737,7 +1737,9 @@ class Parser {
     for (const p of ctorParams ?? []) {
       if (!p.paramProp) continue;
       fields.push({ key: p.name, ty: p.annot ?? "number" });
-      paramPropInits.push({ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: p.name, value: this.ident(p.name), viaThis: true } });
+      // `paramProp: true` marks this as the DEFINITIONAL store — the reason a parameter
+      // property is a CONSUMING parameter rather than a borrow (src/ownership.ts).
+      paramPropInits.push({ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: p.name, value: this.ident(p.name), viaThis: true, paramProp: true } });
     }
     // Field initializers (`name = init`): `this.name = init`, in declaration order, prepended
     // after the parameter-property inits and before the explicit ctor body (TS field-init order).
