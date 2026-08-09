@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "c499cd4"
+    "rev": "eb7c778"
   },
   "modules": {
     "ast.ts": {
@@ -57,20 +57,20 @@
       }
     },
     "coverage-preprocess.ts": {
-      "sha256": "6db75ce346cfc83a",
+      "sha256": "de28999459a7c074",
       "standalone": {
         "stage": "check",
         "code": "NT1031",
         "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1702",
-        "message": "[NT1702] import cycle:"
+        "stage": "check",
+        "code": "NT1031",
+        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
       }
     },
     "coverage.ts": {
-      "sha256": "e868dc31875f5d6f",
+      "sha256": "8cf20add73de7765",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -78,9 +78,9 @@
         "artifact": true
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1702",
-        "message": "[NT1702] import cycle:"
+        "stage": "check",
+        "code": "NT1014",
+        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
       }
     },
     "diagnostics.ts": {
@@ -124,7 +124,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "8ad6d6b87ee5cb98",
+      "sha256": "701d519336b17d77",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

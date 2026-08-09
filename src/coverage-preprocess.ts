@@ -31,7 +31,20 @@
  * caller's recovery loop rather than blanking the whole file.
  */
 
-import type { Blocker } from "./coverage.ts";
+/**
+ * One blocking feature, grouped by NT code — the unit of the coverage histogram.
+ *
+ * It is declared HERE, in the leaf, rather than in `coverage.ts` where it is consumed,
+ * because this file PRODUCES the first ones (`stripped`, below) and `coverage.ts`
+ * already imports this file for `preprocessForCoverage`. Declaring it in the consumer
+ * closed a cycle — `coverage.ts → coverage-preprocess.ts → coverage.ts` — whose closing
+ * edge was `import type`. node and bun erase that edge, so the cycle was invisible to
+ * them, but the linker (src/modules.ts) links modules in dependency order and resolves
+ * each one's types from the modules linked BEFORE it, so it has to refuse a cycle it
+ * cannot order. Moving the declaration DOWN a layer, to the module that does not import
+ * the other, is the fix the NT1702 hint asks for. See docs/divergences.md.
+ */
+export interface Blocker { code: string; feature: string; milestone: string; hint: string; count: number; }
 
 /** A top-level statement, module syntax stripped, ready to feed to `parse`. */
 export interface PreStatement { text: string; line: number }
