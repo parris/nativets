@@ -1023,9 +1023,16 @@ class Parser {
   private parseGenericType(id: string): Ty {
     const a = this.parseTypeArgs();
     switch (id) {
-      case "Map": return makeMapTy(a[0] ?? "string", a[1] ?? "number");
+      // `Readonly*` is a compile-time-only distinction in TypeScript, and nativets'
+      // Map/Set/array ARE immutable (B2: `.set`/`.add` return a new collection), so the
+      // readonly spellings are the same types. Without these two cases they fell through
+      // `default:` and an unknown named type erases to `number` — a guess that turned a
+      // program node runs into `'m' declared number but initialized with Map<…>`.
+      case "Map":
+      case "ReadonlyMap": return makeMapTy(a[0] ?? "string", a[1] ?? "number");
       case "Record": return makeMapTy(a[0] ?? "string", a[1] ?? "number"); // dictionary → Map
-      case "Set": return makeSetTy(a[0] ?? "string");
+      case "Set":
+      case "ReadonlySet": return makeSetTy(a[0] ?? "string");
       case "Array":
       case "ReadonlyArray": return `${a[0] ?? "number"}[]` as Ty;          // Array<T> → T[]
       // single-arg wrapper/mapped types erase to their inner type

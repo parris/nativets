@@ -628,6 +628,55 @@ bindings. Two deliberate differences:
 - **Import cycles are refused** (`NT1702`, naming the cycle). ESM permits them via live bindings
   and a TDZ; a whole-program link has no such machinery, so we reject rather than pick an order
   that silently differs from node. Break the cycle with a third shared module.
+- **…including a cycle whose closing edge is `import type`** — and this one diverges from node,
+  bun AND tsc, all three of which accept it. It is the sharper case, so it gets its own note.
+
+#### A TYPE-ONLY import cycle is still `NT1702`
+
+```ts
+// main.ts
+import { widen } from "./dep.ts";
+export interface Cell { n: number }
+console.log(widen({ n: 41 }));       // node & bun: 42.  nativets: error[NT1702]
+
+// dep.ts
+import type { Cell } from "./main.ts";   // erased — binds nothing at run time
+export function widen(c: Cell): number { return c.n + 1; }
+```
+
+node and bun erase the `import type` statement outright, so **at run time this graph is acyclic**
+and both run it; tsc permits type-level cycles by design. nativets refuses it anyway.
+
+The reason is **ordering, not evaluation**. The linker walks the graph in post-order and links
+each module seeded with the type exports of the modules linked *before* it, so a type reachable
+only by going *forward* in that order has nothing to resolve against — and a cycle, by
+definition, admits no such order. The type-only edge binds no value, but it still constrains
+where the type can be resolved.
+
+The tempting one-line fix — skip type-only edges when detecting the cycle — was **measured, and
+it is not sound**. Dropping the edge does not make the type resolve; it makes it *unseeded*, and
+an unresolved type name falls through the parser's last resort (`SCALARS.has(id) ? id : "number"`)
+and silently becomes `number`. In the example above, `c: Cell` becomes `c: number`. That is the
+silent-wrong-answer class this compiler exists to avoid, so the refusal stays until the linker
+can seed type exports on a pass ordered independently of evaluation order.
+
+What the diagnostic does instead is **name the edge**, because the fix is one declaration:
+
+```
+error[NT1702]: import cycle:
+  → main.ts
+  → dep.ts
+  → main.ts   (this edge is `import type`)
+  = help: node erases an `import type`, so this cycle does not exist at run time — but nativets
+    resolves each module's types from the modules linked BEFORE it, and a cycle has no such
+    order. Move the shared TYPE into a module that both import — usually the one that does not
+    import the other.
+```
+
+The compiler's own source hit exactly this (`coverage.ts ⇄ coverage-preprocess.ts`, closed by
+`import type { Blocker }`) and was fixed the same way: `Blocker` moved down into the leaf that
+produces it. Pinned by the `bad-type-cycle` case in `test/modules.test.ts`, which also asserts
+node prints `42` for it.
 - **Only relative `./`/`../` specifiers with an explicit extension resolve.** There is no
   `node_modules`/bare-specifier resolution, no `export default`, no `import * as ns`, no
   `export * from`, and no dynamic `import()` — each is `NT1017` with a hint naming the supported

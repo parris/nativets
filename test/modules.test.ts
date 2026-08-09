@@ -182,6 +182,55 @@ describe("modules (rejected with a diagnostic)", () => {
 });
 
 /*
+ * A cycle whose closing edge is `import type`.
+ *
+ * node and bun ERASE a type-only import, so at run time that graph is acyclic and both
+ * run it; tsc permits it outright. nativets refuses it anyway, and the reason is
+ * ORDERING, not evaluation: the linker seeds each module's type environment from the
+ * modules linked BEFORE it (src/modules.ts), so a type reachable only by going FORWARD
+ * in the order has nothing to resolve against.
+ *
+ * Dropping type-only edges from the DFS was measured, and it is NOT sound: the name is
+ * then simply never seeded, and an unresolved type falls through src/parser.ts's last
+ * resort (`SCALARS.has(id) ? id : "number"`) and becomes `number`, silently. So this
+ * stays a refusal — a documented divergence (docs/divergences.md) — and the diagnostic's
+ * job is to name the type-only edge, because THAT is the one declaration to move.
+ */
+describe("a type-only import cycle", () => {
+  const entry = join(DIR, "bad-type-cycle", "main.ts");
+  const diagFor = (file: string): { code: string; message: string; hint?: string } => {
+    let err: unknown;
+    try { sourceToIR(readFileSync(file, "utf8"), file); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(NTError);
+    return (err as NTError).diag;
+  };
+
+  test("node runs it — the edge really is erased", () => {
+    const oracle = runWithNodeFile(entry);
+    expect(oracle.stderr).toBe("");
+    expect(oracle.stdout).toBe("42\n");
+  });
+
+  test("we refuse it, naming the cycle IN ORDER and marking the `import type` edge", () => {
+    const diag = diagFor(entry);
+    expect(diag.code).toBe("NT1702");
+    const lines = diag.message.split("\n");
+    expect(lines[1]).toContain("bad-type-cycle/main.ts");
+    expect(lines[2]).toContain("bad-type-cycle/dep.ts");
+    expect(lines[3]).toContain("bad-type-cycle/main.ts");
+    expect(lines[3]).toContain("import type"); // the closing edge, marked
+    expect(diag.hint).toContain("import type");
+  });
+
+  test("a genuine VALUE cycle is unchanged — still refused, still not blamed on types", () => {
+    const diag = diagFor(join(DIR, "bad-cycle", "main.ts"));
+    expect(diag.code).toBe("NT1702");
+    expect(diag.message).not.toContain("import type");
+    expect(diag.hint).not.toContain("import type");
+  });
+});
+
+/*
  * Checking a module WITHOUT linking it first.
  *
  * `check()` on a bare `parse()` result sees `import { parse } from "./parser.ts"` as
@@ -225,5 +274,68 @@ describe("an unlinked import is reported as an unlinked import", () => {
     try { check(parse("console.log(nosuch(1));\n")); } catch (e) { err = e; }
     expect(err).toBeInstanceOf(NTError);
     expect((err as NTError).diag.message).toContain("function values");
+  });
+});
+
+/*
+ * DETERMINISM of the alpha-rename prefix.
+ *
+ * `linkProgram` renames each non-entry module's top-level bindings with a per-module
+ * prefix. `choosePrefixBase` prefers `_m`, escalating to `_nt_m` then
+ * `_nativets_module_` if a source literally contains the shorter one — and if all
+ * three appear it fell back to `` `_nts${Date.now().toString(36)}_m` ``, a CLOCK
+ * read, so the same inputs produced different global names on every run.
+ *
+ * The one file in the tree guaranteed to contain all three strings is
+ * `src/modules.ts` itself (they are the candidate list, spelled in this very
+ * function), so the escalation was reached by exactly the module the self-hosting
+ * measurement cares most about. Three ways that bites, in increasing severity:
+ *
+ *   1. `test/selfhost-ratchet.test.ts` records the blocker MESSAGE as blocker
+ *      identity, and a message naming a renamed binding then differs between two
+ *      measurements IN THE SAME RUN — the ratchet cannot hold.
+ *   2. `test/sh6.test.ts`'s `blameOf` attributes a blocker by byte-identical message,
+ *      so a name-carrying blocker can never be attributed to the dependency it
+ *      actually lives in.
+ *   3. SH7's definition of done is "`nativets-2` and `nativets-3` are BYTE-IDENTICAL".
+ *      A compiler that mints global names from the clock cannot reproduce itself.
+ *
+ * The fix keeps the escalation but derives it from the sources: keep counting until
+ * no source contains the candidate. Same guarantee (no collision), same inputs ->
+ * same answer.
+ */
+describe("the alpha-rename prefix is a function of the sources, never the clock", () => {
+  const readSrc = (f: string) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", f), "utf8");
+
+  test("linking src/modules.ts twice produces identical output", () => {
+    const entry = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "modules.ts");
+    const src = readSrc("modules.ts");
+    const names = () => {
+      // The blocker is what carries the prefix into a user-visible string today.
+      try { sourceToIR(src, entry); return "IR OK"; } catch (e) { return (e as NTError).diag.message; }
+    };
+    const a = names(), b = names();
+    expect(a).toBe(b);
+    // ...and the escalation it lands on is the DETERMINISTIC one. Asserting merely
+    // "no `_nts`" was wrong — `_nts0_m` is the correct answer here, since src/modules.ts
+    // does contain all three preferred bases. What must never appear is a clock, i.e.
+    // anything but the first free counter value.
+    expect(a).toContain("_nts0_m");
+  });
+
+  test("a program containing all three candidate bases still links deterministically", () => {
+    // Every candidate appears as a literal, forcing the escalation path.
+    const dir = join(dirname(fileURLToPath(import.meta.url)), "modules-prefix");
+    const read = (p: string): string =>
+      p.endsWith("dep.ts")
+        ? 'export const bases = ["_m", "_nt_m", "_nativets_module_"];\nexport function two(): number { return 2; }\n'
+        : 'import { two, bases } from "./dep.ts";\nconsole.log(two(), bases.length);\n';
+    const ir = () => {
+      const p = linkProgram(read(join(dir, "main.ts")), join(dir, "main.ts"), read);
+      return p.body.map((s) => ("name" in s ? String((s as { name: unknown }).name) : s.kind)).join(",");
+    };
+    const a = ir();
+    expect(ir()).toBe(a);
+    expect(a).toContain("_nts0_m0_two"); // the first free counter value, not a timestamp
   });
 });

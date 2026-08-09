@@ -1,20 +1,20 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "e88f360"
+    "rev": "1d2cda7"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "377d30463c463876",
+      "sha256": "243df5ca986b2b85",
       "standalone": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] 'HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] 'HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "checker.ts": {
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nt_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "cli.ts": {
@@ -39,8 +39,8 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1702",
-        "message": "[NT1702] import cycle:"
+        "code": "NT1020",
+        "message": "[NT1020] calling async function 'buildBinary' without 'await' at L:C (its value is a Promise under node; nativets runs it to completion immediately) is not supported yet"
       }
     },
     "codegen.ts": {
@@ -52,25 +52,25 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nt_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "coverage-preprocess.ts": {
-      "sha256": "6db75ce346cfc83a",
+      "sha256": "de28999459a7c074",
       "standalone": {
         "stage": "check",
         "code": "NT1031",
         "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1702",
-        "message": "[NT1702] import cycle:"
+        "stage": "check",
+        "code": "NT1031",
+        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
       }
     },
     "coverage.ts": {
-      "sha256": "e868dc31875f5d6f",
+      "sha256": "8cf20add73de7765",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -78,9 +78,9 @@
         "artifact": true
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1702",
-        "message": "[NT1702] import cycle:"
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] '_nts0_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "diagnostics.ts": {
@@ -106,8 +106,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nts0_m2_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "lexer.ts": {
@@ -124,7 +124,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "8ad6d6b87ee5cb98",
+      "sha256": "a7b78b86b0c1a5f8",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -132,8 +132,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nts0_m2_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "ownership.ts": {
@@ -145,12 +145,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nt_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "parser.ts": {
-      "sha256": "4b44a5a57827a10e",
+      "sha256": "67d8498f2bc76722",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -158,8 +158,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] new Map([[key, value], …]) (the entries form needs a [key, value] tuple type we do not have yet; use .set) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] '_nt_m2_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     }
   }

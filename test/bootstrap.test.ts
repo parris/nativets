@@ -364,13 +364,48 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     //            other entry here — not a missing feature but a defect in the module
     //            graph — and it has never been visible before, because ast.ts's refusal
     //            fired before the linker ever got far enough to trip over it.
-    // ...and NT1002 has since LEFT it, by the LANGUAGE rather than by a source change:
-    // `in` is decided at compile time for a literal key over a static shape, so `op in
-    // FCMP` — the only site in the tree — stopped being a blocker instead of moving. Its
-    // three modules redistribute onto NT1014 (codegen.ts, driver.ts, through ast.ts) and
-    // NT1702 (cli.ts, through coverage.ts). Three codes gate the whole tree.
+    //
+    // NT1014 EMPTIED AND NT2001 REFILLED, one source change apart. `DATE_GETTERS` was
+    // written as the `new Map([[k, v], …])` entries form — which needs a `[key, value]`
+    // tuple type nativets does not have — and is now the `.set` chain the diagnostic
+    // itself prescribes. That is the same program by construction (ES2024 24.1.1.1 §8
+    // builds the entries form by calling `set` once per entry, and 24.1.3.9 §8 is
+    // "Return M"), and unlike the `.push` -> `xs = [...xs, v]` rewrite it is FREE under
+    // bun, so the two-toolchain constraint really is satisfied here.
+    //
+    // Read NT1014's absence NARROWLY: this is a FIRST-blocker set, and the entries form
+    // is NOT gone from the tree. A readFileSync census (never shell grep) finds five more
+    // reachable sites — checker.ts:4524/:4565, modules.ts:431/:574, ast.ts:1204 — plus
+    // three that need a real tuple TYPE rather than the `new Map` argument position
+    // (ownership.ts:111/:884, codegen.ts:1052, all `.map`-produced pairs). They are
+    // behind the codes below and will resurface one at a time, exactly as `.push` does.
+    //
+    // NT2001 is ast.ts's `HOST_MODULES`, a `Record` initialized with an object literal —
+    // the same class as checker.ts's `NUMBER_CONSTS` — inherited by the same four modules.
+    // NT1702 IS NOW EMPTY, and it emptied by a SOURCE change, not a compiler change — which
+    // is the right outcome and was not the obvious one. The cycle's closing edge was
+    // type-only (`import type { Blocker }`), which node and bun erase, so the tempting fix
+    // was to stop the linker's DFS from walking type-only edges. Measured: that moves both
+    // modules to exactly the codes below, so it LOOKS right — but only because neither
+    // module reads the erased type before stopping on something else. The type is not
+    // resolved by dropping the edge, it is left unseeded, and an unresolved type silently
+    // becomes `number` (docs/divergences.md). `Blocker` moved down into the leaf instead.
+    //
+    // NT1031 refills in its place: `coverage-preprocess.ts`'s `line++`, a write to a
+    // captured binding — the same one lexer.ts sat on, and the first blocker that module
+    // has ever owned rather than inherited.
+    //
+    // RESOLVED AT THE MERGE BY RE-MEASURING, and for the third time in this file NEITHER
+    // SIDE WAS RIGHT. This branch listed NT1702 (it had not seen the type-cycle lane) and
+    // NT1014 was gone from it (its own change); main listed NT1014 (it had not seen the
+    // entries-form fix) and NT1031 (the type-cycle lane's). The true set is the union of
+    // what each branch cleared minus what the other cleared, and no reviewer holding two
+    // diffs can compute that by reading — only by running it on the merged tree.
+    // NT1002 LEFT when `in` landed (compile-time decidable for a literal key over a static
+    // shape — the same move `instanceof` made). NT1020 arrives in its place: cli.ts calling
+    // an async function without `await`. Re-measured on the merged tree.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1014", "NT1606", "NT1702"],
+      ["NT1020", "NT1031", "NT1606", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -434,20 +469,38 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `new Set([...])` that used to fill it, and NOT a regression: it was masked behind
     // ast.ts's NT1030 until the recursive component was encoded, and four more modules see
     // it only through the link to ast.ts. So: name the construct, count the modules.
-    // ...and SEVEN, as `codegen.ts` and `driver.ts` arrived from the emptied NT1002 bucket.
-    // Still ONE construct at ONE site in ast.ts; five of the seven only ever see it through
-    // the link. Name the construct, count the modules.
-    expect(byCode["NT1014"]).toEqual(["ast.ts", "parser.ts", "checker.ts", "codegen.ts", "ownership.ts", "driver.ts", "modules.ts"]);
-    // NT1702 — AN IMPORT CYCLE, and the one entry in this table that is not a missing
-    // feature. `coverage.ts` and `coverage-preprocess.ts` import each other (directly or
-    // through a third module), which the linker refuses by design; it never had a chance
-    // to say so while ast.ts's refusal fired first. A cycle is a defect in the module
-    // GRAPH, so it is fixed by moving a declaration, not by building anything.
-    // ...and `cli.ts` joined, which makes this the blocker STAGE-1 ITSELF now reports: it
-    // imports coverage.ts, and with NT1002 cleared the cycle is the first thing the link
-    // hits. The compiler's own entry point is gated on the shape of its module graph
-    // rather than on any missing construct.
-    expect(byCode["NT1702"]).toEqual(["coverage.ts", "cli.ts", "coverage-preprocess.ts"]);
+    //
+    // ...AND EMPTY AGAIN, by the same move the `.push` census recommends and for once
+    // without its cost: `DATE_GETTERS` is now the `.set` chain the NT1014 hint already
+    // prescribed. `Map.prototype.set` returns its receiver (ES2024 24.1.3.9 §8), which is
+    // exactly what the Map constructor itself does per entry (24.1.1.1 §8), so the two
+    // spellings are one program and bun runs the new one at the same speed — the thing
+    // that was NOT true of `xs = [...xs, v]` (1036x, and quadratic).
+    //
+    // Heed this file's own advice and read it as MEMBERSHIP, not emptiness: five more
+    // entries-form sites remain in the tree, behind other blockers (checker.ts:4524/:4565,
+    // modules.ts:431/:574, ast.ts:1204), plus three `.map`-produced pair arrays that need
+    // a real tuple TYPE. This bucket has now been emptied and refilled three times.
+    expect(byCode["NT1014"]).toBeUndefined();
+    // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
+    // initialized with an object literal. Same set, one code further along; asserted here
+    // so the group staying a group is visible rather than inferred.
+    // EIGHT now: codegen.ts and driver.ts joined by leaving NT1002. Every one of them is
+    // ast.ts's `HOST_MODULES` through the link — a `Record` initialized with an object
+    // literal — except codegen.ts, which has four tables of its own with the same shape.
+    expect(byCode["NT2001"]!.sort()).toEqual(
+      ["ast.ts", "checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
+    // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
+    // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
+    // linker refuses by design; it never had a chance to say so while ast.ts's refusal
+    // fired first. A cycle is a defect in the module GRAPH, so it is fixed by moving a
+    // declaration, not by building anything — and it was: `Blocker` now lives in the leaf.
+    //
+    // Kept as an assertion rather than deleted, because the closing edge was `import type`
+    // and the linker still refuses those (docs/divergences.md). This bucket refilling would
+    // mean a new cycle in the compiler's own source, which is worth hearing about.
+    expect(byCode["NT1702"]).toBeUndefined();
     // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
     // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
     // working, not a regression — the phase table above is what must never go backwards.
@@ -573,9 +626,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `driver.ts` import codegen.ts, and once ast.ts's NT1030 stopped firing first the
     // link reached `op in FCMP` through it. Same single construct, same single site — a
     // bucket's SIZE counts modules that can SEE a blocker, never how much of it there is.
-    // ...and the bucket is EMPTY: that single site is now compiled, not refused. Its three
-    // modules did not stall — they each fell through to the next blocker in their own
-    // import graph, which is the ratchet working and not a bucket disappearing.
+    // EMPTY NOW: `in` is decided at compile time for a literal key over a static shape.
     expect(byCode["NT1002"]).toBeUndefined();
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
     // the fresh-receiver lane) -> NT1006 (`Math.max(...)`, cleared by the variadic lane) ->
@@ -622,12 +673,33 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // (n = 1) => …`. The parameter-default lane taught every parameter position to take its
     // type from its default, and lexer.ts now walks INTO that arrow's body and stops on
     // NT1031, `line++` — a write to a binding captured from `lex`'s scope.
-    expect(byCode["NT2001"]).toBeUndefined();
+    // …and REFILLED a second time, now with FIVE modules rather than one, and not by
+    // anything to do with lexer.ts: clearing ast.ts's `new Map([[k, v], …])` entries form
+    // landed ast.ts — and the four modules that import it — on `HOST_MODULES`, a `Record`
+    // initialized with an object literal. This bucket has been empty, refilled, empty and
+    // refilled again; asserting `toBeUndefined()` here was a standing invitation to a
+    // false red, exactly as this file's own "assert MEMBERSHIP, not emptiness" note says.
+    // The membership assertion lives with NT1014's clearance above; this line would only
+    // duplicate it.
+    // coverage.ts joined this bucket by LEAVING NT1702 — the type-only cycle fix let it
+    // through to ast.ts's next blocker, which it inherits like the four before it.
+    // EIGHT now: codegen.ts and driver.ts joined by leaving NT1002 when `in` landed.
+    // Sorted, because the bucket's ORDER is an artifact of module iteration and asserting
+    // it unsorted has produced two spurious conflicts already.
+    expect(byCode["NT2001"]!.sort()).toEqual(
+      ["ast.ts", "checker.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a
     // second holder, so this bucket has now been born and emptied without ever growing.
-    expect(byCode["NT1031"]).toBeUndefined();
+    //
+    // ...and it has a second holder after all — the THIRD time this file has pinned an
+    // emptied bucket as if empty were an invariant, and the third time that was wrong. The
+    // holder is `coverage-preprocess.ts`, which reached this construct only by clearing
+    // NT1702 (above); its `advance` closure writes `line++`, the SAME cursor shape lexer.ts
+    // fixed with a `//@@mutable` record. Assert MEMBERSHIP, which names the construct.
+    expect(byCode["NT1031"]).toEqual(["coverage-preprocess.ts"]);
     // NT1606 changed HANDS entirely: diagnostics.ts left it (above), and checker.ts +
     // ownership.ts arrived from NT1009 once general unions landed. Same bucket, none of
     // the same modules — which is why membership, not size, is the thing to assert.

@@ -235,7 +235,16 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // each other for NT1017; they now both blame `parser.ts`, whose `?.[]` they inherit
   // through the link. That is not a regression — they cleared their own blocker and the
   // link surfaced the deepest one they share.
-  "ast.ts": { rung: 0, code: "NT1014", blame: "self" },
+  // ENTRIES-FORM CLEARED, and it was a SOURCE gap, not a compiler one. `DATE_GETTERS`
+  // was written as `new Map([[k, v], …])` — the entries form needs a `[key, value]`
+  // tuple type nativets does not have — and through the link it was the first blocker
+  // for FIVE of the twelve modules. It is now the `.set` chain the diagnostic already
+  // prescribed, which is the same program by construction (ES2024 24.1.1.1 builds the
+  // entries form by calling `set` per entry) and, unlike `.push` -> `xs = [...xs, v]`,
+  // costs nothing under bun because `Map.prototype.set` returns its receiver.
+  // Behind it, in ast.ts's own source: `HOST_MODULES`, a `Record` initialized with an
+  // object literal — the same class as checker.ts's `NUMBER_CONSTS`.
+  "ast.ts": { rung: 0, code: "NT2001", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -282,7 +291,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // problem of its own for several rounds; clearing `?.[]` took its last self-blocker
   // away, and it now inherits ast.ts's forward type reference through the link. The blame
   // column flipping "self" -> "ast.ts" is the real news in this row.
-  "parser.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
+  "parser.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -309,7 +319,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // With it, checker.ts has NO BLOCKER OF ITS OWN for the first time ever — the blame
   // column flips "self" -> "ast.ts" and it lands on the mutually-recursive `Expr` SCC that
   // eight other modules already share. That flip is the news in this row, not the code.
-  "checker.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
+  // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
+  "checker.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -317,15 +328,25 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // the whole-tree construct census found exactly ONE getter and NO setters in `src/*.ts`,
   // so the source change was the fix rather than a language feature. Behind it, NT1002 —
   // `op in FCMP` at codegen.ts:2078, the key-presence operator, 1300 lines deeper.
-  // ...and NT1002 is cleared: `in` is DECIDED at compile time for a literal key over a
-  // static shape, so `op in FCMP` stopped being a blocker instead of moving. This module
-  // now has NO blocker of its OWN under the link — it inherits ast.ts's `new Map([[k,v]])`.
-  // Its own STANDALONE blocker is `const FCMP: Record<string,string> = {…}` (NT2001), the
-  // deliberate Record→Map refusal, ~1450 lines EARLIER than the `in` was — which is why
-  // "`in` was the last thing between codegen.ts and IR" was wrong: the PARSE-stage refusal
-  // was masking a CHECK-stage one that had been in front of it the whole time.
-  "codegen.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
-  "coverage.ts": { rung: 0, code: "NT1702", blame: "coverage.ts" },
+  // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
+  // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
+  // fires first through the link. Its own tables are the same shape and sit behind it.
+  "codegen.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
+  // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
+  // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
+  // exist at run time and nothing had ever noticed it; it only became visible when the
+  // recursive-type work stopped ast.ts's NT1030 from firing first.
+  //
+  // The fix is one moved declaration — `Blocker` now lives in the LEAF that produces it —
+  // and NOT a linker change: dropping type-only edges from the DFS was measured, and it
+  // leaves the type unseeded, whereupon parser.ts erases it to `number` silently. See
+  // docs/divergences.md and the `bad-type-cycle` case in test/modules.test.ts.
+  //
+  // Both rows moved to their real blockers, and the blame column is the interesting part:
+  // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
+  // below; coverage-preprocess.ts finally has one of its OWN.
+  "coverage.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -338,17 +359,25 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // ...and now NT1030, blaming ast.ts DIRECTLY rather than checker.ts — because checker.ts
   // stopped having a blocker of its own, so the nearest module that still does is ast.ts.
   // Six codes, never once its own.
-  "ownership.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
-  // Both followed codegen.ts off NT1002 when `in` landed, and BOTH stopped blaming it:
-  // driver.ts onto ast.ts's `new Map([[k,v]])`, cli.ts onto coverage.ts. Two more rows for
-  // the attribution trap's collection — a module's recorded blame is a fact about the
-  // import graph's shallowest gap, never about the module.
-  "driver.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
-  "cli.ts": { rung: 0, code: "NT1702", blame: "coverage.ts" },
+  // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
+  "ownership.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "driver.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  // Stage-1's entry point now stops on its OWN code for the first time: calling the async
+  // `buildBinary` without `await`. Not a dependency's blocker.
+  "cli.ts": { rung: 0, code: "NT1020", blame: "self" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
-  "modules.ts": { rung: 0, code: "NT1014", blame: "ast.ts" },
-  "coverage-preprocess.ts": { rung: 0, code: "NT1702", blame: "coverage-preprocess.ts" },
+  // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
+  "modules.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
+  // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
+  // the type-only import cycle that used to mask it moved out of the way.
+  //
+  // RESOLVED AT THE MERGE: each side was right about its OWN change and stale about the
+  // other's. This branch had not seen the type-cycle lane (so it still recorded NT1702 for
+  // coverage-preprocess.ts) and main had not seen the entries-form fix (so it still
+  // recorded NT1014 for modules.ts). Re-measured on the merged tree rather than picked.
+  "coverage-preprocess.ts": { rung: 0, code: "NT1031", blame: "self" },
 };
 
 /*
@@ -434,7 +463,7 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // Stage-1 (cli.ts, the whole compiler through its real entry point) left NT1017 when
 // `export async function` landed and now stops on parser.ts's `?.[]` at 1109:66 —
 // inherited through the link, not cli.ts's own code. Still rung 0.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1702" };
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1020" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -546,7 +575,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * CHECKER, after parse is over. A parse-clean module is not an unblocked module, so
    * attribution has to compare what the whole pipeline actually reports.
    */
-  test("parsing clean is not being unblocked — ALL TWELVE parse, one compiles", async () => {
+  test("parsing clean is not being unblocked — ten parse, one compiles", async () => {
     const { parse } = await import("../src/parser.ts");
     const parseClean: string[] = [];
     for (const e of MODULES) {
@@ -567,13 +596,12 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // softening it: ast.ts went from "the single highest-leverage blocker on the board,
     // holding nine modules" to parsing clean, and it is STILL at rung 0 — it now stops at
     // `new Map([[k, v], …])`, one line further on.
-    // ...and TWELVE, i.e. ALL of them: `codegen.ts` joined when `in` stopped being refused
-    // in the PARSER. Every module in the tree now parses its own source and ONE produces
-    // IR. There is no stronger statement of this test's point available.
+    // TWELVE now — codegen.ts joined when `in` landed, so EVERY module in the tree parses
+    // its own source. One produces IR. That is this test's point at its sharpest: parsing
+    // clean has never once correlated with being closer to compiling.
     expect(parseClean.sort()).toEqual([
-      "ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage-preprocess.ts",
-      "coverage.ts", "diagnostics.ts", "driver.ts", "lexer.ts", "modules.ts",
-      "ownership.ts", "parser.ts",
+      "ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage-preprocess.ts", "coverage.ts",
+      "diagnostics.ts", "driver.ts", "lexer.ts", "modules.ts", "ownership.ts", "parser.ts",
     ]);
     // ...and the point SURVIVES the first module getting off the floor, which is the
     // interesting part. `diagnostics.ts` reaching rung 3 did not come from parsing — it
@@ -613,9 +641,30 @@ async function blameOf(file: string): Promise<string> {
   if (!error) return "self";
   for (const dep of depsOf(file)) {
     const d = MODULES.find((e) => e.file === dep);
-    if (d && (await measure(d)).error === error) return dep;
+    if (d && sameBlocker((await measure(d)).error, error)) return dep;
   }
   return "self";
+}
+
+/**
+ * Two blockers are THE SAME blocker when their messages agree once the linker's
+ * alpha-rename prefix is normalized away.
+ *
+ * Plain string equality was not enough and the failure was silent. `linkProgram`
+ * renames every non-entry module's top-level bindings (`HOST_MODULES` becomes
+ * `_nt_m0_HOST_MODULES`), so the instant a module's blocker is a diagnostic that
+ * NAMES a binding, the dependency's own message and the dependent's differ by that
+ * prefix and blame falls through to `"self"`. It cost nothing while the frontier sat
+ * on NT1014/NT1030, whose messages carry no identifier; the moment `src/ast.ts`'s
+ * `HOST_MODULES` became the shared blocker, four modules were credited with owning a
+ * declaration that is not in them — which is exactly the "aiming the burn-down at the
+ * wrong file" this function exists to prevent.
+ */
+function sameBlocker(a: string | undefined, b: string): boolean {
+  if (a === undefined) return false;
+  // Every base `choosePrefixBase` can pick, followed by the per-module index.
+  const strip = (s: string) => s.replace(/_(?:m|nt_m|nativets_module_|nts\d+_m)\d+_/g, "");
+  return strip(a) === strip(b);
 }
 
 /** Transitive `./x.ts` imports, post-order (deepest first) — the linker's own order. */
@@ -686,15 +735,11 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // operator. Nine modules moved and not one of them reached IR, which is this file's
       // recurring lesson stated a fourth time: the frontier is a CONJUNCTION, and clearing
       // its largest term reveals the next one rather than finishing it.
-      //
-      // ...a FIFTH time, and this one is the sharpest yet. `in` is now decided at compile
-      // time and `op in FCMP` stopped being a blocker — and stage-1 did not move a rung.
-      // What it reveals is not another missing feature but an IMPORT CYCLE (NT1702)
-      // between `cli.ts` and `coverage.ts`, i.e. a shape of the compiler's own module
-      // graph rather than a construct in any one file.
       expect(`stage-1 rung ${m.rung}, ${m.code}`)
         .toBe(`stage-1 rung ${STAGE1_BASELINE.rung}, ${STAGE1_BASELINE.code}`);
-      expect(m.error).toContain("import cycle");
+      // FIFTH construct for stage-1, and the first that is cli.ts's OWN rather than a
+      // dependency's: calling the async `buildBinary` without `await`.
+      expect(m.error).toContain("calling async function 'buildBinary' without 'await'");
       return;
     }
 

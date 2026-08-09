@@ -12,9 +12,12 @@ import { parse } from "./parser.ts";
 import { linkProgram } from "./modules.ts";
 import { check } from "./checker.ts";
 import { NTError } from "./diagnostics.ts";
-import { preprocessForCoverage } from "./coverage-preprocess.ts";
+// `Blocker` is declared in the LEAF, not here: this file imports that one, so declaring
+// the shared type here closed an `import type` cycle the linker cannot order (NT1702).
+import { preprocessForCoverage, type Blocker } from "./coverage-preprocess.ts";
 
-export interface Blocker { code: string; feature: string; milestone: string; hint: string; count: number; }
+// (Not re-exported: `export type { … }` is itself NT1017, and nothing imports `Blocker`
+// from here — the one consumer, coverage-preprocess.ts, is where it now lives.)
 export interface CoverageReport {
   parsed: boolean;
   compiles: boolean;
