@@ -88,6 +88,19 @@ function scanUsesActors(node: unknown): boolean {
   return false;
 }
 
+/** Does the program contain a `try` ANYWHERE — including inside an arrow body, a class
+ *  method or a function that is never called? (Same structural walk as scanUsesActors,
+ *  and deliberately over-approximate: it decides whether an uncaught `throw` could
+ *  reach a handler after any number of frames, so a miss would be a wrong answer while
+ *  a false hit is only a refusal.) */
+function scanHasTry(node: unknown): boolean {
+  if (node === null || typeof node !== "object") return false;
+  const n = node as Record<string, unknown>;
+  if (n.kind === "TryStmt") return true;
+  for (const k in n) if (scanHasTry(n[k])) return true;
+  return false;
+}
+
 /** Does this expression mention `name` anywhere? (Structural walk, same shape as
  *  scanUsesActors.) Guards the consuming-append transient: `x = [...x, ...x]` must
  *  NOT hand the first spread ownership of storage the second one still reads. */
@@ -511,6 +524,13 @@ class ModuleGen {
   /** Recursive-type shapes, the table a `@Name` back-edge resolves through (ast.ts).
    *  Read through `FnGen.unfold`; empty unless the program declared a recursive type. */
   recTypes = new Map<string, Ty>();
+  /** Does the program contain a `try` at all? When it does NOT, no handler exists in
+   *  any frame, so a `throw` with no local `try` is an UNCAUGHT exception rather than
+   *  the cross-frame propagation NT1004 refuses. See `FnGen.uncatchable`. */
+  hasTry = true;
+  /** Set when a frame lowered an UNCAUGHT `throw`. Declared conditionally, exactly like
+   *  the actor surface: a program with no uncaught throw emits byte-identical IR. */
+  usesUncaughtThrow = false;
   constructor(readonly functions: Map<string, Sig>, readonly globals: Map<string, Ty> = new Map()) {}
 
   /** `@nt.g.<name>` — the storage symbol of a promoted module-level binding. */
@@ -628,6 +648,7 @@ class ModuleGen {
 
   build(program: Program): string {
     this.usesActors = scanUsesActors(program);
+    this.hasTry = scanHasTry(program);
     this.hostImports = new Set(program.hostImports ?? []);
     this.recTypes = recTypeTable(program); // `@Name` back-edges (empty for most programs)
     const fns: string[] = [];
@@ -641,6 +662,10 @@ class ModuleGen {
       // v1 preemption safepoint — declared only in actor programs (the only ones that
       // emit calls to it + link nt_actor.c), so non-actor IR stays byte-identical.
       ...(this.usesActors ? ["declare void @nt_reduction_tick()", ...ACTOR_V4_DECLARES] : []),
+      // An uncaught `throw` raises on the pending-exception flag before aborting; nothing
+      // else in the emitted IR ever raises (the runtime raises internally), so this one is
+      // declared only where it is used.
+      ...(this.usesUncaughtThrow ? ["declare void @nt_exc_raise_msg(ptr)"] : []),
       "",
       ...this.strDefs,
       this.strDefs.length ? "" : null,
@@ -1453,10 +1478,27 @@ class FnGen {
         // not exist yet. Refuse it; a raw internal error here used to print a Bun stack
         // trace naming our own source files (CLAUDE.md: an NT**** with a hint, always).
         if (!h) {
+          // …but a throw NOBODY can catch needs no unwinding at all: it is node's
+          // uncaught exception, which prints to stderr and exits 1 — exactly what the
+          // pending-exception protocol already does for an uncaught host failure. This
+          // frame is `main` (nothing calls module top-level, so no ancestor frame
+          // exists) or the whole program contains no `try`.
+          if (this.uncatchable() && this.genUncaught(s.argument)) return;
           throw nyi(NYI.EXCEPTION, `\`throw\`${where(s)} that is not inside a \`try\` in the same function`,
             "a throw is lowered as a branch to its enclosing `try`, so it must sit inside one IN THE SAME function — crossing a call boundary needs unwinding. Wrap the throwing code in a local `try`/`catch`, or return a result value (e.g. `T | undefined`) and check it at the call site");
         }
         const v = this.genExpr(s.argument);
+        // The store used to be RAW, under `h.eType` whatever the value actually was — and
+        // `h.eType` is inferred from the FIRST throw the checker could see in this block.
+        // So a second throw of a different type wrote its value under the first one's
+        // type: `catch (e) { e.message }` read the first eight bytes of a string as a
+        // pointer. node's catch binding is `any` and nothing here is, so this is a
+        // refusal, not a coercion — and it is the backstop that makes the whole class
+        // impossible rather than one missed scan at a time.
+        if (h.excVar && v.ty !== h.eType) {
+          throw nyi(NYI.EXCEPTION, `\`throw\`${where(s)} of ${v.ty} where \`catch (${h.excVar})\` is ${h.eType}`,
+            `the catch binding takes ONE type, inferred from the first \`throw\` in the block — node's \`catch\` parameter is \`any\`, which has no equivalent here. Throw the same type from every \`throw\` in a \`try\`, or split them into separate \`try\` blocks`);
+        }
         if (h.excVar) this.emit(`store ${llvmTy(h.eType)} ${v.v}, ptr ${this.addr(h.excVar)}`);
         this.terminate(`br label %${h.catchLbl}`);
         return;
@@ -2957,6 +2999,46 @@ class FnGen {
       this.terminate(`unreachable`);
     }
     this.to(this.block(contLbl));
+  }
+
+  /**
+   * Can a `throw` in THIS frame, with no `try` around it here, still reach a handler?
+   *
+   * Two cases where it provably cannot, and both are exact rather than heuristic:
+   * `main` IS module top-level, which no user frame calls, so it has no ancestor to
+   * unwind to; and a program containing no `try` at all has no handler to reach after
+   * any number of frames. Every other shape may or may not be caught by a caller —
+   * that is the cross-frame propagation NT1004 still refuses.
+   */
+  private uncatchable(): boolean {
+    return this.inMain || !this.mod.hasTry;
+  }
+
+  /**
+   * Lower an UNCAUGHT `throw`: raise the message on the pending-exception flag and
+   * abort — `nt_exc_abort` is one line to stderr plus `exit(1)`, which matches node's
+   * stdout (everything already printed, flushed by `exit`) and its exit code. Only the
+   * stderr TEXT differs (node prints a stack trace); see docs/divergences.md.
+   *
+   * Returns false for a thrown value with no message string — `throw 42`, `throw {a:1}`
+   * — so the caller keeps the NT1004 refusal rather than inventing text for it.
+   */
+  private genUncaught(argument: Expr): boolean {
+    const v = this.genExpr(argument);
+    let msg: string;
+    if (v.ty === "string") msg = v.v;
+    else if (isObjectTy(v.ty) && fieldType(v.ty, "message") === "string") {
+      const g = this.fresh();
+      this.emit(`${g} = getelementptr i64, ptr ${v.v}, i64 ${fieldIndex(v.ty, "message")}`);
+      const raw = this.fresh();
+      this.emit(`${raw} = load i64, ptr ${g}`);
+      msg = this.fromSlot(raw, "string");
+    } else return false;
+    this.mod.usesUncaughtThrow = true;
+    this.emit(`call void @nt_exc_raise_msg(ptr ${msg})`);
+    this.emit(`call void @nt_exc_abort()`);
+    this.terminate("unreachable");
+    return true;
   }
 
   /** Call a function VALUE (closure ptr already computed): indirect call through slot 0. */

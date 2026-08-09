@@ -304,7 +304,16 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // type is `string`, the guard is dead, and at end-of-file the PANIC happens one line
   // before the guard could have helped. `.at` is the spelling that means "may be absent"
   // in both toolchains. Behind it: NT1004, a `throw` outside a `try` at 202:5.
-  "lexer.ts": { rung: 0, code: "NT1004", blame: "self" },
+  //
+  // THE SECOND MODULE OFF THE FLOOR, and NT1004 was its LAST blocker — rungs 1→3 cost
+  // nothing again, exactly as they did for diagnostics.ts. NT1004 was NOT relaxed in the
+  // direction the diagnostic feared: cross-frame propagation still does not exist and is
+  // still refused. What changed is that the refusal had been covering two different
+  // things, and only one of them needs an unwinder. A `throw` NOBODY can catch — this
+  // frame is module top-level, or the program contains no `try` at all — is just node's
+  // uncaught exception: stderr, exit 1. `src/lexer.ts` has eleven `throw`s and zero
+  // `try`s, so every one of them is that second kind. See test/uncaught-throw.test.ts.
+  "lexer.ts": { rung: 3, code: "", blame: "self" },
   // WALKED, not nudged. This module's blocker CHAIN was measured end to end — six
   // distinct blockers between it and rung 1 — and five of them are now cleared:
   //   1. NT1606  `.push` x4 in formatDiagnostic            -> immutable rebind (src)
@@ -632,7 +641,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * score identically. Its top rung cannot distinguish success from failure. This
    * ladder's rung 1 is exactly that distinction, which is why it exists.
    */
-  test("exactly ONE module reaches IR — the rest of the ladder is at rung 0", async () => {
+  test("exactly TWO modules reach IR — the rest of the ladder is at rung 0", async () => {
     const rows = await Promise.all(MODULES.map(async (e) => [e.file, (await measure(e)).rung] as const));
     const reachedIR = rows.filter(([, r]) => r >= 1).map(([f]) => f);
     // THE HEADLINE NUMBER CHANGED, for the first time since this file was written. It read
@@ -640,7 +649,11 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // consuming parameters landed. `diagnostics.ts` is the first, and it did not stop at
     // rung 1: it links and runs. Eleven still sit at rung 0, so this is one module, not a
     // trend; the list is exact so the twelfth cannot arrive unnoticed either way.
-    expect(reachedIR).toEqual(["diagnostics.ts"]);
+    // TWO, and the second is `lexer.ts` — the first module in the tree to reach rung 3 on
+    // a blocker that was a REFUSAL SPLIT rather than a missing feature (NT1004 was covering
+    // both "throw across a frame", which still needs an unwinder and is still refused, and
+    // "throw nobody catches", which needs nothing). Ten still sit at rung 0.
+    expect(reachedIR.sort()).toEqual(["diagnostics.ts", "lexer.ts"]);
   }, 300_000);
 
   /**
@@ -714,10 +727,12 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // ...and the point SURVIVES the first module getting off the floor, which is the
     // interesting part. `diagnostics.ts` reaching rung 3 did not come from parsing — it
     // has parsed cleanly for many rounds — it came from clearing six blockers, five of
-    // them AFTER parse. The other eight parse-clean modules are still at rung 0.
+    // them AFTER parse. `lexer.ts` is the same story with a different count: parse-clean
+    // for many rounds, and what finally moved it was its LAST post-parse blocker.
+    const atRung3 = new Set(["diagnostics.ts", "lexer.ts"]);
     for (const file of parseClean) {
       const m = await measure(MODULES.find((e) => e.file === file)!);
-      expect(`${file} rung ${m.rung}`).toBe(`${file} rung ${file === "diagnostics.ts" ? 3 : 0}`);
+      expect(`${file} rung ${m.rung}`).toBe(`${file} rung ${atRung3.has(file) ? 3 : 0}`);
     }
   }, 300_000);
 
@@ -924,11 +939,11 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       const m = await measure(e);
       if (m.rung === 3 && !m.weak) strong.push(e.file);
     }
-    // `diagnostics.ts` is at rung 3 and is NOT in this list, which is the caveat doing its
-    // job rather than a contradiction: a library that prints nothing matched a bun run that
-    // printed nothing. The behavioural evidence is the DRIVER differential below — the
-    // "per-module EXERCISE entry" this comment has been asking for since the file was
-    // written, now that there is a module to write one for.
+    // `diagnostics.ts` and `lexer.ts` are at rung 3 and are NOT in this list, which is the
+    // caveat doing its job rather than a contradiction: a library that prints nothing
+    // matched a bun run that printed nothing. The behavioural evidence is the two DRIVER
+    // differentials below — the "per-module EXERCISE entry" this comment has been asking
+    // for since the file was written, now that there are modules to write them for.
     expect(strong).toEqual([]);
   }, 300_000);
 
@@ -984,6 +999,56 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       expect(ours.stdout).toBe(oracle.stdout);
       expect(ours.status).toBe(oracle.status);
       expect(ours.status).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 300_000);
+
+  /**
+   * THE SECOND NON-WEAK DIFFERENTIAL — `src/lexer.ts`, compiled by nativets, TOKENIZING.
+   *
+   * A driver imports `lex` and `decodeEscapeAt` and prints a digest of every token of a
+   * small program (type, text, line, column) plus two decoded escapes. That is the whole
+   * scanner: the `//@@mutable` cursor record, the frame-stack template scanner, the
+   * `tokens` accumulator, `.at`-based lookahead, and the punctuation tables.
+   *
+   * And then it takes the ERROR PATH deliberately, because that is what this lane changed:
+   * `lex` on an unexpected character `throw`s a `LexError` nothing catches. bun prints the
+   * lines before it and exits 1; so must the compiled module. Only the stderr TEXT differs
+   * (bun prints a stack trace, we print one line) — docs/divergences.md, "An UNCAUGHT `throw` compiles".
+   */
+  test("lexer.ts DRIVER: tokenizes and throws, byte-identical to the bun-run module", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "nativets-sh6-lex-")));
+    try {
+      const driver = join(dir, "drive.ts");
+      const spec = relative(dir, realpathSync(pathOf("lexer.ts")));
+      writeFileSync(driver, [
+        `import { lex, decodeEscapeAt } from ${JSON.stringify(spec)};`,
+        ``,
+        "const toks = lex(\"const x: number = 1 + 2; // hi\\nconsole.log(`a${x}b`);\\n\");",
+        `console.log(toks.length);`,
+        `for (const t of toks) console.log(t.type + " " + t.value + " @" + t.line + ":" + t.col);`,
+        `const u = decodeEscapeAt("\\\\u0041", 0, 1, 1);`,
+        `console.log(u.text + " " + u.next);`,
+        `const x = decodeEscapeAt("\\\\x1b", 0, 1, 1);`,
+        `console.log(x.text.charCodeAt(0) + " " + x.next);`,
+        ``,
+        `// The error path: an uncaught LexError. stdout stops here and the exit code is 1.`,
+        `lex("const y = #;");`,
+        `console.log("unreachable");`,
+        ``,
+      ].join("\n"));
+
+      const bin = join(dir, "drive");
+      await buildBinary(readFileSync(driver, "utf8"), bin, { target: "host", entryPath: driver });
+      const ours = spawnSync(bin, [], { encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL" });
+      const oracle = spawnSync("bun", ["run", driver], { encoding: "utf8", timeout: 120_000 });
+
+      expect(oracle.stdout.length).toBeGreaterThan(0);
+      expect(ours.stdout).toBe(oracle.stdout);
+      expect(ours.stdout).not.toContain("unreachable"); // the throw really did stop it
+      expect(ours.status).toBe(oracle.status);
+      expect(ours.status).toBe(1); // node/bun's uncaught-exception exit code
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

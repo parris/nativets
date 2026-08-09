@@ -465,7 +465,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // now, and the one DYNAMIC site that was actually blocking (ownership.ts's `clone`,
     // refused for the Map spread) became a `.set` LOOP — which is what the constructor
     // does internally, so no tuple encoding was invented.
-    ["NT1004", "NT1011", "NT1606"],
+    // ...and NT1004 LEAVES, which is the first time a code has left this set by being
+    // SPLIT rather than implemented. `throw` still cannot cross a call boundary — that
+    // needs propagation the runtime does not have, and it is still NT1004. What the
+    // refusal was ALSO covering is a throw nobody can catch (this frame is module
+    // top-level, or the program has no `try` at all), which is node's uncaught exception:
+    // stderr, exit 1, and the pending-exception protocol already did exactly that for an
+    // uncaught host failure. `src/lexer.ts` has eleven `throw`s and zero `try`s, so all
+    // eleven were the second kind — and it is now the SECOND module at rung 3.
+    ["NT1011", "NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
