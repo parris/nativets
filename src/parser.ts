@@ -14,7 +14,7 @@ import {
   isObjectTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES,
   makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf,
-  resolveStaticFieldReads, collectBindingNames, typeRefTy,
+  resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -186,6 +186,17 @@ class Parser {
    * exists to end, so `resolveNamed` reports them as recursion instead.
    */
   private cyclicTypes = new Map<string, string>();
+  /**
+   * MUTUAL recursion. `declaringType` mints a back-edge for the ONE name being declared,
+   * which is all self-recursion needs. A cycle spanning several declarations needs every
+   * member of the strongly-connected component to be a back-edge at once — resolving
+   * `interface A { b?: B }` needs B's shape, which needs A's — so `hoistTypeDecls` proves
+   * the component first and then re-parses each member with this set populated.
+   *
+   * A name is in here only once the SCC round has produced a shape for it, so a `@Name`
+   * the table cannot resolve is never minted (see `resolveCycle`).
+   */
+  private cycleNames = new Set<string>();
   /** The type name `resolveNamed` last refused on. Read by `hoistTypeDecls` off a
    *  sub-parser to build the dependency edge it needs to tell a cycle from a chain. */
   private blockedOn: string | undefined;
@@ -389,8 +400,72 @@ class Parser {
         const b = blocker.get(name);
         if (b !== undefined && stuck.has(b)) this.cyclicTypes.set(name, b);
       }
+      this.resolveCycle([...this.cyclicTypes.keys()]);
       return;
     }
+  }
+
+  /**
+   * The SCC round — MUTUAL recursion (Lane C).
+   *
+   * `hoistTypeDecls` above has proved that `names` are stuck on each other: no ordering
+   * resolves them, because resolving any one of them needs another's shape. That is the
+   * same problem self-recursion has, one declaration wider, and it takes the same answer —
+   * the nominal `@Name` back-edge — applied to the whole component at once: re-parse every
+   * member with EVERY member's name resolving to a reference. Each member then has a finite
+   * shape whose recursive positions are `@Name`, and `recTypes` is the table that resolves
+   * them.
+   *
+   * Still a FIXPOINT, because the members are not independent even with back-edges
+   * available. A union member may not be a bare `@Name` — `unionDiscriminant` needs each
+   * member's SHAPE to find the tag — so `type Expr = TemplateLiteral | …` is expanded ONE
+   * LEVEL at the member boundary (see `discriminatedUnion`), which needs
+   * `interface TemplateLiteral` to have been resolved in an earlier round. Object members
+   * settle first, unions that select over them settle next.
+   *
+   * ALL OR NOTHING. If a round stalls with members left, the whole component is abandoned
+   * and every one of them keeps the NT1030 refusal it had — because a shape carrying a
+   * `@Name` the table cannot resolve is a dangling reference, and this file's rule is that
+   * a `@Name` is minted only where it resolves.
+   */
+  private resolveCycle(names: string[]): void {
+    if (!names.length) return;
+    for (const n of names) this.cycleNames.add(n);
+    const recBefore = new Map(this.recTypes); // restored wholesale if the round stalls
+    const resolved = new Map<string, Ty>();
+    let pending = names;
+    while (pending.length) {
+      const deferred: string[] = [];
+      for (const name of pending) {
+        const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
+        sub.pos = this.typeDeclStarts.get(name)!;
+        sub.hoisting = true;
+        sub.cycleNames = this.cycleNames;
+        sub.recTypes = this.recTypes; // shared: an earlier round's shapes are what unions expand through
+        try {
+          sub.parseStatement();
+        } catch {
+          deferred.push(name); // may only need a member that has not settled yet
+          continue;
+        }
+        const ty = sub.typeAliases.get(name);
+        if (ty === undefined) { deferred.push(name); continue; }
+        resolved.set(name, ty);
+      }
+      if (deferred.length === 0) break;
+      if (deferred.length === pending.length) {
+        // Stalled with members left: abandon the component whole (see the note above).
+        for (const n of names) this.cycleNames.delete(n);
+        this.recTypes.clear();
+        for (const [n, s] of recBefore) this.recTypes.set(n, s);
+        return;
+      }
+      pending = deferred;
+    }
+    for (const [n, ty] of resolved) this.typeAliases.set(n, ty);
+    // These names are no longer an ordering failure, so the NT1030 the main parse would
+    // report for them is withdrawn.
+    for (const n of names) this.cyclicTypes.delete(n);
   }
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
@@ -424,6 +499,19 @@ class Parser {
     // type had two spellings and `===` — which is the whole point of a string encoding —
     // stopped holding between an annotation and a literal.
     if (id === this.declaringType) {
+      this.declaringTypeIsRecursive = true;
+      return typeRefTy(id);
+    }
+    // MUTUAL recursion: a member of a cycle, named from INSIDE a type declaration's body.
+    // Same back-edge, and it must come BEFORE the alias lookup for the same reason — a
+    // shape resolved in an earlier round is registered under the name, and unfolding it
+    // here would give one type two spellings.
+    //
+    // `declaringType !== undefined` is the invariant, not a convenience: a `@Name` may only
+    // appear NESTED inside a shape (src/ast.ts), so a value's own static type is always the
+    // expanded shape. Without the guard, `const a: A = …` annotated `@A` and every pass that
+    // reasons about a VALUE saw a reference instead of an object.
+    if (this.declaringType !== undefined && this.cycleNames.has(id)) {
       this.declaringTypeIsRecursive = true;
       return typeRefTy(id);
     }

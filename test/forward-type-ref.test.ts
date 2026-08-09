@@ -157,12 +157,17 @@ console.log(n + 1);`);
   // declaration" — true but misleading, since moving Q up just moves the failure to P.
   // The hoisting fixpoint knows the difference: Q is stuck on P and P is stuck on Q, so
   // this is a CYCLE and is reported as one, naming the type it closes through.
-  test("mutually recursive types report as recursion, naming the type the cycle closes through", () => {
+  //
+  // A cycle of RECORDS now compiles (Lane C, the block at the bottom of this file). What is
+  // still refused is a cycle whose members have nowhere to put a back-edge: `@Name` is a
+  // POINTER into a slot, and an array alias has no slot. The message must still name it as
+  // recursion rather than as an ordering problem, which is what this pins.
+  test("an unrepresentable mutual cycle reports as recursion, naming the type it closes through", () => {
     const r = reject(`
-interface P { kind: "P"; child: Q; }
-interface Q { kind: "Q"; parent: P; }
-const p: P = { kind: "P", child: { kind: "Q", parent: null } };
-console.log(p.kind);`);
+type P = Q[];
+type Q = P[];
+const p: P = [];
+console.log(p.length);`);
     expect(r.code).toBe("NT1030");
     expect(r.message).toContain("recursive type 'Q'");
     expect(r.message).toContain("through 'P'");
@@ -291,5 +296,35 @@ const x: L = [];
 console.log(1);`);
     expect(r.code).toBe("NT1030");
     expect(r.message).toContain("not an object type");
+  });
+});
+
+/*
+ * RECURSIVE TYPES, step 2 (Lane C): MUTUAL recursion — an SCC of declarations.
+ *
+ * Self-recursion (above) needs one back-edge, and the parser can mint it while parsing the
+ * declaration itself: the name being declared IS the reference. A mutual cycle cannot be
+ * resolved that way — `interface A { b?: B }` needs B's shape, which needs A's — so the
+ * hoisting fixpoint STALLS and every member was refused NT1030.
+ *
+ * The fix is the same encoding applied to the whole strongly-connected component: once the
+ * fixpoint proves a set of names is stuck on each other, every member is re-parsed with
+ * EVERY name in that set resolving to its `@Name` back-edge. Each member then has a finite
+ * shape whose recursive positions are references, and the table on the Program resolves
+ * them.
+ *
+ * This is the shape that gates src/ast.ts: 45 of its 64 top-level type declarations are one
+ * SCC, closed by `TemplateLiteral.exprs: Expr[]`.
+ */
+describe("recursive types — MUTUAL recursion (the SCC)", () => {
+  // Gate (a): the smallest possible cycle. Neither declaration can be resolved without the
+  // other, and neither is self-recursive, so nothing above this reaches it.
+  test("a two-type mutual cycle compiles and matches node", async () => {
+    await matchesNode(`
+interface A { n: number; b?: B }
+interface B { s: string; a?: A }
+const a: A = { n: 1 };
+console.log(a.n);
+console.log(a.b);`);
   });
 });
