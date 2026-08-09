@@ -465,7 +465,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // now, and the one DYNAMIC site that was actually blocking (ownership.ts's `clone`,
     // refused for the Map spread) became a `.set` LOOP — which is what the constructor
     // does internally, so no tuple encoding was invented.
-    ["NT1004", "NT1011", "NT1606", "NT2001"],
+    ["NT1004", "NT1011", "NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -606,7 +606,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // modules to ONE — cli.ts, which never depended on any of it. The eight moved to
     // NT1011, `for-of` over an `unknown` in a reflective AST walker, which is the first
     // entry in this table that is a design decision rather than a gap (see sh6.test.ts).
-    expect(byCode["NT2001"]!.sort()).toEqual(["cli.ts"]);
+    // ...and at the MERGE, EMPTY. cli.ts was NT2001's last holder, and stage-1's own host
+    // surfaces (`process.stdout.write`, `spawnSync stdio:"inherit"`) landed in the same merge
+    // — so cli.ts walked off its own blocker and onto ast.ts's NT1011 with the other eight.
+    // Neither branch could compute this from its own diff: one emptied the ternary, the
+    // other emptied stage-1's, and only together does the bucket go to zero.
+    expect(byCode["NT2001"]).toBeUndefined();
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -859,7 +864,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // modules to ONE — cli.ts, which never depended on any of it. The eight moved to
     // NT1011, `for-of` over an `unknown` in a reflective AST walker, which is the first
     // entry in this table that is a design decision rather than a gap (see sh6.test.ts).
-    expect(byCode["NT2001"]!.sort()).toEqual(["cli.ts"]);
+    // ...and at the MERGE, EMPTY. cli.ts was NT2001's last holder, and stage-1's own host
+    // surfaces (`process.stdout.write`, `spawnSync stdio:"inherit"`) landed in the same merge
+    // — so cli.ts walked off its own blocker and onto ast.ts's NT1011 with the other eight.
+    // Neither branch could compute this from its own diff: one emptied the ternary, the
+    // other emptied stage-1's, and only together does the bucket go to zero.
+    expect(byCode["NT2001"]).toBeUndefined();
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a

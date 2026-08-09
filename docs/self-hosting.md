@@ -2141,6 +2141,72 @@ there cannot be reached from outside by any assignment anywhere in that function
 inner BLOCK (a `switch` case, say — which is literally `src/checker.ts:2207`) is *not* subtracted
 and still poisons the name program-wide. Closing that means resolving each assignment against a
 real scope chain instead of matching names, which is a bigger change than this one.
+### STAGE-1 OWNS NOTHING — both of `cli.ts`'s host surfaces grew, and it rejoined the group
+
+`src/cli.ts` had spent one round as the only module in the tree whose first blocker was its
+**own** and was not `.push`: `process.stdout is not supported`. That separability was real —
+stage-1 could be worked in parallel with everything else — and it was **two blockers deep, not
+one**. Both are now implemented, and cli.ts needed **no source change**:
+
+| # | Construct | Verdict | Why |
+|---|---|---|---|
+| 1 | `process.stdout.write(ir)` | **implement** | `console.log` is not a substitute: it appends a newline, and `emit`'s output IS the compiler's product |
+| 2 | `spawnSync(bin, fwd, { stdio: "inherit" })` | **implement** | the second options shape; `nativets run` must give the compiled program the user's terminal, not a captured buffer |
+
+**Why not rewrite the source, which this document usually prefers.** For (1) the rewrite is
+`console.log(ir)`, and it changes the bytes: `sourceToIR` already ends in `\n`, so every `.ll`
+this compiler ever emits would carry a spurious blank line. Both sides of the stage-1
+differential would *agree* with each other — and both would be wrong against the `nativets emit
+x.ts > x.ll` contract every other consumer has. The variant that preserves the bytes
+(`ir.endsWith("\n") ? ir.slice(0, -1) : ir`) buys that by depending on an unstated codegen
+invariant. For (2) the only capture-mode rewrite loses streaming, loses the child's stdin, and
+merges the two streams — `nativets run` of an interactive program stops working. Growing the
+host FFI by two entries was cheaper and more honest than either.
+
+Both are small because SH4 already built the road: `js_print_str` (the runtime call
+`console.log`'s string arm already makes) is `process.stdout.write`, and the inherited spawn is
+the existing `fork`/`execvp`/`waitpid` with the pipes deleted. Two deliberate narrowings, both
+recorded in docs/divergences.md:
+
+- `process.stdout.write` is typed **`void`** though node returns a `boolean`. node's answer is
+  a runtime fact about pipe backpressure; a constant `true` is a silent wrong answer.
+- the inherited spawn returns **`{status:number}`**, a *different result type* from the same
+  builtin — node's `stdout`/`stderr` are `null` there, so reading `r.stdout` is a type error
+  instead of an empty string claiming the child printed nothing. `spawnMode()` is read from the
+  SOURCE by both the checker and codegen, the `planConsoleFormat` discipline.
+
+| Module | Before | After |
+|---|---|---|
+| `cli.ts` (standalone) | `NT2001` — `process.stdout is not supported` | **`NT1003`** — the unlinked-import artifact, i.e. **no blocker of its own left** |
+| `cli.ts` (linked) / stage-1 | `NT2001` — the same | **`NT2001`** — `Ternary branches differ: string vs undefined`, `src/ast.ts:244` |
+| every other module | — | **unchanged** |
+
+**Stage-1 did NOT reach IR, and the finding is who owns the next step.** It is `ast.ts`'s
+ternary, inherited through the link like the other eleven modules — the ninth construct
+stage-1 has stopped on, and the seventh that was somebody else's. Probed one deeper in a
+scratch tree (the ternary rewritten as an `if`), the next is `NT1001`, `.find` on
+`{key:string,ty:string}[]`, which is also not cli.ts's. So the parallel-lane window this
+document opened last round is **closed**: stage-1 is back to being a function of the tree.
+
+`test/sh6.test.ts`'s `blame` column for `cli.ts` moves `self` → `ast.ts` for that reason, and
+its STAGE1 row now names the ternary. The one non-weak rung-3 row in the harness still cannot
+run: it needs `nativets-1` to exist, and `nativets-1` needs the whole tree.
+
+**PRE-EXISTING BUG, found on the way, and it breaks the diagnostic contract outright.**
+
+```ts
+const x = console.log(1);
+console.log(x);
+```
+
+node prints `1` then `undefined`, exit 0. nativets accepts the program in the checker and then
+emits `%x.addr = alloca void`, so **clang** rejects it: `void type only allowed for function
+results`. It is the same class as the `coerce` ESCAPES recorded above — a program node runs
+that reaches the linker and dies there, with no `NT` code and no hint, which is worse than a
+refusal. It reproduces on `main` untouched, applies to every `void`-typed call (`console.log`,
+a user `function f(): void`), and is therefore *not* introduced by `process.stdout.write` —
+though that builtin inherits it, which is how it was found. Not fixed here: the fix is in the
+declaration path in `checker.ts`, which three lanes were live in.
 
 ## Milestones
 

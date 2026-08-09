@@ -236,7 +236,7 @@ export const NYI = {
   // the argument VALUES that decide what node returns (`readFileSync` with no encoding
   // yields a Buffer; a `spawnSync` option changes what the call does), because
   // half-implementing those would be a silent divergence rather than a refusal.
-  HOSTMOD: { code: "NT1028", milestone: "later", hint: "the host FFI implements exactly what a self-hosted compiler needs — `node:fs` (readFileSync/writeFileSync/existsSync/mkdtempSync/readdirSync/rmSync), `node:path`, `node:os` (tmpdir/homedir), `node:url` (fileURLToPath), `node:child_process` (spawnSync). See docs/self-hosting.md (SH4)" },
+  HOSTMOD: { code: "NT1028", milestone: "later", hint: "the host FFI implements exactly what a self-hosted compiler needs — `node:fs` (readFileSync/writeFileSync/existsSync/mkdtempSync/readdirSync/rmSync), `node:path`, `node:os` (tmpdir/homedir), `node:url` (fileURLToPath), `node:child_process` (spawnSync, with either `{ encoding: \"utf8\" }` or `{ stdio: \"inherit\" }`), and the ambient `process.argv`/`process.env`/`process.exit`/`process.stdout.write`. See docs/self-hosting.md (SH4)" },
   // Indexed access types (`T["field"]` — TypeScript's "lookup type"). The SUPPORTED shape
   // is the one the parser can resolve PRECISELY: a base whose structure is known in THIS
   // file (a `type`/`interface`/class declared here) indexed by a STRING LITERAL naming one

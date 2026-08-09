@@ -2224,13 +2224,51 @@ same `.ts` runs under node, so every supported case is node-differential
   its catch parameter to `{message:string}` (nativets' `Error` shape), so `e.message` prints the
   same text on both sides. `existsSync` never throws, matching node.
 
+`spawnSync` takes **exactly two options literals**, and its RESULT SHAPE follows which one:
+
+| options | what it does | result type |
+|---|---|---|
+| `{ encoding: "utf8" }` | two pipes, drained with `poll(2)` | `{status:number,stdout:string,stderr:string}` |
+| `{ stdio: "inherit" }` | the child gets OUR fds — output goes straight to the terminal, and the child can read our stdin | `{status:number}` |
+
+The inherited form captures nothing, so node's result carries `stdout: null` / `stderr: null`
+and ours simply **has no `stdout` field**: reading `r.stdout` is a type error rather than an
+empty string that silently claims the child printed nothing. It is what `nativets run` needs
+(`src/cli.ts`) — a compiled program must reach the user's terminal, not a buffer. The `-1`
+convention above extends to it unchanged: the captured form tells "`execvp` never ran" from a
+real exit 127 by noticing the child produced no output, and the inherited form (whose output we
+never see) learns the same fact from a **close-on-exec pipe** the child writes its `errno` into
+only if `execvp` returns. So `spawnSync("nope", [], { stdio: "inherit" })` is `-1` and
+`sh -c "exit 127"` is `127`, on both sides of the options fork.
+
 Everything outside the implemented surface is **`NT1028`**, never half-implemented — including
 the argument *values* that decide what node returns: `readFileSync(p)` with no encoding (node
-yields a Buffer), a computed encoding, `spawnSync` without `{ encoding: "utf8" }`, and any other
-`spawnSync` option (`cwd`/`env`/`input`/`shell`/`timeout`), since accepting and ignoring one
-would silently change what the program does.
+yields a Buffer), a computed encoding, `spawnSync` without one of the two literals above (`{
+stdio: "pipe" }`, the node default, yields Buffers), and any other `spawnSync` option
+(`cwd`/`env`/`input`/`shell`/`timeout`), since accepting and ignoring one would silently change
+what the program does.
 
-| NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`) |
+### `process.stdout.write(s)` — the effect is supported, the RETURN VALUE is not
+
+`console.log` appends a newline, and for a program whose output *is* its product — a compiler
+printing `.ll` to stdout, which is `nativets emit` — that newline is a wrong byte, not a
+cosmetic difference. So `process.stdout.write(s)` is a host builtin: the string's bytes on
+stdout, through the same buffer `console.log` uses (`js_print_str`), so the two interleave in
+source order and `process.exit` flushes both.
+
+It is typed **`void`, where node returns a `boolean`**. node's answer is `false` when the
+stream's internal buffer is backed up — a runtime fact about a pipe that nativets does not
+model — and returning a constant `true` would be a silent wrong answer in the one place the
+value is ever read. `const ok = process.stdout.write(s)` is therefore refused, exactly like
+binding the result of any other `void` call.
+
+Only the one-argument string form exists. node's `(chunk, encoding?, callback?)` and its
+`Buffer`/`Uint8Array` chunk are `NT1028`; `process.stdout.<anything else>` — `isTTY`,
+`columns`, `end` — is refused by name rather than guessed at. Like `process.argv` and
+`process.exit`, it is recognized only when `process` is not shadowed by a user binding, which
+is node's own rule.
+
+| NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface — and the ambient `process.stdout` members outside `.write(s)` | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`), `process.stdout.write` |
 
 ### Type declarations HOIST; recursive types are still not representable (NT1030)
 

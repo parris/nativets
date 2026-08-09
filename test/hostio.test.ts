@@ -33,6 +33,7 @@ const cases: Case[] = [
   { file: "stdin-length.ts", io: { stdin: "line1\nline2\n" } },
   { file: "multi-line.ts", io: { stdin: "one\ntwo\nthree\nfour" } },
   { file: "env-exit.ts", io: { env: { GREETING: "hi there" } } },
+  { file: "stdout-write.ts", io: { args: [] } },
 ];
 
 describe("host I/O (differential vs node)", () => {

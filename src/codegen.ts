@@ -11,7 +11,7 @@
  */
 
 import type { CheckedProgram, Sig } from "./checker.ts";
-import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, type FmtSpec } from "./checker.ts";
+import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, spawnMode, SPAWN_INHERIT_TY, type FmtSpec } from "./checker.ts";
 // `blockDrops` is gone: the drop set is a synthesized trailing BlockDrops STATEMENT now,
 // not an expando read back off the array, so codegen reads it in the normal statement loop.
 // `Program` stays — it is still used below, and the lane's branch predated its arrival.
@@ -376,6 +376,7 @@ const DECLARES = [
   "declare ptr @nt_readdir(ptr)",
   "declare void @nt_rm(ptr, i32, i32)",
   "declare ptr @nt_host_spawn(ptr, ptr, ptr, ptr)",
+  "declare void @nt_host_spawn_inherit(ptr, ptr, ptr)",
   "declare ptr @nt_path_join(ptr, ptr)",
   "declare ptr @nt_path_resolve(ptr, ptr)",
   "declare ptr @nt_path_dirname(ptr)",
@@ -2533,6 +2534,21 @@ class FnGen {
   private genCall(e: Extract<Expr, { kind: "CallExpr" }>): Val {
     const cm = consoleMethod(e);
     if (cm !== null) return this.genConsoleLog(e.args, CONSOLE_STREAMS.get(cm) ?? "out");
+
+    // process.stdout.write(s) — the string verbatim, no newline and no separator.
+    // Same buffer as console.log (`js_print_str` is what console.log's string arm
+    // calls), so the two interleave in source order and `nt_exit` flushes both.
+    if (
+      e.callee.kind === "MemberExpr" && e.callee.object.kind === "MemberExpr" &&
+      e.callee.object.object.kind === "Identifier" &&
+      e.callee.object.object.name === "process" && e.callee.object.property === "stdout" &&
+      e.callee.property === "write" &&
+      !this.varTypes.has("process") && !this.captures.has("process")
+    ) {
+      const s = this.genExpr(e.args[0]!);
+      this.emit(`call void @js_print_str(ptr ${s.v})`);
+      return { v: "0", ty: "void" };
+    }
 
     // process.exit(code?) — flush + exit; the block cannot fall through afterwards.
     if (
@@ -4945,6 +4961,16 @@ class FnGen {
         // 2 stderr. The options object is compile-time only ({ encoding: "utf8" }).
         const cmd = this.genExpr(args[0]!).v;
         const argv = this.genExpr(args[1]!).v;
+        // `{ stdio: "inherit" }` — the child runs on OUR fds, so there is nothing to
+        // capture and the result block is one slot wide (checker: SPAWN_INHERIT_TY).
+        if (spawnMode(args) === "inherit") {
+          const r = this.fresh();
+          this.emit(`${r} = call ptr @nt_obj_new(double ${llvmDouble(1)})`);
+          const g = this.fresh();
+          this.emit(`${g} = getelementptr i64, ptr ${r}, i64 0`);
+          this.emit(`call void @nt_host_spawn_inherit(ptr ${cmd}, ptr ${argv}, ptr ${g})`);
+          return { v: r, ty: SPAWN_INHERIT_TY };
+        }
         const res = this.fresh();
         this.emit(`${res} = call ptr @nt_obj_new(double ${llvmDouble(3)})`);
         const gStatus = this.fresh();

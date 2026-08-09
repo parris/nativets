@@ -446,7 +446,18 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // ...and OFF it again: stage-1 owns its blocker for the second time ever, and this one is
   // not a refusal-by-decision but a missing host surface — `process.stdout`. It is the only
   // module in the tree whose first blocker is not `.push`.
-  "cli.ts": { rung: 0, code: "NT2001", blame: "self" },
+  // ...and OFF again, with BOTH of the host surfaces it owned now grown. `process.stdout`
+  // was one of two: behind it sat `spawnSync(bin, fwd, { stdio: "inherit" })`, the second
+  // options shape, which `nativets run` needs so the compiled program reaches the user's
+  // terminal instead of a captured buffer. With both landed cli.ts has NO blocker of its
+  // own — its standalone column is now the unlinked-import artifact — and it rejoins the
+  // group on ast.ts's ternary. Stage-1's next step is no longer stage-1's to take.
+  // ...and at the MERGE with the ternary lane, that ternary was already gone, so cli.ts
+  // lands two blockers further along than either branch measured: NT1011, ast.ts's
+  // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
+  // and it only ever held it because this lane had not landed yet. Sixth time a merge here
+  // produced a frontier neither side could have computed from its own diff.
+  "cli.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
@@ -560,7 +571,7 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // time stage-1 has ever stopped on its own code — and gave it back when both call sites
 // took the `await` the diagnostic prescribes. Now checker.ts's `argTys: ["string", null]`,
 // an ARRAY OF NULLABLE ELEMENTS, which gates five modules. Still rung 0.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT2001" };
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1011" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -847,7 +858,20 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // on `process.stdout is not supported` — a host surface nativets has simply never
       // grown, not a refusal-by-decision. So stage-1's next step is now independent of the
       // 185-site `.push` rewrite, which is the first time those two have been separable.
-      expect(m.error).toContain("process.stdout is not supported");
+      // NINTH, and the separability was real but SHORT: both of cli.ts's own host-surface
+      // blockers are now implemented — `process.stdout.write` (bytes with no trailing
+      // newline, which is exactly what this `emit` path needs and what `console.log`
+      // cannot do) and `spawnSync(…, { stdio: "inherit" })` (the `run` path). cli.ts owns
+      // nothing now, and is back to inheriting with the other eleven: ast.ts's ternary
+      // whose branches are `string` and `undefined`. Stage-1 cannot move again until a
+      // DEPENDENCY does, which is where it spent every round but two.
+      // TENTH — and the dependency moved in the same merge. The ternary lane cleared the
+      // `?:` join (a present arm and a nullish literal widen to `?U`/`?N`) and then six
+      // more ast.ts blockers behind it, so cli.ts never actually sat on the ternary: it
+      // lands on `mapTypesDeep`, the reflective `unknown` walker at src/ast.ts:669. This is
+      // the first blocker stage-1 has inherited that is a DESIGN decision rather than a
+      // gap — a dynamic object model, or three exhaustive typed AST traversals.
+      expect(m.error).toContain("for-of over number");
       return;
     }
 

@@ -502,6 +502,70 @@ console.log(args.length + " " + args[0]);
     );
   });
 
+  /*
+   * `{ stdio: "inherit" }` — the second options shape, and the one `nativets run`
+   * is written with: the child gets OUR fds, so its output is not captured at all
+   * and node's result carries `stdout: null` / `stderr: null`. Typed as a result
+   * with ONLY `status`, so reading `.stdout` is a type error rather than an empty
+   * string that silently pretends the child printed nothing.
+   *
+   * Ordering is deterministic on POSIX: node's stdout is SYNCHRONOUS to a pipe on
+   * Linux/macOS, and our runtime flushes before it forks.
+   */
+  test("`{ stdio: \"inherit\" }` — the child writes straight to our stdout", async () => {
+    await differential(
+      `import { spawnSync } from "node:child_process";
+console.log("parent before");
+const r = spawnSync("sh", ["-c", "echo from the child; echo child stderr 1>&2"], { stdio: "inherit" });
+console.log("parent after, status " + r.status);
+`,
+    );
+  });
+
+  test("`{ stdio: \"inherit\" }` propagates a non-zero exit status", async () => {
+    await differential(
+      `import { spawnSync } from "node:child_process";
+const r = spawnSync("sh", ["-c", "exit 5"], { stdio: "inherit" });
+console.log("status " + r.status);
+`,
+    );
+  });
+
+  /*
+   * The SAME -1 convention as the captured form. The captured form can tell "execvp
+   * never ran" from a real exit 127 by looking at the (empty) output; an inherited
+   * child's output went straight to our fds, so there is nothing to look at — which is
+   * why the child reports the failure over a close-on-exec pipe instead of guessing.
+   */
+  test("`{ stdio: \"inherit\" }`: a command that does not exist is status -1, not 127", async () => {
+    const ours = await compileAndRunIO(
+      `import { spawnSync } from "node:child_process";
+const r = spawnSync("nativets-no-such-command", [], { stdio: "inherit" });
+console.log(r.status);
+console.log("still running");
+`,
+    );
+    expect(ours.exitCode).toBe(0);
+    expect(ours.stdout).toBe("-1\nstill running\n");
+  });
+
+  test("`{ stdio: \"inherit\" }`: a REAL exit 127 is still 127", async () => {
+    await differential(
+      `import { spawnSync } from "node:child_process";
+const r = spawnSync("sh", ["-c", "exit 127"], { stdio: "inherit" });
+console.log("status " + r.status);
+`,
+    );
+  });
+
+  test("reading `.stdout` off an inherited spawn is refused (node: null)", () => {
+    expect(rejects(`import { spawnSync } from "node:child_process";\nconst r = spawnSync("echo", ["x"], { stdio: "inherit" });\nconsole.log(r.stdout);\n`)).toBe("NT2001");
+  });
+
+  test("a stdio mode other than the literal \"inherit\" is refused", () => {
+    expect(rejects(`import { spawnSync } from "node:child_process";\nconst r = spawnSync("echo", ["x"], { stdio: "pipe" });\nconsole.log(r.status);\n`)).toBe("NT1028");
+  });
+
   test("spawnSync without the options object is refused (node yields Buffers)", () => {
     expect(rejects(`import { spawnSync } from "node:child_process";\nconst r = spawnSync("echo", ["x"]);\nconsole.log(r.status);\n`)).toBe("NT1028");
   });
