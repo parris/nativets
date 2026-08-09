@@ -1359,6 +1359,53 @@ freed exactly once, the result is a distinct pointer) and node-differentially in
 `test/immutable.test.ts`, including node's lexicographic default (`[10,9,1,100,2].sort()` →
 `1,10,100,2,9`).
 
+### Binding a LINEAR FIELD off a BORROWED receiver is an ALIAS (`const b = o.lines`)
+
+The third source of aliases, added for the same reason as the `.reverse()` one above and
+closing a **use-after-free** rather than a leak.
+
+```ts
+type Box = { lines: string[] };
+function probe(o: Box): string { const b = o.lines; return b.join("|"); }
+const o: Box = { lines: ["a", "b"] };
+probe(o);
+console.log(o.lines.join("|"));   // node "a|b";  we printed an EMPTY LINE, at exit 0
+```
+
+`const b = o.lines` was **neither a move nor an alias** — nothing recorded the binding at all,
+so it became an ordinary linear local and scope exit emitted `nt_arr_free(b)` on storage the
+caller's object still points at. The next read through the owner printed an empty array **at
+exit 0**, the silent-wrong-answer shape this project ranks worst; the same program through a
+`@@mutable` class field **SEGFAULTED** (exit 139) out of a memory-safe language.
+
+The binding is now recorded as an **alias** of the receiver, exactly as `const b = a.reverse()`
+is, which is what the model already said the answer was: the object owns the field, `b` only
+names it, and nobody frees it twice.
+
+**Three borrowed receivers**, the same set the analysis already treats as borrows everywhere else:
+a **linear parameter** (the caller owns and drops it), a method's **`this`** (the receiver belongs
+to the caller), and a **`for-of` element** over a linear element type (the array owns it for the
+loop's extent). The last two **SEGFAULTED** rather than merely printing a wrong answer:
+
+```ts
+type Tok = { parts: string[] };
+for (const t of toks) { const b = t.parts; console.log(b.join("|")); }   // exit 139
+```
+
+**Alias, not refusal, and the distinction is the whole point.** The READ is safe and matches
+node; refusing it would reject `const b = o.lines; b.length`, a shape this compiler's own source
+is full of. What is unsafe is letting the handle **escape**, and that falls out of the alias
+mechanism for free — an alias is a borrow binding, so `return b` is the existing `NT1604`.
+
+One boundary, deliberate: a **locally-owned** receiver is untouched (`const o = { lines: […] };
+const b = o.lines`) — there the move is genuine, `nt_obj_free` is shallow so nothing is freed
+twice, and that shape compiles and matches node today.
+
+The cost is a **leak where there used to be a dangling pointer** — the array-in-object class
+`nt_obj_free` already leaks by construction (`docs/ROADMAP.md`, "Why ELEMENTS is not a one-line
+fix"), so this joins a known list rather than opening a new one. Pinned node-differentially in
+`test/drops-obj.test.ts` and as UI tests in `test/ownership/move-out-of-field.ts`.
+
 ### `.push()` — refused by default, legal on a `@@mutable` ACCUMULATOR binding
 
 > **Superseded in part.** The section below argued — correctly, and it is kept because the

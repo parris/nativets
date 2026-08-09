@@ -1189,6 +1189,7 @@ class FnGen {
   }
 
   private assemble(header: string, firstBlock: number): string {
+    //@@mutable
     const out: string[] = [`${header} {`, "entry:"];
     for (const a of this.entryAllocas) out.push("  " + a);
     out.push(`  br label %${this.blocks[firstBlock]!.label}`);
@@ -2338,25 +2339,36 @@ class FnGen {
           const lt = e.left.ty ?? "number";
           if (lt === "null" || lt === "undefined") return this.genExpr(e.right); // statically nullish → right
           if (!isNullableTy(lt)) return this.genExpr(e.left);                     // statically present → left
-          // runtime-nullable left: TAG-based branch (never truthiness), collapse to base.
+          // runtime-nullable left: TAG-based branch (never truthiness).
+          //
+          // The RESULT type is the checker's, not `baseTy(lt)`: `??` only consumes the
+          // LEFT's nullishness, so a still-nullable right keeps the whole expression
+          // nullable (`a ?? b` on two `string|undefined`s). Both arms are therefore
+          // COERCED into it, exactly as `ConditionalExpr` below does — the left arm
+          // unboxes to the base and may re-box, the right arm may already be a box.
+          // Storing the right arm RAW into a `base` slot is what silently reinterpreted
+          // a [tag,value] box as a string pointer and made `a ?? b ?? "fallback"` skip
+          // its fallback. See test/nullish-coalesce.test.ts.
           const base = baseTy(lt);
+          const ty = (e.ty ?? base) as Ty;
           const box = this.genExpr(e.left);
-          const slot = this.slot(base);
+          const slot = this.slot(ty);
           const isN = this.isNullish(box.v);
           const rLbl = this.label("nc"), lLbl = this.label("ncl"), endLbl = this.label("nce");
           this.terminate(`br i1 ${isN}, label %${rLbl}, label %${lLbl}`);
           this.to(this.block(rLbl));
-          const rv = this.genExpr(e.right);
-          this.emit(`store ${llvmTy(base)} ${rv.v}, ptr ${slot}`);
+          const rv = this.coerce(this.genExpr(e.right), ty);
+          this.emit(`store ${llvmTy(ty)} ${rv.v}, ptr ${slot}`);
           this.terminate(`br label %${endLbl}`);
           this.to(this.block(lLbl));
           const lv = this.fromSlot(this.nullVal(box.v), base); // unbox the present value
-          this.emit(`store ${llvmTy(base)} ${lv}, ptr ${slot}`);
+          const lc = this.coerce({ v: lv, ty: base }, ty);
+          this.emit(`store ${llvmTy(ty)} ${lc.v}, ptr ${slot}`);
           this.terminate(`br label %${endLbl}`);
           this.to(this.block(endLbl));
           const t = this.fresh();
-          this.emit(`${t} = load ${llvmTy(base)}, ptr ${slot}`);
-          return { v: t, ty: base };
+          this.emit(`${t} = load ${llvmTy(ty)}, ptr ${slot}`);
+          return { v: t, ty };
         }
         // `&&` / `||` — value-returning short-circuit (result type = operand type).
         const ty = (e.ty ?? "boolean") as Ty;
@@ -3814,6 +3826,8 @@ class FnGen {
     // the node also means the index expression travels UNEVALUATED: it is lowered only
     // inside the continuation block past the guard, which is what makes
     // `a?.[sideEffect()]` skip the side effect when `a` is nullish, as node does.
+    // NOT `//@@mutable`: the chain is built with `.unshift`, and the opt-in legalizes
+    // `.push` ONLY — the mark would be dead weight, not a fix.
     const links: Extract<Expr, { kind: "MemberExpr" | "IndexExpr" }>[] = [];
     let node: Expr = e;
     while (node.kind === "MemberExpr" || node.kind === "IndexExpr") { links.unshift(node); node = node.object; }
@@ -5673,6 +5687,7 @@ class FnGen {
     const sig = this.mod.functions.get(name)!;
     if (sig.rest) {
       const fixed = sig.params.length - 1;
+      //@@mutable
       const argVals: string[] = [];
       // The FIXED parameters coerce just like a non-rest call's do (see below) — this
       // path emitted them raw, so a nullable/general-union fixed parameter of a rest
@@ -5688,6 +5703,7 @@ class FnGen {
       this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
       return { v: t, ty: sig.ret };
     }
+    //@@mutable
     const argVals: string[] = [];
     for (let i = 0; i < sig.params.length; i++) {
       // Coerced to the param type — boxing an `undefined` default into a nullable
