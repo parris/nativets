@@ -742,33 +742,93 @@ handle to become a box (one indirection, refcounted, every alias observing the w
 runtime-representation change, i.e. a stage of its own, and it is the recommended follow-on.
 Until it exists, the refusal is the honest answer.
 
-#### KNOWN BUG (unfixed): `.delete` in a BOOLEAN position silently inverts control flow
+#### `.delete` consumed as a BOOLEAN is REFUSED (`NT1606`) — it used to invert control flow
 
-Found while scoping the refusal above; **not fixed by it**, and recorded here so it is not
-rediscovered. Item (2) at the top of this section — "`.delete` returns a new collection,
-where node returns a boolean" — is documented as a *type-level* difference. In a **condition**
-it stops being type-level and becomes a wrong answer, because a collection handle is always
-truthy while node's boolean is not:
+Item (2) at the top of this section — "`.delete` returns a new collection, where node returns
+a boolean" — was documented as a *type-level* difference. In a **condition** it stops being
+type-level and becomes a wrong answer, because a collection handle is truthy for **every**
+input while node's boolean is not:
 
 ```ts
 let m = new Map<string, number>().set("a", 1);
 if (m.delete("a"))  { console.log("deleted");  } else { console.log("absent");  }
 if (m.delete("zz")) { console.log("deleted2"); } else { console.log("absent2"); }
-// node:     deleted / absent2
-// nativets: deleted / deleted2     ← exit 0, wrong branch, no diagnostic
+// node:            deleted / absent2
+// nativets, before: deleted / deleted2    ← exit 0, wrong branch, no diagnostic
 ```
 
-`while (m.delete(k))` is the same fault and loops on an absent key. Binding the result is
-also silently wrong where no annotation forces the check — `const gone = m.delete("zz");`
-prints `Map(1) { 'a' => 1 }` against node's `false` — though an *annotated* binding is caught
-today (`const b: boolean = m.delete(k)` is `NT2001`), and `if (m)` on a plain handle is
-truthy under both and agrees.
+`while (m.delete(k))` was the same fault and **never terminated** on an absent key. Both are
+now rejected:
 
-The fix is the same shape as the refusal above and deliberately out of that lane's scope: a
-`.delete` call in a boolean position (`if`/`while`/`&&`/`!`/a `boolean` context) should be
-`NT1606`, hinting `m.has(k)` for the test and `m = m.delete(k)` for the removal. Note the
-rule must key on **`.delete`**, not on "a `Map`/`Set` in a condition" — the latter would
-falsely reject `if (m)`, which matches node.
+```
+error[NT1606]: `Map` is persistent: `.delete` returns a NEW map, not a boolean, so this
+               `if` condition at 2:5 is ALWAYS true — the `else` arm is unreachable
+  = help: node's `.delete` returns whether the key was there; ours returns the map without
+          it. Test with `m.has("zz")`, and remove with `m = m.delete("zz")` —
+          `if (m.has("zz")) { m = m.delete("zz"); }` says both. …
+```
+
+**Why this needs no analysis and has no false-positive direction.** The condition is not a
+condition: its value is decided by the *representation*, not by the data, so the `else` arm
+is unreachable and the loop cannot exit — in every execution of every program. There is no
+program in which the result of `.delete` is a meaningful boolean, so nothing correct is being
+rejected. Same rule shape as the discarded mutator above, for the same reason.
+
+**Why not "make it match node" instead.** `.delete` cannot return both a boolean and the new
+collection, and the collection is the one thing a persistent structure *must* return —
+`m = m.delete(k)` is the documented removal spelling, used by existing fixtures. Returning a
+boolean and rebinding the receiver implicitly reintroduces exactly the aliasing unsoundness
+that ruled out auto-rebind for `.set` (a rebind updates one handle; node's mutation is seen
+through every alias), and additionally makes `const m` collections un-deletable-from. Real
+node-compatible mutation needs the boxed handle described above — a stage of its own.
+
+**Where the rule applies, measured against node rather than assumed.** The boolean contexts
+split three ways:
+
+| position | before | now |
+|---|---|---|
+| `if` / `while` / `do…while` / `for` test | **silently wrong** (wrong arm; loops never exit) | `NT1606` |
+| `?:` test, `!x`, `!!x` | **silently wrong** | `NT1606` |
+| `&&` / `\|\|` operand (either side) | already `NT2001` (operands must be matching boolean/number/string) | unchanged |
+| `return` from a `: boolean` function | already `NT2001` (return type mismatch) | unchanged |
+| argument to a `boolean` parameter | already `NT2001` | unchanged |
+| `const b: boolean = m.delete(k)` | already `NT2001` | unchanged |
+| `m.delete(k) === true` | already `NT2001` (cannot compare) | unchanged |
+| `Boolean(m.delete(k))` | already `NT1003` (`Boolean` unsupported) | unchanged |
+
+The `return`-from-`: boolean` row holds for a `function` declaration or a method. It does
+**not** hold for an **arrow**, because an arrow's declared return type is never checked
+against its body at all — a separate, pre-existing hole found here:
+`const f = (k: string): boolean => m.delete(k); console.log(f("zz"))` prints the map where
+node prints `false`, with no diagnostic. Not this section's bug and not fixed here.
+
+**It keys on `.delete`, not on "a Map/Set in a condition."** `if (m)` on a plain handle is
+always-true under node too, so it **agrees** and keeps compiling; so do `if (m.size)`,
+`if (m.has(k))` and `if (m.get(k))` — the spellings the hint points at. A user class with its
+own `.delete(): boolean` method is untouched (measured). All are pinned as passing tests in
+`test/mapset-immutable.test.ts`.
+
+**Residual hole, deliberately left open.** Routing the result through a binding first is
+still silently wrong:
+
+```ts
+let m = new Map<string, number>().set("a", 1);
+const gone = m.delete("zz");
+if (gone) { console.log("hit"); } else { console.log("miss"); }   // node: miss.  here: hit.
+console.log(gone);                                                 // node: false. here: Map(1) {…}
+```
+
+At `if (gone)` the expression is a plain `Map`-typed identifier, *indistinguishable* from the
+`if (m)` that must keep working — and `const gone = m.delete(k)` is itself the legitimate
+persistent spelling (it is a pinned test). Closing it needs either a taint that leaks one
+alias later (`const g2 = gone; if (g2)`), which is worse than not trying because it trains
+false confidence, or refusing every always-true collection test, which would take `if (m)`
+with it. The complete fix is the same one the discarded-mutator section names: box the handle
+so `.delete` can return node's boolean.
+
+test262 basis, re-measured on node here: `built-ins/Map/prototype/delete/returns-true.js`,
+`returns-false.js` and the `Set/prototype/delete` pair — `.delete` answers "was the key
+there?", `true` on the first call and `false` on the second.
 
 ### `Record<K, V>` is a `Map`, not an object — and an object literal cannot initialize one
 
