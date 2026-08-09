@@ -9,7 +9,7 @@
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, Declarator } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
-import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mutableTags, exprText, exprLoc, freshArray } from "./ast.ts";
+import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
@@ -505,7 +505,7 @@ function specializeDecl(tmpl: FuncDecl, name: string, bindings: Map<string, Ty>)
   // every use site; and `delete` is refused by this very compiler (NT1606), so writing
   // it would plant a self-hosting blocker in the file that emits the diagnostic.
   const spec = structuredClone({ ...tmpl, name, typeParams: undefined }) as FuncDecl;
-  mapTypesDeep(spec, (t) => substTypeParams(t, bindings));
+  mapTypesDeepStmt(spec, (t) => substTypeParams(t, bindings));
   return spec;
 }
 

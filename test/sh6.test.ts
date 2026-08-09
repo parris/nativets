@@ -278,7 +278,34 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `Object.keys expects an object`. ast.ts has THREE such walkers (this one, the static-
   // field rewriter, the declared-name collector). That is either a dynamic `unknown` model
   // or three exhaustive typed traversals of 44 node kinds — not a gap, a design decision.
-  "ast.ts": { rung: 0, code: "NT1011", blame: "self" },
+  // ...and the THREE REFLECTIVE WALKERS ARE GONE, by a source change rather than a dynamic
+  // `unknown` model — the option this row named as the alternative, and the one that would
+  // have grown the `Ty` encoding. They are one exhaustively-typed traversal now
+  // (`walkExprChildren`/`walkStmtChildren`, 48 node kinds, a `never`-bound `default:` so a
+  // kind nobody handled is a compile-time error) with three small per-node bodies over it.
+  // Evidence it is observationally null: old vs new over the parsed / CHECKED / ownership-
+  // analyzed trees of all 495 `.ts` files in src/, test/ and examples/ — 1012 trees x 3
+  // walkers, comparing both the resulting tree AND the exact order of the `Ty` callbacks —
+  // 0 differences; plus an 84-mutant sweep (skip each of the 48 kinds, drop each field
+  // slot, swap two visit orders) with 81 caught, 3 provably equivalent (`BreakStmt`,
+  // `ContinueStmt`, `BlockDrops` have no children and no type fields, so skipping them IS
+  // the identity). Three mutants survived the 495-file corpus and needed a hand-built
+  // input — a comma `SequenceExpr`, an annotated `for (const x: T of …)`, and a do/while
+  // whose body and test both carry types — which is the usual finding: a null corpus diff
+  // is worth what its coverage is worth and no more.
+  //
+  // All NINE modules that blamed this line moved together. What was BEHIND it, in ast.ts's
+  // own source, is `setBlockDrops`: `list[list.length - 1]` typed `Stmt` (an out-of-range
+  // index PANICS by design), guarded `!== undefined` — a general union compared with
+  // `undefined`, the same dead-guard defect lexer.ts held two rounds ago and cleared with
+  // `.at`. It is worse than dead here: on an EMPTY list node takes the `push` path and
+  // nativets would panic, so it is a source defect with a node divergence behind it.
+  // Probed one deeper before recording, so the next lane knows the size: behind THAT is
+  // NT1606, `o.f = v` on an AST node — the typed walk writes `e.ty = f(e.ty)` where the
+  // reflective one wrote `o[k] = f(v)`, so this is the SAME wall in honest clothing, and
+  // clearing it means deciding whether the AST interfaces carry `@@mutable` (which makes
+  // them nominally tagged) or whether the walkers return new nodes. A decision, not a gap.
+  "ast.ts": { rung: 0, code: "NT2001", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -340,7 +367,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. parser.ts's own 18
   // `this.<field>` push sites are NOT cleared — a field names no binding the ownership
   // pass can prove unique, so they stay NT1606 behind this.
-  "parser.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
+  "parser.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -384,7 +411,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `.push` legal on a `@@mutable` accumulator, nothing stops here any more and all four
   // walk through to ast.ts's ONE `trimEnd` site (NT1002). driver.ts goes to lexer.ts's
   // NT2001 instead. Neither lane could have measured this alone.
-  "checker.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
+  "checker.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -395,7 +422,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
   // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
   // fires first through the link. Its own tables are the same shape and sit behind it.
-  "codegen.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
+  "codegen.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
   // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
   // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
@@ -410,7 +437,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Both rows moved to their real blockers, and the blame column is the interesting part:
   // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
   // below; coverage-preprocess.ts finally has one of its OWN.
-  "coverage.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
+  "coverage.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -427,8 +454,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // The Map spread in `clone` was the one blocker this module ever owned in the STANDALONE
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
-  "ownership.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
-  "driver.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
+  "ownership.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "driver.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
   //
@@ -457,14 +484,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
   // and it only ever held it because this lane had not landed yet. Sixth time a merge here
   // produced a frontier neither side could have computed from its own diff.
-  "cli.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
+  "cli.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
   // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
   // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
-  "modules.ts": { rung: 0, code: "NT1011", blame: "ast.ts" },
+  "modules.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
@@ -571,7 +598,10 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // time stage-1 has ever stopped on its own code — and gave it back when both call sites
 // took the `await` the diagnostic prescribes. Now checker.ts's `argTys: ["string", null]`,
 // an ARRAY OF NULLABLE ELEMENTS, which gates five modules. Still rung 0.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1011" };
+// ...and NT1011 gave way to NT2001 when ast.ts's three reflective AST walkers became one
+// typed traversal: stage-1 inherits ast.ts's `setBlockDrops` union-vs-undefined guard now.
+// Still rung 0, and still nine modules — the frontier is a conjunction, said again.
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT2001" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -871,7 +901,15 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // lands on `mapTypesDeep`, the reflective `unknown` walker at src/ast.ts:669. This is
       // the first blocker stage-1 has inherited that is a DESIGN decision rather than a
       // gap — a dynamic object model, or three exhaustive typed AST traversals.
-      expect(m.error).toContain("for-of over number");
+      // ELEVENTH — the dependency moved again, and this time by taking the OTHER fork the
+      // note above named: three exhaustive typed AST traversals, not a dynamic object
+      // model. Stage-1 now inherits what was behind them, `setBlockDrops`'s
+      // `list[list.length - 1] !== undefined` — a general union compared with `undefined`,
+      // ast.ts's own source defect (see the BASELINE row). Asserted on the tail of the
+      // message rather than the head: the head is the whole 18-member `Stmt` union
+      // printed out, which is 3 KB of encoding that would churn on any AST change.
+      expect(m.error).toContain("with undefined");
+      expect(m.error).toContain("Cannot compare");
       return;
     }
 

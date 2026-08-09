@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "a841ea8"
+    "rev": "dc34e4c"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "73bbc02d5ae30f30",
+      "sha256": "9fdf509df83ea53f",
       "standalone": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over number is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare U<{kind:\"VarDecl\",declKind:string,decls:@Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@Param[],returnAnnot:?Ustring,body:@Stmt[],returnTy:?Ustring,endDro…"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over number is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare U<{kind:\"VarDecl\",declKind:string,decls:@Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@Param[],returnAnnot:?Ustring,body:@Stmt[],returnTy:?Ustring,endDro…"
       }
     },
     "checker.ts": {
-      "sha256": "e265810d30fd4446",
+      "sha256": "8f1cb05009708fee",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over number is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare U<{kind:\"VarDecl\",declKind:string,decls:@Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@Param[],returnAnnot:?Ustring,body:@Stmt[],returnTy:?Ustring,endDro…"
       }
     },
     "cli.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over number is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare U<{kind:\"VarDecl\",declKind:string,decls:@Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@Param[],returnAnnot:?Ustring,body:@Stmt[],returnTy:?Ustring,endDro…"
       }
     },
     "codegen.ts": {
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over number is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare U<{kind:\"VarDecl\",declKind:string,decls:@Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@Param[],returnAnnot:?Ustring,body:@Stmt[],returnTy:?Ustring,endDro…"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over number is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare U<{kind:\"VarDecl\",declKind:string,decls:@Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@Param[],returnAnnot:?Ustring,body:@Stmt[],returnTy:?Ustring,endDro…"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over number is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare U<{kind:\"VarDecl\",declKind:string,decls:@Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@Param[],returnAnnot:?Ustring,body:@Stmt[],returnTy:?Ustring,endDro…"
       }
     },
     "lexer.ts": {
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over number is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare U<{kind:\"VarDecl\",declKind:string,decls:@Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@Param[],returnAnnot:?Ustring,body:@Stmt[],returnTy:?Ustring,endDro…"
       }
     },
     "ownership.ts": {
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over number is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare U<{kind:\"VarDecl\",declKind:string,decls:@Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@Param[],returnAnnot:?Ustring,body:@Stmt[],returnTy:?Ustring,endDro…"
       }
     },
     "parser.ts": {
-      "sha256": "486f6d23fbf52278",
+      "sha256": "71f209429b1b53fc",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over number is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare U<{kind:\"VarDecl\",declKind:string,decls:@Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@Param[],returnAnnot:?Ustring,body:@Stmt[],returnTy:?Ustring,endDro…"
       }
     }
   }

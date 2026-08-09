@@ -10,7 +10,7 @@
 import { lex, LexError, decodeEscapeAt, type Token } from "./lexer.ts";
 import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral, unknownTypeName, NTError } from "./diagnostics.ts";
 import {
-  makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep,
+  makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep, mapTypesDeepExpr,
   isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf,
@@ -2914,7 +2914,7 @@ class Parser {
         // parameter, so the marker must survive the blanket erasure here.
         const own = arrow.params.map((p) => p.annot);
         const ownRet = arrow.retAnnot;
-        mapTypesDeep(arrow, eraseTypeParams);
+        mapTypesDeepExpr(arrow, eraseTypeParams);
         arrow.params.forEach((p, i) => { if (own[i] !== undefined) p.annot = own[i]; });
         if (ownRet !== undefined) arrow.retAnnot = ownRet;
       }

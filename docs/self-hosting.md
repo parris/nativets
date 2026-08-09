@@ -2208,6 +2208,174 @@ a user `function f(): void`), and is therefore *not* introduced by `process.stdo
 though that builtin inherits it, which is how it was found. Not fixed here: the fix is in the
 declaration path in `checker.ts`, which three lanes were live in.
 
+### THE THREE REFLECTIVE AST WALKERS ARE GONE — nine modules move, and the wall behind them is ast.ts's own dead guard
+
+`src/ast.ts` held three passes written **reflectively** — `n: unknown`, `Array.isArray(n)`,
+a cast to `Record<string, unknown>`, a walk over `Object.keys(o)`, and an `o[k] = …`
+write-back. Nine reflection sites over an AST with **48** node kinds. They were the first
+blocker for **nine of the twelve** modules, all through the link (`NT1011`, `for-of` over
+`unknown`, at `src/ast.ts:669`, with `Object.keys expects an object` behind it), and the
+`sh6` row called the choice out explicitly: *a dynamic `unknown` model, or three exhaustive
+typed AST traversals*.
+
+**The typed traversal was taken, and it is FACTORED — one walker, not three.** The argument,
+because it is not obvious from the shapes: the three passes do genuinely different per-node
+work (`mapTypesDeep` rewrites `Ty` fields; `resolveStaticFieldReads` replaces a `MemberExpr`
+node with an `Identifier` and reports an assignment; `collectBindingNames` gathers declared
+names), but their *recursion* is identical. The one thing that looked like it would force
+three switches — the reflective spelling MUTATES a child SLOT (`o[k] = …`), so a shared
+`childrenOf` yielding child VALUES would not serve it — dissolves once the child hook is a
+**rewrite** rather than a visit: `fe: (e: Expr) => Expr`, with the parent storing what comes
+back. That is how a `MemberExpr` becomes an `Identifier` with no reflection and no setters.
+
+So it is `walkExprChildren` / `walkStmtChildren` — **48 cases**, 30 expressions and 18
+statements — plus three small per-node bodies. Not 3 × 48.
+
+**The `default:` arm of each binds `never`**, so a kind added to `Expr` or `Stmt` without a
+case here does not compile. `collectBindingNames` enumerates the thirteen statement kinds
+that bind nothing for the same reason, rather than defaulting: a *new* statement kind that
+does bind a name is the failure the reflective spelling could not detect, and it is the same
+hazard that let `ModuleGen.expr` silently fall through on `NonNullExpr` — here at 48× the
+surface.
+
+**Two things the `Ty` rewrite forced, both order questions.** The reflective walk visited a
+node's type-bearing fields *interleaved* with its children, in `Object.keys` (construction)
+order — `Param.annot` before `Param.default`, `FuncDecl.returnAnnot` between `params` and
+`body`, `ForOfStmt.annot` before `iterable` and `elemTy` after `body`. Hoisting them before
+or after the children would reorder the calls to `f`, and `f` may throw (the checker's
+belt-and-braces "`#T` survived monomorphization" guard does), so the order is observable in
+a diagnostic. The shared walker therefore takes the `Ty` rewrite too and applies it exactly
+where the old key order did; the two passes that do not rewrite types pass the identity.
+Field order was **measured, not assumed**: a census of `Object.keys` over every node in
+1012 real trees says `ty` is the last key on all thirty expression kinds, and names the five
+places where a type field precedes a child.
+
+**Two asymmetries in the old `TY_FIELDS` table are preserved on purpose and now documented
+in the code**: `FuncDecl.returnTy` and `ForOfStmt.valTy` hold a `Ty` and are NOT rewritten,
+while their siblings `ArrowFunction.retTy` and `ForOfStmt.elemTy` are. Both are
+checker-resolved types set after the only pass that substitutes type parameters, so nothing
+observable depends on them today — but they are a live trap for the next `Ty` rewrite that
+runs later.
+
+#### The evidence, and what a null diff is worth
+
+Old and new run over the **parsed**, **checked** and **ownership-analyzed** trees of every
+`.ts` file in `src/`, `test/` and `examples/` — 495 files, 371 that parse, 317 that check,
+**3830 comparisons** (1012 trees × 3 walkers, plus 794 direct runs of the single-node
+`mapTypesDeepExpr` entry point on every real `ArrowFunction`). Compared: the resulting tree AND the exact
+sequence of `Ty` callbacks (so a reordering is a difference, not just a different answer),
+and for the static-field pass, the name its `onAssign` reports first. **0 differences.**
+
+Running the walkers on parsed trees alone would have been far too weak — `ty`, `elemTy`,
+`retTy`, `paramTys`, `captures[].ty`, `drops` and `BlockDrops` are all set by the checker or
+the ownership pass and simply do not exist before them.
+
+A null diff proves nothing about code the corpus never reaches, so: **84 mutants** — skip
+each of the 48 node kinds in turn, drop each individual field slot, swap two visit orders,
+and break each of the three per-node bodies. **81 caught.** Three are provably equivalent
+(`BreakStmt`, `ContinueStmt` and `BlockDrops` have no children and no type fields, so
+"skip this kind" *is* the identity). And **three survived the 495-file corpus** and needed a
+hand-built input, which is the usual finding here:
+
+| Mutant | Why the corpus missed it |
+|---|---|
+| skip `SequenceExpr` | the comma operator appears only in a `for` update, and never in a file that CHECKS |
+| drop `ForOfStmt.annot` | nothing in 495 files writes `for (const x: T of …)` |
+| swap `DoWhileStmt` body/test order | the corpus's eleven `do`/`while`s are all in files that do not check, so neither half contributed a callback to reorder |
+
+One five-line fixture (`for (const x: number of xs)`, a `do`/`while` whose body and test both
+carry types, and `for (let a = 0, b = 9; …; a++, b--)`) kills all three.
+
+#### PRE-EXISTING BUGS this turned up
+
+1. **`NonNullExpr` was missing its `ty` field** — and four modules were already using it.
+   The checker writes it through an `(e as { ty?: Ty })` cast like every other expression's;
+   `codegen.ts`, `ownership.ts` and `modules.ts` read it back the same way; it is present on
+   82 nodes in this repo's own corpus. It is now declared, which is what let the typed walk
+   reach it — the reflective walk always could, and that gap was this rewrite's **only**
+   corpus difference before the field was added.
+
+2. **`tsc` has never semantically checked this project, and that is why nobody saw (1).**
+   `test/pipeline/*.ts` contain nativets' `|>` operator, which is a *syntax* error to `tsc`
+   (`TS1109`) — and `tsc` does not compute semantic diagnostics for a program that has
+   syntactic ones. So `bun run tsc --noEmit` reports 16 syntax errors and **zero** of the 87
+   real type errors in `src/`. Reproduce, and see them:
+
+   ```sh
+   printf '{"extends":"./tsconfig.json","compilerOptions":{"allowImportingTsExtensions":true},"include":["src"]}' > tsconfig.srconly.json
+   bunx --package typescript@5.9.2 tsc -p tsconfig.srconly.json
+   ```
+
+   Declaring `NonNullExpr.ty` takes that count from **87 to 55** on its own. Most of the
+   remainder are benign (`Ty` is a template-literal type, so `t === "Uint8Array"` is
+   "no overlap"), but at least two more look real and are not this lane's:
+   `codegen.ts:2312` reads `this.consumedAssign`, a field `FnGen` does not have (so it is
+   always `undefined`), and `checker.ts:4229` "lacks an ending return statement" on a
+   signature that does not include `undefined`.
+
+3. **`exprLoc` has never worked on a `UnaryExpr`.** `src/ast.ts` reads `e.argument` in that
+   arm; the field is `operand` (`argument` belongs to `SpreadExpr`/`ReturnStmt`/`ThrowStmt`).
+   So it returns `undefined` where the operand has a perfectly good location, and every
+   diagnostic built from a unary expression is unlocatable — the exact failure `exprLoc`'s
+   own comment says cost a lane an instrumented build. `tsc` flags it as `TS2339` the moment
+   the mask in (2) is lifted. Reproduced:
+
+   ```
+   parse("const a = 1;\nconsole.log(-(a));\n")  →  exprLoc(unary) === undefined
+                                                   exprLoc(unary.operand) === {line:2,col:15}
+   ```
+
+   Left unfixed on purpose: it changes diagnostic *spans*, which is a behavioural change with
+   its own tests to write, and this lane's bar was observational nullity.
+
+#### Where the nine modules landed
+
+| Module | Before | After |
+|---|---|---|
+| `ast.ts` (standalone + linked) | `NT1011` — `for-of` over `unknown`, `mapTypesDeep`, 669 | **`NT2001`** — `Cannot compare U<…Stmt…> with undefined`, `src/ast.ts:1093` |
+| `parser.ts`, `checker.ts`, `codegen.ts`, `coverage.ts`, `ownership.ts`, `driver.ts`, `modules.ts`, `cli.ts` (linked) | `NT1011` — the same, inherited | **`NT2001`** — the same, inherited |
+| `lexer.ts` | `NT1004` (`throw` outside a `try`) | **unchanged** |
+| `coverage-preprocess.ts` | `NT1606` (`.push`) | **unchanged** |
+| `diagnostics.ts` | **rung 3** | **rung 3, IR byte-identical** |
+
+Nine modules moved, none reached IR, and `diagnostics.ts` — the one module that
+self-compiles — emits **byte-identical** IR before and after, which is the strongest
+statement available that this rewrite is null.
+
+**What is behind it is `src/ast.ts`'s own dead guard**, and it is the *third* time this
+document has recorded that shape:
+
+```ts
+const last = list[list.length - 1];
+if (last !== undefined && last.kind === "BlockDrops") { … }
+```
+
+An out-of-range index PANICS by design (Stage 41), so nativets types that read `Stmt`, and
+the guard compares an 18-member general union with `undefined` — no answer exists. It is the
+same defect `lexer.ts` held two rounds ago, in the same words, cleared there with `.at`. It
+is worse than dead here: on an **empty** list node returns `undefined` and takes the `push`
+path, while nativets would panic on the index, so it is a source defect with a **node
+divergence** behind it.
+
+Probed one deeper in a scratch tree, so the next lane knows the size: behind it is
+**`NT1606`, `o.f = v` on an AST node**. That is not a coincidence and it should be read
+carefully — the typed walk writes `e.ty = f(e.ty)` exactly where the reflective walk wrote
+`o[k] = f(v)`. **It is the same wall in honest clothing**, and clearing it is a *decision*,
+not a gap: either the AST interfaces carry `@@mutable` (which makes ~48 record types
+nominally tagged, and the `Ty` encoding has a defect history that argues for caution), or
+the walkers stop mutating and return new nodes (which changes node identity for every
+consumer). Neither belongs in a lane whose bar was observational nullity.
+
+**One self-inflicted blocker was planted and caught by re-measuring after the final edit**,
+which is exactly the rule this document already carries. The first draft declared
+`type ExprFn = (e: Expr) => Expr`; an alias whose shape mentions a recursive type is
+`NT1030`, so `src/ast.ts` stopped **parsing** — a blocker moving to an earlier pipeline
+stage, which the ratchet forbids unconditionally. The function types are spelled inline
+instead. A second, subtler one: `const KEEP_TY: TyFn = (t) => t` typechecks and compiles, but
+`coverage` strips undecorated type declarations, so in *that tool alone* the arrow's
+parameter became uninferable and ast.ts's coverage row changed. Written `(t: Ty): Ty => t`,
+it does not.
+
 ## Milestones
 
 - **SH0 — Gradient first (highest-value, do first).** Teach `coverage` (and a throwaway
