@@ -382,8 +382,27 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     //
     // NT2001 is ast.ts's `HOST_MODULES`, a `Record` initialized with an object literal —
     // the same class as checker.ts's `NUMBER_CONSTS` — inherited by the same four modules.
+    // NT1702 IS NOW EMPTY, and it emptied by a SOURCE change, not a compiler change — which
+    // is the right outcome and was not the obvious one. The cycle's closing edge was
+    // type-only (`import type { Blocker }`), which node and bun erase, so the tempting fix
+    // was to stop the linker's DFS from walking type-only edges. Measured: that moves both
+    // modules to exactly the codes below, so it LOOKS right — but only because neither
+    // module reads the erased type before stopping on something else. The type is not
+    // resolved by dropping the edge, it is left unseeded, and an unresolved type silently
+    // becomes `number` (docs/divergences.md). `Blocker` moved down into the leaf instead.
+    //
+    // NT1031 refills in its place: `coverage-preprocess.ts`'s `line++`, a write to a
+    // captured binding — the same one lexer.ts sat on, and the first blocker that module
+    // has ever owned rather than inherited.
+    //
+    // RESOLVED AT THE MERGE BY RE-MEASURING, and for the third time in this file NEITHER
+    // SIDE WAS RIGHT. This branch listed NT1702 (it had not seen the type-cycle lane) and
+    // NT1014 was gone from it (its own change); main listed NT1014 (it had not seen the
+    // entries-form fix) and NT1031 (the type-cycle lane's). The true set is the union of
+    // what each branch cleared minus what the other cleared, and no reviewer holding two
+    // diffs can compute that by reading — only by running it on the merged tree.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1002", "NT1606", "NT1702", "NT2001"],
+      ["NT1002", "NT1031", "NT1606", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -463,13 +482,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
-    expect(byCode["NT2001"]).toEqual(["ast.ts", "parser.ts", "checker.ts", "ownership.ts", "modules.ts"]);
-    // NT1702 — AN IMPORT CYCLE, and the one entry in this table that is not a missing
-    // feature. `coverage.ts` and `coverage-preprocess.ts` import each other (directly or
-    // through a third module), which the linker refuses by design; it never had a chance
-    // to say so while ast.ts's refusal fired first. A cycle is a defect in the module
-    // GRAPH, so it is fixed by moving a declaration, not by building anything.
-    expect(byCode["NT1702"]).toEqual(["coverage.ts", "coverage-preprocess.ts"]);
+    expect(byCode["NT2001"]).toEqual(["ast.ts", "parser.ts", "checker.ts", "coverage.ts", "ownership.ts", "modules.ts"]);
+    // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
+    // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
+    // linker refuses by design; it never had a chance to say so while ast.ts's refusal
+    // fired first. A cycle is a defect in the module GRAPH, so it is fixed by moving a
+    // declaration, not by building anything — and it was: `Blocker` now lives in the leaf.
+    //
+    // Kept as an assertion rather than deleted, because the closing edge was `import type`
+    // and the linker still refuses those (docs/divergences.md). This bucket refilling would
+    // mean a new cycle in the compiler's own source, which is worth hearing about.
+    expect(byCode["NT1702"]).toBeUndefined();
     // NT1027 grew from 2 modules to 4 when `!` stopped blocking lexer.ts and ownership.ts:
     // clearing a blocker UNMASKS what sat behind it. The count going up is the ratchet
     // working, not a regression — the phase table above is what must never go backwards.
@@ -649,12 +672,20 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // false red, exactly as this file's own "assert MEMBERSHIP, not emptiness" note says.
     // The membership assertion lives with NT1014's clearance above; this line would only
     // duplicate it.
-    expect(byCode["NT2001"]).toEqual(["ast.ts", "parser.ts", "checker.ts", "ownership.ts", "modules.ts"]);
+    // coverage.ts joined this bucket by LEAVING NT1702 — the type-only cycle fix let it
+    // through to ast.ts's next blocker, which it inherits like the four before it.
+    expect(byCode["NT2001"]).toEqual(["ast.ts", "parser.ts", "checker.ts", "coverage.ts", "ownership.ts", "modules.ts"]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a
     // second holder, so this bucket has now been born and emptied without ever growing.
-    expect(byCode["NT1031"]).toBeUndefined();
+    //
+    // ...and it has a second holder after all — the THIRD time this file has pinned an
+    // emptied bucket as if empty were an invariant, and the third time that was wrong. The
+    // holder is `coverage-preprocess.ts`, which reached this construct only by clearing
+    // NT1702 (above); its `advance` closure writes `line++`, the SAME cursor shape lexer.ts
+    // fixed with a `//@@mutable` record. Assert MEMBERSHIP, which names the construct.
+    expect(byCode["NT1031"]).toEqual(["coverage-preprocess.ts"]);
     // NT1606 changed HANDS entirely: diagnostics.ts left it (above), and checker.ts +
     // ownership.ts arrived from NT1009 once general unions landed. Same bucket, none of
     // the same modules — which is why membership, not size, is the thing to assert.

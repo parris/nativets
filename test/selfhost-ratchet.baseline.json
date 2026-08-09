@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "eb7c778"
+    "rev": "a3bbe4d"
   },
   "modules": {
     "ast.ts": {
@@ -57,20 +57,20 @@
       }
     },
     "coverage-preprocess.ts": {
-      "sha256": "6db75ce346cfc83a",
+      "sha256": "de28999459a7c074",
       "standalone": {
         "stage": "check",
         "code": "NT1031",
         "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1702",
-        "message": "[NT1702] import cycle:"
+        "stage": "check",
+        "code": "NT1031",
+        "message": "[NT1031] a write to a captured binding (`line++`, where 'line' is bound in an enclosing scope) is not supported yet"
       }
     },
     "coverage.ts": {
-      "sha256": "e868dc31875f5d6f",
+      "sha256": "8cf20add73de7765",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -78,9 +78,9 @@
         "artifact": true
       },
       "linked": {
-        "stage": "link",
-        "code": "NT1702",
-        "message": "[NT1702] import cycle:"
+        "stage": "check",
+        "code": "NT2001",
+        "message": "[NT2001] '_nts0_m0_HOST_MODULES' declared Record<string,string[]> but initialized with {node:fs:string[],node:path:string[],node:os:string[],node:url:string[],node:child_process:string[]}"
       }
     },
     "diagnostics.ts": {
@@ -124,7 +124,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "e32e2e32fb82023c",
+      "sha256": "a7b78b86b0c1a5f8",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

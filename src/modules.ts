@@ -337,6 +337,8 @@ function moduleOrder(
   const order: string[] = [];
   const done = new Set<string>();
   const stack: string[] = [];
+  /** Aligned with `stack`: was the edge that reached `stack[i]` an `import type`? */
+  const edges: boolean[] = [];
 
   const load = (path: string, importer: string | null, line: number): string => {
     const cached = sources.get(path);
@@ -353,27 +355,49 @@ function moduleOrder(
     return src;
   };
 
-  const visit = (path: string, importer: string | null, line: number): void => {
+  const visit = (path: string, importer: string | null, line: number, typeOnly: boolean): void => {
     if (done.has(path)) return;
     const at = stack.indexOf(path);
     if (at >= 0) {
-      const cycle = [...stack.slice(at), path].map(show).join("\n  → ");
+      // The chain, with each module's INCOMING edge marked when it is `import type`.
+      //
+      // A type-only edge is erased by node and bun, so at RUN TIME a cycle it closes does
+      // not exist — and tsc permits one outright. We refuse it anyway, and the reason is
+      // ORDERING, not evaluation: the loop below links modules in post-order and seeds each
+      // one's type environment from the modules linked BEFORE it, so a type reachable only
+      // by going forward in that order has nothing to resolve against. Simply dropping the
+      // edge here was measured and is NOT sound — the name is then never seeded, and an
+      // unresolved type falls through parser.ts's last resort to `number`, silently.
+      //
+      // So the diagnostic's job is to point at the edge that is one declaration from being
+      // gone, instead of leaving the reader to conclude their program is cyclic. It is not.
+      const names = [...stack.slice(at), path];
+      const marks = [...edges.slice(at + 1), typeOnly]; // marks[i-1] is names[i]'s edge
+      const cycle = names.map((p, i) => (i > 0 && marks[i - 1] ? `${show(p)}   (this edge is \`import type\`)` : show(p))).join("\n  → ");
       throw moduleError("NT1702", `import cycle:\n  → ${cycle}`,
-        "break the cycle — move the shared declarations into a third module that both import");
+        marks.some((m) => m)
+          ? "node erases an `import type`, so this cycle does not exist at run time — but nativets resolves each module's types from the modules linked BEFORE it, and a cycle has no such order (docs/divergences.md). Move the shared TYPE into a module that both import — usually the one that does not import the other"
+          : "break the cycle — move the shared declarations into a third module that both import");
     }
     const src = load(path, importer, line);
     stack.push(path);
+    edges.push(typeOnly);
     // A discovery parse, just for the import list: the REAL parse happens post-order
     // below, seeded with the dependencies' type exports (unknowable until then).
     const imports = parse(src).imports ?? [];
     deps.set(path, imports);
-    for (const imp of imports) visit(resolveSpecifier(path, imp.source), path, imp.line);
+    // An `import type { … }` clause (or one whose every specifier is `type`-prefixed)
+    // binds no value. It is still an edge — see the refusal above — but it is a
+    // DIFFERENT KIND of edge, and the user needs to be told which one they hit.
+    for (const imp of imports) visit(resolveSpecifier(path, imp.source), path, imp.line,
+      imp.specs.length > 0 && imp.specs.every((s) => s.typeOnly === true));
     stack.pop();
+    edges.pop();
     done.add(path);
     order.push(path);
   };
 
-  visit(entry, null, 0);
+  visit(entry, null, 0, false);
   return order;
 }
 

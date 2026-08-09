@@ -1202,7 +1202,8 @@ IR. `diagnostics.ts` holds rung 3, byte for byte.
 | `ast.ts` | `NT1030` SCC | **`NT1014`** — `new Map([[k, v], …])`, `DATE_GETTERS` (its own; behind it `NT2001` `Record`-literal, then `NT1606` `.push`) |
 | `checker.ts`, `ownership.ts`, `parser.ts`, `modules.ts` | `NT1030` | `NT1014` — ast.ts's, through the link |
 | `cli.ts`, `driver.ts` | `NT1030` | `NT1002` — `` `in` ``, codegen.ts's |
-| `coverage.ts`, `coverage-preprocess.ts` | `NT1030` | **`NT1702` import cycle** |
+| `coverage.ts` | `NT1030` | ~~`NT1702` import cycle~~ → **`NT1014`** — ast.ts's, through the link (see below) |
+| `coverage-preprocess.ts` | `NT1030` | ~~`NT1702` import cycle~~ → **`NT1031`** — `line++`, a captured-binding write, its OWN |
 | `codegen.ts`, `lexer.ts`, `diagnostics.ts` | — | unchanged (`NT1002`, `NT1606`, rung 3) |
 
 **The `NT1702` is the one to read twice, because it is a different KIND of blocker** — not a
@@ -1213,8 +1214,41 @@ ast.ts's refusal fired before the linker got far enough to trip over it. The cyc
 node and bun erase that import entirely, so there is no cycle at runtime — but `visit` in
 `modules.ts` walks every import including type-only ones. Whether that is an over-refusal or a
 real constraint depends on whether the type-export seeding can be ordered without the edge;
-`spec.typeOnly` already exists at `modules.ts:495`, so the question is answerable. Either way
-the hint's own advice (move `Blocker` to a third module) fixes it in one declaration.
+`spec.typeOnly` already exists at `modules.ts:495`, so the question is answerable.
+
+**ANSWERED, by measurement — it is a REAL CONSTRAINT, not an over-refusal.** The edge is
+genuinely type-only in one direction (`coverage.ts` imports the *value* `preprocessForCoverage`;
+`coverage-preprocess.ts` imports only the *type* `Blocker`), so the runtime graph really is
+acyclic — but dropping the edge from the DFS does not make `Blocker` resolve. It makes it
+**unseeded**: the linker seeds each module's types from the modules linked BEFORE it, and
+post-order puts `coverage-preprocess.ts` first either way, so the type provider is still behind
+it. An unresolved type name then falls through `parser.ts`'s last resort
+(`SCALARS.has(id) ? id : "number"`) and **silently becomes `number`** — measured on a two-module
+repro where `f(x: Sz)` with `Sz = string` became `f(x: number)`. That is the silent-wrong-answer
+class, so the linker keeps the edge.
+
+The trap in the measurement is worth recording, because it nearly bought the wrong fix: patching
+`visit` to skip type-only edges *does* move both modules to `NT1014`/`NT1031`, i.e. it looks like
+it works. It only looks that way because both modules stop on an unrelated blocker before anything
+reads the erased `Blocker`. Motion is not soundness.
+
+So the refusal stays (now a documented divergence — nativets differs from node, bun AND tsc here),
+and the two things that changed are:
+
+1. **The diagnostic names the type-only edge** and says why ordering still binds, so the next
+   reader is pointed at the one declaration to move instead of concluding their program is
+   cyclic. Pinned by `bad-type-cycle` in `test/modules.test.ts`, which also asserts a genuine
+   VALUE cycle is still named in order and is *not* blamed on types.
+2. **`Blocker` moved down into the leaf** (`coverage-preprocess.ts`), which produces the first
+   ones and imports nothing. Both modules then moved to their real blockers, and the blame column
+   is the news: `coverage.ts` is clean on its own and inherits `ast.ts`'s `NT1014`, exactly as
+   this document's rung-3 note predicted, while `coverage-preprocess.ts` has its FIRST blocker of
+   its own — `line++`, the same captured-binding write `lexer.ts` sat on.
+
+A linker fix remains possible, but it is a real feature rather than a flag: seeding type exports
+on a pass ordered *independently* of evaluation order (types are erased, so their dependency
+graph here is acyclic even though the combined graph is not). Until that exists, the honest
+answer is the refusal plus a diagnostic that names the edge.
 
 `ast.ts` also joins the parse-clean list, taking it to **eleven of twelve** — and stays at
 rung 0, which is this document's oldest lesson restated: parsing clean has never once
