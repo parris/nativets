@@ -524,7 +524,9 @@ unrelated to narrowing. Two adjacent gaps this measurement exposed, neither take
   `test/narrowing.test.ts`;
 - a **string literal is not assignable to a `?Ustring` parameter** (`f("abc")` where the
   parameter is `string | undefined`), which forces every fixture here to bind through an
-  annotated local.
+  annotated local. **FIXED** — see "nullable assignability at a parameter" below; it was
+  worse than recorded here (an *inferred* `const` failed too, so only an explicitly
+  annotated local ever passed).
 
 The same lane fixed a real soundness hole it found on the way: the region scanned for
 invalidating assignments covered only the code a fact *covers*, not the guard itself, so
@@ -737,6 +739,71 @@ Two adjacent gaps this exposed, neither taken: narrowing still does not reach `t
 (`this.s === undefined ? "none" : this.s` is `NT2001`), which optional class fields make far
 easier to hit now that they produce real nullables; and `null` is still not accepted for a
 `?N` **parameter** (`new Scope(null)`), adjacent to the recorded `?Ustring` argument gap.
+Both were taken by the next lane — see immediately below.
+
+### NULLABLE ASSIGNABILITY AT A PARAMETER — `new Scope(null)`'s argument stops blocking
+
+Three refusals were reported together; they were **not** one gap, and the split matters.
+
+**Two were gaps, and are fixed.** `fitsParam` was type IDENTITY (plus a union arm), so
+TypeScript's most ordinary assignability rule did not hold at a parameter: `null` into
+`T | null`, `undefined` into `T | undefined`, a `T` into either. `pick(null)` against
+`pick(n: Node | null)` was an error on code node runs. Its comment gave a reason —
+the nullable arm "would accept values codegen does not box here" — which was true when
+written and had quietly stopped being true: `genUserCall`, the `new` path and `return`
+all coerce. The new arm is deliberately narrower than `assignable`, admitting exactly
+the matching nullish literal and a value of the base type, because those are exactly the
+two sources codegen's `coerce` can build a `[tag,value]` box from. A structurally
+compatible OBJECT has a different slot layout and stays with `fitsArg`, which takes it
+only as a literal it can reshape — widening that far is the dereference-a-double bug.
+
+**One is a refusal, and stays.** Narrowing still does not reach `this.<field>`. It is
+sound: no fact is rooted at `this` because a field of `this` can be reassigned by the
+very method that proved the guard, while the invalidation scan is by NAME — it sees a
+rebinding of `d`, never a write to `this.s`. What it lacked was a *reason*; the
+diagnostic now gives one and hands back a fix (bind a local), and that fix is pinned as
+a node-differential test, because advice a diagnostic gives has to compile.
+
+The measured frontier did **not** move: every blocker message, code, stage and line in
+`test/selfhost-ratchet.baseline.json` is byte-identical after the change, and
+`diagnostics.ts` holds rung 3. `new Scope(null)` is nonetheless unblocked *as an
+argument* — the sole remaining complaint on
+
+```ts
+class Scope { constructor(private parent: Scope | null = null) {} }
+const s = new Scope(null);
+```
+
+is `NT1030` for the self-recursive field, which belongs to the recursive-type encoding
+lane. That is the acceptance gate this lane owed, and the `NT1030`-and-nothing-else
+state is asserted in `test/nullable-assign.test.ts` so it cannot silently start passing
+for the wrong reason.
+
+**A real miscompile fell out of the same file, pre-existing and unrelated to the
+feature.** `coerce` is what turns a raw value into its declared type's representation,
+and three value-passing boundaries never called it: a `return` inside a `try`/`finally`
+(which stashes into the return slot), a CLOSURE call (which merely relabelled the
+argument with the parameter's type), and the FIXED parameters of a rest function.
+
+```ts
+function g(): string | boolean {
+  try { return "hi"; } finally { console.log("fin"); }
+}
+console.log(g());
+```
+
+node prints `fin` then `hi`; nativets exited **255 with empty stdout** — the caller read
+a tag out of a string pointer. The double-armed spelling did not even survive `llvm-as`.
+Fixed first, because widening assignability is what makes an unboxed value reach those
+boundaries in the first place.
+
+Two adjacent gaps this one exposed, neither taken: a ternary does not **join** a present
+arm with `undefined` (`b ? "yes" : undefined` against a `string | undefined` return is
+still `NT2001` — a gap in the join, which `fitsParam` never sees), pinned as a refusal in
+`test/nullable-assign.test.ts`; and the `expectRejected` idiom copied across test files
+passes the `NTError` to `formatDiagnostic`, which takes a `Diagnostic` — it renders
+`error[undefined]` and silently drops the HINT, so no test asserting on a hint could ever
+have passed. Only this lane's file was corrected.
 ### THE FIRST MODULE SELF-COMPILES — `diagnostics.ts` at rung 3 (consuming parameters)
 
 Every re-measurement above this one records a frontier that moved *within* rung 0. This one
