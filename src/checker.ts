@@ -3639,7 +3639,7 @@ class Checker {
    * Gate a STRING-COERCION position — `"a=" + x`, `${x}`, `String(x)`.
    *
    * The three share `coerceToString` in codegen, and it handles the primitives, a nullable
-   * box and (now) a `number[]`/`string[]`, then FALLS THROUGH to the boolean path for
+   * box and (now) a `number[]`/`string[]`/`boolean[]`, then FALLS THROUGH to the boolean path for
    * everything else — `zext i1 <ptr>`, which clang rejects. So the checker's allow-list
    * here and `coerceToString`'s cases are one list written twice and must stay in step;
    * this is the side that produces a diagnostic instead of a build error.
@@ -3654,8 +3654,12 @@ class Checker {
     // The box branches on its tag, so it coerces iff its base does.
     if (isNullableTy(t)) { this.checkStringCoercion(baseTy(t), what, at); return; }
     // node's `Array#toString` IS `join(",")` — but only for the element types whose join
-    // is node-exact here (`nt_arr_join_num` / `nt_arr_join_str`).
-    if (isArrayTy(t) && (elemTy(t) === "number" || elemTy(t) === "string")) return;
+    // is node-exact here. That is the three `joinFn` (src/codegen.ts) dispatches on:
+    // `nt_arr_join_num`, `nt_arr_join_str`, `nt_arr_join_bool`. `boolean` joined ITSELF
+    // wrongly until the join existed (it read each `zext i1` slot as a `char *`), which
+    // is why it was refused here rather than merely unimplemented — see
+    // test/boolean-array-join.test.ts. Any other element type is still refused.
+    if (isArrayTy(t) && (elemTy(t) === "number" || elemTy(t) === "string" || elemTy(t) === "boolean")) return;
     // A `Dyn` (a `JSON.parse` result) is the one refusal with a genuinely cheap fix at the
     // SOURCE, so it says so instead of repeating the catalog's object advice: its string
     // form depends on a runtime tag we would have to dispatch on, but narrowing it (`as

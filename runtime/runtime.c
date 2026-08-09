@@ -892,6 +892,19 @@ const char *nt_arr_join_num(NtArray *a, const char *sep) {
   }
   const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
 }
+/* A boolean array joins as node spells booleans — `true`/`false`, not `1`/`0`, and not
+ * a pointer. It needs its own join because neither sibling can serve: the slot holds
+ * `zext i1` (the integers 0 and 1), so `nt_arr_join_str` ran `strlen((char *)1)` and
+ * killed the process, and `nt_arr_join_num` would print the digits. See
+ * test/boolean-array-join.test.ts. */
+const char *nt_arr_join_bool(NtArray *a, const char *sep) {
+  SB sb; sb_init(&sb); size_t sl = strlen(sep);
+  for (int64_t i = 0; i < a->len; i++) {
+    if (i > 0) sb_append(&sb, sep, sl);
+    if (arr_at(a, i)) sb_append(&sb, "true", 4); else sb_append(&sb, "false", 5);
+  }
+  const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
+}
 const char *nt_arr_join_str(NtArray *a, const char *sep) {
   SB sb; sb_init(&sb); size_t sl = strlen(sep);
   for (int64_t i = 0; i < a->len; i++) {

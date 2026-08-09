@@ -22,7 +22,7 @@
  *   | `"" + { a: 1 }`           | `[object Object]` | REFUSED (NT1032)                  |
  *   | `"" + new Map()`          | `[object Map]`    | REFUSED (NT1032)                  |
  *   | `"" + new Set()`          | `[object Set]`    | REFUSED (NT1032)                  |
- *   | `"" + [true, false]`      | `true,false`  | REFUSED (NT1032) — see below           |
+ *   | `"" + [true, false]`      | `true,false`  | IMPLEMENTED — see below                |
  *   | `"" + [[1, 2], [3]]`      | `1,2,3`       | REFUSED (NT1032)                       |
  *   | `"" + new Uint8Array(…)`  | `1,2`         | REFUSED (NT1032)                       |
  *
@@ -35,10 +35,15 @@
  * for the second-worst. And `[object Object]` carries no information the user wanted:
  * the hint points at `JSON.stringify`, which is what the program meant.
  *
- * WHY `boolean[]` is refused: `nt_arr_join_str` reads each slot as a `ptr`, so
- * `[true, false].join(",")` prints EMPTY on main where node prints `true,false` — a
- * pre-existing silent wrong answer in `.join` itself, reported separately. Routing `+`
- * into a join that is already wrong would launder that bug into a second construct.
+ * WHY `boolean[]` WAS refused, and no longer is: `nt_arr_join_str` read each slot as a
+ * `ptr`, so `[true, false].join(",")` printed EMPTY where node prints `true,false` — a
+ * pre-existing defect in `.join` ITSELF, and routing `+` into a join that is already
+ * wrong would have laundered it into a second construct. The refusal was therefore
+ * about the join, not about the coercion. `nt_arr_join_bool` closed the join
+ * (test/boolean-array-join.test.ts, which also owns the `+`/`${…}`/`String(…)` cases
+ * against node), so the reason expired and the row above moved. The other rows did not:
+ * each of those is refused for its OWN reason, stated below, and none of them is
+ * "a runtime function is missing".
  *
  * Cases are DERIVED from node's observed output on each probe above (quoted per test),
  * cross-checked against test262's `built-ins/Array/prototype/toString` and
@@ -132,12 +137,6 @@ describe("REFUSED: a value with no node-exact string form gets NT1032, never cla
   // node: `s=[object Set]`
   test("a Set, through a template literal", () => {
     const r = rejectionOf('const s = new Set<number>().add(1);\nconsole.log(`s=${s}`);\n');
-    expect(r?.code).toBe("NT1032");
-  });
-
-  // node: `true,false`. Refused because `.join` is itself wrong for `boolean[]` here.
-  test("a boolean array", () => {
-    const r = rejectionOf('const b = [true, false];\nconsole.log("b=" + b);\n');
     expect(r?.code).toBe("NT1032");
   });
 

@@ -292,7 +292,7 @@ against node first:
 | `"" + { a: 1 }` | `[object Object]` | `NT1032` |
 | `"" + new C()` (class) | `[object Object]`, or its `toString()` | `NT1032` |
 | `"" + new Map()` / `new Set()` | `[object Map]` / `[object Set]` | `NT1032` |
-| `"" + [true, false]` | `true,false` | `NT1032` |
+| `"" + [true, false]` | `true,false` | **implemented** — see below |
 | `"" + [[1,2],[3]]`, `"" + [{},{}]` | `1,2,3` / `[object Object],…` | `NT1032` |
 | `"" + new Uint8Array([1,2])` | `1,2` | `NT1032` |
 | `` `${JSON.parse(s).f}` `` | the field's own string | `NT1032`, hint: narrow it (`as string`) |
@@ -306,12 +306,19 @@ outcome available, traded for the second-worst. `[object Object]` is also never 
 line meant, so the hint points at `JSON.stringify(x)` — and at `console.log(x)` on its own,
 which already renders objects, class instances, `Map`/`Set` byte-identically to node.
 
-**Why `boolean[]` is refused** even though the numeric and string cases are implemented:
-`nt_arr_join_str` reads each slot as a `ptr`, so `[true, false].join(",")` prints **empty**
-here where node prints `true,false` — a pre-existing silent wrong answer in `.join` itself.
-Routing `+` into a join that is already wrong would launder that bug into a second construct.
-Same reason for a nested or object array: the element's own coercion is what node splices in,
-and we do not have it.
+**`boolean[]` WAS refused, and no longer is.** The reason was never about the coercion: it was
+that `.join` was itself broken for booleans. `genArrayMethod` split array methods on one bit
+(`el === "number"`, number vs "everything else = strings"), so `[true, false].join(",")` went
+to `nt_arr_join_str`, which read each slot — holding `zext i1`, i.e. the integers 0 and 1 — as
+a `char *` and ran `strlen((char *)1)`. Empty output, exit 255, no diagnostic. Routing `+`
+into a join that is already wrong would have laundered that into a second construct, so the
+refusal was the right call *at the time*. `nt_arr_join_bool` closes the join (booleans spell
+`true`/`false`, which neither sibling produces), the split is now the three-way `joinFn`, and
+the coercion follows it. Pinned against node in `test/boolean-array-join.test.ts`.
+
+A **nested or object** array stays refused for a different reason, which has not expired: what
+node splices in is each element's OWN coercion, and that is the `[object …]` problem above, one
+level down.
 
 The refusal is **default-deny** — the checker allows a fixed list and rejects everything else —
 because the failure being closed is precisely "a type nobody added a case for reached codegen".

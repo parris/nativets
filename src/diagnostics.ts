@@ -286,7 +286,7 @@ export const NYI = {
   // Before this code existed every one of them fell through `coerceToString` to the
   // BOOLEAN path (`zext i1 <ptr>`) and the user's error was clang's:
   // "'%t4' defined with type 'ptr' but expected 'i1'".
-  STRINGIFY: { code: "NT1032", milestone: "later", hint: "`+`/`${…}`/`String(…)` coerce the primitives, a nullable box, and a `number[]`/`string[]` (node joins those with `,`). For an object or class instance use `JSON.stringify(x)` — node's `[object Object]` is not what the line meant — and for a Map/Set spread it first (`JSON.stringify([...m])`). `console.log(x)` on its own prints the value exactly like node" },
+  STRINGIFY: { code: "NT1032", milestone: "later", hint: "`+`/`${…}`/`String(…)` coerce the primitives, a nullable box, and a `number[]`/`string[]`/`boolean[]` (node joins those with `,`). For an object or class instance use `JSON.stringify(x)` — node's `[object Object]` is not what the line meant — and for a Map/Set spread it first (`JSON.stringify([...m])`). `console.log(x)` on its own prints the value exactly like node" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
