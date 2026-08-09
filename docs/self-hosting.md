@@ -455,6 +455,24 @@ Two rules are unconditional: a module that reached IR may never stop reaching IR
 the only ratchet in the tree that protects a module that *already* self-compiles), and a
 blocker may never move to an **earlier** pipeline stage.
 
+**"Moved shallower" is NOT automatically a regression.** The rule of thumb this ratchet was
+being read with — *re-record only when each moved blocker moved DEEPER* — is too crude, and
+following it would have held a correct fix. A blocker moving to an earlier line is a
+regression when the module genuinely got worse; it is a **correction** when a blocker that
+was always there stops being MASKED by a miscompile further in. The question that separates
+them is not the direction of the move, it is:
+
+> was the newly-reported construct previously **silently mis-handled**, or was it previously
+> handled **correctly** and passed?
+
+Only the second is a regression. The first means the instrument was crediting the module
+with progress it never had — the same failure mode as `coverage` once scoring a compiler
+crash as "no blockers", and as `phaseOf` returning `ir` from both branches of its `try`.
+
+The worked example is the one that forced the amendment; see the re-measurement below.
+Holding a correct refusal to keep a gate green is the rubber-stamp dynamic with the sign
+flipped, and it is the one this ratchet exists to prevent.
+
 `git` is deliberately not an input to any verdict — `actions/checkout` fetches depth 1, so a
 git-informed verdict would differ between a laptop and CI. It is used only to *enrich* a
 failure message with a before/after taken against the recorded revision.
@@ -663,6 +681,62 @@ array `.push` from a same-named method on a user object, and it cannot see a cal
 through an alias. The numbers are an upper bound on sites and a *lower* bound on effort. They
 are still the right order of magnitude, and an order of magnitude was exactly what was missing.
 
+### Re-measured after the RECURSIVE-CLASS-FIELD refusal — the gap GREW, and that is the finding
+
+`interface N { next: N }` has been refused (`NT1030`) since the forward-type lane. The CLASS
+spelling of the identical recursion was not: `parseClass` resolves a class name inside its own
+body to a self MARKER (so `bump(): Counter` works before the instance shape exists), and a
+FIELD carrying that marker was rewritten to `number` — unconditionally, with no diagnostic, on
+a line whose own comment called it "the pre-existing erasure".
+
+**That erasure was hiding a miscompile in the compiler's own symbol table.** `src/checker.ts:93`
+is `class Scope { constructor(private parent: Scope | null = null) {} … }`. Minimized and run
+against the parser as it stood, the compiler describes its own scope chain in its own words:
+
+```
+BEFORE: error[NT2001]: new Scope arg 0 expects ?NScope{parent:?Nnumber}, got null
+AFTER:  error[NT1030]: recursive type 'Scope' — its field 'parent' refers to itself
+```
+
+`parent: ?Nnumber`. **The scope chain has been a number in every self-host measurement ever
+taken.** checker.ts was recorded as blocked at line 676 (`Checker.inArrow`); it had in fact
+never got past line 93 with its symbol table intact.
+
+| Module | Before | After |
+|---|---|---|
+| `checker.ts` | `NT1023` — `Checker.inArrow` assigns a field, line 676 | **`NT1030`** — `Scope.parent`, line **93** |
+| `ownership.ts` | `NT1023` — the same, inherited through the link | **`NT1030`** — the same, inherited |
+| every other module | — | **unchanged** |
+
+So the measured gap **widened**: recursive types now gate **9 of 12** modules in the linked
+column, not 7. Four instruments reddened on a strict improvement — `selfhost-ratchet`, `sh6`,
+`bootstrap` and `self-host-coverage` — and all four were re-recorded deliberately, under the
+"moved shallower is not automatically a regression" rule the same lane added above. Attribution
+was a controlled experiment, not an inference: reverting the *other* commit in the lane (the
+optional-class-field fix) leaves the ratchet still red, so the move belongs to this refusal
+alone and the optional-field fix is ratchet-neutral.
+
+**What this changes about the plan.** `Scope` is **self**-recursive, and not a member of
+`src/ast.ts`'s 44-declaration mutually-recursive SCC. So the earlier sizing — *"self-recursion
+alone moves zero modules, there is no partial credit before the SCC resolves"* — needs one
+amendment: self-recursion alone still moves nothing *forward*, but it is now what `checker.ts`
+and `ownership.ts` need to get back to where the measurement wrongly thought they already were.
+The recursive-type work is no longer pure foundation.
+
+A second, independent silent wrong answer fell out of the same file and is fixed with it: the
+`?` on a class field was parsed and **discarded**, so `s?: string` was typed `string` rather
+than `?Ustring` as the identical interface field already was. An unassigned optional field read
+back as the zero slot — a NULL `char*` for a string, `0` for a number, `typeof` reporting
+`"string"` — and `this.s = undefined` was *rejected* on code tsc accepts. Fixed rather than
+refused (it mirrors `parseObjectType`), with the non-obvious half being that "absent" has to be
+WRITTEN: an instance is a heap block and every field is a real slot, so an optional field with
+no initializer now gets `undefined` in the constructor prelude. Fixture:
+`test/fixtures/classes/optional-field.ts`, which exited **255 with no output at all** before.
+
+Two adjacent gaps this exposed, neither taken: narrowing still does not reach `this.<field>`
+(`this.s === undefined ? "none" : this.s` is `NT2001`), which optional class fields make far
+easier to hit now that they produce real nullables; and `null` is still not accepted for a
+`?N` **parameter** (`new Scope(null)`), adjacent to the recorded `?Ustring` argument gap.
 ### THE FIRST MODULE SELF-COMPILES — `diagnostics.ts` at rung 3 (consuming parameters)
 
 Every re-measurement above this one records a frontier that moved *within* rung 0. This one

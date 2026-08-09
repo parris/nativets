@@ -69,6 +69,36 @@
  * that "a green local run is not a green CI run" as a hazard already paid for twice. Git
  * history is used only to ENRICH a failure message, never to decide one.
  *
+ * ---- "MOVED SHALLOWER" IS NOT AUTOMATICALLY A REGRESSION ----
+ * The rule of thumb this file used to be read with — "re-record only when each moved
+ * blocker moved DEEPER" — is too crude, and following it would have held a correct fix.
+ *
+ * A blocker moving to an EARLIER line is a regression when the module genuinely got worse.
+ * It is a CORRECTION when a blocker that was always there stops being MASKED by a
+ * miscompile further in. The distinguishing question is not the direction of the move:
+ *
+ *   was the newly-reported construct previously SILENTLY MIS-HANDLED,
+ *   or was it previously handled CORRECTLY and passed?
+ *
+ * Only the second is a regression. The first means the instrument was crediting the module
+ * with progress it never had, and correcting it downward is the gate becoming honest —
+ * the same failure mode as `coverage` once scoring a compiler crash as "no blockers", and
+ * as `phaseOf` once returning `ir` from both branches of a try/catch.
+ *
+ * The worked example, and why this paragraph exists. `src/checker.ts:93` is
+ * `class Scope { constructor(private parent: Scope | null = null) {} … }` — the compiler's
+ * own symbol table. A recursive CLASS field used to be erased to `number`, silently, so the
+ * compiler described its own scope chain as `?NScope{parent:?Nnumber}`. checker.ts was
+ * recorded as blocked at line 676 (`Checker.inArrow`); it had in fact never got past line
+ * 93 with its symbol table intact. When the erasure became the NT1030 refusal it always
+ * should have been, checker.ts and ownership.ts moved NT1023 -> NT1030, ~580 lines
+ * shallower, and this ratchet reddened on a strict improvement.
+ *
+ * Holding a correct refusal to keep a gate green is the rubber-stamp dynamic with the sign
+ * flipped, and it is the one this file was written to prevent. So: read the message, ask
+ * the masking question, and re-record with the reason in the commit — but never suppress a
+ * refusal to keep a number tidy.
+ *
  * ---- Re-recording (deliberately, in one command) ----
  *   NT_RECORD=1 bun test test/selfhost-ratchet.test.ts
  * rewrites `test/selfhost-ratchet.baseline.json` from today's measurement and prints the

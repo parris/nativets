@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "cf4e2b2"
+    "rev": "d7d89f8"
   },
   "modules": {
     "ast.ts": {
@@ -21,13 +21,13 @@
       "sha256": "67510b6152c5af4f",
       "standalone": {
         "stage": "parse",
-        "code": "NT1023",
-        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
+        "code": "NT1030",
+        "message": "[NT1030] recursive type 'Scope' — its field 'parent' refers to itself (declared at line N) is not supported yet"
       },
       "linked": {
         "stage": "parse",
-        "code": "NT1023",
-        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
+        "code": "NT1030",
+        "message": "[NT1030] recursive type 'Scope' — its field 'parent' refers to itself (declared at line N) is not supported yet"
       }
     },
     "cli.ts": {
@@ -145,12 +145,12 @@
       },
       "linked": {
         "stage": "link",
-        "code": "NT1023",
-        "message": "[NT1023] method 'Checker.inArrow' assigns a field, so it produces a NEW Checker, but it does not return one"
+        "code": "NT1030",
+        "message": "[NT1030] recursive type 'Scope' — its field 'parent' refers to itself (declared at line N) is not supported yet"
       }
     },
     "parser.ts": {
-      "sha256": "55fe0c4f70f56fc2",
+      "sha256": "86312c9f76b2e771",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

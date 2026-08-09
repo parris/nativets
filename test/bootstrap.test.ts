@@ -357,7 +357,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and it has since GROWN to three, all of it forward movement: the optional-element
     // lane cleared `?.[]`, so `checker.ts` walked on to `Checker.inArrow` (a method that
     // assigns a field), and `ownership.ts` inherits that identical error through the link.
-    expect(byCode["NT1023"]!.sort()).toEqual(["checker.ts", "codegen.ts", "ownership.ts"]);
+    // ...and then SHRANK back to one, and that was NOT forward movement — it is the
+    // opposite, and it is still correct. `checker.ts` and `ownership.ts` left this bucket
+    // for NT1030 at a SHALLOWER line: `class Scope { parent: Scope | null }` (checker.ts:93,
+    // the compiler's own symbol table) had its recursive field silently erased to `number`,
+    // so this bucket was crediting checker.ts with reaching line 676 past a miscompiled
+    // Scope. A bucket can shrink because the frontier RETREATED to the truth. See the
+    // "moved shallower is not automatically a regression" rule in selfhost-ratchet.test.ts.
+    expect(byCode["NT1023"]!.sort()).toEqual(["codegen.ts"]);
     // RATCHET MOVE (collections): NT1014 is now EMPTY. It held lexer.ts on
     // `new Set([...])` for REGEX_AFTER_KEYWORD; `new Set(iterable)` compiles now, so the
     // module walks on to what sat behind it — NT2001, an object literal where a Map is
@@ -431,8 +438,17 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // — `ast.ts`'s forward type reference is what the link reaches once `?.[]` is gone. It
     // is the single highest-leverage blocker on the board now, on the same reasoning that
     // made `?.[]` the last one: nothing else here moves more than one module.
+    //
+    // NINE of the twelve now, and the two that joined did NOT arrive by moving forward.
+    // `checker.ts` and `ownership.ts` came here from NT1023 at a SHALLOWER line, because a
+    // recursive CLASS field used to be erased to `number` silently and `class Scope {
+    // parent: Scope | null }` (checker.ts:93) is the compiler's own symbol table — it was
+    // being described as `?NScope{parent:?Nnumber}`. This bucket growing is the measurement
+    // getting more honest, not the frontier getting worse; the refusal is correct under the
+    // prime directive whatever this number says. Note also that the two are not the same
+    // problem: ast.ts needs the 44-declaration MUTUAL cycle, Scope needs only SELF-recursion.
     expect(byCode["NT1030"]!.sort()).toEqual(
-      ["ast.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+      ["ast.ts", "checker.ts", "cli.ts", "coverage-preprocess.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
     // NT1015 is empty — the generic-method lane cleared modules.ts's, and codegen.ts's
     // static-member site was cleared earlier. (A fact about today; this file has been

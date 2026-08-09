@@ -221,8 +221,14 @@ describe("SH0: coverage survives the compiler's own module syntax", () => {
     //   So: a clean row here is NOT evidence a module is clean. The standalone column of
     //   test/selfhost-ratchet.test.ts is the one that answers that question, and for
     //   lexer.ts the two now say opposite things.
+    // NT1030 joined via checker.ts — `class Scope { parent: Scope | null }` at line 93, a
+    // recursive CLASS field that used to be erased to `number` silently. Note this
+    // histogram recovers statement-by-statement, so checker.ts contributes to NT1023 AND
+    // NT1030 at once; the first-blocker instruments (sh6, bootstrap, selfhost-ratchet) show
+    // it moving from one to the other, because they stop at the first. Two views of one
+    // change, and neither is wrong — see the "moved shallower" rule in selfhost-ratchet.
     expect([...hist.keys()].sort()).toEqual(
-      ["NT1003", "NT1014", "NT1015", "NT1023", "NT1031"],
+      ["NT1003", "NT1014", "NT1015", "NT1023", "NT1030", "NT1031"],
     );
     expect(hist.get("NT1009")).toBeUndefined();
     // The frontier is not just flat, it is THIN: the largest bucket is 2 (NT1003, the
