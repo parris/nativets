@@ -403,7 +403,12 @@ export function lex(source: string): Token[] {
       // text — the parser's `Number(value)` decodes every form exactly as node does.
       // Without this the lexer read `0` and then `x1f` as an identifier, which is what
       // made `src/codegen.ts`'s byte constants (`0x22`, `0x5c`) unparseable.
-      const radix = source[st.i + 1];
+      // `.at`, not `source[st.i + 1]`: at the very end of the file that index is out of
+      // range, and node answers `undefined` while nativets PANICS there by design (the
+      // Stage 41 bounds rule; `docs/divergences.md`). `.at` is the spelling that means
+      // "may be absent" in BOTH toolchains — identical under bun for a non-negative
+      // index, and a real `?Ustring` here, which `!== undefined` then narrows.
+      const radix = source.at(st.i + 1);
       if (c === "0" && radix !== undefined && "xXbBoO".includes(radix)) {
         let s = "0" + radix;
         advance(2);

@@ -40,7 +40,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-import { compileAndRun, emitIR } from "./harness.ts";
+import { compileAndRun, emitIR, runWithNode } from "./harness.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -197,23 +197,25 @@ console.log(__objLive());`);
   });
 
   /*
-   * SHADOWING — found by this lane, and the reason `shadowedNames` exists. Codegen gives
-   * a name ONE frame slot per function (`addLocal` returns early if the name is known),
-   * so an inner `const f` OVERWRITES the outer's env pointer. The inner block's drop
-   * would then free a block the outer name still calls through: this program exited 255
-   * before the guard, and exits 0 with both envs leaked after it.
+   * SHADOWING — found by this lane, and the reason `shadowedNames` used to exist.
+   * Codegen gave a name ONE frame slot per function (`addLocal` returned early if the
+   * name was known), so an inner `const f` OVERWROTE the outer's env pointer. The inner
+   * block's drop then freed a block the outer name still calls through: this program
+   * exited 255 before the guard, and exited 0 with BOTH envs leaked after it.
    *
-   * That slot sharing is a PRE-EXISTING MISCOMPILE independent of closures — see the
-   * plain-value form in the note below — so stdout is deliberately NOT asserted here:
-   * pinning today's wrong answer would enshrine it. What is asserted is that this lane
-   * does not upgrade a wrong answer into a use-after-free.
+   * The slot sharing was a MISCOMPILE independent of closures — the plain-value form is
    *
    *   const a: number = 1;
    *   if (a > 0) { const a: number = 2; console.log(a); }
-   *   console.log(a);            // node: 2 then 1.  nativets: 2 then 2.
+   *   console.log(a);            // node: 2 then 1.  nativets used to print 2 then 2.
+   *
+   * — so stdout could not be asserted here at all without enshrining a wrong answer.
+   * `alphaRenameShadows` (src/checker.ts, test/shadowing.test.ts) gives the two `f`s
+   * different names, so there is nothing left to disqualify: node's answer IS asserted
+   * now, and BOTH envs are freed rather than both leaked.
    */
-  test("control: a SHADOWED closure binding is not freed (one frame slot, two envs)", async () => {
-    const r = await compileAndRun(`
+  test("a SHADOWED closure binding gets its own slot, and both envs are freed", async () => {
+    const src = `
 function run(): number {
   const f = (k: number): number => k + 1;
   let out = f(1);
@@ -223,10 +225,12 @@ function run(): number {
   }
   return out + f(1);
 }
-console.log(run());
-console.log(__objLive());`);
+console.log(run());`;
+    const oracle = runWithNode(src);
+    const r = await compileAndRun(`${src}\nconsole.log(__objLive());`);
     expect(r.exitCode).toBe(0);
-    expect(r.stdout.trim().split("\n").at(-1)).toBe("2"); // both envs leak, neither is freed
+    expect(r.stdout.split("\n")[0]).toBe(oracle.stdout.trim()); // 2 + 21 + 2 = 25
+    expect(r.stdout.trim().split("\n").at(-1)).toBe("0"); // neither env leaks
   });
 
   /* --------------------------------------------------------------

@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "ee25a3b"
+    "rev": "5f25d03"
   },
   "modules": {
     "ast.ts": {
       "sha256": "e2fccc5970a145a9",
       "standalone": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] string method 'trimEnd' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] string method 'trimEnd' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     },
     "checker.ts": {
-      "sha256": "b95080e8f3820527",
+      "sha256": "a4ae437077765c5f",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] string method 'trimEnd' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     },
     "cli.ts": {
@@ -44,7 +44,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "35404c3c81ac63ba",
+      "sha256": "1b703350be734dfd",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -52,8 +52,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] string method 'trimEnd' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     },
     "coverage-preprocess.ts": {
@@ -79,8 +79,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] string method 'trimEnd' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     },
     "diagnostics.ts": {
@@ -107,20 +107,20 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare string with undefined"
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     },
     "lexer.ts": {
-      "sha256": "41f12f4f1974b041",
+      "sha256": "4ab63503e3cbd30d",
       "standalone": {
-        "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot compare string with undefined"
+        "stage": "codegen",
+        "code": "NT1004",
+        "message": "[NT1004] `throw` at L:C that is not inside a `try` in the same function is not supported yet"
       },
       "linked": {
-        "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot compare string with undefined"
+        "stage": "codegen",
+        "code": "NT1004",
+        "message": "[NT1004] `throw` at L:C that is not inside a `try` in the same function is not supported yet"
       }
     },
     "modules.ts": {
@@ -133,11 +133,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare string with undefined"
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     },
     "ownership.ts": {
-      "sha256": "fbeea5d8dbf866e0",
+      "sha256": "f5ac48a0f4ebafd1",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -146,8 +146,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1002",
-        "message": "[NT1002] string method 'trimEnd' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     },
     "parser.ts": {
@@ -160,7 +160,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare string with undefined"
+        "message": "[NT2001] Ternary branches differ: string vs undefined at L:C"
       }
     }
   }

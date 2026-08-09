@@ -260,18 +260,38 @@ console.log(f());
 `, "NT1600");
   });
 
-  // 19. This analysis is NAME-based, and so is codegen (one slot per name per
+  // 19. This analysis is NAME-based, and so was codegen (one slot per name per
   //     function). An inner `let s` shadowing a tracked outer `s` looked exactly like
   //     an assignment to the outer one, so the outer read passed on the inner one's
-  //     proof and the program printed one line instead of two. We cannot tell the two
-  //     bindings apart, so we refuse.
-  test("shadowing a still-unassigned binding is refused", () => {
+  //     proof and the program printed one line instead of two — hence a blanket
+  //     "redeclared" refusal, which was the only safe answer while the two bindings
+  //     shared a frame slot.
+  //
+  //     `alphaRenameShadows` now gives them DIFFERENT names before this pass runs, so
+  //     they are distinguishable and the special case is gone. The program is still
+  //     refused, but by the ordinary rule and with the accurate reason: the OUTER `s`
+  //     genuinely never gets a value (node prints `inner` then `undefined`), exactly
+  //     like `let s: string; console.log(s);` one test up.
+  test("shadowing does not launder a still-unassigned binding", () => {
     const e = expectRefused(`
 let s: string;
 { let s: string = "inner"; console.log(s); }
 console.log(s);
 `, "NT1600");
-    expect(e.diag.message).toContain("redeclared");
+    expect(e.diag.message).toContain("used before being assigned");
+  });
+
+  // 19b. …and the mirror image, which the blanket refusal used to reject too: the outer
+  //      binding IS assigned, so shadowing it is an ordinary, correct program.
+  test("shadowing an assigned binding is accepted", async () => {
+    const r = await compileAndRun(`
+let s: string;
+s = "outer";
+{ let s: string = "inner"; console.log(s); }
+console.log(s);
+`);
+    expect(r.stdout).toBe("inner\nouter\n");
+    expect(r.exitCode).toBe(0);
   });
 
   /* ----------------------------------------------------------------

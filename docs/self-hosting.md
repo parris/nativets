@@ -1946,6 +1946,97 @@ call site in `ast.ts`**, four of twelve behind lexer.ts's one comparison, one
 Stage-1's own blocker is a missing host builtin and depends on none of them.
 
 ---
+### Re-measured after `trimEnd` and the LEXER'S DEAD GUARD — and one of the three was NOT a compiler gap
+
+Three small blockers were taken together. Two cleared; the third did not, and *why* it does
+not is the more useful result.
+
+| module | before | after |
+|---|---|---|
+| `ast.ts` | `NT1002` — `String.prototype.trimEnd`, own | **`NT2001`** — a `string`/`undefined` ternary at 244:22, own |
+| `lexer.ts` | `NT2001` — "Cannot compare string with undefined", own | **`NT1004`** — a `throw` outside a `try` at 202:5, own |
+| `parser.ts`, `modules.ts` | `NT2001` — lexer.ts's, linked | **`NT2001`** — **ast.ts's**, linked |
+| `coverage-preprocess.ts` | `NT1606` — `.push`, own | **unchanged** — see below |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+**`lexer.ts`'s `NT2001` was a source defect wearing a checker gap's clothes.** The line is
+
+```ts
+const radix = source[st.i + 1];
+if (c === "0" && radix !== undefined && "xXbBoO".includes(radix)) {
+```
+
+which is correct TypeScript *only* because `tsconfig.json` sets `noUncheckedIndexedAccess`,
+making `source[i]` a `string | undefined`. nativets cannot agree, and the disagreement is
+deliberate rather than missing: **a string index that is out of range PANICS** (the Stage 41
+bounds rule), so the element type is `string` and the `!== undefined` arm is unreachable. The
+guard was not merely dead — at end-of-file the panic fires *one line before* it could have
+helped. `.at` is the spelling that means "may be absent" in both toolchains: identical to `[]`
+under bun for every non-negative index, and a real `?Ustring` here, which `!== undefined`
+narrows and `.includes` then accepts. **The checker needed no change**; tsc rejects
+`string === undefined` too (TS2367).
+
+Worth generalizing, because this shape is all over `src/`: wherever the compiler's own source
+reads one character ahead, `[]` and `.at` are the same under bun and *very* different here.
+
+**`coverage-preprocess.ts` does NOT clear, and the blocking shape is `NT1607`.** All four of
+its `.push` receivers were annotated in a scratch tree and all four cleared the checker — but
+`tokenize`'s `toks` is captured by
+
+```ts
+const push = (t: Tok) => { toks.push(t); st.prev = t; };   // 10 call sites
+```
+
+which is precisely the closure-capture refusal the accumulator opt-in kept (`docs/decorators.md`).
+It is masked today only by **pipeline stage order**: `NT1606`/`NT1607` for `.push` are
+*checker*-stage, the capture rule is *ownership*-stage, so every checker blocker in the file
+surfaces first. Probed by clearing them in a scratch tree, the file is **at least four blockers
+deep** — `.push` ×4, then `Set.add` ×3 (a `Set` is persistent; the result is discarded), then an
+`NT2001` on `&&` operands, with `NT1607` still waiting behind those. Annotating only the three
+uncaptured accumulators would move the module's recorded blocker without unblocking it, so it
+was **deliberately not landed** — the same call the nullable-element lane made about rewriting
+two of five table sites.
+
+`tokenize` clears only by removing the closure (inlining it at 10 call sites, or making
+`st.prev` derivable so the arrow is unnecessary), which is a tokenizer refactor and an owner
+decision, not a two-line change.
+
+**No second module reached IR, and `ast.ts` was probed one deeper before that was recorded** —
+behind its ternary is `NT1001`, `.find` on an object array, which is an aliasing refusal rather
+than a small gap. `diagnostics.ts` remains the only rung-3 module.
+
+The tree-wide code set stays at **four** — `NT1004`, `NT1014`, `NT1606`, `NT2001` — with
+`NT1002` out and `NT1004` in. Note what that set cannot show: `NT2001` did not move, it changed
+**owner** (lexer.ts → ast.ts) and its two dependents now inherit from a different module. A
+per-module, message-keyed ratchet sees that; a tree-wide code set structurally cannot.
+
+**PRE-EXISTING BUG, found on the way, and it is a SILENT WRONG ANSWER.**
+
+```
+" x ".trim()   node "x"   nativets " x "   exit 0 on BOTH
+```
+
+`js_str_trim` matched only space/tab/LF/CR, so **21 of the 25** code points in ECMAScript's
+WhiteSpace + LineTerminator went through a trim untouched — no diagnostic, no crash, just the
+input back. It predates this lane by the whole string batch and was invisible because every
+existing fixture trims ASCII. Fixed with `trimEnd`/`trimStart` rather than after them, since
+shipping the siblings with the same four-character set would have planted the identical wrong
+answer twice more *and* made `trim` and `trimEnd` disagree with each other.
+
+There is now one predicate (`nt_ws_cp`) behind all three. It is the **second** copy of the set —
+`isSpace` in `src/lexer.ts` is the first — and it cannot literally reuse it: `isSpace` is
+TypeScript, in the frontend, over UTF-16 code units; this is C, in the runtime, over UTF-8
+bytes. They are pinned to each other by driving both over the same table in
+`test/trim.test.ts`, which is the only coupling available across that boundary. Cases borrowed
+from test262 `String/prototype/trim/15.5.4.20-3-*.js` (one per code point) and
+`trim{,End,Start}/u180e.js` — U+180E stopped being `Zs` in Unicode 6.3 and must **survive** a
+trim, which is the row a hand-written table gets wrong.
+
+**A test-authoring trap worth recording**, because it produced 38 red rows that were not bugs:
+asserting `.length` on a trimmed string measures the deliberate §A.2 divergence (nativets
+strings are UTF-8 **bytes**, so `" x".length` is 3 here and 2 in node), not the trim.
+test262 asserts the trimmed **value**; so does this now. The trimmed bytes were node-exact all
+along.
 
 ## Milestones
 
