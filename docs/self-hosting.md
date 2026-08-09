@@ -4145,3 +4145,39 @@ twice" cannot see a per-process seed at all, and it is nearly blind to the clock
 compiling `src/lexer.ts` in-process takes ~20ms, so two `Date.now()` reads around it land in the
 same millisecond often enough to be a coin flip. A vacuity guard asserts the discovered corpus is
 non-empty, so the file cannot quietly become a no-op if every `src` module regresses off IR.
+
+### `driver.ts` also uses `process.platform` — a blocker hiding behind a nearer one
+
+Found while a build-perf lane was checking that it had not planted a blocker of its own
+(it had, and reverted it). `src/driver.ts` refers to `process.platform` twice:
+
+| site | what it decides |
+|---|---|
+| `driver.ts:318` | whether to append the raylib macOS frameworks |
+| `driver.ts:382` | whether the `host` target can link `-static` (Apple ships no static libc) |
+
+The checker allows exactly `process.argv`, `process.env.NAME`, `process.exit` and
+`process.stdout.write`; anything else takes the `process.${e.property} is not supported`
+path (`src/checker.ts` ~2494). Confirmed directly rather than inferred:
+
+```
+$ echo 'console.log(process.platform);' > /tmp/plat.ts
+$ bun run src/cli.ts run /tmp/plat.ts
+error[NT2001]: process.platform is not supported
+```
+
+So **`driver.ts` was already outside the subset before that lane touched it**, and the
+per-module tables above have never shown it, because its *first* blocker is `NT2001`
+inherited from `ast.ts` through the link — a nearer wall. This is the same masking effect
+`selfhost-ratchet.test.ts` was written for, in the other direction: that file catches a
+blocker being *added* behind the wall, but a blocker that has been sitting behind the wall
+all along is still invisible until the wall moves.
+
+Two things follow for whoever clears `ast.ts`'s `NT2001`:
+
+- expect `driver.ts` to surface `NT2001` again immediately, from its own `process.platform`,
+  not to jump to the next tier;
+- it needs a real decision, not a mechanical fix. Host-platform branching is exactly what a
+  cross-compiling driver is *for*, so the options are a `process.platform` builtin, a
+  compile-time target constant, or hoisting both branches into the runtime. Worth settling
+  before someone reaches for the quickest of the three.
