@@ -226,6 +226,7 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
 
 /** Render a coverage report as a human-readable string. */
 export function renderCoverage(source: string, report: CoverageReport): string {
+  //@@mutable
   const lines: string[] = [];
   if (!report.parsed) {
     lines.push(`✗ parse failed: [${report.firstError!.code}] ${report.firstError!.message}`);

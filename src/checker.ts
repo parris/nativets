@@ -16,7 +16,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // Stage 47 (console.log of compound values): the handle-type predicates the
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
-import { isTypeRefTy, containsTypeRef, expandTypeRef, recTypeTable } from "./ast.ts";
+import { isTypeRefTy, containsTypeRef, unfoldTypeRef, recTypeTable } from "./ast.ts";
 // `k in o`: node's prototype chain is the whole reason `"valueOf" in {}` is true.
 import { OBJECT_PROTO_KEYS } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
@@ -135,8 +135,32 @@ interface NarrowFact { name: string; binding: Binding; path: string; ty: Ty; con
 /** The root binding + dotted suffix an expression reads, and the type at the end of it. */
 interface AccessPath { name: string; binding: Binding; path: string; ty: Ty }
 
+/**
+ * One enclosing function-like body on `Checker.bodyChain`.
+ *
+ * `binds` are the names this body introduces itself, so the chain can be walked inward-out
+ * to find WHICH body owns a given name — the scope-aware replacement for asking a
+ * name-keyed, program-wide question. `closureAssigned` is the per-body answer to "which
+ * names does some arrow inside this body assign?", computed on first use because most
+ * bodies are never asked.
+ */
+interface BodyFrame { body: Stmt[]; binds: Set<string>; closureAssigned?: Set<string> }
+
+/** A `bodyChain` frame for a body, recording the names it binds itself. */
+function bodyFrame(params: { name: string }[], body: Stmt[]): BodyFrame {
+  return { body, binds: ownBindings(params, body) };
+}
+
 /** How a union field read's receiver was written — see `Checker.recvHint`. */
-interface RecvHint { text: string; plain: boolean; already: boolean }
+interface RecvHint {
+  text: string;
+  /** Is this receiver a STABLE access path at all (so a tag test on it could narrow it)? */
+  stable: boolean;
+  /** Is it already narrowed here — to a sub-union with more than one member left? */
+  already: boolean;
+  /** A dotted path rather than a bare name; its root name, for the "rebound" clause. */
+  root?: string;
+}
 
 class Scope {
   private vars = new Map<string, Binding>();
@@ -205,7 +229,12 @@ const STRING_METHODS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("trimEnd", { min: 0, max: 0, argTys: [], ret: "string" })
   .set("trimStart", { min: 0, max: 0, argTys: [], ret: "string" })
   .set("charAt", { min: 1, max: 1, argTys: ["number"], ret: "string" })
-  .set("slice", { min: 1, max: 2, argTys: ["number", "number"], ret: "string" })
+  // Arity follows TYPESCRIPT's lib, not node's runtime laxity — an arity tsc rejects is a
+  // real user type error (NT2001), and one it accepts must not be reported as one.
+  // `slice(start?, end?)`: both optional, so `s.slice()` is the whole string (ES 22.1.3.22).
+  // `substring(start, end?)`: `start` is REQUIRED in lib.es5.d.ts even though node defaults
+  // it to 0, so `s.substring()` stays TS2554 == NT2001. Likewise `charAt`/`at`.
+  .set("slice", { min: 0, max: 2, argTys: ["number", "number"], ret: "string" })
   .set("substring", { min: 1, max: 2, argTys: ["number", "number"], ret: "string" })
   .set("repeat", { min: 1, max: 1, argTys: ["number"], ret: "string" })
   .set("padStart", { min: 1, max: 2, argTys: ["number", "string"], ret: "string" })
@@ -221,7 +250,9 @@ const STRING_METHODS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("replaceAll", { min: 2, max: 2, argTys: ["string", "string"], ret: "string" })  // string pattern only (no RegExp)
   .set("startsWith", { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" })
   .set("endsWith", { min: 1, max: 2, argTys: ["string", "number"], ret: "boolean" })
-  .set("lastIndexOf", { min: 1, max: 1, argTys: ["string"], ret: "number" }); // number | undefined (node: undefined out of range)
+  // 2nd arg = `position`, the index a match may START at (ES 22.1.3.11) — clamped, and
+  // omitted means +Infinity, NOT 0. Not symmetric with `.indexOf`'s fromIndex.
+  .set("lastIndexOf", { min: 1, max: 2, argTys: ["string", "number"], ret: "number" });
 /**
  * Host FFI (SH4) — the signatures of the `node:` builtins, keyed by their canonical
  * name. Unlike GLOBAL_FUNCS these are NOT ambient: a name is only in scope when the
@@ -398,7 +429,29 @@ export function actorSendTy(t: Ty): Ty {
   return actorMsgTy(t);
 }
 
-export function check(program: Program): CheckedProgram {
+/**
+ * One function body the checker refused, collected by the MEASUREMENT mode below.
+ * `fn` is the function's linked (mangled) name, which is what says whose module it is.
+ */
+export interface FnBlocker { fn: string; code: string; message: string }
+
+/**
+ * `collectBlockers` puts `check` in MEASUREMENT mode — see `test/blocker-metric.ts`.
+ *
+ * Normally the first refused function body aborts the whole check, so a program has
+ * exactly one visible blocker no matter how many it holds. Passing an array here makes
+ * the per-function loop record each refusal and carry on, which is the only way to see
+ * the other 300. Two things follow, and both matter:
+ *
+ *  - the returned `CheckedProgram` is NOT a checked program. Bodies that threw are
+ *    half-typed, so it must be DISCARDED, never handed to ownership or codegen. Nothing
+ *    but the metric may pass this argument.
+ *  - `check` will usually still throw somewhere after the loop (the passes below assume
+ *    every body typed). That is expected; the caller keeps the array it already has.
+ *
+ * Omit the argument and this is the pre-existing function, byte for byte.
+ */
+export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedProgram {
   const functions = new Map<string, Sig>();
   // Value bindings this module imports. A linked program has none left (the linker
   // rewrites them to concrete names), so this is populated only for a single-module
@@ -477,12 +530,24 @@ export function check(program: Program): CheckedProgram {
     }
   }
 
-  c.bodyChain = [program.body]; // the outermost enclosing body, for NT1031
+  c.bodyChain = [bodyFrame([], program.body)]; // the outermost enclosing body, for NT1031
   c.checkBlock(program.body, moduleScope);
   // Only reads made from INSIDE a function body promote a module binding to a global,
   // so clear the top level's own hits before checking the functions.
   moduleScope.hits.clear();
-  for (const s of program.body) if (s.kind === "FuncDecl" && !s.typeParams?.length) c.checkFunction(s, moduleScope.child());
+  // Deliberately an ARROW inside `check`, not a module-level helper: the metric this
+  // serves counts top-level `FuncDecl`s of the LINKED COMPILER, so a new one here would
+  // move its own denominator (and, since a `catch (e)` binding types as the erased class,
+  // its own numerator too — the tool caught exactly that when this was a `function`).
+  // `check` is already in the failing set, so an arrow in its body costs nothing.
+  const asBlocker = (fn: string, e: unknown): FnBlocker =>
+    e instanceof NTError
+      ? { fn, code: e.diag.code, message: e.diag.message }
+      : { fn, code: `(${(e as Error).name})`, message: (e as Error).message };
+  for (const s of program.body) if (s.kind === "FuncDecl" && !s.typeParams?.length) {
+    if (collectBlockers === undefined) c.checkFunction(s, moduleScope.child());
+    else try { c.checkFunction(s, moduleScope.child()); } catch (e) { collectBlockers.push(asBlocker(s.name, e)); }
+  }
   // M3: check every specialization that got instantiated above (checking one body can
   // instantiate more generics, so drain to a fixpoint), then SPLICE the templates out of
   // the program and the concrete specializations in — from here on the rest of the
@@ -687,9 +752,14 @@ class Checker {
    * `checkCapturedWrites` (NT1031) reads it: deciding whether a closure's write to a
    * capture is observable means asking whether anything OUTSIDE the closure still
    * mentions the binding, and a scope chain records names, not the code that uses them.
+   *
+   * Each entry carries `binds` — the names that body introduces ITSELF (`ownBindings`:
+   * its parameters plus its top-level `let`/`const`/`function`). That is what makes the
+   * question scope-aware instead of name-keyed; see `bindingFrame`.
+   *
    * Public so `check()` can seed it with the module body.
    */
-  bodyChain: Stmt[][] = [];
+  bodyChain: BodyFrame[] = [];
   /**
    * Call nodes allowed to be a Map/Set ITERATOR (`m.keys()/.values()/.entries()`).
    * node returns a lazy Iterator object there; we return a real array, so the two
@@ -747,7 +817,7 @@ class Checker {
    * Layout is untouched either way — a literal-typed field and a `string` field are one slot
    * holding one string pointer.
    */
-  private unfold(t: Ty): Ty { return widenLiteralTys(expandTypeRef(t, this.recTypes)); }
+  private unfold(t: Ty): Ty { return widenLiteralTys(unfoldTypeRef(t, this.recTypes)); }
 
   /**
    * Does class `tag` declare a `toJSON` METHOD? The parser desugars `class C { toJSON() {} }`
@@ -790,7 +860,12 @@ class Checker {
    * that is NOT in `recTypes` is the case we cannot decide.
    */
   private nominalRefs(t: Ty): { folded: string[]; inline: string[] } {
-    const folded: string[] = [], inline: string[] = [];
+    // Split into two declarations, and each marked: `@@mutable` names ONE accumulator
+    // binding, so the comma form it used to be written in is NT1023 (applyVarAttrs).
+    //@@mutable
+    const folded: string[] = [];
+    //@@mutable
+    const inline: string[] = [];
     const s = String(t);
     for (let i = 0; i < s.length; i++) {
       if (s[i] === "@") {
@@ -818,6 +893,8 @@ class Checker {
    */
   private typeReaches(t: Ty, target: string): boolean {
     const seen = new Set<string>();
+    // NOT `//@@mutable`: the worklist is drained with `.pop`, and the opt-in legalizes
+    // `.push` ONLY — the mark would be dead weight, not a fix.
     const front: Ty[] = [t];
     while (front.length) {
       const { folded, inline } = this.nominalRefs(front.pop()!);
@@ -894,8 +971,9 @@ class Checker {
    *     an arrow in it), so a loop back-edge can never observe a stale narrowing;
    *   - a `let` fact does not survive into an inner function body — a closure may run
    *     after a later assignment. `const` facts do (they cannot be invalidated).
-   * A name assigned inside ANY arrow in the program is never narrowed at all, which is
-   * TypeScript's rule for the same reason.
+   * A name assigned inside some arrow is never narrowed at all, which is TypeScript's
+   * rule for the same reason — asked of the body that DECLARES the binding, not of the
+   * program (see `closureMayAssign`).
    *
    * When the analysis is nonetheless wrong the read unwraps a nullish box, which PANICS
    * exactly like a false `!` assertion (see codegen's `NonNullExpr`) — never a phantom
@@ -906,8 +984,36 @@ class Checker {
   private narrowStack: NarrowFact[][] = [];
   /** Nesting depth of arrow bodies being typed (a `let` narrowing stops at depth+1). */
   private arrowDepth = 0;
-  /** Names assigned inside SOME arrow body anywhere in the program — never narrowable. */
+  /** Names assigned inside SOME arrow body anywhere in the program — the answer for a
+   *  MODULE-LEVEL binding, which any arrow in the program can reach. */
   private closureAssigned = new Set<string>();
+
+  /**
+   * Can a closure assign the binding this fact is about, and so invalidate it?
+   *
+   * Only code inside the binding's own scope can name it, so the question belongs to the
+   * body that DECLARES it — `bindingFrame`. For a module-level binding that body is the
+   * program and the answer is the program-wide set, unchanged. For a local or a
+   * parameter it is one function or arrow body, and every OTHER function's `let` of the
+   * same name — in this file or, since SH1, in any other module linked into the program —
+   * stops being part of the answer. The arrow's own parameter is the extreme case:
+   * `(t: Tok | undefined) => !!t && t.kind === "punct"` was refused because some
+   * unrelated arrow somewhere assigned a `t` (src/coverage-preprocess.ts, which compiled
+   * standalone and did not compile linked).
+   *
+   * Computed on first use and cached on the frame: most bodies are never asked, and the
+   * expression-bodied arrows that dominate the chain rebuild their `Stmt[]` on each push.
+   */
+  private closureMayAssign(name: string): boolean {
+    const frame = this.bindingFrame(name);
+    if (!this.bodyChain.length || frame === this.bodyChain[0]) return this.closureAssigned.has(name);
+    if (!frame.closureAssigned) {
+      const inArrow = new Set<string>();
+      collectAssignedStmts(frame.body, new Set<string>(), inArrow, false);
+      frame.closureAssigned = inArrow;
+    }
+    return frame.closureAssigned.has(name);
+  }
 
   /** Record the program's closure-assigned names (see the note above). */
   noteClosureAssignments(body: Stmt[]): void {
@@ -946,8 +1052,16 @@ class Checker {
     if (e.kind !== "MemberExpr" || e.optional === true) return undefined;
     const base = this.accessPath(e.object, scope);
     if (base === undefined) return undefined;
-    if (!isObjectTy(base.ty) || this.isMutableTy(base.ty)) return undefined;
-    const ft = fieldType(base.ty, e.property);
+    // UNFOLD a recursive back-edge before looking for fields. `@Expr` and the shape it
+    // names are the SAME type written at different depths (the argument is `type()`'s and
+    // `fieldOnBase`'s, applied here) — and without it a path THROUGH a recursive field has
+    // no fields at all, so every step off `e.callee` declined. That is most of the
+    // compiler's own AST, and it is why the `@@mutable` test below is on the UNFOLDED
+    // type: a `@N` is never `isObjectTy`, so asking the folded spelling would answer
+    // "not mutable" for a `@@mutable` class reached through a type reference.
+    const bt = this.unfold(base.ty);
+    if (!isObjectTy(bt) || this.isMutableTy(bt)) return undefined;
+    const ft = fieldType(bt, e.property);
     if (ft === undefined) return undefined;
     const path = base.path + "." + e.property;
     return { name: base.name, binding: base.binding, path, ty: this.narrowedTy(base.binding, path) ?? ft };
@@ -995,14 +1109,28 @@ class Checker {
    * drops the fact: over-conservative, never wrong.
    */
   private factsFor(test: Expr, scope: Scope, positive: boolean, region: Stmt[], guards = true): NarrowFact[] {
+    //@@mutable
     const out: NarrowFact[] = [];
     if (guards) this.guardFacts(test, scope, positive, out);
     this.assertFacts(test, scope, out);
     if (!out.length) return out;
+    const assigned = this.unstableNames(test, region);
+    return out.filter((f) => !assigned.has(f.name) && !this.closureMayAssign(f.name));
+  }
+
+  /**
+   * The root names no fact may be recorded for over `region`, because something in the
+   * guard or in the region itself rebinds them. Shared by `factsFor` and by the TAG
+   * narrowing of a dotted path (`narrowPathInto`), which needs the identical filter for
+   * the identical reason: a path is only narrowable while it is STABLE between the proof
+   * and the use, and `x = …` on the root is the one way a path over immutable objects can
+   * come to denote a different value.
+   */
+  private unstableNames(test: Expr, region: Stmt[]): Set<string> {
     const assigned = new Set<string>();
     collectAssignedStmts(exprRegion(test), assigned, assigned, false);
     collectAssignedStmts(region, assigned, assigned, false);
-    return out.filter((f) => !assigned.has(f.name) && !this.closureAssigned.has(f.name));
+    return assigned;
   }
 
   /**
@@ -1407,7 +1535,7 @@ class Checker {
       this.retypeLiteral(p.default, p.annot);
     }
     this.declareParams(fn, base);
-    this.bodyChain.push(fn.body);
+    this.bodyChain.push(bodyFrame(fn.params, fn.body));
     try { this.checkBlock(fn.body, base, fn.returnTy ?? "number"); } finally { this.bodyChain.pop(); }
     this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
   }
@@ -1462,9 +1590,10 @@ class Checker {
       // nullable facts (`if (x === undefined) return;` — x is present below), and
       // discriminated-union tag elimination (`if (n.kind === "Num") return …;` — the
       // rest of the block sees the remaining members). Different domains, same shape.
-      const facts = this.exitGuardFacts(body[i]!, scope, body.slice(i + 1));
+      const rest = body.slice(i + 1);
+      const facts = this.exitGuardFacts(body[i]!, scope, rest);
+      this.eliminateAfterEarlyExit(body[i]!, scope, rest, facts);
       if (facts.length) { this.narrowStack.push(facts); pushed++; }
-      this.eliminateAfterEarlyExit(body[i]!, scope);
     }
     for (let i = 0; i < pushed; i++) this.narrowStack.pop();
   }
@@ -1483,12 +1612,15 @@ class Checker {
    * because "from here on" IS the rest of this scope — and the statements before it
    * are already checked, so nothing is retroactively affected.
    */
-  private eliminateAfterEarlyExit(s: Stmt, scope: Scope): void {
+  private eliminateAfterEarlyExit(s: Stmt, scope: Scope, rest: Stmt[], facts: NarrowFact[]): void {
     if (s.kind !== "IfStmt" || s.alternate) return;
     if (!leavesBlock(s.consequent)) return;
     // The FALSE branch of the guard, by the same De Morgan walk the `if` arms use — so
     // `if (s.kind === "a" || s.kind === "b") return …;` leaves the third member behind.
-    this.narrowTagsInto(s.test, scope, false);
+    // A NAME shadow lands in the block's own `scope`; a PATH fact lands in `facts`, which
+    // `checkBlock` pushes for exactly the rest of the block — the same region the
+    // stability filter is computed over.
+    this.narrowTagsWith(facts, s.test, scope, false, this.unstableNames(s.test, rest));
   }
 
   /**
@@ -1674,15 +1806,20 @@ class Checker {
    * "narrow it first" hint asking for the very `if (x.kind === "…")` being typed.
    * `accessPath` reports the type AT THIS POINT, which is `U<…>` after the guard.
    */
-  private discriminantRead(e: Expr, scope: Scope): { name: string; union: Ty } | undefined {
-    if (e.kind !== "MemberExpr" || e.optional || e.object.kind !== "Identifier") return undefined;
-    const u = this.accessPath(e.object, scope)?.ty;
-    if (u === undefined || !isUnionTy(u)) return undefined;
-    return unionDiscriminant(u)!.key === e.property ? { name: e.object.name, union: u } : undefined;
+  private discriminantRead(e: Expr, scope: Scope): { p: AccessPath; union: Ty } | undefined {
+    if (e.kind !== "MemberExpr" || e.optional) return undefined;
+    const p = this.accessPath(e.object, scope);
+    if (p === undefined) return undefined;
+    // One unfold, same argument as `accessPath`'s: a RECURSIVE union field (`callee: Expr`
+    // inside `Expr`) reads as the folded `@Expr`, which is not `isUnionTy` and so has no
+    // discriminant to test.
+    const u = this.unfold(p.ty);
+    if (!isUnionTy(u)) return undefined;
+    return unionDiscriminant(u)!.key === e.property ? { p, union: u } : undefined;
   }
 
   /** The narrowing a `===`/`!==` tag comparison implies for its two arms. */
-  private tagTest(test: Expr, scope: Scope): { name: string; union: Ty; tag: string; negated: boolean } | undefined {
+  private tagTest(test: Expr, scope: Scope): { p: AccessPath; union: Ty; tag: string; negated: boolean } | undefined {
     if (test.kind !== "BinaryExpr") return undefined;
     if (test.op !== "===" && test.op !== "!==" && test.op !== "==" && test.op !== "!=") return undefined;
     const negated = test.op === "!==" || test.op === "!=";
@@ -1707,18 +1844,61 @@ class Checker {
    * longer a union in `inner`, `discriminantRead` declines, and the binding is left as
    * the first test made it rather than being re-narrowed from the full union.
    */
-  private narrowTagsInto(test: Expr, inner: Scope, positive: boolean): boolean {
+  private narrowTagsInto(test: Expr, inner: Scope, positive: boolean, out: NarrowFact[] | null, blocked: Set<string> | null): boolean {
     if (test.kind === "LogicalExpr") {
       if (test.op === "??" || (test.op === "&&") !== positive) return false;
-      const l = this.narrowTagsInto(test.left, inner, positive);
-      const r = this.narrowTagsInto(test.right, inner, positive);
+      const l = this.narrowTagsInto(test.left, inner, positive, out, blocked);
+      const r = this.narrowTagsInto(test.right, inner, positive, out, blocked);
       return l || r;
     }
-    if (test.kind === "UnaryExpr" && test.op === "!") return this.narrowTagsInto(test.operand, inner, !positive);
+    if (test.kind === "UnaryExpr" && test.op === "!") return this.narrowTagsInto(test.operand, inner, !positive, out, blocked);
     const t = this.tagTest(test, inner);
     if (!t) return false;
     const others = unionTagValues(t.union).filter((v) => v !== t.tag);
-    this.narrowInto(inner, t.name, t.union, t.negated !== positive ? [t.tag] : others);
+    const tags = t.negated !== positive ? [t.tag] : others;
+    // A plain NAME gets a shadow binding — the mechanism every later pass already reads
+    // off the scope. A dotted PATH has no name to shadow, so it gets a control-flow FACT
+    // instead, which is what `accessPath` consults and what `type()` stamps onto the AST.
+    if (t.p.path === "") { this.narrowInto(inner, t.p.name, t.union, tags); return true; }
+    return this.narrowPathInto(t.p, t.union, tags, out, blocked);
+  }
+
+  /**
+   * Record a tag narrowing of a dotted PATH (`o.inner`, `e.callee`) as a `NarrowFact`.
+   *
+   * WHY A FACT AND NOT A SHADOW. The shadow-binding mechanism keys on a NAME; `o.inner`
+   * has none, and inventing one would need every later pass to agree on the spelling.
+   * The nullish half of narrowing already tracks access PATHS this way, so a tag fact is
+   * the same fact in a different domain — and the two compose in one frame, which is why
+   * an existing fact for the same path is REPLACED rather than skipped: after
+   * `if (o.inner !== undefined && o.inner.kind === "A")` the tag fact is strictly the
+   * more precise of the two, and `narrowedTy` answers with the first match in the frame.
+   *
+   * SOUNDNESS — a path is narrowable only while it is STABLE between the proof and the
+   * use, and this records nothing it cannot prove stable:
+   *   - every object along the path is IMMUTABLE and not `this`, enforced by `accessPath`
+   *     (a `@@mutable` receiver, an index, a call, a `?.` link all decline there), so the
+   *     ONLY way the path can come to denote a different value is rebinding the root;
+   *   - `blocked` is exactly `factsFor`'s filter: the root is assigned somewhere in the
+   *     guard or in the region the fact covers (a loop back-edge included, since the loop
+   *     body is the region);
+   *   - `closureMayAssign` drops a root some arrow can assign — asked of the body that
+   *     DECLARES the root, which is `factsFor`'s filter too and must stay the same call:
+   *     asking it of the whole program instead is the bare-name bug `bindingFrame` closes;
+   *   - `constant`/`arrowDepth` are carried so a `let` root's fact stops at an arrow
+   *     boundary, exactly as a nullish one does.
+   * When any of that fails no fact is recorded and the read keeps its NT2001. Refusing is
+   * the conservative half of reject-don't-miscompile; an unsound narrowing would hand
+   * codegen the wrong slot layout, which is the silent wrong answer.
+   */
+  private narrowPathInto(p: AccessPath, u: Ty, tags: string[], out: NarrowFact[] | null, blocked: Set<string> | null): boolean {
+    if (out === null || blocked === null) return false;
+    const t = this.restrictUnion(u, tags);
+    if (t === undefined) return false;
+    if (blocked.has(p.name) || this.closureMayAssign(p.name)) return false;
+    const fact: NarrowFact = { name: p.name, binding: p.binding, path: p.path, ty: t, constant: p.binding.constant, arrowDepth: this.arrowDepth };
+    const at = out.findIndex((f) => f.binding === p.binding && f.path === p.path);
+    if (at >= 0) out[at] = fact; else out.push(fact);
     return true;
   }
 
@@ -1729,9 +1909,13 @@ class Checker {
    * `withFacts` — including the `finally`, so a diagnostic thrown while typing the test
    * cannot leave a stale frame behind for the next statement.
    */
-  private narrowTagsWith(facts: NarrowFact[], test: Expr, inner: Scope, positive: boolean): boolean {
+  private narrowTagsWith(facts: NarrowFact[], test: Expr, inner: Scope, positive: boolean, blocked: Set<string> | null): boolean {
+    // `facts` is BOTH the live frame and the sink for any path fact proved here, on
+    // purpose: appending to the array that is currently on the stack is what makes the
+    // leaves of `a.b.kind === "X" && a.b.c.kind === "Y"` read against what the leaves
+    // before them proved, and what carries the tag facts out to the caller's `withFacts`.
     this.narrowStack.push(facts);
-    try { return this.narrowTagsInto(test, inner, positive); } finally { this.narrowStack.pop(); }
+    try { return this.narrowTagsInto(test, inner, positive, facts, blocked); } finally { this.narrowStack.pop(); }
   }
 
   /**
@@ -1803,12 +1987,12 @@ class Checker {
     if (ot === "Dyn") { this.type(e.index, scope); return "Dyn"; } // dynamic element/field — runtime tag check
     if (isUnionTy(ot)) { // SH2: `u["kind"]` is the same read as `u.kind`
       if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
-      return this.fieldOnBase(ot, e.index.value, this.recvHint(e.object, scope));
+      return this.fieldOnBase(ot, e.index.value, this.recvHint(e.object, scope), e.loc);
     }
     if (isObjectTy(ot)) {
-      if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal");
+      if (e.index.kind !== "StringLiteral") throw typeError("object must be indexed by a string literal", e.loc);
       const ft = fieldType(ot, e.index.value);
-      if (!ft) throw typeError(`Property '${e.index.value}' does not exist on ${ot}`);
+      if (!ft) throw typeError(`Property '${e.index.value}' does not exist on ${ot}`, e.loc, undefined, "this read");
       return ft;
     }
     const it = this.type(e.index, scope);
@@ -1823,17 +2007,27 @@ class Checker {
   /**
    * What the receiver of a union field read looks like, for the "narrow it first"
    * advice. The advice used to be one fixed sentence prescribing `if (x.kind === "…")`,
-   * which was WRONG in three shapes that reach it with a tag test already written: a
-   * receiver that is not a plain name (narrowing tracks names, not paths), a receiver
-   * already narrowed to a SUB-union (several tags survive, so only the tag is shared),
-   * and — before this lane — a nullable union, which is now narrowed properly instead.
+   * which was WRONG in the shapes that reach it with a tag test ALREADY written: a
+   * receiver already narrowed to a SUB-union (several tags survive, so only the tag is
+   * shared), and a nullable union, which is narrowed properly instead.
    * A diagnostic that prescribes what the program already does is its own defect.
+   *
+   * The split it keys on is no longer "is it a NAME" but "is it a stable access PATH" —
+   * a dotted path narrows now (see `narrowPathInto`), so the old sentence would itself
+   * have become the untruthful one. `accessPath` is the exact predicate: it is what
+   * decides whether a fact could be recorded, so a receiver it declines is a receiver no
+   * tag test can ever narrow, and that is the only case still worth prescribing a `const`
+   * for.
    */
   private recvHint(obj: Expr, scope: Scope): RecvHint {
     const text = exprText(obj) ?? "x";
-    if (obj.kind !== "Identifier") return { text, plain: false, already: false };
-    const b = scope.lookup(obj.name);
-    return { text, plain: true, already: b !== undefined && b.narrowedFrom !== undefined };
+    const p = this.accessPath(obj, scope);
+    if (p === undefined) return { text, stable: false, already: false };
+    if (obj.kind === "Identifier") {
+      const b = scope.lookup(obj.name);
+      return { text, stable: true, already: b !== undefined && b.narrowedFrom !== undefined };
+    }
+    return { text, stable: true, already: this.narrowedTy(p.binding, p.path) !== undefined, root: p.name };
   }
 
   /** The truthful half of the union field diagnostic — see `recvHint`. */
@@ -1842,21 +2036,40 @@ class Checker {
     const values = unionTagValues(base);
     const tags = values.map((v) => `"${v}"`).join(", ");
     const one = `"${values[0] ?? "…"}"`; // a concrete tag to show, not a placeholder
-    if (recv !== undefined && !recv.plain) {
-      return `narrowing tracks a plain NAME, and '${x}' is a path — bind it first ` +
-        `(\`const v = ${x};\`) and narrow \`v\` (\`if (v.${key} === ${one})\`)`;
+    if (recv !== undefined && !recv.stable) {
+      return `narrowing needs a STABLE access path and '${x}' is not one — a '@@mutable' object, ` +
+        `'this', a '?.' link and a computed index can each hold something else by the time this ` +
+        `read runs — so bind it first (\`const v = ${x};\`) and narrow \`v\` (\`if (v.${key} === ${one})\`)`;
     }
     if (recv !== undefined && recv.already) {
       return `'${x}' is narrowed here to MORE THAN ONE member (${tags}), so only the shared tag ` +
         `'${key}' is readable — give each tag its own arm (one \`case\` body per tag, or a further ` +
         `\`if (${x}.${key} === ${one})\`)`;
     }
+    // A dotted path DOES narrow, so "no test written" is no longer the only way to get
+    // here with one: the fact is also dropped when the root is rebound between the proof
+    // and this read. Naming both is what keeps the advice true in either case.
+    const rebound = recv !== undefined && recv.root !== undefined
+      ? ` — and if that test is already written, '${recv.root}' is assigned between it and this read ` +
+        `(anywhere in the region, or inside any arrow), which drops the narrowing; bind ` +
+        `\`const v = ${x};\` before the test and narrow \`v\``
+      : "";
     return `narrow it first (\`if (${x}.${key} === ${one})\` or \`switch (${x}.${key})\`), ` +
-      `then the member's fields are available`;
+      `then the member's fields are available${rebound}`;
   }
 
-  /** Resolve `.prop` on a NON-nullable base (object field, or string/array `.length`). */
-  private fieldOnBase(rawBase: Ty, prop: string, recv?: RecvHint): Ty {
+  /**
+   * Resolve `.prop` on a NON-nullable base (object field, or string/array `.length`).
+   *
+   * `at` is the location of the read, and it is NOT optional decoration. Every throw here
+   * used to call `typeError(msg)` with no position while its siblings all passed one, so
+   * the single most common self-hosting blocker printed with no `L:C` at all — on a
+   * 4000-line file. `src/ast.ts`'s `exprLoc` already carries the note that an unlocatable
+   * `NT2001` "cost a lane an instrumented build of the compiler to find the line"; this
+   * lane paid it again, writing a throwaway AST walker to learn that `ast.ts`'s blocker
+   * was line 1384. The location was always available at all three call sites.
+   */
+  private fieldOnBase(rawBase: Ty, prop: string, recv?: RecvHint, at?: Loc): Ty {
     // Unfold for the reason `indexResultTy` above does: the `?.` arms reach here with
     // `baseTy(ot)`, which strips the nullable and exposes a bare `@N`.
     //
@@ -1871,15 +2084,15 @@ class Checker {
     if (isUnionTy(base)) {
       const d = unionDiscriminant(base)!;
       if (prop === d.key) return "string";
-      throw typeError(`Property '${prop}' does not exist on ${showUnion(base)} — ${this.narrowAdvice(base, d.key, recv)}`);
+      throw typeError(`Property '${prop}' does not exist on ${showUnion(base)} — ${this.narrowAdvice(base, d.key, recv)}`, at, undefined, "this read");
     }
     if ((base === "string" || isArrayTy(base)) && prop === "length") return "number";
     if (isObjectTy(base)) {
       const ft = fieldType(base, prop);
-      if (!ft) throw typeError(`Property '${prop}' does not exist on ${base}`);
+      if (!ft) throw typeError(`Property '${prop}' does not exist on ${base}`, at, undefined, "this read");
       return ft;
     }
-    throw typeError(`Property '${prop}' does not exist on ${base}`);
+    throw typeError(`Property '${prop}' does not exist on ${base}`, at, undefined, "this read");
   }
 
   private checkStmt(s: Stmt, scope: Scope, ret: Ty): void {
@@ -1961,8 +2174,8 @@ class Checker {
         const alt = scope.child();
         const conFacts = this.factsFor(s.test, scope, true, s.consequent);
         const altFacts = s.alternate ? this.factsFor(s.test, scope, false, s.alternate) : [];
-        this.narrowTagsWith(conFacts, s.test, con, true);
-        this.narrowTagsWith(altFacts, s.test, alt, false);
+        this.narrowTagsWith(conFacts, s.test, con, true, this.unstableNames(s.test, s.consequent));
+        this.narrowTagsWith(altFacts, s.test, alt, false, this.unstableNames(s.test, s.alternate ?? []));
         this.withFactsIn(conFacts, () => this.checkBlock(s.consequent, con, ret));
         if (s.alternate) {
           this.withFactsIn(altFacts, () => this.checkBlock(s.alternate!, alt, ret));
@@ -2032,6 +2245,13 @@ class Checker {
         // alone would be unsound exactly there.
         const d = this.discriminantRead(s.discriminant, scope);
         const listed = s.cases.map((c) => (c.test && c.test.kind === "StringLiteral" ? c.test.value : undefined));
+        // A dotted-path discriminant (`switch (o.inner.kind)`) is narrowed by FACT, not by
+        // a shadow. Its stability region is EVERY case body, not just the arm's own: a
+        // fallthrough arm runs code from a later body, so an assignment anywhere in the
+        // switch has to drop the narrowing for all of it.
+        const blocked = d && d.p.path !== ""
+          ? this.unstableNames(s.discriminant, s.cases.flatMap((c) => c.body))
+          : null;
         let carry: string[] = [];
         s.cases.forEach((cse, i) => {
           if (cse.test) {
@@ -2039,15 +2259,17 @@ class Checker {
             if (ct !== dt) throw typeError(`switch case type ${ct} does not match discriminant ${dt}`);
           }
           const inner = scope.child();
+          const facts: NarrowFact[] = [];
           if (d) {
             const own = cse.test
               ? (listed[i] !== undefined ? [listed[i]!] : []) // a non-literal case test tells us nothing
               : unionTagValues(d.union).filter((v) => !listed.includes(v)); // `default:` — whatever is left
             const tags = [...new Set([...carry, ...own])];
-            this.narrowInto(inner, d.name, d.union, tags);
+            if (d.p.path === "") this.narrowInto(inner, d.p.name, d.union, tags);
+            else this.narrowPathInto(d.p, d.union, tags, facts, blocked);
             carry = leavesBlock(cse.body) ? [] : tags;
           }
-          this.checkBlock(cse.body, inner, ret);
+          this.withFactsIn(facts, () => this.checkBlock(cse.body, inner, ret));
         });
         this.switchDepth--;
         return;
@@ -2100,13 +2322,15 @@ class Checker {
    * member access, which matched none of the structural predicates: `NT2001 Property 'kind'
    * does not exist on @Expr`. That single gap was the first blocker for nine modules.
    *
-   * WHY ONE LEVEL TERMINATES. `expandTypeRef` replaces a bare `@N` with `N`'s shape and is
-   * the identity on everything else — including a type that merely CONTAINS a reference. A
-   * shape's own recursive positions stay folded (the parser mints a back-edge exactly there),
-   * so the result is either concrete or another `@N` one access deeper. There is no fixpoint
-   * and no transitive expansion: each unfold is paid for by a real source-level access, and a
-   * program has finitely many. This is the same argument the doc comment already made; it is
-   * now also true of the code.
+   * WHY ONE LEVEL TERMINATES. `unfoldTypeRef` replaces a bare `@N` with `N`'s shape, and
+   * DISTRIBUTES that over the type constructors `?U`/`?N` and `[]` so an optional or listed
+   * back-edge (`next?: N`, `kids: N[]`) is unfolded too — those are constructors applied to
+   * the VALUE, so leaving them folded broke this funnel's own invariant. It stops at a shape:
+   * an object's fields and a union's members are the "nested inside a shape" positions where
+   * a back-edge legitimately stays folded (the parser mints one exactly there), and descending
+   * into them is the fixpoint that would diverge. So the result is either concrete or another
+   * `@N` one access deeper. There is no transitive expansion: each unfold is paid for by a
+   * real source-level access, and a program has finitely many.
    *
    * WHY THE FUNNEL RATHER THAN THE MEMBER ACCESS. Unfolding only at a receiver would leave
    * `const o = e.operand` bound at `@Expr`, and a tag narrowing declares a SHADOW BINDING
@@ -2300,7 +2524,7 @@ class Checker {
               "this read is not proved non-nullish",
             );
           }
-          const ft = this.fieldOnBase(baseTy(ot), e.property, this.recvHint(e.object, scope));
+          const ft = this.fieldOnBase(baseTy(ot), e.property, this.recvHint(e.object, scope), e.loc);
           return makeNullable("undefined", baseTy(ft));
         }
         // fetch's Response: `.status` (number), `.ok` (2xx, computed from the status),
@@ -2323,10 +2547,10 @@ class Checker {
         if ((ot === "string" || isArrayTy(ot) || isBytesTy(ot)) && e.property === "length") return "number";
         if ((isMapTy(ot) || isSetTy(ot)) && e.property === "size") return "number";
         if (ot === "Dyn") return "Dyn"; // dynamic field access — runtime tag check
-        if (isUnionTy(ot)) return this.fieldOnBase(ot, e.property, this.recvHint(e.object, scope)); // SH2: the discriminant, or "narrow it first"
+        if (isUnionTy(ot)) return this.fieldOnBase(ot, e.property, this.recvHint(e.object, scope), e.loc); // SH2: the discriminant, or "narrow it first"
         if (isObjectTy(ot)) {
           const ft = fieldType(ot, e.property);
-          if (!ft) throw typeError(`Property '${e.property}' does not exist on ${ot}`);
+          if (!ft) throw typeError(`Property '${e.property}' does not exist on ${ot}`, e.loc, undefined, "this read");
           // Control-flow narrowing of a DOTTED NAME: `if (d.spans) { d.spans.length }`
           // reads the same immutable field, proved non-nullish. Always written, so a
           // `true` stamped by an earlier typing pass cannot go stale.
@@ -2334,7 +2558,7 @@ class Checker {
           e.narrowed = narrowed !== undefined;
           return narrowed ?? ft; // a redundant `?.` on a non-nullable object is allowed (result unchanged)
         }
-        throw typeError(`Property '${e.property}' does not exist on ${ot}`);
+        throw typeError(`Property '${e.property}' does not exist on ${ot}`, e.loc, undefined, "this read");
       }
       case "IndexExpr": {
         const ot = this.type(e.object, scope);
@@ -2514,7 +2738,7 @@ class Checker {
         let rscope = scope;
         if (e.op !== "??") {
           const inner = scope.child();
-          if (this.narrowTagsWith(facts, e.left, inner, e.op === "&&")) rscope = inner;
+          if (this.narrowTagsWith(facts, e.left, inner, e.op === "&&", this.unstableNames(e.left, exprRegion(e.right)))) rscope = inner;
         }
         const r = this.withFacts(
           facts,
@@ -2527,8 +2751,25 @@ class Checker {
           if (l === "null" || l === "undefined") return r;
           if (isNullableTy(l)) {
             const base = baseTy(l);
-            if (base !== r && !this.assignable(base, r) && !this.assignable(r, base)) throw typeError(`?? branches differ: ${base} vs ${r}`);
-            return base;
+            // `??` consumes the LEFT's nullishness and NOTHING else — the specified type
+            // is `NonNullable<L> | R`. So a still-nullable RIGHT keeps the result
+            // nullable, in the right's own nullish flavour (`x ?? y` on two
+            // `string | undefined`s is `string | undefined`, and `x ?? null` is
+            // `string | null`). Answering `base` here unconditionally was a WRONG
+            // ANSWER, not a refusal: `typeof (f() ?? f())` printed "string" where node
+            // prints "undefined", and codegen then stored the right operand's
+            // [tag,value] BOX into a slot declared to hold the bare base value — so the
+            // ordinary chained cascade `a ?? b ?? "fallback"` reinterpreted that box as
+            // a string pointer, decided the third `??` had a non-nullable left, and
+            // never evaluated the fallback at all. See test/nullish-coalesce.ts.
+            const rbase = r === "null" || r === "undefined" ? base : baseTy(r);
+            if (rbase !== base && !this.assignable(base, rbase) && !this.assignable(rbase, base))
+              throw typeError(`?? branches differ: ${base} vs ${r}`);
+            // The result's base is whichever side is the WIDER of the two (they are
+            // assignable in one direction, proved just above).
+            const j = rbase === base || this.assignable(base, rbase) ? base : rbase;
+            if (r === "null" || r === "undefined") return makeNullable(r, j);
+            return isNullableTy(r) ? makeNullable(nullishKind(r), j) : j;
           }
           if (l !== r) throw typeError(`?? branches differ: ${l} vs ${r}`);
           return l;
@@ -3948,7 +4189,14 @@ class Checker {
       case "copyWithin": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.copyWithin\` would overwrite the array in place`, "build a new array from `.slice` + spread instead", exprLoc(callee.object) ?? callee.loc);
       case "pop": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.pop\` would mutate the array in place`, "use `arr.slice(0, -1)` for the shorter array, or `arr[arr.length - 1]` for the last element", exprLoc(callee.object) ?? callee.loc);
       case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
-      case "indexOf": need(1); if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`); return "number";
+      // `.indexOf(x, fromIndex?)` — the second parameter is optional in lib.es5.d.ts, so
+      // requiring exactly one rejected valid TypeScript with a TYPE error. See the
+      // `.lastIndexOf` arm below: same argument, deliberately different clamping.
+      case "indexOf":
+        if (args.length < 1 || args.length > 2) throw typeError(".indexOf expects 1..2 args");
+        if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`);
+        if (args.length === 2 && argTys[1] !== "number") throw typeError(".indexOf fromIndex must be a number");
+        return "number";
       // ACCEPTED, unlike its in-place siblings above: `.reverse` returns its RECEIVER,
       // so the result type is `recv` and the two are the SAME array. `RETAINS_RECEIVER`
       // (src/ownership.ts) is what keeps that single-owner; adding another such method
@@ -3963,8 +4211,12 @@ class Checker {
         return el;
       }
       case "lastIndexOf":
-        need(1);
+        // `.lastIndexOf(x, fromIndex?)` — optional in lib.es5.d.ts. NOT symmetric with
+        // `.indexOf`: omitted means len-1, and a negative index that underflows returns
+        // -1 rather than restarting at 0 (ES 23.1.3.20).
+        if (args.length < 1 || args.length > 2) throw typeError(".lastIndexOf expects 1..2 args");
         if (argTys[0] !== el) throw typeError(`.lastIndexOf expects ${el}`);
+        if (args.length === 2 && argTys[1] !== "number") throw typeError(".lastIndexOf fromIndex must be a number");
         if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.lastIndexOf on ${recv}`);
         return "number";
       case "concat": // variadic; every argument must be an array of the same element type
@@ -3983,7 +4235,8 @@ class Checker {
         if (argTys[1] !== el) throw typeError(`.with value expects ${el}`);
         return recv;
       case "slice":
-        if (args.length < 1 || args.length > 2) throw typeError(".slice expects 1..2 args");
+        // `start` defaults to 0 (ES 23.1.3.28): `xs.slice()` is a COPY, not a type error.
+        if (args.length > 2) throw typeError(".slice expects 0..2 args");
         if (argTys.some((t) => t !== "number")) throw typeError(".slice args must be numbers");
         return recv;
       case "join":
@@ -4062,7 +4315,7 @@ class Checker {
     // Inlined or not, a value-arrow nested inside this callback needs this body in its
     // enclosing chain (NT1031) — the callback's own statements are one of the places an
     // "is the binding used outside the closure?" question has to look.
-    this.bodyChain.push(arrowBody(arrow));
+    this.bodyChain.push(bodyFrame(arrow.params, arrowBody(arrow)));
     let retTy: Ty;
     try {
       retTy = this.typeArrowReturn(arrow, inner, this.arrowRetAnnot(arrow, undefined));
@@ -4189,7 +4442,7 @@ class Checker {
     // The arrow's own body joins `bodyChain` while its body is typed, so a NESTED arrow
     // sees it as one of ITS enclosing bodies (NT1031) — and comes back off before
     // `computeCaptures`, which asks about the bodies OUTSIDE this arrow.
-    this.bodyChain.push(arrowBody(arrow));
+    this.bodyChain.push(bodyFrame(arrow.params, arrowBody(arrow)));
     const declared = this.arrowRetAnnot(arrow, expected);
     let retTy: Ty;
     try {
@@ -4254,6 +4507,7 @@ class Checker {
     const free = new Set<string>();
     if (arrow.exprBody) collectIdents(arrow.body as Expr, free);
     else for (const s of arrow.stmts as Stmt[]) { collectIdentsStmt(s, free); collectBlockLocals(s, locals); }
+    //@@mutable
     const caps: { name: string; ty: Ty }[] = [];
     for (const n of free) {
       if (params.has(n) || locals.has(n) || BUILTIN_NUMBERS.includes(n)) continue;
@@ -4262,6 +4516,36 @@ class Checker {
     }
     this.checkCapturedWrites(arrow, scope);
     return caps;
+  }
+
+  /**
+   * The innermost enclosing body that BINDS `name` — the only code that can be about this
+   * binding, and so the only code either closure analysis should be reading.
+   *
+   * THE BUG THIS EXISTS FOR. Both used to ask their question of the whole `bodyChain`,
+   * whose outermost frame is the entire program, so a bare-name question answered yes for
+   * a binding in a function that has never heard of this one. Two files that EACH compile
+   * alone then do not compile together (test/modules/closure-name): `linkProgram`
+   * alpha-renames TOP-LEVEL bindings only, so after SH1 every module's locals and
+   * parameters share one flat namespace and the odds of a collision are multiplied by the
+   * module count. It is NOT a link-only bug — the same collision inside one file was
+   * always possible; linking made it ordinary. And it is invisible to every per-module
+   * instrument we have, because per-module is exactly the case that works.
+   *
+   * Walking inward-out to the first binder is conservative in the safe direction at every
+   * step. `ownBindings` sees a body's parameters and its TOP-LEVEL declarations only, so a
+   * `let` in a nested block is not placed here and the walk continues outward to a body
+   * that encloses it — scanning MORE code, never less. With no binder anywhere (a builtin,
+   * or a shape `ownBindings` does not model) it lands on frame 0, which is what this
+   * replaced. An intervening frame can never be the WRONG answer: if it binds the name at
+   * its top level then code inside it naming that word resolves to ITS binding.
+   */
+  private bindingFrame(name: string): BodyFrame {
+    for (let i = this.bodyChain.length - 1; i > 0; i--) if (this.bodyChain[i]!.binds.has(name)) return this.bodyChain[i]!;
+    // The chain is EMPTY during the pre-`check` return-type inference pass, which the note
+    // on `checkCapturedWrites` covers: nothing to scan means nothing observed, and the
+    // arrow is judged again for real once the chain exists.
+    return this.bodyChain[0] ?? { body: [], binds: new Set<string>() };
   }
 
   /**
@@ -4297,6 +4581,9 @@ class Checker {
    * short (the early return-type inference pass runs before it is built) this can only
    * find FEWER references and so allow more, and every such arrow is typed again from
    * `checkBlock` with the full chain, which is the run that decides.
+   *
+   * WHICH enclosing body that is, is `bindingFrame`'s job — and it used to be "all of
+   * them", which is the bug its note describes.
    */
   private checkCapturedWrites(arrow: ArrowFunction, scope: Scope): void {
     const writes = new Map<string, string>();
@@ -4307,7 +4594,12 @@ class Checker {
     for (const [name, op] of writes) {
       const b = scope.lookup(name);
       if (!b) continue; // not an enclosing binding at all — not this rule's business
-      const observed = this.bodyChain.some((body) => referencesName(body, name, arrow));
+      // Only the body that DECLARES `name` can mention this binding — an outer body is
+      // not in its scope, and an inner one is a sub-tree of it, so one frame answers the
+      // whole question. Scanning the rest was the pre-link status quo and is what made
+      // this a program-wide, bare-name test; `bindingFrame` falls back to the outermost
+      // frame whenever it cannot place the declaration, which is the old behaviour.
+      const observed = referencesName(this.bindingFrame(name).body, name, arrow);
       if (!observed && b.ty === "number") continue; // the escaping-counter shape: safe
       const why = observed
         ? `'${name}' is also used outside the closure, so it would be read at its stale value`
@@ -4383,7 +4675,26 @@ class Checker {
     // without being rebuilt, so it is left to `fitsArg`, which accepts it only when it is a
     // literal it can actually reshape. Widening this to the full `assignable` relation is
     // the memory bug (a dereference of a raw double), not the feature.
-    if (isNullableTy(expected)) return actual === nullishKind(expected) || actual === baseTy(expected);
+    if (isNullableTy(expected)) {
+      const nbase = baseTy(expected);
+      if (actual === nullishKind(expected) || actual === nbase) return true;
+      // ...and a nullable UNION takes a MEMBER, for exactly the reason the bare-union
+      // arm at the top of this function does: a union value IS its member's object
+      // block, so boxing one into the `?U` slot is the same tag-2 store as any other
+      // base-typed value. Without this arm the `| undefined` was the whole difference
+      // between an accepted and a refused call —
+      //     f({ kind: "B" })   against  f(e: E)              accepted
+      //     f({ kind: "B" })   against  f(e: E | undefined)  NT2001
+      // — which is why every walker in `src/` that takes an optional node has to bind
+      // its argument to an annotated local first. Reported by lane-rectype.
+      //
+      // Still narrower than `assignable` in the way the comment above insists on: the
+      // union arm of `assignable` is IDENTITY against `unionWidenedMembers`, not the
+      // structural-object rule, so a merely structurally-compatible record with its
+      // own slot layout keeps being refused (test/nullable-assign.test.ts §5).
+      if ((isUnionTy(nbase) || isGeneralUnionTy(nbase)) && this.assignable(nbase, actual)) return true;
+      return false;
+    }
     return false;
   }
 
@@ -4485,15 +4796,21 @@ function leavesFunction(body: Stmt[]): boolean {
 
 /**
  * Does this statement list always leave its enclosing block? Two SH2 narrowings read
- * it: elimination after a guard clause, and whether a switch case can fall through
- * into the next one. Conservative — a `return` in both arms of an `if` is not
- * recognized — and conservative is the safe direction for both: less elimination,
- * and a WIDER set of tags carried into the next case.
+ * it: elimination after a guard clause, and whether a switch case can fall through into
+ * the next one. In both, "leaves" is the same question the definite-assignment pass
+ * already answers exactly — so this DELEGATES to it in shape-only mode rather than
+ * keeping a second, weaker model of control flow. `"fall"` is the one answer that means
+ * the next statement (or the next `case`) is reachable; `break` and `continue` leave the
+ * block just as much as `return` does.
+ *
+ * It used to read only the KIND of the LAST statement, which made the single most common
+ * shape in our own source wrong: a BRACED case body, `case "X": { … return …; }`, ends in
+ * a `BlockStmt` and so read as "falls through" — narrowing the NEXT case to both tags and
+ * refusing its member read. `src/` writes that shape 181 times. node runs every one of
+ * them; nothing was ever miscompiled, they were simply refused.
  */
 function leavesBlock(body: Stmt[]): boolean {
-  if (body.length === 0) return false; // an empty block — see leavesFunction
-  const last = body[body.length - 1]!;
-  return (last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "BreakStmt" || last.kind === "ContinueStmt");
+  return daBlock(body, null, new Set<string>(), null) !== "fall";
 }
 
 /* ============================================================
@@ -4532,7 +4849,13 @@ function leavesBlock(body: Stmt[]): boolean {
 /** The names PROVEN assigned on the path reaching a given program point. */
 type DAFlow = Set<string>;
 
-/** The bindings this pass must prove, mapped to the declared type the hint names. */
+/** The bindings this pass must prove, mapped to the declared type the hint names.
+ *
+ * `null` is the SHAPE-ONLY mode: track nothing, prove nothing, refuse nothing — just
+ * report how control leaves the statements. `leavesBlock` runs the analysis that way, so
+ * the narrowings share this one control-flow model instead of keeping a second, weaker
+ * copy of it (which is what let a braced `case` body ending in `return` read as
+ * "falls through"). Nothing is tracked, so no diagnostic can be raised from a narrowing. */
 /* The VALUE is only ever rendered into a diagnostic ("`let x: ${ty};` starts with no
  * value"), and a declaration with neither an inferred nor a written type has none to
  * render — hence the `"unknown"` placeholder, which is not a `Ty` and was assigned into
@@ -4569,7 +4892,8 @@ function daReads(node: unknown, out: Map<string, Loc | undefined>): void {
 }
 
 /** Refuse every read in `e` of a tracked binding not yet proven assigned. */
-function daUse(e: unknown, tracked: DATracked, flow: DAFlow): void {
+function daUse(e: unknown, tracked: DATracked | null, flow: DAFlow): void {
+  if (tracked === null) return; // shape-only mode: nothing is tracked, so nothing to refuse
   if (e === null || e === undefined) return;
   const reads = new Map<string, Loc | undefined>();
   daReads(e, reads);
@@ -4600,16 +4924,54 @@ function daMerge(paths: { flow: DAFlow; diverged: boolean }[], fallback: DAFlow)
   return out;
 }
 
-/** Analyze a statement list. Returns true if it always DIVERGES (never falls through). */
-function daBlock(body: Stmt[], tracked: DATracked, flow: DAFlow): boolean {
-  for (const s of body) if (daStmt(s, tracked, flow)) return true;
-  return false;
+/**
+ * Does control reach the statement AFTER this one? That is the only thing a return value
+ * has to answer, because a path that leaves by `break` or `continue` is not lost — it is
+ * RECORDED, with the flow it carries, in the `DAEscapes` collector below. That split is
+ * what makes the analysis correct: a `break` halfway down a body escapes exactly as much
+ * as one at the end, and no single return value can carry a flow from the middle.
+ *
+ * Treating every non-`fall` alike was a MISCOMPILE, not an imprecision. `break` and
+ * `continue` were folded in with `return`, so their paths were dropped from the
+ * assignment INTERSECTION — and a switch whose every arm ended in `break` "diverged", so
+ * the statements after it were never analyzed at all. Four programs printed the slot's
+ * zero where node prints `undefined`; see test/definite-assignment.test.ts, 11b–11d.
+ */
+type DAExit = "fall" | "left";
+
+/**
+ * Where the escaping paths out of a body land, and what they had assigned when they left.
+ *
+ * `breaks` reach the enclosing switch-or-loop's EXIT; `conts` reach the enclosing loop's
+ * TEST, which may then fall out of the loop. Both are therefore live incoming paths to
+ * the construct that owns them and must join its merge.
+ *
+ * Ownership follows the language: `break` binds to the nearest enclosing switch OR loop,
+ * `continue` to the nearest enclosing LOOP — so a `switch` shadows `breaks` and passes
+ * `conts` through, while a loop shadows both. Neither carries a label here (`src/ast.ts`:
+ * `BreakStmt` and `ContinueStmt` have no fields), so "nearest enclosing" is the whole
+ * rule. `null` means neither exists, and `break`/`continue` there is already a checker
+ * error ("'break' outside loop/switch").
+ */
+type DAEscapes = { breaks: DAFlow[]; conts: DAFlow[] } | null;
+
+/** Live incoming paths, in the shape `daMerge` reads. */
+const daLive = (flows: DAFlow[]): { flow: DAFlow; diverged: boolean }[] =>
+  flows.map((flow) => ({ flow, diverged: false }));
+
+/** Analyze a statement list. Returns whether control reaches past its end. */
+function daBlock(body: Stmt[], tracked: DATracked | null, flow: DAFlow, esc: DAEscapes): DAExit {
+  for (const s of body) {
+    if (daStmt(s, tracked, flow, esc) === "left") return "left"; // the rest is unreachable
+  }
+  return "fall";
 }
 
-/** Analyze one statement in place, mutating `flow`. Returns true if it DIVERGES. */
-function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
+/** Analyze one statement in place, mutating `flow`. Returns whether control reaches past it. */
+function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes): DAExit {
   switch (s.kind) {
     case "VarDecl":
+      if (tracked === null) return "fall"; // shape-only: a declaration changes no control flow
       for (const d of s.decls) {
         // This analysis is NAME-based, and so is codegen (one slot per name per
         // function). A redeclaration of a name already being tracked is therefore
@@ -4628,72 +4990,93 @@ function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
         if (d.init) { daUse(d.init, tracked, flow); flow.add(d.name); }
         else { tracked.set(d.name, d.ty ?? d.annot ?? "unknown"); flow.delete(d.name); }
       }
-      return false;
+      return "fall";
 
     case "ExprStmt": {
       const e = s.expr;
       // The one form that ASSIGNS: `x = v` at statement level. The value is evaluated
       // first, so its reads are checked against the state BEFORE the write lands.
-      if (e.kind === "AssignExpr" && e.op === "=" && tracked.has(e.target)) {
+      if (e.kind === "AssignExpr" && e.op === "=" && tracked !== null && tracked.has(e.target)) {
         daUse(e.value, tracked, flow);
         flow.add(e.target);
-        return false;
+        return "fall";
       }
       daUse(e, tracked, flow);
-      return daIsExit(e);
+      return daIsExit(e) ? "left" : "fall";
     }
 
-    case "ReturnStmt": daUse(s.argument, tracked, flow); return true;
-    case "ThrowStmt": daUse(s.argument, tracked, flow); return true;
-    case "BreakStmt": case "ContinueStmt": return true;
+    case "ReturnStmt": daUse(s.argument, tracked, flow); return "left";
+    case "ThrowStmt": daUse(s.argument, tracked, flow); return "left";
+    // These land somewhere ELSE that is still reachable, carrying what they have assigned
+    // SO FAR — so the snapshot has to be taken right here, where the path leaves.
+    case "BreakStmt": if (esc) esc.breaks.push(new Set(flow)); return "left";
+    case "ContinueStmt": if (esc) esc.conts.push(new Set(flow)); return "left";
 
     case "IfStmt": {
       daUse(s.test, tracked, flow);
       const con = new Set(flow);
-      const conDiv = daBlock(s.consequent, tracked, con);
+      const conExit = daBlock(s.consequent, tracked, con, esc);
       const alt = new Set(flow);
-      const altDiv = s.alternate ? daBlock(s.alternate, tracked, alt) : false;
-      const merged = daMerge([{ flow: con, diverged: conDiv }, { flow: alt, diverged: altDiv }], flow);
+      const altExit: DAExit = s.alternate ? daBlock(s.alternate, tracked, alt, esc) : "fall";
+      // Only an arm that reaches THIS point contributes to the intersection; one that
+      // left is already recorded wherever it landed.
+      const merged = daMerge([{ flow: con, diverged: conExit === "left" }, { flow: alt, diverged: altExit === "left" }], flow);
       flow.clear(); for (const n of merged) flow.add(n);
-      return conDiv && altDiv;
+      return conExit === "fall" || altExit === "fall" ? "fall" : "left";
     }
 
+    // A loop that MAY RUN ZERO TIMES keeps nothing its body assigned, so the state after
+    // it is the state before it — and the entry flow is already a subset of every escape
+    // path's flow, so merging those in could only intersect it down to itself. The fresh
+    // collector is still needed, to SHADOW the outer one: a `break` in this body belongs
+    // to this loop and must not be charged to the switch around it.
     case "WhileStmt": {
       daUse(s.test, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow)); // may run zero times — assignments discarded
-      return false;
+      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [] });
+      return "fall";
     }
 
     case "DoWhileStmt": {
+      // ...whereas a `do…while` body ALWAYS runs, so its assignments ARE kept — which is
+      // precisely why its escape paths matter here and nowhere else. Both of these reach
+      // the statement after the loop with `n` still unassigned, and keeping the completed
+      // body's flow alone printed the slot's zero where node prints `undefined`:
+      //     do { if (c) break; n = 7; } while (false);
+      //     do { continue; } while (false);        // `continue` runs the TEST, then exits
+      const mine = { breaks: [] as DAFlow[], conts: [] as DAFlow[] };
       const body = new Set(flow);
-      const div = daBlock(s.body, tracked, body); // always runs once — assignments KEPT
-      flow.clear(); for (const n of body) flow.add(n);
+      const exit = daBlock(s.body, tracked, body, mine);
+      const after = daMerge(
+        [{ flow: body, diverged: exit === "left" }, ...daLive(mine.breaks), ...daLive(mine.conts)],
+        flow);
+      flow.clear(); for (const n of after) flow.add(n);
       daUse(s.test, tracked, flow);
-      return div;
+      // Only a body with no way out at all — every path returns or throws — diverges.
+      return exit === "fall" || mine.breaks.length > 0 || mine.conts.length > 0 ? "fall" : "left";
     }
 
     case "ForStmt": {
       if (s.init) { // the init runs exactly once, so its assignments are kept
-        if ((s.init as Stmt).kind === "VarDecl") daStmt(s.init as Stmt, tracked, flow);
+        if ((s.init as Stmt).kind === "VarDecl") daStmt(s.init as Stmt, tracked, flow, esc);
         else daUse(s.init as Expr, tracked, flow);
       }
       daUse(s.test, tracked, flow);
       const body = new Set(flow);
-      daBlock(s.body, tracked, body); // may run zero times — assignments discarded
+      daBlock(s.body, tracked, body, { breaks: [], conts: [] }); // may run zero times
       daUse(s.update, tracked, body);
-      return false;
+      return "fall";
     }
 
     case "ForOfStmt": {
       daUse(s.iterable, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow)); // may run zero times
-      return false;
+      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [] }); // may run zero times
+      return "fall";
     }
 
     case "ForInStmt": {
       daUse(s.object, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow)); // may run zero times
-      return false;
+      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [] }); // may run zero times
+      return "fall";
     }
 
     case "SwitchStmt": {
@@ -4702,51 +5085,62 @@ function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
       // cases assign can be relied on afterwards. A case body that falls through into
       // the next one is handled by analyzing each from the switch's entry state, which
       // under-approximates what is assigned — the safe direction.
+      // A `break` in a case body is THIS switch's, wherever in the body it sits: the path
+      // lands at the switch's exit, so it is a LIVE incoming path and must join the
+      // intersection. A `continue` is NOT — it jumps to the enclosing loop's head, past
+      // this exit — so `conts` is passed through to the loop that owns it.
+      const mine = { breaks: [] as DAFlow[], conts: esc ? esc.conts : [] };
       const paths = s.cases.map((c) => {
         const f = new Set(flow);
         if (c.test) daUse(c.test, tracked, f);
-        return { flow: f, diverged: daBlock(c.body, tracked, f) };
+        return { flow: f, diverged: daBlock(c.body, tracked, f, mine) === "left" };
       });
       const hasDefault = s.cases.some((c) => c.test === null);
-      const merged = hasDefault ? daMerge(paths, flow) : new Set(flow);
+      const all = [...paths, ...daLive(mine.breaks)];
+      const merged = hasDefault ? daMerge(all, flow) : new Set(flow);
       flow.clear(); for (const n of merged) flow.add(n);
-      return hasDefault && paths.every((p) => p.diverged);
+      // The last case falling out the bottom reaches the exit too — that is `diverged`
+      // being false for it, which `every` already accounts for.
+      return hasDefault && all.every((p) => p.diverged) ? "left" : "fall";
     }
 
     case "TryStmt": {
       const tryFlow = new Set(flow);
-      const tryDiv = daBlock(s.block, tracked, tryFlow);
+      const tryExit = daBlock(s.block, tracked, tryFlow, esc);
       let after: DAFlow;
-      let diverged: boolean;
+      let exit: DAExit;
       if (s.handler) {
         // The handler starts from the try's ENTRY state: the throw may have happened
         // before any assignment in the block landed, so none of them can be assumed.
         const catchFlow = new Set(flow);
-        const catchDiv = daBlock(s.handler, tracked, catchFlow);
-        after = daMerge([{ flow: tryFlow, diverged: tryDiv }, { flow: catchFlow, diverged: catchDiv }], flow);
-        diverged = tryDiv && catchDiv;
+        const catchExit = daBlock(s.handler, tracked, catchFlow, esc);
+        after = daMerge([{ flow: tryFlow, diverged: tryExit === "left" }, { flow: catchFlow, diverged: catchExit === "left" }], flow);
+        exit = tryExit === "fall" || catchExit === "fall" ? "fall" : "left";
       } else {
         // try/finally with no catch: reaching past it means the block COMPLETED.
         after = tryFlow;
-        diverged = tryDiv;
+        exit = tryExit;
       }
       flow.clear(); for (const n of after) flow.add(n);
       if (s.finalizer) { // the finalizer always runs, so its assignments are kept
-        if (daBlock(s.finalizer, tracked, flow)) diverged = true;
+        // ...and it can OVERRIDE how the try left: a `return`/`break` in a `finally`
+        // wins over whatever the block was doing (node agrees — that is why `finally`
+        // can swallow a throw).
+        if (daBlock(s.finalizer, tracked, flow, esc) === "left") exit = "left";
       }
-      return diverged;
+      return exit;
     }
 
-    case "BlockStmt": return daBlock(s.body, tracked, flow);
-    case "MultiStmt": return daBlock(s.stmts, tracked, flow);
-    case "FuncDecl": return false; // its body is analyzed on its own, below
+    case "BlockStmt": return daBlock(s.body, tracked, flow, esc);
+    case "MultiStmt": return daBlock(s.stmts, tracked, flow, esc);
+    case "FuncDecl": return "fall"; // its body is analyzed on its own, below
     // The one `Stmt` kind with no arm. It is SYNTHETIC — inserted after this pass, by the
     // ownership analysis, to mark where a scope's drops go — so it never reaches here in
     // practice; but the switch was silently falling off the end and returning `undefined`
-    // for it, which is neither `true` nor `false` and made the `: boolean` return type a
-    // lie (tsc TS2366). Named explicitly so the switch is exhaustive and the next `Stmt`
-    // kind added is a compile error here rather than an implicit "does not diverge".
-    case "BlockDrops": return false;
+    // for it, which is neither of the `DAExit` values and made the return type a lie
+    // (tsc TS2366). Named explicitly so the switch is exhaustive and the next `Stmt`
+    // kind added is a compile error here rather than an implicit "falls through".
+    case "BlockDrops": return "fall";
   }
 }
 
@@ -4767,7 +5161,7 @@ function daStmt(s: Stmt, tracked: DATracked, flow: DAFlow): boolean {
  * `daUse` is shape-blind and descends into it.
  */
 function checkDefiniteAssignment(body: Stmt[]): void {
-  daBlock(body, new Map<string, Ty | "unknown">(), new Set<string>());
+  daBlock(body, new Map<string, Ty | "unknown">(), new Set<string>(), null);
   const seen = new Set<unknown>();
   const walk = (node: unknown): void => {
     if (Array.isArray(node)) { for (const x of node) walk(x); return; }
@@ -4782,7 +5176,7 @@ function checkDefiniteAssignment(body: Stmt[]): void {
     const n = node as { kind?: string; body?: unknown; stmts?: unknown };
     const nested = n.kind === "FuncDecl" ? n.body : n.kind === "ArrowFunction" ? n.stmts : undefined;
     if (Array.isArray(nested)) {
-      daBlock(nested as Stmt[], new Map<string, Ty | "unknown">(), new Set<string>());
+      daBlock(nested as Stmt[], new Map<string, Ty | "unknown">(), new Set<string>(), null);
     }
     for (const v of Object.values(node)) walk(v);
   };
@@ -5348,6 +5742,11 @@ export function planConsoleFormat(args: Expr[]): FmtPlan | null {
 
 /** node's `formatWithOptionsInternal` scan, transcribed. `argc` counts the format string. */
 export function planFormatString(first: string, argc: number): FmtPlan | null {
+  // DELIBERATELY NOT `//@@mutable`, unlike every other accumulator in this file: the local
+  // `push` arrow below CAPTURES `pieces`, and an append through a capture is NT1607 (the
+  // env holds a second pointer this scope cannot null). Marking it would only trade the
+  // NT1606 for an NT1607 while making the checker-only instrument report this function as
+  // clean — docs/ROADMAP.md, the captured-accumulator item.
   const pieces: FmtPiece[] = [];
   const push = (text: string) => { if (text !== "") pieces.push({ kind: "text", text }); };
   let a = 0;

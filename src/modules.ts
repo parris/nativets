@@ -308,6 +308,7 @@ class Renamer {
  * frame, so its locals cannot collide across modules.
  */
 function topLevelNames(p: Program): string[] {
+  //@@mutable
   const out: string[] = [];
   const walk = (list: Stmt[]): void => {
     for (const s of list) {
@@ -362,8 +363,13 @@ function classNames(p: Program): Set<string> {
  * Counting instead of reading the clock keeps the same no-collision guarantee, and
  * terminates: each candidate is longer than the last, so a finite source set must
  * eventually fail to contain one. Pinned in test/modules.test.ts.
+ *
+ * Exported for TOOLING: a mangled top-level name is `${base}${i}_${original}`, so `base`
+ * is what lets a reader turn a linked name back into the module index it came from.
+ * `test/blocker-metric.ts` attributes every blocker that way — exactly, for every
+ * function, rather than through a `loc` most nodes do not carry.
  */
-function choosePrefixBase(sources: string[]): string {
+export function choosePrefixBase(sources: string[]): string {
   for (const base of ["_m", "_nt_m", "_nativets_module_"]) {
     if (!sources.some((s) => s.includes(base))) return base;
   }

@@ -941,8 +941,14 @@ clear();
    * Closing it means resolving the assignment against a real scope chain rather than
    * matching names, which is a bigger change than this one and belongs on its own.
    */
-  test("REFUSED, still: a block-scoped local in another function poisons the name", () => {
-    expectRejected(`
+  test("a block-scoped local in another function does not poison the name either", async () => {
+    // WAS a pinned open refusal: the subtraction covered a function's parameters and its
+    // body's TOP-LEVEL declarations only, so a `let a` declared in an inner BLOCK (here a
+    // `switch` case, the shape at src/checker.ts:2207) still poisoned `a` program-wide.
+    // Scoping the question to the body that DECLARES the narrowed binding closes it from
+    // the other side: `a` in `f` is `f`'s own, so only arrows in `f` can matter, and
+    // `other`'s locals — block-scoped or not — are no longer part of the question.
+    await expectNode(`
 function use(s: string): number { return s.length; }
 function f(xs: string[]): number {
   const a = xs.at(0);
@@ -956,6 +962,45 @@ function other(k: number): number {
   }
 }
 console.log(f(["hi"]), other(1));
-`, "NT2001", "got ?Ustring");
+`);
+  });
+
+  /*
+   * ...and the same question asked of an ARROW'S OWN PARAMETER.
+   *
+   * `closureAssigned` was consulted for EVERY fact by bare name, so it fired even when
+   * the narrowed binding was the parameter of the very arrow being typed — nothing any
+   * closure could possibly reach. That is `src/coverage-preprocess.ts`'s
+   * `const isP = (t: Tok | undefined, v: string) => !!t && t.kind === …`, which compiled
+   * standalone and did not compile once the module graph was linked, because some other
+   * module's arrow assigns a `t`.
+   */
+  test("an arrow's OWN PARAMETER narrows, whatever other arrows in the program assign", async () => {
+    await expectNode(`
+interface Tok { kind: string; value: string }
+let t: number = 0;
+const nums: number[] = [1, 2, 3];
+const doubled: number[] = nums.map((x: number) => { t = t + x; return x * 2; });
+const isP = (t: Tok | undefined, v: string): boolean => !!t && t.kind === "punct" && t.value === v;
+console.log(isP({ kind: "punct", value: "+" }, "+"), isP(undefined, "+"), t, doubled[2]);
+`);
+  });
+
+  /*
+   * The safe direction, pinned: a MODULE-LEVEL binding is still judged against the whole
+   * program, because any arrow anywhere in it can reach one.
+   */
+  test("REFUSED, still: a module-level binding an arrow elsewhere assigns", () => {
+    expectRejected(`
+function use(s: string): number { return s.length; }
+let a: string | undefined = "hi";
+function later(): void { const clear = (): void => { a = undefined; }; clear(); }
+function f(): number {
+  if (a !== undefined) return use(a);
+  return -1;
+}
+console.log(f());
+later();
+`, "NT1031", "captured binding");
   });
 });

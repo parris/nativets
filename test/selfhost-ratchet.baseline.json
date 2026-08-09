@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-09",
-    "rev": "20914a0"
+    "rev": "fb8a3e7"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "0cb91d4a0772e93a",
+      "sha256": "c9020a7c9e29eef6",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],…"
+        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@Expr,right:@Expr,ty:?Ustring} | {kind:string,op:string,left:@Expr,right:@Expr,ty:?Ustring} — 'e' is narrowed here to MORE THAN O…"
       },
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],…"
+        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@Expr,right:@Expr,ty:?Ustring} | {kind:string,op:string,left:@Expr,right:@Expr,ty:?Ustring} — 'e' is narrowed here to MORE THAN O…"
       }
     },
     "checker.ts": {
-      "sha256": "5be6814c0daade0f",
+      "sha256": "728794e4fa7bf707",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -27,7 +27,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],…"
+        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} — 'e' is …"
       }
     },
     "cli.ts": {
@@ -41,11 +41,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],…"
+        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} —…"
       }
     },
     "codegen.ts": {
-      "sha256": "5f6785965b1bcdd1",
+      "sha256": "8bd05c6d169e1461",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -54,11 +54,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],…"
+        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} — 'e' is …"
       }
     },
     "coverage-preprocess.ts": {
-      "sha256": "bf01de153f7f5938",
+      "sha256": "8f468e60ef0f1525",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -81,11 +81,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],…"
+        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nts0_m0_Expr,right:@_nts0_m0_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nts0_m0_Expr,right:@_nts0_m0_Expr,ty:?Ustring} —…"
       }
     },
     "diagnostics.ts": {
-      "sha256": "976f2a8607bb75d3",
+      "sha256": "88ccc3c46adbfbc0",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -108,11 +108,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],…"
+        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} —…"
       }
     },
     "lexer.ts": {
-      "sha256": "facf7291d796d2ef",
+      "sha256": "3b49856343a0861c",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -125,20 +125,20 @@
       }
     },
     "modules.ts": {
-      "sha256": "a093d9708f91c0ed",
+      "sha256": "71ce215bf3e2ef49",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'kind' does not exist on number"
+        "message": "[NT2001] Property 'kind' does not exist on number at L:C"
       },
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],…"
+        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} —…"
       }
     },
     "ownership.ts": {
-      "sha256": "568d724005fb31ab",
+      "sha256": "cfadae7f2f9aa3fd",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -148,7 +148,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],…"
+        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} — 'e' is …"
       }
     },
     "parser.ts": {
@@ -156,12 +156,12 @@
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'kind' does not exist on number"
+        "message": "[NT2001] Property 'kind' does not exist on number at L:C"
       },
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'property' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],…"
+        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nt_m2_Expr,right:@_nt_m2_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nt_m2_Expr,right:@_nt_m2_Expr,ty:?Ustring} — 'e' is …"
       }
     }
   }

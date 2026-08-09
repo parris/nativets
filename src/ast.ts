@@ -566,6 +566,52 @@ export function containsTypeRef(t: Ty): boolean {
 export function expandTypeRef(t: Ty, table: Map<string, Ty>): Ty {
   return isTypeRefTy(t) ? (table.get(typeRefName(t)) ?? t) : t;
 }
+/**
+ * Unfold a back-edge that sits under a TYPE CONSTRUCTOR — `expandTypeRef` distributed
+ * through `?U`/`?N` and `[]`.
+ *
+ * WHY THIS EXISTS. `expandTypeRef` is the identity on anything that is not a BARE `@N`, so
+ * an OPTIONAL back-edge — `interface Node { next?: Node }`, the single commonest spelling
+ * there is — produced `?U@Node` as a value's own static type. That is precisely what the
+ * INVARIANT above forbids: `@Name` is allowed only NESTED inside a shape, and `?U` is not a
+ * shape, it is a constructor applied to the value itself. Two symptoms, one cause:
+ *
+ *   - `if (n.next)` reached codegen's `truthyOf`, which unwrapped the nullable box and asked
+ *     for the truthiness of the bare `@Node` inside — `InternalError: no truthiness rule`.
+ *   - `depth(e.next)` was refused `NT2001 expects ?UU<…>, got ?U@E`, because the PARAMETER's
+ *     annotation `E | undefined` is parsed to the expanded shape while the ARGUMENT read out
+ *     of the field is not. That is the shape every AST walker is written in.
+ *
+ * TERMINATION is the same O(1) argument `expandTypeRef` makes, and this does not weaken it.
+ * The recursion strips one constructor per step off a finite string, and it does NOT descend
+ * into an object's fields or a union's members — those are the "nested inside a shape"
+ * positions where a back-edge legitimately stays folded, and descending into them is exactly
+ * the fixpoint that would diverge. So the result is concrete at the top and folded again one
+ * real access deeper.
+ *
+ * REBUILT, NOT CONCATENATED. `?N` is a prefix and `[]` is a suffix, so `?Nstring` + `[]`
+ * reads back as `string[] | null` — the collision `makeArrayTy` was written for. The nullable
+ * arm therefore keeps the original 2-char prefix and swaps only the base, and the array arm
+ * goes through `makeArrayTy` so a nullable element is parenthesized.
+ */
+export function unfoldTypeRef(t: Ty, table: Map<string, Ty>): Ty {
+  // The cheap half FIRST: `@` never appears in a structural type, so a `false` is conclusive
+  // and costs one scan — and this runs on every expression type in `genExpr`. Any reference
+  // starts with `@`, so nothing is skipped by asking this before `isTypeRefTy`.
+  if (!hasTypeRef(t)) return t;
+  if (isTypeRefTy(t)) return table.get(typeRefName(t)) ?? t;
+  if (isNullableTy(t)) {
+    const base = baseTy(t);
+    const un = unfoldTypeRef(base, table);
+    return un === base ? t : ((t.slice(0, 2) + un) as Ty);
+  }
+  if (isArrayTy(t)) {
+    const el = elemTy(t);
+    const un = unfoldTypeRef(el, table);
+    return un === el ? t : makeArrayTy(un);
+  }
+  return t;                                      // a shape: its back-edges stay folded
+}
 
 /* ============================================================
  * Generic type parameters (M3 — monomorphization).
