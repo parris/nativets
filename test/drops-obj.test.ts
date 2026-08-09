@@ -9,7 +9,7 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { compileAndRun } from "./harness.ts";
+import { compileAndRun, runWithNode } from "./harness.ts";
 
 describe("object drops (deterministic free)", () => {
   test("owned object is freed at scope exit", async () => {
@@ -207,6 +207,115 @@ console.log(f());
 console.log(__objLive());`;
     const r = await compileAndRun(src);
     expect(r.stdout).toBe("2\n0\n"); // g drops `outer` shallowly while the caller owns `inner`
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+/**
+ * THE CHAIN-TEMPORARY DROP, for CLASS INSTANCES — the half Stage 41 never wired.
+ *
+ * `freeReceiverTemp` (src/codegen.ts) frees an unbound temporary receiver after an
+ * ARRAY method call, and lives on the `isArrayTy(recv.ty)` branch of the method
+ * dispatch. A class-instance call takes a different branch entirely — it lowers to
+ * `C.m(inst, …)` via `genUserCall`, arriving several hundred lines earlier — so no
+ * drop was ever emitted there. Measured on the same position in the same loop, before
+ * this change:
+ *
+ *   for (…200…) { t = t + [1,2,3].indexOf(2); }   __arrLive() === 0    freed
+ *   for (…200…) { t = t + new P(7).get(); }       __objLive() === 200  LEAKED
+ *
+ * ROADMAP's Phase C listed only "temporaries in non-chain positions (call arguments)"
+ * as open, which was true for arrays and false for class instances.
+ *
+ * WHAT PROVES THE DROP SAFE. Two facts, and the drop is gated on the second:
+ *  1. `new C(…)` is a fresh allocation nothing else can name, and `this` is a
+ *     PARAMETER — a BORROW. Storing it (`G = this`, `[this]`, into a container) is
+ *     already NT1604, so the receiver pointer cannot escape the method body.
+ *  2. The one sanctioned way it leaves is `return this`, which the `@@mutable` setter
+ *     does. That is invisible to the array rule's `out.v === recv.v` pointer check,
+ *     because a lowered call returns a FRESH SSA name. So the gate is the STATIC
+ *     return type: a method that hands back its receiver returns the receiver's class.
+ *
+ * Everything else still leaks — a leak, never a double free.
+ */
+describe("a fresh `new C(…)` receiver is dropped after a chain call", () => {
+  const P = `class P { constructor(private n: number) {} get(): number { return this.n; } }\n`;
+
+  test("200 chain calls leave 0 live — the array shape's answer, for objects", async () => {
+    const r = await compileAndRun(`${P}let t = 0;\nfor (let i = 0; i < 200; i++) { t = t + new P(7).get(); }\nconsole.log(t);\nconsole.log(__objLive());\n`);
+    expect(r.stdout).toBe("1400\n0\n");
+    expect(r.exitCode).toBe(0); // a double free presents HERE, with correct stdout
+  });
+
+  /**
+   * Spelled LONGHAND, because node refuses a parameter property outright
+   * (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`) and would oracle an empty stdout / exit 1.
+   */
+  test("the answer is still node's — stdout AND exit code", async () => {
+    const source = `class P { n: number; constructor(n: number) { this.n = n; } get(): number { return this.n; } }\n` +
+      `let t = 0;\nfor (let i = 0; i < 200; i++) { t = t + new P(7).get(); }\nconsole.log(t);\n`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("1400\n");
+  });
+
+  test("a NAMED receiver is untouched — its binding owns it and drops it once", async () => {
+    const r = await compileAndRun(`${P}function f(): number { const p = new P(7); return p.get() + p.get(); }\nconsole.log(f());\nconsole.log(__objLive());\n`);
+    expect(r.stdout).toBe("14\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  /**
+   * THE SHAPE THAT MUST NOT BE DROPPED. `bump()` returns `this`, so the call's result
+   * aliases the receiver; freeing it would be a use-after-free on the very next `.n`.
+   * It stays open (leaks) rather than being freed.
+   */
+  test("a method returning `this` is NOT dropped — the result aliases the receiver", async () => {
+    const src = `//@@mutable\nclass C { constructor(public n: number) {} bump(): C { this.n = this.n + 1; return this; } }\n` +
+      `let t = 0;\nfor (let i = 0; i < 5; i++) { t = t + new C(1).bump().n; }\nconsole.log(t);\nconsole.log(__objLive());\n`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("10\n5\n"); // 5 leaked, and every read is valid
+    expect(r.exitCode).toBe(0);
+    const oracle = runWithNode(`//@@mutable\nclass C { n: number; constructor(n: number) { this.n = n; } bump(): C { this.n = this.n + 1; return this; } }\n` +
+      `let t = 0;\nfor (let i = 0; i < 5; i++) { t = t + new C(1).bump().n; }\nconsole.log(t);\n`);
+    expect(oracle.stdout).toBe("10\n");
+  });
+
+  /**
+   * A method returning a FIELD is droppable: `nt_obj_free` frees the receiver's slot
+   * array and nothing it points at (exactly as `nt_arr_free` frees a header only), so
+   * the returned pointer stays valid. The array it hands back still leaks — that is the
+   * `new P([…])` argument's own storage, a separate open case.
+   */
+  test("a method returning a FIELD is dropped, and the field survives it", async () => {
+    const src = `class Q { constructor(public xs: number[]) {} f(): number[] { return this.xs; } }\n` +
+      `const r = new Q([1, 2, 3]).f();\nconsole.log(r[0] + r[1] + r[2]);\nconsole.log(__objLive());\n`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("6\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  /**
+   * STAYS OPEN, and the reason is not this rule. A field-assigning method has its return
+   * type REWRITTEN to the class and an implicit `return this` inserted (src/parser.ts,
+   * "or nothing, which inserts it") — even when it is declared `: void`. So the gate sees
+   * `ret === C` and correctly declines: the call really does hand the receiver back.
+   *
+   * That rewrite is a separate, pre-existing SILENT WRONG ANSWER, reported alongside this
+   * change and deliberately not pinned here (pinning it would cement the wrong value):
+   *
+   *   //@@mutable
+   *   class C { n: number; constructor(n: number) { this.n = n; } set(v: number): void { this.n = v; } }
+   *   const c = new C(1); console.log(c.set(2));
+   *   // node: undefined      nativets: C { n: 2 }      both exit 0
+   */
+  test("a `void`-DECLARED @@mutable setter is NOT dropped — it returns the receiver anyway", async () => {
+    const src = `//@@mutable\nclass C { constructor(public n: number) {} set(v: number): void { this.n = v; } }\n` +
+      `for (let i = 0; i < 50; i++) { new C(1).set(2); }\nconsole.log(__objLive());\n`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("50\n"); // leaked, never freed twice
     expect(r.exitCode).toBe(0);
   });
 });

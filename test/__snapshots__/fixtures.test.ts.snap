@@ -4346,6 +4346,7 @@ L0:
   %t13 = call ptr @nt_obj_new(double 0x4000000000000000)
   call void @Point.constructor(ptr %t13, double 0x4014000000000000, double 0x4028000000000000)
   %t14 = call double @Point.distSquared(ptr %t13)
+  call void @nt_obj_free(ptr %t13)
   call void @js_print_num(double %t14)
   call void @js_print_newline()
   %t15 = load ptr, ptr %p.addr
@@ -5059,6 +5060,7 @@ L0:
   %t5 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   call void @Emitter.constructor(ptr %t5, double 0x401C000000000000)
   %t6 = call ptr @Emitter.emit(ptr %t5)
+  call void @nt_obj_free(ptr %t5)
   call void @js_print_str(ptr %t6)
   call void @js_print_newline()
   %t7 = load ptr, ptr @nt.g.Sym.prefix
@@ -8383,9 +8385,11 @@ L0:
   %t12 = load double, ptr @nt.g.DEFAULT_N
   call void @Box.constructor(ptr %t11, double %t12)
   %t13 = call double @Box.get(ptr %t11)
+  call void @nt_obj_free(ptr %t11)
   %t14 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   call void @Box.constructor(ptr %t14, double 0x3FF0000000000000)
   %t15 = call double @Box.get(ptr %t14)
+  call void @nt_obj_free(ptr %t14)
   call void @js_print_num(double %t13)
   call void @js_print_sep()
   call void @js_print_num(double %t15)
