@@ -631,11 +631,72 @@ const char *js_str_substring(const char *s, double a, double b) {
   double lo = a < b ? a : b, hi = a < b ? b : a;
   return slice_impl(s, lo, hi, 0);
 }
-const char *js_str_trim(const char *s) {
-  const char *start = s; while (*start == ' ' || *start == '\t' || *start == '\n' || *start == '\r') start++;
-  const char *end = s + strlen(s); while (end > start && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\n' || end[-1] == '\r')) end--;
+/* ---- The trims: trim / trimEnd / trimStart, over ONE whitespace set. -------------
+ *
+ * ECMAScript `TrimString` strips WhiteSpace + LineTerminator, which is far more than
+ * the ` \t\n\r` this used to match: 21 of the 25 code points went through untouched,
+ * silently, at exit 0 (`" x ".trim()` returned its input). One predicate
+ * now, shared by all three, so the set cannot be right in one and wrong in another.
+ *
+ * This is the SECOND copy of the set — `isSpace` in `src/lexer.ts` is the first, and
+ * it cannot be reused directly: that one is TypeScript running in the frontend over
+ * UTF-16 code units, this one is C running in the runtime over UTF-8 bytes. They are
+ * pinned to each other by a test (`test/trim.test.ts`) that drives both over the same
+ * table, which is the only coupling available across the language boundary.
+ *
+ * U+180E is deliberately ABSENT: it stopped being Zs in Unicode 6.3, and test262
+ * (trim/u180e.js) asserts it survives a trim. */
+static int nt_ws_cp(unsigned cp) {
+  if (cp == 0x09 || cp == 0x0A || cp == 0x0B || cp == 0x0C || cp == 0x0D || cp == 0x20) return 1;
+  return cp == 0xA0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200A) ||
+         cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F ||
+         cp == 0x3000 || cp == 0xFEFF;
+}
+/* Decode the UTF-8 sequence at `p` (which must not be the end), storing its byte
+ * length in `*len`. Same decoder shape as js_str_code_point_at. */
+static unsigned nt_utf8_cp(const unsigned char *p, const unsigned char *end, long *len) {
+  unsigned c = p[0];
+  long need = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+  if (need == 0 || p + need >= end) { *len = 1; return c; } /* ASCII, or truncated */
+  unsigned cp = c & (unsigned)(0x7F >> (need + 1));
+  for (long k = 1; k <= need; k++) cp = (cp << 6) | (p[k] & 0x3F);
+  *len = need + 1; return cp;
+}
+/* Scan FORWARD past whitespace from `s`. */
+static const char *nt_ws_skip_fwd(const char *s, const char *end) {
+  const unsigned char *p = (const unsigned char *)s, *e = (const unsigned char *)end;
+  while (p < e) {
+    long len; unsigned cp = nt_utf8_cp(p, e, &len);
+    if (!nt_ws_cp(cp)) break;
+    p += len;
+  }
+  return (const char *)p;
+}
+/* Scan BACKWARD past whitespace from `end`, never below `start`. UTF-8 is
+ * self-synchronizing: step back over continuation bytes (0b10xxxxxx) to find the
+ * lead byte, then decode forward from there. */
+static const char *nt_ws_skip_back(const char *start, const char *end) {
+  const unsigned char *s = (const unsigned char *)start, *p = (const unsigned char *)end;
+  while (p > s) {
+    const unsigned char *q = p - 1;
+    while (q > s && (*q & 0xC0) == 0x80) q--;
+    long len; unsigned cp = nt_utf8_cp(q, p, &len);
+    /* Only treat it as one character if it spans exactly back to `p`; a stray
+     * continuation byte is not whitespace and stops the scan. */
+    if (q + len != p || !nt_ws_cp(cp)) break;
+    p = q;
+  }
+  return (const char *)p;
+}
+static const char *nt_trim_impl(const char *s, int front, int back) {
+  const char *end = s + strlen(s);
+  const char *start = front ? nt_ws_skip_fwd(s, end) : s;
+  if (back) end = nt_ws_skip_back(start, end);
   long len = end - start; char *o = alloc_str((size_t)len); memcpy(o, start, (size_t)len); o[len] = 0; return o;
 }
+const char *js_str_trim(const char *s)       { return nt_trim_impl(s, 1, 1); }
+const char *js_str_trim_end(const char *s)   { return nt_trim_impl(s, 0, 1); }
+const char *js_str_trim_start(const char *s) { return nt_trim_impl(s, 1, 0); }
 const char *js_str_repeat(const char *s, double countd) {
   long count = (long)countd; if (count < 0) count = 0;
   size_t n = strlen(s); char *o = alloc_str(n * (size_t)count);

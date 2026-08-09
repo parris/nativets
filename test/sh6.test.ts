@@ -255,7 +255,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // (docs/decorators.md). Behind it: NT1002, `trimEnd`. Note what did NOT clear —
   // `setBlockDrops(list: Stmt[], …)` pushes to a PARAMETER, which is a borrow, so it stays
   // NT1606 and needs a source change rather than a compiler one.
-  "ast.ts": { rung: 0, code: "NT1002", blame: "self" },
+  // ...and NT1002 is CLEARED: `trimEnd`/`trimStart` are implemented (test/trim.test.ts),
+  // which also turned up that `trim` itself had been stripping only 4 of ECMAScript's 25
+  // whitespace code points — a silent wrong answer, at exit 0, since the string batch.
+  // Behind it, ast.ts's own NT2001 at 244:22: `isIdentifier(tag) ? tag : undefined`, a
+  // ternary whose arms are `string` and `undefined` against a `?Ustring` return. Probed
+  // one deeper before recording, so the next lane knows the size: behind THAT is NT1001,
+  // `.find` on an object array, which is an aliasing refusal rather than a small gap.
+  "ast.ts": { rung: 0, code: "NT2001", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -274,7 +281,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // now an `//@@mutable` ACCUMULATOR and all 13 sites are real in-place appends. The
   // immutable rewrite was never taken — measured at 760 ms vs 2 ms for 30k appends under
   // bun, which is stage 0. Behind it: NT2001, "Cannot compare string with undefined".
-  "lexer.ts": { rung: 0, code: "NT2001", blame: "self" },
+  // ...and that NT2001 was a REAL SOURCE DEFECT, not the checker gap it looked like.
+  // `const radix = source[st.i + 1]` was compared `!== undefined` — correct TypeScript
+  // only because tsconfig sets noUncheckedIndexedAccess. nativets cannot agree: a string
+  // index that is out of range PANICS by design (the Stage 41 bounds rule), so the element
+  // type is `string`, the guard is dead, and at end-of-file the PANIC happens one line
+  // before the guard could have helped. `.at` is the spelling that means "may be absent"
+  // in both toolchains. Behind it: NT1004, a `throw` outside a `try` at 202:5.
+  "lexer.ts": { rung: 0, code: "NT1004", blame: "self" },
   // WALKED, not nudged. This module's blocker CHAIN was measured end to end — six
   // distinct blockers between it and rung 1 — and five of them are now cleared:
   //   1. NT1606  `.push` x4 in formatDiagnostic            -> immutable rebind (src)
@@ -310,7 +324,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. parser.ts's own 18
   // `this.<field>` push sites are NOT cleared — a field names no binding the ownership
   // pass can prove unique, so they stay NT1606 behind this.
-  "parser.ts": { rung: 0, code: "NT2001", blame: "lexer.ts" },
+  "parser.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -407,7 +421,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
   // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
   // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
-  "modules.ts": { rung: 0, code: "NT2001", blame: "lexer.ts" },
+  "modules.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
