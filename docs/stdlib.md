@@ -102,6 +102,20 @@ even a side-effecting callback observes node's exact call order.
 naming the immutable replacement (`.with` / `.slice` + spread / `.map`), exactly like
 `.push`/`.pop` (`.sort`'s hint names the ES2023 copying `.toSorted()`).
 
+**ARITY follows TypeScript's lib, not node** (Stage 51). node accepts more than `lib.es5.d.ts`
+declares, and the two disagree in both directions, so the rule is: **an arity `tsc` rejects is a
+real user type error (`NT2001`); an arity `tsc` accepts must not be reported as one.** Refusing a
+form tsc accepts is not merely rude — `coverage` counts only NT1xxx as feature blockers and treats
+NT2xxx as a user error, so such a gap is invisible to the self-hosting gradient. Filled because tsc
+accepts them: **`s.slice()` / `arr.slice()`** (both parameters optional; the zero-argument form is
+the whole receiver, and `slice` is in `FRESH_ARRAY_CALLS` so `xs.slice().sort()` is legal),
+**`s.lastIndexOf(search, position)`**, and **`arr.indexOf(x, fromIndex)` / `arr.lastIndexOf(x,
+fromIndex)`**. The three `fromIndex`/`position` forms clamp *differently on purpose* (ES 22.1.3.11 /
+23.1.3.17 / 23.1.3.20): absent means 0 forward but `len-1` backward, and a negative index that
+underflows restarts at 0 for `indexOf` but gives up with -1 for `lastIndexOf`. Still `NT2001`
+because tsc requires the argument even though node defaults it: **`s.substring()`**, **`s.charAt()`**,
+**`s.at()`**, **`arr.at()`**.
+
 **Still open in Batch 1's spirit** (deferred, each needs more than a fill): `Array.from` of an
 array-*like* or with a `mapFn`, and `.flat(depth)` beyond one level (chain `.flat().flat()`).
 *(`new Date()` + the date-component API landed in Batch 3; `String#normalize` is refused there,
@@ -226,3 +240,15 @@ behavioral tests / local mocks, like the actor and HTTP lanes.
 4. **The prelude → real `std/*` modules** — unblocked: self-hosting **SH1** (a real
    `import`/`export` module system) has landed.
 5. Remaining Tier-C initiatives: **`RegExp`** (a regex engine) and **timers/streams**.
+
+> **`RegExp` is NOT on the self-hosting path — measured, Stage 51.** It is tempting to pair "stdlib
+> helpers" with "and a regex engine", so the measurement is recorded here to stop the next lane
+> re-deciding it from intuition. `src/` contains **zero** regex literals, deliberately and
+> permanently: `test/no-regex.test.ts` is a ratchet (a module that reaches zero is *deleted* from
+> its table, so a cleared module cannot take one back) and its premise is that a compiler which
+> cannot compile itself because of a construct it refuses on principle will never self-host. The
+> compiler scans characters instead, and the equivalence of every rewritten class is pinned over
+> all 65,536 BMP code points. So an engine is pure surface growth against the "keeping the gap from
+> growing" rule in `docs/self-hosting.md`: a large new compiler+runtime subsystem that must itself
+> stay inside the self-hostable subset, buying the frontier nothing. It remains a legitimate
+> *user-facing* feature — just never justify it as self-hosting work, and never let it into `src/`.
