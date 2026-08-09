@@ -1152,6 +1152,17 @@ Refused:
 - **`new Map([[k, v], …])`**, the entries form (`NT1014`) — it needs the `[key, value]` **tuple
   type** we do not have (`["a", 1]` is already `NT2001`, "array elements must share a type").
   Use `.set`.
+- **spreading a Map** (`[...m]`, `NT1014`) — the same gap reached from the other side, since a
+  Map spread yields `[key, value]` pairs. `for (const [k, v] of m)` / `m.keys()` / `m.values()`
+  are the supported spellings.
+
+The `.set` chain the hint prescribes is not a workaround, it is the **same program**:
+`Map.prototype.set` returns its receiver (ES2024 24.1.3.9 §8), and the constructor's entries form
+calls `set` once per entry in order (24.1.1.1 §8). So `new Map([[a,1],[b,2]])` and
+`new Map().set(a,1).set(b,2)` are one computation by construction, and — unlike the `.push`
+rewrite — the chain costs bun nothing. Every `new Map` table in `src/*.ts` is spelled that way;
+`test/collections.test.ts` lifts the real tables out of the real files and diffs nativets on the
+chain against **node running the entries form**.
 
 ### Ordering: `.toSorted()` instead of `.sort()` — but `.reverse()` is accepted
 
@@ -2128,6 +2139,35 @@ codegen's `coerce` can build a `[tag,value]` box from. Everything in this sectio
 refused, unchanged, and `test/nullable-assign.test.ts` pins that — including `null` for a
 non-nullable parameter, and each nullish literal for the WRONG arm (`f(null)` where the
 parameter is `string | undefined`).
+
+### `===` between TWO nullable values is refused (`NT1009`) — it was a silent wrong answer
+
+```ts
+const p: number | undefined = 1;
+const q: number | undefined = 2;
+console.log(p === q);      // node: false      nativets, before: TRUE, exit 0
+```
+
+A nullable is a `[tag, value]` **box**, and `genExpr`'s comparison chain dispatched on
+`number` / `boolean` / array+object / relational-string and then fell through to
+`js_str_eq` — `strcmp` over the box, which stops at the first NUL byte of the i64 tag. So
+every *present* box compared equal to every other one regardless of what it carried, and
+`?Nstring` was wrong the same way (`"a" === "b"` was `true`). This is the **default-arm**
+failure mode `src/codegen.ts`'s own `joinFn` comment names: *"a two-way choice written twice
+is exactly how the third case gets missed twice."*
+
+It is the fourth member of a family `refuseUnboxedUnion` (`src/checker.ts`) already records
+for the general-union box — truthiness tested the pointer, `===` compared tags,
+`JSON.stringify` rendered `null`, concatenation emitted invalid IR. Three of the four were
+fixed for the nullable box; this one had **no refusal in front of it**. Refused now, because
+"reject, never miscompile" says the refusal lands first: a correct lowering is a tag dispatch
+(*both nullish → true; both present → compare the unwrapped bases; else false*) that needs a
+branch per base type, and guessing is the worse outcome.
+
+**Still accepted, and unchanged** — `x === undefined` / `x === null` (either operand order).
+That really *is* a tag comparison, which is why it was always right. The fixes the diagnostic
+hands back are `if (a !== undefined && b !== undefined)` (narrowing makes both operands the
+base type) or `(a ?? d) === (b ?? d)`; both match node. `test/narrowing.test.ts`.
 
 ### Narrowing does not reach `this.<field>` (`NT2001`) — a refusal, with a reason
 

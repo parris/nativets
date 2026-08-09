@@ -454,7 +454,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // guard to ast.ts's ternary. A code holding still while the module behind it changes
     // is exactly what this tree-wide set cannot see, and why selfhost-ratchet exists.
     expect(Object.keys(byCode).sort()).toEqual(
-      ["NT1004", "NT1014", "NT1606", "NT2001"],
+      // NT1014 IS GONE tree-wide: every LITERAL entries-form site in src/ is a `.set` chain
+    // now, and the one DYNAMIC site that was actually blocking (ownership.ts's `clone`,
+    // refused for the Map spread) became a `.set` LOOP — which is what the constructor
+    // does internally, so no tuple encoding was invented.
+    ["NT1004", "NT1606", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -538,9 +542,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // the construct, never a count of it.
     // SIX at the merge, not five: main independently moved `cli.ts` off NT1020 (the
     // un-awaited `buildBinary`), and it landed in this bucket with the rest.
-    expect(byCode["NT1014"]!.sort()).toEqual(
-      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "ownership.ts"],
-    );
+    // EMPTY NOW. Kept as an assertion rather than deleted: this bucket has emptied and
+    // refilled before, and the three DYNAMIC sites that remain in src/ still need a real
+    // [K,V] tuple, so a refill here means someone wrote the entries form again.
+    expect(byCode["NT1014"]).toBeUndefined();
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
@@ -582,7 +587,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // with a ternary of `string`/`undefined` unmasked by `trimEnd` landing. parser.ts and
     // modules.ts still inherit through the link, but now from ast.ts, not lexer.ts — the
     // attribution moved even though the code and the count did not.
-    expect(byCode["NT2001"]!.sort()).toEqual(["ast.ts", "modules.ts", "parser.ts"]);
+    // NINE of twelve, and all nine are ONE ternary in ast.ts (`string` vs `undefined`)
+    // reached through the link — the most concentrated this frontier has ever been.
+    // cli.ts is the exception that proves the shape: its NT2001 is its OWN
+    // (`process.stdout is not supported`), so stage-1 is separable from the grind for
+    // the first time.
+    expect(byCode["NT2001"]!.sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -823,7 +835,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // different module now. Same code, same count, different cause — the case a tree-wide
     // bucket is structurally unable to report, and the reason selfhost-ratchet keys on the
     // MESSAGE plus a per-module source hash instead of on the code.
-    expect(byCode["NT2001"]!.sort()).toEqual(["ast.ts", "modules.ts", "parser.ts"]);
+    // NINE of twelve, and all nine are ONE ternary in ast.ts (`string` vs `undefined`)
+    // reached through the link — the most concentrated this frontier has ever been.
+    // cli.ts is the exception that proves the shape: its NT2001 is its OWN
+    // (`process.stdout is not supported`), so stage-1 is separable from the grind for
+    // the first time.
+    expect(byCode["NT2001"]!.sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a

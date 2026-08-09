@@ -1793,6 +1793,68 @@ other wrong answers**; everything not node-exact is a named refusal (`.at`, `.fi
 `.indexOf`/`.includes`/`.lastIndexOf`/`.with` on the argument's type, `.concat`, `.toSorted`
 without a comparator, `.map` producing a nullable).
 
+### THE ENTRIES FORM IS GONE FROM `src/` — and the six modules did NOT stay a group
+
+`NT1014` was the first blocker for **six of the twelve** modules. It is now absent from the
+whole tree, cleared entirely by SOURCE changes, and the census that drove them was run with
+`readFileSync` rather than shell `grep` (project memory: the shimmed `grep` here silently
+misses matches, and several wrong conclusions today came from it).
+
+**The census splits the construct in two, and the split is the whole finding:**
+
+| | sites in `src/` | shape | available fix |
+|---|---|---|---|
+| **LITERAL** `[[k, v], …]` | 4 | the entries are written out | the `.set` chain — mechanical, **taken** |
+| **DYNAMIC** | 4 | the entries come from a value | a `[K, V]` **tuple type** — not available |
+
+Taken (literal): `checker.ts`'s `CONSOLE_STREAMS` and `FMT_SPECS`, `modules.ts`'s two `sources`
+maps. Left (dynamic): `ast.ts:1287` `new Map(p.recTypes ?? [])` against a declared
+`[string, Ty][]`, and `.map`-produced pair arrays at `codegen.ts:1089` and `ownership.ts:899`.
+`new Map(anotherMap)` — `parser.ts:600`, `codegen.ts:4214` — was never blocked; the Map-copy
+form is supported.
+
+**One dynamic site WAS the blocker, and it did not need the tuple type after all.**
+`ownership.ts:111`'s `clone` was
+`new Map([...s].map(([k, v]) => [k, { ...v }]))`, and what stopped it was reported as a **Map
+SPREAD** (`[...s]` yields pairs) — the same missing tuple reached from the other side. A `.set`
+*chain* cannot express it, since the entries are not known at the source; a `.set` *loop* can,
+and it is what the constructor does internally anyway (24.1.1.1 §8 calls `set` once per entry,
+in order). So the rewrite is a loop, it drops an intermediate pair array under bun, and no
+encoding was invented. This mattered: ownership.ts, driver.ts and cli.ts were all sitting on it.
+
+| module | was (linked) | now |
+|---|---|---|
+| `checker.ts`, `codegen.ts`, `coverage.ts`, `ownership.ts`, `driver.ts` | `NT1014` | **`NT1606`** — `.push` |
+| `cli.ts` (= stage-1) | `NT1014` | **`NT2001`** — `process.stdout is not supported`, its OWN |
+| every other module | — | **unchanged**; `diagnostics.ts` holds rung 3 |
+
+**Five of the six landed exactly where the previous lane MEASURED they would** in a scratch
+tree — `.push`, refused by decision (commit `1ea7fa2`) — which is the first time in this
+document that a prediction about the next blocker has been recorded in advance and then held.
+
+**The sixth did not, and it is the more interesting row.** `cli.ts` does not join the `.push`
+group; it stops on `process.stdout`, a host surface nativets has simply never grown. That is
+a *missing feature*, not a refusal-by-decision, and it means **stage-1's next step is now
+independent of the 185-site `.push` rewrite** — the first time those two have been separable.
+Nobody predicted it, because the six had moved together for four measurements running.
+
+**PRE-EXISTING BUG, found on the way, and it is a SILENT WRONG ANSWER.**
+
+```
+const p: number | undefined = 1, q: number | undefined = 2;  p === q
+                                   node false        nativets TRUE     exit 0 on BOTH
+```
+
+Found because the `clone` gate test compares two `Map.get` results. `===` between two nullable
+BOXES fell through the comparison chain's **default arm** to `js_str_eq`, i.e. `strcmp` over the
+`[tag, value]` block, which stops at the first NUL byte of the i64 tag — so every present box
+equalled every other one, `?Nstring` included (`"a" === "b"` was `true`). It is the fourth member
+of the family `refuseUnboxedUnion` records for the general-union box, and the only one that never
+had a refusal in front of it. **Refused now** (`NT1009`, with the narrowing and `??` fixes in the
+hint); a correct lowering is a tag dispatch needing a branch per base type. `x === undefined` /
+`x === null` is untouched — that one really is a tag comparison. See `docs/divergences.md` and
+`test/narrowing.test.ts`.
+
 ---
 
 ### RESOLVED — `.push` is legal on a `@@mutable` ACCUMULATOR, and the rewrite was never taken
@@ -1858,6 +1920,32 @@ merely borrowed — which is right for every *other* call — a linear value pus
 stayed owned by its local, the local freed it at scope exit, and the array went on pointing at it:
 `g.push(a)` then `g[0].length` printed `3` for a 2-element array, at exit 0.
 
+### RE-MEASURED AT THE MERGE — and this time BOTH branches understated the movement
+
+The entries-form table two sections above was true on its own branch and was superseded within
+the hour: the `.push` lane landed at the same moment and legalized `.push` on a `@@mutable`
+accumulator, so the five modules recorded arriving at `.push` walk straight through it.
+
+| module | entries-form branch | `.push` branch | MERGED |
+|---|---|---|---|
+| `checker.ts`, `codegen.ts`, `coverage.ts`, `ownership.ts` | `NT1606` `.push` | `NT1014` | **`NT1002`** — ast.ts's `trimEnd` |
+| `driver.ts` | `NT1606` `.push` | `NT1014` | **`NT2001`** — lexer.ts's `Cannot compare string with undefined` |
+| `cli.ts` (= stage-1) | `NT2001` `process.stdout` | `NT1014` | **`NT2001`** — unchanged, its OWN |
+| `diagnostics.ts` | rung 3 | rung 3 | **rung 3**, IR byte-identical |
+
+Tree-wide the entries-form branch measured `["NT1606","NT2001"]` and the `.push` branch
+`["NT1002","NT1014","NT1606","NT2001"]`. **The merged answer is `["NT1002","NT1606","NT2001"]`
+and it is not a subset of either** — the fifth time this document records a merge whose blocker
+list neither side had right, and the first where both sides *understated* the frontier rather
+than overstating it. Two lanes each cleared a different term of the conjunction, so the modules
+moved two steps in one merge and no reviewer holding the two diffs could have computed it.
+
+The residual shape is worth stating: **five of twelve modules are now behind ONE `trimEnd`
+call site in `ast.ts`**, four of twelve behind lexer.ts's one comparison, one
+(`coverage-preprocess.ts`) behind an unannotated `.push`, and `diagnostics.ts` self-compiles.
+Stage-1's own blocker is a missing host builtin and depends on none of them.
+
+---
 ### Re-measured after `trimEnd` and the LEXER'S DEAD GUARD — and one of the three was NOT a compiler gap
 
 Three small blockers were taken together. Two cleared; the third did not, and *why* it does

@@ -2105,6 +2105,20 @@ class Checker {
           // tagged pair, never truthiness, so `0` / `""` / `false` compare false.
           if (isNullableTy(l) && (r === "undefined" || r === "null")) return "boolean";
           if (isNullableTy(r) && (l === "undefined" || l === "null")) return "boolean";
+          // TWO nullable boxes, on the other hand, is the SAME defect the general
+          // union comment below records — and it had no refusal in front of it. The
+          // FCMP chain in codegen has no nullable arm, so it fell through to
+          // `js_str_eq` over the `[tag, value]` block, which stops at the first NUL
+          // byte of the i64 tag: every present box equalled every other one, so
+          // `1 === 2` came back TRUE. See test/narrowing.test.ts.
+          if (isNullableTy(l) && isNullableTy(r)) {
+            throw nyi(
+              NYI.OPTIONAL_CHAIN,
+              `\`${e.op}\` between two nullable values (${l} and ${r}) — a nullable is a tagged box, so this would compare ` +
+                `PRESENCE and not the values. Narrow both first (\`if (a !== ${nullishKind(l)} && b !== ${nullishKind(r)}) …\`) ` +
+                `or supply defaults (\`(a ?? d) === (b ?? d)\`)`,
+            );
+          }
           // A general union is a BOX: `===` on it compared the two boxes' TAGS, so
           // `1 === 2` came out true. Refuse until the arms are compared themselves.
           for (const t of [l, r]) refuseUnboxedUnion(t, "`===`");
@@ -4743,10 +4757,9 @@ export function consoleMethod(e: Expr): string | null {
 }
 
 /** The stream each supported `console` method writes to — node's mapping. */
-export const CONSOLE_STREAMS: ReadonlyMap<string, "out" | "err"> = new Map([
-  ["log", "out"], ["info", "out"], ["debug", "out"],
-  ["error", "err"], ["warn", "err"],
-] as const);
+export const CONSOLE_STREAMS: ReadonlyMap<string, "out" | "err"> = new Map<string, "out" | "err">()
+  .set("log", "out").set("info", "out").set("debug", "out")
+  .set("error", "err").set("warn", "err");
 
 /* ============================================================
  * Format specifiers (Stage 49) — a faithful port of node's
@@ -4784,9 +4797,9 @@ export interface FmtPlan {
   restStart: number;
 }
 
-const FMT_SPECS: ReadonlyMap<string, FmtSpec> = new Map([
-  ["s", "s"], ["d", "d"], ["i", "i"], ["f", "f"], ["j", "j"], ["o", "o"], ["O", "O"], ["c", "c"],
-] as const);
+const FMT_SPECS: ReadonlyMap<string, FmtSpec> = new Map<string, FmtSpec>()
+  .set("s", "s").set("d", "d").set("i", "i").set("f", "f")
+  .set("j", "j").set("o", "o").set("O", "O").set("c", "c");
 
 /**
  * The compile-time format plan for a `console.*` call, or null when there is

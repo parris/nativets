@@ -108,7 +108,21 @@ export interface OwnDiag { code: string; message: string; line: number; movedAt?
 type VarState = { moved: boolean; must: boolean; at?: number };
 type State = Map<string, VarState>;
 
-const clone = (s: State): State => new Map([...s].map(([k, v]) => [k, { ...v }]));
+/*
+ * A SHALLOW copy of the state map — same keys, same order, a fresh `VarState` each.
+ * Spelled as a loop rather than `new Map([...s].map(([k, v]) => [k, { ...v }]))`
+ * because spreading a Map yields `[key, value]` PAIRS, and nativets has no tuple
+ * type (NT1014) — the same gap the entries form hits from the other side. This is
+ * what the Map constructor does internally anyway (ES2024 24.1.1.1 §8 calls `set`
+ * once per entry, in order; 24.1.3.9 §8 makes `set` return its receiver), so the two
+ * spellings are one program by construction — pinned against node in
+ * `test/collections.test.ts`. It also drops an intermediate pair array under bun.
+ */
+const clone = (s: State): State => {
+  let out: State = new Map<string, VarState>();
+  for (const [k, v] of s) out = out.set(k, { ...v });
+  return out;
+};
 function merge(a: State, b: State): State {
   const out: State = new Map();
   for (const k of new Set([...a.keys(), ...b.keys()])) {
