@@ -694,3 +694,58 @@ console.log(__objLive(), __arrLive());
     expect(r.exitCode).toBe(0);
   });
 });
+
+/*
+ * PRE-EXISTING BUG, found in this lane's blast radius and fixed here.
+ *
+ * A `@@mutable` record is compiled to the TAGGED object type `Cell{n:number}` — the same
+ * encoding a class instance uses — which is what makes mutability nominal. `genInspectObject`
+ * folds that tag into the opening brace, which is exactly right for a CLASS (node really
+ * does print `Counter { pos: 0 }`) and WRONG for a record, which node prints untagged.
+ *
+ *   node:      { n: 1 }            nativets (before): Cell { n: 1 }        exit 0 on both
+ *
+ * A silent wrong answer on a plain, non-recursive, fully supported feature — and pieces 1-3
+ * multiply it, since tagging the ~48 AST interfaces would make every `console.log` of an AST
+ * node wrong. `program.mutableRecords` already distinguishes the two carriers.
+ *
+ * BOTH SIDES are asserted here, because the fix would otherwise read as a regression: a real
+ * class must KEEP its prefix.
+ */
+describe("console.log of a tagged value: a record is untagged, a class is not", () => {
+  test("a `@@mutable` record prints untagged and a class keeps its name (node is the oracle)", async () => {
+    const source = `
+//@@mutable
+interface Cell { n: number }
+class Counter { pos: number = 0; get(): number { return this.pos; } }
+const c: Cell = { n: 1 };
+const k = new Counter();
+console.log(c);
+console.log(k);
+console.log({ inner: c });
+const xs: Cell[] = [{ n: 2 }, { n: 3 }];
+console.log(xs);
+`;
+    await expectMatches(source, await runWithNode(source));
+  });
+
+  test("the DEPTH cut-off follows the same split — `[Object]` for a record, `[Cls]` for a class", async () => {
+    // node cuts at depth 2 and names the constructor there. A record has none.
+    const source = `
+//@@mutable
+interface L4 { v: number }
+interface L3 { d: L4 }
+interface L2 { c: L3 }
+interface L1 { b: L2 }
+class C4 { v: number = 9; get(): number { return this.v; } }
+interface K3 { d: C4 }
+interface K2 { c: K3 }
+interface K1 { b: K2 }
+const r: L1 = { b: { c: { d: { v: 1 } } } };
+const k: K1 = { b: { c: { d: new C4() } } };
+console.log(r);
+console.log(k);
+`;
+    await expectMatches(source, await runWithNode(source));
+  });
+});
