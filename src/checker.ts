@@ -1289,8 +1289,12 @@ class Checker {
    */
   private checkExhaustiveTailSwitch(fn: FuncDecl, ret: Ty): void {
     if (ret === "void") return;
-    const last = fn.body[fn.body.length - 1];
-    if (!last || last.kind !== "SwitchStmt") return;
+    // `length > 0` first, and never index -1: on an empty body node answers `undefined`
+    // and nativets PANICS on the read (docs/divergences.md), so the `!last` arm below
+    // could never have run. See test/tsc.test.ts.
+    if (fn.body.length === 0) return;
+    const last = fn.body[fn.body.length - 1]!;
+    if (last.kind !== "SwitchStmt") return;
     const d = last.discriminant;
     if (d.kind !== "MemberExpr" || d.object.ty === undefined || !isUnionTy(d.object.ty)) return;
     const u = d.object.ty;
@@ -4131,8 +4135,12 @@ class Checker {
  *  leaving the switch, which `break` does)? Conservative in the safe direction: an
  *  unrecognized shape means "not total", so the exhaustiveness check stands down. */
 function leavesFunction(body: Stmt[]): boolean {
-  const last = body[body.length - 1];
-  return last !== undefined && (last.kind === "ReturnStmt" || last.kind === "ThrowStmt");
+  // An EMPTY body is the common case (`function f(): void {}`), and the old spelling
+  // reached it by indexing -1 — undefined under node, a panic under nativets. The
+  // `length` test decides it without ever forming the index. See test/tsc.test.ts.
+  if (body.length === 0) return false;
+  const last = body[body.length - 1]!;
+  return last.kind === "ReturnStmt" || last.kind === "ThrowStmt";
 }
 
 /**
@@ -4143,9 +4151,9 @@ function leavesFunction(body: Stmt[]): boolean {
  * and a WIDER set of tags carried into the next case.
  */
 function leavesBlock(body: Stmt[]): boolean {
-  const last = body[body.length - 1];
-  return last !== undefined &&
-    (last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "BreakStmt" || last.kind === "ContinueStmt");
+  if (body.length === 0) return false; // an empty block — see leavesFunction
+  const last = body[body.length - 1]!;
+  return (last.kind === "ReturnStmt" || last.kind === "ThrowStmt" || last.kind === "BreakStmt" || last.kind === "ContinueStmt");
 }
 
 /* ============================================================

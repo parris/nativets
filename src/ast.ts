@@ -1124,7 +1124,9 @@ export interface BlockDropsStmt { kind: "BlockDrops"; names: string[]; }
 export function setBlockDrops(list: Stmt[], names: string[]): void {
   const n = list.length;
   if (n > 0) {
-    const last = list[n - 1];
+    // `!` because `n > 0` is not something `noUncheckedIndexedAccess` can see: tsc types
+    // every indexed read `Stmt | undefined` regardless of the guard above (TS18048).
+    const last = list[n - 1]!;
     if (last.kind === "BlockDrops") { last.names = names; return; }
   }
   list.push({ kind: "BlockDrops", names });

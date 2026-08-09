@@ -912,8 +912,10 @@ class Parser {
    * (`spawn`/`send`/`receive`) for actual concurrency.
    */
   private checkFloatingAsyncCalls(body: Stmt[]): void {
-    const last = body[body.length - 1];
-    const entrypoint = last && last.kind === "ExprStmt" ? last.expr : null;
+    // Never index -1: an empty body is ordinary, and there node answers `undefined`
+    // while nativets PANICS on the read. See test/tsc.test.ts.
+    const last = body.length > 0 ? body[body.length - 1]! : null;
+    const entrypoint = last !== null && last.kind === "ExprStmt" ? last.expr : null;
     for (const c of this.identCalls) {
       if (!(c.scopedAsync || this.asyncFns.has(c.name))) continue;
       if (this.awaitedCalls.has(c.node) || c.node === entrypoint) continue;
@@ -2635,7 +2637,11 @@ class Parser {
       this.returnEscapes.push({
         argName, asyncArrow,
         scopedAsync: argName !== null && this.inAsyncParamScope(argName),
-        declared: this.returnsAsyncFnStack[this.returnsAsyncFnStack.length - 1] === true,
+        // `length > 0 &&` first: outside any function the stack is empty, and index -1
+        // is a panic under nativets rather than the `undefined === true` -> false that
+        // node answers. Same result, reachable both ways. See test/tsc.test.ts.
+        declared: this.returnsAsyncFnStack.length > 0 &&
+          this.returnsAsyncFnStack[this.returnsAsyncFnStack.length - 1]! === true,
         line: kw.line, col: kw.col,
       });
     }

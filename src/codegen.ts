@@ -1478,7 +1478,10 @@ class FnGen {
         return;
       }
       case "ThrowStmt": {
-        const h = this.tryHandlers[this.tryHandlers.length - 1];
+        // Never index -1: an empty stack is the ordinary case (a `throw` outside any
+        // `try`), where node answers `undefined` and nativets PANICS on the read. The
+        // `!h` arm below is the one that must stay reachable. See test/tsc.test.ts.
+        const h = this.tryHandlers.length > 0 ? this.tryHandlers[this.tryHandlers.length - 1]! : null;
         // A `throw` is lowered as a BRANCH to the enclosing `try`'s catch block, so the
         // try must be in the same function frame. Crossing a frame — the ordinary "raise
         // in the callee, handle at the call site" idiom — needs real unwinding, which does
@@ -2982,7 +2985,8 @@ class FnGen {
     const contLbl = this.label("cont");
     this.terminate(`br i1 ${cond}, label %${throwLbl}, label %${contLbl}`);
     this.to(this.block(throwLbl));
-    const h = this.tryHandlers[this.tryHandlers.length - 1];
+    // See the ThrowStmt case above: an empty handler stack must not become index -1.
+    const h = this.tryHandlers.length > 0 ? this.tryHandlers[this.tryHandlers.length - 1]! : null;
     if (h) {
       if (h.excVar && h.eType === "string") {
         const m = this.fresh();

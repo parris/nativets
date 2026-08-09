@@ -117,8 +117,15 @@ const REGEX_AFTER_KEYWORD = new Set([
 ]);
 
 /** May a regex literal begin here, given the previous significant token? */
-function regexCanStart(prev: Token | undefined): boolean {
-  if (!prev) return true; // start of input
+/*
+ * Takes a Token, NOT `Token | undefined`. The start-of-input case is decided by the ONE
+ * caller, with a `tokens.length === 0` test, because reaching it as `undefined` meant
+ * indexing `tokens[-1]` — which node answers `undefined` and nativets PANICS on
+ * (docs/divergences.md). The `if (!prev) return true` this replaces could therefore
+ * never have run under nativets; the panic happened one line earlier, at the argument.
+ * See test/tsc.test.ts.
+ */
+function regexCanStart(prev: Token): boolean {
   if (prev.type === "num" || prev.type === "str" || prev.type === "template" || prev.type === "regex") return false;
   if (prev.type === "ident") return REGEX_AFTER_KEYWORD.has(prev.value);
   if (prev.type === "punct") return !(prev.value === ")" || prev.value === "]" || prev.value === "++" || prev.value === "--");
@@ -482,7 +489,8 @@ export function lex(source: string): Token[] {
     //   1. the previous-token rule (`regexCanStart`), and
     //   2. a closing unescaped `/` must exist on the SAME line (a regex literal cannot
     //      span lines), else we fall through and treat `/` as the operator it is.
-    if (c === "/" && regexCanStart(tokens[tokens.length - 1])) {
+    // `tokens.length === 0` IS the start-of-input arm — see regexCanStart.
+    if (c === "/" && (tokens.length === 0 || regexCanStart(tokens[tokens.length - 1]!))) {
       let j = st.i + 1;
       let inClass = false; // inside `[...]`, where `/` is literal and needs no escape
       let closed = false;
