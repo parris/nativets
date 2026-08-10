@@ -307,6 +307,63 @@ console.log(f({ kind: "B", other: 111, n: 222 }));
       expect(m).not.toContain("so only the shared tag");
     });
 
+    /*
+     * BOTH FIXES THE SLOT HINT PRESCRIBES ARE COMPILED HERE, against node, because a hint
+     * is a claim about what will work and this repo has caught twelve that were false. The
+     * message offers "make the layouts AGREE" or "give each tag its own arm"; each is run
+     * below on the very fixture that produced it, stdout AND exit code against node.
+     *
+     * The layout half is not hypothetical: it is the fix that cleared the compiler's own
+     * first self-hosting blocker (`body` at slots 2/2/4/4/3/1 across the six body-carrying
+     * statements in `src/ast.ts`), and it works because a field read wants one constant
+     * offset and reordering the DECLARATIONS gives it one. Object LITERALS are unaffected —
+     * the checker reorders a literal to its contextual type — which is why `mk` below
+     * still writes its fields in the original order and still compiles.
+     */
+    test("...and BOTH prescribed fixes actually compile and match node", async () => {
+      // Fix 1 — make the layouts agree. `B` now declares `n` at slot 1, as `A` does. The
+      // literal in `mk` deliberately keeps the OLD field order, to pin that a literal does
+      // not have to match its interface.
+      const agreed = `interface A { kind: "A"; n: number; other: number }
+interface B { kind: "B"; n: number; other: number }
+interface C { kind: "C"; z: number }
+type U = A | B | C;
+function mk(): U { return { kind: "B", other: 111, n: 222 }; }
+function f(u: U): number { if (u.kind === "C") return -1; return u.n; }
+console.log(f(mk()));
+`;
+      expect(codeOf(agreed)).toBe(null);
+      const oracle1 = runWithNode(agreed);
+      const ours1 = await compileAndRun(agreed);
+      expect(ours1.stdout).toBe(oracle1.stdout);
+      expect(ours1.exitCode).toBe(oracle1.exitCode);
+
+      // Fix 2 — give each tag its own arm. Layouts still disagree; each arm resolves its
+      // own member's offset, so there is nothing to agree about.
+      const split = `interface A { kind: "A"; n: number; other: number }
+interface B { kind: "B"; other: number; n: number }
+interface C { kind: "C"; z: number }
+type U = A | B | C;
+function mk(): U { return { kind: "B", other: 111, n: 222 }; }
+function f(u: U): number {
+  switch (u.kind) {
+    case "A": return u.n;
+    case "B": return u.n;
+    case "C": return -1;
+  }
+}
+console.log(f(mk()));
+`;
+      expect(codeOf(split)).toBe(null);
+      const oracle2 = runWithNode(split);
+      const ours2 = await compileAndRun(split);
+      expect(ours2.stdout).toBe(oracle2.stdout);
+      expect(ours2.exitCode).toBe(oracle2.exitCode);
+      // Both fixes must agree with each other as well as with node — the two spellings
+      // read the same field off the same value and differ only in layout.
+      expect(ours2.stdout).toBe(ours1.stdout);
+    });
+
     test("the refusal names the TYPE disagreement, and which types", () => {
       const bad = `interface A { kind: "A"; v: number }
 interface B { kind: "B"; v: string }
@@ -355,6 +412,73 @@ console.log(f({ kind: "A", a: 7 }));
 `;
       expect(codeOf(bad)).toBe("NT2001");
       expect(messageOf(bad)).toContain("give each tag its own arm");
+    });
+
+    /*
+     * THE LAYOUT INVARIANT IN `src/ast.ts`, gated rather than merely commented.
+     *
+     * `body` sits at slot 1 in all six body-carrying statements, and that is what makes
+     * `src/parser.ts`'s `valueReturns` — the first blocker of `cli`, `coverage`, `driver`,
+     * `modules`, `parser` and of stage-1 itself — compile:
+     *
+     *     case "WhileStmt": case "DoWhileStmt": case "ForStmt":
+     *     case "ForOfStmt": case "ForInStmt": case "BlockStmt": walk(s.body);
+     *
+     * It used to be slots 2, 2, 4, 4, 3 and 1. Every member had the field, all six at
+     * `Stmt[]`; six declarations had simply drifted apart.
+     *
+     * A COMMENT DOES NOT GATE. The identical invariant for `WhileStmt`/`DoWhileStmt` was
+     * documented in `src/ast.ts` and drifted anyway — which is how four more sites came to
+     * carry it. Adding a field before `body`, or a new loop form that declares `body`
+     * anywhere but second, silently costs a self-hosting rung and nothing else in the tree
+     * would say so: the blocker metric REPORTS and never gates. So it is asserted here,
+     * textually, against the real file, the way test/no-index-last.test.ts audits `src/`.
+     *
+     * `BlockStmt` is why the slot is 1 and not something else: it is `{kind, body}` and
+     * can put `body` nowhere else, so slot 1 is the only value that lets it join a group.
+     */
+    test("`body` is declared at slot 1 in every body-carrying statement in src/ast.ts", () => {
+      const AST = readFileSync(join(HERE, "..", "src", "ast.ts"), "utf8");
+      /** Field names of an `export interface X { … }`, in DECLARATION order = slot order. */
+      function fieldsOf(name: string): string[] {
+        const head = `export interface ${name} {`;
+        const start = AST.indexOf(head);
+        expect(start).toBeGreaterThanOrEqual(0);
+        let i = start + head.length - 1;
+        let depth = 0;
+        let end = -1;
+        // Brace COUNTING, not a `[^}]*` regex: `ForStmt`'s members contain no nested
+        // braces today but a future `{ … }` type literal would silently truncate the scan
+        // and make this assert about the wrong field list.
+        while (i < AST.length) {
+          if (AST[i] === "{") depth++;
+          else if (AST[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
+          i++;
+        }
+        expect(end).toBeGreaterThan(start);
+        return AST.slice(start + head.length, end)
+          .split(";")
+          .map((part) => part.trim().split(":")[0]!.trim().replace("?", ""))
+          .filter((k) => k !== "" && !k.startsWith("//") && !k.startsWith("*"));
+      }
+
+      const carriers = ["WhileStmt", "DoWhileStmt", "ForStmt", "ForOfStmt", "ForInStmt", "BlockStmt"];
+      for (const name of carriers) {
+        const fs = fieldsOf(name);
+        // Slot 0 is the discriminant in every AST node; slot 1 is `body` in these six.
+        expect([name, fs[0]]).toEqual([name, "kind"]);
+        expect([name, fs[1]]).toEqual([name, "body"]);
+      }
+
+      // The pair that has to agree on `test` as well keeps agreeing — it moved from slot 1
+      // to slot 2 in BOTH, which is what `case "WhileStmt": case "DoWhileStmt": goE(s.test)`
+      // depends on (five such arms across checker.ts and ownership.ts).
+      expect(fieldsOf("WhileStmt")[2]).toBe("test");
+      expect(fieldsOf("DoWhileStmt")[2]).toBe("test");
+      // ...and `name` lands at slot 2 in both `for…of` and `for…in`, which is what
+      // src/modules.ts's `case "ForOfStmt": case "ForInStmt": out.push(s.name)` depends on.
+      expect(fieldsOf("ForOfStmt")[2]).toBe("name");
+      expect(fieldsOf("ForInStmt")[2]).toBe("name");
     });
   });
 
