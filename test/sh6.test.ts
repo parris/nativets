@@ -1319,7 +1319,28 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // `never` exhaustiveness witness, and the tripwire an earlier lane left — "if this
       // goes RED because someone gave `bindStmt` a returning switch, the witness has become
       // free to delete" — fired. tsc's real TS2366 replaces it.
-      expect(m.error).toContain("Cannot assign");
+      // TWENTY-EIGHTH — the tuple lie is gone. `parseTupleType` modelled `[T, U, …]` as
+      // `T[]`, DISCARDING every element after the first, so `skipQuoted`'s `[string, number]`
+      // made `i = next` read as "Cannot assign string to number". That was not merely a
+      // latent gap: it produced live LYING diagnostics on correct TypeScript —
+      // `function second(t: [number, string]): string { return t[1]; }` was refused for a
+      // `number` the compiler invented. Fixed by returning a named record (the
+      // `DecodedEscape` precedent) and refusing ONLY heterogeneous tuples (NT1037);
+      // refusing all of them would have broken four homogeneous `checker.ts` sites and
+      // pushed that module further from self-hosting to buy no soundness.
+      //
+      // What stops stage-1 now gates FIVE modules at once — `parser`, `modules`, `driver`,
+      // `coverage`, `cli` — and is one line in `valueReturns`:
+      //     case "ReturnStmt": if (s.argument) out.push(s.argument); break;
+      // A truthiness guard on an OPTIONAL FIELD inside a `switch` case does not narrow.
+      // Every conditional form funnels through one mechanism (`narrowTagsWith` →
+      // `narrowTagsInto`), and each form wired into it this session cost a handful of
+      // lines, so this is very likely an unwired call site rather than absent logic.
+      //
+      // Note the message itself: it prints all 30 union members TWICE, ~4,000 characters
+      // for one error. Worth its own fix — a diagnostic nobody can read is a diagnostic
+      // nobody acts on, which is how several lying hints survived this long.
+      expect(m.error).toContain(".push expects");
       expect(m.code).toBe("NT2001");
       return;
     }

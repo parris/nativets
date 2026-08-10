@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "1ced7da"
+    "rev": "53da9af"
   },
   "modules": {
     "ast.ts": {
@@ -41,11 +41,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot assign string to number 'i'"
+        "message": "[NT2001] .push expects U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasi…"
       }
     },
     "codegen.ts": {
-      "sha256": "a1981ced87b82c67",
+      "sha256": "e363c35eec310dc0",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -81,11 +81,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot assign string to number 'i'"
+        "message": "[NT2001] .push expects U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasi…"
       }
     },
     "diagnostics.ts": {
-      "sha256": "4347878d841b9ff1",
+      "sha256": "52cb0d5e40671baa",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -108,7 +108,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot assign string to number 'i'"
+        "message": "[NT2001] .push expects U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasi…"
       }
     },
     "lexer.ts": {
@@ -134,11 +134,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot assign string to number 'i'"
+        "message": "[NT2001] .push expects U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasi…"
       }
     },
     "ownership.ts": {
-      "sha256": "e33cf31db028fbde",
+      "sha256": "9682c439db09f49b",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "7cee95c947d935a5",
+      "sha256": "e3b386546e958ea7",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -161,7 +161,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot assign string to number 'i'"
+        "message": "[NT2001] .push expects U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasi…"
       }
     }
   }
