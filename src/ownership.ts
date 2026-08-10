@@ -118,9 +118,23 @@ function retainedReceiver(e: Expr): string | null {
  * null: the operand is a temporary nobody else owns, so the new binding really does own
  * the result and gets the usual drop.
  */
+// Spelled as three POSITIVE tag tests, which is the narrowing this compiler actually
+// does (SH2) — each one narrows to a single member, so `.expr` is an ordinary field read.
+// Two other spellings were tried and both are blockers in `src/`'s own subset:
+// `(e as { expr: Expr }).expr` is refused by this lane's own new rule, and rightly so
+// (`expr` is at slot 1 in these members but slot 0 in the asserted shape, so the read
+// would take `kind` — a string pointer — as an `Expr`); and a negated chain
+// `if (e.kind !== "AsExpr" && …) return null` does not narrow the remainder, so `.expr`
+// is `Property 'expr' does not exist on <the whole Expr union>`.
 function assertedPlaceRoot(e: Expr): string | null {
-  if (e.kind !== "AsExpr" && e.kind !== "SatisfiesExpr" && e.kind !== "NonNullExpr") return null;
-  const inner = (e as { expr: Expr }).expr;
+  if (e.kind === "AsExpr") return placeRootOf(e.expr);
+  if (e.kind === "SatisfiesExpr") return placeRootOf(e.expr);
+  if (e.kind === "NonNullExpr") return placeRootOf(e.expr);
+  return null;
+}
+
+/** The binding an assertion's operand names, following chained assertions to one place. */
+function placeRootOf(inner: Expr): string | null {
   if (inner.kind === "Identifier") return inner.name;
   return assertedPlaceRoot(inner); // `s as A as B` — chained assertions name one place
 }

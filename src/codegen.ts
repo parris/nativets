@@ -29,7 +29,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from ".
 import { isUnionTy, unionCommonField, widenLiteralTys } from "./ast.ts";
 // `expr as T` needs the union's tag values and their slot index to CHECK an assertion
 // rather than trust it (see `genAsCast`).
-import { unionDiscriminant, unionTagValues, unionWidenedMembers } from "./ast.ts";
+import { unionDiscriminant, unionTagValues, unionWidenedMembers, objectLayoutFits } from "./ast.ts";
 import { exprLoc } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
@@ -1929,10 +1929,16 @@ class FnGen {
       const d = unionDiscriminant(from);
       const widened = unionWidenedMembers(from);
       const tags = unionTagValues(from);
-      // Several members can widen to the SAME shape, which makes them layout-identical
-      // and so all equally safe to read at — accept any of their tags, comma-separated
-      // (a comma cannot occur in a tag value; see TAG_FORBIDDEN in ast.ts). When EVERY
-      // member matches, the assertion cannot fail and no check is emitted at all.
+      // Accept every member the target can be READ through — `objectLayoutFits`, i.e.
+      // the target's fields sit at the same slots with the same types. That covers three
+      // cases with one rule: the target IS a member (the ordinary downcast); several
+      // members widen to the same shape, making them layout-identical and equally safe;
+      // and the target is a structural WINDOW onto some members, which is the
+      // `(e as {name: string}).name` duck-typing idiom `src/` is built on. Tags are
+      // comma-separated (a comma cannot occur in a tag value; see TAG_FORBIDDEN).
+      //
+      // When EVERY member fits, the assertion cannot fail and no check is emitted at all.
+      // When NONE does, the checker has already refused it — codegen never sees one.
       //
       // Spelled as a plain loop building the string directly. The obvious
       // `.map(…).filter((t): t is string => t !== null)` is OUT OF SUBSET — a type
@@ -1942,7 +1948,7 @@ class FnGen {
       let allowed = "";
       let matches = 0;
       for (let i = 0; i < widened.length; i++) {
-        if (widened[i] !== target) continue;
+        if (widened[i] !== target && !objectLayoutFits(target, widened[i]!)) continue;
         allowed = matches === 0 ? tags[i]! : `${allowed},${tags[i]!}`;
         matches++;
       }

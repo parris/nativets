@@ -486,6 +486,36 @@ export function unionMemberFor(t: Ty, tag: string): Ty | undefined {
 export function unionWidenedMembers(t: Ty): Ty[] { return unionMembers(t).map((m) => widenLiteralTys(m)); }
 
 /**
+ * Can a value laid out as `concrete` be READ through the shape `view` without any slot
+ * arithmetic going wrong? True when every field of `view` sits at the SAME index in
+ * `concrete` with the same (widened) type — so `view` is a layout PREFIX-compatible
+ * window onto `concrete`, not merely a structural subtype of it.
+ *
+ * The index is what makes this stricter than assignability: a field read compiles to a
+ * slot offset, so finding the key elsewhere in `concrete` is worthless — `{a,b}` read as
+ * `{b,a}` would take both at the wrong offset. Extra fields at the END of `concrete` are
+ * fine (they are simply never read); extra fields in `view` are not (they are not there).
+ *
+ * This is the predicate behind `expr as T` on a union: the assertion is CHECKABLE exactly
+ * when some member satisfies it, and free when every member does. Shared by the checker
+ * (which refuses when NO member does) and codegen (which tag-checks against the ones that
+ * do), so the two can never disagree about which casts are sound.
+ */
+export function objectLayoutFits(view: Ty, concrete: Ty): boolean {
+  if (!isObjectTy(view) || !isObjectTy(concrete)) return false;
+  const want = objectFields(view);
+  const have = objectFields(concrete);
+  if (want.length > have.length) return false;
+  for (let i = 0; i < want.length; i++) {
+    const w = want[i]!;
+    const h = have[i]!;
+    if (w.key !== h.key) return false;
+    if (widenLiteralTys(w.ty) !== widenLiteralTys(h.ty)) return false;
+  }
+  return true;
+}
+
+/**
  * Replace every string-literal type with `string`, EXCEPT inside a nested `U<…>`
  * (whose members must keep their tags to stay narrowable). Applied wherever a type
  * leaves union space, so a literal type never reaches ownership or codegen.

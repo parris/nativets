@@ -2175,13 +2175,34 @@ so only the directions that can actually be wrong pay anything:
 | Cast | Representation change | Cost |
 |---|---|---|
 | `U<…>` → one of its MEMBERS | none (a union IS the member pointer) | `nt_as_tag`: one slot load + a string compare |
+| `U<…>` → an object SOME members can be read through | none | `nt_as_tag` against exactly those members |
+| `U<…>` → an object EVERY member can be read through | none, and always TRUE | **free** — no check emitted |
+| `U<…>` → an object NO member can be read through | — | **refused**, `NT2001` |
 | member → `U<…>` (widening) | none, and always TRUE | **free** — no check emitted |
 | `G<…>` → an arm, `?U T` → `T` | UNBOX a 2-slot `[tag, value]` block | `nt_as_unbox`: one tag test |
 | arm → `G<…>`, `T` → `?U T` | BOX | the ordinary store-boundary `coerce` |
 | identical layouts (`42 as number`, same-shape objects) | none | **free** |
 
-When several members widen to the same shape they are layout-identical, so the check accepts any
-of their tags; when EVERY member matches, no check is emitted at all.
+The union rows are one predicate, `objectLayoutFits`: a shape can be read off a member when every
+one of its fields sits at the SAME slot with the same type. That is stricter than assignability —
+a field read compiles to a slot offset, so finding the key elsewhere is worthless, and `{a,b}`
+asserted to `{b,a}` would take both at the wrong offset.
+
+It is what makes the `(e as {name: string}).name` DUCK-TYPING idiom work rather than be refused:
+the target need not be a member, only a readable window onto one. Getting there took a
+correction — the first version of this rule required the target to BE a member, which refused
+`src/`'s own `retainedReceiver` for no safety gain. Where NO member fits, there is nothing to
+compare and the assertion is refused outright:
+
+```
+error[NT2001]: '{x:number}' is not a valid assertion for the union
+               'U<{kind:"a",x:number}|{kind:"b",y:string}>':
+               no member of the union can be read through that shape
+```
+
+That one was a SECOND silent wrong answer (`2.12e-314`, the `kind` pointer as a double, where
+node returns `7`), left open by the first version of this lane's own fix and found by testing the
+fallthrough rather than the reported case.
 
 **A panic is not an exception**, exactly as for the out-of-bounds rule: `try { x as T } catch {}`
 still aborts. The escape hatch is to narrow rather than assert — a `switch` on the discriminant,
