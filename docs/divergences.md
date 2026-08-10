@@ -3930,6 +3930,66 @@ of the two and nothing has measured a need for more.)
 Pinned in `test/narrowing.test.ts`, "narrowing 7". The `flow` term is proved by MUTATION: drop it
 and the sub-union fall-through compiles to `2.124223034e-314` where node prints `undefined`.
 
+### `this` IN A `@@mutable` METHOD IS A BORROW — untracking it had been standing in for unchecking it
+
+Every rule in "@@mutable ownership" says the same thing: a `@@mutable` method returns a **borrow**
+of its receiver, and that borrow may not escape. `return a.bump()` out of the owner's scope is
+`NT1604`; `[new Counter().bump()]` is `NT1604`; binding a method result as an owner is `NT1604`.
+All of them name the borrow **at the call site**. `this` is the identical borrow named from
+**inside the body**, and it was exempt from all of it:
+
+```ts
+//@@mutable
+class C { n: number = 30; box(): C[] { return [this]; } }
+function f(): C[] { const c = new C(); return c.box(); }
+console.log(f()[0].n);        // node: 30
+```
+
+This compiled at **exit 0** printing `1e-323` — the receiver is freed at the end of `f` while the
+returned array still points at it, and the denormal is the stale slot re-read. Under
+`-fsanitize=address` it is `heap-use-after-free` in `main`. **The undecorated twin of the same
+program was refused `NT1604` already**, so the attribute was the only thing standing between the
+program and a silent wrong answer — a wrong answer is not what `@@mutable` is supposed to buy.
+
+**Mechanism, and why it is a mechanism rather than a symptom.** `untrackedThis` (`ownership.ts`)
+drops `this` from `linear` *and* from `paramBorrows` for every member of a `@@mutable` class. The
+first is right and is the point: move-tracking the receiver would invent spurious re-move reports
+on the fluent chain. The second was collateral — with `this` out of `paramBorrows` it is out of
+`borrowBindings`, so the `NT1604` arm can never fire on it, and **every** consuming position in the
+body goes unchecked at once: a field store, an array or object literal, a `.push`, an argument in a
+consuming slot. The comment justifying the exemption names exactly one position, `return this`, and
+delegates the rest to "the call-site rules" — but those rules inspect the **result of a call**, and
+none of these happen at a call. The RECEIVER side (`checkOwnedReceiver`, which returns early for
+`this`) was reasoned about; the VALUE side never was.
+
+The two jobs are now separate: **untracked for move state, borrowed for escape** (`Analyzer.borrowThis`).
+`return this` is the one hand-back that stays legal, because the call-site rules can see it.
+`const self = this` also still compiles, by an older mechanism — `collectAliases` already records it
+as an ALIAS of `this`, which makes the initializer a borrow and makes `self` itself a borrow binding.
+
+**The other two `untrackedThis` arms are deliberately NOT included.** A copy-on-write setter on an
+ordinary class works on a private fresh copy, and `untrackThis` marks a decorated constructor whose
+only consuming use of `this` is the `return this` the parser itself synthesized. In both the
+receiver really is this frame's value, and there is nothing to escape.
+
+**What this costs, stated plainly.** `new C(this)` where `C`'s constructor declares a **parameter
+property** of the receiver's type is now `NT1604` — a parameter property *consumes* its argument
+(it stores it in a slot that outlives the call), so the expression asks the new object to take
+ownership of a receiver the caller owns. That is rustc's `FnGen::new(*self)` from `&self`, E0507,
+and it is refused for the same reason. `src/codegen.ts` relies on it at four sites
+(`new FnGen(this)`), so the compiler's own source is now outside the subset it compiles at those
+lines. They are invisible today — `codegen.ts` is blocked earlier by the pre-existing `NT1606`
+`Set.add` refusal, and `bun run test/blocker-metric.ts` is unchanged at 206/693 because it counts
+CHECKER refusals only — but they are a real future blocker, recorded here rather than narrowed
+around. The shapes where the container escapes are measured use-after-free; this pass cannot prove
+that a given container does not, so it refuses rather than guesses. `new Scope(this)` in
+`src/checker.ts` is unaffected: `Scope | null` is nullable, so the parameter property does not
+consume.
+
+Pinned in `test/decorators.test.ts` ("`this` may not ESCAPE its own method body"). Proved by
+MUTATION: drop the `borrowedThis` argument in `analyzeOwnership`'s `runScope` call and the first
+case compiles to `1 1e-323` at exit 0 against node's `1 30` — a MISCOMPILE, not a crash.
+
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
 

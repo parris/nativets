@@ -424,6 +424,30 @@ class Analyzer {
    *  loop variables over a LINEAR element (loop body). Moving out of any is E0507 (NT1604). */
   private borrowBindings = new Set<string>();
 
+  /**
+   * `this` IS A BORROW IN THIS FRAME, EVEN THOUGH IT IS NOT MOVE-TRACKED.
+   *
+   * A `@@mutable` method's receiver belongs to the caller (`untrackedThis` below), so it is
+   * deliberately kept out of `linear` and out of the entry state — move tracking on it
+   * would only invent spurious re-move reports on the fluent chain. That untracking was
+   * doing a SECOND job it was never argued for: `this` was also absent from
+   * `borrowBindings`, so the NT1604 arm in `expr`'s `Identifier` case could not fire on it
+   * either, and every CONSUMING position in the body was silently exempt from the
+   * non-escape rule that governs the identical value at the call site.
+   *
+   * The two jobs are separable and this flag separates them: UNTRACKED for move state,
+   * BORROWED for escape. Kept as its own flag rather than an entry in `borrowBindings`
+   * because `this` is not a binding — the receiver rule (`checkOwnedReceiver`) and the
+   * setter rule both special-case the name already, and folding it in would change what
+   * they mean.
+   *
+   * Measured before/after on `class C { box(): C[] { return [this]; } }` called from a
+   * scope that drops the receiver: exit 0 printing `1 1e-323` against node's `1 30`, and
+   * `heap-use-after-free` under `-fsanitize=address`. The undecorated twin of the same
+   * program is refused NT1604 today; this makes `@@mutable` agree with it.
+   */
+  borrowThis = false;
+
   /** This scope's parameters carrying the per-parameter `@@mutable` opt-in — the ones a
    *  callee may append to, and therefore the only ones this scope may hand ON to another
    *  `@@mutable` position (see `mutableArgs`). */
@@ -690,7 +714,15 @@ class Analyzer {
         return;
       case "ExprStmt": this.expr(s.expr, state, false); return;
       case "ReturnStmt":
-        if (s.argument) this.expr(s.argument, state, true); // returning a bare value moves it out
+        // `return this` from a `@@mutable` member is a BORROW HAND-BACK, not a move: the
+        // caller already owns the receiver, and what it may then do with the returned
+        // handle is governed by the call-site rules that are already pinned in
+        // test/decorators.test.ts — a method result may not be bound as an owner, may not
+        // be returned out of its owner's scope, may not be put in a container. Those rules
+        // can SEE this value (it is a call result); they cannot see `this` packed into a
+        // container inside the body, which is exactly the gap `borrowThis` closes. So the
+        // fluent chain stays legal and nothing else in a consuming position does.
+        if (s.argument) this.expr(s.argument, state, !(this.borrowThis && s.argument.kind === "Identifier" && s.argument.name === "this"));
         s.drops = this.ownedInScope(state); // free everything still owned before returning
         return;
       case "IfStmt": {
@@ -853,7 +885,19 @@ class Analyzer {
       case "Identifier": {
         if (this.arrowDepth > 0) this.arrowNames = this.arrowNames.add(e.name);
         if (this.envArrowDepth > 0) this.envArrowNames = this.envArrowNames.add(e.name);
-        // Moving out of a borrowed binding (by-borrow param / for-of element) is E0507.
+        // Moving out of a borrowed binding (by-borrow param / for-of element) is E0507 —
+        // and `this` in a `@@mutable` member body is one of them (see `borrowThis`). The
+        // one consuming position that IS legitimate, `return this`, never reaches here:
+        // `ReturnStmt` passes it as a borrow.
+        if (consume && this.borrowThis && e.name === "this") {
+          this.report({
+            code: OWN_CODES.MOVE_OUT_OF_BORROW,
+            message: "cannot move out of `this`: it is borrowed (the caller owns the receiver)",
+            line: e.loc?.line ?? 0,
+            hint: "a `@@mutable` method's receiver belongs to the CALLER, which frees it when its own scope ends — so storing `this` where it can outlive the call (a field, an array or object literal, a `.push`) leaves a second handle pointing at freed memory. `return this` is the one hand-back that stays legal, because the call site's own non-escape rules can see it. To keep a reference, return `this` and let the caller decide where to put it, or store an owned COPY of the data instead of the receiver",
+          });
+          return;
+        }
         if (consume && this.borrowBindings.has(e.name)) {
           const owner = this.aliasOf.get(e.name);
           this.report({
@@ -1648,11 +1692,31 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
    *     produce spurious moves.
    *   - ordinary copy-on-write setter: `this` is the METHOD's private fresh copy, so
    *     returning it is a legitimate transfer, not a move out of the caller's value.
+   *
+   * UNTRACKED IS NOT UNCHECKED. Read literally, the first clause justifies exempting ONE
+   * consuming position — the `return this` it names — and then delegates the rest to the
+   * call-site rules. But the mechanism it used, dropping `this` from `paramBorrows`, also
+   * dropped it from `borrowBindings`, which exempted EVERY consuming position: a field
+   * store, an array/object literal, a `.push`, an argument in a consuming slot. The
+   * call-site rules cannot reach any of those — they inspect the RESULT of a call, and
+   * these all happen inside the callee. `borrowedThis` below restores the borrow without
+   * restoring the move tracking; see `Analyzer.borrowThis`.
    */
   const untrackedThis = (fn: FuncDecl): boolean =>
     // `fn.params.length > 0` FIRST: a nullary function makes `fn.params[0]` a read at
     // index == length, which nativets PANICS on (Stage 41), so `?.` never sees `undefined`.
     fn.params.length > 0 && fn.params[0]!.name === "this" && ((fn.setter ?? false) || (fn.untrackThis ?? false) || mutable.classes.has(fn.name.split(".")[0]!));
+
+  /**
+   * The subset of `untrackedThis` where `this` is still the CALLER'S OBJECT: a member of a
+   * `@@mutable` class. The other two arms are deliberately excluded, because in both of
+   * them the receiver really is this frame's own value and there is nothing to escape:
+   *   - a copy-on-write SETTER on an ordinary class works on a private fresh copy;
+   *   - `untrackThis` marks a DECORATED CONSTRUCTOR, whose only consuming use of `this` is
+   *     the `return this` the parser itself synthesized (parser.ts) — already exempt.
+   */
+  const borrowedThis = (fn: FuncDecl): boolean =>
+    fn.params.length > 0 && fn.params[0]!.name === "this" && mutable.classes.has(fn.name.split(".")[0]!);
 
   // The per-parameter `@@mutable` opt-in, as a call-site table: which argument positions
   // of which function the callee may `.push` to. Built over every FuncDecl (methods are
@@ -1685,7 +1749,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   };
   collectMutableArgs(checked.program.body);
 
-  const runScope = (body: Stmt[], params: { name: string; ty: Ty }[], untrack: Set<string> = new Set(), mutableNames: Set<string> = new Set()): string[] => {
+  const runScope = (body: Stmt[], params: { name: string; ty: Ty }[], untrack: Set<string> = new Set(), mutableNames: Set<string> = new Set(), borrowThis: boolean = false): string[] => {
     const aliases = new Map<string, string>();
     // Receivers whose FIELDS this scope may only borrow: a linear parameter (the caller
     // owns and drops it) and a method's `this`. `this` is unconditional — it names no
@@ -1723,6 +1787,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     scan.mutableArgs = mutableArgs;
     scan.mutableArgProps = mutableArgProps;
     scan.mutableParams = mutableNames;
+    scan.borrowThis = borrowThis;
     scan.seq(body, entry());
     const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames, mutable, varTy, aliases, consuming);
     a.envCaptured = scan.envArrowNames; // the subset whose capture really is an env
@@ -1731,6 +1796,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     a.mutableArgs = mutableArgs;
     a.mutableArgProps = mutableArgProps;
     a.mutableParams = mutableNames;
+    a.borrowThis = borrowThis;
     const st = entry();
     a.seq(body, st);
     const end = [...a.ownedTopLevel(st), ...topClosures]; // computed BEFORE marking: it can add to condDrops
@@ -1762,6 +1828,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
         s.params.map((p, i) => ({ name: p.name, ty: sig.params[i]! })),
         untrackedThis(s) ? new Set(["this"]) : new Set(),
         new Set(s.params.filter((p) => p.mutable).map((p) => p.name)),
+        borrowedThis(s),
       );
     }
   }

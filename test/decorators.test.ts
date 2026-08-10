@@ -354,6 +354,90 @@ console.log(__objLive());
     expect(r.exitCode).toBe(0); // a double free is a nonzero exit with correct stdout
   });
 
+  /*
+   * THE SAME NON-ESCAPE RULE, STATED INSIDE THE BODY. Every test above says a `@@mutable`
+   * receiver's borrow may not escape — but each of them names the borrow at the CALL SITE
+   * (`return a.bump()`, `[new Counter().bump()]`). `this` is the same borrow named from
+   * INSIDE, and it was exempt from all of it.
+   *
+   * `untrackedThis` (ownership.ts) drops `this` from `linear` AND from `paramBorrows` for
+   * every method of a `@@mutable` class, so `borrowBindings` never contains it and the
+   * NT1604 arm in `expr`'s `Identifier` case can never fire on it. The stated reason names
+   * exactly ONE consuming position — `return this`, the fluent chain — and delegates the
+   * rest to "the call-site rules". Those rules see the RESULT of a call; they cannot see
+   * `this` being packed into a container inside the callee. The RECEIVER side was reasoned
+   * about; the VALUE side was not.
+   *
+   * Measured, not argued. Before the fix this compiled at exit 0 and printed
+   * `1 1e-323` where node prints `1 30` — the receiver is freed at the end of `f` while
+   * the returned array still points at it, and the denormal is the stale slot re-read.
+   * Under `-fsanitize=address` it is `heap-use-after-free` in `main`. The undecorated twin
+   * of the identical program is correctly refused NT1604 today, so `@@mutable` is the only
+   * thing standing between this program and a silent wrong answer.
+   *
+   * MUTATION TEST: delete the `borrowThis` argument in `analyzeOwnership`'s `runScope`
+   * call and this goes red as a MISCOMPILE (exit 0, `1e-323`), not as a crash.
+   */
+  test("`this` may not ESCAPE its own method body (NT1604) — the receiver is a borrow named from inside", () => {
+    // Into an array literal that is RETURNED — the array outlives the receiver.
+    expect(rejectCode(`
+//@@mutable
+class C { n: number = 30; box(): C[] { return [this]; } }
+function f(): C[] { const c = new C(); return c.box(); }
+console.log(f()[0].n);
+`)).toBe("NT1604");
+    // Into an object literal that is RETURNED.
+    expect(rejectCode(`
+//@@mutable
+class C { n: number = 31; wrap(): { inner: C } { return { inner: this }; } }
+function f(): { inner: C } { const c = new C(); return c.wrap(); }
+console.log(f().inner.n);
+`)).toBe("NT1604");
+    // Appended to an array FIELD — a second owner reachable from the object itself.
+    expect(rejectCode(`
+//@@mutable
+class C { kids: C[] = []; n: number = 2; add(): void { this.kids.push(this); } }
+const c = new C();
+c.add();
+console.log(c.kids.length);
+`)).toBe("NT1604");
+    // Handed out through `move(this)` — the explicit consuming position.
+    expect(rejectCode(`
+//@@mutable
+class C { n: number = 40; give(): C { return move(this); } }
+function f(): C { const c = new C(); return c.give(); }
+console.log(f().n);
+`)).toBe("NT1604");
+  });
+
+  /*
+   * THE EXEMPTION THAT WAS ACTUALLY JUSTIFIED, kept intact. `return this` hands the
+   * receiver's own borrow straight back to the caller, and the call-site rules pinned
+   * above ("returning a METHOD RESULT is rejected", "a fresh receiver's result may not
+   * escape") are what keep THAT single-owner — they can see it, because it is a call
+   * result. So the fluent chain must keep compiling; only the positions those rules
+   * cannot see are closed. A binding of `this` to a local is exempt for the same reason
+   * and by an older mechanism: `collectAliases` already records `const self = this` as an
+   * ALIAS of `this`, which makes the initializer a borrow rather than a move (so it never
+   * reaches the new rule) and makes `self` itself a borrow binding — so it cannot escape,
+   * and it cannot be MUTATED through either (that is the pre-existing NT1607 two tests up).
+   */
+  test("`return this` and `const self = this` still compile — the fluent chain is untouched", async () => {
+    const r = await compileAndRun(`
+//@@mutable
+class Chain {
+  private pos: number = 0;
+  bump(): Chain { this.pos++; return this; }
+  peek(): number { const self = this; return self.pos; }
+  get(): number { return this.pos; }
+}
+const c = new Chain();
+console.log(c.bump().bump().peek(), c.get());
+`);
+    expect(r.stdout).toBe("2 2\n"); // node agrees
+    expect(r.exitCode).toBe(0);
+  });
+
   test("reassigning an owner that is still aliased is rejected (NT1602)", () => {
     expect(rejectCode(`${COUNTER}
 let a = new Counter();
