@@ -122,6 +122,13 @@ interface Binding {
    *  a plain nullish narrowing's are. Without this the member layout would be applied to
    *  the BOX pointer, which is the silent wrong answer, not a diagnostic. */
   nullBox?: boolean;
+  /** This binding is a function PARAMETER, i.e. a BORROW — the caller owns the value.
+   *  DIAGNOSTICS ONLY (the ownership pass computes borrows for itself, from the signature).
+   *  It exists because the `.push` hint used to answer "accumulate with `acc = [...acc, x]`"
+   *  on a parameter receiver, and on a parameter that spelling is NT1608 — it was a
+   *  use-after-free until the guard in ownership.ts landed. A hint is trusted exactly when
+   *  the reader is unsure, so one that routes into a refusal is worse than none. */
+  param?: boolean;
 }
 
 /**
@@ -4145,8 +4152,23 @@ class Checker {
     if (method === "push") {
       const acc = this.accumulatorName(callee.object, scope);
       if (acc === null) {
+        // RECEIVER-AWARE. The general hint offers two accumulator spellings, and BOTH of
+        // them are wrong on a parameter: `@@mutable` never applied to one (it says so),
+        // and `out = [...out, x]` is NT1608 — a parameter is a borrow, so rebinding it is
+        // invisible to the caller and used to free the caller's array out from under it.
+        // Sending a reader there would hand them a use-after-free in answer to a
+        // diagnostic, which is the one thing a hint must never do. On a parameter the only
+        // true answer is the one docs/self-hosting.md already gives for a persistent Map:
+        // accumulate into a LOCAL and RETURN it.
+        // Inlined rather than a `isBorrowedParam` helper: a helper is one more function in
+        // the self-hosting denominator, refused for the same pre-existing reason
+        // `accumulatorName` beside it is, and the blocker metric would read the addition as
+        // a regression. Two lines here cost nothing.
+        const recvIsParam = callee.object.kind === "Identifier" && scope.lookup(callee.object.name)?.param === true;
         throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.push\` would mutate the array in place`,
-          "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage. To append with `.push` instead, declare the binding `@@mutable` (`//@@mutable` on the line above `let acc: T[] = []`) — that works only on a plain local, never on a field, a parameter or an element",
+          recvIsParam
+            ? "build a new array instead: `[...arr, x]` — the original is unchanged. This receiver is a PARAMETER, which is a borrow: the caller owns it, so neither `@@mutable` nor rebinding it (`out = [...out, x]`, which is NT1608) can append to it. Accumulate into a LOCAL and RETURN it — `let acc: T[] = []; acc = [...acc, x]; return acc` — and let the caller rebind"
+            : "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign a LOCAL: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage. To append with `.push` instead, declare the binding `@@mutable` (`//@@mutable` on the line above `let acc: T[] = []`) — that works only on a plain local, never on a field, a parameter or an element",
           exprLoc(callee.object) ?? callee.loc);
       }
       // test262 test/built-ins/Array/prototype/push/: `S15.4.4.7_A2` (the return value is
@@ -4498,6 +4520,10 @@ class Checker {
         );
       }
       base.declare(p.name, tys[i]!, false, undefined, undefined, p.mutable);
+      // Stamped AFTER the fact rather than threaded through `declare` — an eighth
+      // positional argument on that signature is the kind of shared line a 3-way merge
+      // duplicates, and this flag feeds no lowering, only the hint below.
+      base.own(p.name)!.param = true;
     });
   }
 
