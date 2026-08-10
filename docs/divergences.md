@@ -848,6 +848,71 @@ aliased, passed as an argument, stored, captured by another closure) is still ne
 naive version of this — putting function types back into `isLinearTy` — was measured and frees
 the escaping-counter idiom's live env: exit 255. See docs/ROADMAP.md's Phase C.
 
+### A function DECLARATION used as a VALUE — the diagnostic was FALSE, and the fix is a shim
+
+```ts
+function dbl(n: number): number { return n * 2; }
+apply(dbl, 21);        // was: error[NT2001]: 'dbl' is not defined
+```
+
+`dbl` **is** defined — it calls fine as `dbl(21)` on the next line. The cause was a two-table
+split. `check` registers every top-level `FuncDecl` in the SIGNATURE table (`functions`), which
+is keyed by name and consulted only at direct CALL sites, and it never binds the name in the
+value `Scope`; so `scope.lookup("dbl")` missed and the `Identifier` case reported the one thing
+that was certainly untrue. The same program written `const dbl = (n: number) => n * 2` always
+worked, which localizes it to BINDING rather than codegen — the machinery to *call* a function
+value already existed and was exercised, only the machinery to *produce* one from a declaration
+did not.
+
+Across a module boundary the message was worse still, because the linker has renamed the symbol
+by then: `'_m0_eraseOne' is not defined`, naming a spelling that appears nowhere in the source
+and cannot be grepped for.
+
+**Why a shim.** A function value is a heap block `[fn_ptr, cap0, …]` and `callClosure` passes
+that block as an implicit leading `ptr` argument. A top-level function has no such parameter, so
+its symbol cannot go into slot 0 directly — storing it there would shift every real argument by
+one, which is a wrong answer rather than a crash. Codegen therefore emits one trampoline per
+function used this way (`ModuleGen.fnValue`, the lazy pattern `cmpShim`/`actorEntry` already
+use), taking the env and ignoring it.
+
+**Why it is cheaper than a closure.** A declaration captures nothing, so its block is a
+compile-time constant: a `private constant [1 x i64]` global, not an `nt_obj_new`. That removes
+the ownership question instead of answering it — no allocation, so nothing to own, nothing to
+drop, no leak on the argument path and no double free when the same function is passed twice.
+One block per function, which is also a CORRECTNESS requirement and not merely a saving: node
+says `dbl === dbl`, so both references must yield the same pointer. Verified clean under
+ASan+UBSan with `-fno-sanitize-recover=all`.
+
+**Hoisting is supported.** node hoists function declarations, so a reference may precede the
+textual definition; the signature table is fully populated in pass 1, before any body is checked,
+so this costs nothing and refusing it would have been the divergence.
+
+Two shapes stay refused (`NT1003`), and both are ABI facts rather than missing cases — a call
+through a function value passes exactly the arguments the function TYPE spells, while the
+machinery that supplies a **default** or packs a **rest** array lives at the direct call site
+and nowhere else:
+
+| shape | verdict |
+|---|---|
+| `function f(a, b = 2)` / optional `b?` | `NT1003` — `b` would enter unwritten. Hint: wrap in `(a0) => f(a0)` |
+| `function f(...ns: number[])` | `NT1003` — the rest array is packed at the call site. Same hint |
+| generic `function f<T>(…)` | `NT1013`, its own pre-existing and more precise message |
+| point-free `xs.map(f)` | unchanged — refused a layer earlier by the INLINE-ARROW rule above, not by this |
+
+That last row is why the `src/` census reads the way it does. Of 8 value-position references to
+a top-level declaration in the LINKED stage-1 program, **7 are point-free array HOFs** blocked by
+`.map`/`.every`/`.some` demanding a literal arrow — a `const` bound to an arrow cannot pass those
+either, which is what proves the two defects independent — and exactly **1** is unblocked here:
+`mapTypesDeepExpr(arrow, eraseTypeParams)` at `src/parser.ts:3359`. `blocker-metric` cannot show
+even that one clearing, because `Parser.parseAssign` is masked by an `NT1606` twenty-six lines
+above it; the cross-module fixture in `test/modules/fndecl-value/` verifies it directly instead.
+The value of this entry is the false diagnostic, not the count.
+
+Both hints are RUN in `test/fndecl-value.test.ts` and asserted against node. Shadowing is proved
+by mutation: a function-typed parameter named `dbl` that is forwarded onward as a value resolves
+to the function's constant block if the `isBound` check is hoisted, printing **42 at exit 0**
+where node prints 22.
+
 ### `.find` / `.findLast` — one element shape opens, two stay refused, and the result is a BORROW
 
 `.find` over a `(T | undefined)[]` compiles. Over anything else heap-shaped it is `NT1001`, and
