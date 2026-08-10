@@ -377,6 +377,8 @@ interface Baseline {
   alloc?: Record<string, AllocStats>;
   /** Platform-DEPENDENT: keyed by `${process.platform}-${process.arch}`. */
   binarySize?: Record<string, Record<string, number>>;
+  /** `__text` section bytes — the quantization-free code-size metric the gate uses. */
+  textSize?: Record<string, Record<string, number>>;
   /** Anchor probe lines — platform-independent exact strings. */
   anchors?: Record<string, string>;
   /** Anchor peak RSS, platform-keyed (allocator + page size differ). */
@@ -436,9 +438,40 @@ export interface AllocStats {
   pvAllocs: number;
 }
 
-export interface LinkStats extends AllocStats { bytes: number }
+export interface LinkStats extends AllocStats { bytes: number; textBytes: number }
+
+/**
+ * The size of the emitted CODE, free of page quantization.
+ *
+ * The on-disk file size (`bytes`) cannot gate code size: the linker rounds `__TEXT` to a
+ * 16,384-byte page on macOS, so it under-reports real growth by ~5x inside a page and
+ * over-reports by ~25x at a boundary. Both were measured — 660 bytes of real code produced
+ * a +16,640 on-disk jump, and 11,800 bytes of real growth showed as +2,416 on disk.
+ *
+ * THROWS rather than falling back to the file size when `size` is unavailable. A gate that
+ * quietly degrades to an unreliable metric is worse than one that fails: it keeps reporting
+ * green while measuring something else, which is the failure this repo keeps re-learning.
+ */
+function textSectionBytes(bin: string): number {
+  const mach = spawnSync("size", ["-m", bin], { encoding: "utf8" });
+  if (mach.status === 0) {
+    const m = /Section __text:\s*(\d+)/.exec(mach.stdout ?? "");
+    if (m) return Number(m[1]);
+  }
+  const elf = spawnSync("size", ["-A", bin], { encoding: "utf8" });
+  if (elf.status === 0) {
+    const m = /^\.text\s+(\d+)/m.exec(elf.stdout ?? "");
+    if (m) return Number(m[1]);
+  }
+  throw new Error(
+    `could not read the __text section of ${bin} via \`size\` (tried -m for Mach-O and -A for ELF). ` +
+      `Code size cannot be gated on the on-disk file size — it is page-quantized. Install binutils/cctools.`,
+  );
+}
 
 const LINK_THRESHOLD_PCT = 15;
+/** `__text` is exact, so it does not need the slack a page-quantized metric does. */
+const TEXT_THRESHOLD_PCT = 3;
 
 /**
  * The runtime-counter probe.
@@ -489,9 +522,11 @@ async function measureLink(): Promise<Record<string, LinkStats>> {
         // The trap is that quantization LOOKS like corroboration — "nearly identical
         // +17,776..+17,952 across eight unrelated programs" reads as a fixed runtime cost,
         // which is exactly the wrong conclusion. The constant is the page size, not a cost.
-        // The quantization-free number is the `__text` SECTION (`size -m` on macOS,
-        // `size -A` on ELF). Cross-check there before accepting or explaining a move here.
+        // The quantization-free number is `textBytes` below, which is what the gate uses;
+        // this one is kept INFORMATIONAL so a page step is still visible when explaining a
+        // build, and never asserted on.
         bytes: statSync(bin).size,
+        textBytes: textSectionBytes(bin),
         arrLive: arrLive!, objLive: objLive!, strLive: strLive!, pvNodes: pvNodes!, pvAllocs: pvAllocs!,
       };
     }
@@ -540,9 +575,11 @@ describe("perf: baseline regeneration", () => {
   test.skipIf(!UPDATE)("writes the measured metrics to the baseline", () => {
     const alloc: Record<string, AllocStats> = {};
     const sizes: Record<string, number> = {};
+    const textSizes: Record<string, number> = {};
     for (const [name, s] of Object.entries(measuredLink)) {
       alloc[name] = { arrLive: s.arrLive, objLive: s.objLive, strLive: s.strLive, pvNodes: s.pvNodes, pvAllocs: s.pvAllocs };
       sizes[name] = s.bytes;
+      textSizes[name] = s.textBytes;
     }
     saveBaseline({
       note:
@@ -553,6 +590,7 @@ describe("perf: baseline regeneration", () => {
       // MERGE, never clobber: regenerating on macOS must not delete the Linux runner's
       // recorded sizes (and vice versa) — that would silently disarm the gate there.
       binarySize: { ...(baseline?.binarySize ?? {}), [PLATFORM]: sizes },
+      textSize: { ...(baseline?.textSize ?? {}), [PLATFORM]: textSizes },
       anchors: Object.fromEntries(Object.entries(measuredAnchors).map(([k, v]) => [k, v.line])),
       anchorRss: {
         ...(baseline?.anchorRss ?? {}),
@@ -622,13 +660,31 @@ describe.skipIf(UPDATE)("perf: compiled binary size (deterministic per toolchain
     for (const name of LINK_CORPUS) expect(measuredLink[name]!.bytes).toBeGreaterThan(0);
   });
 
+  const textBaseline = baseline?.textSize?.[PLATFORM];
   const sizeBaseline = baseline?.binarySize?.[PLATFORM];
 
-  test("binary size is within the significance threshold", () => {
-    if (!sizeBaseline) {
+  /*
+   * THE GATE IS `__text`, NOT THE FILE SIZE — and the reason is a measured failure of the
+   * old gate, not a preference. The linker rounds `__TEXT` to a 16,384-byte page on macOS,
+   * so on-disk size is wrong in BOTH directions:
+   *
+   *   660 bytes of real code  ->  +16,640 on disk   (over-reports ~25x, at a boundary)
+   *   11,800 bytes of real code -> +2,416 on disk   (under-reports ~5x, inside a page)
+   *
+   * The over-report is noise and merely trips the gate; the UNDER-report is the dangerous
+   * one, because a genuine ~15KB regression landing in page slack reads as nearly free.
+   *
+   * The trap that cost a round here: quantization LOOKS like corroboration. Eight unrelated
+   * programs moving by "+17,776 to +17,952" reads as a fixed runtime cost and was recorded
+   * as one; the constant was just the page size, and the real cost was ~1.1KB — sixteen
+   * times smaller. A near-constant delta across unrelated inputs is evidence of an ARTIFACT
+   * until something quantization-free says otherwise.
+   */
+  test("code size (__text) is within the significance threshold", () => {
+    if (!textBaseline) {
       // Not a silent pass: say out loud that this platform is unmeasured, and how to fix it.
       console.log(
-        `\n  perf: no binary-size baseline for platform "${PLATFORM}" — size is NOT being gated here.\n` +
+        `\n  perf: no __text baseline for platform "${PLATFORM}" — code size is NOT being gated here.\n` +
           `  Sizes are platform-specific (Mach-O vs ELF), so this is expected on a runner that\n` +
           `  has never recorded one. To start gating it here: ${REGEN}\n`,
       );
@@ -637,13 +693,29 @@ describe.skipIf(UPDATE)("perf: compiled binary size (deterministic per toolchain
     // Once a platform HAS a baseline, a program missing from it is a lost metric, not an
     // expected gap — fail rather than skip.
     expect(
-      LINK_CORPUS.filter((n) => sizeBaseline[n] === undefined),
-      `Programs missing from the "${PLATFORM}" size baseline. ${REGEN}`,
+      LINK_CORPUS.filter((n) => textBaseline[n] === undefined),
+      `Programs missing from the "${PLATFORM}" __text baseline. ${REGEN}`,
     ).toEqual([]);
 
     const after: Record<string, number> = {};
+    for (const [k, v] of Object.entries(measuredLink)) after[k] = v.textBytes;
+    reportAndAssert(compareMetric("textBytes", textBaseline, after, TEXT_THRESHOLD_PCT), TEXT_THRESHOLD_PCT);
+  });
+
+  test("on-disk size is REPORTED, never asserted (it is page-quantized)", () => {
+    if (!sizeBaseline) return;
+    const after: Record<string, number> = {};
     for (const [k, v] of Object.entries(measuredLink)) after[k] = v.bytes;
-    reportAndAssert(compareMetric("binBytes", sizeBaseline, after, LINK_THRESHOLD_PCT), LINK_THRESHOLD_PCT);
+    const changes = compareMetric("binBytes", sizeBaseline, after, LINK_THRESHOLD_PCT);
+    const moved = changes.filter((c) => c.significant);
+    if (moved.length) {
+      console.log(
+        `\n  perf: on-disk binary size moved (INFORMATIONAL — page-quantized, not a gate):\n` +
+          `${renderChanges(changes, LINK_THRESHOLD_PCT)}\n` +
+          `  Cross-check the __text gate above before concluding anything about code size.\n`,
+      );
+    }
+    expect(true).toBe(true); // never asserts — see the block comment above
   });
 });
 

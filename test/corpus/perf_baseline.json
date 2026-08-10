@@ -192,13 +192,25 @@
       "json-pretty.ts": 150096
     }
   },
+  "textSize": {
+    "darwin-arm64": {
+      "primes.ts": 87640,
+      "matrix.ts": 90596,
+      "sudoku.ts": 90744,
+      "life.ts": 89800,
+      "maze.ts": 108616,
+      "wordfreq.ts": 106592,
+      "stackvm.ts": 89636,
+      "json-pretty.ts": 89152
+    }
+  },
   "anchors": {
     "append-200k": "__nt_perf 0 0 0 0 0",
     "with-path-copy": "__nt_anchor 2 2 3 4 1 2002"
   },
   "anchorRss": {
     "darwin-arm64": {
-      "append-200k": 5292032
+      "append-200k": 5095424
     }
   }
 }
