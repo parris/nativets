@@ -62,8 +62,9 @@
  * the `!`, is what fixed it, and the line is still counted here.
  *
  * Three more of the entries below are likewise safe for reasons unrelated to their `!`:
- * `codegen.ts`'s `typeofTagOf(members[members.length - 1]!)` (a general union has >= 2
- * members, and `typeofTagOf(undefined)` would not throw either), `checker.ts`'s
+ * `codegen.ts`'s `typeofNameOf(members[members.length - 1]!)` (a general union has >= 2
+ * members, and `typeofNameOf(undefined)` answers `"object"` rather than throwing — every
+ * predicate inside `staticTypeofName` short-circuits on `typeof t === "string"`), `checker.ts`'s
  * `scopes[scopes.length - 1]!` (`pushScope` appends before it returns), and `driver.ts`'s
  * `versions[versions.length - 1]!` (an NDK directory that EXISTS but is empty is a real
  * configuration; node then fails inside `join`, not on a deref, where every other

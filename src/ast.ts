@@ -375,13 +375,67 @@ export function makeGeneralUnionTy(members: Ty[]): Ty {
 /** The tag a member carries in `t`, or -1 when it is not a member. */
 export function generalUnionTagOf(t: Ty, member: Ty): number { return generalUnionMembers(t).indexOf(member); }
 /**
- * What `typeof` reports for a value of this static type — the ONLY discriminant a
- * general union has, so it is also what decides whether one can be represented.
+ * What `typeof` reports for a value of this static type, or `undefined` when the answer
+ * is not a compile-time constant. THE ONE CANONICAL COPY: it is both the general union's
+ * only discriminant (so it decides what a union can be represented as) and the whole
+ * lowering of the `typeof` operator.
+ *
+ * WHY THE DEFAULT IS `"object"` AND NOT THE SPELLING. `typeof` answers from a CLOSED set
+ * of eight strings, of which five are reachable in this subset — `"undefined"`,
+ * `"boolean"`, `"number"`, `"string"`, `"function"` — and EVERYTHING else in the language
+ * is `"object"`. There is no sixth answer, so enumerating the five and defaulting to
+ * `"object"` is exhaustive BY CONSTRUCTION: a type encoding added tomorrow is an object
+ * unless it is one of those five, and those five are not growing.
+ *
+ * The lowering used to be written the other way round — enumerate the object-ish kinds,
+ * fall through to the raw `Ty` — and a kind nobody remembered to list printed the
+ * compiler's internal spelling as if it were a JavaScript answer. `typeof new Set(…)` was
+ * `"Set<string>"` against node's `"object"`, at exit 0, and since `typeof` is a BRANCH
+ * primitive `if (typeof s === "object")` took the wrong arm. SIX kinds were wrong, found
+ * by a differential probe rather than by reading the code: `Uint8Array`, `TextEncoder`,
+ * `TextDecoder`, `Map<K,V>`, `Set<T>`, and a discriminated union — which printed its
+ * entire member list. Enumerating the object side is the defect; the direction is the fix.
+ *
+ * `undefined` means one of three things, and every one of them is the CALLER's to handle
+ * rather than to guess at:
+ *   - the nullable box (`?U…`/`?N…`) and the general union (`G<…>`) — `typeof` is a
+ *     genuine RUNTIME fact there, decided by the box's tag, which is the point of the tag;
+ *   - `Dyn` (the actor-message ABI) — likewise carries no static kind;
+ *   - a bare type-parameter marker (`#T`) — no value has this type; monomorphization
+ *     substitutes it, so reaching here means a specialization escaped and the honest
+ *     answer is an internal error, not `"object"`.
+ *
+ * This function is the reason `typeofTagOf` no longer exists. That one was correct only
+ * over `isGeneralUnionArm`'s domain (number/string/boolean/array) and answered `"object"`
+ * for `undefined` and for a FUNCTION type — right for its one caller, a landmine for the
+ * next. Same shape as the `objectFields("@N")` phantom-record hazard documented above:
+ * a rule that holds only over its current caller's inputs is not a rule.
  */
-export function typeofTagOf(t: Ty): string {
+export function staticTypeofName(t: Ty): string | undefined {
   if (t === "number" || t === "string" || t === "boolean") return t;
+  if (t === "undefined" || t === "void") return "undefined";
+  if (isStringLitTy(t)) return "string";           // literal tags widen to `string`
+  if (isNullableTy(t) || isGeneralUnionTy(t)) return undefined; // a RUNTIME fact
+  if (t === "Dyn" || isTypeParamTy(t)) return undefined;        // no static kind at all
+  if (isFuncTy(t)) return "function";
+  // `null`, arrays, records, class instances, tagged unions, nominal back-edges, and every
+  // builtin handle (Map/Set/Uint8Array/TextEncoder/TextDecoder/Response/Headers/Date/URL/
+  // URLSearchParams). node says `"object"` for all of them whatever our representation is —
+  // a `Date` is a bare double here and still an object there.
   return "object";
 }
+/**
+ * The `typeof` tag of a general-union ARM — the union's only discriminant, and what
+ * decides whether one can be represented at all.
+ *
+ * A DOMAIN ADAPTER over `staticTypeofName`, not a second rule: arms are restricted by
+ * `isGeneralUnionArm` to number/string/boolean/array, on which `staticTypeofName` is
+ * total, so the `?? "object"` is unreachable. It is spelled out rather than asserted
+ * because a `!` on a `string | undefined` is outside the subset `src/` must stay inside,
+ * and because "object" is the answer an array arm gets anyway — the fallback cannot be
+ * a wrong answer even if the arm set is widened to another object kind later.
+ */
+export function generalUnionArmTypeof(t: Ty): string { return staticTypeofName(t) ?? "object"; }
 /**
  * An arm a general union may carry. Kept deliberately narrow: only shapes whose
  * `typeof` is a compile-time constant AND whose value round-trips through the

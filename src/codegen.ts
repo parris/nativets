@@ -19,7 +19,7 @@ import { freshArray, RETAINS_RECEIVER, arrayElements } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
-import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
+import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, staticTypeofName } from "./ast.ts";
 import { isTypeRefTy, unfoldTypeRef, recTypeTable } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
@@ -2329,16 +2329,13 @@ class FnGen {
         // A general union's typeof is likewise a RUNTIME fact — it is the whole point of
         // the box's tag, and it is what the checker's narrowing is reading.
         if (isGeneralUnionTy(inner)) return this.genTypeofGeneralUnion(this.genExpr(e.operand).v, inner);
-        const name =
-          inner === "undefined" || inner === "void" ? "undefined" :
-          inner === "null" ? "object" :
-          isFuncTy(inner) ? "function" :
-          isObjectTy(inner) || isArrayTy(inner) ? "object" :
-          // stdlib Batch 3: a Date/URL/URLSearchParams is an OBJECT in node, whatever
-          // our internal representation is (a Date is a bare double here).
-          isDateTy(inner) || isUrlRefTy(inner) ? "object" :
-          inner; // number | boolean | string
-        return { v: this.mod.intern(name), ty: "string" };
+        // Everything else is a compile-time constant. This used to ENUMERATE the object-ish
+        // kinds and fall through to `inner` — the raw `Ty` encoding — so any kind nobody
+        // listed printed the compiler's internal spelling as a JavaScript answer
+        // (`typeof new Set(…)` → `"Set<string>"`, and a tagged union printed its whole
+        // member list). `staticTypeofName` inverts the dispatch: five non-object answers,
+        // `"object"` otherwise.
+        return { v: this.mod.intern(this.typeofNameOf(inner)), ty: "string" };
       }
 
       case "UnaryExpr": {
@@ -3874,9 +3871,15 @@ class FnGen {
     this.to(this.block(end));
   }
 
-  /** Runtime typeof of a nullable box: tag 0→"undefined", 1→"object" (null), else typeof(base). */
+  /**
+   * Runtime typeof of a nullable box: tag 0→"undefined", 1→"object" (null), else
+   * typeof(base). The PRESENT arm carried its own copy of the leaking default arm —
+   * `Set<string> | undefined` holding a set answered `"Set<string>"` — so it asks the one
+   * canonical `staticTypeofName` too. `base` is never itself nullable (the box does not
+   * nest), so the answer is always a constant here.
+   */
   private genTypeofNullable(ptr: string, base: Ty): Val {
-    const baseName = base === "undefined" || base === "void" ? "undefined" : isFuncTy(base) ? "function" : isObjectTy(base) || isArrayTy(base) ? "object" : base;
+    const baseName = this.typeofNameOf(base);
     const slot = this.slot("string");
     const tag = this.nullTag(ptr);
     const isU = this.fresh(); this.emit(`${isU} = icmp eq i64 ${tag}, 0`);
@@ -3894,6 +3897,20 @@ class FnGen {
   }
 
   /**
+   * The `typeof` name for a type whose answer must be a COMPILE-TIME CONSTANT — the
+   * present arm of a nullable box and each arm of a general union. `staticTypeofName`
+   * returns `undefined` exactly when the answer is a runtime fact or the type has no
+   * value form (`Dyn`, an unsubstituted `#T`); neither can reach here, and a wrong
+   * guess would be a silent wrong answer, so it is an internal error rather than a
+   * fallback to `"object"`. Reject, never miscompile.
+   */
+  private typeofNameOf(t: Ty): string {
+    const name = staticTypeofName(t);
+    if (name === undefined) throw internalError(`no constant \`typeof\` for ${t}`);
+    return name;
+  }
+
+  /**
    * Runtime `typeof` of a general-union box: select the arm's `typeof` name by tag.
    * A chain of `select`s rather than blocks — every arm's answer is a constant string,
    * so there is nothing to branch around.
@@ -3901,12 +3918,12 @@ class FnGen {
   private genTypeofGeneralUnion(ptr: string, ty: Ty): Val {
     const members = generalUnionMembers(ty);
     const tag = this.nullTag(ptr);
-    let acc = this.mod.intern(typeofTagOf(members[members.length - 1]!)); // the last arm needs no test
+    let acc = this.mod.intern(this.typeofNameOf(members[members.length - 1]!)); // the last arm needs no test
     for (let i = members.length - 2; i >= 0; i--) {
       const is = this.fresh();
       this.emit(`${is} = icmp eq i64 ${tag}, ${i}`);
       const sel = this.fresh();
-      this.emit(`${sel} = select i1 ${is}, ptr ${this.mod.intern(typeofTagOf(members[i]!))}, ptr ${acc}`);
+      this.emit(`${sel} = select i1 ${is}, ptr ${this.mod.intern(this.typeofNameOf(members[i]!))}, ptr ${acc}`);
       acc = sel;
     }
     return { v: acc, ty: "string" };

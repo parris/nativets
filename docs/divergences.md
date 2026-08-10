@@ -292,6 +292,68 @@ Two things that look like divergences and are not:
 ToFixed; V8's `DoubleToRadixCString`) and are unchanged — see the Batch 1 entry above for their
 one restriction (literal, in-range arguments).
 
+### `typeof` is NOT a divergence (it leaked the internal type spelling, silently)
+
+`typeof` answers from a **closed set of eight strings**, of which five are reachable in this
+subset — `"undefined"`, `"boolean"`, `"number"`, `"string"`, `"function"` — and *everything*
+else in the language is `"object"`. There is no sixth answer.
+
+The lowering was written the other way round. It **enumerated the object-ish kinds it knew
+about** — `null`, arrays, records/classes, `Date`, `URL`, `URLSearchParams` — and let anything
+else fall through to `inner`, the raw `Ty` encoding. So a kind nobody remembered to list did
+not fail loudly; it printed the compiler's own internal spelling as if that were a JavaScript
+answer:
+
+```ts
+const s: Set<string> = new Set<string>(["a", "b"]);
+console.log(typeof s);                                  // node: "object"   before: "Set<string>"
+if (typeof s === "object") { … } else { … }             // node: then.      before: ELSE.
+```
+
+Exit `0`, wrong stdout — and **not cosmetic**, because `typeof` is a *branch* primitive and
+`typeof x === "object"` is the standard JS spelling of "is this a reference?". Every such test
+took the wrong arm.
+
+**Eight kinds were wrong, across three separate code paths**, found by running a 30-kind
+differential probe against node rather than by reading the code:
+
+| kind | node | before |
+|---|---|---|
+| `Set<T>` | `"object"` | `"Set<string>"` |
+| `Map<K, V>` | `"object"` | `"Map<string,number>"` |
+| `Uint8Array` | `"object"` | `"Uint8Array"` |
+| `TextEncoder` / `TextDecoder` | `"object"` | `"TextEncoder"` / `"TextDecoder"` |
+| a discriminated union | `"object"` | `"U<{k:\"a\",v:number}\|{k:\"b\",v:string}>"` — the whole member list |
+| `Set<T> \| undefined` holding a set | `"object"` | `"Set<string>"` |
+| `Uint8Array \| undefined` holding one | `"object"` | `"Uint8Array"` |
+
+The last two rows are a **third, independent copy** of the same default arm: the present arm
+of the A2 nullable box (`genTypeofNullable`) computed the base's name with its own inline
+chain. The first probe missed them because the only nullables it sampled were
+`string | undefined` and `number[] | null`, whose bases are kinds the old chain *did*
+enumerate — **a probe that only samples the arms already covered proves nothing about the
+default arm.** They were re-measured on the pre-fix tree before being claimed.
+
+**The fix is the DIRECTION of the dispatch, not seven more cases.** `staticTypeofName`
+(`src/ast.ts`) enumerates the five non-object answers and defaults to `"object"`, which is
+exhaustive *by construction*: a type encoding added tomorrow is an object unless it is a
+number, string, boolean, undefined or function, and that list is not growing. It returns
+`undefined` — never a guess — for the three things whose `typeof` is not a compile-time
+constant: the nullable box and the general union (a genuine runtime fact, decided by the tag,
+which is the point of the tag), `Dyn`, and an unsubstituted `#T`. Codegen turns that
+`undefined` into an **internal error** rather than falling back to `"object"`, so a kind added
+later is a loud failure instead of a quiet wrong answer.
+
+`typeofTagOf` was deleted in the same change. It was correct only over its one caller's domain
+(general-union arms: number/string/boolean/array) and answered `"object"` for `undefined` and
+for a *function* type — right for that caller, a landmine for the next, the same shape as the
+`objectFields("@N")` phantom-record hazard documented beside it. There is now one rule and one
+copy of it, with `generalUnionArmTypeof` as a named domain adapter over it.
+
+This is the **fifth** defect found in the default arm of a dispatch, after `join` on booleans,
+nested-array `join`, string coercion (directly below) and `===` on two nullables. Pinned in
+`test/typeof-operator.test.ts`, differentially against node.
+
 ### String coercion of a NON-primitive (`NT1032`) — it used to be a clang error
 
 `"a=" + x`, `` `${x}` `` and `String(x)` all run through one codegen helper
@@ -1374,6 +1436,14 @@ split three ways:
 | `const b: boolean = m.delete(k)` | already `NT2001` | unchanged |
 | `m.delete(k) === true` | already `NT2001` (cannot compare) | unchanged |
 | `Boolean(m.delete(k))` | already `NT1003` (`Boolean` unsupported) | unchanged |
+| **`const r = m.delete(k)` with NO type annotation** | **silently wrong, and still is** | **open — see "STILL OPEN" below** |
+
+Read that last row before trusting the six above it. Every "already `NT2001`" row is a
+**type-level** rescue: it fires because the *annotation* says `boolean` and `.delete` hands
+back a collection. Drop the annotation and nothing fires — `const r = m.delete(k)` infers the
+collection type and compiles, and the divergence reaches stdout. The rows above are not
+evidence that the boolean confusion is contained; they are evidence that it is contained
+*wherever the user happened to write a type*.
 
 The `return`-from-`: boolean` row holds for a `function` declaration, a method **and now an
 arrow**. It used **not** to: an arrow's declared return type was never checked against its
@@ -1444,12 +1514,57 @@ The two diagnostics are deliberately worded differently for the same code: a `.d
 is a **misunderstanding** (you wanted node's boolean; the fix is `.has`), a bare handle test
 is **dead code** (delete it, or test `.size`).
 
-**Still open, and the complete fix.** `console.log(m.delete("zz"))` prints the map where node
-prints `false`, and `const gone = m.delete(k); console.log(gone)` does the same — those are
-value positions, not boolean ones, and under our semantics printing the resulting collection
-is the *correct* rendering, indistinguishable from `console.log(m.set(k, v))`. The complete
-fix is the one the discarded-mutator section names: box the handle so `.delete` can return
-node's boolean.
+#### STILL OPEN: `.delete` in a VALUE position, and what it actually costs
+
+The boolean *contexts* above are closed. The **value** positions are not, deliberately —
+`const m2 = m.delete(k)`, the chained `new Set<T>().add(x).delete(x)` and `m.delete(k).size`
+are the supported persistent idioms and are pinned as *accepted* in
+`test/mapset-immutable.test.ts` ("the value-consuming `.delete` spellings still compile") and
+`test/collections.test.ts`. So this is a **known-open divergence with a written rationale**,
+not a rule that leaked. Anyone widening the refusal is overturning that decision, not
+patching an oversight.
+
+What it costs, stated in full, because an earlier version of this paragraph understated it
+in two ways and that is what made it read as benign:
+
+```ts
+const s: Set<string> = new Set<string>(["a", "b"]);
+const r = s.delete("a");
+console.log(typeof r);        // node: "boolean"   here: "object"
+console.log(s.size);          // node: 1           here: 2
+```
+
+**Exit 0 on both sides, wrong stdout on both lines, no diagnostic.** This is the shape a
+node-fluent programmer actually writes — bind the result of `.delete`, then read the
+**receiver** — and neither line goes anywhere near a boolean context, so none of the three
+rules above sees it. The `s.size` line is §A item (1), the headline persistence divergence,
+reached through a call that *looks* like a mutation. The `typeof r` line is §A item (2).
+
+> The earlier wording claimed printing the result was "the *correct* rendering,
+> indistinguishable from `console.log(m.set(k, v))`". **That sentence was false.** Under node
+> `.set` returns the **receiver**, so `console.log(m.set(k, v))` prints a `Map` there and a
+> `Map` here — the two agree in kind, and only the contents can differ. `.delete` returns a
+> **boolean**, so `console.log(m.delete(k))` prints `false` there and `Map(1) { … }` here:
+> a different *type*, not a different rendering of the same thing. The two cases are
+> distinguishable, and conflating them is what made the value hole look cosmetic. A
+> divergence note that understates its own symptom is its own defect.
+
+**Why the obvious narrowings were not taken.** Two were costed:
+
+| candidate rule | closes every door? | cost |
+|---|---|---|
+| refuse `.delete` anywhere but a self-rebind `x = x.delete(k)` | **yes** — the rule sits on the *call*, and a call has exactly one site | overturns the pinned decision above and breaks four pinned tests; an owner-level language call |
+| refuse only *direct* rendering (`console.log(m.delete(k))`, `typeof m.delete(k)`) | **no** — the repro above routes through a `const` and still leaks | worse than nothing: it is exactly the "being *partly* clever" failure the vacuous-test section warns about, and buys false confidence |
+
+The reason no *binding-level* rule works is the same one that forced the vacuous-test rule to
+be written on the type: at `console.log(gone)` the expression is a plain `Map`-typed
+identifier, and `console.log(m)` on a genuine map **agrees with node byte-for-byte**. Refusing
+the type would cost a real, correct capability, and one-level taint (`const g2 = gone`) is
+unsound at the second binding.
+
+**The complete fix** is the one the discarded-mutator section names: box the handle, so
+`.delete` can return node's boolean *and* the receiver can be updated through every alias.
+That is a stage of its own, not a checker rule.
 
 #### Rebinding a `Map`/`Set` PARAMETER from its own mutator is refused (`NT1606`)
 

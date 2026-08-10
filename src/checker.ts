@@ -23,7 +23,7 @@ import { OBJECT_PROTO_KEYS } from "./ast.ts";
 import { isUnionTy, unionDiscriminant, unionCommonField, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys, objectLayoutFits } from "./ast.ts";
 // The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
 // by `typeof` instead. Distinct from the discriminated-union machinery imported above.
-import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, typeofTagOf } from "./ast.ts";
+import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, generalUnionArmTypeof } from "./ast.ts";
 import type { ArrowFunction, BinaryExpr, Loc } from "./ast.ts";
 // `unlinkedImportError` says "you did not link" instead of blaming closures, for a call
 // to an imported binding that the standalone (unlinked) check cannot see.
@@ -1424,7 +1424,7 @@ class Checker {
       if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") continue;
       const p = this.accessPath(t.operand, scope);
       if (p === undefined || !isGeneralUnionTy(p.ty)) continue;
-      const keep = generalUnionMembers(p.ty).filter((m) => (typeofTagOf(m) === lit.value) === matched);
+      const keep = generalUnionMembers(p.ty).filter((m) => (generalUnionArmTypeof(m) === lit.value) === matched);
       if (keep.length !== 1) continue;
       if (out.some((f) => f.binding === p.binding && f.path === p.path)) continue;
       out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
@@ -6772,7 +6772,7 @@ function refuseUnboxedUnion(ty: Ty, what: string): void {
   throw nyi(
     NYI.OPTIONAL_CHAIN,
     `${what} of the un-narrowed union ${generalUnionMembers(ty).join(" | ")} — it is a tagged box, so which arm it holds ` +
-      `is only known at RUNTIME. Narrow it first (\`if (typeof x === "${typeofTagOf(generalUnionMembers(ty)[0]!)}") { … }\`) and use the arm`,
+      `is only known at RUNTIME. Narrow it first (\`if (typeof x === "${generalUnionArmTypeof(generalUnionMembers(ty)[0]!)}") { … }\`) and use the arm`,
   );
 }
 
