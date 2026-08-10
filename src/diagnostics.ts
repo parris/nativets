@@ -319,6 +319,31 @@ export const NYI = {
   // imported or otherwise unresolved base has no fields here at all, and would silently
   // inherit nothing. Refused at the `extends` clause, which is where the fault is.
   IFACE_EXTENDS: { code: "NT1034", milestone: "later", hint: "an interface may extend a `type`/`interface` that resolves to a plain record IN THIS FILE. A class or `@@mutable` base is nominal (its tag drives method resolution and the mutability rules), so its fields cannot be folded into a structural record — write the inherited fields out, or declare the derived shape as a `type` alias" },
+  // An AMBIENT lib type name this subset does not model — `any`, `unknown`, `never`,
+  // `object`, `symbol`, `bigint`, `Function`, `Iterable`, a BARE `Map`/`Set`/`Promise`
+  // written without type arguments, and the rest of `AMBIENT_TYPES` (src/parser.ts) that
+  // nothing else claims.
+  //
+  // Every one of them used to ERASE to `number`. `AMBIENT_TYPES` exists so NT2003 can tell
+  // "you never declared this" from "this is a global you never have to declare", and its
+  // escape returned control to `resolveNamed`'s last line — which answers `number`. The
+  // set is documented as "deliberately generous" on the argument that a name wrongly IN it
+  // "merely preserves the status quo"; the status quo was the erasure.
+  //
+  // `number` is a REAL type, so this is the destructive erasure NT1033 and NT2003 already
+  // refuse for `typeof`/`keyof` and for undeclared names — once it happens the spelling is
+  // gone and no later pass can tell the result from a `number` the user wrote. It was not
+  // merely a bad message. `x as any[]` re-typed a `string[]` as a `number[]`, and since
+  // both are `ptr` the LLVM verifier had nothing to object to: node printed `x`, nativets
+  // printed nothing and exited 255. `s as unknown` reached codegen and surfaced as clang's
+  // own "'%t1' defined with type 'ptr' but expected 'double'".
+  //
+  // Refused in the PARSER, which is the last pass that still holds the spelling. Only the
+  // erasing fallback is refused: a name that resolves honestly (`Date`, `Error`,
+  // `Uint8Array`, `Response`, `Headers`, `URL`, `TextEncoder`) and every applied generic
+  // `parseGenericType` maps to a real shape (`Map<K,V>`, `Array<T>`, `Partial<T>`, …) are
+  // untouched.
+  AMBIENT_TYPE: { code: "NT1035", milestone: "later", hint: "this is a type from TypeScript's standard library that nativets does not model, and guessing it would be a silent wrong answer — write the concrete type the value actually has" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };
