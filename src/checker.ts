@@ -260,13 +260,48 @@ function returnsUnderFinally(body: Stmt[], under = false): boolean {
   return false;
 }
 
+/**
+ * The UTF-8 byte length of `s` — exactly what `Buffer.byteLength(s, "utf8")` returns.
+ *
+ * `Buffer` is a node global with no representation here (`NT2001`), so it cannot appear in
+ * `src/`: it was this module's FIRST blocker, and — because `codegen.ts` and `ownership.ts`
+ * both import this file — theirs too.
+ *
+ * This must agree with the number the RUNTIME will report for the same literal, because it
+ * feeds the `NT2002` compile-time out-of-bounds rejection. It does: a string literal's bytes
+ * are emitted by codegen's `encodeCString`, which is `TextEncoder` — plain UTF-8. Verified
+ * against the runtime for ASCII, Latin-1, BMP, astral, and lone surrogates.
+ *
+ * A well-formed surrogate PAIR is therefore ONE code point and FOUR bytes, not 3+3. The
+ * distinction is not academic: the runtime's `String.fromCharCode` path really does emit
+ * CESU-8 (`fromCharCode(0xD83D) + fromCharCode(0xDE00)` measures 6 here, 4 in node), but
+ * that path builds a string at RUN time and never reaches this function, which only ever
+ * sees a `StringLiteral` the lexer already decoded into one JS string.
+ *
+ * A LONE surrogate is not representable in UTF-8 at all; `TextEncoder` and
+ * `Buffer.byteLength` both substitute U+FFFD, so it counts as 3 — and so does the runtime.
+ */
+function utf8ByteLength(s: string): number {
+  let n = 0;
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) { n += 1; i += 1; }
+    else if (c < 0x800) { n += 2; i += 1; }
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length &&
+             s.charCodeAt(i + 1) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff) { n += 4; i += 2; }
+    else { n += 3; i += 1; }
+  }
+  return n;
+}
+
 /** The length of an expression whose size is fixed at compile time, else undefined. */
 function literalLength(e: Expr): number | undefined {
   if (e.kind === "ArrayLiteral") {
     return e.elements.some((x) => x.kind === "SpreadExpr") ? undefined : e.elements.length;
   }
   // String indices address UTF-8 BYTES here (docs/divergences.md §A.2), so measure bytes.
-  if (e.kind === "StringLiteral") return Buffer.byteLength(e.value, "utf8");
+  if (e.kind === "StringLiteral") return utf8ByteLength(e.value);
   return undefined;
 }
 

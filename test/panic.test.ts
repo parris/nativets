@@ -183,6 +183,51 @@ console.log(a[-1]);
     expect(d?.message).toContain("a string of length 3");
   });
 
+  /*
+   * The compile-time length of a NON-ASCII literal must be the same number the RUNTIME
+   * reports, or NT2002 rejects in-bounds code / admits out-of-bounds code — a silent
+   * wrong answer on the bounds themselves.
+   *
+   * It used to be `Buffer.byteLength(v, "utf8")`, which cannot appear in `src/` (`Buffer`
+   * is a node global with no representation here — NT2001, and it was the FIRST blocker
+   * for checker/codegen/ownership). It is now `utf8ByteLength` in the checker; these cases
+   * pin the two together. Each expectation was taken from `Buffer.byteLength` itself.
+   *
+   * Note a well-formed surrogate PAIR is ONE code point and FOUR bytes, not 3+3: a string
+   * literal's bytes come from codegen's `encodeCString`, which is `TextEncoder` — plain
+   * UTF-8. (The runtime's `String.fromCharCode` concat path really does produce CESU-8, 6
+   * bytes, but it builds a string at RUN time and never reaches the literal path.)
+   * A LONE surrogate is not representable in UTF-8; TextEncoder and Buffer.byteLength both
+   * substitute U+FFFD, so it measures 3.
+   */
+  test("a NON-ASCII literal's length is its UTF-8 byte count, matching the runtime", () => {
+    const BS = String.fromCharCode(92); // a backslash, without writing one in a template
+    const cases: { lit: string; bytes: number; what: string }[] = [
+      { lit: '"é"', bytes: 2, what: "Latin-1 (U+00E9)" },
+      { lit: '"€"', bytes: 3, what: "BMP (U+20AC)" },
+      { lit: '"\u{1f600}"', bytes: 4, what: "astral, raw in source" },
+      { lit: `"${BS}u{1F600}"`, bytes: 4, what: "astral via ${BS}u{...}" },
+      { lit: `"${BS}uD83D${BS}uDE00"`, bytes: 4, what: "astral via a SURROGATE PAIR — 4, not 3+3" },
+      { lit: `"${BS}uD800"`, bytes: 3, what: "a LONE high surrogate — U+FFFD, 3 bytes" },
+      { lit: `"${BS}uDC00"`, bytes: 3, what: "a LONE low surrogate — U+FFFD, 3 bytes" },
+      { lit: '"aéb"', bytes: 4, what: "mixed ASCII + Latin-1" },
+    ];
+    for (const { lit, bytes, what } of cases) {
+      // one PAST the end is refused, and the message states the byte length
+      const d = compileError(`console.log(${lit}[${bytes}]);\n`);
+      expect(`${what}: ${d?.code}`).toBe(`${what}: NT2002`);
+      expect(`${what}: ${d?.message}`).toBe(`${what}: index ${bytes} is out of bounds for a string of length ${bytes}`);
+      // …and the LAST byte is still in bounds, so the boundary sits exactly on the count
+      expect(`${what}: ${compileError(`console.log(${lit}[${bytes - 1}]);\n`)}`).toBe(`${what}: null`);
+    }
+  });
+
+  test("the empty literal has length 0, so even index 0 is out of bounds", () => {
+    const d = compileError(`console.log(""[0]);\n`);
+    expect(d?.code).toBe("NT2002");
+    expect(d?.message).toBe("index 0 is out of bounds for a string of length 0");
+  });
+
   test("an empty const array says so", () => {
     const d = compileError(`const a: number[] = [];
 console.log(a[0]);
