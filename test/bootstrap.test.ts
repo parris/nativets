@@ -611,7 +611,16 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // What is left is NT1606 — `Set.add` discarded, 30 sites, byte-identical in both
     // trees and merely unmasked by the code above it clearing. That is a REAL
     // refusal: `Set` is persistent here, so `s.add(x)` genuinely does nothing.
-    ["NT1606"],
+    // ...and it SPLITS IN TWO, which is the shape of `ast.ts` leaving the table. For five
+    // rounds this set was one code because nine modules were reporting one line of
+    // ast.ts through the link. ast.ts is now at ZERO failing functions and out of the
+    // blame column entirely, so the remaining nine sit on their OWN source and the set
+    // finally measures nine walls instead of nine views of one.
+    //
+    // NT1605 is ast.ts itself, and it is a RUNG rather than a blocker: ast.ts now runs
+    // the entire CHECKER clean and dies in the OWNERSHIP pass, a stage it had never
+    // reached. NT2001 is the other eight, blaming `self`/`parser.ts`/`checker.ts`.
+    ["NT1605", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -841,7 +850,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // identical-looking unions, and NT2001's location for a LINKED program comes from the
     // merged text, so it pointed at a blank line. A blocker that cannot be located reads
     // as many blockers.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    // ...and it refills with EIGHT, not nine, and that difference is the whole point:
+    // `ast.ts` is no longer in it. For five rounds this bucket and the one above it
+    // traded the same nine names because nine modules reported ONE line of ast.ts
+    // through the link. ast.ts is at zero failing functions now, so these eight are
+    // on their own source -- blame reads `self`/`parser.ts`/`checker.ts` -- and the
+    // set measures eight distinct walls for the first time.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NT1001 EMPTIES, and it is worth being precise about what did NOT happen: `.find`
     // over a heap element is still refused. What cleared is the one shape where the
     // element already IS a nullable box (`(T | undefined)[]`), so `.find` hands the
@@ -896,9 +913,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // visible. Byte-identical in both trees; nothing regressed. This is the promotion
     // effect at its most misleading -- a bucket going from empty to nine while the
     // per-function count FELL 245 -> 244.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    // ...and NT1606 EMPTIES. The `Set`/`Map` accumulator that held this bucket for four
+    // rounds is gone from ast.ts: a `@@mutable` RECORD can carry it through a by-borrow
+    // parameter where a `@@mutable` CLASS cannot (a class write is a setter call on a
+    // borrowed receiver, NT1607; a record write is a field store named in the signature,
+    // which `checkOwnedReceiver` admits). A prior lane measured the class case and
+    // reported the constraint as parameter-specific; it was class-specific.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -1117,9 +1138,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // can undo without anything regressing -- the per-function count fell in the same
     // change. Asserted as the measured set now, so the next promotion reads as a
     // membership change rather than a code appearing from nowhere.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    // ...and NT1606 EMPTIES. The `Set`/`Map` accumulator that held this bucket for four
+    // rounds is gone from ast.ts: a `@@mutable` RECORD can carry it through a by-borrow
+    // parameter where a `@@mutable` CLASS cannot (a class write is a setter call on a
+    // borrowed receiver, NT1607; a record write is a field store named in the signature,
+    // which `checkOwnedReceiver` admits). A prior lane measured the class case and
+    // reported the constraint as parameter-specific; it was class-specific.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
@@ -1223,7 +1248,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     //
     // All eight now sit behind ONE real term in ast.ts (`.map` over heap elements,
     // NT1001), which is why THAT bucket grew as this one emptied.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    // ...and refills with the same EIGHT as the bucket above, for the same reason:
+    // `ast.ts` left the table. Recorded twice on purpose -- the two assertions measure
+    // different passes, and having both move together is the evidence that ast.ts was
+    // a shared blocker rather than nine independent ones.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a

@@ -399,7 +399,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `SatisfiesExpr`, where `ty: Ty` is required) — so neither agreeing layouts nor a
   // runtime tag test reaches them on its own; the TYPE must be unified first. ZERO of
   // the 15 need a runtime tag test per read. Nobody should build one on this evidence.
-  "ast.ts": { rung: 0, code: "NT1606", blame: "self" },
+  "ast.ts": { rung: 0, code: "NT1605", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -461,7 +461,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. parser.ts's own 18
   // `this.<field>` push sites are NOT cleared — a field names no binding the ownership
   // pass can prove unique, so they stay NT1606 behind this.
-  "parser.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "parser.ts": { rung: 0, code: "NT2001", blame: "self" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -505,7 +505,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `.push` legal on a `@@mutable` accumulator, nothing stops here any more and all four
   // walk through to ast.ts's ONE `trimEnd` site (NT1002). driver.ts goes to lexer.ts's
   // NT2001 instead. Neither lane could have measured this alone.
-  "checker.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "checker.ts": { rung: 0, code: "NT2001", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -516,7 +516,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
   // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
   // fires first through the link. Its own tables are the same shape and sit behind it.
-  "codegen.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "codegen.ts": { rung: 0, code: "NT2001", blame: "checker.ts" },
   // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
   // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
   // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
@@ -531,7 +531,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Both rows moved to their real blockers, and the blame column is the interesting part:
   // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
   // below; coverage-preprocess.ts finally has one of its OWN.
-  "coverage.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "coverage.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -548,8 +548,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // The Map spread in `clone` was the one blocker this module ever owned in the STANDALONE
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
-  "ownership.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
-  "driver.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "ownership.ts": { rung: 0, code: "NT2001", blame: "checker.ts" },
+  "driver.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
   //
@@ -578,14 +578,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
   // and it only ever held it because this lane had not landed yet. Sixth time a merge here
   // produced a frontier neither side could have computed from its own diff.
-  "cli.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "cli.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
   // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
   // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
-  "modules.ts": { rung: 0, code: "NT1606", blame: "ast.ts" },
+  "modules.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
@@ -723,7 +723,7 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // (`unionCommonField`). Stage-1 inherits ast.ts's `exprLoc` either way: the blocker moved
 // 22 lines down that one function, from the `e.left` read to the `.map` over its own
 // recursive calls. Still rung 0, still nine modules — the conjunction, again.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1606" };
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT2001" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -1288,8 +1288,28 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // that closed zero blockers, and now a feature that already existed. The remaining
       // NT1003 refusal is now TRUE and says so: calling an un-narrowed optional callback
       // is tsc's TS2722, a permanent type error, not a feature to wait for.
-      expect(m.error).toContain("persistent");
-      expect(m.code).toBe("NT1606");
+      // TWENTY-SEVENTH, and the biggest structural move of the round: `src/ast.ts` is at
+      // ZERO failing functions and has DROPPED OUT of the blame column entirely. It was the
+      // inherited blocker for NINE of twelve modules; they now blame `self`, `parser.ts` or
+      // `checker.ts`, which is the first time this table has shown nine DIFFERENT walls
+      // rather than nine views of one line.
+      //
+      // `ast.ts` itself now runs the ENTIRE CHECKER CLEAN and dies in the OWNERSHIP pass
+      // (NT1605, `objectFields(m)[i]`) — a stage it had never reached. That is a rung.
+      //
+      // What unlocked it: a `@@mutable` RECORD can carry an accumulator through a by-borrow
+      // parameter, where a `@@mutable` CLASS cannot. A prior lane measured the class case
+      // (NT1607, a setter call on a borrowed receiver) and reported the constraint as
+      // parameter-specific; it was class-specific. `checkOwnedReceiver` admits a record's
+      // field store because it is named in the signature, and `ThisHit` ten lines away was
+      // already doing exactly that.
+      //
+      // `bindStmt` cleared against its predicted ceiling too: its promoted blocker was the
+      // `never` exhaustiveness witness, and the tripwire an earlier lane left — "if this
+      // goes RED because someone gave `bindStmt` a returning switch, the witness has become
+      // free to delete" — fired. tsc's real TS2366 replaces it.
+      expect(m.error).toContain("Cannot assign");
+      expect(m.code).toBe("NT2001");
       return;
     }
 

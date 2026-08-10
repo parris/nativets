@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "d544bdd"
+    "rev": "b0609ba"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "d4412ac12260451c",
+      "sha256": "c50b22db43c2f089",
       "standalone": {
-        "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
+        "stage": "ownership",
+        "code": "NT1605",
+        "message": "[NT1605] cannot move out of array element (its element type is linear)"
       },
       "linked": {
-        "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
+        "stage": "ownership",
+        "code": "NT1605",
+        "message": "[NT1605] cannot move out of array element (its element type is linear)"
       }
     },
     "checker.ts": {
-      "sha256": "42c7d30ed7e45fa0",
+      "sha256": "059e914ec77af061",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] 'Buffer' is not defined"
       }
     },
     "cli.ts": {
@@ -40,12 +40,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot assign string to number 'i'"
       }
     },
     "codegen.ts": {
-      "sha256": "8919d9259d607aa5",
+      "sha256": "b3810ddc03c36a5f",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] 'Buffer' is not defined"
       }
     },
     "coverage-preprocess.ts": {
@@ -71,7 +71,7 @@
       }
     },
     "coverage.ts": {
-      "sha256": "d8c0c2632712c6a8",
+      "sha256": "b94d87bfc3028e16",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -80,12 +80,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot assign string to number 'i'"
       }
     },
     "diagnostics.ts": {
-      "sha256": "7cffa4042cf5b7e8",
+      "sha256": "4347878d841b9ff1",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot assign string to number 'i'"
       }
     },
     "lexer.ts": {
@@ -125,7 +125,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "6e15c9f55cb600b7",
+      "sha256": "dfd8da7e676b3118",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -133,12 +133,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot assign string to number 'i'"
       }
     },
     "ownership.ts": {
-      "sha256": "5ad105351b743be8",
+      "sha256": "e33cf31db028fbde",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] 'Buffer' is not defined"
       }
     },
     "parser.ts": {
-      "sha256": "ce65ef87b9fc8b60",
+      "sha256": "14dd77d925d08473",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot assign string to number 'i'"
       }
     }
   }
