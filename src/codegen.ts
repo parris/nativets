@@ -5711,7 +5711,12 @@ class FnGen {
    *  leaves) — the receiver shares nothing with the sender's heap. Numbers are values and
    *  strings are copied by the runtime, so both pass straight through. */
   private msgValue(val: Val): Val {
-    return isStructMsgTy(val.ty) ? this.genDeepClone(val, /*copyStrings=*/true) : val;
+    // The pass-through arm rebuilds the record rather than handing `val` back: returning a
+    // PARAMETER is a move out of a borrow (NT1604), and the `if` spelling of this exact
+    // function was already refused — only the `?:` spelling slipped through, because the
+    // ownership pass could not see a move through a ternary arm. A `Val` is an immutable
+    // {SSA name, type} descriptor, so the copy is free at runtime and identity-neutral.
+    return isStructMsgTy(val.ty) ? this.genDeepClone(val, /*copyStrings=*/true) : { v: val.v, ty: val.ty };
   }
 
   private slotNoRetain(val: Val): string {

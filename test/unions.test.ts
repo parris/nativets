@@ -25,6 +25,8 @@ import { fileURLToPath } from "node:url";
 
 import { compileAndRun, runWithNode, compileAndRunFile, runWithNodeFile } from "./harness.ts";
 import { sourceToIR } from "../src/driver.ts";
+import { parse } from "../src/parser.ts";
+import { check } from "../src/checker.ts";
 import { NTError } from "../src/diagnostics.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -110,9 +112,14 @@ describe("narrowing is the ONLY way to a member's fields — the unsound reads a
 interface B { kind: "B"; right: number }
 type E = A | B;
 function mkA(n: number): E { return { kind: "A", left: n }; }
-function opt(e: E, on: boolean): E | undefined { return on ? e : undefined; }
+function optA(n: number, on: boolean): E | undefined { return on ? mkA(n) : undefined; }
 `;
-    const f = (body: string) => `${E}function f(e: E | undefined): number { ${body} }\nconsole.log(f(opt(mkA(7), true)));\n`;
+    // `optA` BUILDS its value in the arm. It used to be `opt(e: E, on)` returning
+    // `on ? e : undefined` — returning a parameter, i.e. moving out of a borrow, which
+    // only compiled because a `?:` arm discarded the caller's `consume`. See the note in
+    // test/unions/narrow-nullable.ts; the nullish-then-tag narrowing pinned here is
+    // unchanged, only the plumbing that produces the `E | undefined` is.
+    const f = (body: string) => `${E}function f(e: E | undefined): number { ${body} }\nconsole.log(f(optA(7, true)));\n`;
 
     test("the guarded-then-narrowed read compiles", () => {
       expect(codeOf(f(`if (!e) return -1; if (e.kind === "A") return e.left; return 0;`))).toBe(null);
@@ -132,12 +139,12 @@ function opt(e: E, on: boolean): E | undefined { return on ? e : undefined; }
       // no guard at all
       expect(messageOf(f(`if (e.kind === "A") return e.left; return 0;`))).toContain("possibly undefined");
       // assigned between the proof and the use — the fact is dropped, so is the narrowing
-      expect(messageOf(`${E}function f(e: E | undefined, o: E): number { if (!e) return -1; e = o; if (e.kind === "A") return e.left; return 0; }\nconsole.log(f(opt(mkA(7), true), mkA(1)));\n`))
+      expect(messageOf(`${E}function f(e: E | undefined, o: E): number { if (!e) return -1; e = o; if (e.kind === "A") return e.left; return 0; }\nconsole.log(f(optA(7, true), mkA(1)));\n`))
         .toContain("possibly undefined");
     });
 
     test("the DISCRIMINANT alone is readable after only the nullish guard", () => {
-      expect(codeOf(`${E}function f(e: E | undefined): string { if (!e) return "none"; return e.kind; }\nconsole.log(f(opt(mkA(7), true)));\n`)).toBe(null);
+      expect(codeOf(`${E}function f(e: E | undefined): string { if (!e) return "none"; return e.kind; }\nconsole.log(f(optA(7, true)));\n`)).toBe(null);
     });
   });
 
@@ -1127,10 +1134,20 @@ console.log(f(undefined));
    * Both compiled on the base tree and were verified to fail with the naive wiring, which
    * is why `ConditionalExpr` falls back to the UN-NARROWED typing when the join fails.
    */
+  /*
+   * The join is read through the RESULT (`(…).kind`) rather than RETURNED, which is the
+   * same spelling the sibling test below uses and it is load bearing. `return e.kind ===
+   * "A" ? e : f` moves a parameter out of the function — one allocation, two owners — and
+   * under ASan it is an "attempting double-free" that prints NOTHING where node prints
+   * `A`/`B`. It compiled only because `Ownership.expr` hard-coded `consume: false` on both
+   * arms of a `?:` and so could not see the move; `return e` alone was already NT1604.
+   * Reading a field BORROWS, so what this test is actually about — that the join still
+   * produces a union whose discriminant is readable — is pinned unchanged.
+   */
   test("an arm that is the RECEIVER ITSELF still joins with the union", async () => {
-    const src = `${E}function pick(e: E, f: E): E { return e.kind === "A" ? e : f; }
-console.log(pick({ kind: "A", left: 1 }, { kind: "B", text: "x" }).kind);
-console.log(pick({ kind: "B", text: "y" }, { kind: "B", text: "x" }).kind);
+    const src = `${E}function pick(e: E, f: E): string { return (e.kind === "A" ? e : f).kind; }
+console.log(pick({ kind: "A", left: 1 }, { kind: "B", text: "x" }));
+console.log(pick({ kind: "B", text: "y" }, { kind: "B", text: "x" }));
 `;
     await expectMatches(src);
   });
@@ -1453,5 +1470,65 @@ console.log(f({ inner: { kind: "C", other: 9 } }));
     const ours = await compileAndRun(src);
     expect(ours.stdout).toBe(oracle.stdout);
     expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
+/*
+ * The `?:` UN-NARROWED FALLBACK MUST NOT POISON THE AST.
+ *
+ * `Checker.type`'s `ConditionalExpr` types the arms in their NARROWED scopes, and when the
+ * join fails it re-types them un-narrowed and takes that instead. But `this.type` WRITES
+ * the type it computes onto the AST nodes, and codegen reads them back — so the fallback is
+ * a MUTATION, not a query. On `x.kind === "Neg" ? x.inner : x` it retypes the receiver `x`
+ * to the un-narrowed union and only THEN throws on `.inner` (unreadable there), and the
+ * `catch` swallows the throw but not the damage.
+ *
+ * This is LATENT, not live: every path that reaches the damaged state also re-throws, so
+ * codegen never sees the AST. It becomes a wrong answer the moment any widening rescues the
+ * join after that point — `lane-unionfit` measured exactly that, an `InternalError` from
+ * codegen ("not at one slot in every member") instead of a refusal, and had to place its
+ * widening BEFORE the fallback to avoid it. Ordering is the right habit but a fragile
+ * guarantee, so the fallback now restores the narrowed typing when it does not take.
+ *
+ * Asserted on the AST rather than through a compiled program precisely BECAUSE the defect
+ * is unreachable today: there is no source text that can observe it yet, and a test that
+ * waits for one is a test that arrives after the regression.
+ */
+describe("the `?:` un-narrowed fallback restores the AST when it does not take", () => {
+  const SRC = `interface Neg { kind: "Neg"; inner: E }
+interface Lit { kind: "Lit"; v: number }
+type E = Neg | Lit;
+function f(x: E): E { return x.kind === "Neg" ? x.inner : x; }
+console.log(f({ kind: "Lit", v: 1 }).kind);
+`;
+
+  /** The `ty` the checker left on the CONSEQUENT's receiver (`x` in `x.inner`). */
+  function consequentReceiverTy(src: string): { refused: string | null; ty: unknown } {
+    const prog = parse(src);
+    let refused: string | null = null;
+    try { check(prog); } catch (e) { refused = e instanceof NTError ? e.diag.code : "THREW"; }
+    let cond: Record<string, unknown> | null = null;
+    const seen = new Set<unknown>();
+    const walk = (n: unknown): void => {
+      if (n === null || typeof n !== "object" || seen.has(n)) return;
+      seen.add(n);
+      const o = n as Record<string, unknown>;
+      if (o.kind === "ConditionalExpr" && cond === null) cond = o;
+      for (const k of Object.keys(o)) walk(o[k]);
+    };
+    walk(prog);
+    const con = (cond as Record<string, unknown> | null)?.consequent as Record<string, unknown> | undefined;
+    return { refused, ty: (con?.object as Record<string, unknown> | undefined)?.ty };
+  }
+
+  test("a fallback that throws leaves the NARROWED type on the arm, not the union", () => {
+    const { refused, ty } = consequentReceiverTy(SRC);
+    // The program itself is still refused — this test widens nothing.
+    expect(refused).toBe("NT2001");
+    // `x` inside `x.inner` must still carry the narrowed Neg member. Before the restore it
+    // held the whole union, which is the state codegen reports as
+    // "not at one slot in every member".
+    expect(String(ty)).toContain("inner");
+    expect(String(ty)).not.toContain("U<");
   });
 });

@@ -994,8 +994,36 @@ class Analyzer {
       case "LogicalExpr": this.expr(e.left, state, false); this.expr(e.right, state, false); return;
       case "UnaryExpr": this.expr(e.operand, state, false); return;
       case "TypeofExpr": this.expr(e.operand, state, false); return;
+      /**
+       * A `?:` YIELDS ONE OF ITS ARMS, so in a consuming position it MOVES whichever one
+       * runs — the arms inherit `consume`, exactly as `as` / `satisfies` / `!` below do.
+       * Only the TEST is unconditionally a borrow.
+       *
+       * This used to hard-code `consume: false` for both arms, which discarded the
+       * caller's move and made `?:` a universal laundering step for the ownership rules:
+       * `const y: string[] = x` was NT1604, and `const y: string[] = c ? x : o` — the
+       * IDENTICAL move — compiled at exit 0. Everything downstream is designed assuming
+       * those refusals hold, so this was not merely a missing diagnostic: the binding
+       * became a second owner of the caller's value and freed it, which ASan reports as
+       * `heap-use-after-free` in `nt_arr_free`, and as "attempting double-free" when a
+       * union member is returned through an arm. Silent on a plain run — the allocator's
+       * abort discards buffered stdout, so the program exits 0 having printed a prefix of
+       * the right answer. Same defect and same shape as `AsExpr` (481c463), one node type
+       * over. An explicit `move(x)` in an arm WAS caught (its own case consumes), which is
+       * why only the IMPLICIT move stayed open.
+       *
+       * MOVE and not the ALIAS reading `as` takes: `as` retypes ONE place, so its result
+       * is always the operand's allocation, while a `?:` picks between two — and an arm can
+       * be a fresh value (`c ? a : ["z"]`) that nothing else will ever free. Aliasing would
+       * leak those. The cost of moving is the mirror case, two owned locals as the two arms
+       * (`c ? a : b`): both are marked moved but only the one that ran is reachable through
+       * the result, so the other LEAKS. Making that exact needs a per-path drop flag this
+       * pass does not have — the same one `AssignExpr`'s borrow-param rule above declined
+       * to invent — and a leak is the better of the two failures. It was a
+       * use-after-free before. Pinned in test/drops.test.ts.
+       */
       case "ConditionalExpr":
-        this.expr(e.test, state, false); this.expr(e.consequent, state, false); this.expr(e.alternate, state, false);
+        this.expr(e.test, state, false); this.expr(e.consequent, state, consume); this.expr(e.alternate, state, consume);
         return;
       case "TemplateLiteral": for (const x of e.exprs) this.expr(x, state, false); return;
       case "ArrayLiteral":
