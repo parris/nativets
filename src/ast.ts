@@ -516,6 +516,74 @@ export function objectLayoutFits(view: Ty, concrete: Ty): boolean {
 }
 
 /**
+ * `Extract<T, U>`'s per-member test: is the union member `member` assignable to the
+ * pattern `U`? TypeScript's `Extract` is `T extends U ? T : never` distributed over `T`,
+ * and `extends` on two object types means "has every property of `U`, at an assignable
+ * type" — so this asks exactly that, key by key.
+ *
+ * DELIBERATELY NOT SLOT-SENSITIVE, and this is the line that separates it from
+ * `objectLayoutFits` one function up. That predicate answers a LAYOUT question — "may a
+ * value laid out as `concrete` be READ through the shape `view`" — so it is index-keyed,
+ * because a field read compiles to a constant `getelementptr` and finding the key at some
+ * other offset is worthless. `Extract` asks nothing of the kind: it SELECTS whole members
+ * out of a union and hands one of them back unchanged, so the value is always read at its
+ * own layout and there is no reinterpretation to get wrong. Using the layout rule here
+ * would be a silent narrowing of what `Extract` means (`Extract<Expr, {ty?: string}>`
+ * would answer the empty set because `ty` is at slot 1, not slot 0) and `tsc` — which is
+ * authoritative on what a TYPE means — would disagree with us about a type. Where the two
+ * systems genuinely differ is the `as` that consumes this result, and that cast is checked
+ * against `objectLayoutFits` on its own.
+ *
+ * A STRING-LITERAL pattern field is matched EXACTLY (`"square"` selects the member tagged
+ * `"square"` and no other); every other field is matched by WIDENED type, which is the
+ * same equality `unionCommonField` and `objectLayoutFits` use, so all three agree about
+ * when two field types are "the same one".
+ */
+export function extractMatchesPattern(member: Ty, pattern: Ty): boolean {
+  if (!isObjectTy(member) || !isObjectTy(pattern)) return false;
+  const want = objectFields(pattern);
+  const have = objectFields(member);
+  for (let i = 0; i < want.length; i++) {
+    const wantKey = want[i]!.key;
+    const wantTy = want[i]!.ty;
+    let ok = false;
+    for (let j = 0; j < have.length; j++) {
+      if (have[j]!.key !== wantKey) continue;
+      const haveTy = have[j]!.ty;
+      ok = isStringLitTy(wantTy) ? haveTy === wantTy : widenLiteralTys(haveTy) === widenLiteralTys(wantTy);
+      break;
+    }
+    if (!ok) return false;
+  }
+  return true;
+}
+
+/**
+ * The members of the discriminated union `subject` that survive `Extract<subject, pattern>`,
+ * in declaration order. Empty when `subject` is not a union, when `pattern` is not an object
+ * type, or when nothing matches — the caller distinguishes those, since only the last is
+ * TypeScript's `never`.
+ *
+ * A pattern that constrains NOTHING keeps every member, and that is the load-bearing
+ * degenerate case rather than an oversight: `{ kind: "MemberExpr" | "IndexExpr" }` has
+ * already collapsed to `{kind:string}` by the time any of this runs (a union of string
+ * literals widens in `parseTypeInner`, long before `Extract` sees it), so every member's
+ * `kind` matches by widened type and the answer is the whole union — which is precisely the
+ * erasure `Extract` had before, i.e. the conservative direction. See the parser.
+ */
+export function extractUnionMembers(subject: Ty, pattern: Ty): Ty[] {
+  //@@mutable
+  const keep: Ty[] = [];
+  if (!isUnionTy(subject) || !isObjectTy(pattern)) return keep;
+  const members = unionMembers(subject);
+  for (let i = 0; i < members.length; i++) {
+    const m = members[i]!;
+    if (extractMatchesPattern(m, pattern)) keep.push(m);
+  }
+  return keep;
+}
+
+/**
  * Replace every string-literal type with `string`, EXCEPT inside a nested `U<…>`
  * (whose members must keep their tags to stay narrowable). Applied wherever a type
  * leaves union space, so a literal type never reaches ownership or codegen.

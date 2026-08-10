@@ -3978,7 +3978,7 @@ reads, and they split three ways:
 
 | Shape | Count | Why |
 |---|---|---|
-| receiver is the FULL 30-member `Expr`, field absent from most members | 31 | **`Extract<T, U>` erases to `T`** (`parseGenericType`, `src/parser.ts:1323`). `Extract<Expr, {kind:"ArrowFunction"}>` is the whole union, so every field read on such a parameter fails. `tsc` sees the member. |
+| receiver is the FULL 30-member `Expr`, field absent from most members | 31 | **`Extract<T, U>` erased to `T`** (`parseGenericType`). `Extract<Expr, {kind:"ArrowFunction"}>` was the whole union, so every field read on such a parameter failed. `tsc` sees the member. **CLOSED below.** |
 | `.ty` on the full `Expr` union | 5 | present in all 30 members but at slots 1..5, and `string` in some / `?Ustring` in others — needs agreeing layout or a tag branch |
 | same-type field at DIFFERENT slots on a 2-member sub-union | 2 | same |
 
@@ -4056,6 +4056,72 @@ blocker for no safety gain. Measuring which `src/` sites it hit is what produced
 `objectLayoutFits` rule that keeps the idiom working. The lane's own new helper
 (`assertedPlaceRoot`) was also caught by its own rule and had to be respelled as positive tag
 tests — `src/` stays inside the subset it compiles, and that now includes this.
+
+### CLOSED — `Extract<T, U>` erased to `T` (the 31-blocker bucket in the table above)
+
+`Extract` was in `parseGenericType`'s "multi-arg utility types erase to their first (subject) type
+argument" group, alongside `Omit`/`Pick`/`Parameters`/`ReturnType`. It now RESOLVES: the members
+of `T` assignable to the pattern `U`, TypeScript's `T extends U ? T : never` distributed over `T`.
+One survivor gives the member with its tag widened — the same expression `unionMemberFor` uses for
+narrowing, so the two routes to a member produce one `Ty` and not two spellings of it. Several
+give the sub-union. The rule is `extractMatchesPattern` / `extractUnionMembers` in `src/ast.ts`,
+and it is deliberately NOT slot-keyed the way its neighbour `objectLayoutFits` is: `Extract`
+selects whole members out of a union and hands one back unchanged, so the value is always read at
+its own layout and there is no reinterpretation to get wrong. Using the layout rule here would be
+a silent narrowing of what `Extract` MEANS (`Extract<Expr, {ty?: string}>` would answer the empty
+set, because `ty` is at slot 1 and not slot 0) and `tsc` would be right and we would be wrong.
+
+**FRONTIER DELTA: 268/666 → 263/669 failing (40.2% → 39.3%).** Verified per function with
+`check(linkProgram(src, entry), blockers)` diffed by `b.fn`, never by the `--json` `firstBlocker`
+field — which is a single overall blocker, not a per-function map, and reading it as one is the
+method error the previous entry records. **5 newly clean, 0 newly failing** (`inferFetch`,
+`thisNarrowHint`, `genElemRead`, `genSearchHof`, `prepHofLocals`). The other 26 `Extract` sites
+did not clear because the bucket was MASKING a second refusal in the same body; 16 of the 28
+first-blocker changes are exactly that promotion, and the remaining 12 are line-number shifts from
+the edit itself. This is the instrument's documented promotion effect and the reason per-code
+totals moved *up* in four codes while the failing-function count fell: NT2001 133 → 119, and
+NT1606 +3 / NT1003 +2 / NT1031 +3 / NT1001 +1 are all previously-hidden blockers becoming visible.
+The three new functions (two in `ast.ts`, one in `parser.ts`) check CLEAN — the denominator moved
+666 → 669 while `ast.ts` stayed at 15 failing and `parser.ts` at 51.
+
+**What the promoted blockers actually are**, since this is now the honest picture of what the
+HOF/AST layer needs rather than one utility type standing in front of it: `array .forEach` and
+first-class callbacks (`genFilter`/`genFlatMap`/`genMap` all promote to NT1031, a write to a
+captured accumulator inside a HOF arrow), `.push` on a field-held array, `Set#add` used for
+effect, and `.ty` on the full `Expr` union (`hofRetTy`) — which is the 5-site bucket already in
+the table above, now the first blocker of that function rather than the second.
+
+#### A THIRD `src/` site now carries a layout refusal — and this one is a WRITE
+
+The previous entry lists `exprLoc` and `retainedReceiver` as the two sites whose duck-typing `as`
+cannot be read through any member. Resolving `Extract` exposes a third, previously masked:
+
+| Site | Assertion | Why it cannot work |
+|---|---|---|
+| `Checker.retarget` (`src/checker.ts`) | `(e.callee as { name: string }).name = mangled` | `e.callee` is the full `Expr` union and every member has `kind` at slot 0, so `{name:string}` is a window onto the TAG — and unlike the other two this one ASSIGNS through it, which would overwrite the discriminant of the node being retargeted |
+
+It costs nothing today (`retarget` was already failing, and still is), but it is worse than the
+other two in kind: a bad read returns a wrong value, a bad write corrupts the union's tag for
+every later narrowing of that node. It wants a `switch` on `e.callee.kind` with a real
+`Identifier` / `MemberExpr` case, not a wider cast rule.
+
+#### Two things this lane deliberately did NOT do
+
+- **`Exclude<T, U>` is the exact complement and shares every line of the machinery** — the same
+  `extractUnionMembers` with the survivors inverted. It is not implemented, because a lexer-count
+  over `src/` finds ZERO uses outside `parseGenericType`'s own case list, and the rule here is to
+  scope by measurement. Whoever needs it should note that `Exclude` selecting EVERYTHING is the
+  identity and selecting nothing is `never` — the mirror of `NT1036` — and that its degenerate
+  literal-union pattern falls the OTHER way: where `Extract` widens to `T` (safe), `Exclude` would
+  narrow to the empty set (a false refusal), so it needs the residue handled explicitly rather
+  than inherited.
+- **`NonNullable<T>` and `Partial<T>` still erase to `T`, and both are wrong in `tsc`'s terms.**
+  `NonNullable<string | undefined>` should be `string` and answers `?Ustring`; `Partial<T>` should
+  make every field optional and answers `T`. Neither is in this lane's measured bucket and
+  `Partial` in particular is not a one-liner — an optional FIELD changes the record's slot count,
+  which is the `objectLayoutFits` question and not this one. Named here so the next lane does not
+  assume the whole utility-type family moved.
+
 
 
 ---

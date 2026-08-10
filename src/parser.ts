@@ -13,7 +13,7 @@ import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep, mapTypesDeepExpr,
   isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
-  makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf,
+  makeGeneralUnionTy, isGeneralUnionArm, typeofTagOf, extractUnionMembers, unionWidenedMembers,
   resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
 } from "./ast.ts";
 import type {
@@ -1526,7 +1526,12 @@ class Parser {
   // supported shape (never miscompiled): container/wrapper/utility types map to their
   // erasure; a type parameter or unknown generic falls back through `resolveNamed`.
   private parseGenericType(id: string): Ty {
-    const a = this.parseTypeArgs();
+    // `Extract` is the one utility type here that READS its arguments rather than
+    // discarding them, and the tag it selects on is a string-LITERAL type — which
+    // `parseType` widens to `string` on its way out. So its argument list is parsed with
+    // literals kept; everything else is untouched, because a literal that escapes into an
+    // ordinary annotation is the thing `parseType`'s wrapper exists to prevent.
+    const a = this.parseTypeArgs(id === "Extract");
     switch (id) {
       // `Readonly*` is a compile-time-only distinction in TypeScript, and nativets'
       // Map/Set/array ARE immutable (B2: `.set`/`.add` return a new collection), so the
@@ -1547,8 +1552,9 @@ class Parser {
       case "Required":
       case "Readonly":
       case "NonNullable": return a[0] ?? "number";
+      // `Extract<T, U>` RESOLVES rather than erases — see `extractType`.
+      case "Extract": return this.extractType(a[0] ?? "number", a[1]);
       // multi-arg utility types erase to their first (subject) type argument
-      case "Extract":
       case "Exclude":
       case "Omit":
       case "Pick":
@@ -1558,9 +1564,73 @@ class Parser {
       default: return this.resolveNamed(id);
     }
   }
+  /**
+   * `Extract<T, U>` — the members of `T` assignable to `U`, TypeScript's
+   * `T extends U ? T : never` distributed over `T`.
+   *
+   * WHY IT IS RESOLVED HERE AND NOT ERASED. It sat in `parseGenericType`'s "multi-arg
+   * utility types erase to their first (subject) type argument" group, which made
+   * `Extract<Expr, { kind: "ArrowFunction" }>` the whole 30-member `Expr` union — so every
+   * field read on such a PARAMETER was refused, since a field is readable off an un-narrowed
+   * union only when it sits at the same slot with the same widened type in every member.
+   * That was 31 of 136 remaining `NT2001` blockers over the linked stage-1 program, the
+   * largest single bucket, and it is not a narrowing gap at all: there is nothing to narrow,
+   * the parameter's declared type IS the member. `tsc` is authoritative about what a type
+   * means and it sees the member; erasing to `T` was us disagreeing with it about a type.
+   *
+   * IT SELECTS; IT NEVER REINTERPRETS. The result is a member of `T` handed back unchanged,
+   * so the value is always read at its own layout — `Extract` cannot produce the slot
+   * confusion `objectLayoutFits` exists to refuse. What CAN is the `as` that consumes the
+   * result (`e as Extract<Expr, {kind:"CallExpr"}>` is the commonest `as` shape in `src/`),
+   * and that is a checked assertion since `481c463`: a tag load, a compare, and a panic on a
+   * mismatch. This resolution was gated on that landing, because before it every one of
+   * those casts would have become an unchecked union downcast reading one member's bytes at
+   * another member's offsets — the `2.12e-314` failure this project has had three times.
+   *
+   * THE THREE ANSWERS, and the two fallbacks:
+   *   - ONE survivor  → the member, tags widened. Exactly what narrowing already produces
+   *                     (`unionMemberFor`), so a value that reaches this parameter by a
+   *                     `switch (e.kind)` and one that reaches it by an `Extract` annotation
+   *                     have the SAME `Ty`, and neither the checker nor codegen can tell
+   *                     which route it took.
+   *   - SEVERAL       → the sub-union. Still discriminated by construction: a subset of a
+   *                     union whose tag is at one index with distinct values has both
+   *                     properties, so `unionDiscriminant` holds without re-deriving it.
+   *   - NONE          → TypeScript's `never`, which this subset cannot represent. REFUSED
+   *                     rather than quietly answered with `T`: a pattern that selects
+   *                     nothing is a typo in a tag value (`{kind:"Aggregate"}` for
+   *                     `"AggregateError"`), and erasing it to the full union turns that
+   *                     typo into thirty confusing field-read refusals somewhere else.
+   *
+   * The fallbacks BOTH widen, never narrow, which is what makes them safe to leave silent:
+   * a non-union subject (`Extract<number, number>`, a type parameter, an unresolved import)
+   * keeps its old erasure to `T`, and so does a pattern that is not an object type. A wider
+   * type refuses more field reads and permits fewer casts; it cannot turn into a wrong
+   * answer. The one residue worth naming is a pattern whose tag is a UNION of literals —
+   * `Extract<Expr, { kind: "MemberExpr" | "IndexExpr" }>`, twice in `src/` — where
+   * `parseTypeInner` has already collapsed `"MemberExpr" | "IndexExpr"` to `string`. Every
+   * member then matches by widened type and the answer is the whole union again, i.e. the
+   * old erasure, arrived at by the rule rather than by a special case. Recorded in
+   * docs/divergences.md.
+   */
+  private extractType(subject: Ty, pattern: Ty | undefined): Ty {
+    // `parseType`'s discipline, restated: this method's arguments came through
+    // `parseTypeInner` (to keep the pattern's tag), so a literal can still be sitting in
+    // `subject` itself (`Extract<"a", "a">`) and must not escape into an annotation.
+    const erased = isUnionTy(subject) ? subject : widenLiteralTys(subject);
+    if (pattern === undefined || !isUnionTy(subject) || !isObjectTy(pattern)) return erased;
+    const keep = extractUnionMembers(subject, pattern);
+    if (keep.length === 1) return widenLiteralTys(keep[0]!);
+    if (keep.length >= 2) return makeUnionTy(keep);
+    throw nyi(NYI.UTILITY_TYPE, `Extract<…, ${widenLiteralTys(pattern)}> selects no member of '${unionWidenedMembers(subject).join(" | ")}'`);
+  }
   // generic type-argument list `<T, U>` — parsed everywhere a `<...>` type-arg list
   // appears (annotations, `new X<..>()`, call-site `f<..>()`); the args are erased.
-  private parseTypeArgs(): Ty[] {
+  //
+  // `keepLiterals` is for `Extract` alone (see `extractType`): its pattern argument's
+  // string-literal field types ARE the selector, and `parseType` widens them to `string`
+  // on the way out. Off everywhere else, so no literal type reaches an ordinary annotation.
+  private parseTypeArgs(keepLiterals = false): Ty[] {
     this.eat("<");
     //@@mutable
     const tys: Ty[] = [];
@@ -1569,7 +1639,7 @@ class Parser {
     const fatal = this.erasureIsFatal;
     this.erasureIsFatal = false;
     try {
-      if (!this.at(">")) { do { tys.push(this.parseType()); } while (this.at(",") && (this.eat(","), true)); }
+      if (!this.at(">")) { do { tys.push(keepLiterals ? this.parseTypeInner() : this.parseType()); } while (this.at(",") && (this.eat(","), true)); }
     } finally { this.erasureIsFatal = fatal; }
     this.eatTypeClose();
     return tys;

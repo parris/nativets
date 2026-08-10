@@ -344,6 +344,17 @@ export const NYI = {
   // `parseGenericType` maps to a real shape (`Map<K,V>`, `Array<T>`, `Partial<T>`, …) are
   // untouched.
   AMBIENT_TYPE: { code: "NT1035", milestone: "later", hint: "this is a type from TypeScript's standard library that nativets does not model, and guessing it would be a silent wrong answer — write the concrete type the value actually has" },
+  // `Extract<T, U>` that selects NO member of `T`. TypeScript answers `never`, and this
+  // subset has no inhabitant for it: every `Ty` here denotes a set of values with a
+  // layout, and the empty set has neither. The alternative was to keep the old erasure
+  // (answer `T`), and that is rejected on the same grounds as NT1033 and NT1035 — the
+  // erasure is DESTRUCTIVE. `Extract<Expr, {kind:"Aggregate"}>` is a misspelt tag, and
+  // answering it with the whole 30-member union turns one typo into a scatter of
+  // confusing field-read refusals in the body below, each blaming a line that is correct.
+  // Erasing here would also be the one direction that is not conservative for `as`: a
+  // cast INTO the erased type is a widening (free, unchecked), where the cast the program
+  // actually wrote can never succeed at all.
+  UTILITY_TYPE: { code: "NT1036", milestone: "later", hint: "check the tag spelling — `Extract<T, U>` keeps the members of `T` assignable to `U`, and TypeScript calls the empty result `never`, which this subset cannot represent" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

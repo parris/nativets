@@ -2621,6 +2621,58 @@ would be a silent wrong answer — the worst outcome available. Before `NT1029` 
 died in the `[]` array-suffix loop as an **anonymous `NT0001 Expected ']'`**, with no code and no
 hint; it was the last unnamed refusal in the tree.
 
+### `Extract<T, U>` — RESOLVED to the member(s); the empty result is `NT1036`
+
+`Extract` used to sit in the "multi-arg utility types erase to their first (subject) type
+argument" group in `parseGenericType`, next to `Omit`/`Pick`/`Parameters`/`ReturnType`. So
+`Extract<Expr, { kind: "ArrowFunction" }>` **was** the whole 30-member `Expr` union, and every
+field read on a parameter so annotated was refused — a field is readable off an un-narrowed union
+only when it sits at the same slot with the same widened type in *every* member, and `params` is
+in one member out of thirty. Measured over the linked stage-1 program that was **31 of 136**
+remaining `NT2001` blockers, the largest single bucket, and it was never a narrowing gap: there is
+nothing to narrow, because the parameter's declared type already *is* the member. `tsc` is
+authoritative about what a type means and it sees the member; erasing to `T` was us disagreeing
+with `tsc` about a type, which is the direction this project always loses.
+
+It is resolved now. `Extract<T, U>` distributes over `T`'s members and keeps the ones assignable
+to `U`, TypeScript's `T extends U ? T : never`. A member survives when every field of the pattern
+`U` is present under the same key at a matching type — **exactly** for a string-literal pattern
+field (that is the tag test), by widened type otherwise. One survivor gives the member with its
+tag widened, which is byte-identical to what narrowing already produces (`unionMemberFor`), so a
+value that reaches such a parameter through a `switch` and one that reaches it through the
+annotation are the *same* `Ty`. Several survivors give the sub-union, still discriminated by
+construction.
+
+**It selects; it never reinterprets** — and that is the line that separates it from
+`objectLayoutFits`, which is slot-keyed. `Extract` hands back a member of `T` unchanged, so the
+value is always read at its own layout. What *can* reinterpret is the `as` that consumes the
+result, and that has been a checked assertion (tag load, compare, panic) since `481c463` — which
+is why resolving `Extract` had to wait for it. Verified by mutation: with codegen's `nt_as_tag`
+emission disabled, `s as Extract<Shape, {kind:"square"}>` on a circle returns
+`2.1263599894e-314` (the `name` pointer read as a double) where node says `undefined`, and a
+plausible `1` where the two members' slots happen to agree.
+
+**The empty result is refused (`NT1036`), not erased back to `T`.** TypeScript answers `never` and
+this subset has no inhabitant for it: every `Ty` here denotes a set of values *with a layout*, and
+the empty set has neither. Erasing would be the wider (so nominally safe) answer, but it is
+destructive in the sense `NT1033` and `NT1035` already record — `Extract<Expr, {kind:"Aggregate"}>`
+is a misspelt tag, and answering it with the whole union turns one typo into a scatter of
+field-read refusals in the body below, each blaming a line that is correct.
+
+**Two fallbacks keep their old erasure to `T`, and both are conservative.** A non-union subject
+(`Extract<number, number>`, an unresolved import, a generic parameter) and a non-object pattern
+are answered with `T`, as before. A wider type refuses more field reads and permits fewer casts,
+so a fallback can cost a blocker but never a wrong answer.
+
+**The one residue: a pattern field that is a UNION of string literals.**
+`Extract<Expr, { kind: "MemberExpr" | "IndexExpr" }>` — which `src/` writes twice — selects
+nothing in particular, because `"MemberExpr" | "IndexExpr"` has already collapsed to `string` in
+`parseTypeInner` (the same rule that keeps `type Dir = "n" | "s"` a `string`) long before
+`Extract` runs. Every member then matches by widened type and the answer is the whole union: the
+old erasure, arrived at by the rule rather than by a special case. It is left supported-as-before
+rather than refused, because this refusal happens at PARSE time and would be fatal for the whole
+program. Reads through such a parameter still need an ordinary narrowing.
+
 ### Type queries — `typeof x` and `keyof T` in TYPE position are `NT1033`
 
 Both are **refused**, and the reason is that neither can be *answered* where annotations are
