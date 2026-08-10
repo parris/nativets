@@ -608,7 +608,13 @@ function f(): number {
 console.log(f());
 `;
     expect(codeOf(src)).toBe("NT2001");
-    expect(messageOf(src)).toContain("NARROWED");
+    // It now refuses at the READ rather than at the assignment, and the sentence that
+    // says why moved with it. `narrowNameInto` declines to narrow a name the region
+    // reassigns (the same filter a dotted path takes), instead of narrowing it CONST and
+    // erroring on the assignment — because the const form also refused the region that
+    // reassigns and never reads a narrowed field, which is `while (n.kind === "x") { …;
+    // n = next(); }` and used to compile. Refused either way; this is the message.
+    expect(messageOf(src)).toContain("'s' is assigned between it and this read");
     // Reassigning OUTSIDE the arm is fine.
     expect(codeOf(src.replace(`  if (s.kind === "sq") {\n    s = { kind: "ci", radius: 9 };\n    return s.size;\n  }`,
       `  s = { kind: "ci", radius: 9 };\n  if (s.kind === "ci") { return s.radius; }`))).toBe(null);
@@ -1162,7 +1168,9 @@ console.log(f({ kind: "A", left: 1 }));
 console.log(f());
 `;
     expect(codeOf(src)).toBe("NT2001");
-    expect(messageOf(src)).toContain("it is NARROWED to");
+    // Refused at the READ, not at the assignment — see the note on "assigning THROUGH a
+    // narrowed binding" above for why `narrowNameInto` declines rather than shadowing.
+    expect(messageOf(src)).toContain("'e' is assigned between it and this read");
   });
 
   test("REFUSED: a PATH condition whose ROOT is reassigned inside the arm", () => {
