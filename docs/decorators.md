@@ -137,6 +137,32 @@ Concretely, three adjustments, all inert in a program with no `@@mutable` class:
    `NT1604`), because a method still hands back a borrow and there is no owning binding to
    return instead. A fresh receiver is subject to the pre-existing unbound-temporary leak:
    the object is never dropped, exactly as for an ordinary class's `new P(7).get()`.
+
+   **The other receiver that is not a binding and is owned anyway: the method's own
+   `this`, one or more FIELDS down.** `this.mod.intern(…)` inside a method is accepted;
+   `h.c.bump()` from outside is not.
+
+   This was not a judgement about aliasing — it was two arms of one rule disagreeing about
+   one receiver. The FIELD-ASSIGN arm (`checkOwnedReceiver`) has always peeled the member
+   chain to its root and returned early on `this`, "a method's own receiver"; the
+   SETTER-CALL arm peeled method calls only and then demanded a bare identifier, which bare
+   `this` satisfies but `this.c` does not. So the identical mutation was accepted written
+   one way and refused written the other — `this.c.pos = this.c.pos + 1` compiled while
+   `this.c.bump()` was `NT1607`. The difference was *spelling*, not ownership.
+
+   Sound for the reason the field-assign arm is: a setter **mutates in place**. It frees
+   nothing and stores no second owner, so it writes into storage the caller's receiver
+   transitively owns, and the caller still drops exactly once. What is given up is
+   EXCLUSIVITY — another handle may observe the write — which is the identical cost
+   `this.c.pos = …` already paid, and which Decision 3 disclaims by design.
+
+   The exemption is **`this`-rooted, not field-rooted**: a field path whose root is a
+   by-borrow parameter (`function tick(h: Holder) { h.c.bump(); }`) names an owner that is
+   elsewhere and stays refused. Rule 2 is untouched — `this` remains a borrow, so
+   `return [this.c.bump()]` is still `NT1604`. This shape inherits the pre-existing
+   SHALLOW-FIELD leak: freeing an object does not free an object-typed field it holds, and
+   an undecorated `class Outer { c: Inner = new Inner(); }` measures the identical leak
+   with no attribute, no setter and no mutation in it.
 4. **Reassigning an aliased owner is `NT1602`** (≈ rustc E0506): `let b = a; a = new C();` would
    free the old value out from under `b`.
 
@@ -380,6 +406,7 @@ instead of a setter call:
 | `b.n = 1` through an alias, a **container element** (`cells[0].n = 1`), `p.b.n = 1`, a call result, a capture | **`NT1607`** (≈ rustc E0596) — the receiver is not a binding whose ownership this scope can establish |
 | `c.n = 1` through a **PARAMETER** or a `for-of` **element** | **ACCEPTED** — see below |
 | a setter on a **fresh** `new C(…)` receiver (`new Counter().bump().get()`) | **accepted** — a temporary nothing can name is uniquely owned by construction |
+| a setter through the method's **own `this`, one or more fields down** (`this.mod.intern(…)`) | **accepted** — owned exactly as far as `this` is, and the same write `this.mod.<f> = …` always allowed. `this`-rooted only: `h.c.bump()` on a borrowed `h` stays `NT1607` |
 | letting an alias **escape** (`return b`) | **`NT1604`** (≈ E0507) — including a *fresh* chain's result |
 | reassigning an owner that is still aliased | **`NT1602`** (≈ E0506) |
 | **reading** through any handle | always fine |

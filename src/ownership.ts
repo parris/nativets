@@ -327,6 +327,18 @@ function chainRoot(e: Expr): Expr {
   return cur;
 }
 
+/** Peel a FIELD path back to what it starts from: `this.mod.strings` ⇒ `this`.
+ *  The other half of `chainRoot` — that one peels method CALLS, this one peels member
+ *  ACCESSES. Both answer "what is this receiver ultimately reached through". */
+function fieldRoot(e: Expr): Expr {
+  return e.kind === "MemberExpr" ? fieldRoot(e.object) : e;
+}
+
+/** Is this expression the method's own receiver? */
+function isThisExpr(e: Expr): boolean {
+  return e.kind === "Identifier" && e.name === "this";
+}
+
 function isMoveCall(e: Expr): boolean {
   return e.kind === "CallExpr" && e.callee.kind === "Identifier" && e.callee.name === "move";
 }
@@ -831,9 +843,10 @@ class Analyzer {
   private checkOwnedReceiver(object: Expr, field: string): void {
     if (!this.mutable.classes.size) return;
     // Resolve the receiver: `a.b.c = v` mutates the record `a.b`, whose root binding is `a`.
-    let root: Expr = object;
-    while (root.kind === "MemberExpr") root = root.object;
-    if (root.kind === "Identifier" && root.name === "this") return; // a method's own receiver
+    // `fieldRoot`/`isThisExpr` are shared with the SETTER-CALL arm, which states the same
+    // rule over `this.b.c()` — one notion of "what is this reached through", one spelling.
+    const root: Expr = fieldRoot(object);
+    if (isThisExpr(root)) return; // a method's own receiver
     const owned = root.kind === "Identifier" && this.varTy.has(root.name) && !this.borrowBindings.has(root.name);
     if (owned) return;
     // THE SIGNATURE ARM (piece 3). A by-borrow PARAMETER or a `for-of` ELEMENT whose type
@@ -1000,15 +1013,68 @@ class Analyzer {
         // above — a `@@mutable` method returns a borrow of its receiver either way, and
         // for a temporary there is no owning binding to return instead.
         const freshRecv = e.callee.kind === "MemberExpr" && chainRoot(e.callee.object).kind === "NewExpr";
-        if (e.callee.kind === "MemberExpr" && !freshRecv && this.mutable.setterProps.has(e.callee.property)) {
+        // …and with one ROOT that is a binding this arm could not see: the method's OWN
+        // RECEIVER, one or more fields down (`this.mod.intern(…)`).
+        //
+        // This is not a new permission. `checkOwnedReceiver` — THE SAME RULE stated over a
+        // field ASSIGN rather than a setter call — peels the member chain to its root and
+        // returns early on `this`, "a method's own receiver". So on the unmodified tree
+        // `this.c.pos = this.c.pos + 1` compiled while `this.c.bump()`, which performs the
+        // identical write, was refused. Two arms of one rule disagreed about one receiver,
+        // and the difference was SPELLING, not ownership.
+        //
+        // The arm's own `recv` lookup already accepts bare `this` (it is in `varTy`), so
+        // depth 0 was never in question; it just stopped peeling at depth 1, where a field
+        // path is a `MemberExpr` and not the `Identifier` the lookup demands. `borrowThis`'s
+        // comment states the intent this restores, in as many words: "`this` is not a
+        // binding — the receiver rule (`checkOwnedReceiver`) and the setter rule BOTH
+        // special-case the name already".
+        //
+        // SOUND, for the reason the field-assign arm is: a setter MUTATES IN PLACE. It
+        // frees nothing and stores no second owner, so it writes into storage the caller's
+        // receiver transitively owns and the caller still drops exactly once. What is given
+        // up is EXCLUSIVITY — another handle may observe the write — which is the identical
+        // cost `this.c.pos = …` already pays, and which docs/decorators.md Decision 3
+        // disclaims for `@@mutable` by design.
+        //
+        // ESCAPE IS UNTOUCHED, and that is the boundary worth naming: `this` remains a
+        // borrow (`borrowThis`), the setter still returns a borrow of the inner object, and
+        // MOVE_OUT_OF_BORROW still refuses handing either one out of the body.
+        //
+        // Restricted to depth >= 1 on purpose (`chainRoot(...) is a MemberExpr`): bare
+        // `this.setter()` keeps going through the arm exactly as before, so the accepted
+        // path for it — and the borrowed-receiver report below — are byte-identical.
+        const ownFieldRecv = e.callee.kind === "MemberExpr"
+          && chainRoot(e.callee.object).kind === "MemberExpr"
+          && isThisExpr(fieldRoot(chainRoot(e.callee.object)));
+        if (e.callee.kind === "MemberExpr" && !freshRecv && !ownFieldRecv && this.mutable.setterProps.has(e.callee.property)) {
           const root = chainRoot(e.callee.object);
           const recv = root.kind === "Identifier" && this.varTy.has(root.name) ? root.name : null;
           if (recv === null) {
+            // WHICH ADVICE IS TRUE depends on what the receiver actually is, and the one
+            // text this used to print was FALSE for the commonest case that reaches here.
+            // On `const h = new Holder(); h.c.bump();` it said "it needs an OWNED receiver
+            // — a local bound to `new C(…)` in this scope", and `h` IS exactly that; then
+            // it listed "container elements, closure captures and callback parameters",
+            // and `h.c` is none of the three. So it named neither the reason (a FIELD is
+            // not a binding this scope can name) nor a rewrite that compiles — following
+            // it literally gives `const c = new Counter(); c.bump();`, which builds a
+            // second counter and mutates the wrong one.
+            //
+            // The field arm's advice is COMPILED, not asserted: reaching the field from
+            // inside a method of its holder (`tick(): void { this.c.bump(); }`, then
+            // `h.tick()`) is the shape legalized above, and it runs byte-identically to
+            // node from an owned local AND through a by-borrow parameter.
+            const fieldRecv = root.kind === "MemberExpr";
             this.report({
               code: OWN_CODES.MUTATE_THROUGH_BORROW,
-              message: `cannot call the \`@@mutable\` setter \`${e.callee.property}\` here: its receiver is not a binding whose ownership this scope can establish`,
+              message: fieldRecv
+                ? `cannot call the \`@@mutable\` setter \`${e.callee.property}\` here: its receiver is the field \`${root.property}\`, which this scope owns no binding for`
+                : `cannot call the \`@@mutable\` setter \`${e.callee.property}\` here: its receiver is not a binding whose ownership this scope can establish`,
               line: lineOf(e.callee),
-              hint: "a setter mutates in place, so it needs an OWNED receiver — a local bound to `new C(…)` in this scope. Container elements, closure captures and callback parameters cannot be proved unique, so they are refused rather than mutated blind",
+              hint: fieldRecv
+                ? `a setter mutates in place, so it needs a receiver whose ownership this scope can establish — and a FIELD is owned by the object that holds it, not by anything named here. Mutate it from INSIDE a method of that holder, where \`this.${root.property}.${e.callee.property}(…)\` is owned exactly as far as \`this\` is, and call that method from here instead`
+                : "a setter mutates in place, so it needs an OWNED receiver — a local bound to `new C(…)` in this scope. Container elements, closure captures and callback parameters cannot be proved unique, so they are refused rather than mutated blind",
             });
             return;
           }

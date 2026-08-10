@@ -19,9 +19,16 @@
  *    test/actors.test.ts. Documented in docs/divergences.md.
  */
 import { test, expect, describe } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 
-import { compileAndRun, runWithNode, runWithNodeAttrs } from "./harness.ts";
+import { compileAndRun, runWithNode, runWithNodeAttrs, emitIRAsan } from "./harness.ts";
 import { sourceToIR } from "../src/driver.ts";
+
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /** Compile-only: return the NT code of the rejection, or "" when it compiled. */
 function rejectCode(source: string): string {
@@ -352,6 +359,213 @@ console.log(__objLive());
     // 200 = the pre-existing unbound-temporary leak, one per iteration.
     expect(r.stdout).toBe("400\n0\n400\n200\n");
     expect(r.exitCode).toBe(0); // a double free is a nonzero exit with correct stdout
+  });
+
+  /*
+   * 9c. A FIELD PATH ROOTED AT `this` — the method's OWN receiver, one level down.
+   *
+   * The refusal this closes was not a judgement about aliasing; it was the setter arm
+   * failing to do what its sibling already does. Two arms enforce one rule ("only the
+   * owner may mutate"), over the same receivers:
+   *
+   *   - `checkOwnedReceiver` (the FIELD-ASSIGN arm) peels the member chain to its root
+   *     and returns early on `this` — "a method's own receiver".
+   *   - the SETTER-CALL arm peels method calls only, then demands a bare `Identifier`.
+   *     `this` at depth 0 passes (it is in `varTy`); `this.c` at depth 1 does not, and
+   *     is reported as "not a binding whose ownership this scope can establish".
+   *
+   * So the identical mutation was accepted written one way and refused written the other:
+   * `this.c.pos = this.c.pos + 1` compiled on the unmodified tree, `this.c.bump()` did
+   * not. That is a spelling test, not an ownership test — and `borrowThis`'s own comment
+   * states the intent the arm was missing: "`this` is not a binding — the receiver rule
+   * (`checkOwnedReceiver`) and the setter rule BOTH special-case the name already".
+   *
+   * Nothing about escape moves: `this` stays a borrow (`borrowThis`), so handing the
+   * result out is still NT1604, and the two tests below this one pin that.
+   */
+  test("a `@@mutable` object in a FIELD may be mutated through `this`", async () => {
+    const out = await expectMatchesStripped(`${COUNTER}
+@@mutable
+class Holder {
+  c: Counter = new Counter();
+  tick(): void { this.c.bump(); }
+  read(): number { return this.c.get(); }
+}
+const h = new Holder();
+h.tick();
+h.tick();
+console.log(h.read());
+`);
+    expect(out).toBe("2\n");
+  });
+
+  // THE BOUNDARY THE EXEMPTION DOES NOT MOVE. `this` is still a borrow (`borrowThis`), so
+  // the inner object may be mutated IN PLACE and still not handed OUT — the same split
+  // every test above draws at the call site, drawn one field down.
+  test("a field mutated through `this` still may not ESCAPE (NT1604)", () => {
+    expect(rejectCode(`${COUNTER}
+@@mutable
+class Holder {
+  c: Counter = new Counter();
+  leak(): Counter[] { return [this.c.bump()]; }
+}
+console.log(new Holder().leak()[0].get());
+`)).toBe("NT1604");
+  });
+
+  /*
+   * OVER-WIDENING GUARD — the mutation that proves the exemption is the narrow one.
+   *
+   * `ownFieldRecv` is `this`-ROOTED, not field-rooted. Peeling the field path and then
+   * accepting whatever binding it lands on would be a much larger rule: the report below
+   * the `recv === null` one only fires when the setter belongs to the ROOT's own class, so
+   * a peeled `h.c.bump()` would match nothing and be admitted SILENTLY — `h` is a by-borrow
+   * parameter whose owner is elsewhere, and that is the alias the whole rule exists to
+   * refuse. MEASURED: replacing `isThisExpr(…)` with `true` in `ownFieldRecv`
+   * (src/ownership.ts) turns this test and the hint test below it RED — the program is
+   * accepted with no diagnostic at all — and moves nothing else in this file.
+   */
+  test("a field path rooted at a borrowed PARAMETER is still rejected (NT1607)", () => {
+    expect(rejectCode(`${COUNTER}
+@@mutable
+class Holder {
+  c: Counter = new Counter();
+  read(): number { return this.c.get(); }
+}
+function tick(h: Holder): void { h.c.bump(); }
+const x = new Holder();
+tick(x);
+console.log(x.read());
+`)).toBe("NT1607");
+  });
+
+  /*
+   * THE HINT THE REFUSAL PRINTS, for the shape that still reaches it.
+   *
+   * It used to be false in both halves. On `const h = new Holder(); h.c.bump();` it asked
+   * for "an OWNED receiver — a local bound to `new C(…)` in this scope", and `h` IS that;
+   * then it listed "container elements, closure captures and callback parameters", and
+   * `h.c` is none of them. Following it literally yields `const c = new Counter();
+   * c.bump();` — a second counter, and the wrong one mutated.
+   *
+   * The replacement is COMPILED, not asserted: the rewrite it names is the `tick()` shape
+   * in the test three up, which runs byte-identically to node from an owned local and
+   * through a by-borrow parameter alike.
+   */
+  test("the field refusal names the FIELD and recommends a rewrite that compiles", () => {
+    let diag: { message?: string; hint?: string } = {};
+    try {
+      sourceToIR(`${COUNTER}
+@@mutable
+class Holder {
+  c: Counter = new Counter();
+  read(): number { return this.c.get(); }
+}
+const h = new Holder();
+h.c.bump();
+console.log(h.read());
+`);
+    } catch (e) {
+      diag = (e as { diag?: { message?: string; hint?: string } }).diag ?? {};
+    }
+    expect(diag.message).toContain("its receiver is the field `c`");
+    expect(diag.message).not.toContain("is not a binding whose ownership");
+    expect(diag.hint).toContain("INSIDE a method of that holder");
+    expect(diag.hint).toContain("`this.c.bump(…)`");
+    // The old text asked for the thing the program already had.
+    expect(diag.hint).not.toContain("a local bound to `new C(…)` in this scope");
+  });
+
+  // …and a CONTAINER ELEMENT, which is not a field path, keeps the original text — that
+  // hint was always true for it (an element genuinely cannot be proved unique).
+  test("a container element keeps the non-field hint", () => {
+    let diag: { message?: string; hint?: string } = {};
+    try {
+      sourceToIR(`${COUNTER}
+const items: Counter[] = [new Counter()];
+items[0].bump();
+console.log(items[0].get());
+`);
+    } catch (e) {
+      diag = (e as { diag?: { message?: string; hint?: string } }).diag ?? {};
+    }
+    expect(diag.message).toContain("is not a binding whose ownership");
+    expect(diag.hint).toContain("Container elements, closure captures and callback parameters");
+  });
+
+  /*
+   * MEMORY EVIDENCE for the shape legalized above — this project has shipped both a leak
+   * and a double free, and the safety argument ("a setter mutates IN PLACE, so it frees
+   * nothing and stores no second owner") is worth exactly as much as its measurement.
+   *
+   * Under ASan + UBSan with `-fno-sanitize-recover=all`: no double free, no
+   * use-after-free, exit 0. That instrumentation reaches the EMITTED code, not just the
+   * runtime, so a use-after-free READ is caught (it was not, until recently).
+   *
+   * `__objLive()` reads 200, and the leak is PRE-EXISTING and not `@@mutable`-specific:
+   * object drops are SHALLOW, so freeing an object never frees an object-typed FIELD it
+   * holds. The undecorated control in the same program measures the identical 200 with no
+   * attribute, no setter and no mutation anywhere in it — and a FLAT class (no object
+   * field) in the same run measures 0, which is what pins the cause to the field rather
+   * than to the construction. Both numbers are identical on the tree before this change.
+   */
+  test("the field-through-`this` mutation is free of double frees and use-after-free", () => {
+    const CHURN = `${COUNTER}
+@@mutable
+class Holder {
+  c: Counter = new Counter();
+  tick(): void { this.c.bump(); }
+  read(): number { return this.c.get(); }
+}
+class PlainInner { n: number = 1; get(): number { return this.n; } }
+class PlainOuter { c: PlainInner = new PlainInner(); read(): number { return this.c.get(); } }
+class Flat { n: number = 1; get(): number { return this.n; } }
+function churn(k: number): number {
+  let t = 0;
+  for (let i = 0; i < k; i++) { const h = new Holder(); h.tick(); h.tick(); t = t + h.read(); }
+  return t;
+}
+function control(k: number): number {
+  let t = 0;
+  for (let i = 0; i < k; i++) { const h = new PlainOuter(); t = t + h.read(); }
+  return t;
+}
+function flat(k: number): number {
+  let t = 0;
+  for (let i = 0; i < k; i++) { const h = new Flat(); t = t + h.get(); }
+  return t;
+}
+console.log(churn(200));
+console.log(control(200));
+console.log(flat(200));
+console.log(__objLive());`;
+    const dir = mkdtempSync(join(tmpdir(), "nativets-fieldasan-"));
+    try {
+      const ll = join(dir, "module.ll");
+      writeFileSync(ll, emitIRAsan(CHURN));
+      const bin = join(dir, "prog");
+      const built = spawnSync("clang", [
+        "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+        ll, join(ROOT, "runtime/runtime.c"), "-lm", "-o", bin,
+      ], { encoding: "utf8" });
+      expect(built.status).toBe(0);
+      const run = spawnSync(bin, [], {
+        encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+        // detect_leaks=0: the SHALLOW-FIELD leak below is pre-existing and measured
+        // explicitly in stdout rather than left for LSan to report as a failure.
+        env: { ...process.env, ASAN_OPTIONS: "detect_leaks=0" },
+      });
+      expect(run.stderr).not.toContain("AddressSanitizer");
+      expect(run.stderr).not.toContain("runtime error");
+      expect(run.status).toBe(0);
+      // 400 = 200 iterations x 2 bumps, the mutation actually happening through the field.
+      // 200 = the undecorated control's answer, and ALSO its leak count, below.
+      // 400 live = 200 leaked inner `Counter`s + 200 leaked inner `PlainInner`s; `flat`
+      // adds none, which is what makes this a FIELD leak and not a construction leak.
+      expect(run.stdout).toBe("400\n200\n200\n400\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   /*
