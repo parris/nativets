@@ -95,6 +95,21 @@ const CASES = [
   // its fields). The case also covers the `for…of` and `for…in` single bindings, which
   // were already renamed, so the arm cannot be "fixed" by dropping those.
   "loopvar",
+  // An ARROW's declared return type (`(x): T => …`) in a non-entry module, where `T` is
+  // one of that module's recursive types. `Renamer.expr`'s `ArrowFunction` arm renamed
+  // `paramTys` and `retTy` and missed `retAnnot` — and `retAnnot` is the only one of the
+  // three that carries anything at LINK time (the other two are written by the checker,
+  // which runs after the link), so every annotated arrow in every imported module kept
+  // its module's pre-rename `@N`. The arrow's declared type is what the checker hands
+  // back, so the stale spelling ESCAPED into the enclosing function and lost against that
+  // function's correctly-renamed `returnAnnot`, printing two identical-looking types:
+  // `return type U<…inner:@Expr> does not match declared U<…inner:@_m0_Expr>`. Same
+  // walker-misses-a-field class as `nonnull` and `loopvar` above, and it was the first
+  // blocker of the compiler's own src/ast.ts (`mapExprList`, ast.ts:1874). The entry
+  // module here declares its own differently-laid-out `Expr` so the case pins the
+  // `rectypes` layout hazard too, and annotates a local arrow to pin that the rename does
+  // NOT reach the entry module's own spelling.
+  "arrow-retannot",
 ];
 
 describe("modules (differential vs node)", () => {
