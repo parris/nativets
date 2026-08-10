@@ -788,8 +788,22 @@ class Analyzer {
         // Without this the scope dropped `a` and returned the freed pointer.
         // (A BINDING of the result reaches here with consume=false: `collectAliases`
         // already made it an alias, so the receiver stays the one owner.)
-        if (retainsReceiver(e)) {
-          this.expr((e.callee as { object: Expr }).object, state, consume);
+        // The tag test is REPEATED from `retainsReceiver` rather than inherited from it,
+        // because a `boolean` return carries no narrowing back here — the same gap
+        // `retainedReceiver` documents 700 lines above, closed the same way. That comment
+        // was written about the sibling site and this one was missed, so it is worth being
+        // explicit: the read this replaces,
+        //
+        //     (e.callee as { object: Expr }).object
+        //
+        // put `object` at slot 0 of the asserted shape while `MemberExpr` carries it at
+        // slot 1 and slot 0 is `kind`. Compiled, it took the `kind` STRING POINTER and
+        // handed it to `this.expr` as an `Expr`. Every other site in this family produces a
+        // wrong VALUE; this one feeds a wrong POINTER to the pass that decides what gets
+        // freed, and `.reverse()` is exactly the case where that decision is "the result IS
+        // the receiver, so do not drop it twice".
+        if (e.callee.kind === "MemberExpr" && retainsReceiver(e)) {
+          this.expr(e.callee.object, state, consume);
           return;
         }
         // A method call on a `@@mutable` instance hands back the RECEIVER (`return this`),

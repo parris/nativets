@@ -1660,6 +1660,96 @@ export function exprLoc(e: Expr | undefined): Loc | undefined {
  * `(e as any).name ?? "value"`) reported every dotted receiver as the word `value`, an
  * identifier that appears nowhere in the program being compiled.
  */
+/**
+ * The type the checker recorded on an expression — `e.ty`, read through the TAG.
+ *
+ * ALL THIRTY `Expr` members declare `ty`, and it sits at FIVE DIFFERENT SLOTS across them
+ * (1 for the two nullish literals, 2, 3, 4, and 5 for `UpdateExpr`/`IndexAssign`/
+ * `ArrowFunction`). So `unionCommonField` does not hold and there is no free shared read:
+ * `(e as { ty?: Ty }).ty`, which is how `guardFacts` used to spell it, names slot 0 — and
+ * slot 0 of every member is `kind`. Compiled, that returned the kind STRING for all 30.
+ *
+ * ONE ARM PER KIND, deliberately, where `exprLoc` groups its tags. Grouping is what makes
+ * a multi-tag arm depend on the grouped members agreeing on a slot, and that agreement is
+ * exactly what is false here. A per-kind arm cannot be slot-wrong: the compiler resolves
+ * each narrowed member's own offset.
+ *
+ * EXHAUSTIVENESS IS TESTED, NOT TYPED. The `default: { const impossible: never = e; … }`
+ * idiom `walkExprChildren` uses would be the natural spelling and it is deliberately not
+ * used here: `never` erases to `number` in this compiler's own subset, so that arm is an
+ * NT2001 blocker — `walkExprChildren` carries exactly that blocker today, and copying the
+ * idiom into a new function measurably added one. test/cast-write.test.ts reads the `Expr`
+ * union out of this file and asserts every member has an arm below, which is the same
+ * guarantee without the self-host cost.
+ */
+export function exprTy(e: Expr): Ty | undefined {
+  switch (e.kind) {
+    case "NumberLiteral": return e.ty;
+    case "BooleanLiteral": return e.ty;
+    case "StringLiteral": return e.ty;
+    case "TemplateLiteral": return e.ty;
+    case "UndefinedLiteral": return e.ty;
+    case "NullLiteral": return e.ty;
+    case "ArrayLiteral": return e.ty;
+    case "ObjectLiteral": return e.ty;
+    case "Identifier": return e.ty;
+    case "MemberExpr": return e.ty;
+    case "IndexExpr": return e.ty;
+    case "UnaryExpr": return e.ty;
+    case "UpdateExpr": return e.ty;
+    case "BinaryExpr": return e.ty;
+    case "LogicalExpr": return e.ty;
+    case "ConditionalExpr": return e.ty;
+    case "SequenceExpr": return e.ty;
+    case "AssignExpr": return e.ty;
+    case "IndexAssign": return e.ty;
+    case "FieldAssign": return e.ty;
+    case "TypeofExpr": return e.ty;
+    case "SpreadExpr": return e.ty;
+    case "ArrowFunction": return e.ty;
+    case "NewExpr": return e.ty;
+    case "AsExpr": return e.ty;
+    case "SatisfiesExpr": return e.ty;
+    case "NonNullExpr": return e.ty;
+    case "InstanceOfExpr": return e.ty;
+    case "InExpr": return e.ty;
+    case "CallExpr": return e.ty;
+    default: return undefined;
+  }
+}
+
+/**
+ * The elements of an `ArrayLiteral`, and the text of a `StringLiteral` — the two literal
+ * shapes `Object.fromEntries` has to read out of the AST, in the checker to build the
+ * result type and again in codegen to fill the object's slots.
+ *
+ * THEY LIVE HERE, not at either call site, and that is the entire point. Both used to be
+ * duck-typed windows — `(x as { elements: Expr[] }).elements`, `(x as { value: string })
+ * .value` — which name their field at slot 0 while `ArrayLiteral` and `StringLiteral`
+ * carry it at slot 1 and slot 0 is `kind`. Compiled, both read the `kind` STRING POINTER
+ * and used it as an array / a key.
+ *
+ * The obvious repair, widening each window to `{kind, elements}` so it is slot-correct,
+ * does not work from another module and it is worth recording why: `Expr` resolves to the
+ * EXPANDED union at an importing call site but to the type REF `@…Expr` in this file's own
+ * declarations, and `objectLayoutFits` compares those two spellings as strings, so it
+ * reports "no member of the union can be read through that shape" for a window that is in
+ * fact laid out correctly. Inside THIS module the tag test narrows directly and no window
+ * is needed at all — no cast, no runtime tag check, and the accessor is the only place
+ * that has to know the layout.
+ *
+ * `undefined` for any other expression, so a caller that has already proved the shape can
+ * `??` a fallback and one that has not can fail loudly. Neither may assume.
+ */
+export function arrayElements(e: Expr): Expr[] | undefined {
+  return e.kind === "ArrayLiteral" ? e.elements : undefined;
+}
+
+/** The text of a `StringLiteral`; `undefined` for anything else. See `arrayElements`. */
+export function stringLiteralValue(e: Expr): string | undefined {
+  return e.kind === "StringLiteral" ? e.value : undefined;
+}
+
 export function exprText(e: Expr): string | undefined {
   if (e.kind === "Identifier") return e.name;
   if (e.kind === "MemberExpr") {

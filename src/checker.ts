@@ -9,7 +9,7 @@
 
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, Declarator } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
-import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray } from "./ast.ts";
+import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray, stringLiteralValue, exprTy } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
@@ -1208,7 +1208,17 @@ class Checker {
         for (const [v, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
           // Both operand orders narrow — TypeScript's
           // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
-          const lt = (lit as { ty?: Ty }).ty;
+          // `exprTy`, not `(lit as { ty?: Ty }).ty` — `ty` lives at five different slots
+          // across the 30 members and the window named slot 0, `kind`, for every one of
+          // them. Compiled, this compared a kind string against "undefined"/"null", never
+          // matched, and so silently dropped EVERY nullish narrowing in the compiler.
+          //
+          // A tag test for `UndefinedLiteral`/`NullLiteral` would not do: the operand does
+          // not have to be the literal. `const u = undefined; if (x !== u)` narrows today
+          // because the read is of the recorded TYPE, not of the syntax, and TypeScript's
+          // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` is about the operand ORDER, not
+          // about it being literal. Reading the real `ty` keeps both.
+          const lt = exprTy(lit);
           if (lt === "undefined" || lt === "null") this.addFact(v, scope, lt, out);
         }
         return;
@@ -3576,7 +3586,18 @@ class Checker {
         for (const pair of lit.elements) {
           if (pair.kind !== "ArrayLiteral" || pair.elements.length !== 2 || pair.elements[0]!.kind !== "StringLiteral")
             throw nyi(NYI.OBJECT, "Object.fromEntries entries (each must be a literal [\"key\", value] pair)");
-          const key = (pair.elements[0] as { value: string }).value;
+          // `stringLiteralValue` rather than `(pair.elements[0] as { value: string }).value`,
+          // which named `value` at slot 0 while `StringLiteral` carries it at slot 1 and
+          // slot 0 is `kind` — so compiled, every key of a `Object.fromEntries` result was
+          // the string `"StringLiteral"`. The tag test on the line above cannot be reused
+          // to narrow, because `pair.elements[0]` is a computed index and so not a stable
+          // access path; the accessor does its own test, in the module that owns the layout.
+          //
+          // The `undefined` arm is unreachable — the line above has already thrown for
+          // anything that is not a `StringLiteral` — and it THROWS rather than defaulting
+          // to `""`, so it cannot become a silent empty key if that guard is ever loosened.
+          const key = stringLiteralValue(pair.elements[0]!);
+          if (key === undefined) throw nyi(NYI.OBJECT, "Object.fromEntries entries (each must be a literal [\"key\", value] pair)");
           const vt = this.type(pair.elements[1]!, scope);
           if (vt !== "number" && vt !== "string" && vt !== "boolean") throw nyi(NYI.OBJECT, `Object.fromEntries value of type ${vt}`);
           fields.push(`${key}:${vt}`);

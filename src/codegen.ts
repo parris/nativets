@@ -15,7 +15,7 @@ import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, spawnMode, SPAWN_INH
 // `blockDrops` is gone: the drop set is a synthesized trailing BlockDrops STATEMENT now,
 // not an expando read back off the array, so codegen reads it in the normal statement loop.
 // `Program` stays — it is still used below, and the lane's branch predated its arrival.
-import { freshArray, RETAINS_RECEIVER } from "./ast.ts";
+import { freshArray, RETAINS_RECEIVER, arrayElements } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
@@ -2833,12 +2833,22 @@ class FnGen {
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
     if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" && e.callee.object.name === "Object" && !this.isBound("Object")) {
       if (e.callee.property === "fromEntries") {
-        // Literal entries (checker-verified): build the object block slot by slot.
-        const pairs = (e.args[0] as { elements: Expr[] }).elements;
+        // Literal entries: the checker has already verified the shape (see `inferCall`),
+        // but "verified elsewhere" is not something codegen can read off the node, so the
+        // tag is re-tested here through `arrayElements` rather than assumed through a
+        // duck-typed window. Both reads used to be `as { elements: Expr[] }`, which names
+        // `elements` at slot 0 while `ArrayLiteral` carries it at slot 1 and slot 0 is
+        // `kind` — compiled, both took the `kind` STRING POINTER and indexed it.
+        // `internalError` rather than a fallback: if the checker's guarantee ever fails,
+        // an empty object here would be a silent wrong answer.
+        const pairs = arrayElements(e.args[0]!);
+        if (pairs === undefined) throw internalError("Object.fromEntries reached codegen with a non-literal argument");
         const obj = this.fresh();
         this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(pairs.length)})`);
         pairs.forEach((pair, i) => {
-          const v = this.genExpr((pair as { elements: Expr[] }).elements[1]!);
+          const inner = arrayElements(pair);
+          if (inner === undefined) throw internalError("Object.fromEntries reached codegen with a non-literal entry");
+          const v = this.genExpr(inner[1]!);
           const gep = this.fresh();
           this.emit(`${gep} = getelementptr i64, ptr ${obj}, i64 ${i}`);
           this.emit(`store i64 ${this.toSlot(v)}, ptr ${gep}`);
