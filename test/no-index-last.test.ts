@@ -105,6 +105,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import { lex } from "../src/lexer.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { preprocessForCoverage } from "../src/coverage-preprocess.ts";
+import { linkProgram } from "../src/modules.ts";
+import { check } from "../src/checker.ts";
 
 const SRC = new URL("../src/", import.meta.url);
 
@@ -541,5 +543,118 @@ describe("src/ never depends on a string read at index == length", () => {
         }
       }
     });
+  });
+});
+
+/*
+ * ============================================================================
+ * THE ARRAY HALF OF THE SAME END — a HOST CALL'S ARGUMENT LIST, read past its length
+ * ============================================================================
+ *
+ * The census in the header above names this family and had no instrument:
+ *
+ *   8 ARRAY sites — `e.args[0]`, `args[1] ? …`, `args[i] ?? …`, `fn.params[0]?.name`:
+ *                   argument lists that are simply SHORTER than the read
+ *
+ * The string half above got the `String.prototype` tripwire; the array half got nothing,
+ * and it regressed. `Checker.checkHostCall` runs BEFORE `checkArgs` — see the host-FFI
+ * branch of `Checker.type`, which calls them in that order — so ARITY IS NOT YET CHECKED
+ * when the per-host option validators run. `spawnSync("ls")` therefore reached
+ * `spawnMode`'s `args[2]` and `readFileSync(p)` reached `args[1]`, both out of range. Both
+ * sites then tested the VALUE (`opts !== undefined`, `!enc`), which is node's answer and
+ * not this compiler's: nativets panics on the read, so neither guard could ever run and a
+ * self-hosted nativets would ABORT where it should print NT1028. Both are now length-first.
+ *
+ * ---- Why this needs a different instrument from the two above ----
+ * The prototype trick cannot be reused at the POSITIVE end. `xs[-1]` is a read-only shape,
+ * so a throwing getter on `Array.prototype["-1"]` is harmless; but a getter at
+ * `Array.prototype["0"]` with no setter makes `xs.push(v)` on an EMPTY array an assignment
+ * to a readonly property, and the compiler pushes onto empty arrays constantly. The
+ * process-wide move breaks the subject rather than observing it.
+ *
+ * So this instrument is SCOPED instead of global: parse the program, then swap just the
+ * `args` array of each HOST call for a Proxy that panics out of range, exactly as Stage 41
+ * does. `rmSync` is in the table as the CONTROL — it has always tested `args.length === 2`
+ * first, so it must stay green, which is what shows the tripwire is discriminating rather
+ * than firing on everything.
+ */
+describe("src/ never reads a host call's argument list past its length", () => {
+  const HOST_CALLS = new Set(["readFileSync", "writeFileSync", "existsSync", "mkdtempSync",
+    "readdirSync", "rmSync", "spawnSync", "join", "dirname", "basename", "resolve"]);
+
+  const panicOutOfRange = (xs: unknown[]): unknown[] =>
+    new Proxy(xs, {
+      get(t, p, r) {
+        if (typeof p === "string" && String(Number(p)) === p) {
+          const i = Number(p);
+          if (i < 0 || i >= (t as unknown[]).length)
+            throw new RangeError(`index out of bounds: the length is ${(t as unknown[]).length} but the index is ${i}`);
+        }
+        return Reflect.get(t, p, r);
+      },
+    });
+
+  /** Replace every host `CallExpr`'s `args` with a panicking Proxy, in place. */
+  const armHostArgs = (n: unknown, seen: Set<unknown> = new Set()): void => {
+    if (n === null || typeof n !== "object" || seen.has(n)) return;
+    seen.add(n);
+    if (Array.isArray(n)) { for (const v of n) armHostArgs(v, seen); return; }
+    const o = n as Record<string, unknown>;
+    const callee = o["callee"] as Record<string, unknown> | undefined;
+    if (o["kind"] === "CallExpr" && Array.isArray(o["args"]) && callee &&
+        callee["kind"] === "Identifier" && HOST_CALLS.has(String(callee["name"]))) {
+      // Arm AFTER walking the children: the Proxy would panic on nothing here, but the
+      // walk reads indices and there is no reason to route it through the tripwire.
+      for (const v of o["args"] as unknown[]) armHostArgs(v, seen);
+      o["args"] = panicOutOfRange(o["args"] as unknown[]);
+      return;
+    }
+    for (const k of Object.keys(o)) armHostArgs(o[k], seen);
+  };
+
+  /**
+   * `null` expects a clean check; an `NT` string expects that REFUSAL and not a panic.
+   * The under-length calls must still produce their diagnostic — reaching it is the whole
+   * point, and "it stopped panicking because it stopped checking" is the failure mode a
+   * bare "did not throw RangeError" assertion would pass.
+   */
+  const CASES: [string, string, string | null][] = [
+    ["spawnSync(cmd) — one arg, `args[2]` out of range",
+     'import { spawnSync } from "node:child_process";\nconst r = spawnSync("ls");\nconsole.log(r.status);\n', "NT1028"],
+    ["spawnSync(cmd, argv) — two args, `args[2]` == length",
+     'import { spawnSync } from "node:child_process";\nconst r = spawnSync("ls", []);\nconsole.log(r.status);\n', "NT1028"],
+    ["readFileSync(path) — one arg, `args[1]` out of range",
+     'import { readFileSync } from "node:fs";\nconsole.log(readFileSync("/etc/hosts").length);\n', "NT1028"],
+    // CONTROL: length-guarded since it was written. Green here proves the tripwire is
+    // selective — if this one failed, the instrument would be flagging every host call.
+    ["rmSync(path) — one arg, the CONTROL (already length-guarded)",
+     'import { rmSync } from "node:fs";\nrmSync("/tmp/nt-idxnull");\n', null],
+    ["the well-formed spawnSync, three args",
+     'import { spawnSync } from "node:child_process";\nconst r = spawnSync("ls", [], { encoding: "utf8" });\nconsole.log(r.status);\n', null],
+  ];
+
+  for (const [name, src, want] of CASES) {
+    test(name, () => {
+      const program = linkProgram(src, "/tmp/nt-idxnull-hostargs.ts");
+      armHostArgs(program);
+      let got: string | null = null;
+      try { check(program); }
+      catch (e) {
+        // A RangeError is THE BUG and propagates. A diagnostic is a legitimate answer.
+        if (e instanceof RangeError) throw e;
+        const m = /NT\d{4}/.exec(String((e as Error).message));
+        got = m ? m[0] : `unexpected: ${String((e as Error).message).slice(0, 60)}`;
+      }
+      expect([name, got]).toEqual([name, want]);
+    });
+  }
+
+  test("the tripwire is REAL — it fires on the shape the fix replaced", () => {
+    // The pre-fix spelling, run against the same Proxy: a value test on an out-of-range
+    // read. Without this, a tripwire that silently armed nothing would pass every case.
+    const args = panicOutOfRange([{ kind: "StringLiteral" }]);
+    expect(() => (args as { kind: string }[])[2] !== undefined).toThrow(RangeError);
+    // ...and the length-first spelling that replaced it never forms the index.
+    expect(args.length < 3).toBe(true);
   });
 });

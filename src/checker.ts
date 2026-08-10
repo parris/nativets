@@ -546,10 +546,19 @@ export const SPAWN_INHERIT_TY = "{status:number}";
  * anything else. Read from the SOURCE so the checker (which types the result) and
  * codegen (which picks the runtime entry point) derive the same answer from the same
  * function — the `planConsoleFormat` discipline.
+ *
+ * The LENGTH test, not a `!== undefined` test on the value: `checkHostCall` runs BEFORE
+ * `checkArgs` (see the host-FFI branch of `type`), so a short call — `spawnSync("ls")` —
+ * arrives here with fewer than three arguments and `args[2]` is OUT OF RANGE. node answers
+ * that read `undefined` and the guard this used to spell (`opts !== undefined && …`) worked;
+ * nativets PANICS on the read itself (Stage 41), so the guard could never run and a
+ * self-hosted compiler would abort instead of printing the NT1028 the guard exists to
+ * reach. The rewrite never FORMS the index. See test/no-index-last.test.ts.
  */
 export function spawnMode(args: Expr[]): "capture" | "inherit" | null {
-  const opts = args[2];
-  const props = opts !== undefined && opts.kind === "ObjectLiteral" ? opts.properties : null;
+  if (args.length < 3) return null;
+  const opts = args[2]!;
+  const props = opts.kind === "ObjectLiteral" ? opts.properties : null;
   if (props === null || props.length !== 1) return null;
   const p = props[0]!;
   if (p.value.kind !== "StringLiteral") return null;
@@ -6257,8 +6266,16 @@ class Checker {
    */
   private checkHostCall(name: string, args: Expr[]): void {
     if (name === "readFileSync") {
-      const enc = args[1];
-      if (!enc || enc.kind !== "StringLiteral" || enc.value !== "utf8")
+      // Length-first, for the reason `spawnMode` records: this method runs BEFORE the
+      // arity check, so `readFileSync(path)` reaches here and `args[1]` is out of range —
+      // `undefined` under node, a PANIC under nativets. The `!enc` guard this replaces
+      // could never run.
+      let ok = false;
+      if (args.length > 1) {
+        const enc = args[1]!;
+        ok = enc.kind === "StringLiteral" && enc.value === "utf8";
+      }
+      if (!ok)
         throw nyi(NYI.HOSTMOD, `readFileSync without the literal encoding "utf8" (node returns a Buffer, which has no representation here — write \`readFileSync(path, "utf8")\`)`);
     }
     if (name === "rmSync" && args.length === 2) {
