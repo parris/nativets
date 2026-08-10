@@ -4252,11 +4252,33 @@ module-level nullable **every one of those routes failed to build or ran wrong**
 now compile and match node, and each is pinned as a test — `?.`, `!` and the local copy in
 `test/nullable-assign.test.ts` block 6, alongside the write family.
 
-One narrowing refusal in that area survives on purpose and is *not* this bug: at **top
-level**, `if (g) { g.length }` on a global that some function **writes** is still NT2001
-(the fact is dropped because a call could have invalidated it). It is a refusal, not a
-miscompile, and the hint's other three routes work there. Narrowing inside the reading
-function, and narrowing a global no function writes, both work.
+One narrowing refusal in that area survives on purpose and is *not* this bug — but its
+boundary is **not** where it was first described, and the difference matters because it is
+the shape the original report used. Measured both ways:
+
+```ts
+// A — WORKS. The write is at top level.
+let g: string | undefined = "abc";
+function f(): void { if (g) { console.log(g.length); } else { console.log("absent"); } }
+f(); g = undefined; f();                       // node: 3 / absent — nativets matches
+
+// B — REFUSED (NT2001). Identical, except a FUNCTION does the write.
+let g: string | undefined = "abc";
+function clear(): void { g = undefined; }
+function f(): void { if (g) { console.log(g.length); } else { console.log("absent"); } }
+f(); clear(); f();                             // node: 3 / absent
+```
+
+So the trigger is **"some function writes the global"**, not "the narrowing is at top
+level" — in B the narrowing is *inside* the reading function and is still dropped, because
+any call could have invalidated it. It is a refusal, not a miscompile.
+
+**And the hint is still circular for exactly this case.** On B it advises *"prove it
+non-nullish first — `if (g) { … }`"* at a read whose author wrote precisely that. The other
+routes (`g?.length`, `!`, a local copy) do work here, so the hint is not useless — but its
+first suggestion is the one the reader has already tried. Worth fixing when the narrowing
+is, and worth remembering that this hint has now been read as circular twice, in two
+different bugs.
 
 **Related boundary worth stating explicitly:** `verifyModule` passing means *the module
 parses*, explicitly **not** that it is correct. The segfault above is the proof, and the
