@@ -935,15 +935,22 @@ gated on `finallyStack.length === 0`, and a `finally` outranks it. So the `retur
 ordinary **function** return: it abandoned the rest of the loop *and* returned from the caller.
 
 ```ts
-[1, 2, 3].map((x) => { try { if (x === 2) return 99; return x } finally { console.log("fin " + x) } })
+function run(): number {
+  const m: number[] = [1, 2, 3].map((x) => { try { if (x === 2) { return 99 } return x } finally { console.log("fin " + x) } });
+  console.log(m.join(","));
+  return 0;
+}
+console.log(run());
 ```
 
 | | stdout | exit |
 |---|---|---|
-| node | `fin 1` `fin 2` `fin 3` → `1,99,3` | 0 |
-| nativets (before) | `fin 1` → returned from the enclosing function | **0** |
+| node | `fin 1` / `fin 2` / `fin 3` / `1,99,3` / `0` | 0 |
+| nativets (before) | `fin 1` / `1` | **0** |
 
-Exit 0 on both sides — the silent wrong answer. Refused now in `typeArrowBody`, the one entry
+Exit 0 on both sides — the silent wrong answer. The stray `1` is the giveaway: the first
+element's `return x` returned it from **`run`**, so `console.log(run())` printed `1` and neither
+the remaining elements nor `m.join(",")` ever happened. Refused now in `typeArrowBody`, the one entry
 every inlined HOF body passes through, so `.map`/`.filter`/`.reduce`/`.flatMap`/`.forEach`/the
 search HOFs are all covered by one guard. The `finally` itself is fine; only a `return` from
 under it is refused, and a `return` inside a `try` with **no** `finally` still compiles.
