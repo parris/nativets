@@ -465,9 +465,20 @@ export function unionDiscriminant(t: Ty): { key: string; index: number } | undef
     let values = new Set<Ty>();
     let ok = true;
     for (const m of members) {
-      const f = objectFields(m)[i];
-      if (!f || f.key !== key || !isStringLitTy(f.ty)) { ok = false; break; }
-      values = values.add(f.ty);
+      // `const f = fs[i]` is the natural spelling and nativets refuses it (`NT1605`):
+      // the element is a HEAP object, so binding it would make `f` a second owner of a
+      // slot the array still holds. Read THROUGH the index instead — `fs[i]!.key` is a
+      // borrow, not a handoff — exactly as `fieldType` above does for the same reason.
+      // The `i >= fs.length` guard replaces the old `!f` undefined-test and must come
+      // FIRST: an out-of-range index PANICS here (Stage 41) rather than yielding
+      // `undefined`, so the short-circuit is load-bearing, not a style choice. Members
+      // may legitimately be shorter than `first`. Identical under bun.
+      const fs = objectFields(m);
+      if (i >= fs.length) { ok = false; break; }
+      const fkey = fs[i]!.key;
+      const fty = fs[i]!.ty;
+      if (fkey !== key || !isStringLitTy(fty)) { ok = false; break; }
+      values = values.add(fty);
     }
     if (ok && values.size === members.length) return { key, index: i };
   }
@@ -561,10 +572,13 @@ export function objectLayoutFits(view: Ty, concrete: Ty): boolean {
   const have = objectFields(concrete);
   if (want.length > have.length) return false;
   for (let i = 0; i < want.length; i++) {
-    const w = want[i]!;
-    const h = have[i]!;
-    if (w.key !== h.key) return false;
-    if (widenLiteralTys(w.ty) !== widenLiteralTys(h.ty)) return false;
+    // Read THROUGH the index rather than binding the element: `const w = want[i]!` is
+    // `NT1605` (binding a heap element makes the local a second owner of a slot the
+    // array still holds). `want[i]!.key` is a borrow. Same reason as `fieldType` above.
+    // In bounds by construction — `i < want.length`, and `want.length <= have.length`
+    // was checked before the loop, so neither index can panic.
+    if (want[i]!.key !== have[i]!.key) return false;
+    if (widenLiteralTys(want[i]!.ty) !== widenLiteralTys(have[i]!.ty)) return false;
   }
   return true;
 }
@@ -628,11 +642,19 @@ export function extractMatchesPattern(member: Ty, pattern: Ty): boolean {
 export function extractUnionMembers(subject: Ty, pattern: Ty): Ty[] {
   //@@mutable
   const keep: Ty[] = [];
-  if (!isUnionTy(subject) || !isObjectTy(pattern)) return keep;
-  const members = unionMembers(subject);
-  for (let i = 0; i < members.length; i++) {
-    const m = members[i]!;
-    if (extractMatchesPattern(m, pattern)) keep.push(m);
+  // SINGLE return, rather than the natural `if (…) return keep;` guard clause. The
+  // ownership pass merges an `if`'s consequent state into the join UNCONDITIONALLY
+  // (`IfStmt` in ownership.ts), even when that branch diverges — so an early `return
+  // keep` marks `keep` moved along a path it cannot reach, and the later `keep.push`
+  // is a spurious `NT1601`. Refusing correct code, not miscompiling it, so this is a
+  // safe spelling workaround rather than a correctness hazard; the guard-clause form
+  // is restored once the pass drops diverging branches at the join. Identical in node.
+  if (isUnionTy(subject) && isObjectTy(pattern)) {
+    const members = unionMembers(subject);
+    for (let i = 0; i < members.length; i++) {
+      const m = members[i]!;
+      if (extractMatchesPattern(m, pattern)) keep.push(m);
+    }
   }
   return keep;
 }
@@ -1381,6 +1403,22 @@ export interface BlockDropsStmt { kind: "BlockDrops"; names: string[]; }
  * `Stmt` and comparing an 18-member union with `undefined` has no overlap (`NT2001`).
  * Pinned by an out-of-range-throws proxy in test/block-drops.test.ts, because node's own
  * answer is precisely the one this function must not depend on.
+ *
+ * REPLACE IS SPELLED POP-THEN-PUSH rather than as an in-place `last.names = names`, and
+ * all three reasons are ownership rules this file must stay inside:
+ *   1. `const last = list[n - 1]!` BINDS a heap element, making the local a second owner
+ *      of a slot the array still holds — `NT1605`. Reading THROUGH the index is a borrow,
+ *      so the `kind` test below is fine; it is the binding that was not.
+ *   2. Mutating through that index instead (`list[n-1]!.names = …`) does not help: it is
+ *      `NT1606` (the receiver is not a `@@mutable` path through an index), and tsc will
+ *      not narrow an element access behind a computed index either (TS2339).
+ *   3. `names` is a BORROWED parameter, so storing it into a node that outlives the call
+ *      would give the marker a pointer the caller still frees — `NT1604`. The marker
+ *      takes its OWN copy (`[...names]`), which is what makes the store sound.
+ * Still idempotent, which is the property that matters: the list ends with exactly one
+ * `BlockDrops` carrying `names`, however many times `loop()` re-walks the body. Only the
+ * marker's object IDENTITY changes, and nothing reads it — the node is created here and
+ * only ever consumed positionally by codegen. Identical under node.
  */
 export function setBlockDrops(
   //@@mutable
@@ -1388,13 +1426,11 @@ export function setBlockDrops(
   names: string[],
 ): void {
   const n = list.length;
-  if (n > 0) {
-    // `!` because `n > 0` is not something `noUncheckedIndexedAccess` can see: tsc types
-    // every indexed read `Stmt | undefined` regardless of the guard above (TS18048).
-    const last = list[n - 1]!;
-    if (last.kind === "BlockDrops") { last.names = names; return; }
-  }
-  list.push({ kind: "BlockDrops", names });
+  // `!` because `n > 0` is not something `noUncheckedIndexedAccess` can see: tsc types
+  // every indexed read `Stmt | undefined` regardless of the guard beside it (TS18048).
+  // The `n > 0 &&` short-circuit is what keeps index `-1` from ever being FORMED.
+  if (n > 0 && list[n - 1]!.kind === "BlockDrops") { list.pop(); }
+  list.push({ kind: "BlockDrops", names: [...names] });
 }
 export interface IfStmt { kind: "IfStmt"; test: Expr; consequent: Stmt[]; alternate: Stmt[] | null; }
 export interface WhileStmt { kind: "WhileStmt"; test: Expr; body: Stmt[]; }
@@ -2110,9 +2146,19 @@ function walkStmtChildren(s: Stmt, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt,
     case "MultiStmt": return { ...s, kind: "MultiStmt", stmts: mapStmtList(s.stmts, fs) };
     // No children, and nothing type-bearing. `BlockDrops` is the ownership pass's
     // synthesized scope-exit marker; the other two are leaves.
-    case "BreakStmt": return s;
-    case "ContinueStmt": return s;
-    case "BlockDrops": return s;
+    //
+    // Spelled `{ ...s }` rather than the bare `return s` these three used to be. `s` is a
+    // BORROWED parameter, so handing it straight back makes the result a second owner of
+    // a node the caller still frees — `NT1604`, and the only three arms of this walker
+    // that did it (every other arm already builds a fresh node). A shallow spread is the
+    // right copy depth here precisely because these kinds have no children to alias:
+    // `BreakStmt`/`ContinueStmt` are `kind`-only, and `BlockDrops.names` is rebuilt
+    // rather than shared, since it is the one field that is a heap array. Observationally
+    // null in node — this is a MAPPING walker whose callers rebind the result, so nothing
+    // depended on the returned node being reference-identical to the input.
+    case "BreakStmt": return { ...s, kind: "BreakStmt" };
+    case "ContinueStmt": return { ...s, kind: "ContinueStmt" };
+    case "BlockDrops": return { ...s, kind: "BlockDrops", names: [...s.names] };
   }
 }
 
