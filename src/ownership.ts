@@ -324,9 +324,9 @@ class Analyzer {
      *  of a linear type). Empty for every program without one, so the rule is inert. */
     private consuming: Map<string, Set<number>> = new Map(),
   ) {
-    for (const p of paramBorrows) { this.borrowBindings.add(p); this.borrowParams.add(p); }
-    for (const a of aliasOf.keys()) this.borrowBindings.add(a); // an alias may never escape
-    for (const owner of aliasOf.values()) if (owner) this.aliasedOwners.add(owner);
+    for (const p of paramBorrows) { this.borrowBindings = this.borrowBindings.add(p); this.borrowParams = this.borrowParams.add(p); }
+    for (const a of aliasOf.keys()) this.borrowBindings = this.borrowBindings.add(a); // an alias may never escape
+    for (const owner of aliasOf.values()) if (owner) this.aliasedOwners = this.aliasedOwners.add(owner);
   }
 
   /** Owners that something else aliases — reassigning one would dangle the alias. */
@@ -352,7 +352,7 @@ class Analyzer {
 
   /** Collection mode: record every name an arrow body mentions (pass 1). */
   private arrowDepth = 0;
-  readonly arrowNames = new Set<string>();
+  arrowNames = new Set<string>();
 
   /** Names bound to a BORROW rather than owned: by-borrow params (whole scope) and for-of
    *  loop variables over a LINEAR element (loop body). Moving out of any is E0507 (NT1604). */
@@ -376,8 +376,8 @@ class Analyzer {
 
   /** Arrays currently borrowed by an enclosing for-of (lexical, count for nesting). */
   private borrowed = new Map<string, number>();
-  private pushBorrow(n: string): void { this.borrowed.set(n, (this.borrowed.get(n) ?? 0) + 1); }
-  private popBorrow(n: string): void { const c = (this.borrowed.get(n) ?? 1) - 1; if (c <= 0) this.borrowed.delete(n); else this.borrowed.set(n, c); }
+  private pushBorrow(n: string): void { this.borrowed = this.borrowed.set(n, (this.borrowed.get(n) ?? 0) + 1); }
+  private popBorrow(n: string): void { const c = (this.borrowed.get(n) ?? 1) - 1; if (c <= 0) this.borrowed.delete(n); else this.borrowed = this.borrowed.set(n, c); }
   private isBorrowed(n: string): boolean { return this.borrowed.has(n); }
 
   /**
@@ -447,13 +447,13 @@ class Analyzer {
     if (!st) return false;
     if (!st.moved) return true;
     if (st.must || this.captured.has(n)) return false;
-    this.condDrops.add(n); // ⇒ every move of `n` must null its slot
+    this.condDrops = this.condDrops.add(n); // ⇒ every move of `n` must null its slot
     return true;
   }
 
   /** Names that need the null-on-move drop flag, and the move sites to null at. */
-  readonly condDrops = new Set<string>();
-  readonly moveSites = new Map<string, Set<Expr>>();
+  condDrops = new Set<string>();
+  moveSites = new Map<string, Set<Expr>>();
 
   /** Top-level linear locals to free at this point — the scope-exit drop set. */
   ownedTopLevel(state: State): string[] {
@@ -554,7 +554,7 @@ class Analyzer {
     collectAliases(list, (t) => this.isMutableInstance(t), aliases);
     for (const a of aliases.keys()) own.delete(a); // an alias owns nothing, so it is never dropped
     const added: string[] = [];
-    for (const n of own) if (!this.linear.has(n)) { this.linear.add(n); added.push(n); }
+    for (const n of own) if (!this.linear.has(n)) { this.linear = this.linear.add(n); added.push(n); }
     this.loop(state, (st) => { this.scoped(list, st); });
     for (const n of added) this.linear.delete(n);
   }
@@ -579,7 +579,7 @@ class Analyzer {
           //
           // Never DELETED again, unlike the for-of case: a for-of binding dies with its
           // loop, and this one lives to the end of the function like any other `const`.
-          if (d.init && searchBorrowBase(d.init) !== null) this.borrowBindings.add(d.name);
+          if (d.init && searchBorrowBase(d.init) !== null) this.borrowBindings = this.borrowBindings.add(d.name);
         }
         return;
       case "ExprStmt": this.expr(s.expr, state, false); return;
@@ -619,7 +619,7 @@ class Analyzer {
         // If the element type is linear, the loop var only BORROWS each element —
         // moving it out of the loop is E0507 (NT1604).
         const elemBorrow = s.elemTy !== undefined && isLinearTy(s.elemTy);
-        if (elemBorrow) this.borrowBindings.add(s.name);
+        if (elemBorrow) this.borrowBindings = this.borrowBindings.add(s.name);
         this.loop(state, (st) => { this.scoped(s.body, st); });
         if (elemBorrow) this.borrowBindings.delete(s.name);
         if (bv) this.popBorrow(bv);
@@ -738,7 +738,7 @@ class Analyzer {
   private expr(e: Expr, state: State, consume: boolean): void {
     switch (e.kind) {
       case "Identifier": {
-        if (this.arrowDepth > 0) this.arrowNames.add(e.name);
+        if (this.arrowDepth > 0) this.arrowNames = this.arrowNames.add(e.name);
         // Moving out of a borrowed binding (by-borrow param / for-of element) is E0507.
         if (consume && this.borrowBindings.has(e.name)) {
           const owner = this.aliasOf.get(e.name);
@@ -771,7 +771,7 @@ class Analyzer {
             return;
           }
           let sites = this.moveSites.get(e.name);
-          if (!sites) { sites = new Set(); this.moveSites.set(e.name, sites); }
+          if (!sites) { sites = new Set(); this.moveSites = this.moveSites.set(e.name, sites); }
           sites.add(e);
           state.set(e.name, { moved: true, must: true, at: e.loc?.line });
         }

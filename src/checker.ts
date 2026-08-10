@@ -304,6 +304,11 @@ interface RecvHint {
   root?: string;
 }
 
+// NOT `//@@mutable`, and it cannot become so: `parent: Scope | null` makes this class
+// RECURSIVE, and an `@@mutable` recursive class is refused (NT1030 — mutating one in
+// place could close a cycle). So the two tables below keep the DISCARDED-mutator
+// spelling that NT1606 refuses, and `Scope.declare`/`Scope.lookup` stay self-hosting
+// blockers until either the cycle rule or a non-recursive scope representation lands.
 class Scope {
   private vars = new Map<string, Binding>();
   /** Names of THIS scope's own bindings that some lookup resolved to. Used on the
@@ -1475,7 +1480,7 @@ class Checker {
 
   declareGeneric(fn: FuncDecl, base: () => Scope): void {
     if (this.generics.has(fn.name) || this.functions.has(fn.name)) throw typeError(`Duplicate function '${fn.name}'`);
-    this.generics.set(fn.name, fn);
+    this.generics = this.generics.set(fn.name, fn);
     this.genericBase = base;
   }
   specializations(): FuncDecl[] { return this.specialized; }
@@ -1563,7 +1568,7 @@ class Checker {
       throw nyi(NYI.GENERIC, `too many generic instantiations while specializing '${name}' (>${MAX_INSTANTIATIONS}); a generic that calls itself at a DIFFERENT type argument (polymorphic recursion) cannot be monomorphized`);
     }
     const mangled = this.mangle(name, typeArgs);
-    this.instances.set(key, mangled); // BEFORE cloning — self-recursion resolves here
+    this.instances = this.instances.set(key, mangled); // BEFORE cloning — self-recursion resolves here
     const spec = specializeDecl(tmpl, mangled, bindings);
     const params: Ty[] = spec.params.map((p) => p.annot ?? (p.default ? this.type(p.default, this.genericBase!()) : "number"));
     spec.params.forEach((p, i) => { if (p.default && p.annot) this.type(p.default, this.genericBase!(), params[i]); });
@@ -1576,7 +1581,7 @@ class Checker {
       rest: !!spec.params.at(-1)?.rest,
     };
     spec.returnTy = sig.ret;
-    this.functions.set(mangled, sig);
+    this.functions = this.functions.set(mangled, sig);
     this.specialized.push(spec);
     if (!spec.returnAnnot) { sig.ret = this.inferReturnType(spec, this.genericBase!()); spec.returnTy = sig.ret; }
     this.pending.push(spec); // body checked in the drain loop (keeps recursion finite)
@@ -1630,7 +1635,7 @@ class Checker {
 
   /** Whitelist `e` as an iteration position (see `iterOk`). */
   private markIter(e: Expr): void {
-    if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") this.iterOk.add(e);
+    if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") this.iterOk = this.iterOk.add(e);
   }
 
   /**

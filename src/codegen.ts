@@ -578,7 +578,7 @@ class ModuleGen {
     const existing = this.actorEntries.get(key);
     if (existing) return existing;
     const name = `nt_actor_entry_${this.actorEntries.size}`;
-    this.actorEntries.set(key, name);
+    this.actorEntries = this.actorEntries.set(key, name);
     // slot(i64) -> param: number is a bit-cast double; heap types are inttoptr.
     const conv = argTy === "number"
       ? `%arg = bitcast i64 %slot to double`
@@ -609,7 +609,7 @@ class ModuleGen {
     const existing = this.msgRenderers.get(key);
     if (existing) return existing;
     const name = `nt_msg_render_${this.msgRenderers.size}`;
-    this.msgRenderers.set(key, name);
+    this.msgRenderers = this.msgRenderers.set(key, name);
     this.liftedFns.push(new FnGen(this).genMsgRender(name, ty));
     return name;
   }
@@ -628,7 +628,7 @@ class ModuleGen {
     const existing = this.cmpShims.get(lt);
     if (existing) return existing;
     const name = `nt_cmp_shim_${this.cmpShims.size}`;
-    this.cmpShims.set(lt, name);
+    this.cmpShims = this.cmpShims.set(lt, name);
     const conv = (reg: string, slot: string) =>
       lt === "double" ? `%${reg} = bitcast i64 %${slot} to double` : `%${reg} = inttoptr i64 %${slot} to ptr`;
     this.liftedFns.push(
@@ -657,7 +657,7 @@ class ModuleGen {
     const sym = `@.str.${this.strings.size}`;
     const { body, len } = encodeCString(s);
     this.strDefs.push(`${sym} = private unnamed_addr constant [${len} x i8] c"${body}"`);
-    this.strings.set(s, sym);
+    this.strings = this.strings.set(s, sym);
     return sym;
   }
 
@@ -1036,7 +1036,7 @@ class FnGen {
 
   private addLocal(name: string, ty: Ty): void {
     if (this.varTypes.has(name)) return;
-    this.varTypes.set(name, ty);
+    this.varTypes = this.varTypes.set(name, ty);
     // A promoted module-level binding lives in its LLVM global, not a frame slot.
     if (!this.globalVars.has(name)) this.alloca(name, ty);
   }
@@ -1047,7 +1047,7 @@ class FnGen {
         case "VarDecl":
           for (const d of s.decls) {
             this.addLocal(d.name, d.ty ?? "number");
-            if ((d.ty ?? "number") === "string") this.strLocals.add(d.name);
+            if ((d.ty ?? "number") === "string") this.strLocals = this.strLocals.add(d.name);
           }
           break;
         case "IfStmt":
@@ -1092,7 +1092,7 @@ class FnGen {
     const sig = this.mod.functions.get(fn.name)!;
     fn.params.forEach((p, i) => {
       const ty = sig.params[i]!;
-      this.varTypes.set(p.name, ty);
+      this.varTypes = this.varTypes.set(p.name, ty);
       this.alloca(p.name, ty);
     });
     this.collectLocals(fn.body);
@@ -1164,7 +1164,7 @@ class FnGen {
     this.retTy = arrow.retTy ?? "number";
     const paramTys = arrow.paramTys ?? [];
     this.captures = new Map((arrow.captures ?? []).map((c, i) => [c.name, { index: i, ty: c.ty }]));
-    arrow.params.forEach((p, i) => { this.varTypes.set(p.name, paramTys[i]!); this.alloca(p.name, paramTys[i]!); });
+    arrow.params.forEach((p, i) => { this.varTypes = this.varTypes.set(p.name, paramTys[i]!); this.alloca(p.name, paramTys[i]!); });
     if (!arrow.exprBody) this.collectLocals(arrow.stmts as Stmt[]);
     const b0 = this.block(this.label("L"));
     this.to(b0);
