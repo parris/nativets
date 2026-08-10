@@ -1098,7 +1098,7 @@ class Checker {
       if (!b) return undefined;
       return { name: e.name, binding: b, path: "", ty: this.narrowedTy(b, "") ?? b.ty };
     }
-    if (e.kind !== "MemberExpr" || e.optional === true) return undefined;
+    if (e.kind !== "MemberExpr" || (e.optional ?? false)) return undefined;
     const base = this.accessPath(e.object, scope);
     if (base === undefined) return undefined;
     // UNFOLD a recursive back-edge before looking for fields. `@Expr` and the shape it
@@ -1994,7 +1994,7 @@ class Checker {
     // nullable (a nullish guard proved it present, but the slot is unchanged), and it
     // stays true through a re-narrowing of an already-shadowed name.
     const b = inner.lookup(name);
-    const boxed = b !== undefined && (isNullableTy(b.ty) || b.nullBox === true);
+    const boxed = b !== undefined && (isNullableTy(b.ty) || (b.nullBox ?? false));
     inner.declare(name, t, true, undefined, u, undefined, boxed);
   }
 
@@ -2534,7 +2534,7 @@ class Checker {
         // `nullBox` says the same thing for a TAG-narrowing shadow of a nullable name:
         // the type is the member, the storage is still the box, so the read unwraps.
         const narrowed = this.narrowedTy(b, "");
-        e.narrowed = narrowed !== undefined || b.nullBox === true;
+        e.narrowed = narrowed !== undefined || (b.nullBox ?? false);
         return narrowed ?? b.ty;
       }
       case "MemberExpr": {
@@ -5765,7 +5765,7 @@ function collectAssignedStmts(body: Stmt[], direct: Set<string>, closure: Set<st
 
 /** The field name if `e` reads `this.<f>` (not `this.<f>?.`, not a nested receiver). */
 function thisFieldRead(e: Expr): string | undefined {
-  if (e.kind !== "MemberExpr" || e.optional === true) return undefined;
+  if (e.kind !== "MemberExpr" || (e.optional ?? false)) return undefined;
   if (e.object.kind !== "Identifier" || e.object.name !== "this") return undefined;
   return e.property;
 }

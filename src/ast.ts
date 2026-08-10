@@ -1664,7 +1664,7 @@ export function exprText(e: Expr): string | undefined {
   if (e.kind === "Identifier") return e.name;
   if (e.kind === "MemberExpr") {
     const o = exprText(e.object);
-    return o === undefined ? undefined : o + (e.optional === true ? "?." : ".") + e.property;
+    return o === undefined ? undefined : o + ((e.optional ?? false) ? "?." : ".") + e.property;
   }
   if (e.kind === "IndexExpr") {
     const o = exprText(e.object);
@@ -1980,7 +1980,7 @@ function staticExpr(e: Expr, names: Set<string>, onAssign?: (name: string, at: L
   }
   // A `?.` link is left alone (rewriting it would silently drop the optional; a class name
   // is never nullish, so the read is rejected instead).
-  if (e.kind === "MemberExpr" && e.optional !== true && e.object.kind === "Identifier"
+  if (e.kind === "MemberExpr" && !(e.optional ?? false) && e.object.kind === "Identifier"
       && names.has(`${e.object.name}.${e.property}`)) {
     const id: Identifier = { kind: "Identifier", name: `${e.object.name}.${e.property}` };
     return id; // rewritten: its only child WAS the class name, so there is nothing below

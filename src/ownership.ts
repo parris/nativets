@@ -959,7 +959,7 @@ class Analyzer {
         // BORROW — `constructor(readonly xs: T[]) { this.n = xs.length }` reads `xs` after
         // the store, which is exactly the rustc-legal `Self { n: xs.len(), xs }` reordered.
         // `xs` stays in `borrowBindings`, so moving it out a SECOND time is still NT1604.
-        this.expr(e.value, state, e.paramProp !== true);
+        this.expr(e.value, state, !(e.paramProp ?? false));
         return;
       case "IndexAssign": // `u[i] = v` (Uint8Array only reaches here — arrays/objects rejected in the checker)
         this.expr(e.object, state, false);
@@ -1407,7 +1407,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     if (sig === undefined) continue;
     const idx = new Set<number>();
     for (let i = 1; i < s.params.length; i++) {
-      if (s.params[i]!.paramProp === true && isLinearTy(sig.params[i] ?? "number")) idx.add(i - 1);
+      if ((s.params[i]!.paramProp ?? false) && isLinearTy(sig.params[i] ?? "number")) idx.add(i - 1);
     }
     if (idx.size > 0) consuming.set(s.name.slice(0, s.name.length - CTOR.length), idx);
   }
@@ -1430,7 +1430,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   const untrackedThis = (fn: FuncDecl): boolean =>
     // `fn.params.length > 0` FIRST: a nullary function makes `fn.params[0]` a read at
     // index == length, which nativets PANICS on (Stage 41), so `?.` never sees `undefined`.
-    fn.params.length > 0 && fn.params[0]!.name === "this" && (fn.setter === true || fn.untrackThis === true || mutable.classes.has(fn.name.split(".")[0]!));
+    fn.params.length > 0 && fn.params[0]!.name === "this" && ((fn.setter ?? false) || (fn.untrackThis ?? false) || mutable.classes.has(fn.name.split(".")[0]!));
 
   // The per-parameter `@@mutable` opt-in, as a call-site table: which argument positions
   // of which function the callee may `.push` to. Built over every FuncDecl (methods are
