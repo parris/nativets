@@ -322,7 +322,15 @@ describe("exprLoc pins a location for every Expr kind", () => {
     ["o.f++", "UpdateExpr 1:2"],
     ["a[i]++", "UpdateExpr 1:2"],
     ["x ? y : z", "ConditionalExpr 1:1"],
-    ["`a${x}b`", "TemplateLiteral 1:1"],
+    // 1:5 is `x`'s real column in `` `a${x}b` `` (1 backtick, 2 a, 3 $, 4 {, 5 x). This
+    // pin was captured as `1:1` — a substitution was lexed as its own one-line source, so
+    // every node in one carried a FRAGMENT-relative position, and 1:1 was the fragment's
+    // origin rather than anything in the file. That is a WRONG position, not a missing
+    // one: NT2001 on `` `${b.missing}` `` printed the file's first line under the caret.
+    // `parseExpressionFrom` now takes the fragment's origin and rebases its tokens, which
+    // is the fix test/string-coercion.test.ts asked for by name ("until the fragment
+    // offset is threaded") while working around it with no location at all.
+    ["`a${x}b`", "TemplateLiteral 1:5"],
     ["[x, y]", "ArrayLiteral 1:2"],
     ["{ a: x }", "ObjectLiteral 1:6"],
     // --- no `loc`, and no arm: genuinely unlocatable ---------------------------

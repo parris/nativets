@@ -3127,11 +3127,13 @@ class Checker {
         for (const x of e.exprs) {
           const t = this.type(x, scope);
           refuseUnboxedUnion(t, "a template literal");
-          // No location: a substitution is re-lexed from its own source fragment
-          // (`parseExpressionFrom`, src/parser.ts), so every node in it carries a
-          // FRAGMENT-relative `loc` — `1:1` for the whole file. A wrong line number is
-          // worse than none, so the type in the message is what locates this one.
-          this.checkStringCoercion(t, "a template literal");
+          // A location again, and it is right this time. A substitution used to be lexed
+          // as its own standalone source, so every node in one carried a FRAGMENT-relative
+          // `loc` — `1:1` for the whole file — and this call passed NO location on the
+          // grounds that a wrong line number is worse than none. `parseExpressionFrom` now
+          // takes the fragment's origin and rebases its tokens (src/parser.ts), so
+          // `exprLoc` here is file-absolute like every other caller's.
+          this.checkStringCoercion(t, "a template literal", exprLoc(x));
         }
         return "string";
       case "ArrayLiteral": {
