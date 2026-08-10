@@ -599,7 +599,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // to its own one-level unfolding. One type, two spellings, for the SECOND time in
     // two rounds (the first was `Renamer.expr` missing `retAnnot`). Two different
     // causes, one shape; that is now a pattern rather than a coincidence.
-    ["NT2001"],
+    // ...and the frontier crosses a CATEGORY. Not a type-identity or narrowing gap this
+    // time but NT1003, first-class FUNCTION VALUES — `walkStmtChildren`'s `onAssign`
+    // callback. Every previous term on this line turned out to be a spelling or a
+    // missing wiring; this one is a feature the language does not have.
+    ["NT1003"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -829,9 +833,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // identical-looking unions, and NT2001's location for a LINKED program comes from the
     // merged text, so it pointed at a blank line. A blocker that cannot be located reads
     // as many blockers.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
     // NT1001 EMPTIES, and it is worth being precise about what did NOT happen: `.find`
     // over a heap element is still refused. What cleared is the one shape where the
     // element already IS a nullable box (`(T | undefined)[]`), so `.find` hands the
@@ -1196,9 +1198,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     //
     // All eight now sit behind ONE real term in ast.ts (`.map` over heap elements,
     // NT1001), which is why THAT bucket grew as this one emptied.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a
@@ -1249,17 +1249,29 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // Counting blockers was pinning the symptom. The INVARIANT is the GAP: whatever
     // coverage reports, it is not what actually stops the module. Asserted that way now,
     // so this survives the frontier moving instead of failing for the good reason.
+    // ...and the CODE-level form of that check has now itself become a symptom, which is
+    // the same lesson one level up. Stage-1's real blocker moved to NT1003 (`onAssign`, a
+    // function value), and coverage's own artifact is ALSO NT1003 (`readFileSync` reading
+    // as an unknown callee once the preprocess strips imports). Same code, unrelated
+    // cause, so `not.toContain(realCode)` went red on a coincidence while the gap it
+    // exists to measure was completely unchanged.
+    //
+    // Compare the FEATURE, not the code. Two blockers sharing a number are not the same
+    // blocker, and a test that cannot tell them apart is measuring the catalog rather than
+    // the compiler.
     const r = coverage(read("cli.ts"));
     expect(r.parsed).toBe(true);
-    const covCodes = r.blockers.map((b) => b.code);
     let realCode = "";
+    let realMsg = "";
     try { sourceToIR(read("cli.ts"), new URL("cli.ts", SRC).pathname); } catch (e) {
-      realCode = /\[(NT\d+)\]/.exec(String((e as Error).message))?.[1] ?? "";
+      realMsg = String((e as Error).message);
+      realCode = /\[(NT\d+)\]/.exec(realMsg)?.[1] ?? "";
     }
     // The pipeline DOES refuse it...
     expect(realCode).not.toBe("");
-    // ...and coverage does not see that reason. That is the gap, and it is the point.
-    expect(covCodes).not.toContain(realCode);
+    // ...and coverage does not see that REASON — not merely that number. Every feature
+    // coverage names must be absent from the real diagnostic's text.
+    for (const b of r.blockers) expect(realMsg).not.toContain(b.feature);
   });
 });
 

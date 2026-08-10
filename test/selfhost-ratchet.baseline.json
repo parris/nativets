@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "f3bc8d3"
+    "rev": "d264ce9"
   },
   "modules": {
     "ast.ts": {
       "sha256": "d4412ac12260451c",
       "standalone": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustr…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustr…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "checker.ts": {
-      "sha256": "1eccbe22a71ed20a",
+      "sha256": "4e941bf02dd45071",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nt_m0_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,t…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "cli.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nts0_m2_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "codegen.ts": {
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nt_m0_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,t…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nts0_m0_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nts0_m2_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "lexer.ts": {
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nts0_m2_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "ownership.ts": {
@@ -147,8 +147,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nt_m0_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,t…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "parser.ts": {
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nt_m2_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,t…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
       }
     }
   }
