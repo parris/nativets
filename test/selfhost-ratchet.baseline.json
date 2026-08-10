@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "4767a1a"
+    "rev": "5e155da"
   },
   "modules": {
     "ast.ts": {
       "sha256": "d4412ac12260451c",
       "standalone": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT2001",
+        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT2001",
+        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
       }
     },
     "checker.ts": {
-      "sha256": "a88ed9341cbae21d",
+      "sha256": "12e8991c5c82a14f",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT2001",
+        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
       }
     },
     "cli.ts": {
@@ -40,12 +40,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT2001",
+        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
       }
     },
     "codegen.ts": {
-      "sha256": "7d9c7a76272d320f",
+      "sha256": "4f388eb10e151f5c",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT2001",
+        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT2001",
+        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT2001",
+        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
       }
     },
     "lexer.ts": {
@@ -133,12 +133,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT2001",
+        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
       }
     },
     "ownership.ts": {
-      "sha256": "d730fd725daa408a",
+      "sha256": "5ad105351b743be8",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -147,8 +147,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT2001",
+        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
       }
     },
     "parser.ts": {
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT2001",
+        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
       }
     }
   }
