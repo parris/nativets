@@ -161,3 +161,111 @@ f({ name: "a", def: "xyz" });
     expect(r!.hint ?? "").not.toContain("STABLE access path");
   });
 });
+
+/*
+ * WHY THE RULE IS LOAD-BEARING — and what it costs, measured.
+ *
+ * The file above says the aliasing rule "is sound and stays" and leaves it there. That is
+ * an assertion about a counterexample nobody had written down, on a rule that is the
+ * FIRST BLOCKER of three of this compiler's own modules, so the next lane to look at it
+ * has to re-derive the argument from scratch. Both halves are pinned here instead.
+ *
+ * THE COUNTEREXAMPLE. It is not aliasing that does it — an aliased write is already
+ * NT1607 ("`q` is an alias of `p`, which still owns the value"). It is a CALL:
+ *
+ *     //@@mutable interface P { name: string; def?: string }
+ *     function clear(p: P): void { p.def = undefined; }
+ *     function f(p: P): void { if (p.def) { clear(p); console.log(p.def.length); } }
+ *     try { f({ name: "a", def: "xyz" }); } catch { console.log("caught"); }
+ *     console.log("done");
+ *
+ * node prints "caught\ndone" and exits 0. Delete the `isMutableTy` test from
+ * `Checker.accessPath` and this compiles, then PANICS: exit 255, and the `try/catch` node
+ * uses to survive it does not exist at runtime. That is a wrong answer, not a refusal —
+ * the "compiles, then exit 255 with empty stdout" shape, which is why the decline is not
+ * an over-approximation that can simply be dropped. The engine of it — a callee writing a
+ * caller's field in place, and the caller observing it — is compiled against node below,
+ * because that is the fact everything above depends on.
+ *
+ * WHAT IT COSTS. Measured on the stage-1 program (bun run test/blocker-metric.ts), by
+ * per-function diff:
+ *
+ *   164/717 baseline
+ *   168/717 with `Param` and `Declarator` tagged `//@@mutable`   (+4: the tag clears one
+ *           NT1606 and costs FIVE optional-field narrowings, `if (d.init) go(d.init)` and
+ *           `d.ty === undefined || isArrayTy(d.ty)`)
+ *   160/717 with the same tags AND the decline removed          (-4, and zero new failures)
+ *
+ * So the narrowing rule is the WHOLE cost of the `@@mutable` route for the AST types, and
+ * the entire prize for solving it is four functions. Every one of the five sites reads the
+ * narrowed field as an ARGUMENT of the first call after the guard — where no call has yet
+ * COMPLETED — so a sound rule exists, but it needs evaluation-order-sensitive
+ * invalidation (statement granularity is not enough: `f(clear(p), p.def.length)` would
+ * slip through it), and its failure mode is the panic above. That trade is a design
+ * decision, not a lane's to take.
+ */
+describe("the aliasing rule's counterexample (why `accessPath` declines `@@mutable`)", () => {
+  test("a CALLEE writes the caller's field in place, and the caller sees it", async () => {
+    await expectMatchesNodeAttrs(`
+//@@mutable
+interface P { name: string; def?: string }
+function clear(p: P): void { p.def = undefined; }
+function f(p: P): void {
+  const before = p.def;
+  clear(p);
+  console.log(before === undefined ? "before-gone" : "before-here");
+  console.log(p.def === undefined ? "after-gone" : "after-here");
+}
+f({ name: "a", def: "xyz" });
+`);
+  });
+
+  test("an ALIASED write is refused before it gets that far (NT1607, not narrowing)", () => {
+    const r = rejectionOf(`
+//@@mutable
+interface P { name: string; def?: string }
+function f(p: P): void {
+  const q = p;
+  q.def = undefined;
+  console.log(p.def === undefined ? "gone" : "here");
+}
+f({ name: "a", def: "xyz" });
+`);
+    expect(r).not.toBeNull();
+    expect(r!.code).toBe("NT1607");
+  });
+
+  // The guard on the relaxation. Remove `|| this.isMutableTy(bt)` from `accessPath` and
+  // this stops being refused and starts being a panic where node prints "caught".
+  test("the counterexample itself stays REFUSED", () => {
+    const r = rejectionOf(`
+//@@mutable
+interface P { name: string; def?: string }
+function clear(p: P): void { p.def = undefined; }
+function f(p: P): void {
+  if (p.def) { clear(p); console.log("len=" + String(p.def.length)); }
+}
+try { f({ name: "a", def: "xyz" }); } catch (e) { console.log("caught"); }
+console.log("done");
+`);
+    expect(r).not.toBeNull();
+    expect(r!.code).toBe("NT2001");
+    expect(r!.hint ?? "").toContain("STABLE access path");
+  });
+
+  // …and the bound-local rewrite the hint recommends is still correct UNDER that
+  // mutation: `v` holds the value the guard proved, so node and we both print 3.
+  test("`bind it first` survives the mutation the rule is about", async () => {
+    await expectMatchesNodeAttrs(`
+//@@mutable
+interface P { name: string; def?: string }
+function clear(p: P): void { p.def = undefined; }
+function f(p: P): void {
+  const v = p.def;
+  if (v) { clear(p); console.log(v.length); } else console.log(-1);
+}
+f({ name: "a", def: "xyz" });
+console.log("done");
+`);
+  });
+});
