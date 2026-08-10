@@ -3987,11 +3987,11 @@ So the dominant sub-shape is not a narrowing gap at all: it is one erased utilit
 because it turns every `x as Extract<…>` in `src/` into an unchecked union downcast, which is
 the hole recorded next.
 
-### PRE-EXISTING, unrelated to any lane: `as` reinterprets a union at another member's layout
+### CLOSED — `as` reinterpreted a union at another member's layout (the `Extract<>` prerequisite)
 
-`Checker.type`'s `AsExpr` case is `{ this.type(e.expr, scope); return e.ty; }` — an identity
-retype with no check at all — and codegen emits a bare pointer with the new type. For a
-DOWNCAST, which `tsc` accepts without complaint, that is memory reinterpretation:
+`Checker.type`'s `AsExpr` case was `{ this.type(e.expr, scope); return e.ty; }` — an identity
+retype with no check at all — and codegen emitted a bare pointer with the new type. For a
+DOWNCAST, which `tsc` accepts without complaint, that was memory reinterpretation:
 
 ```ts
 type Shape = { kind: "circle"; r: number } | { kind: "square"; label: string };
@@ -3999,17 +3999,35 @@ function bad(s: Shape): number { const c = s as { kind: "circle"; r: number }; r
 console.log(bad({ kind: "square", label: "hello" }));
 ```
 
-node prints `undefined`. nativets prints **`2.1241009864e-314`** — the string pointer read as a
-double. With `{ kind:"square"; side:number; label:string }` instead it prints `3`, the `side`
-field, silently. The object-to-object form is the same defect and reads out of bounds:
-`(x as {a:number; b:string}).b` on a one-slot `{a:number}` prints `(null)` where node prints
-`undefined`.
+node prints `undefined`. nativets printed **`2.1241009864e-314`** — the string pointer read as a
+double. With `{ kind:"square"; side:number; label:string }` instead it printed `3`, the `side`
+field, silently.
 
-Refusing `as` outright is not available: `src/` itself downcasts (`lit as {ty?: Ty}`,
-`e.callee as {name: string}`, and eleven `as Extract<…>`), so this needs a **checked** cast —
-load the discriminant slot, compare, panic on mismatch — for which the machinery already
-exists (`genDynNarrow` for `dyn as T`, `nt_union_arm` for a general union's arm, `nt_nonnull`
-for `!`). That is the prerequisite lane for `Extract<>`, and it is the larger of the two.
+**Now a CHECKED cast**, as this entry called for and reusing the machinery it named. A `U<…>`
+value IS the member pointer with the tag inside it, so codegen emits `nt_as_tag` to load the
+discriminant slot, compare, and panic on a mismatch; `nt_as_unbox` does the same for a `G<…>` /
+nullable BOX. Only the NARROWING direction pays — widening a member to its union, and every
+same-layout retype, emits nothing. Refusing was never available: a lexer-accurate census counts
+**217** `as` assertions in `src/`. The panic is a deliberate divergence (node erases `as` and
+answers `undefined`) and is recorded in `docs/divergences.md`; `test/as-cast.test.ts` is the spec.
+
+**So `Extract<T, U>` is now unblocked.** The 31 `NT2001` blockers in the table above are the
+largest single remaining bucket, and the reason `Extract` could not land alone was that resolving
+it turns every `x as Extract<…>` in `src/` into exactly the unchecked downcast above. Those casts
+are now checked, so the hole no longer widens with the bucket.
+
+Two further defects fell out of the same lane, neither of them union-specific:
+
+- **`as` caused a DOUBLE FREE.** It reinterprets a PLACE, so `const b = a as T;` gives one
+  allocation two names — but ownership left `a` owned AND made `b` an owner, so the scope freed
+  the same pointer twice. Out of safe TypeScript, with no `@@mutable` and no `unsafe` construct,
+  and silent (the abort discards buffered stdout). `b` is now an ALIAS of `a`, by the same rule
+  `const b = a.reverse()` already used — which is also what keeps `as` legal on a borrowed
+  PARAMETER, and that matters here: `const c = e as Extract<Expr, {kind:"…"}>` on a parameter is
+  the single most common `as` shape in `src/`, so the MOVE reading would have refused the very
+  pattern `Extract` exists to serve.
+- **`as` across a box boundary did not COMPILE.** The identity retype handed a `ptr` where a
+  `double` was wanted, and the user saw clang's verifier error rather than an `NT****` code.
 
 
 ---

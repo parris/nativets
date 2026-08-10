@@ -27,6 +27,10 @@ import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from ".
 // SH2 (discriminated unions): a union value IS its member's object block, so every
 // lowering below treats it exactly like an object pointer.
 import { isUnionTy, unionCommonField, widenLiteralTys } from "./ast.ts";
+// `expr as T` needs the union's tag values and their slot index to CHECK an assertion
+// rather than trust it (see `genAsCast`).
+import { unionDiscriminant, unionTagValues, unionWidenedMembers } from "./ast.ts";
+import { exprLoc } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI, internalError } from "./diagnostics.ts";
@@ -260,6 +264,10 @@ const DECLARES = [
   // `expr!` — unwrap the A2 tagged pair, PANIC when the assertion is false (Stage 41 shape)
   "declare i64 @nt_nonnull(ptr, ptr)",
   "declare i64 @nt_union_arm(ptr, double, ptr, ptr)",
+  // `expr as T` — the CHECKED type assertion. `nt_as_tag` tests a discriminated union's
+  // in-value tag field; `nt_as_unbox` tests a `G<…>` / nullable BOX and unwraps it.
+  "declare void @nt_as_tag(ptr, double, ptr, ptr, ptr)",
+  "declare i64 @nt_as_unbox(ptr, double, ptr, ptr)",
   "declare ptr @nt_str_index(ptr, double, ptr)",
   "declare void @nt_panic_bounds(ptr, double, double, ptr)",
   "declare i64 @nt_arr_pop(ptr)",
@@ -1882,6 +1890,97 @@ class FnGen {
     return { v: this.nullBox(String(tag), this.toSlot(val)), ty: target };
   }
 
+  /**
+   * `expr as T` — emit the assertion, CHECKING it wherever the check is possible and
+   * skipping it wherever the layouts are provably identical.
+   *
+   * The case analysis is entirely about REPRESENTATION, because that is the only thing
+   * an assertion can get wrong here. There are four representations in play and the
+   * boundaries between them are what used to break:
+   *
+   *   1. IDENTICAL representation — `42 as number`, `xs as number[]`, and every
+   *      same-shape object retype. Free, and stays free: no check is emitted, so `as`
+   *      costs nothing on the hot paths that use it as documentation.
+   *
+   *   2. `U<…>` -> one of its MEMBERS (the downcast). A discriminated union IS the
+   *      member pointer, so this is where the reinterpretation happened. The tag is in
+   *      the value at a known slot, so it is checkable — `nt_as_tag`. One load and a
+   *      string compare, and only in this direction.
+   *
+   *   3. member -> `U<…>` (the WIDENING). Also pointer-identical, and always TRUE, so
+   *      it is free — a member is a union. Checking it would be pure cost.
+   *
+   *   4. Across a BOX boundary (`G<…>`, nullable). Narrowing unboxes via `nt_as_unbox`;
+   *      widening BOXES via the ordinary `coerce`. Neither is optional: the old identity
+   *      retype handed a `ptr` where a `double` was wanted and the module failed to
+   *      verify, so the user got clang's error rather than one of ours.
+   *
+   * Anything left over is a cast between representations that cannot be reconciled at
+   * all (`{a:number}` -> `{a:number,b:string}` reads off the end of the object). Those
+   * are REFUSED by the checker rather than emitted — see `checkAsCast`.
+   */
+  private genAsCast(val: Val, target: Ty, loc?: Loc): Val {
+    const from = val.ty;
+    if (from === target) return val;                                    // (1) identity
+    const locp = this.locArg(loc) ?? "null";
+
+    // (2) `U<…>` -> member: check the in-value discriminant.
+    if (isUnionTy(from) && !isUnionTy(target)) {
+      const d = unionDiscriminant(from);
+      const widened = unionWidenedMembers(from);
+      const tags = unionTagValues(from);
+      // Several members can widen to the SAME shape, which makes them layout-identical
+      // and so all equally safe to read at — accept any of their tags, comma-separated
+      // (a comma cannot occur in a tag value; see TAG_FORBIDDEN in ast.ts). When EVERY
+      // member matches, the assertion cannot fail and no check is emitted at all.
+      //
+      // Spelled as a plain loop building the string directly. The obvious
+      // `.map(…).filter((t): t is string => t !== null)` is OUT OF SUBSET — a type
+      // PREDICATE in an arrow is not something this compiler parses, so `src/` may not
+      // use one (docs/self-hosting.md), and it broke the whole-program LINK rather than
+      // showing up as a checker blocker.
+      let allowed = "";
+      let matches = 0;
+      for (let i = 0; i < widened.length; i++) {
+        if (widened[i] !== target) continue;
+        allowed = matches === 0 ? tags[i]! : `${allowed},${tags[i]!}`;
+        matches++;
+      }
+      if (d !== undefined && matches > 0) {
+        if (matches < widened.length) {
+          this.emit(`call void @nt_as_tag(ptr ${val.v}, double ${llvmDouble(d.index)}, ptr ${this.mod.intern(allowed)}, ptr ${this.mod.intern(target)}, ptr ${locp})`);
+        }
+        return { v: val.v, ty: target };
+      }
+    }
+
+    // (3) member -> `U<…>`: pointer-identical and always true.
+    if (isUnionTy(target) && !isUnionTy(from)) return { v: val.v, ty: target };
+
+    // (4a) `G<…>` -> arm, and nullable -> base: unbox, checking the box tag.
+    if (isGeneralUnionTy(from) && !isGeneralUnionTy(target)) {
+      const tag = generalUnionTagOf(from, target);
+      if (tag >= 0) {
+        const slot = this.fresh();
+        this.emit(`${slot} = call i64 @nt_as_unbox(ptr ${val.v}, double ${llvmDouble(tag)}, ptr ${this.mod.intern(target)}, ptr ${locp})`);
+        return { v: this.fromSlot(slot, target), ty: target };
+      }
+    }
+    if (isNullableTy(from) && !isNullableTy(target) && baseTy(from) === target) {
+      const slot = this.fresh();
+      // `want < 0` is the runtime's "any PRESENT value" — tags 0/1 are undefined/null.
+      this.emit(`${slot} = call i64 @nt_as_unbox(ptr ${val.v}, double ${llvmDouble(-1)}, ptr ${this.mod.intern(target)}, ptr ${locp})`);
+      return { v: this.fromSlot(slot, target), ty: target };
+    }
+
+    // (4b) arm -> `G<…>`, base -> nullable: BOX, by the same coercion a store uses.
+    if ((isGeneralUnionTy(target) && !isGeneralUnionTy(from)) || (isNullableTy(target) && !isNullableTy(from))) {
+      return this.coerce(val, target);
+    }
+
+    return { v: val.v, ty: target }; // representations already agree — retype only
+  }
+
   /** i1 result of `a === b` for same-typed operands. */
   private compareEq(a: Val, b: Val): string {
     const t = this.fresh();
@@ -2477,11 +2576,22 @@ class FnGen {
         return { v: t, ty: "number" };
       }
 
+      /**
+       * `expr as T` — the type assertion, and NOT an identity retype.
+       *
+       * It used to be one, which made `as` a hole through the value model: nativets
+       * reasons about MEMORY LAYOUT where tsc reasons about types, and the two genuinely
+       * disagree here — tsc ACCEPTS a union-to-member downcast, so no diagnostic
+       * anywhere fired. Retyping a `U<…>` to one of its members reinterpreted the same
+       * bytes at a different member's field layout and returned a neighbouring slot; and
+       * retyping across a `G<…>` / nullable BOX boundary emitted IR that did not even
+       * verify. See `genAsCast` for the case analysis and what each case costs.
+       */
       case "AsExpr": {
         // Narrowing a dynamic value (`dyn as T`) emits a runtime validator that
-        // checks the tag and unboxes; a plain `expr as Type` is an identity retype.
+        // checks the tag and unboxes — its own, much heavier, machinery.
         if (e.expr.ty === "Dyn") return this.genDynNarrow(this.genExpr(e.expr).v, e.ty);
-        return { v: this.genExpr(e.expr).v, ty: e.ty };
+        return this.genAsCast(this.genExpr(e.expr), e.ty, exprLoc(e));
       }
 
       // `satisfies` never retypes, so it erases completely — no validator, no retag.

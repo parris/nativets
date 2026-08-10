@@ -3033,7 +3033,51 @@ class Checker {
         if (e.args.length !== 1 || this.type(e.args[0]!, scope) !== "string") throw typeError("new Error(message: string)");
         return "{message:string}";
       }
-      case "AsExpr": { this.type(e.expr, scope); return e.ty; } // identity retype
+      /**
+       * `expr as T` — an assertion, CHECKED where a check is possible and REFUSED where
+       * it is not. It used to be `{ this.type(e.expr, scope); return e.ty; }`, a bare
+       * identity retype, which is how it became a hole through the value model.
+       *
+       * Most of the work is codegen's (`genAsCast`), which tests a `U<…>` tag or unboxes
+       * a `G<…>` / nullable at runtime. What has to be caught HERE is the one shape no
+       * runtime check can rescue: asserting a plain object to a WIDER plain object. A
+       * field the operand does not have is not merely untagged, it is not THERE — the
+       * read runs off the end of the allocation. node answers `undefined`; we printed
+       * `(null)`, out of bounds, at exit 0.
+       */
+      case "AsExpr": {
+        const from = this.type(e.expr, scope);
+        // Both plain objects: every field read through `T` must land on a real slot of
+        // the operand, at the SAME index and the same type. Narrowing to a PREFIX is
+        // therefore fine (`{a,b} as {a}` reads slot 0 and is exactly node's answer);
+        // adding or reordering a field is not. Unions are exempt — a `U<…>` is not an
+        // object type here, and its member downcast is tag-checked in codegen instead.
+        if (isObjectTy(from) && isObjectTy(e.ty) && from !== e.ty) {
+          const src = objectFields(from);
+          const want = objectFields(e.ty);
+          for (let n = 0; n < want.length; n++) {
+            const f = want[n]!;
+            // The SLOT is what a field read compiles to, so the operand must carry this
+            // field at index `n` — finding the key elsewhere is not good enough, and
+            // checking only the key/type let `{a,b} as {b,a}` through, reading both at
+            // the wrong offset.
+            const g = n < src.length ? src[n]! : undefined;
+            const i = src.findIndex((h) => h.key === f.key);
+            if (g !== undefined && g.key === f.key && widenLiteralTys(g.ty) === widenLiteralTys(f.ty)) continue;
+            throw typeError(
+              `'${e.ty}' is not a valid assertion for '${from}': the field '${f.key}' `
+                + (i < 0 ? `is not present in the operand` : `is at a different slot or type`),
+              exprLoc(e),
+              "`as` does not convert a value — it reinterprets the operand's memory at the "
+                + "asserted type's layout, so a field the operand does not have would be read "
+                + "off the end of the allocation (node answers `undefined`; there is no such "
+                + "value here). Build a new object with the fields you want, or assert to a "
+                + "type whose fields the operand already has at the same positions",
+            );
+          }
+        }
+        return e.ty;
+      }
       /**
        * `satisfies` CHECKS against the annotation but keeps the expression's own type.
        * The annotation is passed down as the contextual hint (so an object literal is

@@ -254,25 +254,27 @@ console.log(f({ kind: "C", z: 1 }));
   });
 
   /**
-   * KNOWN DEFECT, PINNED — `as` reinterprets a union value at another member's layout.
+   * FIXED — `as` no longer reinterprets a union value at another member's layout.
    *
-   * `Checker.type`'s `AsExpr` case is `{ this.type(e.expr, scope); return e.ty; }`, an
-   * identity retype with no check, and codegen hands the same pointer back under the new
-   * type. tsc ACCEPTS a union-to-member downcast (the member is a subtype), so nothing
-   * anywhere refuses this — and where tsc's unsoundness costs an `undefined`, ours costs
-   * a slot read at the wrong offset. It predates this lane and it is not a union-only
-   * defect: `(x as {a:number,b:string}).b` on a one-slot `{a:number}` reads out of bounds.
+   * This was pinned here as a KNOWN DEFECT: `Checker.type`'s `AsExpr` case was
+   * `{ this.type(e.expr, scope); return e.ty; }`, an identity retype with no check, and
+   * codegen handed the same pointer back under the new type. tsc ACCEPTS a
+   * union-to-member downcast (the member is a subtype), so nothing anywhere refused it —
+   * and where tsc's unsoundness costs an `undefined`, ours cost a slot read at the wrong
+   * offset. The fixture below returned `3`, the `square` arm's `side`, read through the
+   * `circle` arm's `r`.
    *
-   * It is asserted here rather than left in a document because it is a SILENT wrong
-   * answer, the outcome this project ranks worst, and because the fix it needs is not a
-   * refusal — `src/` itself downcasts in twenty-odd places, including every
-   * `as Extract<Expr, {kind:"…"}>` — but a CHECKED cast that tests the tag and panics,
-   * the way `dyn as T` (`genDynNarrow`) and `!` (`nt_nonnull`) already do.
+   * The fix is the CHECKED cast the old note called for, not a refusal — `src/` itself
+   * downcasts in twenty-odd places, including every `as Extract<Expr, {kind:"…"}>`. A
+   * `U<…>` value IS the member pointer with the tag inside it, so codegen emits
+   * `nt_as_tag` to test that tag at the discriminant's slot and PANIC on a mismatch,
+   * the way `dyn as T` (`genDynNarrow`) and `!` (`nt_nonnull`) already do. Only the
+   * NARROWING direction pays for it; widening a member to its union is still free.
    *
-   * WHEN THIS TEST FAILS, THAT IS THE FIX LANDING. Replace it with the panic/refusal
-   * assertion and delete the entry in docs/self-hosting.md.
+   * The panic is a deliberate divergence (node erases `as` and answers `undefined`) and
+   * is recorded in docs/divergences.md. test/as-cast.test.ts is the full spec.
    */
-  test("KNOWN DEFECT: an `as` downcast to a union MEMBER reads the wrong slot", async () => {
+  test("an `as` downcast to the WRONG union member panics, and never reads the wrong slot", async () => {
     const src = `type Shape =
   | { kind: "circle"; r: number }
   | { kind: "square"; side: number; label: string };
@@ -284,8 +286,22 @@ console.log(bad({ kind: "square", side: 3, label: "hi" }));
 `;
     // node erases the cast, so `c.r` is genuinely absent: `undefined`.
     expect(runWithNode(src).stdout).toBe("undefined\n");
-    // We read slot 1 of a `square`, which is `side`. Deterministic, and wrong.
-    expect((await compileAndRun(src)).stdout).toBe("3\n");
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe("");                       // never the old `3`
+    expect(ours.stderr).toContain("type assertion failed");
+  });
+
+  test("an `as` downcast to the RIGHT union member still works", async () => {
+    const src = `type Shape =
+  | { kind: "circle"; r: number }
+  | { kind: "square"; side: number; label: string };
+function ok(s: Shape): number {
+  const c = s as { kind: "circle"; r: number };
+  return c.r;
+}
+console.log(ok({ kind: "circle", r: 3 }));
+`;
+    expect((await compileAndRun(src)).stdout).toBe(runWithNode(src).stdout);
   });
 
   test("narrowing does not leak past the arm it was proved in", () => {
