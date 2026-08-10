@@ -3149,6 +3149,26 @@ spellings of one declaration: `recTypes` keeps `tag: "m"` (a recursive union's d
 must survive) and `parseType` widens it to `string`. Widening does not descend into a `U<…>`,
 so a recursive union keeps the tags its dispatch reads.
 
+**...so `===` alone is NOT type comparison for a recursive type.** The two halves above meet:
+a value's own type is the EXPANDED shape, a nested back-edge stays FOLDED — so the instant a
+value goes back into a field of its own type, the composed type carries the expanded spelling
+in a position the declaration spells folded, and the two disagree as strings while denoting
+one type. `interface Node { name: string; kids: Node[] }` with
+`function leaf(n: string): Node { return { name: n, kids: [] } }` refused itself with
+`{name:string,kids:{name:string,kids:@Node[]}[]}` **vs** `{name:string,kids:@Node[]}`. Both
+spellings are what the invariant *requires* at their own site, so there is no over-eager
+unfold to delete; **equality is what has to normalize**. `assignable` already did (the
+coinductive rule); `fitsParam`, the return/argument gate, was pure `===` — which is why
+`const a: Node = {…}` compiled and `return {…}` did not.
+
+`Checker.sameShape` is that normalization, and it is IDENTITY, not the widening `assignable`:
+fields must match in count, key and **order** (a field list is a slot order), union members in
+count and order (index is the tag), and unfolding is **one-sided**, so `@A` vs `@B` stays
+false and the encoding does not quietly become equirecursive. It terminates on a well-founded
+measure rather than a fixpoint — a structural step shortens both strings, an unfold replaces a
+bare `@N` with a fixed table entry and cannot repeat immediately — with a plain depth counter
+as the hang guard, answering *false* (a refusal) at the bound.
+
 **Across MODULES the back-edge is renamed with the module.** A non-entry module is
 alpha-renamed, and every `@Name` it mints travels with it — in the shape table, in the
 module's own signatures, and in the shape it exports. Two modules may each declare a

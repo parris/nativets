@@ -16,7 +16,7 @@ import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } fro
 // Stage 47 (console.log of compound values): the handle-type predicates the
 // inspectability walk needs to refuse a value it cannot render exactly like node.
 import { isBytesRefTy, isFetchRefTy, isUrlRefTy } from "./ast.ts";
-import { isTypeRefTy, containsTypeRef, unfoldTypeRef, recTypeTable } from "./ast.ts";
+import { isTypeRefTy, containsTypeRef, hasTypeRef, unfoldTypeRef, recTypeTable } from "./ast.ts";
 // `k in o`: node's prototype chain is the whole reason `"valueOf" in {}` is true.
 import { OBJECT_PROTO_KEYS } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
@@ -5249,6 +5249,117 @@ class Checker {
   }
 
   /**
+   * Are `a` and `b` ONE type written at two FOLD DEPTHS? Type IDENTITY, normalized over
+   * the `@N` back-edge — NOT a subtyping or widening relation.
+   *
+   * WHY THIS IS NEEDED, and why it is not an over-eager unfold to be deleted somewhere.
+   * The `@Name` INVARIANT (src/ast.ts) has two halves that necessarily meet:
+   *
+   *   - a VALUE's own static type is always the EXPANDED shape — so a parameter declared
+   *     `k: Node[]` has type `{name:string,kids:@Node[]}[]`, and must, or every pass that
+   *     reads a field off it sees a bare reference it cannot resolve;
+   *   - a back-edge NESTED inside a shape stays FOLDED — so the `kids` field of that same
+   *     `Node` is spelled `@Node[]`, and must, or the encoding does not terminate.
+   *
+   * So the moment a value goes back INTO a field of its own type — `{ name: "a", kids: k }`
+   * — the composed object type carries the value's expanded spelling in a position the
+   * declaration spells folded, and the two disagree as STRINGS while denoting one type.
+   * Both spellings are correct at their own site; there is no site to "fix". Equality is
+   * what has to normalize. (`assignable` already does — the coinductive rule above.)
+   *
+   * DELIBERATELY NOT `assignable`. That relation is a WIDENING: its object arm accepts a
+   * structurally-compatible record with a different SLOT LAYOUT, which is the dereference-a
+   * -raw-double bug `fitsParam` is narrow to avoid. This one accepts only re-spellings, so
+   * both sides always have byte-identical layout:
+   *
+   *   - fields must match in COUNT, KEY and ORDER — a field list is a slot order here, not
+   *     a set, so `{a,b}` and `{b,a}` are two layouts and stay unequal;
+   *   - union members must match in COUNT and ORDER — member index IS the tag;
+   *   - unfolding is ONE-SIDED. `@A` vs `@B` is FALSE even when the two declarations are
+   *     structurally identical: recursive types are NOMINAL here by design (src/ast.ts
+   *     states that cost), and this exists to reconcile two spellings of ONE declaration,
+   *     not to quietly widen the encoding into equirecursive equality.
+   *
+   * TERMINATION, which is the constraint that shaped this whole encoding — and the one a
+   * hang was already found under (`rewriteRefs`, which handled self-recursion but not
+   * mutual). There is NO fixpoint here, and the argument is a well-founded measure rather
+   * than a coinductive assumption:
+   *
+   *   - a structural step makes BOTH strings strictly shorter (a field/member/element type
+   *     is a proper substring), so it cannot repeat;
+   *   - an unfold step replaces a BARE `@N` with a FIXED finite table entry — never a
+   *     growing string — and unfolding is ONE-SIDED, so the other side is unchanged and the
+   *     result is not a bare reference, which means the next step must be a structural one.
+   *
+   * The only way to unfold twice in a row is an ALIAS CYCLE in `recTypes` (`A -> @B -> @A`),
+   * which no legal recursive declaration produces. `fuel` caps that anyway: it is a plain
+   * per-PATH depth counter (a number, not a `Set` — this file has to stay inside the subset
+   * it compiles), and exhausting it answers FALSE, a refusal, which is the safe direction.
+   * 128 is far above any real nesting depth; a legal comparison bottoms out in single
+   * digits, so the bound can only ever bite on the pathological tree.
+   */
+  private sameShape(a: Ty, b: Ty, fuel: number = 128): boolean {
+    if (a === b) return true;
+    // The cheap half FIRST, and it is CONCLUSIVE: a back-edge is the only thing that gives
+    // one type two spellings, and `@` never appears in a structural type. Two `@`-free
+    // strings that are not `===` are two different types, decided in one scan. This runs on
+    // every argument and every return, so the common case must not walk anything.
+    if (!hasTypeRef(a) && !hasTypeRef(b)) return false;
+    if (fuel <= 0) return false;                   // hang guard — see TERMINATION above
+    const next = fuel - 1;
+    // Reference arms, before any structural test: `@N` matches none of the structural
+    // predicates, so asking them first would fall through to `false` on the one case this
+    // function exists for.
+    if (isTypeRefTy(a) && isTypeRefTy(b)) return false;            // two different names — nominal
+    if (isTypeRefTy(a)) { const u = this.unfold(a); return u !== a && this.sameShape(u, b, next); }
+    if (isTypeRefTy(b)) { const u = this.unfold(b); return u !== b && this.sameShape(a, u, next); }
+    // Structural arms in `assignable`'s order, which is the collision-safe one: `U<`/`G<`
+    // before the object test, and the `[]` suffix test last (`isArrayTy` already excludes
+    // nullables and function types, and `?N` + `[]` is why `elemTy` unparenthesizes).
+    if (isUnionTy(a) || isUnionTy(b)) {
+      if (!isUnionTy(a) || !isUnionTy(b)) return false;
+      return this.sameShapeList(unionMembers(a), unionMembers(b), next);
+    }
+    if (isGeneralUnionTy(a) || isGeneralUnionTy(b)) {
+      if (!isGeneralUnionTy(a) || !isGeneralUnionTy(b)) return false;
+      // `makeGeneralUnionTy` SORTS its members, so a re-spelled arm can sort to a different
+      // position and this pairwise walk says false. That is a refusal, not a wrong answer,
+      // and widening it would need a matching that does not exist yet — left alone.
+      return this.sameShapeList(generalUnionMembers(a), generalUnionMembers(b), next);
+    }
+    if (isNullableTy(a) || isNullableTy(b)) {
+      if (!isNullableTy(a) || !isNullableTy(b)) return false;
+      // The nullish ARM is part of the type: `?U` and `?N` carry different tags.
+      return nullishKind(a) === nullishKind(b) && this.sameShape(baseTy(a), baseTy(b), next);
+    }
+    if (isObjectTy(a) && isObjectTy(b)) {
+      const fa = objectFields(a), fb = objectFields(b);
+      // COUNT, KEY and ORDER: this is a slot layout, not a structural-compatibility test.
+      if (fa.length !== fb.length) return false;
+      for (let i = 0; i < fa.length; i++) {
+        if (fa[i]!.key !== fb[i]!.key) return false;
+        if (!this.sameShape(fa[i]!.ty, fb[i]!.ty, next)) return false;
+      }
+      return true;
+    }
+    if (isArrayTy(a) && isArrayTy(b)) return this.sameShape(elemTy(a), elemTy(b), next);
+    // Everything else — function types, Map/Set, the handle types — is left FALSE. A
+    // back-edge under one of those is a refusal we have never needed to lift, and the
+    // refusal is the safe direction.
+    return false;
+  }
+
+  /** Pairwise `sameShape` over two member lists — same COUNT, same ORDER, because a
+   *  member's index IS its tag. An indexed loop rather than `.every((m, i) => …)`: the
+   *  two-parameter callback is itself outside the subset src/ has to stay inside
+   *  (`NT2001 .every callback takes (elem)`), which this function tripped over. */
+  private sameShapeList(xs: Ty[], ys: Ty[], fuel: number): boolean {
+    if (xs.length !== ys.length) return false;
+    for (let i = 0; i < xs.length; i++) if (!this.sameShape(xs[i]!, ys[i]!, fuel)) return false;
+    return true;
+  }
+
+  /**
    * Does an argument / return value of type `actual` fit a declared `expected`?
    * Type IDENTITY, as it always was — widened by exactly one rule, for SH2: a member
    * of a discriminated union fits the union, because a union value simply IS its
@@ -5257,6 +5368,11 @@ class Checker {
    */
   private fitsParam(expected: Ty, actual: Ty): boolean {
     if (actual === expected) return true;
+    // ...and identity is `===` MODULO FOLD DEPTH. `@N` and its unfolding are one type with
+    // two spellings, and the invariant that produces both is stated on `sameShape`. Still
+    // identity — `sameShape` accepts only re-spellings, never a different layout — so the
+    // "narrower than `assignable` for a REASON" promise below is intact.
+    if (this.sameShape(expected, actual)) return true;
     if ((isUnionTy(expected) || isGeneralUnionTy(expected)) && this.assignable(expected, actual)) return true;
     // A NULLABLE parameter/return takes the matching nullish literal and a present value
     // of its base type — TypeScript's rule (`null` is assignable to `T | null`, `undefined`

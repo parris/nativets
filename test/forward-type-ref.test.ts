@@ -1111,3 +1111,97 @@ describe("import scanning: a bare side-effect import does not disable NT2003", (
     expect(parseCode(`import src from "../runtime/runtime.c" with { type: "text" };\nconsole.log(src);\n`)).toBe("");
   });
 });
+
+/*
+ * ONE TYPE, TWO SPELLINGS — the fold depth of a `@N` back-edge.
+ *
+ * The `@Name` INVARIANT (src/ast.ts) has two halves that meet head-on here:
+ *
+ *   - a VALUE's own static type is always the EXPANDED shape, so a parameter declared
+ *     `k: Node[]` has type `{name:string,kids:@Node[]}[]`;
+ *   - a back-edge NESTED inside a shape stays FOLDED, so the field `kids` of that same
+ *     `Node` is written `@Node[]`.
+ *
+ * So the instant a value is put back into a field of its own type — `{ kids: k }` — the
+ * composed object type carries the value's expanded spelling in a position the declaration
+ * spells folded, and the two disagree as STRINGS:
+ *
+ *     {name:string,kids:{name:string,kids:@Node[]}[]}   vs   {name:string,kids:@Node[]}
+ *
+ * They denote one type; tsc --strict accepts every program below. This is not an over-eager
+ * unfold to be removed — both spellings are what the invariant REQUIRES at their own site —
+ * so it is EQUALITY that has to normalize. `assignable` already does (the Amadio-Cardelli
+ * coinductive rule, checker.ts); the return/argument gate `fitsParam` was pure `===` and
+ * did not, which is why `const a: Node = {…}` compiled and `return {…}` did not.
+ *
+ * Shapes are the compiler's own: `paramProp`/`default` on src/ast.ts:1887 (`Param.default:
+ * Expr | undefined`, the `?U@Expr` spelling) is what blocked all nine modules, and the
+ * `kids` shape is the minimal probe lane-mapheap reduced it to.
+ */
+describe("fold depth: a `@N` back-edge and its unfolding are one type", () => {
+  // The minimal probe (lane-mapheap's, five lines). `[]` takes its type from the context
+  // `@Node[]`, and `Checker.type` unfolds THROUGH the `[]` — legitimately, that arm is what
+  // an optional back-edge needs — so the composed literal type is the unfolded spelling
+  // while the declared return type is the folded one.
+  test("`{ kids: [] }` returned as a recursive `Node`", async () => {
+    await matchesNode(
+      `interface Node { name: string; kids: Node[]; }\n` +
+      `function leaf(n: string): Node { return { name: n, kids: [] }; }\n` +
+      `const r = leaf("x");\n` +
+      `console.log(r.name, r.kids.length);\n`,
+    );
+  });
+
+  // The same rule on the ARGUMENT side — `fitsParam` is one gate for both — and the
+  // control for the test above: a program in this family that ALREADY compiled must go
+  // on compiling, or the "one type, two spellings" claim is being tested against nothing.
+  test("a recursive value's field passed as an argument", async () => {
+    await matchesNode(
+      `interface Node { name: string; kids: Node[]; }\n` +
+      `function leaf(n: string): Node { return { name: n, kids: [] }; }\n` +
+      `function count(ks: Node[]): number { return ks.length; }\n` +
+      `const r = leaf("a");\n` +
+      `console.log(count(r.kids), r.name);\n`,
+    );
+  });
+
+  /*
+   * THE TWO REFUSALS THAT MAKE THE ACCEPTANCE SAFE. A type-identity rule that is one notch
+   * too wide is a SLOT CONFUSION — two different layouts compared equal — which is the
+   * failure this tree has produced seven times, always as a clean compile with empty stdout
+   * and exit 255 where node prints a value. Both of these were measured by MUTATION: swap
+   * `sameShape` for the (widening) `assignable` in `fitsParam` and the second one compiles,
+   * prints nothing and exits 255 against node's `1 undefined`.
+   */
+
+  // NOMINAL, still. `@A` and `@B` unfold to byte-identical shapes and tsc --strict accepts
+  // this program; we refuse it. That cost is stated in src/ast.ts and docs/divergences.md,
+  // and `sameShape` unfolds ONE-SIDED precisely so that fixing the fold depth did not
+  // quietly turn the encoding equirecursive as a side effect.
+  test("two structurally identical recursive declarations stay distinct", () => {
+    const r = reject(
+      `interface A { v: number; next: A[]; }\n` +
+      `interface B { v: number; next: B[]; }\n` +
+      `function f(): A { return { v: 1, next: [] }; }\n` +
+      `function g(): B { return f(); }\n` +
+      `console.log(g().v);\n`,
+    );
+    expect(r.code).toBe("NT2001");
+    expect(r.message).toContain("@A[]");
+    expect(r.message).toContain("@B[]");
+  });
+
+  // A DIFFERENT FIELD COUNT is a different LAYOUT, back-edge or no back-edge. Nothing
+  // reshapes an object literal on the return path (the argument path has `fitsArg` and the
+  // declaration path has `retypeLiteral`; `return` has neither), so accepting this emits a
+  // one-slot record where the caller reads two — the exit-255 program above.
+  test("a returned literal that omits an optional field is still refused", () => {
+    const r = reject(
+      `interface Opts { a: number; b?: number; }\n` +
+      `function f(): Opts { return { a: 1 }; }\n` +
+      `console.log(f().a);\n`,
+    );
+    expect(r.code).toBe("NT2001");
+    expect(r.message).toContain("{a:number} does not match declared {a:number,b:?Unumber}");
+  });
+});
