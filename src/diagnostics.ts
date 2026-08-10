@@ -186,6 +186,17 @@ export const NYI = {
   // layout with the length folded into the opening brace, which the Stage-47 inspect
   // builder already owned, so a Uint8Array now prints exactly like node and nothing
   // is left for the code to refuse. The number is not reused.)
+  // A `return` inside a `try` that has a `finally`, in an INLINED HOF callback
+  // (`.map`/`.filter`/`.reduce`/`.flatMap`/`.forEach`/`.some`/`.find`/…). Those callbacks
+  // are inlined into the enclosing function, and a `return` in one means "this element's
+  // result", not "leave the function" — codegen carries that on `hofReturnStack`. But a
+  // live `finally` takes priority over it (`finallyStack.length === 0` gates the HOF arm),
+  // so the `return` was compiled as a FUNCTION return: it abandoned the loop AND the
+  // caller. That is a silent wrong answer at exit 0 — `[1,2,3].map(x => { try { if (x===2)
+  // return 99; return x } finally { … } })` printed one element and returned from the
+  // enclosing function, where node yields `1,99,3`. Refused until the two unwind paths are
+  // reconciled; the `finally` itself is fine, only `return` from under it is not.
+  HOF_FINALLY_RETURN: { code: "NT1018", milestone: "later", hint: "move the `try`/`finally` INTO a named helper the callback calls (`xs.map((x) => step(x))`), or lift the `return` out of the `try` — assign to a local inside it and `return` that local after the `try`/`finally` ends" },
   // Networking tier: `fetch`/`await` ARE supported — but nativets has no event loop, so
   // `await` never yields and every request BLOCKS. Anything whose meaning depends on real
   // promises (concurrent/overlapping requests, `Promise.all`, `.then`, an un-awaited async
