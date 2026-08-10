@@ -2311,7 +2311,24 @@ class FnGen {
             return { v: this.mod.fnValue(e.name, fnTy), ty: fnTy };
           }
         }
-        const declared = this.varTypes.get(e.name) ?? (e.ty ?? "number");
+        /**
+         * The binding's DECLARED type, which is what its STORAGE is laid out as — and
+         * therefore the type this load must use. `e.ty` is the checker's type for this
+         * READ, which control-flow narrowing may have already sharpened to the present
+         * arm; falling back to it directly loses the box.
+         *
+         * `varTypes` does not hold a module-level binding promoted to a global (SH1) in
+         * any frame but `main`, so `mod.globals` has to answer for one here, exactly as
+         * `addr` consults it for the address. Without it, `if (g) { g.length }` on a
+         * module-level `string | undefined` read `e.ty` = `string`, loaded the A2 BOX
+         * pointer and passed it to `js_str_len` as if it were the string: node prints
+         * `3`, we printed `1` — the length of the box's first word read as UTF-8. Exit 0,
+         * no diagnostic, valid IR. `narrowRead` below is what unwraps the box, and it is
+         * gated on seeing a nullable, so it only ever fires once the type is right.
+         * `alphaRenameShadows` has already renamed any inner binding of the same name, so
+         * a global's name here can only mean the global.
+         */
+        const declared = this.varTypes.get(e.name) ?? this.mod.globals.get(e.name) ?? (e.ty ?? "number");
         const ty = isUnionTy(declared) && e.ty !== undefined && e.ty !== declared ? e.ty : declared;
         const t = this.fresh();
         this.emit(`${t} = load ${llvmTy(ty)}, ptr ${this.addr(e.name)}`);
@@ -2733,7 +2750,25 @@ class FnGen {
           this.writeCapture(e.target, { v: t0, ty: "number" });
           return { v: t0, ty: "number" };
         }
-        const ty = this.varTypes.get(e.target) ?? "number";
+        /**
+         * The TYPE of the assignment target. `varTypes` only knows the frame's own
+         * bindings, so for a module-level binding promoted to a global (SH1) it is empty
+         * in every frame but `main` — and the old `?? "number"` fallback then lowered
+         * EVERY such write as a bare `double`, at whatever the global's real layout was.
+         * `addr()` already consults `mod.globals` for the same reason; the type had to,
+         * or the address and the value it stores describe different cells.
+         *
+         * It was not one bug but the whole family: `g = undefined` on a module-level
+         * `number | undefined` skipped the nullable BOXING (`store double 0, ptr @g`),
+         * a `string`/`boolean`/array global stored a pointer as a `double`, and `s += "b"`
+         * on a `string` global took the ARITHMETIC path (`fadd double %t, @.str.0`). Most
+         * of those are caught by clang's parser — but `g = 7` on a `number | undefined`
+         * global is `store double 7.0, ptr @g` into a box slot, which is well-formed IR
+         * that LLVM's own verifier accepts and SEGFAULTS on the next read. That one shape
+         * was a silent miscompile with nothing anywhere to catch it, which is why the type
+         * has to be right here rather than the constant made well-formed downstream.
+         */
+        const ty = this.varTypes.get(e.target) ?? this.mod.globals.get(e.target) ?? "number";
         if (e.op === "=") {
           const consume = this.consumingSpread(e, ty);
           if (consume) { this.consumeNode = consume; }

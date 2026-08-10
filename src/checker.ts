@@ -3177,11 +3177,27 @@ class Checker {
             // `value`) and point at the `.` that is not allowed, so the reader can find
             // it. Getting both wrong is what once hid this rejection in `diagnostics.ts`.
             const what = exprText(e.object);
+            // A DOTTED receiver `accessPath` declines is one no guard can ever narrow —
+            // `this`, a `@@mutable` object, a `?.` link, a computed index — so no fact is
+            // ever recorded for it and `if (x.f)` one line up changed nothing. Saying
+            // "prove it non-nullish first — `if (x.f) { … }`" there names the code the
+            // author has ALREADY written, which is the untruthful-hint shape this tree
+            // keeps finding; `narrowAdvice` learned the same lesson for the union-field
+            // read and its wording is reused deliberately. The replacement is COMPILED in
+            // test/mutable-narrowing.test.ts rather than asserted, because advice that
+            // does not build is the failure this clause exists to remove.
+            const unstable = e.object.kind === "MemberExpr" && this.accessPath(e.object, scope) === undefined;
             throw typeError(
               `${what === undefined ? "this value" : `'${what}'`} is possibly ${nullishKind(ot)}`,
               e.loc,
-              `use '?.' (\`${what ?? "value"}?.${e.property}\` short-circuits the whole chain to undefined), ` +
-              `or prove it non-nullish first — \`if (${what ?? "value"}) { … }\`, an early \`return\`, or \`!\``,
+              unstable && what !== undefined
+                ? `narrowing needs a STABLE access path and '${what}' is not one — a '@@mutable' object, ` +
+                  `'this', a '?.' link and a computed index can each hold something else by the time this ` +
+                  `read runs, so \`if (${what}) { … }\` records nothing here even when it is already ` +
+                  `written. BIND IT FIRST and test the local: \`const v = ${what}; if (v) { … v.${e.property} … }\` ` +
+                  `— or use '?.' (\`${what}?.${e.property}\` short-circuits the whole chain to undefined), or \`!\``
+                : `use '?.' (\`${what ?? "value"}?.${e.property}\` short-circuits the whole chain to undefined), ` +
+                  `or prove it non-nullish first — \`if (${what ?? "value"}) { … }\`, an early \`return\`, or \`!\``,
               "this read is not proved non-nullish",
             );
           }

@@ -419,3 +419,163 @@ describe("5 — a union MEMBER reaches a `Union | undefined` parameter", () => {
       `console.log(g({ kind: "B" }), g({ kind: "A", n: 5 }));\n`);
   });
 });
+
+/*
+ * THE MODULE-LEVEL SLOT is a value-passing boundary too — block 0's rule, applied to
+ * the one storage cell that is not a frame alloca.
+ *
+ * A module-level binding a function body touches is PROMOTED to an LLVM global
+ * (`@nt.g.x`, SH1). `FnGen.addr` already knew to look it up in `mod.globals`; the two
+ * places that asked for its TYPE did not, and each had its own wrong fallback:
+ *
+ *   WRITE (`AssignExpr`)  `varTypes.get(target) ?? "number"` — so every write to a
+ *     global from inside a function was lowered as a bare `double`, whatever the
+ *     global's real layout was. `g = undefined` on a `number | undefined` skipped the
+ *     nullable boxing entirely (`store double 0, ptr @nt.g.g`), while the SAME slot's
+ *     initializing store in `main` one line later was correctly boxed.
+ *
+ *   READ (`Identifier`)   `varTypes.get(name) ?? e.ty` — and `e.ty` is the checker's
+ *     type for THIS READ, which control-flow narrowing may already have sharpened to
+ *     the present arm. So a narrowed read of a nullable global loaded the A2 box
+ *     pointer AS the base value.
+ *
+ * Why it had to be fixed at the type and not at the constant: most of the write family
+ * is caught by clang's parser (`store double 0` is not even parseable), which made the
+ * whole thing look like a formatting bug. It is not. Two of these shapes produce
+ * PERFECTLY VALID IR that `verifyModule` accepts and that gets a wrong answer at
+ * runtime — `g = 7` on a `number | undefined` global (`store double 7.0` into a box
+ * slot → SIGSEGV on the next read), and the narrowed read (`js_str_len` of the box,
+ * printing the length of the tag word read as UTF-8: `1`, where node prints `3`).
+ * docs/divergences.md records the measurement that patching the constant instead turns
+ * the loud build failure into the segfault.
+ *
+ * node is the oracle for every case. Each was confirmed failing against a `git archive`
+ * checkout of the base commit before the fix.
+ */
+describe("6 — a module-level binding's PROMOTED global slot keeps its declared layout", () => {
+  // The reported shape. `store double 0, ptr @nt.g.g` — no boxing at all.
+  test("`g = undefined` from a function boxes into a `number | undefined` global", async () => {
+    await expectNode(`
+let g: number | undefined = 5;
+function clear(): void { g = undefined; }
+clear();
+console.log(g ?? 0);
+`);
+  });
+
+  /*
+   * THE ONE WITH NO LOUD FAILURE. Writing a PRESENT value is `store double 7.0, ptr @g`
+   * — well-formed IR, accepted by LLVM's verifier, linked without complaint, and it
+   * SEGFAULTED on the read because the slot holds a box. This is the case that proves
+   * the fix belongs at the type: there is no IR-level check that could have caught it.
+   */
+  test("`g = 7` from a function boxes into a `number | undefined` global", async () => {
+    await expectNode(`
+let g: number | undefined = undefined;
+function f(): void { g = 7; }
+f();
+console.log(g ?? 0);
+`);
+  });
+
+  test("the `| null` arm behaves the same as `| undefined`", async () => {
+    await expectNode(`
+let g: number | null = 5;
+function f(): void { g = null; }
+f();
+console.log(g ?? 0);
+`);
+  });
+
+  test("a `string | undefined` global, read back through `?.`", async () => {
+    await expectNode(`
+let g: string | undefined = "abc";
+function clear(): void { g = undefined; }
+clear();
+console.log(g?.length ?? -1);
+`);
+  });
+
+  /*
+   * NOT a nullable, and broken for the same reason: the `"number"` fallback made every
+   * non-`double` global's write ill-typed. These three are the rest of the family.
+   */
+  test("a `string` global assigned from a function", async () => {
+    await expectNode(`
+let g: string = "a";
+function f(): void { g = "b"; }
+f();
+console.log(g);
+`);
+  });
+
+  test("a `boolean` and an array global assigned from a function", async () => {
+    await expectNode(`
+let ok: boolean = false;
+let xs: number[] = [1, 2];
+function f(): void { ok = true; xs = [3]; }
+f();
+console.log(ok, xs[0]);
+`);
+  });
+
+  // `+=` on a `string` global took the ARITHMETIC branch, because that branch is
+  // selected by the same type — it emitted `fadd double %t, @.str.0`.
+  test("`s += \"b\"` on a `string` global concatenates rather than adding", async () => {
+    await expectNode(`
+let s: string = "";
+function add(x: string): void { s += x; }
+add("a");
+add("b");
+console.log(s, s.length);
+`);
+  });
+
+  /*
+   * THE READ HALF. Narrowing a nullable global inside the function that reads it: exit
+   * 0, no diagnostic, and the wrong number. It is also the `if (g) { … }` route of the
+   * NT2001 nullable-read hint, so the hint's own advice now produces a program that
+   * both compiles and is right.
+   */
+  test("a narrowed read of a nullable global unwraps the box", async () => {
+    await expectNode(`
+let g: string | undefined = "abc";
+function f(): void { if (g) { console.log(g.length); } else { console.log("absent"); } }
+f();
+g = undefined;
+f();
+`);
+  });
+
+  // The controls. A `number` global always worked (the fallback happened to be right),
+  // and an inner binding of the same name must still win over the global — `varTypes`
+  // is consulted first, and `alphaRenameShadows` has already separated the two.
+  test("a `number` global, and a shadowing local/parameter, are unaffected", async () => {
+    await expectNode(`
+let g: number = 1;
+let s: string = "outer";
+function bump(): void { g += 1; g = g * 2; }
+function shadow(): void { let s: number = 3; s = s + 1; console.log(s); }
+function param(s: number): void { s = s + 1; console.log(s); }
+bump();
+shadow();
+param(1);
+console.log(g, s);
+`);
+  });
+
+  // Two globals of DIFFERENT layouts written by two different functions — the type has
+  // to be per-binding, not per-frame.
+  test("several globals of different types, written from several functions", async () => {
+    await expectNode(`
+let a: string = "p";
+let b: number | undefined = 1;
+function f(): void { a = a + "q"; b = undefined; }
+function h(): void { b = 9; }
+f();
+console.log(a, b ?? 0);
+h();
+console.log(a, b ?? 0);
+`);
+  });
+});
