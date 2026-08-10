@@ -537,18 +537,26 @@ function run(cc: string, args: string[]): void {
 export async function buildBinary(source: string, outPath: string, opts: BuildOpts = {}): Promise<void> {
   const target = opts.target ?? "host";
   const { dir, ll, rt, actor, extra } = writeIR(source, opts.entryPath);
-  // Everything that can throw lives inside the `try`, so the scratch dir is reclaimed on
+  // The SEMANTIC gate runs before the TOOLCHAIN probe, and the order matters. Actors need
+  // the ucontext-based cooperative scheduler (nt_actor.c) and wasm32-wasi has no ucontext,
+  // so this is permanent — telling someone to install wasi-sdk would send them after a
+  // toolchain that cannot fix it. Ordinary (non-actor) programs link fine; the actor
+  // runtime is only pulled in when used.
+  //
+  // It sits OUTSIDE the `try` below, and reclaims the scratch dir itself, because a `throw`
+  // inside a `try` that has a `finally` and no `catch` is NT1004 — the finalizer would have
+  // to run on the exceptional path, which the lexical throw model cannot express. Before
+  // that was a refusal it was worse: codegen emitted `br label %catchN` for a block it never
+  // defined, so this function's IR was INVALID and only clang said so. Keeping the shape out
+  // of `src/` is the self-hosting subset rule (CLAUDE.md), not a style preference.
+  if (target === "wasm" && actor) {
+    rmSync(dir, { recursive: true, force: true });
+    throw new BuildError("the wasm (WASI) target does not support actors (spawn/send/receive): the actor runtime needs ucontext, which wasm32-wasi lacks");
+  }
+  // Everything else that can throw lives inside the `try`, so the scratch dir is reclaimed on
   // EVERY exit — a stronger guarantee than ordering the throwing calls before it, because
   // it also covers a failure the ordering cannot anticipate.
   try {
-    // The SEMANTIC gate runs before the TOOLCHAIN probe, and the order matters. Actors need
-    // the ucontext-based cooperative scheduler (nt_actor.c) and wasm32-wasi has no ucontext,
-    // so this is permanent — telling someone to install wasi-sdk would send them after a
-    // toolchain that cannot fix it. Ordinary (non-actor) programs link fine; the actor
-    // runtime is only pulled in when used.
-    if (target === "wasm" && actor) {
-      throw new BuildError("the wasm (WASI) target does not support actors (spawn/send/receive): the actor runtime needs ucontext, which wasm32-wasi lacks");
-    }
     // `ccFor` hunts for the Android NDK / wasi-sdk and throws when they are absent.
     const cc = ccFor(target);
     const { args, warning } = linkArgv(target, { ll, rt, actor, extra, out: outPath }, { static: opts.static });

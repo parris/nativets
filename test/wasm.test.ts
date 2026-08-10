@@ -75,6 +75,23 @@ describe("wasm target plumbing", () => {
     ].join("\n");
     await expect(buildBinary(ACTOR, join(tmp(), "a.wasm"), { target: "wasm" })).rejects.toThrow(/actor/i);
   });
+
+  // The gate used to sit INSIDE `buildBinary`'s `try { … } finally { rmSync(dir) }`, which is
+  // how the scratch dir was reclaimed on this path. That shape is NT1004 (a `throw` in a
+  // `finally`-only `try` has no catch block to branch to, and codegen emitted `br label
+  // %catchN` for a block it never defined), so the gate moved OUT of the `try` and now
+  // reclaims the dir itself. This asserts the guarantee that move is responsible for —
+  // without it the refusal leaks a build directory per invocation, silently.
+  test("...and the refusal still reclaims its scratch directory", async () => {
+    const { readdirSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const scratch = () => readdirSync(tmpdir()).filter((f) => f.startsWith("nativets-build-")).length;
+    const before = scratch();
+    for (let i = 0; i < 3; i++) {
+      await expect(buildBinary(`const p = spawn((x: number) => { receive(); }, 1);\n`, join(tmp(), "b.wasm"), { target: "wasm" })).rejects.toThrow(/actor/i);
+    }
+    expect(scratch()).toBe(before);
+  });
 });
 
 // ---- Arch check: build a real .wasm and confirm `file` reports a WebAssembly module. ----

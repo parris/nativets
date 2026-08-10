@@ -3105,6 +3105,33 @@ For ORDINARY programs the over-approximation is real and it does refuse working 
 snippet above — which is the honest cost of the current gate and the reason it is written down
 here instead of only in a code comment.
 
+#### The NT1004 tail GROWS when we do the right thing, and that is the argument for propagation
+
+`parseTupleType` is the worked example, and it is worth stating because the obvious reading of
+it is wrong. It looks like new code landing already-refused; the count of the compiler's own
+functions went 701 → 702 in the same cycle it appeared in the tail. It is neither.
+
+The function dates to the Stage-19 baseline, and at `5f90e26` it was seven lines with **no
+`throw`** and no blocker: it read `[T, U, …]`, kept `tys[0]`, and returned `T[]`. That was a
+silent wrong answer — the erasure invented a type and then blamed the program for it (above,
+and `test/tuple-type.test.ts`). Replacing it with an honest `throw nyi(NYI.TUPLE, …)` is
+exactly what "reject, never miscompile" asks for. And that `throw` is `NT1004`, genuinely so
+rather than through the over-approximation: `parseParenOrFuncType` does `try { return
+this.parseFuncType(); } catch { this.pos = save; }`, and `parseFuncType` → `parseType` →
+`parseTupleType`, so a heterogeneous tuple inside a parenthesized function type has its throw
+caught one frame up, by design.
+
+So the tail did not grow because someone wrote careless code. **It grew because a lane removed
+a silent wrong answer**, and the honest replacement for a silent wrong answer is a `throw`.
+Every such fix that lands in a function reachable from a `try` adds one, and this compiler
+catches around its own front end deliberately (`tokenize` around `lex`, `coverage` around
+`parse`/`check`, `parseParenOrFuncType` around `parseFuncType`) because recovery is a feature.
+
+The two prime rules therefore pull against each other while cross-frame propagation is missing:
+obeying "reject, never miscompile" enlarges the one refusal that most blocks self-hosting. That
+is a stronger reason to do the propagation work than the size of the tail on any given day,
+because the tail is not a fixed backlog to be burned down — it refills from correctness fixes.
+
 #### A `finally` with no `catch` is NOT a handler
 
 `try { … } finally { … }` catches nothing: node runs the finalizer and keeps propagating. The

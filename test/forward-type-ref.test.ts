@@ -1201,14 +1201,33 @@ describe("fold depth: a `@N` back-edge and its unfolding are one type", () => {
     expect(r.message).toContain("@B[]");
   });
 
-  // A DIFFERENT FIELD COUNT is a different LAYOUT, back-edge or no back-edge. Nothing
-  // reshapes an object literal on the return path (the argument path has `fitsArg` and the
-  // declaration path has `retypeLiteral`; `return` has neither), so accepting this emits a
-  // one-slot record where the caller reads two — the exit-255 program above.
-  test("a returned literal that omits an optional field is still refused", () => {
-    const r = reject(
+  // A DIFFERENT FIELD COUNT is a different LAYOUT, back-edge or no back-edge — so this was
+  // REFUSED, on the grounds that nothing reshaped an object literal on the return path (the
+  // argument path had `fitsArg`, the declaration path `retypeLiteral`; `return` had
+  // neither) and accepting it on the predicate alone emits a one-slot record where the
+  // caller reads two, the exit-255 program above.
+  //
+  // The premise was true and the conclusion no longer follows: `return` now gets the same
+  // `fitsArg` reshape, so the literal is REBUILT in the declared two-slot layout instead of
+  // being accepted in its own. The rule that keeps the acceptance safe is unchanged — it is
+  // still a reshape, never a widened `fitsParam`, and the mutation that swaps one for the
+  // other still produces exactly the empty-stdout/exit-255 program this comment describes
+  // (re-measured on lane-retreshape; see test/return-reshape.test.ts).
+  test("a returned literal that omits an optional field is RESHAPED, not refused", async () => {
+    await matchesNode(
       `interface Opts { a: number; b?: number; }\n` +
       `function f(): Opts { return { a: 1 }; }\n` +
+      `const o = f();\nconsole.log(o.a, o.b);\n`,
+    );
+  });
+
+  // ...and the boundary that widening cannot cross, kept HERE because this describe block
+  // is where the layout argument lives: a non-literal has a layout already fixed by its own
+  // declaration and nothing to rebuild, so it is still refused.
+  test("a returned VARIABLE of the narrower shape is still refused", () => {
+    const r = reject(
+      `interface Opts { a: number; b?: number; }\n` +
+      `function f(): Opts { const v = { a: 1 }; return v; }\n` +
       `console.log(f().a);\n`,
     );
     expect(r.code).toBe("NT2001");

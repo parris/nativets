@@ -260,13 +260,48 @@ function returnsUnderFinally(body: Stmt[], under = false): boolean {
   return false;
 }
 
+/**
+ * The UTF-8 byte length of `s` — exactly what `Buffer.byteLength(s, "utf8")` returns.
+ *
+ * `Buffer` is a node global with no representation here (`NT2001`), so it cannot appear in
+ * `src/`: it was this module's FIRST blocker, and — because `codegen.ts` and `ownership.ts`
+ * both import this file — theirs too.
+ *
+ * This must agree with the number the RUNTIME will report for the same literal, because it
+ * feeds the `NT2002` compile-time out-of-bounds rejection. It does: a string literal's bytes
+ * are emitted by codegen's `encodeCString`, which is `TextEncoder` — plain UTF-8. Verified
+ * against the runtime for ASCII, Latin-1, BMP, astral, and lone surrogates.
+ *
+ * A well-formed surrogate PAIR is therefore ONE code point and FOUR bytes, not 3+3. The
+ * distinction is not academic: the runtime's `String.fromCharCode` path really does emit
+ * CESU-8 (`fromCharCode(0xD83D) + fromCharCode(0xDE00)` measures 6 here, 4 in node), but
+ * that path builds a string at RUN time and never reaches this function, which only ever
+ * sees a `StringLiteral` the lexer already decoded into one JS string.
+ *
+ * A LONE surrogate is not representable in UTF-8 at all; `TextEncoder` and
+ * `Buffer.byteLength` both substitute U+FFFD, so it counts as 3 — and so does the runtime.
+ */
+function utf8ByteLength(s: string): number {
+  let n = 0;
+  let i = 0;
+  while (i < s.length) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) { n += 1; i += 1; }
+    else if (c < 0x800) { n += 2; i += 1; }
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length &&
+             s.charCodeAt(i + 1) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff) { n += 4; i += 2; }
+    else { n += 3; i += 1; }
+  }
+  return n;
+}
+
 /** The length of an expression whose size is fixed at compile time, else undefined. */
 function literalLength(e: Expr): number | undefined {
   if (e.kind === "ArrayLiteral") {
     return e.elements.some((x) => x.kind === "SpreadExpr") ? undefined : e.elements.length;
   }
   // String indices address UTF-8 BYTES here (docs/divergences.md §A.2), so measure bytes.
-  if (e.kind === "StringLiteral") return Buffer.byteLength(e.value, "utf8");
+  if (e.kind === "StringLiteral") return utf8ByteLength(e.value);
   return undefined;
 }
 
@@ -2630,7 +2665,33 @@ class Checker {
       case "ReturnStmt":
         if (s.argument) {
           const t = this.type(s.argument, scope, ret === "void" ? undefined : ret); // return type is the context (e.g. `return []`)
-          if (ret !== "void" && !this.fitsParam(ret, t)) throw typeError(`return type ${t} does not match declared ${ret}`, exprLoc(s.argument), undefined, "returned here");
+          // `fitsArg`, not the bare `fitsParam` identity test — because a `return` is an
+          // assignment to the declared return type in exactly the way an argument is an
+          // assignment to a parameter, and every OTHER such position already reshapes the
+          // literal into the declared slot layout. The declaration path does it
+          // (`retypeLiteral`, the VarDecl arm above), the argument path does it (`fitsArg`),
+          // an arrow's EXPRESSION body does it (`typeArrowReturn`) — `return` had neither,
+          // so the identical value was accepted as a `const` initializer and as an argument
+          // and refused here:
+          //
+          //     interface F { a: number; b?: number }
+          //     function f(): F { return { a: 1 }; }   // NT2001, and `tsc` accepts it
+          //
+          // That was the FIRST blocker of src/checker.ts, src/codegen.ts and
+          // src/ownership.ts alike — `bodyFrame` returns `{ body, binds }` against a
+          // `BodyFrame` with an optional third field.
+          //
+          // Reusing `fitsArg` is the point, not an economy: it is the same
+          // assignable+`reshapable`+`retypeLiteral` recipe, so the two paths cannot drift,
+          // and it keeps the SAME boundary. Accepting merely-`assignable` values here
+          // instead is the memory bug — `{a:number}` is one raw double slot and
+          // `{a:number,b?:number}` reads slot 1 as a pointer to a nullable box, so a
+          // predicate-only widening compiles clean and dies (empty stdout, exit 255,
+          // measured on this lane). Only a literal `fitsArg` can actually rebuild gets
+          // through; a variable of a structurally-compatible type keeps being refused,
+          // because its layout is already fixed by its own declaration.
+          if (ret !== "void" && !this.fitsArg(ret, t, s.argument))
+            throw typeError(`return type ${t} does not match declared ${ret}`, exprLoc(s.argument), this.returnHint(s.argument, ret, t), "returned here");
         }
         return;
       case "IfStmt": {
@@ -5690,7 +5751,19 @@ class Checker {
     // (2) again: only a widening `fitsParam` rejects but `assignable` accepts keeps the
     // inferred type. A body the annotation genuinely contradicts goes to `checkBlock`
     // against the DECLARED type, so the `NT2001` names the offending `return`'s position.
-    const widened = declared !== undefined && !this.fitsParam(declared, inferred) && this.assignable(declared, inferred);
+    //
+    // ...EXCEPT when the first `return` is a literal that can be REBUILT in the declared
+    // layout. Widening (2) exists for values whose layout is already fixed by their own
+    // declaration and cannot be rewritten; a literal is exactly the case that can be, and
+    // `checkBlock` below now rewrites it (the `ReturnStmt` arm's `fitsArg`). Without this
+    // the same blocker survived in arrow spelling, one step further on:
+    //
+    //     const f = (): F => { return { a: 1 }; };   // f's return type became {a:number}
+    //     f().b                                      // "Property 'b' does not exist"
+    //
+    // — the annotation silently discarded, which is worse than the refusal it replaced.
+    const rebuilt = declared !== undefined && this.firstReturnReshapes(body, declared, inferred);
+    const widened = declared !== undefined && !rebuilt && !this.fitsParam(declared, inferred) && this.assignable(declared, inferred);
     const ret = declared === undefined || widened ? inferred : declared;
     this.checkBlock(body, inner.child(), ret); // validate every return against it
     return ret;
@@ -5746,6 +5819,46 @@ class Checker {
     const ty = makeFuncTy(paramTys, retTy);
     arrow.ty = ty;
     return ty;
+  }
+
+  /**
+   * The hint on a refused `return`, for the one case whose boundary is genuinely
+   * surprising and whose surprise this lane introduced.
+   *
+   * `return { a: 1 }` against `{ a: number; b?: number }` is now ACCEPTED — the literal is
+   * rebuilt in the declared layout. `const v = { a: 1 }; return v;` is still refused, and
+   * that pair is confusing without a sentence explaining it: `v`'s layout is fixed by its
+   * own declaration (one raw double), nothing is left to rewrite, and rebuilding it would
+   * mean the caller reading slot 1 of a one-slot record. Both fixes below were compiled and
+   * run against node before this string was written.
+   *
+   * Deliberately silent otherwise: a genuinely wrong return type (`number` for `string`)
+   * needs no advice, and a hint that fires on everything is read as noise.
+   */
+  private returnHint(arg: Expr, ret: Ty, actual: Ty): string | undefined {
+    if (arg.kind === "ObjectLiteral" || arg.kind === "ArrayLiteral") return undefined;
+    const base = baseTy(ret);
+    if (!isObjectTy(base) && !isArrayTy(base)) return undefined;
+    if (!this.assignable(ret, actual)) return undefined;
+    return `the value is structurally compatible, but its SLOT LAYOUT was fixed where it was ` +
+      `declared — only an object/array LITERAL can be rebuilt in the declared layout. Either ` +
+      `write the literal in the \`return\` itself, or ANNOTATE it with the declared return ` +
+      `type where it is declared, which reshapes it there instead`;
+  }
+
+  /**
+   * Is the body's first top-level `return` an object/array literal that the DECLARED
+   * return type can be rebuilt in? This is `fitsArg`'s acceptance test with the mutation
+   * left out — the actual `retypeLiteral` happens once, in the `ReturnStmt` arm of
+   * `checkStmt`, so that every `return` in the body is reshaped and not merely this one.
+   */
+  private firstReturnReshapes(body: Stmt[], declared: Ty, inferred: Ty): boolean {
+    let arg: Expr | null = null; // `ReturnStmt.argument` is `Expr | null` — a bare `return` is null
+    for (const s of body) { if (s.kind === "ReturnStmt") { arg = s.argument; break; } }
+    if (arg === null || (arg.kind !== "ObjectLiteral" && arg.kind !== "ArrayLiteral")) return false;
+    const base = baseTy(declared);
+    if (!isObjectTy(base) && !isArrayTy(base)) return false;
+    return this.assignable(declared, inferred) && this.reshapable(arg, declared, inferred);
   }
 
   /** First top-level return's type in a body (for closure/function return inference). */
