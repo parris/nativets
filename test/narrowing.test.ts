@@ -1201,3 +1201,201 @@ do {
 `, "NT2001", "number + ?Unumber");
   });
 });
+
+/*
+ * narrowing 7 — the SWITCH arm, which had been left out of the reassignment filter.
+ *
+ * `narrowNameInto` takes a `blocked` set so a region that rebinds the name DECLINES to
+ * narrow rather than shadowing the name CONST and turning the rebind into an error (see
+ * "narrowing 6"). Every condition form routes through it — `if`, `while`, `&&`/`||`, the
+ * early-exit guard — except one: `checkStmt`'s `SwitchStmt` arm called `narrowInto`
+ * DIRECTLY, and computed its `blocked` set only for a dotted-path discriminant
+ * (`d.p.path !== ""`), leaving a plain NAME discriminant with `null`.
+ *
+ * So the identical program compiled as an `if` and was REFUSED as a `switch` — and
+ * `switch (x.kind)` is both the more idiomatic form over a discriminated union and the
+ * one `src/` itself is written in throughout (`src/ast.ts` documents the house style).
+ *
+ * The region a NAME shadow has to be stable over is NOT every case body, which is what
+ * the dotted-path set uses. It is the arm's own body plus every arm reachable from it by
+ * FALL-THROUGH — the same reachability `carry` already computes with `leavesBlock`. Using
+ * the blunt all-bodies set instead would refuse `case "a": read; break; default: assign;`,
+ * which node runs and nothing about it is unsound.
+ */
+describe("narrowing 7 — a `switch` arm that reassigns the discriminant", () => {
+  /*
+   * The half that must NOT be refused, and the direct analogue of narrowing 6's
+   * "a body that reassigns the name WITHOUT reading a narrowed field still compiles".
+   * Before the fix this was `cannot assign to 'cur' here: it is NARROWED to …`.
+   */
+  test("an arm that reassigns the name WITHOUT reading a narrowed field compiles", async () => {
+    await expectNode(`
+type N = { kind: "a"; x: number } | { kind: "b"; s: string };
+let cur: N = { kind: "a", x: 1 };
+switch (cur.kind) {
+  case "a":
+    cur = { kind: "b", s: "swapped" };
+    break;
+  case "b":
+    break;
+}
+console.log("done");
+`);
+  });
+
+  /*
+   * The precision that makes the per-arm region worth computing: one arm rebinds, a
+   * DIFFERENT arm reads a narrowed field, and neither can reach the other (both `break`).
+   * The all-bodies filter would refuse both reads; only the fall-through-aware one keeps
+   * this compiling, which is what node does.
+   */
+  test("a SIBLING arm still narrows when the rebinding arm cannot reach it", async () => {
+    await expectNode(`
+type N = { kind: "a"; x: number } | { kind: "b"; s: string };
+let cur: N = { kind: "b", s: "hello" };
+switch (cur.kind) {
+  case "a":
+    cur = { kind: "b", s: "swapped" };
+    break;
+  case "b":
+    console.log(cur.s);
+    break;
+}
+`);
+  });
+
+  /*
+   * ...and the same shape with the rebinding arm LAST, so the narrowed read is the one
+   * that comes first. `default:` takes the tags no `case` listed, so it is shadowed too —
+   * this was refused at the assignment before the fix (proved by mutation).
+   */
+  test("a narrowed read in an earlier arm survives a rebinding `default:`", async () => {
+    await expectNode(`
+type N = { kind: "a"; x: number } | { kind: "b"; s: string };
+let cur: N = { kind: "a", x: 3 };
+switch (cur.kind) {
+  case "a":
+    console.log(cur.x);
+    break;
+  default:
+    cur = { kind: "a", x: 9 };
+    break;
+}
+console.log("end");
+`);
+  });
+
+  /* ---------------------------------------------------------------- refusals
+   * The set that must NOT move. Each of these is a stale narrowing if the arm is allowed
+   * to keep its shadow, which is the silent wrong answer this project has hit seven times
+   * (a string pointer read as a double, at exit 0). Each was verified by MUTATION: with
+   * the fall-through term dropped from the region, the first prints `2.1219957915e-314`
+   * where node prints `swapped`.
+   */
+
+  /*
+   * FALL-THROUGH. The rebinding arm does not `break`, so control reaches the next arm
+   * carrying a value the next arm's tags no longer describe. `leavesBlock` is what sees
+   * this — exactly as it already does for `carry`.
+   */
+  test("REFUSED: an arm rebinds and FALLS THROOUGH into an arm that reads a narrowed field", () => {
+    expectRejected(`
+type N = { kind: "a"; x: number } | { kind: "b"; s: string };
+let cur: N = { kind: "a", x: 3 };
+switch (cur.kind) {
+  case "a":
+    cur = { kind: "b", s: "swapped" };
+  case "b":
+    console.log(cur.s);
+    break;
+}
+`, "NT2001", "does not exist on");
+  });
+
+  /*
+   * The arm rebinds and then reads a narrowed field ITSELF. The read is refused as
+   * un-narrowed rather than the assignment being refused as narrowed-const — the same
+   * trade `narrowNameInto` already makes, and the hint names the assignment. (node prints
+   * `undefined` here; `tsc --strict` errors, so refusing is the agreeing answer.)
+   */
+  test("REFUSED: an arm rebinds and then reads the narrowed field", () => {
+    expectRejected(`
+type N = { kind: "a"; x: number } | { kind: "b"; s: string };
+let cur: N = { kind: "a", x: 3 };
+switch (cur.kind) {
+  case "a":
+    cur = { kind: "b", s: "swapped" };
+    console.log(cur.x);
+    break;
+  case "b":
+    break;
+}
+`, "NT2001", "does not exist on");
+  });
+
+  /*
+   * The SUB-UNION fall-through, and the case that proves the `flow` term is load-bearing
+   * rather than subsumed by `carry`. `carry` unions the tags, so a fall-through arm is
+   * never narrowed to ONE member — but with three members it can still be narrowed to a
+   * two-member SUB-union, and `unionCommonField`'s same-slot rule then admits `.v`, which
+   * `a` and `b` both carry at slot 1. The rebind in `case "a"` stores a `c`, whose slot 1
+   * is a string pointer.
+   *
+   * MUTATION: with `flow` never accumulating (`flow = []`), this compiles and prints
+   *   2.124223034e-314   at exit 0, where node prints `undefined`.
+   * That is this project's signature silent wrong answer — a string pointer read as a
+   * double — for the eighth recorded time, and it is one `case` from the accepting path.
+   */
+  /*
+   * THE MISCOMPILE THIS LANE ACTUALLY FOUND — live on main at 9c9477f, not hypothetical.
+   * Base tree prints
+   *   2.157443986e-314   at exit 0, where node prints `undefined`.
+   *
+   * A NON-LITERAL case test (`case pick:` — legal, only its TYPE is checked against the
+   * discriminant) contributes no tags, so `tags` is empty, `restrictUnion` answers
+   * `undefined` and `narrowInto` declares NO shadow for that arm. The CONST shadow is what
+   * had been standing in for a reassignment filter on every other arm, so with it absent
+   * the arm's `cur = { kind: "c", … }` was simply allowed — and the arm falls through into
+   * `case "b"`, which `carry` narrows to the `{a,b}` SUB-union, where `unionCommonField`'s
+   * same-slot rule admits `.v` because `a` and `b` both carry a number at slot 1. The value
+   * actually there is a `c`, whose slot 1 is a string pointer. Read as a double: 2.15e-314.
+   *
+   * The `flow` term is what closes it: the arm rebinds and does not leave, so its successor
+   * declines to narrow and the read is refused. Nothing else in the switch path could —
+   * `carry` tracks TAGS, and the tags were right; it was the VALUE that had moved.
+   */
+  test("REFUSED: a non-literal case arm rebinds and falls through (was a MISCOMPILE)", () => {
+    expectRejected(`
+type N = { kind: "a"; v: number } | { kind: "b"; v: number } | { kind: "c"; s: string };
+function f(pick: string): void {
+  let cur: N = { kind: "a", v: 1 };
+  switch (cur.kind) {
+    case pick:
+      cur = { kind: "c", s: "boom" };
+    case "b":
+      console.log(cur.v);
+      break;
+    case "c":
+      break;
+  }
+}
+f("a");
+`, "NT2001", "does not exist on");
+  });
+
+  test("REFUSED: a fall-through arm narrowed to a SUB-union the predecessor rebound", () => {
+    expectRejected(`
+type N = { kind: "a"; v: number } | { kind: "b"; v: number } | { kind: "c"; s: string };
+let cur: N = { kind: "a", v: 1 };
+switch (cur.kind) {
+  case "a":
+    cur = { kind: "c", s: "boom" };
+  case "b":
+    console.log(cur.v);
+    break;
+  case "c":
+    break;
+}
+`, "NT2001", "does not exist on");
+  });
+});

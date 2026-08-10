@@ -2470,11 +2470,26 @@ class Checker {
         // A dotted-path discriminant (`switch (o.inner.kind)`) is narrowed by FACT, not by
         // a shadow. Its stability region is EVERY case body, not just the arm's own: a
         // fallthrough arm runs code from a later body, so an assignment anywhere in the
-        // switch has to drop the narrowing for all of it.
+        // switch has to drop the narrowing for all of it. Deliberately kept blunt — a path
+        // fact is the more fragile of the two and nothing has measured a need for more.
         const blocked = d && d.p.path !== ""
           ? this.unstableNames(s.discriminant, s.cases.flatMap((c) => c.body))
           : null;
         let carry: string[] = [];
+        // The NAME half of the same filter, and it is computed PER ARM rather than over
+        // every body. `narrowNameInto` declines when the region rebinds the name, instead
+        // of shadowing it CONST and turning the rebind into an error — see its own note,
+        // and "narrowing 6"/"narrowing 7" in test/narrowing.test.ts. This call site was the
+        // one that never passed a set at all, so `switch` still shadowed CONST and refused
+        // `case "a": cur = …; break;` outright while the identical `if` compiled.
+        //
+        // The region a NAME shadow must be stable over is the arm's OWN body plus every arm
+        // reachable from it by FALL-THROUGH — precisely the reachability `carry` already
+        // computes below with `leavesBlock`, so `flow` is `carry`'s twin in the assignment
+        // domain. Using the all-bodies set here instead would be sound but would refuse
+        // `case "a": read; break; default: assign;`, which node runs and which is not stale
+        // at all: the two arms cannot reach each other.
+        let flow: string[] = []; // roots a fall-through PREDECESSOR of this arm rebinds
         s.cases.forEach((cse, i) => {
           if (cse.test) {
             const ct = this.type(cse.test, scope);
@@ -2487,9 +2502,28 @@ class Checker {
               ? (listed[i] !== undefined ? [listed[i]!] : []) // a non-literal case test tells us nothing
               : unionTagValues(d.union).filter((v) => !listed.includes(v)); // `default:` — whatever is left
             const tags = [...new Set([...carry, ...own])];
-            if (d.p.path === "") this.narrowInto(inner, d.p.name, d.union, tags);
+            // `s.discriminant` is passed for symmetry with the path-case `blocked` above and
+            // with `factsFor`, but it is VACUOUS here and is not load-bearing: a discriminant
+            // that narrows anything has already been through `discriminantRead` → `accessPath`,
+            // which admits only an identifier and ordinary field reads — no call, no index, and
+            // so no assignment. `switch ((cur = f()).kind)` does not narrow at all, for want of
+            // an access path, rather than narrowing and being filtered. Said out loud because a
+            // safe-but-vacuous clause reads exactly like a working one.
+            //
+            // Built by `new Set([...])` rather than by `.add`-ing into the set
+            // `unstableNames` returns, because a discarded `.add` is NT1606 in the subset
+            // the compiler compiles ITSELF in (`Set` is persistent here). `checkStmt`'s own
+            // first blocker sits above this line, so blocker-metric would have MASKED that
+            // — see its header on masking hiding blockers a lane adds.
+            const armAssigns = [...this.unstableNames(s.discriminant, cse.body)];
+            const rebound = new Set<string>([...armAssigns, ...flow]);
+            if (d.p.path === "") this.narrowNameInto(inner, d.p.name, d.union, tags, rebound);
             else this.narrowPathInto(d.p, d.union, tags, facts, blocked);
-            carry = leavesBlock(cse.body) ? [] : tags;
+            // An arm that LEAVES the switch reaches no later arm, so it passes on neither
+            // its tags nor its rebindings; one that falls through passes on both.
+            const leaves = leavesBlock(cse.body);
+            carry = leaves ? [] : tags;
+            flow = leaves ? [] : [...armAssigns, ...flow];
           }
           this.withFactsIn(facts, () => this.checkBlock(cse.body, inner, ret));
         });
