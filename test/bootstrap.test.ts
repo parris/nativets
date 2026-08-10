@@ -603,7 +603,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // time but NT1003, first-class FUNCTION VALUES — `walkStmtChildren`'s `onAssign`
     // callback. Every previous term on this line turned out to be a spelling or a
     // missing wiring; this one is a feature the language does not have.
-    ["NT1003"],
+    // ...and NT1003 leaves as fast as it arrived, because function values were never
+    // missing. 33 of 36 function-typed params in `src/` already compiled; the call
+    // path was simply the only read of a binding in the checker that skipped
+    // `narrowedTy`, so an optional callback was judged by its declared type.
+    //
+    // What is left is NT1606 — `Set.add` discarded, 30 sites, byte-identical in both
+    // trees and merely unmasked by the code above it clearing. That is a REAL
+    // refusal: `Set` is persistent here, so `s.add(x)` genuinely does nothing.
+    ["NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -881,7 +889,16 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // answered that. The census number stands and is still the right warning: nine
     // modules moved because they share ONE inherited line, not because 191 sites got
     // fixed. What they moved onto is NT1014, asserted above.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    // ...and it REFILLS with all nine, which is the honest shape of this round: NT1003
+    // cleared (function values were never missing -- an optional callback was judged by
+    // its DECLARED type because the call path was the one read that skipped
+    // `narrowedTy`), and the 30 discarded-`Set.add` blockers underneath it became
+    // visible. Byte-identical in both trees; nothing regressed. This is the promotion
+    // effect at its most misleading -- a bucket going from empty to nine while the
+    // per-function count FELL 245 -> 244.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -1094,7 +1111,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // still NT1607, and exactly TWO parameters in the tree carry the new marker. What
     // changed is that no module's first blocker is a mutation any more. The list this
     // deferred to is empty now for the same reason.
-    expect(byCode["NT1606"]).toBeUndefined();
+    // ...and NT1606 is back, for the reason recorded at the bucket above: the 30
+    // discarded-`Set.add` sites were always there and were merely masked by the
+    // NT1003 that cleared. `toBeUndefined()` was pinning ABSENCE, which a promotion
+    // can undo without anything regressing -- the per-function count fell in the same
+    // change. Asserted as the measured set now, so the next promotion reads as a
+    // membership change rather than a code appearing from nowhere.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the

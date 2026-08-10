@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "d264ce9"
+    "rev": "d544bdd"
   },
   "modules": {
     "ast.ts": {
       "sha256": "d4412ac12260451c",
       "standalone": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
       }
     },
     "checker.ts": {
-      "sha256": "4e941bf02dd45071",
+      "sha256": "42c7d30ed7e45fa0",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
       }
     },
     "cli.ts": {
@@ -40,12 +40,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
       }
     },
     "codegen.ts": {
-      "sha256": "4f388eb10e151f5c",
+      "sha256": "8919d9259d607aa5",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
       }
     },
     "lexer.ts": {
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
       }
     },
     "ownership.ts": {
@@ -147,8 +147,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
       }
     },
     "parser.ts": {
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'onAssign' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT1606",
+        "message": "[NT1606] `Set` is persistent: `.add` returns a NEW set and leaves the receiver unchanged, so discarding the result here does NOTHING at L:C"
       }
     }
   }
