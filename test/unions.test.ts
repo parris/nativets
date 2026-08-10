@@ -231,9 +231,13 @@ console.log(f({ kind: "B", other: 111, n: 222 }));
 interface B { kind: "B"; v: string }
 interface C { kind: "C"; z: number }
 type U = A | B | C;
-function f(u: U): string { if (u.kind === "C") return "none"; return u.v as unknown as string; }
-console.log(f({ kind: "B", v: "hello" }));
+function f(u: U): void { if (u.kind === "C") return; console.log(u.v); }
+f({ kind: "B", v: "hello" });
 `;
+      // Reads `u.v` with NO cast on purpose. This fixture used to launder it through
+      // `as unknown as string`, which NT1035 now refuses FIRST (the ambient-erasure lane) —
+      // so the test still went red-to-green while never reaching the slot/type rule it is
+      // named for. A refusal arriving from the wrong door is not evidence for this rule.
       expect(codeOf(bad)).toBe("NT2001");
     });
 
