@@ -1271,3 +1271,98 @@ console.log(out.names.size);
     expect(r?.code).toBe("NT1607");
   });
 });
+
+/*
+ * `@@mutable` IS NOMINAL — and the diagnostic that never said so.
+ *
+ * `isMutableTy` reads a TAG, so `Cell{n:number}` and `{n:number}` are different types
+ * even though their fields are identical. An existing untagged value therefore does not
+ * flow into a `Cell` position:
+ *
+ *     //@@mutable
+ *     interface Cell { n: number }
+ *     const c = { n: 1 };
+ *     bump(c);   // error[NT2001]: 'bump' arg 0 expects Cell{n:number}, got {n:number}
+ *
+ * Two types that print four characters apart, and no hint at all. The reader has just
+ * been told by NT1606 to "declare the record `@@mutable`", has done exactly that, and
+ * lands here with nothing to go on — the walked-in-a-circle shape
+ * `allUnionMembersMutable` was written for, one step further along.
+ *
+ * The fix is real and small: tag the value where it is CREATED. A literal takes the tag
+ * from its CONTEXT, so annotating the binding (or passing the literal straight in) is all
+ * it needs. Both spellings are COMPILED against node below rather than asserted, because
+ * a hint that does not build is worse than no hint.
+ */
+describe("@@mutable is nominal — the tag mismatch explains itself", () => {
+  const NOMINAL_MISMATCH = `
+//@@mutable
+interface Cell { n: number }
+function bump(c: Cell): void { c.n = c.n + 1; }
+const c = { n: 1 };
+bump(c);
+console.log(c.n);
+`;
+
+  test("an untagged value in a `@@mutable` position is refused WITH a hint", () => {
+    const r = rejectionOf(NOMINAL_MISMATCH);
+    expect(r).not.toBeNull();
+    expect(r!.code).toBe("NT2001");
+    expect(r!.message).toContain("expects Cell{n:number}, got {n:number}");
+    const hint = r!.hint ?? "";
+    expect(hint).toContain("NOMINAL");
+    expect(hint).toContain("const c: Cell =");
+  });
+
+  test("the hint's annotate-the-binding spelling compiles and matches node", async () => {
+    const source = `
+//@@mutable
+interface Cell { n: number }
+function bump(c: Cell): void { c.n = c.n + 1; }
+const c: Cell = { n: 1 };
+bump(c);
+console.log(c.n);
+`;
+    await expectMatches(source, runWithNodeAttrs(source));
+  });
+
+  test("the hint's pass-the-literal-straight-in spelling compiles and matches node", async () => {
+    const source = `
+//@@mutable
+interface Cell { n: number }
+function bump(c: Cell): void { c.n = c.n + 1; console.log(c.n); }
+bump({ n: 1 });
+`;
+    await expectMatches(source, runWithNodeAttrs(source));
+  });
+
+  test("the same hint reaches the DECLARATION position", () => {
+    const r = rejectionOf(`
+//@@mutable
+interface Cell { n: number }
+const u = { n: 1 };
+const c: Cell = u;
+console.log(c.n);
+`);
+    expect(r).not.toBeNull();
+    expect(r!.code).toBe("NT2001");
+    expect(r!.hint ?? "").toContain("NOMINAL");
+  });
+
+  // The mutation guard on the hint's CONDITION. Two records that differ in their FIELDS
+  // do not have a tag problem, and telling that author to add an annotation would send
+  // them to write one that changes nothing. Drop the same-body test from `tagHint` and
+  // this fails.
+  test("a genuine shape mismatch does NOT get the tag hint", () => {
+    const r = rejectionOf(`
+//@@mutable
+interface Cell { n: number }
+function bump(c: Cell): void { c.n = c.n + 1; }
+const c = { m: 1 };
+bump(c);
+`);
+    expect(r).not.toBeNull();
+    expect(r!.code).toBe("NT2001");
+    expect(r!.hint ?? "").not.toContain("NOMINAL");
+  });
+});

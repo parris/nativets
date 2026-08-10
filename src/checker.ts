@@ -908,6 +908,61 @@ function dictHint(annot: Ty, head: string | undefined, got: Ty): string | undefi
 }
 
 /**
+ * The NOMINAL-TAG half of a type mismatch: `Cell{n:number}` wanted, `{n:number}` given.
+ *
+ * A class instance type and a `@@mutable` record are object types with a leading TAG
+ * (`classTag`), and `isMutableTy` — like method resolution — reads the tag, not the
+ * shape. So the two types above are different, and print four characters apart with the
+ * difference at the FRONT of a body that may be hundreds of characters long. Without a
+ * hint the message reads as if the compiler is refusing a type to itself.
+ *
+ * It is reachable by following this compiler's OWN advice. NT1606 on a field store says
+ * "declare the record `@@mutable`"; doing that tags the annotation and leaves every
+ * already-untagged value in the program behind, so the next stop is here. That is the
+ * same walked-in-a-circle failure `allUnionMembersMutable` exists to break, one step
+ * further along, and the fix is likewise a spelling the reader cannot guess: a literal
+ * takes its tag from CONTEXT, so the annotation belongs where the value is CREATED.
+ *
+ * Fires only when the bodies are IDENTICAL. Two records that differ in their fields have
+ * an ordinary shape mismatch, and telling that author to add an annotation would send
+ * them to write one that changes nothing — test/mutable-records.test.ts asserts both
+ * halves. `what` is the value as the source spells it, so the suggested line is the one
+ * they can paste.
+ */
+/** Is `s` a bare identifier — something a `const <s>: T = …` line could be written about? */
+function plainName(s: string): boolean {
+  if (s.length === 0) return false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    const alpha = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c === "_" || c === "$";
+    if (alpha) continue;
+    if (i > 0 && c >= "0" && c <= "9") continue;
+    return false;
+  }
+  return true;
+}
+
+function tagHint(want: Ty, got: Ty, what: string | undefined): string | undefined {
+  if (!isObjectTy(want) || !isObjectTy(got)) return undefined;
+  const tag = classTag(want);
+  if (tag === undefined || tag === classTag(got)) return undefined;
+  const w = String(want), g = String(got);
+  if (w.slice(w.indexOf("{")) !== g.slice(g.indexOf("{"))) return undefined;
+  // A NAME only. `exprText` also answers for `xs[0]` and `f(x)`, and `const xs[0]: Cell`
+  // is not a line anyone can paste — the hint falls back to `v` rather than print one.
+  // A character loop, not a regex: `src/` must stay inside the subset it compiles, and
+  // regex literals are not in it (the same reason `t.replace(/[^A-Za-z0-9_]/g, …)` in
+  // `mangle` below is spelled out by hand).
+  const v = what !== undefined && plainName(what) ? what : "v";
+  return `'${tag}' is NOMINAL here — the leading tag is part of the type, not decoration — so a structurally identical ` +
+    `untagged \`${g.slice(g.indexOf("{"))}\` is a DIFFERENT type and never becomes one by having the right fields. ` +
+    `An object literal takes the tag from its CONTEXT, so annotate the value where it is CREATED ` +
+    `(\`const ${v}: ${tag} = { … }\`), or pass the literal straight into the '${tag}' position. ` +
+    `On a value you cannot re-annotate, \`${what ?? "v"} as ${tag}\` is exact — the bodies are identical, so the ` +
+    `assertion is a pure retag and stays field-checked`;
+}
+
+/**
  * Decide `k in o` from the static type, or refuse — the `instanceof` split applied to key
  * presence (see `InExpr` in src/ast.ts for why it is the same question).
  *
@@ -2688,7 +2743,7 @@ class Checker {
           const t = this.type(d.init, scope, d.annot); // annotation is the context (e.g. `const a: T[] = []`)
           if (d.annot && d.annot !== t && (!this.assignable(d.annot, t) || !this.reshapable(d.init, d.annot, t))) {
             throw typeError(`'${d.name}' declared ${asWritten(d.annot, d.annotHead)} but initialized with ${t}`,
-              undefined, dictHint(d.annot, d.annotHead, t));
+              undefined, dictHint(d.annot, d.annotHead, t) ?? tagHint(d.annot, t, exprText(d.init)));
           }
           // Reshape the initializer literal to the declared slot layout (fill omitted
           // optional fields, box scalars into nullable fields) — runs AFTER inference,
@@ -3857,7 +3912,7 @@ class Checker {
           e.args.forEach((a, i) => {
             const exp = ctor.params[i + 1]!;
             const at = this.typeArg(a, exp, scope);
-            if (!this.fitsArg(exp, at, a)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument");
+            if (!this.fitsArg(exp, at, a)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`, exprLoc(a), tagHint(exp, at, exprText(a)), "this argument");
           });
           return objTy;
         }
@@ -4529,7 +4584,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = msig.params[i + 1]!;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${callee.property}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument");
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${callee.property}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), tagHint(exp, at, exprText(a)), "this argument");
         });
         return msig.ret;
       }
@@ -4715,7 +4770,7 @@ class Checker {
           // named function (no union arm, no nullable arm, no literal reshape). Safe because
           // `genCallValueFrom` now coerces each argument to the parameter type, exactly as
           // the direct-call path does.
-          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
+          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), tagHint(ps[i]!, at, exprText(a)), "this argument");
         });
         return funcRet(boundTy);
       }
@@ -4757,7 +4812,7 @@ class Checker {
         if (e.args.length !== ps.length) throw typeError(`'${e.callee.name}' expects ${ps.length} arguments, got ${e.args.length}`);
         e.args.forEach((a, i) => {
           const at = this.typeArg(a, ps[i]!, scope);
-          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
+          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), tagHint(ps[i]!, at, exprText(a)), "this argument");
         });
         callee.ty = self.ty;
         return funcRet(self.ty);
@@ -4783,7 +4838,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = i < fixed ? sig.params[i]! : restElem;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsArg(exp, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), undefined, "this argument");
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), tagHint(exp, at, exprText(a)), "this argument");
         });
         return sig.ret;
       }
@@ -4792,7 +4847,7 @@ class Checker {
       }
       e.args.forEach((a, i) => {
         const at = this.typeArg(a, sig.params[i]!, scope); // contextual: function-typed params type their arrow args
-        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
+        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`, exprLoc(a), tagHint(sig.params[i]!, at, exprText(a)), "this argument");
       });
       return sig.ret;
     }
@@ -4801,7 +4856,7 @@ class Checker {
     if (isFuncTy(ct)) {
       const ps = funcParams(ct);
       if (e.args.length !== ps.length) throw typeError(`call expects ${ps.length} arguments, got ${e.args.length}`);
-      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument"); });
+      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), tagHint(ps[i]!, at, exprText(a)), "this argument"); });
       return funcRet(ct);
     }
     throw nyi(NYI.CLOSURE, "unsupported call target");
@@ -6506,7 +6561,7 @@ class Checker {
       // forcing case. `null` in argTys means "any type", hence no hint.
       const want = sig.argTys[i];
       const at = want ? this.type(a, scope, want) : this.type(a, scope);
-      if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`, exprLoc(a), undefined, "this argument");
+      if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`, exprLoc(a), tagHint(want, at, exprText(a)), "this argument");
     });
   }
 }
