@@ -404,16 +404,17 @@ class Parser {
    *  fixpoint has to know to keep its hands off a declaration that names one. */
   private declaredClassNames = new Set<string>();
   /**
-   * Names whose declaration this parse CANNOT SEE — so "I have no shape for it" says
-   * nothing about whether it exists, and NT2003 must not fire. Two sources:
+   * Every identifier an `import` in this file BINDS, collected lexically from the token
+   * stream in the constructor (`scanExternalNames`) — like `declaredTypeLines` and for the
+   * same reason: a hoisting sub-parser starts in the MIDDLE of the file and never sees the
+   * import list at all. Its declaration is somewhere this parse CANNOT SEE, so "I have no
+   * shape for it" says nothing about whether it exists and NT2003 must not fire.
    *
-   *   1. every identifier an `import` in this file binds, collected lexically from the
-   *      token stream in the constructor (`scanExternalNames`), like `declaredTypeLines`
-   *      and for the same reason: a hoisting sub-parser starts in the MIDDLE of the file
-   *      and never sees the import list at all;
-   *   2. `ParseOpts.externalTypeNames`, for a caller parsing a FRAGMENT of a file whose
-   *      declarations it already stripped — `coverage`, which erases the module preamble
-   *      and every `type`/`interface` and then parses statement by statement.
+   * ONE SOURCE ONLY. This used to be the union of three, which made "a name in here" an
+   * ambiguous claim — `refuseUnknownName` could not tell an import from a stripped fragment
+   * name from a generic parameter, and so could not act differently on them. The other two
+   * are now `fragmentNames` and `genericParamNames`; `isExternal` is the old union, for the
+   * arms that genuinely do not care which.
    *
    * The import half is deliberately BLIND to whether the import actually seeded a type.
    * `modules.ts` seeds `typeEnv` from the exporting module's `finalTypes`, and a type that
@@ -427,6 +428,16 @@ class Parser {
    * namespace forms. A name in here is only ever a reason NOT to refuse.
    */
   private externalNames = new Set<string>();
+  /** SPLIT OUT of `externalNames`: names a fragment-parsing caller stripped and handed
+   *  back (`ParseOpts.externalTypeNames`; `coverage` is the only caller). */
+  private fragmentNames = new Set<string>();
+  /** SPLIT OUT of `externalNames`: a generic DECLARATION's own type parameters
+   *  (`type X<T> = …`), collected by `skipGenerics`. */
+  private genericParamNames = new Set<string>();
+  /** The union `refuseUnknownName` used to consult as one set. */
+  private isExternal(id: string): boolean {
+    return this.externalNames.has(id) || this.fragmentNames.has(id) || this.genericParamNames.has(id);
+  }
   /** True on a sub-parser built by `hoistTypeDecls` — i.e. this parse is resolving ONE
    *  declaration ahead of the file, and may only use what hoisting can actually see. */
   private hoisting = false;
@@ -539,7 +550,7 @@ class Parser {
     if (opts.asyncEnv) for (const n of opts.asyncEnv) this.asyncFns.add(n);
     this.file = opts.file;
     this.collectTypes = opts.collectTypes;
-    if (opts.externalTypeNames) for (const n of opts.externalTypeNames) this.externalNames.add(n);
+    if (opts.externalTypeNames) for (const n of opts.externalTypeNames) this.fragmentNames.add(n);
     // Pre-scan for declared type names. Lexical on purpose: `interface`/`type` followed by
     // an identifier is unambiguous in the token stream, and this has to run BEFORE any
     // parsing so a name's declaration is known no matter where it sits in the file.
@@ -925,29 +936,65 @@ class Parser {
    * this must stay a THROW and must never record the refusal as a side effect.
    */
   private refuseUnknownName(id: string): void {
-    // Imported, or stripped by a fragment-parsing caller. STILL ERASES, and it is the
-    // larger half of the problem NT1035 closes for ambient names — recorded here because
-    // this is where the next lane will look.
+    // A generic DECLARATION's own type parameter — `type Box<T> = { v: T }`. `T` IS
+    // declared (right there in the `<…>`, which is why `skipGenerics` collects it and why
+    // NT2003 must not fire), but nothing SUBSTITUTES the type argument, so falling through
+    // to the erasure made every instantiation the `number` shape whatever was written.
     //
-    // Measured over the src/ corpus: 2,400+ resolutions land here against 272 ambient ones,
-    // `Ty` alone 986 times, then `Expr` 699 and `Stmt` 444. Those three are unseeded
-    // because src/ast.ts refuses their declarations, so every annotation naming one across
-    // the tree silently says `number`.
+    // That is the ambient half's bug from a third source, and it reproduces all three of
+    // that bug's failures: a misattributed NT2001 ("'a' declared number[] but initialized
+    // with string[]" for `type Arr<T> = T[]; const a: Arr<string> = ["x"]`), a misdirected
+    // NT1002 ("number method 'toUpperCase'" on a value that is a string), and — the one
+    // that proves it is not merely a bad message — INVALID IR: `type W<T> = T; const v = s
+    // as W<string>; v + 1` reached clang as `store double %t1` against a `ptr`. The
+    // checker never noticed the string had been retyped, exactly as it did not for
+    // `s as unknown`. See test/type-erasure.test.ts.
     //
-    // And it is the same SILENT WRONG ANSWER, not merely a misattributed message. With a
-    // `lib.ts` exporting a recursive `type Node` (refused there, so never seeded) and a
-    // `main.ts` doing `const ns = xs as Node[]` over a `string[]`: node prints `lib x 2`
-    // and exits 0; nativets prints nothing and exits 255 — the exact signature `as any[]`
-    // had. `parseAssertedType` does NOT cover this arm, deliberately: `s.init as Stmt` is
-    // how src/ narrows a union today, so making it fatal would refuse the compiler's own
-    // source before there is anything to replace it with.
+    // NT1013 because that is what the gap IS — the argument needs monomorphizing, not a
+    // better name. It costs src/ nothing: the compiler's own source declares zero generic
+    // `type`/`interface` aliases, and zero of the 871 fallback resolutions in a linked
+    // `src/cli.ts` parse arrive from this source.
     //
-    // Why it cannot just be refused here: `externalNames` CONFLATES two cases — a name
-    // this file imports, and a name a fragment-parsing caller stripped before handing the
-    // text over. Refusing would be a false refusal on the second, so the two have to be
-    // told apart first. Blaming the annotation is also the wrong report for the first: the
-    // cause is the exporting module's own refusal, one file away.
-    if (this.externalNames.has(id)) return;
+    // AFTER the import/fragment arms would be wrong — this one is checked FIRST, but only
+    // for a name those two do NOT also claim. `genericParamNames` is file-wide and
+    // over-collected on purpose (see `skipGenerics`), and the standing rule for all three
+    // sets is that over-collection may only ever PRESERVE today's behavior for a name, so a
+    // `T` that is also an import binding keeps the old escape rather than gaining a refusal.
+    if (this.genericParamNames.has(id) && !this.externalNames.has(id) && !this.fragmentNames.has(id)) {
+      const t0 = this.toks[this.pos - 1];
+      throw nyi(
+        NYI.GENERIC,
+        `the type parameter '${id}' of a generic type alias`,
+        `'${id}' is a type PARAMETER, and nothing in this subset substitutes the type argument for it — so the declaration would silently become its \`number\` shape for every instantiation. Write the concrete type out, or declare one alias per instantiation (\`type ArrOfString = string[]\`)`,
+        t0 === undefined ? undefined : { line: t0.line, col: t0.col },
+      );
+    }
+    // Imported (unseeded), or stripped by a fragment-parsing caller. STILL ERASES.
+    //
+    // MEASURED, because the previous note here over-stated this by conflating two
+    // populations. Over a linked `src/cli.ts` parse — the real compile path, what
+    // test/blocker-metric.ts measures — 871 resolutions land here and ALL 871 are imports
+    // (`Ty` 330, `Expr` 235, `Stmt` 152; 144 of the 871 sit inside an assertion). The
+    // "2,400" figure was the COVERAGE path, where 1,355 of 2,225 hits are `fragment` —
+    // coverage strips every `type`/`interface` and hands the bare names back, so those are
+    // an artifact of that tool and cannot occur in a real compile.
+    //
+    // So the CONFLATION is real but it is not what blocks a refusal: the fragment case
+    // never arises here outside `coverage`. What blocks it is that an unseeded import is
+    // genuinely declared one file over — `modules.ts` seeds `typeEnv` from the exporting
+    // module's `finalTypes`, and a type that module refused for its own reason is simply
+    // absent — so refusing would blame the annotation for a cause one file away, and would
+    // refuse 871 sites of the compiler's own source. That diagnostic belongs to the linker,
+    // which is the only pass that can tell "your dependency refused this type" from "no
+    // such name". Reaching this line with an import name is exactly that condition.
+    //
+    // The silent wrong answer previously recorded here as motivation — a `lib.ts` recursive
+    // `type Node`, a `main.ts` doing `xs as Node[]` — is NOT caused by this erasure. It
+    // reproduces identically with a local, fully-resolved type and no import at all
+    // (`type T = {v:string}; const raw = {v:"hi"}; const n = raw as T; console.log(n.v)`
+    // traps: node prints `hi`, the binary takes SIGTRAP). That is the unchecked `as` retype
+    // on an identifier operand, not a resolution failure.
+    if (this.isExternal(id)) return;
     // A global the program never had to declare — and one nothing above claimed, so
     // returning here would hand the caller its `number`. REFUSED instead (NT1035): the
     // name is real TypeScript, but `number` is not what it means, and a wrong type that
@@ -1640,21 +1687,24 @@ class Parser {
     }
     return names;
   }
-  // Skip an erased generic type-parameter list (names discarded).
   /**
    * A generic DECLARATION's own type parameters (`type X<T> = …`, `interface X<T> { … }`).
    *
-   * They are still ERASED — `T` in the body falls back to `number` exactly as it always
-   * did, and nothing about what the declaration means changes here. What changed is that
-   * "declared nowhere" is now a refusal (NT2003), and `T` IS declared: right there in the
-   * `<…>` this function was throwing away. So the names are kept as a reason NOT to refuse
-   * — the same role an import binding plays — rather than as a reason to resolve, which
-   * would make `T` a `#T` marker and change every generic alias in the tree.
+   * Collected, not discarded, because `T` IS declared — right there in the `<…>` this
+   * function used to throw away — so NT2003 ("Cannot find name") would be a false refusal.
    *
-   * Not `typeParamScopes` for that reason, and file-wide rather than scoped for the same
-   * one: over-collecting here can only ever preserve today's behavior for a name.
+   * They no longer ERASE. `T` in the body used to fall through to `number`, which made
+   * every instantiation the `number` shape whatever argument was written; that is NT1013
+   * now (see `refuseUnknownName`), because the erasure escaped the checker into codegen.
+   * Kept in their OWN set for that: while these names shared `externalNames` with import
+   * bindings, "the name is in the set" could not distinguish the two and the arm could not
+   * refuse one without refusing the other.
+   *
+   * Not `typeParamScopes`, which is the mechanism for a generic FUNCTION's parameters —
+   * those are monomorphized for real and must keep working. File-wide rather than scoped
+   * because it only has to be a reason to refuse the declaration, not a resolution.
    */
-  private skipGenerics(): void { for (const p of this.parseTypeParamList()) this.externalNames.add(p); }
+  private skipGenerics(): void { for (const p of this.parseTypeParamList()) this.genericParamNames.add(p); }
 
   // `type X = <type>;` — record the alias, erase the declaration. RHS uses the normal
   // type grammar (so `type Dir = "n" | "s"` collapses to string; a general union throws NYI).

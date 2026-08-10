@@ -1046,6 +1046,43 @@ annotation inside an asserted record, and a type argument — because `node as
 Record<string, unknown>` is how every reflective walk in `src/` opens an unidentified node.
 That boundary is a consequence of the residue and disappears with it.
 
+### Generic `type`/`interface` parameters (`NT1013`) — the same erasure, a third source
+
+`skipGenerics` in `src/parser.ts` collects a generic *declaration's* own parameters
+(`type Box<T> = { v: T }`) so `NT2003` will not fire on `T` — it **is** declared, right
+there in the angle brackets. But that escape returned control to the same last line of
+`resolveNamed`, so `T` in the body answered `number`, and every instantiation became the
+`number` shape whatever type argument was written.
+
+This is the `NT1035` bug from a third source, and it reproduces all three of that entry's
+failures:
+
+| written | node | before `NT1013` |
+|---|---|---|
+| `type Arr<T> = T[]; const a: Arr<string> = ["x"]` | `x` | `'a' declared number[] but initialized with string[]` — a type the source never contains |
+| `type Id<T> = T; (s as Id<string>).toUpperCase()` | `HI` | `number method 'toUpperCase' is not supported yet`, about a string |
+| `type W<T> = T; const v = s as W<string>; v + 1` | `51` | clang's `'%t1' defined with type 'ptr' but expected 'double'` |
+
+The third is the telling one: in an assertion the named type is *adopted* rather than
+checked, so nothing in the checker noticed a `string` had been retyped to a `double` and the
+erasure reached **codegen**. A build error is the lucky outcome — the two-`ptr` case
+(`as any[]`) is the one LLVM cannot catch, and that one prints nothing and exits 255.
+
+`NT1013` (`GENERIC`, "generics need monomorphization") because that is what the gap actually
+is: nothing in this subset substitutes the type argument. The hint says to write the concrete
+type, or to declare one alias per instantiation (`type ArrOfString = string[]`).
+
+**Cost: two declarations, both in `test/forward-type-ref.test.ts`.** The whole tree, `src/`
+included, declares no other generic `type`/`interface`, and zero of the 871 fallback
+resolutions in a linked `src/cli.ts` parse arrive from this source. The guard those two
+declarations came from asserted the erasure was harmless, and only passed because both
+instantiate at `<number>` — the one argument the erasure gets right.
+
+**Generic FUNCTIONS are untouched.** Their parameters live in `typeParamScopes` and are
+monomorphized for real; `function first<T>(xs: T[]): T` is the one generic form the subset
+genuinely supports. The refusal keys on `genericParamNames`, not on "a `<` after the name",
+precisely to keep that line.
+
 ### Inline import types (`import("./m").T`) — the same last line, reached differently
 
 `parseImportType` **drops the module path** and resolves the bare name against *this* file.

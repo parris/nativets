@@ -323,3 +323,66 @@ console.log(unknown + never, object(unknown));
     expect(ours.exitCode).toBe(oracle.exitCode);
   });
 });
+
+/*
+ * A GENERIC DECLARATION'S OWN TYPE PARAMETERS — `type Box<T> = { v: T }`.
+ *
+ * The same erasure as the ambient half, from a different source. `skipGenerics`
+ * (src/parser.ts) collects a generic declaration's `<T>` names so `refuseUnknownName` will
+ * not report NT2003 on them: `T` IS declared, right there in the angle brackets. But the
+ * escape returned control to `resolveNamed`'s last line, so `T` in the body answered
+ * `number` — and every instantiation of the alias silently became the `number` shape,
+ * whatever type argument was written.
+ *
+ * It reproduces all THREE failures this file's header lists for the ambient half:
+ *
+ *   - A MISATTRIBUTED diagnostic. `type Arr<T> = T[]; const a: Arr<string> = ["x"]` is
+ *     rejected "'a' declared number[] but initialized with string[]" — naming a type the
+ *     source never contains, and refusing a program node accepts.
+ *   - clang's error, verbatim. `type W<T> = T; const v = s as W<string>; v + 1` emitted
+ *     "'%t1' defined with type 'ptr' but expected 'double'". The erasure reached CODEGEN:
+ *     nothing in the checker noticed that a string had been retyped to a double.
+ *   - A misdirected method refusal — `s as Id<string>` then `.toUpperCase()` reports
+ *     "number method 'toUpperCase' is not supported yet" about a value that is a string.
+ *
+ * Refused as NT1013 (`GENERIC`, "generics need monomorphization"), which is what the gap
+ * actually is: a generic type alias needs the type argument SUBSTITUTED, and nothing in
+ * this subset does that yet. The refusal costs src/ nothing — the compiler's own source
+ * declares zero generic `type`/`interface` aliases, and zero of the 871 fallback
+ * resolutions in a linked `src/cli.ts` parse come from this source.
+ */
+describe("a generic type alias's own parameters no longer erase to `number`", () => {
+  /* The misattributed diagnostic: a program node runs, refused for the wrong reason. */
+  test("an applied generic alias is refused, not silently retyped to number", () => {
+    expectRejected(`type Arr<T> = T[];\nconst a: Arr<string> = ["x"];\nconsole.log(a[0]);\n`, "NT1013", "type parameter 'T'");
+  });
+
+  /*
+   * THE ONE THAT PROVES IT IS NOT JUST A BAD MESSAGE. In an ASSERTION the named type is
+   * ADOPTED rather than checked, so the erasure retyped a `string` to a `double` and
+   * NOTHING in the checker objected — it reached clang, which rejected the module with
+   * "'%t1' defined with type 'ptr' but expected 'double'". Same escape as `s as unknown`
+   * in the ambient half. A build error is the lucky outcome: the two `ptr` case (`a as
+   * any[]`) is what LLVM cannot catch, and that one printed nothing and exited 255.
+   */
+  test("a generic alias in an assertion is refused before it reaches codegen", () => {
+    expectRejected(`type W<T> = T;\nconst s = "5";\nconst v = s as W<string>;\nconsole.log(v + 1);\n`, "NT1013", "type parameter 'T'");
+  });
+
+  /*
+   * THE OVER-REFUSAL GUARD, and the reason the check keys on `genericParamNames` rather
+   * than on "there is a `<` after the name". A generic FUNCTION's parameters live in
+   * `typeParamScopes` and are monomorphized for real, so they must be untouched — this is
+   * the one generic form the subset genuinely supports.
+   */
+  test("a generic FUNCTION is untouched by the refusal", async () => {
+    const source = `
+function first<T>(xs: T[]): T { return xs[0]; }
+console.log(first<string>(["a", "b"]), first<number>([1, 2]));
+`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});

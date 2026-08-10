@@ -194,19 +194,31 @@ console.log(f(new MyC(7)));`);
 
   // THE OVER-REFUSAL GUARD. A generic DECLARATION's own parameter is declared right there
   // in the `<…>`, but `skipGenerics` throws the names away — so `T` in the body reached the
-  // fallback looking exactly like a name that exists nowhere. It compiled before NT2003 and
-  // it has to keep compiling: the parameter erases to `number` as it always did, and only
-  // the false refusal is gone. Caught by probing generic declarations after the fact, not by
-  // the corpus, which happens not to contain one.
-  test("a generic type/interface declaration's own parameter is not a missing name", async () => {
-    await matchesNode(`
-interface Box<T> { v: T }
-const b: Box<number> = { v: 3 };
-console.log(b.v);`);
-    await matchesNode(`
-type Wrap<T> = { inner: T };
-const w: Wrap<number> = { inner: 7 };
-console.log(w.inner);`);
+  // fallback looking exactly like a name that exists nowhere. NT2003 must not fire on it:
+  // that is a REAL name, and "Cannot find name 'T'" would be a false refusal.
+  //
+  // That intent is unchanged; the OUTCOME is. This used to assert the erasure was harmless
+  // and let both programs compile, and it only ever passed because both instantiate at
+  // `<number>` — the one type argument the erasure happens to get right. Measured against
+  // any other argument the erasure is the same destructive bug NT1035 closes for ambient
+  // names: `type Arr<T> = T[]; const a: Arr<string> = ["x"]` is refused "declared number[]
+  // but initialized with string[]" (a type the source never contains), and `type W<T> = T;
+  // const v = s as W<string>; v + 1` reaches clang as `store double` against a `ptr` — the
+  // erasure escaping the checker into codegen. So it is NT1013 (`GENERIC`) now: the gap is
+  // that nothing substitutes the type argument. See test/type-erasure.test.ts.
+  //
+  // The cost of the change is two declarations, both of them here — the whole tree, src/
+  // included, declares no other generic `type`/`interface`.
+  test("a generic type/interface declaration's own parameter is refused as generic, not as a missing name", () => {
+    for (const source of [
+      `interface Box<T> { v: T }\nconst b: Box<number> = { v: 3 };\nconsole.log(b.v);`,
+      `type Wrap<T> = { inner: T };\nconst w: Wrap<number> = { inner: 7 };\nconsole.log(w.inner);`,
+    ]) {
+      const r = reject(source);
+      expect(r.code).toBe("NT1013");
+      expect(r.message).toContain("type parameter 'T'");
+      expect(r.message).not.toContain("Cannot find name"); // the guard this test exists for
+    }
   });
 
   // SPECULATION SAFETY, and it is the biggest structural risk in the whole refusal.
