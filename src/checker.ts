@@ -3033,12 +3033,29 @@ class Checker {
         // diagnostics still propagate, so `e.kind === "A" ? e.text : "-"` stays refused; and
         // a fallback that cannot type the arms at all re-throws the original join error
         // rather than the un-narrowed read's, which is the more informative of the two.
+        //
+        // `typeArms` is a MUTATION, not a query: `this.type` writes the type it computes
+        // onto the AST nodes themselves, and codegen reads them back. So a fallback that
+        // fails PART WAY leaves the arms half-retyped — `x.kind === "Neg" ? x.inner : x`
+        // retypes the receiver `x` to the un-narrowed union and only then throws on
+        // `.inner`, and the `catch` swallows the throw but not the damage. That is
+        // invisible today only because every failing path below re-throws, so codegen never
+        // sees the AST; the moment any widening rescues `j` after this point, codegen gets
+        // an AST with the narrowing rubbed out and reports the internal
+        // "not at one slot in every member". Re-running the NARROWED pass on failure puts
+        // the arms back exactly as the successful pass at the top left them, so the
+        // invariant this block restores — the AST always describes the typing `a`/`b`/`j`
+        // report — holds however this expression is later widened. Any new widening should
+        // still prefer to run BEFORE the fallback; this makes the order safe, not moot.
         if (j === undefined && (con.narrowed || alt.narrowed)) {
+          let took = false;
           try {
             const [a2, b2] = typeArms(false);
             const j2 = joinTernary(a2, b2);
-            if (j2 !== undefined) { a = a2; b = b2; j = j2; }
+            if (j2 !== undefined) { a = a2; b = b2; j = j2; took = true; }
           } catch { /* keep the join error below */ }
+          // Not `finally`: on the path we KEEP, the un-narrowed types are the answer.
+          if (!took) try { typeArms(true); } catch { /* it already succeeded once above */ }
         }
         if (j === undefined) throw typeError(`Ternary branches differ: ${a} vs ${b}`, exprLoc(e), thisNarrowHint(e, a, b));
         return j;

@@ -9,8 +9,16 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { compileAndRun, expectMatchesNode } from "./harness.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+
+import { compileAndRun, expectMatchesNode, emitIR } from "./harness.ts";
 import { sourceToIR } from "../src/driver.ts";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** The NT code a program is REFUSED with (`""` if it compiles) — diagnostics are
  *  thrown, so a rejection cannot be observed through `compileAndRun`. */
@@ -394,4 +402,156 @@ console.log(__arrLive());`;
     expect(r.stdout).toBe("1\n0\n"); // the superseded ["a","b"] was freed; no leak, no double free
     expect(r.exitCode).toBe(0);
   });
+});
+
+/*
+ * A `?:` ARM IN A CONSUMING POSITION MOVES.
+ *
+ * `Analyzer.expr`'s `ConditionalExpr` walked both arms with a hard-coded `consume: false`,
+ * throwing away the caller's `consume`. The move checker therefore could not see through a
+ * `?:`, and EVERY ownership rule was bypassable by laundering the move through one — the
+ * identical shape `AsExpr` was fixed for in 481c463, one node type over.
+ *
+ *   const y: string[] = x;          // error[NT1604]: cannot move out of `x`
+ *   const y: string[] = c ? x : o;  // the same move — compiled, exit 0
+ *
+ * Not a refusal-only defect: the second line gives one allocation two owners, so the
+ * callee frees the caller's array. `test/ownership/ternary-move.ts` pins the diagnostics;
+ * what is pinned HERE is that the accepted programs are still memory-correct, and the ASan
+ * gate at the bottom is the only assertion in this file that can see the double free at
+ * all — the live counters balance to zero just as happily while a program reads freed
+ * memory.
+ */
+describe("drops: a `?:` arm moves (NT1604 was bypassable through a ternary)", () => {
+  test("the headline bypass is refused — `c ? x : o` is the same move as `x`", () => {
+    const bypass = `
+function use(a: string[]): number { return a.length; }
+function pick(x: string[], o: string[], c: boolean): number {
+  const y: string[] = c ? x : o;
+  return use(y);
+}
+console.log(pick(["a"], ["b", "c"], true));`;
+    expect(rejectCode(bypass)).toBe("NT1604");
+    // ...and it is refused for the SAME reason the un-laundered spelling always was.
+    expect(rejectCode(bypass.replace("c ? x : o", "x"))).toBe("NT1604");
+  });
+
+  test("a union member returned through a `?:` is refused — this one was a double free", () => {
+    // The `opt(e, on) { return on ? e : undefined }` helper shape that test/unions.test.ts
+    // and test/unions/narrow-nullable.ts both used to rest on. With a plain (non-boxed)
+    // return type ASan calls it "attempting double-free"; the program printed NOTHING
+    // where node prints its output, because the allocator's abort discards buffered stdout.
+    expect(rejectCode(`
+interface A { kind: "A"; left: number }
+interface B { kind: "B"; text: string }
+type E = A | B;
+function pick(e: E, f: E): E { return e.kind === "A" ? e : f; }
+function g(): string {
+  const a: E = { kind: "A", left: 1 };
+  const b: E = { kind: "B", text: "x" };
+  const r: E = pick(a, b);
+  return r.kind;
+}
+console.log(g());`)).toBe("NT1604");
+  });
+
+  test("reading THROUGH the result is a borrow, and still compiles", async () => {
+    // The receiver spelling is what keeps the union-join shape `(e.kind === "A" ? e : f).kind`
+    // legal — the fix must not swallow it, or it would take the useful half of `?:` with it.
+    // The arrays are LOCALS, not literal arguments: an array literal passed straight to a
+    // call is a temporary nothing owns, and it leaks on `main` too (pre-existing, and
+    // unrelated to `?:`), which would drown out the counter this test is here to read.
+    const src = `
+function longer(x: string[], o: string[]): number { return (x.length > o.length ? x : o).length; }
+function g(): number { const a: string[] = ["a"]; const b: string[] = ["b", "c"]; return longer(a, b); }
+console.log(g());
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("2\n0\n"); // both arrays freed exactly once by their owners
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("fresh values in both arms are freed exactly once", async () => {
+    const src = `
+function f(c: boolean): number { const y: string[] = c ? ["a"] : ["b", "c"]; return y.length; }
+console.log(f(true));
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("1\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("one place arm + one fresh arm: still exactly one free, no leak", async () => {
+    // `true ? a : ["z"]` marks `a` moved and makes `y` the owner. Only one arm ever
+    // allocates, so this balances to zero — it was a heap-use-after-free before.
+    const src = `
+function f(): number { const a: string[] = ["x"]; const y: string[] = true ? a : ["z"]; return y.length; }
+console.log(f());
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("1\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("KNOWN COST: two owned locals as the two arms LEAK the arm not taken", async () => {
+    // Both arms are marked moved, but only the one that actually ran is reachable through
+    // `y`, so the other is never freed. Making this exact needs a per-path drop flag this
+    // pass does not have — the same one the NT1608 rule above also declined to invent. A
+    // LEAK is the better of the two failures and node's answer is still exact: before the
+    // fix this shape was a heap-use-after-free.
+    const src = `
+function f(c: boolean): number { const a: string[] = ["x"]; const b: string[] = ["y", "z"]; const y: string[] = c ? a : b; return y.length; }
+console.log(f(true));
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("1\n1\n"); // 1 leaked (was: use-after-free). node prints 1.
+    expect(r.exitCode).toBe(0);
+  });
+
+  /*
+   * The sanitizer gate — the only assertion here that can see the double free this fix is
+   * about. Same construction as test/hof-drops.test.ts and test/transients.test.ts: ASan +
+   * UBSan, `-fno-sanitize-recover` so every finding is fatal, LSan left OFF (it does not
+   * exist on macOS, and the leak half is gated precisely by `__arrLive()` above).
+   *
+   * Proved by MUTATION: restore `consume: false` on either arm in `ConditionalExpr` and
+   * `CHURN` below builds into a binary that dies with
+   * `AddressSanitizer: heap-use-after-free ... in nt_arr_free`.
+   */
+  test("ASan + UBSan: the accepted `?:` shapes are free of double frees and use-after-free", () => {
+    // Every array is a LOCAL, so `__arrLive()` reads the drop paths rather than the
+    // pre-existing leak of array-literal arguments (see the borrow test above).
+    const CHURN = `
+function longer(x: string[], o: string[]): number { return (x.length > o.length ? x : o).length; }
+function borrowed(): number { const a: string[] = ["a"]; const b: string[] = ["b", "c"]; return longer(a, b); }
+function fresh(c: boolean): number { const y: string[] = c ? ["a"] : ["b", "c"]; return y.length; }
+function mixed(c: boolean): number { const a: string[] = ["x"]; const y: string[] = c ? a : ["z"]; return y.length; }
+let n = 0;
+for (let i = 0; i < 200; i = i + 1) {
+  n = n + borrowed() + fresh(i % 2 === 0) + mixed(true);
+}
+console.log(n);
+console.log(__arrLive());`;
+    const dir = mkdtempSync(join(tmpdir(), "nativets-ternasan-"));
+    try {
+      const ll = join(dir, "module.ll");
+      writeFileSync(ll, emitIR(CHURN));
+      const bin = join(dir, "prog");
+      const built = spawnSync("clang", [
+        "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+        ll, join(ROOT, "runtime/runtime.c"), "-lm", "-o", bin,
+      ], { encoding: "utf8" });
+      expect(built.status).toBe(0);
+      const run = spawnSync(bin, [], {
+        encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+        env: { ...process.env, ASAN_OPTIONS: "detect_leaks=0" },
+      });
+      expect(run.stderr).not.toContain("AddressSanitizer");
+      expect(run.stderr).not.toContain("runtime error");
+      expect(run.status).toBe(0);
+      expect(run.stdout).toBe("900\n0\n"); // node agrees on 900
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

@@ -3392,9 +3392,70 @@ un-narrowed typing is still a correct account of the same program, so `Condition
 to it when the join fails. This only ever widens: the narrowed pass runs FIRST and its diagnostics
 still propagate, so `e.kind === "A" ? e.text : "-"` stays refused.
 
+That fallback is a MUTATION, not a query, and it now UNDOES itself when it does not take.
+`Checker.type` writes the type it computes onto the AST nodes and codegen reads them back, so
+re-typing the arms un-narrowed rewrites them in place: on `x.kind === "Neg" ? x.inner : x` it
+retypes the receiver `x` to the whole union and only *then* throws on `.inner` (unreadable there),
+and the `catch` swallowed the throw but not the damage. Nothing could observe that while every
+failing path re-threw — codegen never saw the AST — but the moment any widening rescued the join
+after that point, codegen got an AST with the narrowing rubbed out and reported the internal
+"not at one slot in every member" instead of a refusal. The fallback re-runs the narrowed pass on
+failure, so the AST always describes the typing that was actually returned. A new widening should
+still prefer to run BEFORE the fallback; this makes that ordering safe rather than moot.
+
 **Still refused, unchanged:** `e && e.kind === "A"` as a ternary condition, for exactly the reason
 the fourth-wiring section gives — a bare nullable as an `&&` operand is `NT2001` in `if` too. It is
 not specific to ternaries.
+
+### A `?:` ARM IN A CONSUMING POSITION MOVES — `NT1604` was bypassable through a ternary
+
+`Ownership.expr`'s `ConditionalExpr` walked both arms with a hard-coded `consume: false`, throwing
+away the caller's `consume`. The move checker therefore could not see through a `?:` **at all**, so
+every ownership rule had a one-token bypass:
+
+```ts
+function pick(x: string[], o: string[], c: boolean): number {
+  const y: string[] = x;          // error[NT1604]: cannot move out of `x`: it is borrowed
+  const y: string[] = c ? x : o;  // the IDENTICAL move — compiled, exit 0
+  return y.length;
+}
+```
+
+This is the same defect as `AsExpr`'s (see "A STATIC `expr as T` is CHECKED too"), one node type
+over, and it was **not refusal-only**. The laundered binding becomes a second owner of a value the
+caller still owns, so the callee frees it: ASan reports `heap-use-after-free` in `nt_arr_free` for
+the declarator shape and *attempting double-free* when a union member is returned through an arm.
+Both are SILENT on an ordinary run — the allocator's abort discards buffered stdout, so the binary
+exits 0 having printed a prefix of the right answer. `move(x)` in an arm was always caught (its own
+case consumes), which is why only the IMPLICIT move survived.
+
+The arms now inherit `consume`; only the TEST is unconditionally a borrow. Reading THROUGH the
+result is still a borrow, which is what keeps the useful half — `(e.kind === "A" ? e : f).kind`,
+the union-join shape from the section above, compiles unchanged.
+
+**MOVE, not the ALIAS reading `as` takes.** `as` retypes ONE place, so its result is always the
+operand's allocation; a `?:` picks between two, and an arm can be a fresh value (`c ? a : ["z"]`)
+that nothing else will ever free — aliasing would leak those. The cost is the mirror case, two
+owned locals as the two arms:
+
+```ts
+const a: string[] = ["x"]; const b: string[] = ["y", "z"];
+const y: string[] = c ? a : b;   // both marked moved; only the one that RAN is reachable
+```
+
+Both are marked moved but only one is reachable through `y`, so the other **leaks**. Making that
+exact needs a per-path drop flag this pass does not have — the same one the `NT1608` linear-parameter
+rule also declined to invent — and a leak is the better of the two failures. It was a
+use-after-free before. node's answer is still exact in every accepted case.
+
+**What this removed.** Five tests rested on the hole, all of them on the same unsound spelling —
+a helper that returns a borrowed parameter through an arm (`opt(e, on) { return on ? e : undefined }`,
+and `pick(e, f) { return e.kind === "A" ? e : f }`). Both are now written to BUILD their value in
+the arm, or to read through the result; `test/unions/narrow-nullable.ts` produces byte-identical
+output under node, so its `.expected` file needed no change. In `src/`, exactly one site changed
+behaviour — `Codegen.msgValue`, whose `if` spelling was ALREADY `NT1604`, so the fix makes the two
+spellings agree rather than narrowing anything. Pinned in `test/ownership/ternary-move.ts` and
+`test/drops.test.ts` (which carries the ASan gate).
 
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
