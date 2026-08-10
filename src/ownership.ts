@@ -277,6 +277,49 @@ function lineOf(e: Expr): number {
   }
 }
 
+/**
+ * The array HOFs whose callback codegen INLINES rather than allocating a closure for.
+ *
+ * Kept in step with `genArrayMethod`'s dispatch (src/codegen.ts) and with the checker's
+ * `inferHof`/`inferForEach`/`inferSearchHof`, which already require the argument to be an
+ * arrow LITERAL and refuse a function value ("array .map needs an inline arrow"). The
+ * comparator of `.toSorted(cmp)` is deliberately ABSENT: that one goes through
+ * `Module.cmpShim`, which reads a real `[fn_ptr, caps…]` env, so it is a closure in every
+ * sense this file cares about.
+ */
+const INLINED_HOFS = new Set([
+  "forEach", "map", "filter", "reduce", "flatMap",
+  "some", "every", "find", "findIndex", "findLast", "findLastIndex",
+]);
+
+/**
+ * The arrow argument of an inlined-HOF call, if this call is one.
+ *
+ * WHY THIS PREDICATE EXISTS. `arrowNames` — "mentioned inside ANY arrow" — is the
+ * conservative stand-in for "a heap env holds a second pointer to this". For an inlined
+ * HOF callback that premise is FALSE: `genForEach`/`genMap`/… emit the body straight into
+ * the enclosing frame as a loop, so no `nt_obj_new` env is allocated, no pointer is
+ * snapshotted into one, and the body cannot outlive the statement — it IS the statement.
+ * `envArrowNames` below is the same over-approximation restricted to arrows that really
+ * do get an env, and it is what the `.push` rule consults.
+ *
+ * Guarded on the RECEIVER'S TYPE, not the method name alone: a user class may define its
+ * own `.map`, and ITS argument is an ordinary closure value. `isArrayTy` is exactly the
+ * test `genExpr` uses to route into `genArrayMethod` at all.
+ *
+ * Takes the three PRIMITIVES rather than the `CallExpr`, so that `src/` stays inside the
+ * subset it compiles: an `Expr`-typed parameter cannot have `.callee`/`.ty` read off it
+ * without narrowing, and this checker refuses that with NT2001 ("Property 'ty' does not
+ * exist on <UNION> — narrow it first"). Its sibling `retainsReceiver` above takes the
+ * `Expr` and is a self-hosting blocker for exactly that reason; this one is not. The
+ * caller reads the three fields where `e` is ALREADY narrowed to a `CallExpr`, reusing the
+ * same accesses the `arrPush` test a few lines below it already performs.
+ */
+function isInlinedHofArrow(property: string, recvTy: Ty | undefined, cbKind: string): boolean {
+  if (!INLINED_HOFS.has(property) || cbKind !== "ArrowFunction") return false;
+  return recvTy !== undefined && isArrayTy(recvTy);
+}
+
 /** Peel a method CHAIN back to what it started from: `a.bump().bump()` ⇒ `a`. */
 function chainRoot(e: Expr): Expr {
   let cur = e;
@@ -353,6 +396,26 @@ class Analyzer {
   /** Collection mode: record every name an arrow body mentions (pass 1). */
   private arrowDepth = 0;
   readonly arrowNames = new Set<string>();
+
+  /**
+   * `arrowNames`, restricted to arrows that actually GET a heap env — i.e. every arrow
+   * except an inlined HOF callback (`inlinedHofCallback`). Same pass, same
+   * over-approximation, one nesting counter narrower.
+   *
+   * The two sets are deliberately kept APART rather than merged. `captured` gates DROP
+   * decisions (`droppable`, `dropOld`), where being conservative costs a leak; this one
+   * gates a REFUSAL, where being conservative costs a correct program. Relaxing a drop is
+   * the direction that can mint a use-after-free, so it is not relaxed here.
+   */
+  private envArrowDepth = 0;
+  readonly envArrowNames = new Set<string>();
+
+  /** Arrow literals this walk has identified as inlined HOF callbacks — recorded by the
+   *  `CallExpr` case for the `ArrowFunction` case, which has no parent to ask. */
+  private readonly inlinedCallbacks = new Set<Expr>();
+
+  /** Names an arrow WITH AN ENV mentions — set from pass 1's `envArrowNames`. */
+  envCaptured = new Set<string>();
 
   /** Names bound to a BORROW rather than owned: by-borrow params (whole scope) and for-of
    *  loop variables over a LINEAR element (loop body). Moving out of any is E0507 (NT1604). */
@@ -739,6 +802,7 @@ class Analyzer {
     switch (e.kind) {
       case "Identifier": {
         if (this.arrowDepth > 0) this.arrowNames.add(e.name);
+        if (this.envArrowDepth > 0) this.envArrowNames.add(e.name);
         // Moving out of a borrowed binding (by-borrow param / for-of element) is E0507.
         if (consume && this.borrowBindings.has(e.name)) {
           const owner = this.aliasOf.get(e.name);
@@ -778,6 +842,11 @@ class Analyzer {
         return;
       }
       case "CallExpr": {
+        // Record the inlined-HOF callback BEFORE anything can walk into it, so the
+        // `ArrowFunction` case below can tell "loop body" from "closure with an env".
+        const cb0 = e.args[0];
+        if (e.callee.kind === "MemberExpr" && cb0 !== undefined
+          && isInlinedHofArrow(e.callee.property, e.callee.object.ty, cb0.kind)) this.inlinedCallbacks.add(cb0);
         this.checkMutableArgs(e);
         if (isMoveCall(e)) { this.expr(e.args[0]!, state, true); return; }
         if (isIdentityCall(e)) { this.expr(e.args[0]!, state, consume); return; }
@@ -876,18 +945,39 @@ class Analyzer {
           //   - a PARAMETER is a borrow and cannot carry the attribute (the attribute is
           //     on a `let`/`const`), so the checker's NT1606 already covers it;
           //   - `this.f`, `xs[0]`, `f()` name no binding, so they are NT1606 too.
-          // The one hole the type/flow layers cannot see is a CLOSURE: an arrow copies the
-          // pointer into an env that this scope cannot null and that may outlive the
-          // binding, so a push through it is a write to storage we may already have freed.
-          // `captured` is the scan pass's over-approximation ("mentioned inside ANY arrow
-          // in this scope"), which refuses the push whether it is written inside the arrow
-          // or outside it while an arrow holds the name. Over-refusal, never a UAF.
-          if (e.callee.property === "push" && this.linear.has(recv) && this.captured.has(recv)) {
+          // The one hole the type/flow layers cannot see is a CLOSURE WITH AN ENV: a bound
+          // arrow copies the array pointer into an `nt_obj_new` block that this scope
+          // cannot null and that may outlive the binding, so a push through it is a write
+          // to storage we may already have freed. `envCaptured` is the scan pass's
+          // over-approximation ("mentioned inside any arrow that GETS an env"), which
+          // refuses the push whether it is written inside the arrow or outside it while an
+          // arrow holds the name. Over-refusal, never a UAF.
+          //
+          // An INLINED HOF callback is deliberately NOT in that set, and this is where the
+          // rule used to be wrong: `xs.forEach((x) => out.push(x))` was refused with a
+          // reason that does not apply to it. `genForEach`/`genMap`/… emit the arrow's
+          // statements straight into the enclosing frame as a loop — no env is allocated,
+          // no pointer is snapshotted, and the body cannot outlive the statement it is
+          // written in, because it IS the statement. The accepted program is the `for-of`
+          // loop it desugars to, which has always compiled; `nt_arr_push` mutates the
+          // NtArray header in place (only `a->data` is reallocated), so the accumulator's
+          // pointer does not move under the loop either. See docs/divergences.md.
+          if (e.callee.property === "push" && this.linear.has(recv) && this.envCaptured.has(recv)) {
+            // WHICH ADVICE IS TRUE depends on where this push is written. Inside an
+            // inlined callback the push itself is already the recommended spelling, and
+            // telling the author to write what they just wrote is the "hint that compiles
+            // to a wrong answer" failure this file has hit before: the env belongs to some
+            // OTHER arrow in the scope, and that arrow is what has to move.
+            const insideInlined = this.arrowDepth > 0 && this.envArrowDepth === 0;
             this.report({
               code: OWN_CODES.MUTATE_THROUGH_BORROW,
-              message: `cannot \`.push\` to \`${recv}\`: a closure captures it, so this scope is not its only handle`,
+              message: insideInlined
+                ? `cannot \`.push\` to \`${recv}\`: this callback is inlined, but ANOTHER arrow in this scope captures \`${recv}\` into its own environment`
+                : `cannot \`.push\` to \`${recv}\`: a closure with its own environment captures it, so this scope is not its only handle`,
               line: e.callee.object.loc?.line ?? 0,
-              hint: "an arrow copies the array pointer into an env this scope cannot null, and the closure may outlive the binding — so an in-place append could write storage that is already freed. Build the array with `[...xs, v]` here and pass the finished array in, or move the accumulation inside the closure",
+              hint: insideInlined
+                ? `the \`.push\` itself is fine — an inlined HOF callback is a loop in this frame. What blocks it is a BOUND arrow elsewhere in this scope that mentions \`${recv}\`: it copies the array pointer into a heap env this scope cannot null, so the append could write storage already freed. Drop that arrow, or read \`${recv}\` through a plain expression instead of from inside one`
+                : "a BOUND arrow copies the array pointer into a heap env this scope cannot null, and the closure may outlive the binding — so an in-place append could write storage that is already freed. An INLINED callback is different and is allowed: write the accumulation as `xs.forEach((x) => { out.push(x); })` (or a plain `for-of`), which compiles to a loop in this same frame and needs no env at all",
             });
           }
         }
@@ -1063,12 +1153,21 @@ class Analyzer {
       case "InstanceOfExpr": this.expr(e.object, state, false); return; // a type TEST only borrows
       case "InExpr": this.expr(e.key, state, false); this.expr(e.object, state, false); return; // a key-presence TEST only borrows
       case "ObjectLiteral": for (const p of e.properties) this.expr(p.value, state, !p.spread); return; // fields move into the object; a `...spread` source is COPIED (borrow), so it stays usable + owned
-      case "ArrowFunction": // captures/params aren't linear here; the BODY is its own scope
+      case "ArrowFunction": { // captures/params aren't linear here; the BODY is its own scope
+        // An inlined HOF callback allocates no env, so descending into it does NOT cross a
+        // capture boundary for `envArrowNames` (it still does for the conservative
+        // `arrowNames`). Nesting is honoured both ways: a bound arrow written INSIDE an
+        // inlined body still bumps the env counter, and an inlined callback written inside
+        // a bound arrow stays under that arrow's already-raised counter.
+        const inlined = this.inlinedCallbacks.has(e);
         this.arrowDepth++;
+        if (!inlined) this.envArrowDepth++;
         if (e.exprBody) this.expr(e.body as Expr, state, false);
         else this.arrowScope(e.stmts as Stmt[], state);
+        if (!inlined) this.envArrowDepth--;
         this.arrowDepth--;
         return;
+      }
       case "SequenceExpr": for (const x of e.exprs) this.expr(x, state, false); return;
       case "UpdateExpr":
         // `c.n++` on a `@@mutable` record is a field WRITE, so it needs an owned receiver
@@ -1559,6 +1658,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     scan.mutableParams = mutableNames;
     scan.seq(body, entry());
     const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames, mutable, varTy, aliases, consuming);
+    a.envCaptured = scan.envArrowNames; // the subset whose capture really is an env
     a.topClosures = topClosures;
     a.shadowed = shadowed;
     a.mutableArgs = mutableArgs;

@@ -369,14 +369,18 @@ console.log(run());
     expect(oracle.stdout).toBe("10\n");
   });
 
-  /* The BOUNDARY, recorded because `.forEach` + a push accumulator is the most idiomatic
-   * shape there is and it does NOT compile. `.push` to a `@@mutable` accumulator from an
-   * inlined callback is NT1607 ("a closure captures it"). That reasoning does not hold for
-   * an inlined arrow — there is no env and nothing that can outlive the binding — but the
-   * rule is PRE-EXISTING and fires identically for `.map`, which is the control below.
-   * Relaxing it is a separate lane's call; this test pins that `.forEach` inherits the
-   * rule rather than dodging or widening it. */
-  test("`.push` to a @@mutable accumulator is NT1607 — same as .map, not new here", () => {
+  /* THE BOUNDARY THAT MOVED. This test used to pin `.push` to a `@@mutable` accumulator
+   * from an inlined callback as NT1607 ("a closure captures it"), noting in the same
+   * breath that the reasoning does not hold for an inlined arrow — there is no env and
+   * nothing that can outlive the binding — and leaving the relaxation to another lane.
+   * That lane measured it: the premise really was false, the refusal is now restricted to
+   * arrows that GET an env, and both spellings compile. See test/push-accumulator.test.ts
+   * for the full split, including the closure shapes that keep the refusal because for
+   * them the premise is real.
+   *
+   * What this test still pins is the EQUALITY it was written to pin — `.forEach` behaves
+   * exactly as `.map` does here, inheriting the rule rather than dodging or widening it. */
+  test("`.push` to a @@mutable accumulator now compiles — same as .map, not special to forEach", async () => {
     const each = `
 function run(): number {
   @@mutable let out: number[] = [];
@@ -395,8 +399,15 @@ function run(): number {
 }
 console.log(run());
 `;
-    expect(ownCodes(each)).toEqual(["NT1607"]);
-    expect(ownCodes(map)).toEqual(["NT1607"]); // the control: pre-existing, not forEach's
+    expect(ownCodes(each)).toEqual([]);
+    expect(ownCodes(map)).toEqual([]); // the control: the same answer, as it always was
+    // …and the accepted program is the right one. Asserted against a literal rather than
+    // against node, because these fixtures use the BARE `@@mutable` attribute, which is a
+    // syntax error to node — the node-oracle duty for this shape lives in
+    // test/push-accumulator.test.ts, which uses the `//@@mutable` comment spelling.
+    const ours = await compileAndRun(each);
+    expect(ours.exitCode).toBe(0);
+    expect(ours.stdout).toBe("3\n");
   });
 
   test("an empty array runs the body zero times", async () => {
