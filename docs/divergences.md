@@ -3246,6 +3246,58 @@ callback shape diverges, and it diverges toward refusing.
 |---|---|---|
 | a dotted-path tag narrowing whose root is assigned inside any arrow in the program | the arrow may run between the proof and the read, and unlike `tsc` we would emit the wrong slot layout rather than a merely-wrong type | tracking WHERE each arrow can run (an effect/order analysis), not by matching `tsc` |
 
+### A tag test in a `?:` CONDITION narrows both arms — the FIFTH wiring
+
+`if`, `switch`, and the `&&`/`||` short circuit each routed their condition through
+`Checker.narrowTagsWith` (the "fourth wiring", above). `ConditionalExpr` was the one
+conditional form that never did, so two spellings of one program disagreed:
+
+```ts
+function f(e: E): number { return e.kind === "A" ? e.left : 0; }   // NT2001 "narrow it first"
+function g(e: E): number { if (e.kind === "A") return e.left; return 0; }   // fine
+```
+
+That was an arbitrary difference in surface syntax, not a soundness line. The ternary already
+had the NULLISH half (`factsFor`, so `x !== undefined ? x.f : …` worked) — which is why the gap
+read as a nullable problem and **is not one**: a tag test failed to narrow a ternary whether or
+not a nullable was anywhere in sight.
+
+`ConditionalExpr` is now a fifth CALL SITE of the one rule, not a fifth copy of it: all five
+conditional forms share `narrowTagsWith` → `narrowTagsInto` → `narrowInto`/`narrowPathInto`, so
+the path-stability rules (`accessPath`, `unstableNames`, `closureMayAssign`) apply to a ternary
+unchanged. The arms take SEPARATE fact frames and SEPARATE child scopes — the consequent is
+proved the tested tag, the alternate the remaining members.
+
+54 of the 454 ternaries in `src/` have a tag test in the condition (counted with the compiler's
+own parser; a line-based grep undercounts the multi-line spellings). Clearing this closed three
+`NT2001` blockers in the stage-1 metric (268 → 265 of 666) and promoted one masked `NT1606`.
+
+**The refusals are unchanged**, and the path one was verified by MUTATION: passing an empty
+`blocked` set to `narrowTagsWith` makes
+
+```ts
+let o: Box = { inner: { kind: "A", left: 1 } };
+return o.inner.kind === "A" ? ((o = { inner: { kind: "B", text: "zzzz" } }), o.inner.left) : 0;
+```
+
+compile and print `2.126700047e-314` — the string pointer `"zzzz"` read as a double — where node
+prints `undefined`. With the filter it keeps its `NT2001`.
+
+**A widening that could REMOVE programs, and the fallback that prevents it.** Narrowing makes an
+arm *more precise*, and `joinTernary` is deliberately narrow (only a nullish literal joins with a
+present arm). So `e.kind === "A" ? e : f` — both arms the whole union before, joining trivially —
+became the `A` member vs the union, two unrelated object types. `e.kind === "A" ? e : e` is worse:
+`restrictUnion` widens the tag literal away, so nothing downstream can tell the two members share
+a union. Both compiled before this lane. Because the narrowing is a pure RETYPE of the same
+pointer (a discriminated union value IS the member object pointer — there is no box), the
+un-narrowed typing is still a correct account of the same program, so `ConditionalExpr` falls back
+to it when the join fails. This only ever widens: the narrowed pass runs FIRST and its diagnostics
+still propagate, so `e.kind === "A" ? e.text : "-"` stays refused.
+
+**Still refused, unchanged:** `e && e.kind === "A"` as a ternary condition, for exactly the reason
+the fourth-wiring section gives — a bare nullable as an `&&` operand is `NT2001` in `if` too. It is
+not specific to ternaries.
+
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
 

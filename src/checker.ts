@@ -2839,18 +2839,64 @@ class Checker {
         // its element type from the OTHER arm (`flag ? [1, 2] : []`), so type the
         // non-empty arm first and feed its type back.
         // Each arm is also NARROWED by the test, exactly as an `if` branch is
-        // (`x !== undefined ? x.toUpperCase() : "-"`).
-        const yes = (f: () => Ty) => this.withFacts(this.factsFor(e.test, scope, true, exprRegion(e.consequent)), f);
-        const no = (f: () => Ty) => this.withFacts(this.factsFor(e.test, scope, false, exprRegion(e.alternate)), f);
-        let a: Ty, b: Ty;
-        if (isEmptyArrayLit(e.consequent) && !isEmptyArrayLit(e.alternate)) {
-          b = no(() => this.type(e.alternate, scope, hint));
-          a = yes(() => this.type(e.consequent, scope, hint ?? b));
-        } else {
-          a = yes(() => this.type(e.consequent, scope, hint));
-          b = no(() => this.type(e.alternate, scope, hint ?? a));
+        // (`x !== undefined ? x.toUpperCase() : "-"`), and — the fifth call site of the
+        // ONE tag-narrowing rule, after `if`, `switch`, `&&`/`||` — a TAG test in the
+        // condition discriminates each arm too: `e.kind === "A" ? e.left : 0`. The `if`
+        // spelling of that program already compiled, so refusing the ternary was an
+        // arbitrary difference in surface syntax, not a soundness line.
+        //
+        // The two arms get SEPARATE fact frames and SEPARATE child scopes on purpose:
+        // the consequent is proved the tested tag, the alternate the remaining members,
+        // which is what makes `e.kind === "A" ? e.left : e.text` type-check BOTH reads
+        // on a two-member union. `factsFor` already returns a fresh array per call, so
+        // a path fact appended by one arm's `narrowTagsWith` cannot leak into the other.
+        //
+        // `region` is the ARM, not the whole ternary: `unstableNames` must see exactly
+        // the code the narrowing has to survive. A receiver reassigned inside the arm
+        // (or inside the test) blocks the fact there, same filter `if` uses.
+        const armOf = (positive: boolean, body: Expr) => {
+          const region = exprRegion(body);
+          const facts = this.factsFor(e.test, scope, positive, region);
+          const inner = scope.child();
+          const narrowed = this.narrowTagsWith(facts, e.test, inner, positive, this.unstableNames(e.test, region));
+          return { facts, sc: narrowed ? inner : scope, narrowed };
+        };
+        const con = armOf(true, e.consequent);
+        const alt = armOf(false, e.alternate);
+        /** Type both arms, either in their narrowed scopes or (fallback) the outer one. */
+        const typeArms = (narrow: boolean): [Ty, Ty] => {
+          const cs = narrow ? con.sc : scope, alts = narrow ? alt.sc : scope;
+          if (isEmptyArrayLit(e.consequent) && !isEmptyArrayLit(e.alternate)) {
+            const y = this.withFacts(alt.facts, () => this.type(e.alternate, alts, hint));
+            return [this.withFacts(con.facts, () => this.type(e.consequent, cs, hint ?? y)), y];
+          }
+          const x = this.withFacts(con.facts, () => this.type(e.consequent, cs, hint));
+          return [x, this.withFacts(alt.facts, () => this.type(e.alternate, alts, hint ?? x))];
+        };
+        let [a, b] = typeArms(true);
+        let j = joinTernary(a, b);
+        // A tag-narrowed arm can be MORE PRECISE than the join understands, and that is a
+        // way for a widening to REMOVE programs rather than add them. `e.kind === "A" ? e : f`
+        // used to type both arms as the whole union and join trivially; narrowed, the arms
+        // are the A member and the union, which `joinTernary` — deliberately narrow, only a
+        // nullish literal joins with a present arm — reads as two unrelated object types.
+        // Two members of ONE union (`e.kind === "A" ? e : e`) are worse still: `restrictUnion`
+        // widens the tag literal away, so nothing downstream can even tell they are related.
+        //
+        // The narrowing is a pure RETYPE of the same pointer (a discriminated union value IS
+        // the member object pointer — there is no box), so the un-narrowed typing of the arms
+        // is still a correct account of the same program. Fall back to it rather than refuse
+        // what compiled before. This only ever WIDENS: the narrowed pass runs FIRST and its
+        // diagnostics still propagate, so `e.kind === "A" ? e.text : "-"` stays refused; and
+        // a fallback that cannot type the arms at all re-throws the original join error
+        // rather than the un-narrowed read's, which is the more informative of the two.
+        if (j === undefined && (con.narrowed || alt.narrowed)) {
+          try {
+            const [a2, b2] = typeArms(false);
+            const j2 = joinTernary(a2, b2);
+            if (j2 !== undefined) { a = a2; b = b2; j = j2; }
+          } catch { /* keep the join error below */ }
         }
-        const j = joinTernary(a, b);
         if (j === undefined) throw typeError(`Ternary branches differ: ${a} vs ${b}`, exprLoc(e), thisNarrowHint(e, a, b));
         return j;
       }
