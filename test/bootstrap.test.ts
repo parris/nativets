@@ -620,7 +620,14 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // NT1605 is ast.ts itself, and it is a RUNG rather than a blocker: ast.ts now runs
     // the entire CHECKER clean and dies in the OWNERSHIP pass, a stage it had never
     // reached. NT2001 is the other eight, blaming `self`/`parser.ts`/`checker.ts`.
-    ["NT1605", "NT2001"],
+    // ...and NT1605 is GONE, because `ast.ts` reached IR. It was the ownership refusal
+    // that surfaced the moment ast.ts cleared the checker -- three element-BINDING sites
+    // plus three NT1604s behind them. Fixed with ZERO rule changes: reading THROUGH an
+    // index is `consume=false` and always legal, so most NT1605 sites are pure spelling.
+    // The rule still refuses the exact shape that was removed (verified by mutation).
+    //
+    // ast.ts is now at RUNG 3 -- four modules reach IR where three did.
+    ["NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009

@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "b0609ba"
+    "rev": "1ced7da"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "c50b22db43c2f089",
+      "sha256": "0bd71d9f255b378c",
       "standalone": {
-        "stage": "ownership",
-        "code": "NT1605",
-        "message": "[NT1605] cannot move out of array element (its element type is linear)"
+        "stage": "clear",
+        "code": "",
+        "message": ""
       },
       "linked": {
-        "stage": "ownership",
-        "code": "NT1605",
-        "message": "[NT1605] cannot move out of array element (its element type is linear)"
+        "stage": "clear",
+        "code": "",
+        "message": ""
       }
     },
     "checker.ts": {
-      "sha256": "059e914ec77af061",
+      "sha256": "36c4a3f458d8111b",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -45,7 +45,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "b3810ddc03c36a5f",
+      "sha256": "a1981ced87b82c67",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -98,7 +98,7 @@
       }
     },
     "driver.ts": {
-      "sha256": "665cce46576a8a11",
+      "sha256": "4a40eb7a8f7e8ca8",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -125,7 +125,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "dfd8da7e676b3118",
+      "sha256": "05845418c8b5463f",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "14dd77d925d08473",
+      "sha256": "7cee95c947d935a5",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

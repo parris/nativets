@@ -399,7 +399,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `SatisfiesExpr`, where `ty: Ty` is required) — so neither agreeing layouts nor a
   // runtime tag test reaches them on its own; the TYPE must be unified first. ZERO of
   // the 15 need a runtime tag test per read. Nobody should build one on this evidence.
-  "ast.ts": { rung: 0, code: "NT1605", blame: "self" },
+  "ast.ts": { rung: 3, code: "", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -784,7 +784,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
    * score identically. Its top rung cannot distinguish success from failure. This
    * ladder's rung 1 is exactly that distinction, which is why it exists.
    */
-  test("exactly THREE modules reach IR — the rest of the ladder is at rung 0", async () => {
+  test("exactly FOUR modules reach IR — the rest of the ladder is at rung 0", async () => {
     const rows = await Promise.all(MODULES.map(async (e) => [e.file, (await measure(e)).rung] as const));
     // SORTED: the row order is module-iteration order, an artifact. Asserting it
   // unsorted produced a spurious conflict at the merge.
@@ -804,7 +804,18 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     //
     // Two is still not a trend, and the ORDER of the list is a fact worth reading: this is
     // the FILE ORDER of `MODULES`, so a module joining does not reshuffle it.
-    expect(reachedIR).toEqual(["coverage-preprocess.ts", "diagnostics.ts", "lexer.ts"]);
+    // ...and THREE BECOMES FOUR. `ast.ts` joins, and it is the first module to arrive
+    // by way of the OWNERSHIP pass rather than the checker: it had cleared every
+    // checker blocker and then sat on NT1605 (binding a heap array element), which was
+    // simply unreachable until the checker got out of the way. Three element-binding
+    // sites plus three NT1604s behind them, fixed with ZERO rule changes -- reading
+    // THROUGH an index is `consume=false` and always legal, so most NT1605 sites are
+    // pure spelling. The rule still refuses the exact shape removed, verified by
+    // mutation in reverse.
+    //
+    // ast.ts is also the largest by far: 405,646 bytes of IR, 129 defines, and clang
+    // assembles it to a native object.
+    expect(reachedIR).toEqual(["ast.ts", "coverage-preprocess.ts", "diagnostics.ts", "lexer.ts"]);
   }, 300_000);
 
   /**
@@ -883,7 +894,7 @@ describe("SH6: the frontier as it stands (expected-to-fail — flip these when i
     // `coverage-preprocess.ts` is the second, and it makes the same point twice: it has
     // ALSO parsed clean for many rounds (it is in the list above), and the four blockers it
     // then cleared were all post-parse. Ten of twelve parse clean and remain at rung 0.
-    const AT_RUNG_3 = ["coverage-preprocess.ts", "diagnostics.ts", "lexer.ts"];
+    const AT_RUNG_3 = ["coverage-preprocess.ts", "diagnostics.ts", "lexer.ts", "ast.ts"];
     for (const file of parseClean) {
       const m = await measure(MODULES.find((e) => e.file === file)!);
       expect(`${file} rung ${m.rung}`).toBe(`${file} rung ${AT_RUNG_3.includes(file) ? 3 : 0}`);
