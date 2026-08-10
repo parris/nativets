@@ -4204,10 +4204,12 @@ case compiles to `1 1e-323` at exit 0 against node's `1 30` — a MISCOMPILE, no
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
 
-### OPEN DEFECT — a module-level nullable assigned by a function emits invalid IR
+### CLOSED — a module-level binding's promoted global slot lost its declared type
 
-**Do not "fix" this by making the constant well-formed. That converts a loud build failure
-into a SEGFAULT.** Verified twice, independently.
+Filed here as "a module-level nullable assigned by a function emits invalid IR", with the
+warning **not** to fix it by making the constant well-formed. That warning was right, and
+the reason it was right turned out to be the whole diagnosis: the ill-formed constant was
+the *loudest* member of a family, not the bug.
 
 ```ts
 let g: number | undefined = 5;
@@ -4216,32 +4218,45 @@ clear();
 console.log(g ?? 0);          // node prints 0
 ```
 
-`emit` exits **0** (10,622 bytes), and clang then refuses to parse it:
+A module-level binding a function body touches is promoted to an LLVM global (`@nt.g.x`,
+SH1). `FnGen.addr` looked its address up in `mod.globals`; the two places that needed its
+**type** did not, and `varTypes` never holds a promoted global in any frame but `main`:
 
-```
-@nt.g.g = internal global ptr null     ; line 254 — the slot is a ptr
-store double 0, ptr @nt.g.g            ; line 260 — "integer constant must have integer type"
-store ptr %t1, ptr @nt.g.g             ; line 276 — the CORRECT boxed store, same slot
-```
+- **write** (`AssignExpr`) fell back to `"number"`, so *every* write to a global from
+  inside a function was lowered as a bare `double` — `store double 0, ptr @nt.g.g` for the
+  case above, three lines from that same slot's correctly-boxed initializing store.
+- **read** (`Identifier`) fell back to `e.ty`, the checker's type for *this read*, which
+  control-flow narrowing may already have sharpened to the present arm — so a narrowed
+  read loaded the A2 box pointer as if it were the base value.
 
-Line 276 shows codegen already knows how to store into this slot. The `g = undefined`
-assignment at 260 skips the boxing and writes a raw scalar into a pointer slot.
+Both now consult `mod.globals`, and the whole family agrees with node.
 
-**What happens if you only fix the constant.** Patching `double 0` → `double 0.0` gives:
-`clang -x ir -c` exit 0 → link exit 0 → **run exit 139 (SIGSEGV), empty stdout**, where node
-prints `0`. Under opaque pointers `store double 0.0, ptr @g` is well-formed IR that **LLVM's
-own verifier accepts**, so no IR-level validator — including `verifyModule` — can catch it.
-In a variant where the slot is never dereferenced, the same change would yield a **silent
-wrong answer** instead of a crash.
+**Why the constant was the wrong place to fix it.** Patching `double 0` → `double 0.0`
+gave `clang -x ir -c` exit 0 → link exit 0 → **run exit 139 (SIGSEGV)**. And the family
+contained two shapes that never produced a build failure at all — valid IR, exit 0, wrong
+answer:
 
-So today the parse error is the only thing enforcing "reject, never miscompile" here. The real
-fix belongs in codegen: `g = undefined` must box exactly as the initializing store does.
+| shape | node | before |
+|---|---|---|
+| `g = 7` where `g: number \| undefined` is a global | `7` | `store double 7.0` into a box slot → **SIGSEGV** |
+| `if (g) { g.length }` on a global `string \| undefined` | `3` | **`1`** — `js_str_len` of the box, i.e. the tag word read as UTF-8 |
 
-**Its diagnostic is also circular**, which is how this stayed hidden. The NT2001 nullable-read
-hint advises `if (g) { … }`; writing exactly that reproduces the identical error *and* the
-identical hint. The hint's other advice (`g?.x`) and the honest alternative (bind a local copy)
-both hit this same bug for a module-level nullable — so **every route the hint offers fails to
-build**. All three were compiled, not reasoned about.
+Neither is reachable by any IR-level check. The rest of the family — `T | null`, a
+`string`/`boolean`/array global assigned plainly, and `s += "b"` on a `string` global
+taking the `fadd` path — happened to be caught by clang's parser, which is what made the
+whole thing look like a formatting problem.
+
+**Its diagnostic was also circular**, which is how this stayed hidden. The NT2001
+nullable-read hint advises `g?.x`, `if (g) { … }`, `!`, or binding a local copy; for a
+module-level nullable **every one of those routes failed to build or ran wrong**. All four
+now compile and match node, and each is pinned as a test — `?.`, `!` and the local copy in
+`test/nullable-assign.test.ts` block 6, alongside the write family.
+
+One narrowing refusal in that area survives on purpose and is *not* this bug: at **top
+level**, `if (g) { g.length }` on a global that some function **writes** is still NT2001
+(the fact is dropped because a call could have invalidated it). It is a refusal, not a
+miscompile, and the hint's other three routes work there. Narrowing inside the reading
+function, and narrowing a global no function writes, both work.
 
 **Related boundary worth stating explicitly:** `verifyModule` passing means *the module
 parses*, explicitly **not** that it is correct. The segfault above is the proof, and the
