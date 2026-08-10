@@ -27,12 +27,56 @@ conveniences, not requirements.
 ## Where we are (measured, not guessed)
 
 > **Read this first.** The sections below are a chronological series of re-measurements,
-> each one true when written. For the CURRENT frontier jump to
-> [Re-measured at SH6](#re-measured-at-sh6--the-frontier-per-module-standalone). The
-> headline there: **no module reaches IR**, and the per-module blocker table is the list
-> of things to fix. Two earlier sections overstated progress and now carry inline
-> corrections — a "reaches `ir`" claim that was a harness bug, and a regex count that
-> measured first-blockers instead of the construct.
+> each one true when written. For the CURRENT frontier see
+> [The full pipeline, per module](#the-full-pipeline-per-module-2026-08-10) immediately
+> below — **not** the older SH6 section, whose headline "no module reaches IR" is now
+> false (four modules build and run). Several earlier sections overstated progress and
+> carry inline corrections — a "reaches `ir`" claim that was a harness bug, and a regex
+> count that measured first-blockers instead of the construct.
+
+### The full pipeline, per module (2026-08-10)
+
+Every earlier per-module table in this document reports **first-blocker-per-module**, which
+understates the distance by roughly an order of magnitude and has caused two retracted
+"one line gates N modules" claims. This table stubs checker-refused functions so that
+**ownership and codegen actually run**, and was re-derived independently by two agents via
+different code paths (0 inconsistent rows).
+
+| module | fns | checker | own | codegen | tail | **total** |
+|---|---|---|---|---|---|---|
+| `ast` / `coverage-preprocess` / `diagnostics` / `lexer` | 111/10/17/11 | 0 | 0 | 0 | 0 | **0 (exact)** |
+| `parser` | 251 | 36 | 14 | 21 | 31 | **≥ 67** |
+| `modules` | 272 | 44 | 14 | 22 | 32 | **≥ 76** |
+| `checker` | 306 | 73 | 12 | 27 | 34 | **≥ 107** |
+| `ownership` | 353 | 96 | 14 | 27 | 36 | **≥ 132** |
+| `codegen` | 466 | 109 | 21 | 42 | 56 | **≥ 165** |
+| `coverage` | 463 | 121 | 26 | 49 | 66 | **≥ 187** |
+| `driver` | 686 | 184 | 38 | 70 | 96 | **≥ 280** |
+| **`cli` (= stage-1)** | **702** | **185** | **38** | **70** | **96** | **≥ 281 (40.0%)** |
+
+**The residual has a direction: stubbing can only understate.** A stubbed function
+contributes nothing downstream, so if genuinely fixed it could only add work. Every
+non-zero total is a **lower bound**. The four zeros are the only exact figures in the
+table — exact precisely because nothing was stubbed to get them.
+
+**Four modules reach rung 3** (`lexer`, `diagnostics`, `coverage-preprocess`, `ast`): emit →
+`clang -x ir -c` → link → run at exit 0. They get there by reading **0 in every column**,
+not by having a small first-blocker count. That is the pattern to aim for.
+
+**Self-hosting is NOT reached.** Stage-1 still dies in `check`; no 3-stage fixed point
+exists. Do not claim one without a measured byte-identical `nativets-2`/`nativets-3`.
+
+Two structural findings that change how this table should be read:
+
+- **The tail refills from correctness fixes.** NT1004 is 73% of it, and while cross-frame
+  `throw` propagation is missing, every lane that swaps a silent wrong answer for an honest
+  `throw` in a function reachable from a `try` *adds* one. Obeying "reject, never
+  miscompile" enlarges the exact refusal class that most blocks self-hosting. So 281 is
+  wrong in both directions at once as a "backlog to burn down".
+- **`emit` exiting 0 proves nothing.** `sourceToIR` is check → ownership → codegen and
+  **never runs clang**, so it emits structurally invalid IR at exit 0. The gates are
+  `emit` (nothing), `clang -x ir -c` (assembles, leaves `declare`s unresolved), and
+  **link + run** (the real one). Promote a rung on a link.
 
 `nativets coverage src/*.ts` today fails at **parse time on ~line 10 of every file** — before any
 type or codegen analysis can even run:
