@@ -4746,7 +4746,12 @@ class Checker {
       // AFTER the `bound` lookup above, so anything genuinely in scope — a parameter, a
       // local, an enclosing binding — still wins, which is what JS does with a shadowing
       // declaration. Only the innermost frame is consulted; see `selfArrows`.
-      const self = this.selfArrows.length > 0 ? this.selfArrows[this.selfArrows.length - 1] : null;
+      // Hoisted rather than spelled `this.selfArrows[this.selfArrows.length - 1]`: that form
+      // reads index -1 on an empty stack, which node answers `undefined` and nativets PANICS
+      // on by design (Stage 41), so `src/` may not depend on it even behind a length guard.
+      // See `test/no-index-last.test.ts`, which scans for exactly this shape.
+      const depth = this.selfArrows.length;
+      const self = depth > 0 ? this.selfArrows[depth - 1] : null;
       if (self && bound === undefined && self.name === e.callee.name) {
         const ps = funcParams(self.ty);
         if (e.args.length !== ps.length) throw typeError(`'${e.callee.name}' expects ${ps.length} arguments, got ${e.args.length}`);
