@@ -124,7 +124,13 @@ describe("immutable-by-default: in-place mutation is rejected (NT1606)", () => {
    * on every run, at exit 0, so a differential test could pass by luck. It is NT1608 now
    * (see test/drops.test.ts), but a hint whose advice is another refusal is still a dead
    * end, and this one is read exactly when someone is unsure. So the parameter receiver
-   * gets the true answer instead: accumulate into a local and RETURN it.
+   * gets the true answers instead: MARK the parameter `//@@mutable` (the per-parameter
+   * opt-in, which shipped after this test was written — for several stages the hint went
+   * on asserting that no attribute could help, which is its own kind of false advice), or
+   * accumulate into a local and RETURN it.
+   *
+   * The load-bearing assertion is the NEGATIVE one at the bottom: whatever else this hint
+   * grows, it must never send the reader back to rebinding the parameter.
    */
   test("the .push rejection does NOT recommend rebinding when the receiver is a PARAMETER", () => {
     const hint = rejectHint(`
@@ -135,6 +141,7 @@ console.log(acc.length);`);
     expect(hint).toContain("PARAMETER");
     expect(hint).toContain("NT1608");
     expect(hint).toContain("RETURN it");
+    expect(hint).toContain("MARK it");
     // The load-bearing negative: the accumulator spelling must not be offered here as
     // something to do to `out` itself. It appears only as the named-and-refused form.
     expect(hint).not.toContain("To accumulate in a loop, reassign");

@@ -2123,13 +2123,15 @@ prints `9 1` where node prints `9,1 2` — the silent wrong answer.
 |---|---|
 | an undecorated local | `NT1606` |
 | an **unmarked parameter** | `NT1606` |
-| `this.<field>` | `NT1606` |
+| `this.<field>` on an **ordinary** class (the method copy-on-writes) | `NT1606` |
+| an array field through a handle that is **not `this`** (`b.xs.push(v)`) | `NT1606` |
 | a container **element** (`g[0].push(v)`) | `NT1606` |
 | an accumulator captured by a **bound arrow** (one that gets an env) | `NT1607` |
 | an accumulator captured by a `.toSorted` **comparator** | `NT1607` |
 | an accumulator a **user class's** own `.forEach`/`.map` receives an arrow over | `NT1607` |
 | an accumulator already **moved out** | `NT1601` |
 | the accumulator while a `for-of` **borrows** it (iterator invalidation) | `NT1603` |
+| a `@@mutable` class's field while a `for-of` over **that same field** is live | `NT1603` |
 | `@@mutable` on a non-array, or on a multi-name declaration | `NT1023` |
 | `.pop`/`.shift`/`.unshift`/`.splice`/`.fill`/`.copyWithin` — the opt-in legalizes `.push` ONLY | `NT1606` |
 
@@ -2169,6 +2171,47 @@ parameter** into a marked position is `NT1607` (the marker must travel, or an un
 launders the mutation past every check below it), and passing a binding a live `for-of`
 **borrows** is `NT1603` — a *wrong-answer* hazard, since a `for-of` reads its length once while
 node re-reads it. `test/push-param.test.ts`; full design in `docs/decorators.md`.
+
+#### …and a THIRD receiver: `this.<field>` on a `@@mutable` class
+
+The table's "a field" row is gone. Inside a method of a `@@mutable` class, `this.f.push(v)`
+on an array field is legal:
+
+```ts
+//@@mutable
+class ModuleGen { liftedFns: string[] = [];
+  lift(fn: string): void { this.liftedFns.push(fn); } }
+```
+
+**No new syntax** — the attribute is the one already on the `class`; `@@` on a class MEMBER
+is still `NT1023`. An **ordinary** class keeps the refusal (its field-assigning method
+copy-on-writes, so the append would land in the copy), and the receiver must be `this`
+(`b.xs.push(v)` stays `NT1606`).
+
+The refusal's stated reason — "`this.f` names no binding whose ownership can be
+established" — was a fact about the *analyzer*, not the program: `this.f = [...this.f, v]`
+already compiled with the same observable effect, and the field-read **alias** rule supplies
+the exclusivity a local's linearity supplies. What it hid was **one** real defect, and it hid
+it by making it uncheckable:
+
+```ts
+//@@mutable
+class A { xs: number[] = [1,2,3];
+  boom(): number { let s = 0;
+    for (const x of this.xs) { if (this.xs.length < 40) this.xs.push(x + 100); s = s + x; }
+    return s; } }
+console.log(new A().boom(), new A().xs.length);   // node 24779 40 — we printed 6 6, exit 0
+```
+
+The same **wrong-answer** iterator-invalidation hazard the parameter rule above names, except
+the check could not fire: `borrowed` was keyed by binding NAME, and a field has none. Fixed at
+the key — the borrow is keyed by the receiver's PATH, so a bare name is its own path and
+`this.<field>` has one too. That shape is `NT1603`, proved by mutation (remove the arm and
+`6 6` returns). `.forEach` is deliberately **not** refused: node's `forEach` also snapshots the
+length, so the inlined-HOF lowering agrees with node exactly.
+
+Still refused on a field, exactly as on a local: `.pop`, `.shift`, `.unshift`, `.splice`,
+`.fill`, `.copyWithin` — the attribute legalizes **append**, nothing else.
 
 #### The original argument, kept: `.push()` gets NO fresh-receiver permission — unlike `.sort()`
 

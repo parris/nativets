@@ -434,6 +434,64 @@ console.log(new Counter().bump());
   });
 });
 
+/* ------------------------------- 5. `.push` to an ARRAY FIELD of a `@@mutable` class */
+
+/*
+ * An `@@mutable` class already mutates its fields in place: `this.xs = [...this.xs, v]`
+ * compiles today and every handle observes it. `.push` is the SAME observable effect
+ * done in O(1) instead of O(n), so the attribute that sanctions the one sanctions the
+ * other — and `src/` needs the O(1) form because bun is stage 0 (docs/ROADMAP.md).
+ *
+ * Oracle: node on the attribute-stripped source. An `@@mutable` class IS a plain TS
+ * class, and TS `.push` on a field is exactly this.
+ */
+describe("`@@mutable` class: `.push` to an array field", () => {
+  test("a method appends to its own array field, and every handle observes it", async () => {
+    expect(await expectMatchesStripped(`
+//@@mutable
+class Acc {
+  xs: number[] = [];
+  add(v: number): void { this.xs.push(v); }
+  size(): number { return this.xs.length; }
+}
+const a = new Acc();
+a.add(1); a.add(2); a.add(3);
+console.log(a.xs.join(","), a.size());
+`)).toBe("1,2,3 3\n");
+  });
+
+  /*
+   * ITERATOR INVALIDATION — rustc's E0502, our NT1603. `nt_arr_push` reallocates the
+   * array's data block and the lowered `for-of` snapshots the length at entry, so
+   * appending to the array being iterated printed `6 6` where node prints `24779 40`.
+   * That is a SILENT WRONG ANSWER at exit 0, so the shape is refused.
+   *
+   * This is the guard the whole feature rests on. Delete the `iterationPath` arm in
+   * `ownership.ts` and this test goes green-to-red as a MISCOMPILE, not as a crash.
+   */
+  test("appending to the field being iterated is refused, never miscompiled", () => {
+    expect(rejectCode(`
+//@@mutable
+class A {
+  xs: number[] = [1, 2, 3];
+  boom(): number {
+    let sum = 0;
+    for (const x of this.xs) {
+      if (this.xs.length < 40) { this.xs.push(x + 100); }
+      sum = sum + x;
+    }
+    return sum;
+  }
+}
+console.log(new A().boom());
+`)).toBe("NT1603");
+  });
+
+  /* The receiver shapes that KEEP the refusal (`o.xs.push`, an ordinary class's field)
+   * live in test/push-accumulator.test.ts, which owns the canonical `.push` receiver
+   * table. Only the two behaviours the class attribute is responsible for are here. */
+});
+
 /* ------------------------------------------------------------------ 1. syntax */
 
 describe("decorator syntax", () => {

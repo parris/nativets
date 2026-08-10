@@ -4862,13 +4862,53 @@ class Checker {
    * Is this `.push` receiver an ACCUMULATOR binding — a name declared `@@mutable` in a
    * scope reachable from here? Returns the name, or null.
    *
-   * A bare IDENTIFIER only. `this.f.push(…)`, `xs[0].push(…)`, `f().push(…)` and every
-   * other path are deliberately not accumulators: the attribute is attached to a binding,
-   * and those receivers name no binding whose ownership can be established. The ownership
-   * pass re-derives the same fact and refuses the shapes the checker cannot see (a
-   * capture, a moved-out binding) — this check is necessary, not sufficient.
+   * A bare IDENTIFIER, or `this.<field>` inside a method of a `@@mutable` class.
+   *
+   * `xs[0].push(…)`, `f().push(…)`, `o.f.push(…)` on any other receiver and every other
+   * path are deliberately not accumulators: the attribute is attached to a binding or to a
+   * class, and those receivers name neither. The ownership pass re-derives the same fact
+   * and refuses the shapes the checker cannot see (a capture, a moved-out binding, a live
+   * iterator) — this check is necessary, not sufficient.
+   *
+   * WHY `this.<field>` IS ALLOWED, and why the old blanket "never on a field" was wrong.
+   * The comment this replaces gave "names no binding" as the reason, which is a fact about
+   * the ANALYZER's representation rather than about the program. Take the three facts that
+   * establish exclusive access for a local and ask each of them about a field of a
+   * `@@mutable` receiver:
+   *
+   *   - LINEARITY. For a local, `const b = xs` MOVES, so a second live handle never
+   *     exists. For a field, `const b = this.xs` is an ALIAS (`collectAliases`'
+   *     `borrowedFieldRoot` arm — `this` is a borrow root), and an alias is a borrow
+   *     binding that may not escape. Same guarantee, reached by a different rule.
+   *   - THE RECEIVER IS A BORROW. True, and irrelevant: `@@mutable` on the class is
+   *     exactly the announcement that this receiver is mutated through the borrow and that
+   *     every handle observes it. `this.xs = [...this.xs, v]` already compiles on the same
+   *     receiver and has the same observable effect — `.push` only makes it O(1), which is
+   *     the whole reason the opt-in exists (bun is stage 0; docs/ROADMAP.md).
+   *   - A CLOSURE WITH AN ENV. This one is strictly WEAKER for a field. The local hazard is
+   *     that the env snapshots a pointer the SCOPE will free at exit; a field's owner is
+   *     the object, whose lifetime is not this scope's, so the scope frees nothing and
+   *     there is no stale env pointer to write through.
+   *
+   * The one hazard that does survive is ITERATOR INVALIDATION, and it survives precisely
+   * BECAUSE of the representation: `nt_arr_push` reallocates `a->data`, so a `for-of` over
+   * the field holds a pointer the append moves. On a local that is NT1603, keyed by name;
+   * a field has no name, so `ForOfStmt` registered no borrow and the check could not fire.
+   * That is a real defect and it is closed in `ownership.ts` by keying the borrow on the
+   * PATH (`this.xs`) rather than only on a bare name — not by refusing the whole feature.
+   *
+   * Returns the receiver's PATH text, which is what the caller uses to report; `null` when
+   * this receiver is not an accumulator.
    */
   private accumulatorName(recv: Expr, scope: Scope): string | null {
+    // `this.<field>` in a method of a `@@mutable` class. The field must be an ARRAY, which
+    // the caller already established (this is `inferArrayMethod`), and the receiver must be
+    // `this` itself: `o.xs.push(…)` on some other handle stays refused, because there the
+    // object is a binding whose ownership this scope may not have.
+    if (recv.kind === "MemberExpr" && recv.object.kind === "Identifier" && recv.object.name === "this") {
+      const selfTy = scope.lookup("this")?.ty;
+      return selfTy !== undefined && this.isMutableTy(selfTy) ? `this.${recv.property}` : null;
+    }
     if (recv.kind !== "Identifier") return null;
     // `?? false` rather than `=== true`, for the reason spelled out in
     // `rejectDiscardedMutator`: `?Uboolean === boolean` is NT2001 in the self-host subset.
@@ -4941,15 +4981,24 @@ class Checker {
     if (method === "push") {
       const acc = this.accumulatorName(callee.object, scope);
       if (acc === null) {
-        // RECEIVER-AWARE. The general hint offers two accumulator spellings, and BOTH of
-        // them are wrong on a parameter: `@@mutable` never applied to one (it says so),
-        // and `out = [...out, x]` is NT1608 — a parameter is a borrow, so rebinding it is
-        // invisible to the caller and used to free the caller's array out from under it.
-        // Sending a reader there would hand them a use-after-free in answer to a
-        // diagnostic, which is the one thing a hint must never do. On a parameter the only
-        // true answer is the one docs/self-hosting.md already gives for a persistent Map:
-        // accumulate into a LOCAL and RETURN it.
-        // Inlined rather than a `isBorrowedParam` helper: a helper is one more function in
+        // RECEIVER-AWARE, in three arms — and the previous two were BOTH out of date, in
+        // the direction a hint must never be: they denied that a spelling which works
+        // exists, so a reader following them rewrote working code into a slower shape for a
+        // stated reason that was false.
+        //
+        //  - PARAMETER. The old text read "neither `@@mutable` nor rebinding it can append
+        //    to it", and the general arm agreed ("never on a field, a parameter or an
+        //    element"). The per-parameter opt-in has SHIPPED since — `parseParams` accepts
+        //    `//@@mutable` before a parameter, `declareParams` declares it as an
+        //    accumulator, and `mutableArgs` carries the obligation to the call site — and
+        //    `function fill(/*@@mutable*/ out: number[], n)` + `out.push(i)` compiles and
+        //    matches node today. Only the rebinding half was ever true: `out = [...out, x]`
+        //    IS NT1608, and it is still named as the thing not to do.
+        //  - `this.<field>` of a `@@mutable` class is an accumulator now too
+        //    (`accumulatorName`), so a plain-class field is told which attribute to add
+        //    rather than that no attribute can help.
+        //
+        // Inlined rather than an `isBorrowedParam` helper: a helper is one more function in
         // the self-hosting denominator, refused for the same pre-existing reason
         // `accumulatorName` beside it is, and the blocker metric would read the addition as
         // a regression. Two lines here cost nothing.
@@ -4960,10 +5009,13 @@ class Checker {
     // is the overstatement direction of first-blocker masking documented in
     // test/blocker-metric.ts: a lane editing an already-failing function gets no signal.
     const recvIsParam = callee.object.kind === "Identifier" && (scope.lookup(callee.object.name)?.param ?? false);
+    const recvIsThisField = callee.object.kind === "MemberExpr" && callee.object.object.kind === "Identifier" && callee.object.object.name === "this";
         throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.push\` would mutate the array in place`,
           recvIsParam
-            ? "build a new array instead: `[...arr, x]` — the original is unchanged. This receiver is a PARAMETER, which is a borrow: the caller owns it, so neither `@@mutable` nor rebinding it (`out = [...out, x]`, which is NT1608) can append to it. Accumulate into a LOCAL and RETURN it — `let acc: T[] = []; acc = [...acc, x]; return acc` — and let the caller rebind"
-            : "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign a LOCAL: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage. To append with `.push` instead, declare the binding `@@mutable` (`//@@mutable` on the line above `let acc: T[] = []`) — that works only on a plain local, never on a field, a parameter or an element",
+            ? "build a new array instead: `[...arr, x]` — the original is unchanged. This receiver is a PARAMETER, so there are two true answers. To append in place, MARK it: put `//@@mutable` on the line above it in the parameter list — the opt-in travels to the call site, so a caller passing its own parameter along has to mark that one too. Otherwise accumulate into a LOCAL and RETURN it — `let acc: T[] = []; acc = [...acc, x]; return acc` — and let the caller rebind. What you must NOT do is rebind the parameter: `out = [...out, x]` is NT1608, because a parameter is a borrow and the rebind is invisible to the caller while freeing the caller's array out from under it"
+            : recvIsThisField
+              ? "build a new array instead: `this.f = [...this.f, x]` — but to append in place, put `//@@mutable` on the line above the `class`. A `@@mutable` class mutates its fields in place and every handle observes it, which is what makes `this.f.push(x)` legal; an ordinary class copy-on-writes, so the append would land in the copy and be lost"
+              : "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign a LOCAL: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage. To append with `.push` instead, declare the binding `@@mutable` (`//@@mutable` on the line above `let acc: T[] = []`) — that also works on a `@@mutable` class's own field (`this.f.push(x)`) and on a parameter marked in the parameter list, but never on an element (`xs[0].push(x)`) or a call result",
           exprLoc(callee.object) ?? callee.loc);
       }
       // test262 test/built-ins/Array/prototype/push/: `S15.4.4.7_A2` (the return value is

@@ -484,6 +484,80 @@ it, so it was the first blocker of all nine. Two marked parameters (`setBlockDro
 `list`, `ownership.ts`'s `scoped`'s `list`) moved all nine — onto `new Map(p.recTypes ?? [])`,
 the tuple-entries form. See `docs/self-hosting.md`.
 
+### ...and on an ARRAY FIELD of a `@@mutable` class
+
+```ts
+//@@mutable
+class ModuleGen {
+  liftedFns: string[] = [];
+  lift(fn: string): void { this.liftedFns.push(fn); }   // a real in-place append
+}
+```
+
+**No third spelling.** The attribute is the one already on the `class`. There is no
+field-level `//@@mutable` — `@@` on a class member stays `NT1023`, unchanged.
+
+That is the right granularity because the class attribute is *already* exactly this
+promise. `@@mutable` on a class means true in-place mutation that every handle observes
+(Decision 3), and `this.liftedFns = [...this.liftedFns, fn]` compiles today with the same
+observable effect. `.push` only makes it O(1) — which is the whole reason the accumulator
+opt-in exists, because bun is stage 0 and the spread form is O(n²) there.
+
+An **ordinary** class keeps the refusal, and this is load-bearing rather than
+conservatism: an undecorated class's field-assigning method *copy-on-writes*, so an append
+would land in the copy and be lost. The receiver must also be `this` — `b.xs.push(v)` on a
+handle stays `NT1606`, because there the object is a binding whose ownership this scope may
+not have.
+
+#### The refusal's stated reason was not the real one
+
+`.push` on a field was refused with "`this.f` names no binding whose ownership can be
+established". That is a fact about the **analyzer's representation**, not about the
+program, and each of the three facts it stood in for turns out to hold anyway:
+
+| fact, for a LOCAL | for a FIELD of a `@@mutable` receiver |
+|---|---|
+| linear: `const b = xs` MOVES, so no second live handle | `const b = this.xs` is an **alias** (`borrowedFieldRoot`; `this` is a borrow root), and an alias is a borrow binding that may not escape — the same guarantee by a different rule |
+| a parameter is a borrow | true and irrelevant: `@@mutable` on the class **is** the announcement that this receiver is mutated through the borrow |
+| a closure with an env may outlive the binding | strictly **weaker** here — a field's owner is the object, not this scope, so the scope frees nothing and there is no stale env pointer to write through |
+
+What "names no binding" really hid was **one** defect, and it hid it by making it
+uncheckable rather than by refusing it.
+
+#### The one real hazard: iterator invalidation
+
+`nt_arr_push` reallocs `data`, and a `for-of` reads the length **once** — so appending to
+the array being iterated walks the old length where node walks the growing array. Exactly
+the wrong-answer hazard the parameter section above describes, and for a field it was not
+merely unrefused, it was invisible: `ForOfStmt` registered a borrow only when the iterable
+was an `Identifier`, and the mutation check fired only when the receiver was one.
+
+```ts
+//@@mutable
+class A { xs: number[] = [1,2,3];
+  boom(): number { let s = 0;
+    for (const x of this.xs) { if (this.xs.length < 40) this.xs.push(x + 100); s = s + x; }
+    return s; } }
+console.log(new A().boom(), new A().xs.length);
+// node: 24779 40        us, before the fix: 6 6, exit 0
+```
+
+Fixed **at the key**, not by refusing the feature: `Analyzer.borrowed` is keyed by the
+receiver's *path*, so a bare name is its own path (every pre-existing entry reads the same)
+and `this.<field>` now has one too. The shape above is `NT1603`, and it is proved by
+mutation — remove the `iterationPath` arm and `6 6` comes back.
+
+`.forEach` is deliberately **not** refused: node's `forEach` also snapshots the length, so
+the inlined-HOF lowering agrees with node exactly (`this.xs.forEach(x => this.xs.push(…))`
+matches, verified differentially).
+
+#### What it does NOT legalize
+
+`.pop`, `.shift`, `.unshift`, `.splice`, `.fill`, `.copyWithin` on a field are still
+`NT1606`, exactly as on a local accumulator — the attribute legalizes **append**, nothing
+else. `this.blocks[i].lines.push(…)` (an element path) also stays refused: the receiver is
+not `this.<field>`.
+
 ### The attribute is on the BINDING, not the type
 
 This is the one place the three `@@mutable` forms differ, and it is deliberate. A class's

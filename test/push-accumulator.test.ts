@@ -26,8 +26,23 @@
  *
  *   - an array is LINEAR: `const b = xs` MOVES, so a second live handle cannot exist and
  *     a push after one is the ordinary NT1601;
- *   - a PARAMETER is a borrow and cannot carry the attribute (it is on a `let`/`const`);
- *   - `this.f`, `xs[0]` and `f()` name no binding, so they never match the opt-in.
+ *   - `xs[0]` and `f()` name no binding, so they never match the opt-in.
+ *
+ * TWO ENTRIES THAT USED TO BE ON THAT LIST HAVE SINCE MOVED, and both were still being
+ * quoted as reasons long after they stopped being true — the failure mode this project
+ * keeps re-finding, a refusal whose stated reason is not the real one:
+ *
+ *   - a PARAMETER. "cannot carry the attribute (it is on a `let`/`const`)" was overtaken
+ *     by the per-parameter opt-in: `//@@mutable` before a parameter makes it an
+ *     accumulator, and the obligation travels to the call site (`mutableArgs`). The
+ *     NT1606 hint went on denying it for several stages.
+ *   - `this.f`. "names no binding" is a fact about the ANALYZER, not the program. On a
+ *     `@@mutable` class the receiver is the one whose mutation the attribute announces,
+ *     `this.f = [...this.f, v]` already compiled with the same observable effect, and the
+ *     field-read alias rule (`borrowedFieldRoot`) supplies the exclusivity the linearity
+ *     of a local supplies. What "names no binding" DID hide was one real defect —
+ *     iterator invalidation, which was silently uncheckable because the borrow was keyed
+ *     by name. That is fixed at the key (`Analyzer.iterationPath`), not by the refusal.
  *
  * The one hole those do not cover is a CLOSURE WITH AN ENV — a BOUND arrow copies the
  * array POINTER into a heap env this scope cannot null, and the closure may outlive the
@@ -433,6 +448,65 @@ console.log(sum, self.length);
   }, 120_000);
 });
 
+/*
+ * `.push` TO AN ARRAY FIELD of a `@@mutable` class — the second accumulator receiver.
+ *
+ * The elements here are HEAP values (strings, nested arrays), which is the half a
+ * counter-balanced drop test cannot see: `xs.push(s)` MOVES `s` into the array, and the
+ * array now belongs to the OBJECT rather than to this scope, so the question "who frees
+ * it" changes owner mid-expression. `nt_obj_free` is shallow, so the standing answer is
+ * a LEAK rather than a dangle — the project's stated trade (docs/ROADMAP.md, "Why
+ * ELEMENTS is not a one-line fix") — and what this gate is for is proving there is no
+ * double free or use-after-free on top of it.
+ */
+describe("`.push` to a `@@mutable` class's array field", () => {
+  test("ASan + UBSan: heap elements into a field are free of UAF and double frees", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nativets-fieldpush-"));
+    try {
+      const ll = join(dir, "module.ll");
+      writeFileSync(ll, emitIR(`
+//@@mutable
+class S {
+  names: string[] = [];
+  rows: number[][] = [];
+  ys: number[] = [1, 2, 3];
+  xs: number[] = [];
+  addName(n: string): void { this.names.push(n + "!"); }
+  addRow(a: number, b: number): void { const row: number[] = [a, b]; this.rows.push(row); }
+  fromYs(): void { for (const y of this.ys) { this.xs.push(y * 2); } }
+}
+function build(k: number): number {
+  const s = new S();
+  s.addName("a"); s.addName("b");
+  s.addRow(k, k + 1); s.addRow(k + 2, k + 3);
+  s.fromYs();
+  return s.names.join("").length + s.rows[1]![1]! + s.xs.length;
+}
+let sum = 0;
+for (let k = 0; k < 50; k++) { sum = sum + build(k); }
+console.log(sum);
+`));
+      const bin = join(dir, "prog");
+      const built = spawnSync("clang", [
+        "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+        ll, join(ROOT, "runtime/runtime.c"), "-lm", "-o", bin,
+      ], { encoding: "utf8" });
+      expect(built.status).toBe(0);
+      const run = spawnSync(bin, [], {
+        encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+        env: { ...process.env, ASAN_OPTIONS: "detect_leaks=0" },
+      });
+      expect(run.stderr).not.toContain("AddressSanitizer");
+      expect(run.stderr).not.toContain("runtime error");
+      expect(run.status).toBe(0);
+      // node agrees: per k, 4 + (k+3) + 3 => Σ(0..49)(k+10) = 1225 + 500 = 1725.
+      expect(run.stdout).toBe("1725\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
+
 describe("`.push` on a `@@mutable` accumulator — node is the oracle", () => {
   /**
    * PAST THE 32-ELEMENT PERSISTENT-VECTOR THRESHOLD, which every other case here is under.
@@ -721,14 +795,30 @@ describe("`.push` receiver shapes that stay REFUSED", () => {
       source: `let xs: number[] = [];\nxs.push(1);\nconsole.log(xs.length);\n`,
     },
     {
-      what: "a PARAMETER (a borrow: the caller owns and drops it, and it cannot carry the attribute)",
+      what: "an UNMARKED parameter (a borrow — the caller cannot see that its array grows)",
       code: "NT1606",
       source: `function add(xs: number[]): void { xs.push(1); }\nconst a: number[] = [];\nadd(a);\nconsole.log(a.length);\n`,
     },
     {
-      what: "a `this.<field>` array — a field names no binding whose ownership this scope can establish",
+      // The field of a `@@mutable` class is ALLOWED (see the field describe block above).
+      // These two are the edges that keep the refusal, and they are the ones that matter:
+      // the receiver must be `this`, and the class must have announced its mutability.
+      what: "a `this.<field>` array on an ORDINARY class — the method copy-on-writes, so the append would land in the copy",
       code: "NT1606",
-      source: `//@@mutable\nclass B { xs: number[] = []; add(n: number): B { this.xs.push(n); return this; } }\nconst b = new B();\nb.add(1);\nconsole.log(b.xs.length);\n`,
+      source: `class B { xs: number[] = []; add(n: number): B { this.xs.push(n); return this; } }\nconst b = new B();\nb.add(1);\nconsole.log(b.xs.length);\n`,
+    },
+    {
+      what: "an array field through a handle that is not `this` — a binding whose ownership this scope may not have",
+      code: "NT1606",
+      source: `//@@mutable\nclass B { xs: number[] = []; }\nconst b = new B();\nb.xs.push(1);\nconsole.log(b.xs.length);\n`,
+    },
+    {
+      // The guard the field relaxation rests on. `nt_arr_push` reallocates `data` and the
+      // lowered `for-of` snapshots the length at entry, so this printed `6 6` where node
+      // prints `24779 40` — a silent wrong answer at exit 0, not a crash.
+      what: "NT1603: appending to the very field a `for-of` is iterating (iterator invalidation)",
+      code: "NT1603",
+      source: `//@@mutable\nclass A { xs: number[] = [1,2,3];\n  boom(): number { let s = 0;\n    for (const x of this.xs) { if (this.xs.length < 40) { this.xs.push(x + 100); } s = s + x; }\n    return s; } }\nconsole.log(new A().boom());\n`,
     },
     {
       what: "a container ELEMENT (`g[0].push(v)`)",
@@ -769,11 +859,41 @@ describe("`.push` receiver shapes that stay REFUSED", () => {
     });
   }
 
-  test("the NT1606 hint names the opt-in AND its limits (advice a diagnostic gives has to be true)", () => {
+  /*
+   * ADVICE A DIAGNOSTIC GIVES HAS TO BE TRUE — in both directions. The earlier version of
+   * this test asserted the hint said "never on a field, a parameter or an element", and it
+   * passed for several stages after two thirds of that sentence stopped being true. A
+   * string match pins the words, not the claim, so each arm below is checked against a
+   * program: the shapes the hint says WORK are compiled here, so the sentence cannot go
+   * stale again without a red test.
+   */
+  test("the NT1606 hint names the opt-in AND its limits", () => {
     const got = rejectionOf(`let xs: number[] = [];\nxs.push(1);\nconsole.log(xs.length);\n`);
     expect(got?.code).toBe("NT1606");
     expect(got?.hint).toContain("@@mutable");
-    expect(got?.hint).toContain("never on a field, a parameter or an element");
+    expect(got?.hint).toContain("never on an element");
+  });
+
+  test("every receiver the hint says WORKS actually compiles", () => {
+    // the LOCAL, which the general hint names
+    expect(rejectionOf(`//@@mutable\nlet acc: number[] = [];\nacc.push(1);\nconsole.log(acc.length);\n`)).toBeNull();
+    // the `@@mutable` class FIELD, which the `this.<field>` hint names
+    expect(rejectionOf(`//@@mutable\nclass C { f: number[] = []; add(v: number): void { this.f.push(v); } }\nconst c = new C();\nc.add(1);\nconsole.log(c.f.length);\n`)).toBeNull();
+    // the marked PARAMETER, which the parameter hint names
+    expect(rejectionOf(`function fill(\n//@@mutable\nout: number[],\n): void { out.push(1); }\n//@@mutable\nconst a: number[] = [];\nfill(a);\nconsole.log(a.length);\n`)).toBeNull();
+  });
+
+  test("the `this.<field>` hint fires on a field receiver and names the CLASS attribute", () => {
+    const got = rejectionOf(`class C { f: number[] = []; add(v: number): void { this.f.push(v); } }\nconst c = new C();\nc.add(1);\nconsole.log(c.f.length);\n`);
+    expect(got?.code).toBe("NT1606");
+    expect(got?.hint).toContain("above the `class`");
+  });
+
+  test("the PARAMETER hint names the parameter opt-in and still warns off the rebind", () => {
+    const got = rejectionOf(`function add(xs: number[]): void { xs.push(1); }\nconst a: number[] = [];\nadd(a);\nconsole.log(a.length);\n`);
+    expect(got?.code).toBe("NT1606");
+    expect(got?.hint).toContain("MARK it");
+    expect(got?.hint).toContain("NT1608");
   });
 
   test("the hint's prescribed fix COMPILES AND RUNS — the one the NT1606 hint spells out", async () => {

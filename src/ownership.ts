@@ -440,11 +440,51 @@ class Analyzer {
    *  method can be over-refused — over-refusal, never a wrong answer. */
   mutableArgProps: Map<string, Set<number>> = new Map();
 
-  /** Arrays currently borrowed by an enclosing for-of (lexical, count for nesting). */
+  /** Arrays currently borrowed by an enclosing for-of (lexical, count for nesting).
+   *
+   *  Keyed by the receiver's PATH, not only by a bare name. A bare name is its own path,
+   *  so every pre-existing entry reads exactly as before; the addition is `this.<field>`,
+   *  which became reachable when a `@@mutable` class's array field learned `.push`
+   *  (`Checker.accumulatorName`). Without the path key that append was a SILENT WRONG
+   *  ANSWER rather than a refusal — see `iterationPath`. */
   private borrowed = new Map<string, number>();
   private pushBorrow(n: string): void { this.borrowed = this.borrowed.set(n, (this.borrowed.get(n) ?? 0) + 1); }
   private popBorrow(n: string): void { const c = (this.borrowed.get(n) ?? 1) - 1; if (c <= 0) this.borrowed.delete(n); else this.borrowed = this.borrowed.set(n, c); }
   private isBorrowed(n: string): boolean { return this.borrowed.has(n); }
+
+  /**
+   * The BORROW PATH of a for-of iterable / mutation receiver, or `null` when this scope
+   * cannot name the storage.
+   *
+   * Two shapes, and only two:
+   *   - a bare `xs` — a binding, the pre-existing case;
+   *   - `this.xs` — an array field of a `@@mutable` class, which `Checker.accumulatorName`
+   *     now lets a method `.push` to.
+   *
+   * WHY THIS EXISTS. `nt_arr_push` reallocates the array's `data` block, and a `for-of`
+   * reads through it, so appending to the array being iterated is iterator invalidation —
+   * rustc's E0502, our NT1603. For a bare name that was already caught. For a field it was
+   * not, because `ForOfStmt` only registered a borrow when the iterable was an
+   * `Identifier`, and the mutation check only fired when the receiver was one. Neither
+   * REFUSED the field shape; they simply never saw it, so it compiled and printed the
+   * wrong answer at exit 0:
+   *
+   *   //@@mutable
+   *   class A { xs: number[] = [1,2,3];
+   *     boom(): number { let s = 0;
+   *       for (const x of this.xs) { if (this.xs.length < 40) this.xs.push(x + 100); s = s + x; }
+   *       return s; } }
+   *   console.log(new A().boom(), new A().xs.length);   // node: 24779 40;  we printed 6 6
+   *
+   * The lowered loop snapshots the length at entry, so the growth was invisible to the
+   * iteration. Refusing the shape is the fix — an append to the array you are iterating has
+   * no memory-safe lowering here, and node's answer depends on the growth being observed.
+   */
+  private iterationPath(e: Expr): string | null {
+    if (e.kind === "Identifier") return e.name;
+    if (e.kind === "MemberExpr" && e.object.kind === "Identifier" && e.object.name === "this") return `this.${e.property}`;
+    return null;
+  }
 
   /**
    * A call that hands an array to a `@@mutable` PARAMETER (docs/decorators.md). The
@@ -680,15 +720,22 @@ class Analyzer {
       case "ForOfStmt": {
         this.expr(s.iterable, state, false); // borrow the iterable
         // for-of holds a borrow of a linear array for the whole loop body.
-        const bv = s.iterable.kind === "Identifier" && this.linear.has(s.iterable.name) ? s.iterable.name : null;
-        if (bv) this.pushBorrow(bv);
+        //
+        // Two ways to be that array. A bare NAME must be `linear` — the pre-existing test,
+        // unchanged. `this.<field>` carries no entry in `linear` (that set holds bindings,
+        // and a field is not one), so it is registered unconditionally: the borrow is inert
+        // unless something later mutates the same path, and the only thing that can is the
+        // `.push` this lane legalized. See `iterationPath` for the wrong answer this stops.
+        const ip = this.iterationPath(s.iterable);
+        const bv = ip !== null && (s.iterable.kind !== "Identifier" || this.linear.has(ip)) ? ip : null;
+        if (bv !== null) this.pushBorrow(bv);
         // If the element type is linear, the loop var only BORROWS each element —
         // moving it out of the loop is E0507 (NT1604).
         const elemBorrow = s.elemTy !== undefined && isLinearTy(s.elemTy);
         if (elemBorrow) this.borrowBindings = this.borrowBindings.add(s.name);
         this.loop(state, (st) => { this.scoped(s.body, st); });
         if (elemBorrow) this.borrowBindings.delete(s.name);
-        if (bv) this.popBorrow(bv);
+        if (bv !== null) this.popBorrow(bv);
         return;
       }
       case "SwitchStmt": {
@@ -931,6 +978,23 @@ class Analyzer {
               hint: owner !== undefined && owner !== ""
                 ? `\`${recv}\` is an alias of \`${owner}\`, which still owns the value — call the setter on \`${owner}\`, or make \`${recv}\` the owner with \`const ${recv} = move(${owner})\``
                 : `\`${recv}\` is borrowed (a parameter, an alias, or a \`for-of\` element) and its owner is elsewhere — mutate it where it is owned, or return a new value instead`,
+            });
+          }
+        }
+        // ITERATOR INVALIDATION on a FIELD (`for (const x of this.xs) this.xs.push(…)`).
+        // Stated over the PATH, so it covers the receiver a `@@mutable` class's array field
+        // now presents. Separate from the bare-name arm below rather than merged into it:
+        // that arm additionally requires `this.linear.has(recv)`, and a field has no entry
+        // there, so folding the two would either lose the field or drop a guard the bare
+        // name still needs. See `iterationPath` for the wrong answer this stops.
+        if (e.callee.kind === "MemberExpr" && e.callee.object.kind === "MemberExpr" && MUTATING.has(e.callee.property)) {
+          const path = this.iterationPath(e.callee.object);
+          if (path !== null && this.isBorrowed(path)) {
+            this.report({
+              code: OWN_CODES.MUTATE_WHILE_BORROWED,
+              message: `cannot mutate \`${path}\` while it is borrowed (iterator invalidation)`,
+              line: e.callee.object.loc?.line ?? 0,
+              hint: `a \`for-of\` over \`${path}\` reads through the array's storage, and \`.${e.callee.property}\` reallocates it — so the loop would keep reading the old block, and node's answer depends on the growth being SEEN. Collect into a local first (\`let add: T[] = []\` … \`add.push(v)\`), then append after the loop`,
             });
           }
         }
