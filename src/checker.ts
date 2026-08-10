@@ -1919,12 +1919,58 @@ class Checker {
   }
 
   /**
+   * What a DISJUNCTION of tag tests proves — the two polarities `narrowTagsInto` used to
+   * decline: `a || b` when TRUE, and `a && b` when FALSE (`!(a && b)` is `!a || !b`).
+   *
+   * A disjunction proves the UNION of what its arms prove, which is why this returns a
+   * TAG SET rather than a single tag: `e.kind === "A" || e.kind === "B"` leaves `e` in
+   * `{A, B}`, a sub-union `restrictUnion` already builds and that `switch` fall-through
+   * (`case "A": case "B":`) has produced since SH2. Nothing downstream is new.
+   *
+   * SOUNDNESS — every arm must constrain the SAME access path, and that single condition
+   * is the whole rule. `a.kind === "A" || b.kind === "B"` proves NOTHING about `a`: the
+   * `b` arm may be the true one, leaving `a` at any member, so narrowing `a` to `A` would
+   * read `B`'s or `C`'s block at `A`'s slots. That is this project's recurring silent
+   * wrong answer (a string pointer loaded as a double, at exit 0), so an arm that
+   * declines — a non-tag test, a different path, a different union — makes the whole
+   * disjunction prove nothing rather than contributing nothing. `undefined` is that.
+   *
+   * A tag set covering EVERY member also proves nothing (`k === "A" || k !== "A"`), and
+   * is declined rather than narrowed: `narrowInto` shadows the name as a CONST, so
+   * "narrowing" to the union it already had would forbid a later assignment for free.
+   */
+  private disjunctTags(test: Expr, scope: Scope, positive: boolean): { p: AccessPath; union: Ty; tags: string[] } | undefined {
+    if (test.kind === "UnaryExpr" && test.op === "!") return this.disjunctTags(test.operand, scope, !positive);
+    if (test.kind === "LogicalExpr" && test.op !== "??" && (test.op === "&&") !== positive) {
+      const l = this.disjunctTags(test.left, scope, positive);
+      if (l === undefined) return undefined;
+      const r = this.disjunctTags(test.right, scope, positive);
+      if (r === undefined) return undefined;
+      // Same BINDING and same PATH, and the same union off it. Comparing the resolved
+      // binding rather than the spelling is what makes a shadowed name in an inner scope
+      // compare unequal to the outer one it shadows.
+      if (l.p.binding !== r.p.binding || l.p.path !== r.p.path || l.union !== r.union) return undefined;
+      //@@mutable
+      const tags: string[] = [];
+      for (const t of l.tags) if (!tags.includes(t)) tags.push(t);
+      for (const t of r.tags) if (!tags.includes(t)) tags.push(t);
+      return { p: l.p, union: l.union, tags };
+    }
+    const t = this.tagTest(test, scope);
+    if (t === undefined) return undefined;
+    const values = unionTagValues(t.union);
+    const tags = t.negated !== positive ? [t.tag] : values.filter((v) => v !== t.tag);
+    return { p: t.p, union: t.union, tags };
+  }
+
+  /**
    * Apply every TAG narrowing `test` proves on the branch `positive` selects, shadowing
    * into `inner`. Returns whether anything was proved.
    *
    * `&&` proves both operands when true and `||` proves both when false (De Morgan) —
-   * the same rule `guardFacts` uses for nullish facts, which is why an operand of the
-   * wrong polarity proves nothing rather than proving the negation.
+   * the same rule `guardFacts` uses for nullish facts. The OTHER two polarities are the
+   * disjunction, and they go through `disjunctTags`: an arm of a disjunction proves
+   * nothing on its own, so they cannot use the sequential per-arm path below.
    *
    * Applied SEQUENTIALLY through `inner`, so each leaf is read against what the leaves
    * before it already proved. That is what makes a contradictory chain
@@ -1934,7 +1980,14 @@ class Checker {
    */
   private narrowTagsInto(test: Expr, inner: Scope, positive: boolean, out: NarrowFact[] | null, blocked: Set<string> | null): boolean {
     if (test.kind === "LogicalExpr") {
-      if (test.op === "??" || (test.op === "&&") !== positive) return false;
+      if (test.op === "??") return false;
+      if ((test.op === "&&") !== positive) {
+        const d = this.disjunctTags(test, inner, positive);
+        if (d === undefined) return false;
+        if (d.tags.length >= unionTagValues(d.union).length) return false; // constrains nothing
+        if (d.p.path === "") { this.narrowInto(inner, d.p.name, d.union, d.tags); return true; }
+        return this.narrowPathInto(d.p, d.union, d.tags, out, blocked);
+      }
       const l = this.narrowTagsInto(test.left, inner, positive, out, blocked);
       const r = this.narrowTagsInto(test.right, inner, positive, out, blocked);
       return l || r;

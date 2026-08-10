@@ -4487,3 +4487,113 @@ Exit 0 on both sides. A narrowed nullable binding that ALIASES a field is not re
 borrow the way a `for-of` element is, so rebinding it under the narrowing creates a second owner.
 `collectAliases` already handles the non-nullable spelling (`const b = o.lines`); the nullable
 one falls through. That is a general ownership gap, not a `.find` gap, and it wants its own lane.
+
+## THE 26-MEMBER UNION FIELD READ — the premise was wrong; it was NARROWING, not layout
+
+`ast.ts`'s `exprText` held the compiler's headline blocker for five rounds, and it was the
+**linked** blocker for nine of the twelve modules:
+
+```
+[NT2001] Property 'expr' does not exist on <26-member union> — 'e' is narrowed here to
+MORE THAN ONE member, so only the shared tag 'kind' is readable
+```
+
+The line is
+
+```ts
+if (e.kind === "AsExpr" || e.kind === "SatisfiesExpr") return exprText(e.expr);
+```
+
+and it had been read as evidence that `unionCommonField`'s **same-slot** rule was too narrow —
+that the fix needed either agreeing member layouts or a runtime tag test on every union field
+read. It needed neither. `narrowTagsInto` handled the CONJUNCTION polarities only (`&&` when
+true, `||` when false, by De Morgan) and returned `false` for the other two, so the `||` proved
+**nothing** and the read was tested against all 26 members. `AsExpr` and `SatisfiesExpr` both
+carry `expr` at slot 1 with type `Expr`; the shipped same-slot rule accepts the read the instant
+the narrowing is right.
+
+### The census — measured before scoping, and it retires the premise
+
+Instrumented at the throw in `Checker.fieldOnBase`, over the **linked** stage-1 program. Fifteen
+union-field refusals reached (first-blocker-per-function, so this is the visible set):
+
+| n | category | what it is | what would fix it |
+|---|---|---|---|
+| 6 | field ABSENT from 24–29 of 30 members | not a layout question at all — `tsc` refuses these too, unless a narrowing we do not implement applies | five DIFFERENT narrowing forms: this `||`; a `while` condition that does not reach the loop body (×2); assignment narrowing; a ternary condition; a `?.` receiver ruled unstable |
+| 2 | same type, DIFFERENT slot | gratuitous field-ORDER accidents in `src/ast.ts`'s own interfaces — `WhileStmt {kind,test,body}` vs `DoWhileStmt {kind,body,test}`, `SequenceExpr` vs `TemplateLiteral` | reorder the interface DECLARATION. No compiler change at all |
+| 7 | different slot AND different type | all of them `.ty` on `Expr`: slots 1..5, and `?Ustring` everywhere except `AsExpr`/`SatisfiesExpr`, where `ty: Ty` is REQUIRED | neither agreeing layouts nor a tag test reaches these alone — the TYPE has to be unified first, and `AsExpr.ty` means "the asserted type" while every other node's `ty` means "the inferred type". That is a name collision in the AST, not a compiler gap |
+| **0** | — | **need a runtime tag test per read** | — |
+
+Three conclusions, stated because the next lane will otherwise re-derive them:
+
+1. **Do not build the tag-branching read (option 3).** Zero of the fifteen sites need it. It
+   would cost a runtime test on every union field read to buy nothing measured.
+2. **"Make layouts agree" (option 2) is not a codegen change.** Where it applies it is a
+   one-line reorder of an `interface` in `src/ast.ts`. Field order there is arbitrary — object
+   literals are reshaped to the declared layout (`retypeLiteral`) and under bun the order is
+   unobservable — so agreement is free wherever it is wanted.
+3. **The `.ty` bucket is a source-design question.** Seven sites want one field name to mean two
+   things at two representations. Unifying it is a source change to 30 interfaces, not a rule.
+
+### What shipped
+
+`Checker.disjunctTags` — the two missing polarities. A disjunction proves the **union** of what
+its arms prove, and that multi-tag sub-union is not a new representation: `switch` fall-through
+(`case "A": case "B":`) has produced one since SH2.
+
+The soundness rule is one clause: **every arm must constrain the same access path.** An arm that
+declines makes the whole disjunction prove nothing rather than contributing nothing — because
+`a.kind === "A" || b.kind === "B"` proves nothing whatsoever about `a`. Both halves proved by
+mutation, both memory-unsafe, both in `test/unions.test.ts`:
+
+| mutation | result | node |
+|---|---|---|
+| return the LEFT arm's tags instead of the union | builds clean, **SIGSEGV (exit 139)** — a double loaded as a string pointer | `hi`, exit 0 |
+| drop the same-path guard | builds clean, prints **`2.156035505e-314` at exit 0** — a string pointer loaded as a double | `hello`, exit 0 |
+
+The second is the sixth appearance of that exact shape in this project's history.
+
+### A PRE-EXISTING BUG found by widening onto it, and fixed
+
+Reproduced on the **base tree** with none of this lane's changes — `switch` fall-through over a
+dotted path is enough, and has been since SH2:
+
+```ts
+interface Box { inner: U }                      // U = A | B | C, `v` in A and B only
+switch (o.inner.kind) { case "A": case "B": return o.inner.v; default: return "c"; }
+```
+
+```
+InternalError: internal compiler error: .v is not at one slot in every member of U<…>
+```
+
+The checker types `o.inner` through `narrowedPath`, so `fieldOnBase` sees the two-member
+SUB-union and accepts `.v`. Codegen's SH2 retype hook in `genExprInner` took the checker's answer
+only when it was a single **member** (`isObjectTy`) — a narrowed **sub-union** fell through, so
+codegen re-derived the receiver type from the FIELD (`fieldType(Box, "inner")`, the whole union),
+asked `unionCommonField` about that instead, and died on the assertion. One clause,
+`|| isUnionTy(narrowedRecv)`, and it is a free retype for the usual reason: a `U<…>` value IS the
+member pointer.
+
+**Why it stayed hidden is the reusable part.** The assertion fires in CODEGEN, and every
+self-hosting instrument in this tree — `blocker-metric`, `coverage`, `self-host-coverage`,
+`selfhost-ratchet` — runs the CHECKER and stops (`blocker-metric`'s own header says so under
+"THE CHECKER ONLY"). A defect strictly downstream of the checker is invisible to all of them, and
+this one was reachable from a construct the checker had blessed since SH2.
+
+### Frontier delta, measured
+
+`blocker-metric` **258/673 → 257/674**. Per-FUNCTION diff against the base tree: exactly one line
+changed, `exprText` cleared; nothing else moved and nothing was added (the denominator rises by
+one because `disjunctTags` is itself inside the subset).
+
+The number to read is not that one, though — it is the **blame column** in `test/sh6.test.ts`,
+which moved for the first time in this file's history. Eight modules stopped blaming `ast.ts`
+and now stop on their own source or on `parser.ts`/`checker.ts`. For five rounds the tree-wide
+`NT2001` bucket held nine names that were nine views of ONE line; it holds eight distinct
+blockers now. `ast.ts` alone moved to `NT1001` — `.map` producing an array of union elements,
+which was masked behind `exprText` and is an ownership decision, not a narrowing one.
+
+**Next terms, now that they are separate.** The five other missing narrowing forms in the census
+table are each one lane; the `while`-condition one covers two sites in `ownership.ts` and looks
+like the cheapest.

@@ -574,7 +574,22 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // What holds the nine now is `exprText`, ~20 lines further on: `e.optional === true`,
     // comparing an optional boolean field with a boolean. Five rounds, one region of one
     // file, and this time the construct is not about ownership either.
-    ["NT2001"],
+    //
+    // ...and NT1001 RETURNS beside NT2001 — the THIRTEENTH refill, and the first one this
+    // file has recorded where the two codes stopped being held by the SAME nine modules.
+    // `exprText`'s union field read cleared (the `||` of two tag tests narrows now — see
+    // the census in test/sh6.test.ts's `ast.ts` BASELINE row), and with it the last term
+    // `ast.ts` shared with everyone downstream. `ast.ts` alone now reports NT1001,
+    // `.map` producing an array of union elements, which was masked behind `exprText`
+    // and is an OWNERSHIP refusal rather than a narrowing one. The other eight keep
+    // NT2001 and now hold it on their OWN source: the blame column in test/sh6.test.ts
+    // moved for the first time, from `ast.ts` to `self`/`parser.ts`/`checker.ts`.
+    //
+    // A two-element set here is therefore not a regression; it is the set finally
+    // SEPARATING. For five rounds this instrument read one code because one line of
+    // ast.ts gated every module, which is precisely the masking its own header warns
+    // about. The tiers below are now measuring nine different walls, not one.
+    ["NT1001", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -789,15 +804,26 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `exprLoc`'s two-member field read, which is gone; a code that empties and refills is
     // the pattern this file keeps recording, and the tree-wide set cannot see it. The
     // per-module move is in test/selfhost-ratchet.baseline.json.
+    // ...and `ast.ts` DROPS OUT of this list — the nine become eight. This is the line to
+    // read, not the code: for five rounds every name here was reporting ONE line of
+    // ast.ts through the link, so the list was nine copies of a single blocker. It is
+    // eight distinct blockers now. `ast.ts` moved to NT1001 (see the set assertion above).
     expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
     // NT1001 EMPTIES, and it is worth being precise about what did NOT happen: `.find`
     // over a heap element is still refused. What cleared is the one shape where the
     // element already IS a nullable box (`(T | undefined)[]`), so `.find` hands the
     // existing box back instead of building a second owner around a borrowed pointer.
     // Five rounds running, one region of src/ast.ts has been the wall for nine modules.
-    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual([]);
+    // ...and it REFILLS with `ast.ts` alone, which is the shape the note above already
+    // named as still-refused: `.map` producing an array whose elements are UNION values,
+    // i.e. heap elements the callback does not own. Unmasked, not introduced — it sat
+    // behind `exprText` and the standalone measurement on the base tree stopped at
+    // `exprText` before reaching it. `.find`/`.map` over a heap element remains an
+    // OWNERSHIP decision (a second owner for a pointer the array still holds), so this
+    // is a different wall from the narrowing one that just came down, in a different pass.
+    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual(["ast.ts"]);
     // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
     // This is the DECISION the entry above named, arrived at: the typed walkers in
     // src/ast.ts write `e.ty = f(e.ty)` exactly where the reflective ones wrote
@@ -1124,8 +1150,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // existing box back rather than building a second owner), so `exprText`'s
     // `e.optional === true` — an optional boolean compared with a boolean — is what the
     // nine now sit on. Same bucket above, which carries the reasoning.
+    // ...and the NINE BECOME EIGHT, which is the first time this bucket has changed SIZE
+    // rather than contents. `exprText` cleared and `ast.ts` moved to NT1001, so the eight
+    // names left are on eight DIFFERENT blockers in their own source rather than nine
+    // views of one line of ast.ts. Same bucket above, which carries the reasoning.
     expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
