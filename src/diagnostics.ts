@@ -366,6 +366,26 @@ export const NYI = {
   // cast INTO the erased type is a widening (free, unchecked), where the cast the program
   // actually wrote can never succeed at all.
   UTILITY_TYPE: { code: "NT1036", milestone: "later", hint: "check the tag spelling — `Extract<T, U>` keeps the members of `T` assignable to `U`, and TypeScript calls the empty result `never`, which this subset cannot represent" },
+  // A tuple type whose elements are NOT all the same type. `parseTupleType` models
+  // `[T, U, …]` as `T[]` — it keeps the first element's type and DISCARDS the rest — which
+  // is the destructive erasure NT1033, NT1035 and NT1036 already refuse, in its worst
+  // form: the erasure invents a type the program never mentioned, and then blames the
+  // program for it. `function second(t: [number, string]): string { return t[1]; }` is
+  // TypeScript that `tsc` accepts and node runs, and it was rejected as "return type
+  // number does not match declared string" — a mismatch that existed only inside us.
+  //
+  // It was ALSO a latent silent wrong answer. `t[1]` reads a `string` at a `number` type,
+  // and the only reason that never reached codegen is that a heterogeneous array literal
+  // cannot be built at all (`NT2001 array elements must share a type`), so the one
+  // construct able to witness the discarded type is caught in a different pass. Correct
+  // by accident, out of a check that was never meant to be holding this up.
+  //
+  // HOMOGENEOUS tuples are untouched. `[T, T]` erases to `T[]` and every element really
+  // does have type `T`, so no type is misreported — only the arity is lost, and reading
+  // past the end already panics (Stage 41). `src/checker.ts` has four such sites
+  // (`as [Expr, Expr][]`, `(): [Ty, Ty]`); refusing them would move that module AWAY from
+  // self-hosting to buy no soundness. The line is drawn exactly where the erasure lies.
+  TUPLE: { code: "NT1037", milestone: "later", hint: "nativets has no tuple type — `[T, U]` would erase to `T[]`, silently giving every later element the first one's type. Spell the pair as a NAMED RECORD and read it by field: `interface Pair { first: number; second: string }`, returned as `{ first: n, second: s }` and destructured as `const { first, second } = …`. A tuple whose elements all share one type (`[T, T]`) is an array and is accepted as written" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

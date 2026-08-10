@@ -1653,14 +1653,32 @@ class Parser {
     }
     this.eat(">");
   }
-  // tuple type `[T, U, ...]` — modeled as an array of the first element type
+  /**
+   * Tuple type `[T, U, …]`, modeled as an array of the first element type.
+   *
+   * That model is only honest when the elements AGREE. `[T, T]` really is a `T[]` — every
+   * element has type `T`, and only the arity is lost, which the Stage-41 bounds panic
+   * already covers. `[T, U]` is not: keeping `T` and discarding `U` invents a type for
+   * element 1 that the program never wrote, and the parser is the last pass that still
+   * holds the spelling, so the mistake is unattributable from here on (NT1033's argument,
+   * verbatim). It surfaced as diagnostics blaming correct code for a mismatch we had just
+   * manufactured — `(t: [number, string]): string => t[1]` rejected as "return type number
+   * does not match declared string" — and, behind that, as a latent silent wrong answer
+   * held off only by the array-literal homogeneity check in a different pass.
+   *
+   * So the heterogeneous case is REFUSED (NT1037) and the homogeneous case is kept.
+   */
   private parseTupleType(): Ty {
     this.eat("[");
     //@@mutable
     const tys: Ty[] = [];
     if (!this.at("]")) { do { tys.push(this.parseType()); } while (this.at(",") && (this.eat(","), true)); }
     this.eat("]");
-    return makeArrayTy(tys[0] ?? "number");
+    const head = tys[0] ?? "number";
+    for (const t of tys) {
+      if (t !== head) throw nyi(NYI.TUPLE, `the tuple type \`[${tys.join(", ")}]\` (its elements do not share one type, and nativets would keep only \`${head}\` and discard the rest)`);
+    }
+    return makeArrayTy(head);
   }
   /**
    * A leading `(` in type position is either a function type's parameter list
@@ -3877,7 +3895,7 @@ class Parser {
         while (i < raw.length && depth > 0) {
           const ch = raw[i]!;
           if (ch === "\\") { src += ch + (raw[i + 1] ?? ""); i += 2; continue; }
-          if (ch === "`" || ch === '"' || ch === "'") { const [txt, next] = skipQuoted(raw, i); src += txt; i = next; continue; }
+          if (ch === "`" || ch === '"' || ch === "'") { const run = skipQuoted(raw, i); src += run.text; i = run.next; continue; }
           if (ch === "{") depth++;
           else if (ch === "}") { depth--; if (depth === 0) break; }
           src += ch; i++;
@@ -3894,11 +3912,27 @@ class Parser {
 }
 
 /**
- * Copy a quoted run (a `'`/`"` string or a nested `` ` `` template) starting at `i`
- * verbatim, returning `[text, indexAfterIt]`. A nested template's own `${…}`
- * substitutions are skipped recursively, so `` `${a ? `}` : b}` `` stays intact.
+ * The result of copying one quoted run: the verbatim text, and the index just past it.
+ *
+ * A RECORD, not the `[string, number]` tuple this started as — the same fix, for the same
+ * reason, as `DecodedEscape` in `src/lexer.ts`. `parseTupleType` erases `[T, U]` to `T[]`,
+ * so `next` typed as `string` and `i = next` was rejected as `NT2001 Cannot assign string
+ * to number 'i'` — a LYING diagnostic, on TypeScript that `tsc` accepts and node runs.
+ *
+ * That single erasure was the first blocker of FIVE modules at once — `parser`, `modules`,
+ * `driver`, `coverage`, `cli` — because every one of them reaches this function through
+ * the template-literal builder. `parseTupleType` now REFUSES a heterogeneous tuple
+ * outright (NT2601) rather than erasing one element's type into another's, so this
+ * particular lie cannot be told again.
  */
-function skipQuoted(raw: string, i: number): [string, number] {
+export interface QuotedRun { text: string; next: number; }
+
+/**
+ * Copy a quoted run (a `'`/`"` string or a nested `` ` `` template) starting at `i`
+ * verbatim, returning the text and the index just past it. A nested template's own
+ * `${…}` substitutions are skipped recursively, so `` `${a ? `}` : b}` `` stays intact.
+ */
+function skipQuoted(raw: string, i: number): QuotedRun {
   const q = raw[i]!;
   let out = q;
   i++;
@@ -3911,7 +3945,7 @@ function skipQuoted(raw: string, i: number): [string, number] {
       while (i < raw.length && depth > 0) {
         const c2 = raw[i]!;
         if (c2 === "\\") { out += c2 + (raw[i + 1] ?? ""); i += 2; continue; }
-        if (c2 === "`" || c2 === '"' || c2 === "'") { const [t, n] = skipQuoted(raw, i); out += t; i = n; continue; }
+        if (c2 === "`" || c2 === '"' || c2 === "'") { const run = skipQuoted(raw, i); out += run.text; i = run.next; continue; }
         if (c2 === "{") depth++;
         else if (c2 === "}") depth--;
         out += c2; i++;
@@ -3920,7 +3954,7 @@ function skipQuoted(raw: string, i: number): [string, number] {
     }
     out += ch; i++;
   }
-  return [out + q, i + 1];
+  return { text: out + q, next: i + 1 };
 }
 
 /** Every `return <expr>` in a statement list, recursively. Expressions are not walked,

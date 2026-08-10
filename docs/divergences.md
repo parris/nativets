@@ -1462,6 +1462,43 @@ That works when the file already has the name; when it does not, the name reache
 type *string*, so the map's value type said `number`. Now refused with the fix in the hint —
 import the name and annotate with the bare `T` — which is what `src/coverage.ts` does.
 
+### Heterogeneous tuple types (`NT1037`) — the erasure invented a type, then blamed the program
+
+`parseTupleType` modelled `[T, U, …]` as `T[]`: it kept the **first** element's type and
+discarded every other one. Same destructive erasure as `NT1033`/`NT1035`/`NT1036` — the
+parser is the last pass holding the spelling — but with a sharper edge, because the
+invented type then appeared in diagnostics as if the *user* had written it:
+
+```ts
+function second(t: [number, string]): string { return t[1]; }
+// was: error[NT2001] return type number does not match declared string
+```
+
+`tsc` accepts that and node runs it. The declared return type **is** `string`; the `number`
+came from our own erasure. Three other shapes were rejected the same way, and the one that
+mattered was in `src/parser.ts` itself: `skipQuoted` returned `[string, number]`, so
+`const [txt, next] = skipQuoted(raw, i); i = next` was `Cannot assign string to number 'i'`
+— the **first blocker of five modules at once** (`parser`, `modules`, `driver`, `coverage`,
+`cli`, all of which reach it through the template-literal builder). It is now a named
+record, `QuotedRun { text, next }`, exactly as `decodeEscapeAt` → `DecodedEscape` fixed the
+identical defect in `src/lexer.ts`.
+
+It was **also a latent silent wrong answer**: `t[1]` reads a `string` at a `number` type,
+and the only thing that stopped it reaching codegen is that a heterogeneous array literal
+cannot be built at all (`NT2001 array elements must share a type`), so the sole construct
+able to witness the discarded type is caught in an unrelated pass. Correct by accident, out
+of a check never meant to be holding it up. Hence the refusal now, while the gap is still
+theoretical.
+
+**Homogeneous tuples are still accepted.** `[T, T]` erases to `T[]` and every element really
+does have type `T`, so no type is misreported — only the arity is lost, and reading past the
+end already panics (Stage 41). `src/checker.ts` has four such sites (`as [Expr, Expr][]`
+×3, `(): [Ty, Ty]`); refusing those would move that module *away* from self-hosting and buy
+no soundness. The line is drawn exactly at the set where the erasure can lie.
+
+Real tuples remain unimplemented — they need a `Ty` inhabitant with per-index types, which
+is a type-system feature, not a diagnostic. The hint's replacement is a named record.
+
 `node` is our oracle. Two kinds of "we differ from node" exist, tracked separately.
 
 ## A. Semantic divergences (we compile it, but differ deliberately)
