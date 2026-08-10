@@ -18,7 +18,7 @@ import {
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
-  ImportDecl, TextImport, ExportTable, RecTypeEntry,
+  ImportDecl, TextImport, ExportTable, RecTypeEntry, AssignOp,
 } from "./ast.ts";
 
 /** Options for parsing ONE module of a program (see src/modules.ts). */
@@ -119,6 +119,96 @@ const AMBIENT_TYPES = new Set([
   "Blob", "File", "FormData", "AbortController", "AbortSignal", "Event", "EventTarget",
   "ReadableStream", "WritableStream", "TransformStream", "Console", "Buffer", "NodeJS", "globalThis",
 ]);
+/**
+ * The three ambient names still allowed to erase, and the ONLY three — a documented
+ * residue, not a judgement that they are safe. All three are refused inside an
+ * `as`/`satisfies` assertion regardless (`parseAssertedType`), which is where the erasure
+ * stops being a confusing refusal and becomes a wrong answer.
+ *
+ * WHY THEY ARE HERE. src/ uses all three, and none has an honest rewrite today:
+ *
+ *   - `never` (13 sites: src/cli.ts, src/ast.ts, src/checker.ts, src/modules.ts,
+ *     src/parser.ts) is a DIVERGENT return (`function usage(): never`) or an
+ *     EXHAUSTIVENESS witness (`default: { const impossible: never = e; return impossible; }`).
+ *     The witness is load-bearing and says so in src/ast.ts: "add an `Expr` member and this
+ *     stops compiling". There is no way to keep that tsc-checked invariant without `never`,
+ *     so refusing it would mean deleting a real invariant to satisfy a subset limitation.
+ *     Supporting it means a BOTTOM type — assignable to everything, inhabited by nothing,
+ *     and a return type that excuses the missing `return`.
+ *   - `unknown` (18 sites: src/checker.ts, src/ownership.ts, src/codegen.ts) is the
+ *     parameter of a REFLECTIVE walk (`scanUsesActors(node: unknown)`), where it is the
+ *     correct TypeScript type and a concrete one would be a lie. Those functions are
+ *     already refused for their own reasons (`for…in`, `Object.values`, index signatures).
+ *   - `object` (2 sites, src/ownership.ts) is an IDENTITY set over heterogeneous AST nodes
+ *     (`Set<object>`, `Map<string, object>`), where it is likewise the correct type.
+ *
+ * WHY THE RESIDUE IS SAFE, as far as it goes. An ANNOTATION is CHECKED against the value
+ * it annotates, so an erased `number` that is wrong produces a refusal — misattributed and
+ * confusing, but never a wrong answer. An ASSERTION is not: it ADOPTS the type outright,
+ * which is why `xs as any[]` silently re-typed a `string[]` as a `number[]`. That case is
+ * refused for every name including these two.
+ *
+ * This set should shrink to empty. Removing an entry needs the feature, not just the
+ * deletion: a bottom type for `never`, and for `unknown`/`object` either an opaque
+ * unusable `Ty` or reflective walks the subset can express.
+ */
+const ERASURE_STILL_ALLOWED = new Set(["unknown", "never", "object"]);
+/**
+ * Ambient names `parseGenericType` DOES map to a real shape once type ARGUMENTS are
+ * written — mapped to the shortest spelling that compiles, for the hint.
+ *
+ * Reaching `resolveNamed` with one of these proves it was written BARE: an applied
+ * `Map<K,V>` is claimed by `parseGenericType` and never gets here, and a bare `Map` has no
+ * `<` for `parseGenericType` to open. So the refusal can give the one edit that fixes the
+ * line rather than the catalog's general advice.
+ *
+ * Every key is a `case` label in `parseGenericType`; keep the two in step. A label missing
+ * here only costs the specific hint, never correctness — the general one still fires.
+ */
+const NEEDS_TYPE_ARGS = new Map<string, string>()
+  .set("Map", "Map<string, number>").set("ReadonlyMap", "ReadonlyMap<string, number>")
+  .set("Record", "Record<string, number>")
+  .set("Set", "Set<string>").set("ReadonlySet", "ReadonlySet<string>")
+  .set("Array", "Array<number>").set("ReadonlyArray", "ReadonlyArray<number>")
+  .set("Promise", "Promise<number>").set("Awaited", "Awaited<number>")
+  .set("Partial", "Partial<{ a: number }>").set("Required", "Required<{ a: number }>")
+  .set("Readonly", "Readonly<{ a: number }>").set("NonNullable", "NonNullable<number>")
+  .set("Extract", "Extract<number, number>").set("Exclude", "Exclude<number, string>")
+  .set("Omit", "Omit<{ a: number }, \"a\">").set("Pick", "Pick<{ a: number }, \"a\">")
+  .set("Parameters", "Parameters<(n: number) => void>")
+  .set("ReturnType", "ReturnType<() => number>");
+/**
+ * Why THIS ambient name cannot be resolved, and what to write instead (NT1035).
+ *
+ * The advice genuinely differs by name — "add the type arguments" fixes a bare `Map` and
+ * is nonsense for `any` — so the catalog's shared hint is overridden per group. Anything
+ * not named here keeps the catalog text, which is why this can stay a partial list.
+ */
+function ambientTypeHint(id: string): string | undefined {
+  const applied = NEEDS_TYPE_ARGS.get(id);
+  if (applied !== undefined) {
+    return `\`${id}\` is supported WITH its type arguments — write \`${applied}\`. Bare \`${id}\` says nothing about what it holds, and a container's element type decides how its contents are stored, compared and printed here, so there is nothing to guess from`;
+  }
+  if (id === "any") {
+    return "`any` turns type checking OFF, which a compiler whose rule is reject-never-miscompile cannot honour: nativets picks a value's machine representation from its STATIC type (a `number` is a `double`, a `string` is a `ptr`), so a slot typed `any` has no representation to pick. Write the concrete type. For a value that really is one of several, use a union this subset supports — `T | undefined`, `T | null`, or a discriminated union of object types";
+  }
+  if (id === "unknown") {
+    return "`unknown` means \"some type — narrow before use\", and nativets carries no runtime type tag to narrow from: a value's representation is fixed at compile time. Write the concrete type, or a discriminated union of object types (a literal-typed tag field `switch` narrows on) when the value really is one of several";
+  }
+  if (id === "never") {
+    return "`never` is the uninhabited type and nativets does not model it. In RETURN position (`function f(): never`) write what the function would return if it returned, or `void` — divergence is not tracked here. As an EXHAUSTIVENESS witness (`const impossible: never = x`) delete the binding: it asserts a `switch` covered every case, which this subset cannot verify";
+  }
+  if (id === "object") {
+    return "`object` means \"any non-primitive\" — a bound, not a shape — and nativets compiles a record from its FIELDS. Write the record type out (`{ a: number, b: string }`), or declare a `type`/`interface` for it";
+  }
+  if (id === "symbol" || id === "bigint") {
+    return `\`${id}\` is not implemented — nativets' primitives are \`number\` (an IEEE-754 double), \`string\`, \`boolean\`, \`null\` and \`undefined\`. ${id === "bigint" ? "For integers beyond a double's exact range there is no substitute here yet" : "Use a `string` for a unique key"}`;
+  }
+  if (id === "this") {
+    return "`this` in TYPE position is the polymorphic this-type, which only means something under inheritance — nativets resolves a class's methods against the class it found them on. Name the class instead (`): C`)";
+  }
+  return undefined;
+}
 /**
  * Compile-time class ATTRIBUTES (`@@name`) the checker understands. An attribute changes
  * how a class is CHECKED and COMPILED and has zero runtime footprint — so an unknown one
@@ -299,6 +389,16 @@ class Parser {
   /** The type name `resolveNamed` last refused on. Read by `hoistTypeDecls` off a
    *  sub-parser to build the dependency edge it needs to tell a cycle from a chain. */
   private blockedOn: string | undefined;
+  /** The module path of the inline `import("m").T` currently being resolved, if any — set
+   *  by `parseImportType` around its one `resolveNamed` call. While it is set, the `number`
+   *  fallback is a REFUSAL (NT1035) rather than an answer: that caller dropped the path, so
+   *  a `number` there is the annotation quietly changing meaning, not a resolution. */
+  private erasedImportOf: string | undefined;
+  /** Set while an `as`/`satisfies` assertion's type is being parsed. It withdraws the
+   *  `ERASURE_STILL_ALLOWED` escape: an assertion ADOPTS the type it names instead of
+   *  checking a value against it, so an erasure there is a wrong answer rather than a
+   *  confusing refusal. See `parseAssertedType`. */
+  private erasureIsFatal = false;
   /** Every `class X` declared in this file. A class declares a TYPE too (`parseClass`
    *  registers its instance shape), and classes are NOT hoisted — so the hoisting
    *  fixpoint has to know to keep its hands off a declaration that names one. */
@@ -774,6 +874,17 @@ class Parser {
     if (id === "Error") return "{message:string}" as Ty;
     if (SCALARS.has(id)) return id as Ty;
     this.refuseUnknownName(id);
+    // Nothing above claimed the name, so the answer is the erasure. For an inline
+    // `import("m").T` that is never acceptable — see `parseImportType`.
+    if (this.erasedImportOf !== undefined) {
+      const t0 = this.toks[this.pos - 1];
+      throw nyi(
+        NYI.AMBIENT_TYPE,
+        `the inline import type 'import("${this.erasedImportOf}").${id}'`,
+        `'${id}' is not in scope in this file, and an inline import type is resolved against this file's scope — the module path is dropped, so there is nothing left to look '${id}' up in. Import it by name instead (\`import type { ${id} } from "${this.erasedImportOf}"\`) and annotate with the bare \`${id}\``,
+        t0 === undefined ? undefined : { line: t0.line, col: t0.col },
+      );
+    }
     return "number" as Ty;
   }
 
@@ -814,8 +925,52 @@ class Parser {
    * this must stay a THROW and must never record the refusal as a side effect.
    */
   private refuseUnknownName(id: string): void {
-    if (AMBIENT_TYPES.has(id)) return;      // a global the program never had to declare
-    if (this.externalNames.has(id)) return; // imported, or stripped by a fragment-parsing caller
+    // Imported, or stripped by a fragment-parsing caller. STILL ERASES, and it is the
+    // larger half of the problem NT1035 closes for ambient names — recorded here because
+    // this is where the next lane will look.
+    //
+    // Measured over the src/ corpus: 2,400+ resolutions land here against 272 ambient ones,
+    // `Ty` alone 986 times, then `Expr` 699 and `Stmt` 444. Those three are unseeded
+    // because src/ast.ts refuses their declarations, so every annotation naming one across
+    // the tree silently says `number`.
+    //
+    // And it is the same SILENT WRONG ANSWER, not merely a misattributed message. With a
+    // `lib.ts` exporting a recursive `type Node` (refused there, so never seeded) and a
+    // `main.ts` doing `const ns = xs as Node[]` over a `string[]`: node prints `lib x 2`
+    // and exits 0; nativets prints nothing and exits 255 — the exact signature `as any[]`
+    // had. `parseAssertedType` does NOT cover this arm, deliberately: `s.init as Stmt` is
+    // how src/ narrows a union today, so making it fatal would refuse the compiler's own
+    // source before there is anything to replace it with.
+    //
+    // Why it cannot just be refused here: `externalNames` CONFLATES two cases — a name
+    // this file imports, and a name a fragment-parsing caller stripped before handing the
+    // text over. Refusing would be a false refusal on the second, so the two have to be
+    // told apart first. Blaming the annotation is also the wrong report for the first: the
+    // cause is the exporting module's own refusal, one file away.
+    if (this.externalNames.has(id)) return;
+    // A global the program never had to declare — and one nothing above claimed, so
+    // returning here would hand the caller its `number`. REFUSED instead (NT1035): the
+    // name is real TypeScript, but `number` is not what it means, and a wrong type that
+    // silently becomes a REAL type is the seed of a miscompile rather than a lost nicety.
+    //
+    // AFTER the `externalNames` arm, deliberately. A file may import a type whose name
+    // collides with a lib global (`Set`, `Event`, `Console` are ordinary identifiers), and
+    // for an import the "this is TypeScript's `Set`" reading is a guess. Refusing on it
+    // would be a FALSE refusal on valid code, which is the one outcome the `AMBIENT_TYPES`
+    // comment rightly calls worse than the erasure — so an imported name keeps the old
+    // fallback and only a genuinely ambient one is refused.
+    if (AMBIENT_TYPES.has(id)) {
+      // The documented residue — see `ERASURE_STILL_ALLOWED`. Never inside an assertion,
+      // which is the position where an erased type is ADOPTED instead of checked.
+      if (!this.erasureIsFatal && ERASURE_STILL_ALLOWED.has(id)) return;
+      const t0 = this.toks[this.pos - 1];
+      throw nyi(
+        NYI.AMBIENT_TYPE,
+        `the type '${id}'`,
+        ambientTypeHint(id),
+        t0 === undefined ? undefined : { line: t0.line, col: t0.col },
+      );
+    }
     const t = this.toks[this.pos - 1];
     // Declared in this file as a CLASS, and not yet parsed — the class case of the same
     // ordering problem `declaredTypeLines` handles for `type`/`interface`, and it needs its
@@ -1280,18 +1435,38 @@ class Parser {
     }
     return f.ty;
   }
-  // Inline import type `import("./mod").Name` (optionally qualified) — erased to the
-  // referenced named type (an alias if known, else `number`). The module path is dropped.
+  /**
+   * Inline import type `import("./mod").Name` (optionally qualified) — resolved to the
+   * referenced named type, or REFUSED. The module path is dropped either way.
+   *
+   * Dropping the path is what makes this a resolution problem rather than a lookup: the
+   * only thing left to resolve is the bare `Name`, against THIS file's scope. That works
+   * whenever the file already has the name — a `type`/`interface` declared here, or a
+   * seeded `import type` — and `import("./m").T` then means exactly what `T` means.
+   *
+   * When it does not, the name reaches `resolveNamed`'s `number` fallback, and until
+   * NT1035 that is what the annotation silently became. It is live in this tree:
+   * src/coverage.ts:167 writes `new Map<string, import("./ast.ts").Ty>()`, and `Ty` is a
+   * structural type STRING, so the map's value type quietly said `number` instead.
+   *
+   * `erasedImportOf` is how the fallback is intercepted rather than inspected: the answer
+   * IS `number`, indistinguishable from a `number` the user wrote, so there is nothing to
+   * test after the call. Cleared in a `finally` — `resolveNamed` throws on several paths
+   * (a forward reference, a recursive type), and a flag left set would make the next
+   * unrelated name in this file report as an import type.
+   */
   private parseImportType(): Ty {
     this.eat("import"); this.eat("(");
-    this.next(); // module path string literal
+    const path = this.next().value;                 // module path string literal
     this.eat(")"); this.eat(".");
     let name = this.expectIdent();
     while (this.at(".")) { this.eat("."); name = this.expectIdent(); } // import("m").Ns.Type
     // The name belongs to the OTHER module, so "declared nowhere in this file" says nothing
-    // about it — NT2003 would be a false refusal by construction. Keep the old fallback.
+    // about it — NT2003 would be a false refusal by construction. This escape suppresses it;
+    // `erasedImportOf` is what stops the suppression from becoming a silent `number`.
     this.externalNames.add(name);
-    return this.resolveNamed(name);
+    this.erasedImportOf = path;
+    try { return this.resolveNamed(name); } finally { this.erasedImportOf = undefined; }
   }
   // A generic type reference `Name<T, U>` in type position. Generics carry no runtime
   // in this subset, so the arg list is parsed for grammar and then ERASED to a concrete
@@ -1336,7 +1511,13 @@ class Parser {
     this.eat("<");
     //@@mutable
     const tys: Ty[] = [];
-    if (!this.at(">")) { do { tys.push(this.parseType()); } while (this.at(",") && (this.eat(","), true)); }
+    // A type ARGUMENT is inside the assertion but is not the type being asserted — see
+    // `parseAssertedType` for where that line is drawn and why.
+    const fatal = this.erasureIsFatal;
+    this.erasureIsFatal = false;
+    try {
+      if (!this.at(">")) { do { tys.push(this.parseType()); } while (this.at(",") && (this.eat(","), true)); }
+    } finally { this.erasureIsFatal = fatal; }
     this.eatTypeClose();
     return tys;
   }
@@ -1411,6 +1592,13 @@ class Parser {
     this.eat("{");
     //@@mutable
     const fields: string[] = [];
+    // A FIELD's annotation is inside the assertion but is not the type being asserted —
+    // see `parseAssertedType`.
+    const fatal = this.erasureIsFatal;
+    this.erasureIsFatal = false;
+    try { return this.parseObjectTypeFields(fields); } finally { this.erasureIsFatal = fatal; }
+  }
+  private parseObjectTypeFields(fields: string[]): Ty {
     if (!this.at("}")) {
       do {
         if (this.at("}")) break; // tolerate a trailing `,`/`;` separator (interface bodies)
@@ -3064,7 +3252,7 @@ class Parser {
       // type, so it emits an IndexAssign and lets type inference decide.
       if (left.kind === "IndexExpr") {
         if (isOptChainTarget(left)) optChainWriteError("`a?.[i] = v`");
-        const op = this.next().value as any;
+        const op = this.next().value as AssignOp; // guarded by `ASSIGN_OPS` above
         return { kind: "IndexAssign", op, object: left.object, index: left.index, value: this.parseAssign(), loc: left.loc };
       }
       if (left.kind === "MemberExpr") {
@@ -3096,7 +3284,7 @@ class Parser {
         };
       }
       if (left.kind !== "Identifier") throw parseError("Invalid assignment target");
-      const op = this.next().value as any;
+      const op = this.next().value as AssignOp; // guarded by `ASSIGN_OPS` above
       return { kind: "AssignExpr", op, target: left.name, value: this.parseAssign() };
     }
     return left;
@@ -3143,9 +3331,9 @@ class Parser {
         // outside a union tag — `parseType`), so there is nothing left for it to change:
         // it is the IDENTITY, and the operand keeps its own inferred type.
         if (this.at("const")) { this.eat("const"); continue; }
-        test = { kind: "AsExpr", expr: test, ty: this.parseType() };
+        test = { kind: "AsExpr", expr: test, ty: this.parseAssertedType() };
       }
-      else { this.eat("satisfies"); test = { kind: "SatisfiesExpr", expr: test, ty: this.parseType() }; }
+      else { this.eat("satisfies"); test = { kind: "SatisfiesExpr", expr: test, ty: this.parseAssertedType() }; }
     }
     if (this.at("?")) {
       this.eat("?");
@@ -3155,6 +3343,37 @@ class Parser {
       return { kind: "ConditionalExpr", test, consequent, alternate };
     }
     return test;
+  }
+
+  /**
+   * The type of an `as` / `satisfies` assertion — `parseType`, with the erasure escape
+   * withdrawn for its whole extent (including nested annotations and type arguments).
+   *
+   * An assertion is the one position where an erased type becomes a WRONG ANSWER instead
+   * of a confusing refusal. Everywhere else the `number` `resolveNamed` invents is CHECKED
+   * against the value's real type, so a mismatch is caught. A cast ADOPTS the type: nothing
+   * downstream has anything left to compare it with. `xs as any[]` therefore re-typed a
+   * `string[]` as a `number[]`, and because both are `ptr` the LLVM verifier passed it too
+   * — node printed `x` and `2`, nativets printed nothing and exited 255.
+   *
+   * WHERE THE LINE IS. "The type being asserted" is the type CONSTRUCTOR the assertion
+   * names, including its array suffixes and union arms — `as any`, `as any[]`,
+   * `as unknown[]`, `as never | undefined` are all fatal, and `any[]` is the exact shape
+   * that produced the wrong answer above. It stops at a nested BINDER: a field annotation
+   * inside a record type (`parseObjectType`) and a type ARGUMENT (`parseTypeArgs`) restore
+   * the escape, because those name the parts rather than the whole and src/ needs them —
+   * `node as Record<string, unknown>` and `node as { name?: unknown }` are how every
+   * reflective walk in checker.ts/ownership.ts/codegen.ts opens a node it has not yet
+   * identified. That boundary is a consequence of the residue, not a claim those are safe:
+   * it disappears when `ERASURE_STILL_ALLOWED` does.
+   *
+   * Restores the previous value rather than clearing, because assertions chain
+   * (`x as unknown as T`) and the flag must stay set across the whole chain.
+   */
+  private parseAssertedType(): Ty {
+    const prev = this.erasureIsFatal;
+    this.erasureIsFatal = true;
+    try { return this.parseType(); } finally { this.erasureIsFatal = prev; }
   }
 
   private parseBinary(minPrec: number): Expr {

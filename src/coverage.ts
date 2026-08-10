@@ -7,7 +7,7 @@
  * so "unsupported" becomes an actionable, prioritized list.
  */
 
-import type { Program, Stmt, Expr, ImportDecl } from "./ast.ts";
+import type { Program, Stmt, Expr, ImportDecl, Ty } from "./ast.ts";
 import { parse } from "./parser.ts";
 import { linkProgram } from "./modules.ts";
 import { check } from "./checker.ts";
@@ -100,7 +100,7 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
       case "WhileStmt": walkExpr(s.test); s.body.forEach(walkStmt); break;
       case "DoWhileStmt": walkExpr(s.test); s.body.forEach(walkStmt); break;
       case "ForStmt":
-        if (s.init) { if ((s.init as any).kind === "VarDecl") walkStmt(s.init as Stmt); else walkExpr(s.init as Expr); }
+        if (s.init) { if ((s.init as Stmt).kind === "VarDecl") walkStmt(s.init as Stmt); else walkExpr(s.init as Expr); }
         if (s.test) walkExpr(s.test); if (s.update) walkExpr(s.update); s.body.forEach(walkStmt); break;
       case "ForOfStmt": walkExpr(s.iterable); s.body.forEach(walkStmt); break;
       case "ForInStmt": walkExpr(s.object); s.body.forEach(walkStmt); break;
@@ -164,7 +164,7 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   // before. Only the names are taken; the statements still come from the preprocess.
   let imports: ImportDecl[] = [];
   if (!linked) { try { imports = parse(source).imports ?? []; } catch { /* preamble does not parse; no names to recover */ } }
-  const typeEnv = new Map<string, import("./ast.ts").Ty>();
+  const typeEnv = new Map<string, Ty>();
   const mutableClasses = new Set<string>();
   const mutableRecords = new Set<string>();
   for (const st of linked ? [] : pre.statements) {

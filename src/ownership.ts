@@ -505,7 +505,7 @@ class Analyzer {
         this.loop(state, (st) => { this.scoped(s.body, st); this.expr(s.test, st, false); });
         return;
       case "ForStmt": {
-        if (s.init) { if ((s.init as any).kind === "VarDecl") this.stmt(s.init as Stmt, state); else this.expr(s.init as Expr, state, false); }
+        if (s.init) { if ((s.init as Stmt).kind === "VarDecl") this.stmt(s.init as Stmt, state); else this.expr(s.init as Expr, state, false); }
         this.loop(state, (st) => {
           if (s.test) this.expr(s.test, st, false);
           this.scoped(s.body, st);
@@ -1000,7 +1000,7 @@ function closureDecls(list: Stmt[], out: Map<string, object>): void {
         if (!isFuncTy(d.ty ?? "number")) continue;
         // A name declared twice in one scope would be freed twice for one live slot.
         if (out.has(d.name)) { out.set(d.name, {}); continue; } // an unreachable node ⇒ its `name` disqualifies it below
-        out.set(d.name, d as unknown as object);
+        out.set(d.name, d);
       }
     } else if (s.kind === "MultiStmt") closureDecls(s.stmts, out);
   }
@@ -1200,7 +1200,7 @@ function collectLinear(stmts: Stmt[], out: Set<string>): void {
       case "VarDecl": for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out.add(d.name); break;
       case "IfStmt": collectLinear(s.consequent, out); if (s.alternate) collectLinear(s.alternate, out); break;
       case "WhileStmt": case "DoWhileStmt": collectLinear(s.body, out); break;
-      case "ForStmt": if (s.init && (s.init as any).kind === "VarDecl") collectLinear([s.init as Stmt], out); collectLinear(s.body, out); break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectLinear([s.init as Stmt], out); collectLinear(s.body, out); break;
       case "ForOfStmt": collectLinear(s.body, out); break;
       case "SwitchStmt": for (const c of s.cases) collectLinear(c.body, out); break;
       case "BlockStmt": collectLinear(s.body, out); break;

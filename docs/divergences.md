@@ -946,6 +946,70 @@ does, and stay accepted (test262 `legacy-non-octal-escape-sequence-8-non-strict.
 > `\u0000` into `NT1705`. `String#length` over the result is still UTF-8 byte-oriented —
 > §A.2, unchanged.
 
+### Ambient lib type names (`NT1035`) — 56 of them silently meant `number`
+
+`AMBIENT_TYPES` in `src/parser.ts` is the set of names TypeScript's own lib declares, so a
+program may use one without declaring it. It exists so `NT2003` ("Cannot find name") can
+tell *"you never declared this"* from *"this is a global you never have to declare"* — and
+its escape handed control back to `resolveNamed`'s last line, which answers `number`. So
+every name on the list that no earlier arm claimed **became `number`**. Measured: 56 of the
+62 names, and only `Date`, `Error`, `Uint8Array`, `Response`, `Headers`, `URL` and
+`TextEncoder` resolved honestly.
+
+It was never only `any`/`unknown`/`never`. `symbol`, `bigint`, `Function`, `Iterable`,
+`Generator`, `ArrayBuffer`, `globalThis`, every `Readonly*`, and a **bare** `Map`/`Set`/
+`Promise`/`Record` written without type arguments all erased the same way. (An *applied*
+`Map<K,V>` never reaches that line — `parseGenericType` claims it — which is why the bug
+stayed invisible: the common spellings work.)
+
+The erasure is **destructive**, in exactly the sense `NT1033` and `NT2003` already document:
+`number` is a real type, so once `resolveNamed` answers it the spelling is gone and no later
+pass can tell the result from a `number` the user wrote. Three failures came out of it, in
+increasing order of severity:
+
+| written | node | before `NT1035` |
+|---|---|---|
+| `function f(x: unknown): string` | — | `'f' arg 0 expects number, got string` — a type the source never contains |
+| `const a = s as unknown` | `string` | clang's own `'%t1' defined with type 'ptr' but expected 'double'` |
+| `const b = (a as any[]); b[0]` where `a: string[]` | `x` | **no output, exit 255** |
+
+The third is the one that mattered. `any[]` erased to `number[]`, and since a `string[]` and
+a `number[]` are *both* `ptr` at the LLVM level, the verifier — which caught the scalar case
+above — had two matching types and passed it. A silent wrong answer is the worst outcome
+available, so the erasure is now a refusal, in the **parser**, which is the last pass that
+still holds the spelling.
+
+**What is refused:** only `resolveNamed`'s erasing fallback. A name some earlier arm claims
+is untouched, and so is every applied generic `parseGenericType` maps to a real shape. A
+bare container names its fix (`Map` → "write `Map<string, number>`").
+
+**The residue — three names, annotation position only.** `unknown`, `never` and `object`
+still erase in an annotation, because `src/` uses all three and none has an honest rewrite:
+`never` is a divergent return and the exhaustiveness witness `src/ast.ts` calls load-bearing
+(`default: { const impossible: never = e; … }` — "add an `Expr` member and this stops
+compiling"), and `unknown`/`object` are the parameter and identity-set types of the
+reflective AST walks in `checker.ts`/`ownership.ts`/`codegen.ts`. Closing them needs a
+**feature**, not a deletion: a bottom type for `never`; an opaque unusable `Ty`, or
+reflective walks the subset can express, for `unknown`/`object`. Refusing them instead would
+mean deleting a real `tsc`-checked invariant to satisfy a subset limitation.
+
+All three are refused inside an `as`/`satisfies` **assertion** regardless. That is the only
+position where the erasure was ever a wrong answer: an annotation is *checked* against the
+value it annotates, so a wrong erased type produces a refusal, while an assertion *adopts*
+the type and leaves nothing to compare. The line stops at a nested binder — a field
+annotation inside an asserted record, and a type argument — because `node as
+Record<string, unknown>` is how every reflective walk in `src/` opens an unidentified node.
+That boundary is a consequence of the residue and disappears with it.
+
+### Inline import types (`import("./m").T`) — the same last line, reached differently
+
+`parseImportType` **drops the module path** and resolves the bare name against *this* file.
+That works when the file already has the name; when it does not, the name reached the same
+`number` fallback and the annotation quietly changed meaning. It was live here:
+`src/coverage.ts` wrote `new Map<string, import("./ast.ts").Ty>()`, and `Ty` is a structural
+type *string*, so the map's value type said `number`. Now refused with the fix in the hint —
+import the name and annotate with the bare `T` — which is what `src/coverage.ts` does.
+
 `node` is our oracle. Two kinds of "we differ from node" exist, tracked separately.
 
 ## A. Semantic divergences (we compile it, but differ deliberately)

@@ -225,13 +225,34 @@ while (i < n) { i = i + 1; }
 console.log(i, i < n, n < s.length, i < s.length);`);
   });
 
-  // The ambient escape: a name TypeScript's own lib declares is never "declared nowhere".
-  // The list is deliberately generous — a name wrongly out of it is a false refusal on valid
-  // code, which is strictly worse than the erasure NT2003 replaces.
-  test("builtin/ambient type names are not refused", async () => {
+  // The ambient escape: a name TypeScript's own lib declares is never "declared nowhere",
+  // so it is never NT2003. What it is INSTEAD changed with NT1035 (test/type-erasure.test.ts).
+  //
+  // This case used to assert `matchesNode` on `f(x: any, y: unknown, z: Readonly<number>)`,
+  // and it passed for the wrong reason: `any` and `unknown` both ERASED to `number` and the
+  // three arguments happened to be numbers, so the program agreed with node by coincidence.
+  // The same erasure made `x as any[]` re-type a `string[]` as a `number[]` — a silent wrong
+  // answer — so the two keywords are now refused. `Readonly<number>` is NOT: it is claimed
+  // by `parseGenericType`, which maps it to a real shape, and it still compiles.
+  //
+  // The generosity argument the ambient list is built on is unaffected. It says a name
+  // wrongly OUT of the set is worse than the erasure, because leaving it out produces
+  // NT2003 — "Cannot find name", a claim that is FALSE for a name TypeScript declares.
+  // NT1035 makes no such claim: "nativets does not model this type" is true of every name
+  // it fires on. The set still does its NT2003 job; only its fallthrough changed.
+  test("builtin/ambient type names are refused as unmodelled, never as undeclared", () => {
+    expect(reject(`function f(x: any): number { return x; }\nconsole.log(f(1));`).code).toBe("NT1035");
+    expect(reject(`function f(x: Function): number { return 1; }\nconsole.log(f(1));`).code).toBe("NT1035");
+    // `unknown` is one of the three names still allowed to erase in an ANNOTATION
+    // (src/parser.ts `ERASURE_STILL_ALLOWED`), so it is not NT1035 here — but the point
+    // this test guards is that no ambient name is ever NT2003, and that still holds.
+    expect(reject(`function f(y: unknown): number { return 1; }\nconsole.log(f("s"));`).code).not.toBe("NT2003");
+  });
+
+  test("an applied utility type is still resolved, not refused", async () => {
     await matchesNode(`
-function f(x: any, y: unknown, z: Readonly<number>): number { return x + y + z; }
-console.log(f(1, 2, 3));`);
+function f(z: Readonly<number>): number { return z + 1; }
+console.log(f(3));`);
   });
 
   // The whole point of the ambient list is to CHANGE NOTHING for the names on it: whatever
@@ -1064,8 +1085,12 @@ describe("import scanning: a bare side-effect import does not disable NT2003", (
   });
 
   // ...and the dynamic-import type position, which had its own guard already.
+  // `Foo` is declared here so the inline import RESOLVES: an unresolvable one is now
+  // NT1035 in its own right (test/type-erasure.test.ts), which would mask what this case
+  // is about — that `import("m").Foo` does not add `Foo`, or anything else, to the set of
+  // names that suppress NT2003. `Bogus` must still be reported.
   test("`import(\"m\").T` still binds nothing", () => {
-    expect(parseCode(`type T = import("./m.ts").Foo;\nconst x: Bogus = 1;\n`)).toBe("NT2003");
+    expect(parseCode(`type Foo = number;\ntype T = import("./m.ts").Foo;\nconst x: Bogus = 1;\n`)).toBe("NT2003");
   });
 
   // The text-import spelling driver.ts uses, which DOES have a `from` and so was never
