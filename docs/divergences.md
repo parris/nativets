@@ -3497,6 +3497,64 @@ behaviour — `Codegen.msgValue`, whose `if` spelling was ALREADY `NT1604`, so t
 spellings agree rather than narrowing anything. Pinned in `test/ownership/ternary-move.ts` and
 `test/drops.test.ts` (which carries the ASan gate).
 
+### A `switch` ARM THAT REBINDS ITS DISCRIMINANT — the const shadow was standing in for a filter
+
+`narrowNameInto` takes a `blocked` set so a region that rebinds the narrowed name **declines to
+narrow** instead of shadowing the name `const` and turning the rebind into an error. Every
+condition form routes through it — `if`, `while`, `&&`/`||`, the early-exit guard, `?:` — except
+one. `checkStmt`'s `SwitchStmt` arm called `narrowInto` **directly**, and computed a `blocked` set
+only for a dotted-path discriminant, so a plain NAME discriminant got `null`. Two spellings of one
+program disagreed, and the `switch` was the one refused:
+
+```ts
+let cur: N = { kind: "a", x: 1 };
+if (cur.kind === "a") { cur = { kind: "b", s: "swapped" }; }            // fine
+switch (cur.kind) { case "a": cur = { kind: "b", s: "swapped" }; break; }  // NT2001 "cannot assign"
+```
+
+`switch (x.kind)` is the more idiomatic form over a discriminated union and the one `src/` is
+written in throughout, so this was the worse half to have missed.
+
+**It was not refusal-only.** The const shadow had been doing the filter's job, and there is one
+arm shape that never gets a shadow: a **non-literal case test** (`case pick:`, legal — only its
+TYPE is checked against the discriminant) contributes no tags, so `restrictUnion` answers
+`undefined` and `narrowInto` declares nothing. With no shadow the arm's rebind was simply allowed,
+and if the arm falls through, `carry` narrows the successor to a **sub-union** where
+`unionCommonField`'s same-slot rule admits the read:
+
+```ts
+type N = { kind: "a"; v: number } | { kind: "b"; v: number } | { kind: "c"; s: string };
+let cur: N = { kind: "a", v: 1 };
+switch (cur.kind) {
+  case pick: cur = { kind: "c", s: "boom" };   // no shadow ⇒ allowed
+  case "b":  console.log(cur.v);               // narrowed to {a,b}; `.v` is slot 1 in both
+}
+```
+
+`a` and `b` both carry a number at slot 1, so the read is accepted — but the value there is a `c`,
+whose slot 1 is a **string pointer**. On main at `9c9477f` this printed `2.157443986e-314` at
+exit 0 where node prints `undefined`: this project's signature silent wrong answer, for the eighth
+recorded time. `carry` could not have caught it — it tracks TAGS, and the tags were right; it was
+the VALUE that had moved.
+
+**The region is per-arm, not the whole switch.** A NAME shadow must be stable over the arm's own
+body plus every arm reachable from it by FALL-THROUGH — the same reachability `carry` already
+computes with `leavesBlock`, so the new `flow` is `carry`'s twin in the assignment domain. The
+blunt all-bodies set the dotted-path case uses would also be sound, but it would refuse
+`case "a": read; break; default: assign;`, which node runs and which is not stale at all: the two
+arms cannot reach each other. (The path case keeps the blunt set — a path fact is the more fragile
+of the two and nothing has measured a need for more.)
+
+| | before | after |
+|---|---|---|
+| an arm rebinds, reads no narrowed field | **refused** at the assignment | compiles, matches node |
+| a sibling arm reads a narrowed field, both `break` | **refused** | compiles, matches node |
+| an arm rebinds then reads a narrowed field | refused at the assignment | refused at the READ, hint names the assignment |
+| a non-literal arm rebinds and falls through | **`2.157443986e-314`, exit 0** | refused, `NT2001` |
+
+Pinned in `test/narrowing.test.ts`, "narrowing 7". The `flow` term is proved by MUTATION: drop it
+and the sub-union fall-through compiles to `2.124223034e-314` where node prints `undefined`.
+
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
 
