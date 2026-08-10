@@ -3892,6 +3892,69 @@ error[NT2001]: Property 'left' does not exist on … at 1407:60
        |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this read
 ```
 
+### The sub-union field read — cleared, and the extra condition WAS the rule
+
+The prediction above held exactly. `unionCommonField` (`src/ast.ts`) admits a field only when
+it is in every surviving member, **at the same slot index**, with the same widened type; that
+triple is what makes the read a single constant-offset load and so what lets a `U<…>` value
+stay an unboxed member pointer. Both added clauses were proved by mutation — with the slot
+check deleted the read returns a sibling field, with the type check deleted it returns a string
+pointer bit-cast to a double (`2.1254528236e-314`). See `docs/divergences.md` for the table.
+
+**Frontier delta, measured.** All nine linked columns plus `ast.ts`'s standalone column moved
+`NT2001 → NT1001`. `blocker-metric` went **270/654 → 269/655** — one net function, because the
+new helper adds one to the denominator and three of the four cleared sites simply revealed a
+second blocker in the same body (limitation #2 of that instrument, doing its job).
+
+**The next term did not even change function.** It is 22 lines further down `exprLoc`:
+
+```ts
+case "TemplateLiteral": return e.exprs.map((x) => exprLoc(x)).find((l) => l !== undefined);
+```
+
+`NT1001 .map producing ?U{line,col,file}` — an array of NULLABLE elements. Four rounds running,
+one function of `src/ast.ts` has been the wall for nine modules, and this round's next term is
+not a union construct at all.
+
+**The bucket this came out of is much smaller than "union field before narrowing" suggests.**
+Measured over the linked stage-1 program, 38 of 136 remaining `NT2001` blockers are union field
+reads, and they split three ways:
+
+| Shape | Count | Why |
+|---|---|---|
+| receiver is the FULL 30-member `Expr`, field absent from most members | 31 | **`Extract<T, U>` erases to `T`** (`parseGenericType`, `src/parser.ts:1323`). `Extract<Expr, {kind:"ArrowFunction"}>` is the whole union, so every field read on such a parameter fails. `tsc` sees the member. |
+| `.ty` on the full `Expr` union | 5 | present in all 30 members but at slots 1..5, and `string` in some / `?Ustring` in others — needs agreeing layout or a tag branch |
+| same-type field at DIFFERENT slots on a 2-member sub-union | 2 | same |
+
+So the dominant sub-shape is not a narrowing gap at all: it is one erased utility type. Making
+`Extract<U, {k:"K"}>` resolve to the member is the wide lane here — but it cannot land alone,
+because it turns every `x as Extract<…>` in `src/` into an unchecked union downcast, which is
+the hole recorded next.
+
+### PRE-EXISTING, unrelated to any lane: `as` reinterprets a union at another member's layout
+
+`Checker.type`'s `AsExpr` case is `{ this.type(e.expr, scope); return e.ty; }` — an identity
+retype with no check at all — and codegen emits a bare pointer with the new type. For a
+DOWNCAST, which `tsc` accepts without complaint, that is memory reinterpretation:
+
+```ts
+type Shape = { kind: "circle"; r: number } | { kind: "square"; label: string };
+function bad(s: Shape): number { const c = s as { kind: "circle"; r: number }; return c.r; }
+console.log(bad({ kind: "square", label: "hello" }));
+```
+
+node prints `undefined`. nativets prints **`2.1241009864e-314`** — the string pointer read as a
+double. With `{ kind:"square"; side:number; label:string }` instead it prints `3`, the `side`
+field, silently. The object-to-object form is the same defect and reads out of bounds:
+`(x as {a:number; b:string}).b` on a one-slot `{a:number}` prints `(null)` where node prints
+`undefined`.
+
+Refusing `as` outright is not available: `src/` itself downcasts (`lit as {ty?: Ty}`,
+`e.callee as {name: string}`, and eleven `as Extract<…>`), so this needs a **checked** cast —
+load the discriminant slot, compare, panic on mismatch — for which the machinery already
+exists (`genDynNarrow` for `dyn as T`, `nt_union_arm` for a general union's arm, `nt_nonnull`
+for `!`). That is the prerequisite lane for `Extract<>`, and it is the larger of the two.
+
 
 ---
 

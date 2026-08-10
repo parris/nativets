@@ -546,7 +546,22 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // short-circuit fact plumbing that already existed could not carry it.
     // What holds all nine now is the KNOWN next term: `Property 'kind' does not exist on
     // @Expr` — a property read through a recursive back-edge, which has its own lane.
-    ["NT2001"],
+    //
+    // ...and NT2001 LEAVES, replaced by NT1001 — the ELEVENTH refill, and for the fourth
+    // round running the holder is one FUNCTION of `src/ast.ts` that nine modules inherit.
+    // The back-edge read and then the dotted-path tag test fell in their own lanes; what
+    // was left was `exprLoc`'s `case "BinaryExpr": case "LogicalExpr": return
+    // exprLoc(e.left)`, a field read on a receiver narrowed to two members. It is legal
+    // now because `left` is at the SAME slot with the SAME type in both, so one
+    // constant-offset load reads it (`unionCommonField`); a field at DIFFERENT slots, or
+    // with different types, is still refused, and both guards have a mutation test.
+    //
+    // The next term did not even change function: it is 22 lines further down `exprLoc`,
+    // `e.exprs.map((x) => exprLoc(x))` — an ARRAY OF NULLABLE ELEMENTS, NT1001. Worth
+    // saying plainly, because the bucket this came out of was named "union field before
+    // narrowing": the union work is NOT what stands between these nine modules and the
+    // next rung, and this set is the instrument that says so.
+    ["NT1001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -745,7 +760,22 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // itself was the error. A tag narrowing is a shadow BINDING (`Checker.narrowInto`), not
     // a `NarrowFact`, so the short-circuit plumbing that already carried nullish guards
     // across `&&`/`||` could not carry it. Fixture: test/unions/narrow-shortcircuit.ts.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+    //
+    // ...and it EMPTIES AGAIN — the back-edge read fell, then the dotted-path tag test,
+    // and now the last term of that chain: `exprLoc`'s `case "BinaryExpr": case
+    // "LogicalExpr": return exprLoc(e.left)`, a field read on a receiver narrowed to two
+    // members. tsc allows it because `left` is in both surviving members; we allow it
+    // because it is ALSO at the same slot with the same type in both, which is what makes
+    // it one constant-offset load and lets a union value stay an unboxed member pointer
+    // (`unionCommonField`, src/ast.ts). Different slots, or different types, stay refused
+    // — each guard has a mutation test, and deleting the type one prints a string pointer
+    // as a double.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    // The bucket the same nine moved INTO, and it is the same FUNCTION 22 lines further
+    // down: `exprLoc`'s `e.exprs.map((x) => exprLoc(x)).find(…)`, an array of NULLABLE
+    // elements. Four rounds running, one function of src/ast.ts has been the wall for
+    // nine modules — and this round it is not a union construct at all.
+    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual(
       ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
     // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
@@ -1066,9 +1096,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // moved on together to NT1606 (`o.f = v` on an AST node). See the same bucket above.
     // ...and REFILLED with the same nine, on ast.ts's `@Expr` property read. Same bucket
     // above, which carries the reasoning.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    // ...and EMPTY again, on `exprLoc`'s two-member sub-union field read. Same bucket
+    // above, which carries the reasoning; the nine moved to NT1001, also asserted above.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a

@@ -20,7 +20,7 @@ import { isTypeRefTy, containsTypeRef, unfoldTypeRef, recTypeTable } from "./ast
 // `k in o`: node's prototype chain is the whole reason `"valueOf" in {}` is true.
 import { OBJECT_PROTO_KEYS } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
-import { isUnionTy, unionDiscriminant, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
+import { isUnionTy, unionDiscriminant, unionCommonField, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
 // The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
 // by `typeof` instead. Distinct from the discriminated-union machinery imported above.
 import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, typeofTagOf } from "./ast.ts";
@@ -2078,12 +2078,15 @@ class Checker {
     // what the REFUSAL says when there are none. Keeping only one would have silently
     // dropped either recursive field reads or the truthful narrowing advice.
     const base = this.unfold(rawBase);
-    // SH2: only the DISCRIMINANT is readable on an un-narrowed union — it is the one
-    // field guaranteed to exist, at the same slot, in every member. Everything else
-    // needs a narrowing first; say so instead of guessing a member.
+    // SH2: a field is readable on an un-narrowed union when it is in EVERY member, at the
+    // SAME slot, with the SAME type — `unionCommonField` is the whole rule, and the
+    // DISCRIMINANT is its degenerate case rather than a special one (in every member by
+    // construction, and its per-member literal types all widen to `string`). Anything
+    // else needs a narrowing first; say so instead of guessing a member.
     if (isUnionTy(base)) {
+      const c = unionCommonField(base, prop);
+      if (c) return c.ty;
       const d = unionDiscriminant(base)!;
-      if (prop === d.key) return "string";
       throw typeError(`Property '${prop}' does not exist on ${showUnion(base)} — ${this.narrowAdvice(base, d.key, recv)}`, at, undefined, "this read");
     }
     if ((base === "string" || isArrayTy(base)) && prop === "length") return "number";

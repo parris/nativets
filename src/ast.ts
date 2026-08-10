@@ -420,6 +420,49 @@ export function unionDiscriminant(t: Ty): { key: string; index: number } | undef
   return undefined;
 }
 
+/**
+ * A field readable on an un-narrowed union — present in EVERY member, at the SAME slot
+ * index, with the SAME type once tags are widened. `undefined` when any of that fails.
+ *
+ * tsc's rule is only the first clause: a property in every constituent is readable, and
+ * its type is the union of the per-member types. Ours has to add the other two, and the
+ * reason is REPRESENTATION rather than typing. A `U<…>` value IS the member object
+ * pointer (see the SH2 note above) — there is no box and no per-member vtable — so a
+ * field read lowers to one `getelementptr` at a CONSTANT slot. A field sitting at slot 1
+ * in one member and slot 3 in another has no such constant, and a field whose type
+ * differs between members has no single way to interpret the 64 bits once loaded.
+ * Reading it anyway is the type-confusion this project exists to refuse: a `{r:number}`
+ * / `{label:string}` pair at the same slot hands back a string pointer bit-cast to a
+ * double (`2.1e-314`), not a wrong number.
+ *
+ * So this is deliberately the SOUND PARTIAL rule. Agreeing slots across a union's
+ * members (by laying members out to match) and branching on the tag to pick a slot are
+ * both strictly wider and both cost something — a layout change and a runtime test
+ * respectively — and neither is needed for the shape that actually blocks self-hosting,
+ * `case "BinaryExpr": case "LogicalExpr": return exprLoc(e.left)`, where the shared
+ * field is at the same slot in both members already.
+ *
+ * The DISCRIMINANT is the degenerate case of exactly this rule, not a separate one: it
+ * is in every member at one index by construction, and its per-member string-LITERAL
+ * types all widen to `string`. That is why the tag read and the shared-field read are
+ * one code path in both the checker and codegen.
+ */
+export function unionCommonField(t: Ty, key: string): { index: number; ty: Ty } | undefined {
+  const members = unionMembers(t);
+  if (members.length === 0) return undefined;
+  let index = -1;
+  let ty: Ty = "number";
+  for (const m of members) {
+    const fs = objectFields(m);
+    const i = fs.findIndex((f) => f.key === key);
+    if (i < 0) return undefined;                       // absent from this member
+    const w = widenLiteralTys(fs[i]!.ty);
+    if (index < 0) { index = i; ty = w; continue; }
+    if (i !== index || w !== ty) return undefined;     // different slot, or different type
+  }
+  return index < 0 ? undefined : { index, ty };
+}
+
 /** Every tag value of a union, in declaration order (drives exhaustiveness). */
 export function unionTagValues(t: Ty): string[] {
   const d = unionDiscriminant(t);

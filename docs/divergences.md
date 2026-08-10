@@ -538,6 +538,51 @@ with a tag test already written. `Checker.narrowAdvice` now says which one it is
 
 Each of the three workarounds it prescribes was verified to compile and match node.
 
+### A SHARED field is readable on an un-narrowed union — but only at an agreeing slot
+
+`tsc` reads a property that is present in **every** surviving constituent, and types it as the
+union of the per-member types. The compiler's own first self-hosting blocker was exactly that
+read, in `src/ast.ts`:
+
+```ts
+case "BinaryExpr": case "LogicalExpr": return exprLoc(e.left);
+//                                                     ^ NT2001 — narrowed here to MORE THAN
+//                                                       ONE member, so only the tag is readable
+```
+
+That now compiles. **Our rule is tsc's plus two clauses, and they are a REPRESENTATION question
+rather than a typing one.** A `U<…>` value IS the member object pointer — no box, no per-member
+vtable — so a field read lowers to one `getelementptr` at a *constant* slot. So
+`unionCommonField` (`src/ast.ts`) admits a field only when it is:
+
+1. present in every surviving member — tsc's clause; and
+2. at the **same slot index** in every one of them; and
+3. of the **same type** in every one of them, once literal tags are widened.
+
+The discriminant is the degenerate case of that rule, not a special one (in every member at one
+index by construction, every member's literal tag widening to `string`), so the tag read and the
+shared-field read are a single code path in both the checker and codegen.
+
+**Clauses 2 and 3 are load-bearing, and were proved by mutation rather than argument.** Deleting
+either from `unionCommonField` produces a silent wrong answer one `if` away from the accepting
+path:
+
+| Mutation | Program | node | nativets with the guard deleted |
+|---|---|---|---|
+| slot check removed | `{kind:"A",n,other}` / `{kind:"B",other,n}`, read `.n` | `222` | `111` — it read `other` |
+| type check removed | `{kind:"A",v:number}` / `{kind:"B",v:string}`, read `.v` | `hello` | `2.1254528236e-314` — a string pointer as a double |
+
+Both are permanent tests in `test/unions.test.ts`; the accepting side runs against node as
+`test/unions/shared-field.ts`.
+
+**What stays refused, and what would lift it.** A field at DIFFERENT slots, or with different
+types, keeps its `NT2001`. Two strictly wider designs exist and neither is taken: laying a
+union's members out so common fields agree on a slot (a layout change, so it reaches every
+object mechanism), and branching on the tag to pick the slot (a runtime test on every such
+read). Neither is needed for the shape that actually blocks self-hosting, and a sound partial
+rule beats a risky complete one. The `narrowAdvice` row above therefore fires only when the
+receiver *is* narrowed to several members AND the field fails one of the three clauses.
+
 ### `break` is not `return` — one conflation, one false refusal and four wrong answers (closed)
 
 Two passes asked "does this code leave?" and both got `break` wrong, in opposite directions.

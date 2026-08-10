@@ -26,7 +26,7 @@ import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isF
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
 // SH2 (discriminated unions): a union value IS its member's object block, so every
 // lowering below treats it exactly like an object pointer.
-import { isUnionTy, unionDiscriminant, widenLiteralTys } from "./ast.ts";
+import { isUnionTy, unionCommonField, widenLiteralTys } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
 import { nyi, NYI, internalError } from "./diagnostics.ts";
@@ -2152,15 +2152,24 @@ class FnGen {
           this.emit(`${d} = sitofp i64 ${sz} to double`);
           return { v: d, ty: "number" };
         }
-        // SH2: on an un-narrowed union only the DISCRIMINANT is readable, and it sits at
-        // the same slot in every member (that requirement is what lets the union go
-        // unboxed) — so this is an ordinary slot load, of a string.
+        // SH2: on an un-narrowed union the readable fields are the ones `unionCommonField`
+        // admits — in every member, at the SAME slot, with the SAME type. That is exactly
+        // what makes this an ordinary constant-offset slot load with no tag test, which is
+        // in turn what lets the union go unboxed. The discriminant is the degenerate case
+        // (same slot by construction, every member's literal tag widening to `string`), so
+        // it needs no branch of its own; the checker refuses everything this declines.
         if (isUnionTy(obj.ty)) {
+          // NOT a `!`. The checker refuses every read this declines, so reaching here with
+          // nothing means the two passes have drifted — and the failure mode of guessing a
+          // slot is a load at the wrong offset, which is the one outcome this whole rule
+          // exists to prevent. Say so loudly instead of emitting a plausible `getelementptr`.
+          const c = unionCommonField(obj.ty, e.property);
+          if (!c) throw internalError(`.${e.property} is not at one slot in every member of ${obj.ty}`);
           const gep = this.fresh();
-          this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${unionDiscriminant(obj.ty)!.index}`);
+          this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${c.index}`);
           const slot = this.fresh();
           this.emit(`${slot} = load i64, ptr ${gep}`);
-          return { v: this.fromSlot(slot, "string"), ty: "string" };
+          return this.narrowRead(e, { v: this.fromSlot(slot, c.ty), ty: c.ty });
         }
         if (isObjectTy(obj.ty)) {
           const idx = fieldIndex(obj.ty, e.property);

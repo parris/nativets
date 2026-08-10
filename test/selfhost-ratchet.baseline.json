@@ -1,24 +1,24 @@
 {
   "recordedAt": {
-    "date": "2026-08-09",
-    "rev": "fb8a3e7"
+    "date": "2026-08-10",
+    "rev": "a6dcc2f"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "c9020a7c9e29eef6",
+      "sha256": "d1e8d591c33ed5ac",
       "standalone": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@Expr,right:@Expr,ty:?Ustring} | {kind:string,op:string,left:@Expr,right:@Expr,ty:?Ustring} — 'e' is narrowed here to MORE THAN O…"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@Expr,right:@Expr,ty:?Ustring} | {kind:string,op:string,left:@Expr,right:@Expr,ty:?Ustring} — 'e' is narrowed here to MORE THAN O…"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
       }
     },
     "checker.ts": {
-      "sha256": "728794e4fa7bf707",
+      "sha256": "f2fda204e72f1c6a",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} — 'e' is …"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
       }
     },
     "cli.ts": {
@@ -40,12 +40,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} —…"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
       }
     },
     "codegen.ts": {
-      "sha256": "8bd05c6d169e1461",
+      "sha256": "3f7c85c4c6a0285c",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} — 'e' is …"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
       }
     },
     "coverage-preprocess.ts": {
@@ -71,7 +71,7 @@
       }
     },
     "coverage.ts": {
-      "sha256": "756f7d195b4c866e",
+      "sha256": "140a8e6c3f6dcc0c",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nts0_m0_Expr,right:@_nts0_m0_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nts0_m0_Expr,right:@_nts0_m0_Expr,ty:?Ustring} —…"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
       }
     },
     "diagnostics.ts": {
@@ -98,7 +98,7 @@
       }
     },
     "driver.ts": {
-      "sha256": "8453ea6c43a0ea91",
+      "sha256": "665cce46576a8a11",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} —…"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
       }
     },
     "lexer.ts": {
@@ -125,7 +125,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "71ce215bf3e2ef49",
+      "sha256": "2a31cdd7ae247ded",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -133,12 +133,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nts0_m2_Expr,right:@_nts0_m2_Expr,ty:?Ustring} —…"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
       }
     },
     "ownership.ts": {
-      "sha256": "cfadae7f2f9aa3fd",
+      "sha256": "6343151e9079c4ed",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nt_m0_Expr,right:@_nt_m0_Expr,ty:?Ustring} — 'e' is …"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
       }
     },
     "parser.ts": {
-      "sha256": "4dbd00e7e5c8be0f",
+      "sha256": "2a05c1643d738b2f",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'left' does not exist on {kind:string,op:string,left:@_nt_m2_Expr,right:@_nt_m2_Expr,ty:?Ustring} | {kind:string,op:string,left:@_nt_m2_Expr,right:@_nt_m2_Expr,ty:?Ustring} — 'e' is …"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
       }
     }
   }

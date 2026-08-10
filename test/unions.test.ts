@@ -189,6 +189,101 @@ function mkBox(): Box { return { inner: mkA(7) }; }
     });
   });
 
+  /**
+   * A field in EVERY surviving member, at the SAME slot, with the SAME type, reads
+   * without narrowing further — the `test/unions/shared-field.ts` fixture runs the
+   * accepting side against node. What is pinned HERE is the boundary, because widening a
+   * read makes strictly MORE programs compile and the only thing that can go wrong is
+   * accepting one that resolves to the wrong slot.
+   *
+   * Both refusals below were proved by MUTATION, not by argument. With the slot check
+   * deleted from `unionCommonField`, the first program prints `111` (the `other` field)
+   * where node prints `222`. With the type check deleted, the second prints
+   * `2.1254528236e-314` — a string pointer bit-cast to a double — where node prints
+   * `hello`. Each guard is one `if` away from a silent wrong answer, so each has a test.
+   */
+  describe("a SHARED field is readable, and only when one constant offset can read it", () => {
+    test("same slot, same type, every surviving member ⇒ the read compiles", () => {
+      const ok = `interface Num { kind: "Num"; value: number }
+interface Bin { kind: "Bin"; left: number; right: number }
+interface Log { kind: "Log"; left: number; right: number }
+type Node = Num | Bin | Log;
+function f(n: Node): number { switch (n.kind) { case "Num": return n.value; case "Bin": case "Log": return n.left; } }
+console.log(f({ kind: "Bin", left: 1, right: 2 }));
+`;
+      expect(codeOf(ok)).toBe(null);
+    });
+
+    test("present in both members but at DIFFERENT slots ⇒ still refused", () => {
+      const bad = `interface A { kind: "A"; n: number; other: number }
+interface B { kind: "B"; other: number; n: number }
+interface C { kind: "C"; z: number }
+type U = A | B | C;
+function f(u: U): number { if (u.kind === "C") return -1; return u.n; }
+console.log(f({ kind: "B", other: 111, n: 222 }));
+`;
+      expect(codeOf(bad)).toBe("NT2001");
+      expect(messageOf(bad)).toContain("MORE THAN ONE member");
+    });
+
+    test("same slot but DIFFERENT types ⇒ still refused (this is the type confusion)", () => {
+      const bad = `interface A { kind: "A"; v: number }
+interface B { kind: "B"; v: string }
+interface C { kind: "C"; z: number }
+type U = A | B | C;
+function f(u: U): string { if (u.kind === "C") return "none"; return u.v as unknown as string; }
+console.log(f({ kind: "B", v: "hello" }));
+`;
+      expect(codeOf(bad)).toBe("NT2001");
+    });
+
+    test("absent from ONE surviving member ⇒ still refused, whatever the others agree on", () => {
+      const bad = `interface A { kind: "A"; v: number }
+interface B { kind: "B"; v: number }
+interface C { kind: "C"; z: number }
+type U = A | B | C;
+function f(u: U): number { return u.v; }
+console.log(f({ kind: "C", z: 1 }));
+`;
+      expect(codeOf(bad)).toBe("NT2001");
+    });
+  });
+
+  /**
+   * KNOWN DEFECT, PINNED — `as` reinterprets a union value at another member's layout.
+   *
+   * `Checker.type`'s `AsExpr` case is `{ this.type(e.expr, scope); return e.ty; }`, an
+   * identity retype with no check, and codegen hands the same pointer back under the new
+   * type. tsc ACCEPTS a union-to-member downcast (the member is a subtype), so nothing
+   * anywhere refuses this — and where tsc's unsoundness costs an `undefined`, ours costs
+   * a slot read at the wrong offset. It predates this lane and it is not a union-only
+   * defect: `(x as {a:number,b:string}).b` on a one-slot `{a:number}` reads out of bounds.
+   *
+   * It is asserted here rather than left in a document because it is a SILENT wrong
+   * answer, the outcome this project ranks worst, and because the fix it needs is not a
+   * refusal — `src/` itself downcasts in twenty-odd places, including every
+   * `as Extract<Expr, {kind:"…"}>` — but a CHECKED cast that tests the tag and panics,
+   * the way `dyn as T` (`genDynNarrow`) and `!` (`nt_nonnull`) already do.
+   *
+   * WHEN THIS TEST FAILS, THAT IS THE FIX LANDING. Replace it with the panic/refusal
+   * assertion and delete the entry in docs/self-hosting.md.
+   */
+  test("KNOWN DEFECT: an `as` downcast to a union MEMBER reads the wrong slot", async () => {
+    const src = `type Shape =
+  | { kind: "circle"; r: number }
+  | { kind: "square"; side: number; label: string };
+function bad(s: Shape): number {
+  const c = s as { kind: "circle"; r: number };
+  return c.r;
+}
+console.log(bad({ kind: "square", side: 3, label: "hi" }));
+`;
+    // node erases the cast, so `c.r` is genuinely absent: `undefined`.
+    expect(runWithNode(src).stdout).toBe("undefined\n");
+    // We read slot 1 of a `square`, which is `side`. Deterministic, and wrong.
+    expect((await compileAndRun(src)).stdout).toBe("3\n");
+  });
+
   test("narrowing does not leak past the arm it was proved in", () => {
     const leaks = `${SHAPES}function f(s: Shape): number {
   if (s.kind === "square") { return s.size; }
