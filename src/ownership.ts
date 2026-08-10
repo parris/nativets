@@ -1043,6 +1043,20 @@ function declaredLinear(list: Stmt[], aliases: Set<string>): string[] {
  *  disqualifies on a match, so the omission of a key is the conservative direction. */
 const NOT_A_MENTION = new Set(["kind", "ty", "elemTy", "retTy", "key", "property", "field", "names", "drops", "endDrops"]);
 
+/**
+ * KEPT AS A CAST, deliberately — the one duck-typed window in `src/` that is sound, and
+ * the reason is worth stating so it is not "fixed" into something worse.
+ *
+ * The others (`retarget`, the `nullOnMove` marking) named a field that lives at slot 1, 2
+ * or 4 through a ONE-FIELD window, i.e. at slot 0, i.e. at `kind`. This one names `kind`,
+ * and `kind` genuinely IS slot 0 of every `Expr`/`Stmt` member — so the window and the
+ * layout agree, and the read is exactly node's answer. `test/as-cast.test.ts` pins that
+ * case as legal and, being an agreeing slot in every member, free of any tag check.
+ *
+ * Tag dispatch is not available here anyway: the argument is `unknown` from a structural
+ * walk, so there is no static union to narrow — reading the tag IS the narrowing. That is
+ * what makes this a type guard rather than a layout assumption.
+ */
 function isIdentNode(x: unknown): boolean {
   return typeof x === "object" && x !== null && (x as { kind?: unknown }).kind === "Identifier";
 }
@@ -1464,7 +1478,19 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     const end = [...a.ownedTopLevel(st), ...topClosures]; // computed BEFORE marking: it can add to condDrops
     // Drop flags: a name that is dropped on a path where it MIGHT already have been
     // moved needs its move sites to null the slot, so the drop is a no-op there.
-    for (const n of a.condDrops) for (const site of a.moveSites.get(n) ?? []) (site as { nullOnMove?: boolean }).nullOnMove = true;
+    //
+    // The tag test is not a filter — EVERY move site is an `Identifier` by construction
+    // (`sites.add(e)` runs only inside `expr`'s `case "Identifier"`, and codegen reads the
+    // flag back off an `Identifier` too). It is there because the store needs a slot, and
+    // the cast this replaced,
+    //
+    //     (site as { nullOnMove?: boolean }).nullOnMove = true;
+    //
+    // named slot 0. `nullOnMove` is slot 4 of `Identifier`; slot 0 is `kind`. Dynamic
+    // under `bun`, and compiled it would have overwritten the discriminant of every
+    // conditionally-dropped move site with `true` — on ordinary correct programs, not
+    // just exotic ones. Narrowing costs a tag compare that is already proven.
+    for (const n of a.condDrops) for (const site of a.moveSites.get(n) ?? []) if (site.kind === "Identifier") site.nullOnMove = true;
     diags.push(...a.diags);
     return end;
   };

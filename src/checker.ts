@@ -1490,10 +1490,39 @@ class Checker {
    * expression is left untouched, which is what keeps `this` flowing normally.
    */
   private retarget(e: Extract<Expr, { kind: "CallExpr" }>, mangled: string, recvOffset: number): void {
-    if (recvOffset === 0) { (e.callee as { name: string }).name = mangled; return; }
+    /*
+     * TAG DISPATCH, not a cast — `exprLoc`'s pattern (src/ast.ts), for the same reason and
+     * one worse. These two stores used to be
+     *
+     *     (e.callee as { name: string }).name = mangled;
+     *     (e.callee as { property: string }).property = mangled.slice(…);
+     *
+     * which is correct under `bun` (property access is dynamic) and lands on the wrong
+     * slot compiled. `name` is slot 1 of `Identifier` and `property` is slot 2 of
+     * `MemberExpr`, but a ONE-FIELD window puts its field on slot 0 — and slot 0 of every
+     * `Expr` member is `kind`. So both stores were aimed at the DISCRIMINANT. A bad read
+     * yields a wrong value; a bad write corrupts the tag for every later narrowing, which
+     * is how the entire checker reads unions.
+     *
+     * What actually held the line was neither rule you would expect: an `as` target is an
+     * untagged structural record, an untagged record is immutable, so NT1606 refused the
+     * store. Real, but incidental — it is the mutability rule catching a LAYOUT bug, and
+     * `@@mutable` exists to relax exactly that rule. Narrowing on the tag is what makes
+     * the store land on the right slot when it is eventually permitted.
+     *
+     * The `recvOffset` test still decides WHICH store, because it is what the caller
+     * knows; the tag test is what makes the store type-safe. They agree by construction —
+     * a method call is the only thing with a receiver — and if they ever disagree, doing
+     * nothing is the safe answer: an un-retargeted call keeps the template name and fails
+     * to link, which is loud, rather than silently running the wrong specialization.
+     */
+    if (recvOffset === 0) {
+      if (e.callee.kind === "Identifier") e.callee.name = mangled;
+      return;
+    }
     // `mangled` is the whole dotted symbol (`C.t$number`); a class name cannot contain a
     // `.`, so everything after the first one is the property.
-    (e.callee as { property: string }).property = mangled.slice(mangled.indexOf(".") + 1);
+    if (e.callee.kind === "MemberExpr") e.callee.property = mangled.slice(mangled.indexOf(".") + 1);
   }
 
   /** Whitelist `e` as an iteration position (see `iterOk`). */
@@ -4542,7 +4571,22 @@ class Checker {
       // --- stdlib Batch 1 (part 2): array fills ---
       case "flat": { // ONE level only (node's default depth); an explicit depth must be 1
         if (args.length > 1) throw typeError(".flat expects 0..1 args");
-        if (args.length === 1 && !(args[0]!.kind === "NumberLiteral" && (args[0] as { value: number }).value === 1))
+        // The window includes `kind` so that it is SLOT-CORRECT. It used to be
+        // `(args[0] as { value: number }).value`, a one-field window — i.e. slot 0, i.e.
+        // `kind` — while `value` is slot 1 of `NumberLiteral`. Compiled, that compared a
+        // string POINTER against 1, never matched, and so refused `.flat(1)`: the explicit
+        // spelling of the only depth we support.
+        //
+        // A WINDOW rather than tag dispatch, unlike this lane's other sites, because
+        // neither narrowing spelling is available on an array element: `args[0]!.kind ===
+        // … && args[0]!.value` is refused (a computed index is not a stable access path,
+        // and rightly — the element could be replaced between the two reads), and binding
+        // it first is NT1605, a move out of a linear element. `{kind,value}` is exactly
+        // slots 0,1 of `NumberLiteral`, so the read is sound; it is tag-checked in codegen,
+        // and the `&&` on its left means the tag has already been tested, so the check
+        // always passes. Same shape as `retainedReceiver`'s window (test/as-cast.test.ts,
+        // "a structural WINDOW onto SOME members is tag-checked, not refused").
+        if (args.length === 1 && !(args[0]!.kind === "NumberLiteral" && (args[0] as { kind: string; value: number }).value === 1))
           throw nyi(NYI.ARRAY, ".flat(depth) with a depth other than 1 (chain .flat().flat() instead)");
         if (!isArrayTy(el)) throw typeError(".flat expects an array of arrays");
         return el;
