@@ -1929,9 +1929,38 @@ established — but not by a new analysis. Three facts the compiler already has 
   the attribute is on a `let`/`const`;
 - `this.f`, `xs[0]` and `f()` name **no binding**, so they never match the opt-in.
 
-The one hole those do not cover is a **CLOSURE**: an arrow copies the array POINTER into a heap env
-this scope cannot null, and the closure may outlive the binding. A push to a captured accumulator is
-`NT1607`.
+The one hole those do not cover is a **CLOSURE WITH AN ENV**: a *bound* arrow copies the array
+POINTER into a heap env this scope cannot null, and the closure may outlive the binding. A push to
+such a captured accumulator is `NT1607`.
+
+**An INLINED HOF callback is not that, and is allowed.** The rule was originally stated over "any
+arrow", which refused the most idiomatic accumulator shape there is —
+`src.forEach((x) => { out.push(x); })` — for a reason that does not apply to it. `.forEach`, `.map`,
+`.filter`, `.reduce`, `.flatMap`, `.some`, `.every`, `.find`, `.findIndex`, `.findLast` and
+`.findLastIndex` take an arrow **literal** (the checker requires one) and codegen emits its
+statements straight into the enclosing frame as a loop: **no env is allocated, no pointer is
+snapshotted, and the body cannot outlive the statement it is written in, because it IS the
+statement.** The accepted program is exactly the `for-of` loop it desugars to, which always
+compiled, and `nt_arr_push` mutates the `NtArray` header in place (only `a->data` is reallocated),
+so the accumulator's pointer does not move under the loop either.
+
+Two guards keep that narrow, and both are load-bearing rather than decorative:
+
+- the **receiver must be an array** — a user class may declare its own `.forEach` taking a real
+  function value, and *its* argument is an ordinary closure with an env. Remove this test and that
+  program compiles;
+- `.toSorted(cmp)` is **excluded**: its comparator goes through `Module.cmpShim`, which loads a
+  `fn_ptr` out of a real `[fn_ptr, caps…]` env, so it is a closure in every sense the rule cares
+  about.
+
+The **drop** decisions (`droppable`, `dropOld`) deliberately keep consulting the wider,
+conservative "mentioned inside any arrow" set. Relaxing a refusal costs a leak at worst; relaxing a
+drop is the direction that mints a use-after-free, and the two are not relaxed together.
+
+**The closure shapes that keep the refusal**, proved by mutation — with the guard forced off, a
+returned closure over the accumulator compiles and ASan reports `heap-use-after-free … READ of size
+8 … in nt_arr_push`, freed by `nt_arr_free`; and a reassigned binding compiles, exits **0**, and
+prints `9 1` where node prints `9,1 2` — the silent wrong answer.
 
 **The receiver shapes that stay refused**, each pinned in `test/push-accumulator.test.ts`:
 
@@ -1941,7 +1970,9 @@ this scope cannot null, and the closure may outlive the binding. A push to a cap
 | an **unmarked parameter** | `NT1606` |
 | `this.<field>` | `NT1606` |
 | a container **element** (`g[0].push(v)`) | `NT1606` |
-| a **captured** accumulator | `NT1607` |
+| an accumulator captured by a **bound arrow** (one that gets an env) | `NT1607` |
+| an accumulator captured by a `.toSorted` **comparator** | `NT1607` |
+| an accumulator a **user class's** own `.forEach`/`.map` receives an arrow over | `NT1607` |
 | an accumulator already **moved out** | `NT1601` |
 | the accumulator while a `for-of` **borrows** it (iterator invalidation) | `NT1603` |
 | `@@mutable` on a non-array, or on a multi-name declaration | `NT1023` |

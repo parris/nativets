@@ -256,6 +256,33 @@ console.log(out.join(","), peek());
     expect(got?.hint).toContain("the `.push` itself is fine");
   });
 
+  /*
+   * THE METHOD-NAME COLLISION, which is the trap this whole relaxation could have fallen
+   * into: `INLINED_HOFS` matches on the method NAME, and a user class may declare its own
+   * `.forEach` taking a real function value. `isInlinedHofArrow` therefore also requires
+   * the RECEIVER to be an array — the same test `genExpr` uses to route into
+   * `genArrayMethod` at all — and that guard is load-bearing, not decorative: with it
+   * removed, this exact source compiles, because the arrow drops out of `envArrowNames`
+   * and takes the whole refusal with it. Here the arrow really is a closure with an env
+   * (`liftArrow` + `nt_obj_new`), so the premise holds and the refusal is right.
+   */
+  test("a USER CLASS's own `.forEach` is not an inlined HOF — the receiver type decides", () => {
+    const got = rejectionOf(`
+class Box {
+  items: number[] = [];
+  forEach(f: (n: number) => number): void {
+    for (const x of this.items) f(x);
+  }
+}
+const b = new Box();
+//@@mutable
+const out: number[] = [];
+b.forEach((x) => { out.push(x); });
+console.log(out.length);
+`);
+    expect(got?.code).toBe("NT1607");
+  });
+
   test("a bound arrow inside an INLINED body re-raises the boundary (nesting is honoured)", () => {
     const got = rejectionOf(`
 const src: number[] = [1, 2];
