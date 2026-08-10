@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "1d19b28"
+    "rev": "91c1a97"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "0bd71d9f255b378c",
+      "sha256": "6b69418d8cdd9334",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "c0de7bf95d1b2609",
+      "sha256": "879a063b18675889",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -40,12 +40,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'walk' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'message' does not exist on string at L:C"
       }
     },
     "codegen.ts": {
-      "sha256": "dda6034aaad3e4b3",
+      "sha256": "736d16ed8826b9eb",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'walk' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'message' does not exist on string at L:C"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'walk' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'message' does not exist on string at L:C"
       }
     },
     "lexer.ts": {
@@ -133,12 +133,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'walk' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'message' does not exist on string at L:C"
       }
     },
     "ownership.ts": {
-      "sha256": "68895fc3483b8b28",
+      "sha256": "84a0145f0914a182",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "88a000cedc9944d4",
+      "sha256": "36b6ae1883560f0a",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1003",
-        "message": "[NT1003] call to 'walk' (function values / unknown callee) is not supported yet at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'message' does not exist on string at L:C"
       }
     }
   }
