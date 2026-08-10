@@ -1159,7 +1159,21 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // Two silent wrong answers were removed on the way, both found by mutation and both
       // exit 0 on BOTH sides — see test/find-borrow.test.ts for the numbers. The line
       // now clears entirely; `exprText`'s `e.optional === true` is what stops ast.ts next.
-      expect(m.error).toContain("Cannot compare ?Uboolean with boolean");
+      //
+      // TWENTY-FIRST — and that `=== true` is gone too. Comparing an OPTIONAL boolean
+      // against `boolean` is itself outside the subset (NT2001, "Cannot compare ?Uboolean
+      // with boolean"), so the compiler's own source carried a construct it refuses.
+      // Respelled `?? false` at the sites whose declarations prove the field optional —
+      // NOT `Boolean(…)`, which is unimplemented here (NT1003) and would trade a narrowing
+      // gap the checker could one day close for a global it never can.
+      //
+      // What stops `ast.ts` now is the union-field-before-narrowing shape: `exprText`
+      // reading `.expr` off a receiver narrowed to 26 members at once. That is the largest
+      // measured remaining bucket, and it is a genuine gap rather than a spelling — the
+      // field must sit at the SAME SLOT INDEX in every surviving member for a read to
+      // compile to one offset, which is a condition tsc never has to check.
+      expect(m.error).toContain("does not exist on");
+      expect(m.error).toContain("narrowed here to MORE THAN ONE member");
       expect(m.code).toBe("NT2001");
       return;
     }

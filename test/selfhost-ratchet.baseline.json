@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "5456cc5"
+    "rev": "eadf20b"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "f5d36e2d72be5762",
+      "sha256": "c35a4dda79a2d759",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
+        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
       },
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
+        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
       }
     },
     "checker.ts": {
-      "sha256": "baa6ebb75834b510",
+      "sha256": "4705d56becd29520",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -27,7 +27,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
+        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
       }
     },
     "cli.ts": {
@@ -41,7 +41,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
+        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
       }
     },
     "codegen.ts": {
@@ -54,7 +54,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
+        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
       }
     },
     "coverage-preprocess.ts": {
@@ -81,11 +81,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
+        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
       }
     },
     "diagnostics.ts": {
-      "sha256": "c1af8fa23c113575",
+      "sha256": "7cffa4042cf5b7e8",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -108,7 +108,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
+        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
       }
     },
     "lexer.ts": {
@@ -134,11 +134,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
+        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
       }
     },
     "ownership.ts": {
-      "sha256": "c32f59e9a132ae65",
+      "sha256": "bfc30638815ae728",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -148,11 +148,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
+        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
       }
     },
     "parser.ts": {
-      "sha256": "4e54e0685fb02f85",
+      "sha256": "ce65ef87b9fc8b60",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -161,7 +161,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
+        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
       }
     }
   }
