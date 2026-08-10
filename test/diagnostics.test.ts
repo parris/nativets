@@ -14,6 +14,8 @@ import { spawnSync } from "node:child_process";
 import { formatDiagnostic, NYI, internalError } from "../src/diagnostics.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { NTError } from "../src/diagnostics.ts";
+import { parseExpressionFrom } from "../src/parser.ts";
+import { exprLoc } from "../src/ast.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -262,6 +264,108 @@ describe("diagnostic spans reach through a unary expression", () => {
   // descent returns `undefined` and the caller falls back, as it did before.
   test("a unary over an unlocated operand still produces the diagnostic", () => {
     expect(emit(`${FN}f(-1);\n`)).toContain("expects string, got number");
+  });
+});
+
+/*
+ * `exprLoc` PER NODE KIND — the table that pins the descent for all 30 `Expr` members.
+ *
+ * WHY A TABLE, and why now. `exprLoc` used to open with
+ *
+ *     const own = (e as { loc?: Loc }).loc;
+ *
+ * a cast that is fine under `bun` (property access is dynamic, so it really did read
+ * `loc`) and a MISCOMPILE once nativets compiles nativets. `loc` sits at slot 0 of the
+ * asserted shape `{loc?: Loc}`, and slot 0 of every `Expr` member is `kind` — so compiled,
+ * this hands a STRING POINTER back as a `?ULoc` box, for all 30 members, including the 7
+ * that genuinely carry a `loc`. The checked-`as` work made it a refusal (NT2001) instead
+ * of a silent wrong answer, which is what surfaced it.
+ *
+ * The replacement dispatches on the tag. That is a bigger edit than it looks — `exprLoc`
+ * computes EVERY diagnostic's span, so a dropped arm degrades every error message in the
+ * compiler and nothing else in the suite would notice. Exactly SEVEN members declare
+ * `loc` (Identifier, MemberExpr, IndexExpr, IndexAssign, NonNullExpr, InExpr, CallExpr —
+ * confirmed against the parser's own resolved `Expr` type, not by reading the file), and
+ * two of those already had a structural arm that must remain their fallback.
+ *
+ * So every kind is pinned here, with its exact line:column, as a CHARACTERIZATION: these
+ * values were captured from the pre-fix compiler and must survive it unchanged. The
+ * literal-only rows at the bottom are the controls — they prove the descent still bottoms
+ * out at `undefined` rather than inventing a position.
+ */
+describe("exprLoc pins a location for every Expr kind", () => {
+  const at = (src: string): string => {
+    const e = parseExpressionFrom(src);
+    const l = exprLoc(e);
+    return `${e.kind} ${l ? `${l.line}:${l.col}` : "undefined"}`;
+  };
+
+  // [source, expected `kind line:col`] — captured from the compiler before the tag-dispatch
+  // rewrite, so any drift is a behaviour change and fails here.
+  const PINS: [string, string][] = [
+    // --- the 7 that carry their own `loc` -------------------------------------
+    ["x", "Identifier 1:1"],
+    ["o.f", "MemberExpr 1:2"],
+    ["a[i]", "IndexExpr 1:2"],
+    ["a[i] = y", "IndexAssign 1:2"],
+    ["x!", "NonNullExpr 1:2"],
+    ['"k" in o', "InExpr 1:5"],
+    ["f(x)", "CallExpr 1:2"],
+    // --- structural descent: no `loc` of their own ----------------------------
+    ["x + y", "BinaryExpr 1:1"],
+    ["x && y", "LogicalExpr 1:1"],
+    ["-x", "UnaryExpr 1:2"], // `operand`, NOT `argument` — see the unary block above
+    ["x as string", "AsExpr 1:1"],
+    ["x satisfies string", "SatisfiesExpr 1:1"],
+    ["o.f = y", "FieldAssign 1:1"], // located by its RECEIVER `o`, not by `o.f`
+    ["x = y", "AssignExpr 1:5"], // target is a bare string; the value is the only child
+    ["o.f++", "UpdateExpr 1:2"],
+    ["a[i]++", "UpdateExpr 1:2"],
+    ["x ? y : z", "ConditionalExpr 1:1"],
+    ["`a${x}b`", "TemplateLiteral 1:1"],
+    ["[x, y]", "ArrayLiteral 1:2"],
+    ["{ a: x }", "ObjectLiteral 1:6"],
+    // --- no `loc`, and no arm: genuinely unlocatable ---------------------------
+    ["1", "NumberLiteral undefined"],
+    ["true", "BooleanLiteral undefined"],
+    ['"s"', "StringLiteral undefined"],
+    ["undefined", "UndefinedLiteral undefined"],
+    ["null", "NullLiteral undefined"],
+    ["(x, y)", "SequenceExpr undefined"],
+    ["typeof x", "TypeofExpr undefined"],
+    ["(a) => a", "ArrowFunction undefined"],
+    ["new C(x)", "NewExpr undefined"],
+    ["x instanceof C", "InstanceOfExpr undefined"],
+    // --- controls: a descent over literal-only children invents nothing --------
+    ["1 + 2", "BinaryExpr undefined"],
+    ["[1, 2]", "ArrayLiteral undefined"],
+    ["1 ? 2 : 3", "ConditionalExpr undefined"],
+  ];
+
+  for (const [src, want] of PINS) {
+    test(`\`${src}\` → ${want}`, () => {
+      expect([src, at(src)]).toEqual([src, want]);
+    });
+  }
+
+  /*
+   * A PRE-EXISTING BUG, pinned as-is rather than fixed here — fixing it is a behaviour
+   * change and this lane's contract is that behaviour does not move.
+   *
+   * `case "UpdateExpr": return exprLoc(e.targetExpr);` — but `targetExpr` is set ONLY for
+   * the member/index forms. The interface says so itself: "`target` names the local for
+   * the (overwhelmingly common) identifier case", and that case leaves `targetExpr`
+   * undefined. So a plain `x++` / `x--` is `exprLoc(undefined)` and reports NO location,
+   * while `o.f++` and `a[i]++` (directly above) report one.
+   *
+   * That is the SAME defect, in the same function, as the `e.argument`-vs-`e.operand` bug
+   * the block above memorialises: an arm reading a field that is not populated on the path
+   * that matters. It survived that fix because both are silent — the error text is
+   * identical and only the `at L:C` suffix goes missing.
+   */
+  test("KNOWN BUG: a plain `x++` reports no location, unlike `o.f++`", () => {
+    expect(at("x++")).toBe("UpdateExpr undefined");
+    expect(at("o.f++")).toBe("UpdateExpr 1:2"); // the contrast that makes it a bug
   });
 });
 

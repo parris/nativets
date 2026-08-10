@@ -99,8 +99,20 @@ function retainsReceiver(e: Expr): boolean {
  *  (`a.map(f).reverse()`) is deliberately NOT a match — there the receiver is a fresh
  *  temporary that no binding owns, so the result legitimately becomes its owner. */
 function retainedReceiver(e: Expr): string | null {
+  // The tag tests are REPEATED from `retainsReceiver` rather than inherited from it,
+  // because a `boolean` return carries no narrowing back to the caller. This used to
+  // bridge that gap with `(e as { callee: { object: Expr } }).callee.object`, which is the
+  // same unsound shape as the old `exprLoc` cast and fails the same way: `callee` is at
+  // slot 0 of the asserted shape but slot 1 of `CallExpr`, so compiled it reads `kind` —
+  // a string pointer — and walks `.object` off it. Dynamic property access hid that under
+  // `bun`; the checked-`as` work turned it into a refusal.
+  //
+  // A type predicate (`(e): e is CallExpr =>`) would let `retainsReceiver` narrow for
+  // real and delete the duplication, but that spelling currently breaks the whole-program
+  // LINK, so the honest fix today is to narrow in place.
+  if (e.kind !== "CallExpr" || e.callee.kind !== "MemberExpr") return null;
   if (!retainsReceiver(e)) return null;
-  const base = (e as { callee: { object: Expr } }).callee.object;
+  const base = e.callee.object;
   return base.kind === "Identifier" ? base.name : null;
 }
 

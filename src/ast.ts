@@ -1510,9 +1510,11 @@ export function freshArray(e: Expr): boolean {
  * The nearest source location an expression can offer, for a diagnostic that would
  * otherwise have none.
  *
- * Only SOME node kinds carry a `loc` (Identifier, MemberExpr, IndexExpr, CallExpr, …) —
- * a literal or a binary operator does not — so `e.loc` alone is `undefined` for most
- * expressions and the diagnostics built from them came out unlocatable. That is not a
+ * Exactly SEVEN of the 30 `Expr` members carry a `loc` — Identifier, MemberExpr,
+ * IndexExpr, IndexAssign, NonNullExpr, InExpr, CallExpr — and those seven are also the
+ * only kinds anything in `src/` ever writes one onto. A literal, a binary operator or an
+ * assignment does not, so `e.loc` alone is `undefined` for most expressions and the
+ * diagnostics built from them came out unlocatable. That is not a
  * cosmetic problem: `[NT2001] return type string does not match declared number` with no
  * span, on a 4000-line file, cost a lane an instrumented build of the compiler to find
  * the line. Descending to the first child that DOES carry one is exact enough to jump to
@@ -1520,9 +1522,38 @@ export function freshArray(e: Expr): boolean {
  */
 export function exprLoc(e: Expr | undefined): Loc | undefined {
   if (!e) return undefined;
-  const own = (e as { loc?: Loc }).loc;
-  if (own) return own;
   switch (e.kind) {
+    /*
+     * THE SEVEN members that declare a `loc`, read through the TAG rather than through a
+     * cast. This block used to be one line above the switch:
+     *
+     *     const own = (e as { loc?: Loc }).loc;
+     *     if (own) return own;
+     *
+     * which is correct under `bun` — property access is dynamic, so it really did fetch
+     * `loc` — and a MISCOMPILE the moment nativets compiles itself. `loc` is at slot 0 of
+     * the asserted shape `{loc?: Loc}`, and slot 0 of every `Expr` member is `kind`, so
+     * compiled this loads a STRING POINTER and hands it back as a `?ULoc` box. Not for the
+     * 23 members that lack a `loc` — for ALL 30, the seven real carriers included, because
+     * the cast never consulted the member layout at all. The checked-`as` work turned it
+     * into an NT2001 refusal, which is the only reason it was ever noticed.
+     *
+     * Exactly seven members declare the field (verified against the parser's resolved
+     * `Expr` type, and against the fact that these same seven are the ONLY kinds any code
+     * in `src/` ever writes a `loc` onto — so tag dispatch loses nothing the dynamic read
+     * found). The multi-tag arm is legal because `unionCommonField` holds for it: `loc` is
+     * at slot 5 with the same widened type in all four. IF YOU ADD A FIELD to MemberExpr,
+     * IndexExpr, InExpr or CallExpr, put it AFTER `loc` or split this arm — the slots must
+     * agree. Getting that wrong is a refusal, not a wrong answer, which is the point.
+     */
+    case "Identifier": return e.loc; // slot 3, on its own
+    case "MemberExpr": case "IndexExpr": case "InExpr": case "CallExpr": return e.loc; // slot 5
+    // The two carriers that ALSO have a structural fallback, kept in that order: the
+    // node's own `loc` wins, and the descent answers only when the parser left it unset
+    // (a desugared node). `NonNullExpr` is split out of the `AsExpr`/`SatisfiesExpr` arm
+    // below for exactly this reason — the other two have no `loc` to prefer.
+    case "NonNullExpr": return e.loc ?? exprLoc(e.expr);
+    case "IndexAssign": return e.loc ?? exprLoc(e.object) ?? exprLoc(e.index) ?? exprLoc(e.value);
     case "BinaryExpr": case "LogicalExpr": return exprLoc(e.left) ?? exprLoc(e.right);
     // `operand`, NOT `argument` — this read `e.argument` (an ESTree name; the interface
     // at `UnaryExpr` above has no such field) from the day it was written, so it was
@@ -1531,17 +1562,17 @@ export function exprLoc(e: Expr | undefined): Loc | undefined {
     // same error `at 3:3` with a source frame. Found by tsc (TS2339) once the pipeline
     // fixtures stopped masking semantic diagnostics — see tsconfig.src.json.
     case "UnaryExpr": return exprLoc(e.operand);
-    case "AsExpr": case "SatisfiesExpr": case "NonNullExpr": return exprLoc(e.expr);
+    case "AsExpr": case "SatisfiesExpr": return exprLoc(e.expr);
     // The ASSIGNMENT forms. None of `FieldAssign`/`AssignExpr`/`UpdateExpr` carries a
     // `loc`, and none had an arm here, so `exprLoc(fieldAssign)` was `undefined` while
     // `exprLoc(fieldAssign.object)` gave a real position two lines away — which is why
     // NT1606, the most-hit refusal in the tree, printed no location at all. A store is
     // located by its RECEIVER: that is where the statement starts and what a reader
-    // scans for (`IndexAssign` already carries the written `[`, so `own` answers it
-    // first and this arm is only its fallback). An `AssignExpr` names its target with a
-    // bare string, so the value is the only child that can carry a position.
+    // scans for (`IndexAssign` DOES carry the written `[`, so it prefers its own `loc`
+    // and keeps this descent as its fallback — see its arm above). An `AssignExpr` names
+    // its target with a bare string, so the value is the only child that can carry a
+    // position.
     case "FieldAssign": return exprLoc(e.object) ?? exprLoc(e.value);
-    case "IndexAssign": return exprLoc(e.object) ?? exprLoc(e.index) ?? exprLoc(e.value);
     case "AssignExpr": return exprLoc(e.value);
     case "UpdateExpr": return exprLoc(e.targetExpr);
     case "ConditionalExpr": return exprLoc(e.test) ?? exprLoc(e.consequent) ?? exprLoc(e.alternate);
