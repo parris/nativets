@@ -4553,7 +4553,7 @@ class FnGen {
 
   /** HOF loop skeleton. `setup(len)` runs in the pre-loop block (create output
    *  arrays etc. exactly once); then the cond/body blocks are set up and entered. */
-  private hofLoop(recv: Val, tag: string, setup: (len: string) => void): { idx: string; cond: string; upd: string; end: string; elem: (el: Ty, pName: string) => string } {
+  private hofLoop(recv: Val, tag: string, setup: (len: string) => void): { idx: string; cond: string; upd: string; end: string; elem: (el: Ty, pName: string, iName: string) => string } {
     const src = recv.v;
     const len = this.fresh();
     this.emit(`${len} = call double @nt_arr_len(ptr ${src})`);
@@ -4569,16 +4569,49 @@ class FnGen {
     this.emit(`${cmp} = fcmp olt double ${iC}, ${len}`);
     this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
     this.to(this.block(body));
-    const elem = (el: Ty, pName: string): string => {
+    const elem = (el: Ty, pName: string, iName: string): string => {
       const iB = this.fresh();
       this.emit(`${iB} = load double, ptr ${idx}`);
       const slot = this.fresh();
       this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src}, double ${iB})`);
       const v = this.fromSlot(slot, el);
       this.emit(`store ${llvmTy(el)} ${v}, ptr ${this.addr(pName)}`);
+      // The INDEX parameter, when the callback declared one: the loop counter this line
+      // just loaded, copied into the callback's own slot. Re-read per iteration inside the
+      // body block rather than hoisted, so a body that ASSIGNS to `i` perturbs only its own
+      // copy and the loop keeps stepping — node's callback parameter is a fresh binding too.
+      //
+      // `""` for "no index parameter", not an optional parameter: `iName?: string` in this
+      // annotation is outside the subset `src/` must stay inside (the parser does not take
+      // `?` on a function-TYPE parameter, and the recovery reported it as `Cannot find name
+      // 'el'` — the whole tree stopped linking). Same sentinel `hofReturnStack`'s `slot`
+      // already uses two screens down.
+      if (iName !== "") this.emit(`store double ${iB}, ptr ${this.addr(iName)}`);
       return v;
     };
     return { idx, cond, upd, end, elem };
+  }
+
+  /**
+   * The INDEX parameter of an inlined HOF callback — its (already freshened) name, given a
+   * `number` slot in the flat frame, or `""` when the callback did not declare one.
+   *
+   * `at` is where the index sits in the parameter list: 1 for `.map`/`.filter`/`.forEach`/
+   * `.flatMap`/`.find*`/`.some`/`.every`, whose callback is `(elem, index)`, and 2 for
+   * `.reduce`, whose callback is `(acc, elem, index)`. The checker (`hofCallbackParams`)
+   * has already established the arity, so an absent parameter here means the source
+   * omitted it — never that a slot went unbound.
+   *
+   * The slot MUST be added here, before `hofLoop` emits: it is the enclosing function's
+   * flat frame, and a `store` to a `%i.addr` that was never allocated is not a wrong
+   * answer but a tree LLVM rejects ("use of undefined value") — which is how the missing
+   * `.filter`/`.flatMap` wiring announced itself rather than silently reading garbage.
+   */
+  private hofIndexParam(arrow: Extract<Expr, { kind: "ArrowFunction" }>, at: number): string {
+    const p = arrow.params[at];
+    if (!p) return "";
+    this.addLocal(p.name, "number");
+    return p.name;
   }
 
   private hofStep(idx: string, upd: string, cond: string): void {
@@ -4791,9 +4824,10 @@ class FnGen {
     const el = elemTy(recv.ty);
     const p = arrow.params[0]!.name;
     this.addLocal(p, el);
+    const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
     const L = this.hofLoop(recv, "each", () => {}); // no output array to build
-    L.elem(el, p);
+    L.elem(el, p, ip);
     if (arrow.exprBody) {
       this.genExpr(arrow.body as Expr); // evaluated for effect, exactly as an ExprStmt is
     } else {
@@ -4815,10 +4849,11 @@ class FnGen {
     const R = this.hofRetTy(arrow);
     const p = arrow.params[0]!.name;
     this.addLocal(p, el);
+    const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
     let out = "";
     const L = this.hofLoop(recv, "map", (len) => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); });
-    L.elem(el, p);
+    L.elem(el, p, ip);
     const rv = this.genHofBody(arrow, R);
     this.emit(`call double @nt_arr_push(ptr ${out}, i64 ${this.toSlot(rv)})`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -4834,10 +4869,11 @@ class FnGen {
     const R = this.hofRetTy(arrow); // an array type (checker-enforced)
     const p = arrow.params[0]!.name;
     this.addLocal(p, el);
+    const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
     let out = "";
     const L = this.hofLoop(recv, "fmap", () => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double 1.0)`); });
-    L.elem(el, p);
+    L.elem(el, p, ip);
     const rv = this.genHofBody(arrow, R);
     this.emit(`call void @nt_arr_extend(ptr ${out}, ptr ${rv.v})`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -4850,10 +4886,11 @@ class FnGen {
     const el = elemTy(recv.ty);
     const p = arrow.params[0]!.name;
     this.addLocal(p, el);
+    const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
     let out = "";
     const L = this.hofLoop(recv, "flt", (len) => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); });
-    const pv = L.elem(el, p);
+    const pv = L.elem(el, p, ip);
     const keep = this.genHofBody(arrow, "boolean"); // boolean
     const pushLbl = this.label("fltp");
     const skipLbl = this.label("flts");
@@ -4878,6 +4915,7 @@ class FnGen {
     const p = arrow.params[0]!.name;
     const backwards = method === "findLast" || method === "findLastIndex";
     this.addLocal(p, el);
+    const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
 
     const src = recv.v;
@@ -4904,6 +4942,11 @@ class FnGen {
     const slot = this.fresh();
     this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src}, double ${iB})`);
     this.emit(`store ${llvmTy(el)} ${this.fromSlot(slot, el)}, ptr %${p}.addr`);
+    // The index parameter — this loop's OWN counter, which for `.findLast`/`.findLastIndex`
+    // starts at `len - 1` and counts DOWN. node passes the real position either way, so
+    // reusing `idx` (rather than a separate forward count) is what makes the backwards
+    // arms node-exact instead of merely non-crashing.
+    if (ip !== "") this.emit(`store double ${iB}, ptr ${this.addr(ip)}`);
     const keep = this.genHofBody(arrow, "boolean");
     // `.every` short-circuits on the FIRST FALSE; everything else on the first true.
     const stop = this.label("srchs"), go = this.label("srchg");
@@ -4967,10 +5010,11 @@ class FnGen {
     const A = init.ty;
     this.addLocal(accName, A);
     this.addLocal(xName, el);
+    const ip = this.hofIndexParam(arrow, 2); // `(acc, elem, index)` — index is param TWO here
     this.emit(`store ${llvmTy(A)} ${init.v}, ptr ${this.addr(accName)}`); // pre-loop init
     this.prepHofLocals(arrow);
     const L = this.hofLoop(recv, "red", () => {});
-    L.elem(el, xName);
+    L.elem(el, xName, ip);
     const rv = this.genHofBody(arrow, A);
     this.emit(`store ${llvmTy(A)} ${rv.v}, ptr ${this.addr(accName)}`);
     this.hofStep(L.idx, L.upd, L.cond);

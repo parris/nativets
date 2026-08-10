@@ -915,9 +915,9 @@ terms a `.map` body is — its nested-block locals are freed per iteration, and 
 captures is not. Only the refusal's *message* changed for the point-free half, to one that names
 which spelling is which; `xs.forEach((x) => go(x))` is the hint, and it compiles.
 
-Two limits, both matching `.map` rather than inventing anything: the callback takes **`(elem)`
-only** (node's `index`/`array` parameters are separate work — binding `x` while leaving `i`
-unwritten would be a wrong answer, so it is refused), and `.forEach` itself evaluates to `void`.
+Two limits, both matching `.map` rather than inventing anything: the callback took **`(elem)`
+only**, and `.forEach` itself evaluates to `void`. The first of those has since been lifted —
+`(elem, index)` is bound, see the entry below — and only the `array` parameter is still refused.
 
 A callback `return` means **"next element"**, not "leave the enclosing function". Codegen carries
 that on `hofReturnStack`; `.forEach` pushes a *discard* frame, because node throws the result away
@@ -926,6 +926,46 @@ returned expression is still evaluated, for its side effects.
 
 Pinned in `test/foreach.test.ts`; the drop, capture and name-collision guards are proved by
 mutation (deleting `freshenHofArrow` reproduces the `2.1578754706e-314`-at-exit-0 shape).
+
+### HOF callbacks bind `(elem, index)`; only the trailing `array` parameter is refused
+
+node passes `(element, index, array)` to `.map`/`.filter`/`.forEach`/`.flatMap`/`.some`/`.every`/
+`.find*`, and `(acc, element, index, array)` to `.reduce`. We accepted only the shortest prefix of
+each and refused the rest with **`NT2001 ".map callback takes (elem)"`**.
+
+That refusal was *safe* — an unbound `i` reads a frame slot nothing ever wrote — but it was wrong
+twice over. It reported a **type error on valid TypeScript**, and it was the first blocker in **17
+of the compiler's own functions**, including two spellings `src/` itself recommends in NT hints
+(`src/parser.ts` advises `xs.filter((_, i) => i !== 0)`; `src/checker.ts` carries a comment
+apologising for writing an indexed loop "rather than `.every((m, i) => …)`"). Neither compiled.
+
+The index needed no new machinery. These HOFs do not build closures — they **inline the arrow body
+into a loop**, and that loop already keeps its counter in a `number` slot (`hofLoop`'s `idx`,
+`genSearchHof`'s own `idx`). Binding the parameter is one extra `store` from the slot the loop is
+already stepping. Reusing that slot rather than a separate forward counter is also what makes
+`.findLast`/`.findLastIndex` node-exact: they walk **backwards**, so their index counts *down*.
+
+`.reduce` is the exception to every "one rule covers all" instinct here — its index is parameter
+**two**, not one, because the accumulator comes first. The arity rule lives in one place
+(`hofCallbackParams` in `src/checker.ts`) and is *told* the leading prefix rather than deriving it.
+
+The trailing **`array`** parameter stays refused. It is the receiver the loop is walking, so
+binding it would make the body a second owner of an array the caller still owns — the aliasing
+`.find` on a heap element already refuses one method over. Zero of the ~90 HOF callbacks in `src/`
+use it. What it must *not* do is blame the index, so it gets its own message naming the `array`
+parameter, and a callback that binds **fewer** than the leading parameters (`xs.map(() => 1)`,
+still refused) gets a third message about the missing element — the single shared message told
+that site to "drop the last parameter" and lectured it about an `array` argument it had never
+written, which is the same defect one arity over.
+
+Frontier: **227 → 217** failing functions in the linked stage-1 program. All 17 arity blockers
+cleared; 10 functions became fully clean and 7 revealed a second, pre-existing blocker underneath
+(`.push` mutation, nullability, heterogeneous array literals) — the ~2 masking depth the
+`blocker-metric` header describes. **Zero functions newly blocked**, checked per-function rather
+than by reading the total.
+
+Pinned in `test/hof-index.test.ts`, both hints executed against node, and the binding proved by
+mutation: deleting the index `store` prints `10 20 30` where node prints `10 21 32`, **at exit 0**.
 
 ### `return` from under a `finally` in an INLINED callback is `NT1018` (it was a wrong answer)
 
