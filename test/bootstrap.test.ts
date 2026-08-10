@@ -589,7 +589,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // SEPARATING. For five rounds this instrument read one code because one line of
     // ast.ts gated every module, which is precisely the masking its own header warns
     // about. The tiers below are now measuring nine different walls, not one.
-    ["NT1001", "NT2001"],
+    // ...and NT2001 LEAVES, for the fifth time this file records that code emptying.
+    // Not a narrowing fix this round: `Renamer.expr` missed `retAnnot`, so one type had
+    // two spellings and eight modules each reported it as their own blocker. What is
+    // left is ONE code and ONE term — `ast.ts`'s `.map` over heap elements, an
+    // ownership refusal that every module inherits through the link.
+    ["NT1001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -808,9 +813,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // read, not the code: for five rounds every name here was reporting ONE line of
     // ast.ts through the link, so the list was nine copies of a single blocker. It is
     // eight distinct blockers now. `ast.ts` moved to NT1001 (see the set assertion above).
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    // ...and the bucket EMPTIES. "Eight distinct blockers now" was wrong — the same
+    // mistake the two lines above congratulate themselves for catching, made again one
+    // round later. The eight were nine-minus-one copies of a single defect: `Renamer.expr`
+    // missed `retAnnot`, the only link-time member of that trio, so one type had two
+    // spellings (`@Expr` vs `@_nts0_m2_Expr`) and every module that crossed a module
+    // alias reported it as its own.
+    //
+    // What made it look like eight independent blockers: the diagnostic printed two
+    // identical-looking unions, and NT2001's location for a LINKED program comes from the
+    // merged text, so it pointed at a blank line. A blocker that cannot be located reads
+    // as many blockers.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
     // NT1001 EMPTIES, and it is worth being precise about what did NOT happen: `.find`
     // over a heap element is still refused. What cleared is the one shape where the
     // element already IS a nullable box (`(T | undefined)[]`), so `.find` hands the
@@ -823,7 +837,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `exprText` before reaching it. `.find`/`.map` over a heap element remains an
     // OWNERSHIP decision (a second owner for a pointer the array still holds), so this
     // is a different wall from the narrowing one that just came down, in a different pass.
-    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual(["ast.ts"]);
+    // ...and it GROWS to all twelve-minus-three. That is the shape of progress here, not
+    // a regression: NT2001 emptied because one type had two spellings, and behind that
+    // accident every module was always waiting on the SAME term — `ast.ts`'s `.map`
+    // producing an array of heap elements. One code, one line, nine modules. The
+    // blame column reconverging on `ast.ts` is what a single real blocker looks like
+    // once the spelling accidents in front of it are gone.
+    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
     // This is the DECISION the entry above named, arrived at: the typed walkers in
     // src/ast.ts write `e.ty = f(e.ty)` exactly where the reflective ones wrote
@@ -1154,9 +1176,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // rather than contents. `exprText` cleared and `ast.ts` moved to NT1001, so the eight
     // names left are on eight DIFFERENT blockers in their own source rather than nine
     // views of one line of ast.ts. Same bucket above, which carries the reasoning.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
-    );
+    // ...and now EMPTY. The eight were never on eight different blockers — they were on
+    // ONE, twice-spelled: `Renamer.expr` renamed `paramTys`/`retTy` but missed `retAnnot`,
+    // the only one of the three written at LINK time, so a module alias and a direct
+    // reference produced `@_nts0_m2_Expr` vs `@Expr` for the same type. The reading above
+    // ("eight DIFFERENT blockers in their own source") was wrong, and wrong in the
+    // flattering direction — a shared defect looked like eight independent ones because
+    // the diagnostic printed two identical-looking unions and pointed at a blank line in
+    // the merged program rather than the source module.
+    //
+    // All eight now sit behind ONE real term in ast.ts (`.map` over heap elements,
+    // NT1001), which is why THAT bucket grew as this one emptied.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a
