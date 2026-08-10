@@ -1985,7 +1985,7 @@ class Checker {
         const d = this.disjunctTags(test, inner, positive);
         if (d === undefined) return false;
         if (d.tags.length >= unionTagValues(d.union).length) return false; // constrains nothing
-        if (d.p.path === "") { this.narrowInto(inner, d.p.name, d.union, d.tags); return true; }
+        if (d.p.path === "") return this.narrowNameInto(inner, d.p.name, d.union, d.tags, blocked);
         return this.narrowPathInto(d.p, d.union, d.tags, out, blocked);
       }
       const l = this.narrowTagsInto(test.left, inner, positive, out, blocked);
@@ -2000,8 +2000,33 @@ class Checker {
     // A plain NAME gets a shadow binding — the mechanism every later pass already reads
     // off the scope. A dotted PATH has no name to shadow, so it gets a control-flow FACT
     // instead, which is what `accessPath` consults and what `type()` stamps onto the AST.
-    if (t.p.path === "") { this.narrowInto(inner, t.p.name, t.union, tags); return true; }
+    if (t.p.path === "") return this.narrowNameInto(inner, t.p.name, t.union, tags, blocked);
     return this.narrowPathInto(t.p, t.union, tags, out, blocked);
+  }
+
+  /**
+   * Record a tag narrowing of a plain NAME — the shadow-binding half of `narrowPathInto`,
+   * and it takes the SAME stability filter for the same reason.
+   *
+   * The filter used to be redundant here: `narrowInto` shadows the name CONST, so an
+   * assignment inside the region was refused outright ("cannot assign to 'n' here: it is
+   * NARROWED to …") and no stale narrowing could survive. That is sound, but it is not
+   * neutral — it turns the assignment into an ERROR rather than declining to narrow, so a
+   * region that reassigns the name and never reads a narrowed field went from compiling to
+   * refused. Wiring `while` is what made that bite: `while (n.kind === "num") { …; n = next(); }`
+   * is the most idiomatic loop there is over a discriminated union, and it compiled fine
+   * while the condition proved nothing.
+   *
+   * Declining instead is strictly better in both directions. A region that reassigns the
+   * name gets no narrowing, so it compiles exactly as it did before the condition narrowed
+   * anything; and a region that reassigns AND reads a narrowed field still fails, now at
+   * the READ (`Property 'value' does not exist on …`) with `narrowAdvice`'s rebound clause
+   * naming the assignment — the same diagnostic a rebound dotted path already gets.
+   */
+  private narrowNameInto(inner: Scope, name: string, u: Ty, tags: string[], blocked: Set<string> | null): boolean {
+    if (blocked !== null && blocked.has(name)) return false;
+    this.narrowInto(inner, name, u, tags);
+    return true;
   }
 
   /**
@@ -2166,7 +2191,12 @@ class Checker {
     if (p === undefined) return { text, stable: false, already: false };
     if (obj.kind === "Identifier") {
       const b = scope.lookup(obj.name);
-      return { text, stable: true, already: b !== undefined && b.narrowedFrom !== undefined };
+      // `root` is carried for a NAME too, not just a dotted path. Since `narrowNameInto`
+      // takes the same stability filter, "the test is written but the region rebinds the
+      // name" is now reachable here as well — and without the root the advice would read
+      // `narrow it first (\`if (n.kind === "num")\`)` at a read whose author wrote exactly
+      // that test one line up, which is the untruthful-hint shape this repo keeps finding.
+      return { text, stable: true, already: b !== undefined && b.narrowedFrom !== undefined, root: obj.name };
     }
     return { text, stable: true, already: this.narrowedTy(p.binding, p.path) !== undefined, root: p.name };
   }
@@ -2326,11 +2356,32 @@ class Checker {
         }
         return;
       }
-      case "WhileStmt":
+      case "WhileStmt": {
         refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
         this.rejectVacuousCollectionTest(s.test, "this `while` condition", "the loop can never terminate");
-        this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
+        // The SAME composition `IfStmt` above does, with the loop BODY as the region: a
+        // `while` condition dominates its body exactly as an `if` test dominates its
+        // consequent, and this was simply an unwired call site — `while (x !== undefined)`
+        // was refused while the identical `if` was accepted.
+        //
+        // The region is what makes the BACK EDGE safe, and it is the whole risk. A fact
+        // is dropped when its root is assigned anywhere in the region (`unstableNames`),
+        // and here the region is the body — so `while (s !== undefined) { …; s = next(); }`
+        // records nothing and keeps its refusal rather than carrying a proof about the
+        // PREVIOUS value into the next iteration. A plain NAME takes the identical filter
+        // through `narrowNameInto`, which is what keeps `while (n.kind === "x") { …;
+        // n = next(); }` compiling exactly as it did before the condition proved anything.
+        //
+        // Only the POSITIVE polarity exists here. `while (x === undefined)` proves the
+        // negative for the code AFTER the loop, not for its body, and there is no `alt`
+        // region to hang it on — so nothing is recorded and the body keeps the box.
+        const inner = scope.child();
+        const facts = this.factsFor(s.test, scope, true, s.body);
+        this.narrowTagsWith(facts, s.test, inner, true, this.unstableNames(s.test, s.body));
+        this.loopDepth++;
+        try { this.withFactsIn(facts, () => this.checkBlock(s.body, inner, ret)); } finally { this.loopDepth--; }
         return;
+      }
       case "DoWhileStmt":
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
         refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");

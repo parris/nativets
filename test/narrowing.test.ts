@@ -1004,3 +1004,200 @@ later();
 `, "NT1031", "captured binding");
   });
 });
+
+/*
+ * ============================================================================
+ * narrowing 6 — a `while` CONDITION narrows the loop body.
+ *
+ * `if`, `switch`, `&&`/`||`, an early-exit guard and `?:` all route through the one
+ * mechanism (`factsFor` + `narrowTagsWith` → `narrowInto`/`narrowPathInto`); `while` was
+ * simply never wired to it, so `while (x !== undefined) { x.length }` was refused while
+ * the identical `if` was accepted. It is the same call site shape as `IfStmt`'s, with the
+ * loop BODY as the region.
+ *
+ * The region choice is what makes the back edge safe, and it is the whole risk here: a
+ * fact is dropped when the region assigns its root anywhere (`unstableNames`), and the
+ * loop body IS the region — so the classic `while (s !== undefined) { …; s = next(); }`
+ * keeps its refusal rather than carrying a stale proof across the back edge. A plain NAME
+ * is shadowed CONST by `narrowInto`, so an assignment to it inside the body is refused
+ * outright by the same rule an `if` arm uses.
+ *
+ * Reference cases mined from `microsoft/TypeScript`:
+ *   - tests/cases/conformance/controlFlow/controlFlowWhileStatement.ts
+ *   - tests/cases/conformance/controlFlow/controlFlowIfStatement.ts (the `if` twin each
+ *     case below is checked against)
+ *   - tests/cases/conformance/types/typeRelationships/typeGuards/
+ *     narrowingPastLastAssignment.ts (the back-edge refusals)
+ * ============================================================================
+ */
+describe("narrowing 6 — a `while` condition narrows the loop body", () => {
+  test("`!== undefined` narrows the binding inside the body", async () => {
+    await expectNode(`
+let x: number | undefined = 3;
+let n = 0;
+while (x !== undefined) {
+  n = n + x;
+  if (n > 2) break;
+}
+console.log(n, x === undefined);
+`);
+  });
+
+  test("a truthiness test narrows, and the loop still terminates", async () => {
+    await expectNode(`
+const words: string[] = ["alpha", "beta"];
+let i = 0;
+let out = "";
+const s: string | undefined = words[0];
+while (s) {
+  out = out + s.toUpperCase();
+  i = i + 1;
+  if (i === 2) break;
+}
+console.log(out, i);
+`);
+  });
+
+  test("a TAG test narrows the union in the body", async () => {
+    await expectNode(`
+type Node = { kind: "num"; value: number } | { kind: "str"; text: string } | { kind: "nil" };
+const n: Node = { kind: "num", value: 7 };
+let total = 0;
+while (n.kind === "num") {
+  total = total + n.value;
+  if (total > 6) break;
+}
+console.log(total);
+`);
+  });
+
+  test("a DOTTED PATH tag test narrows the body", async () => {
+    await expectNode(`
+type Leaf = { kind: "num"; value: number } | { kind: "nil" };
+interface Box { leaf: Leaf }
+const b: Box = { leaf: { kind: "num", value: 4 } };
+let seen = 0;
+while (b.leaf.kind === "num") {
+  seen = seen + b.leaf.value;
+  if (seen > 3) break;
+}
+console.log(seen);
+`);
+  });
+
+  test("the `else` polarity is NOT proved: the body of `while (x === undefined)` sees the box", () => {
+    expectRejected(`
+function pick(i: number): number | undefined { return i > 0 ? i : undefined; }
+let x: number | undefined = pick(0);
+let i = 0;
+while (x === undefined) {
+  console.log(x + 1);
+  i = i + 1;
+  if (i > 1) break;
+}
+`, "NT2001", "?Unumber + number");
+  });
+
+  /*
+   * THE BACK EDGE. Each of these three assigns the proven root inside the body, so the
+   * proof does not survive to the next iteration. All three were refused before this
+   * lane and must stay refused: a stale narrowing here hands codegen a slot layout the
+   * value no longer has, which is the silent-wrong-answer shape this project has hit six
+   * times (`n2.1622591016e-314` — a string pointer read as a double).
+   */
+  test("REFUSED: the body reassigns the narrowed nullable (loop back edge)", () => {
+    expectRejected(`
+function pick(i: number): string | undefined { return i < 2 ? "x" : undefined; }
+let i = 0;
+let s: string | undefined = pick(i);
+while (s !== undefined) {
+  console.log(s.length);
+  i = i + 1;
+  s = pick(i);
+}
+`, "NT2001", "possibly undefined");
+  });
+
+  /*
+   * The plain-NAME back edge. `narrowNameInto` declines to narrow a name the body
+   * reassigns, so the read below is refused as un-narrowed rather than the assignment
+   * being refused as narrowed-const — and the hint names the assignment, because the
+   * author DID write the test one line up. Loosening the region filter here is what
+   * mutation-testing showed prints `2.1630537015e-314` for a string read as a double.
+   */
+  test("REFUSED: the body reassigns a TAG-narrowed binding", () => {
+    expectRejected(`
+type Node = { kind: "wrap"; inner: Node } | { kind: "nil" };
+let root: Node = { kind: "wrap", inner: { kind: "nil" } };
+while (root.kind === "wrap") {
+  root = root.inner;
+}
+console.log(root.kind);
+`, "NT2001", "'root' is assigned between it and this read");
+  });
+
+  /*
+   * ...and the half that must NOT be refused, which is why `narrowNameInto` declines
+   * instead of shadowing CONST: a body that reassigns the name and never reads a narrowed
+   * field compiled before `while` narrowed anything, and still does.
+   */
+  test("a body that reassigns the name WITHOUT reading a narrowed field still compiles", async () => {
+    await expectNode(`
+type Node = { kind: "num"; value: number } | { kind: "str"; text: string };
+function mkStr(): Node { const l: Node = { kind: "str", text: "hello" }; return l; }
+let n: Node = { kind: "num", value: 4 };
+let count = 0;
+while (n.kind === "num") {
+  count = count + 1;
+  n = mkStr();
+}
+console.log(count, n.kind);
+`);
+  });
+
+  test("REFUSED: the body reassigns the ROOT of a narrowed dotted path", () => {
+    expectRejected(`
+type Leaf = { kind: "num"; value: number } | { kind: "nil" };
+interface Box { leaf: Leaf }
+function next(): Box { return { leaf: { kind: "nil" } }; }
+let b: Box = { leaf: { kind: "num", value: 4 } };
+while (b.leaf.kind === "num") {
+  console.log(b.leaf.value);
+  b = next();
+}
+`, "NT2001", "does not exist on");
+  });
+
+  test("REFUSED: a read of the narrowed name AFTER the loop", () => {
+    expectRejected(`
+let x: number | undefined = 3;
+let n = 0;
+while (x !== undefined) { n = n + x; if (n > 2) break; }
+console.log(x + 1);
+`, "NT2001", "?Unumber + number");
+  });
+
+  test("REFUSED: the WRONG member's field, proved by the condition", () => {
+    expectRejected(`
+type Node = { kind: "num"; value: number } | { kind: "str"; text: string };
+const n: Node = { kind: "num", value: 7 };
+let seen = 0;
+while (n.kind === "num") {
+  console.log(n.text);
+  seen = seen + 1;
+  if (seen > 1) break;
+}
+`, "NT2001", "does not exist on");
+  });
+
+  test("REFUSED: a `do`/`while` condition proves nothing about the body it already ran", () => {
+    expectRejected(`
+let x: number | undefined = 3;
+let n = 0;
+do {
+  n = n + x;
+  if (n > 2) break;
+} while (x !== undefined);
+`, "NT2001", "number + ?Unumber");
+  });
+});
