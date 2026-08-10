@@ -110,26 +110,27 @@ describe("what parses is not what is ALLOWED — precise codes, never a guess", 
   /*
    * `instanceof` is a CONSTANT FOLD, not a runtime test: the checker decides it from the
    * operand's static type and codegen emits `true`/`false`. That is exact only while the
-   * static type names ONE class — which is the premise the five branches in
-   * `InstanceOfExpr` were written against ("a value's static type IS its exact class").
+   * static type names ONE thing — the premise the five branches in `InstanceOfExpr` were
+   * written against ("a value's static type IS its exact class").
    *
-   * A NULLABLE or UNION operand breaks the premise, and it broke it SILENTLY. `?UDog{…}`
-   * is not `Dog{…}`: `classTag` reads the tag as `?UDog`, which is not an identifier, so
-   * it answered `undefined` and the fold produced `false`. Same for every built-in arm —
-   * `isArrayTy` excludes nullables by construction (`!isNullableTy(t)`), and `isMapTy` /
-   * `isSetTy` / `isBytesTy` anchor on a prefix that `?U` displaces. So
+   * A NULLABLE or UNION operand breaks the premise, and it broke it SILENTLY: the arms
+   * were applied to the WHOLE type spelling, and every one of them answers `false` on a
+   * compound spelling for structural reasons rather than semantic ones. `classTag` reads
+   * the tag of `?UDog{…}` as `?UDog`, which is not an identifier, so it answered
+   * `undefined`; `isArrayTy` excludes nullables by construction (`!isNullableTy(t)`); and
+   * `isMapTy`/`isSetTy`/`isBytesTy` anchor on a prefix that `?U` displaces. So
    *
-   *     const d: Dog | undefined = new Dog("rex");
-   *     console.log(d instanceof Dog);           // node: true.  nativets printed FALSE.
+   *     const d: Dog | undefined = new Dog("rex");  d instanceof Dog    // node: TRUE
+   *     const a: number[] | string = [1, 2];        a instanceof Array  // node: TRUE
    *
-   * — the worst outcome available: wrong stdout at exit 0, invisible to any check that
-   * does not diff against node. Every arm answered `false` for a value that IS one.
+   * both printed `false` at exit 0 — wrong stdout, invisible to any check that does not
+   * diff against node.
    *
-   * The fold cannot be repaired by widening the predicates: `?UDog` genuinely has two
-   * inhabitants and only a RUNTIME null test separates them, which `e.result` (one
-   * boolean) cannot carry. So it is refused, and the hint names the test that decides it.
+   * The rule now decides PER ARM. Where the arms agree the fold is still exact and still
+   * happens; where they disagree the answer depends on which arm the value holds at run
+   * time, which one compile-time boolean cannot carry, so it is refused.
    */
-  test("`instanceof` on a NULLABLE operand is NT1022, never a silent `false`", () => {
+  test("`instanceof` whose arms DISAGREE is NT1022, never a silent `false`", () => {
     const DOG = `class Dog { name: string; constructor(n: string) { this.name = n; } }\n`;
     expect(codeOf(`${DOG}const d: Dog | undefined = new Dog("rex");\nconsole.log(d instanceof Dog);\n`)).toBe("NT1022");
     expect(codeOf(`${DOG}const d: Dog | null = new Dog("rex");\nconsole.log(d instanceof Dog);\n`)).toBe("NT1022");
@@ -138,10 +139,32 @@ describe("what parses is not what is ALLOWED — precise codes, never a guess", 
     expect(codeOf(`const m: Map<string, number> | undefined = new Map<string, number>();\nconsole.log(m instanceof Map);\n`)).toBe("NT1022");
     expect(codeOf(`const s: Set<number> | undefined = new Set<number>();\nconsole.log(s instanceof Set);\n`)).toBe("NT1022");
     expect(codeOf(`const b: Uint8Array | undefined = new Uint8Array(2);\nconsole.log(b instanceof Uint8Array);\n`)).toBe("NT1022");
+    // A GENERAL union: one arm is an Array and one is not. Same wrong `false` before.
+    expect(codeOf(`function pick(f: boolean): number[] | string { if (f) return [1]; return "hi"; }\nconst a: number[] | string = pick(true);\nconsole.log(a instanceof Array);\n`)).toBe("NT1022");
 
-    // MUTATION GUARD. A non-nullable operand still folds — widen the refusal to "any
-    // class instance" and this line fails.
+    // MUTATION GUARDS. The fold must survive wherever the arms AGREE — widen the refusal
+    // to "compound operand" and each of these fails.
     expect(codeOf(`${DOG}const d: Dog = new Dog("rex");\nconsole.log(d instanceof Dog);\n`)).toBe(null);
+    // Every arm of a nullable NON-array is a non-array: still a decided, compiled `false`.
+    expect(codeOf(`const s: string | undefined = "hi";\nconsole.log(s instanceof Map);\n`)).toBe(null);
+    // Every arm of a record union is a plain object: `instanceof Array` is a real `false`.
+    expect(codeOf(`type A = { kind: "a"; n: number };\ntype B = { kind: "b"; s: string };\nfunction f(x: A | B): void { console.log(x instanceof Array); }\nf({ kind: "a", n: 1 });\n`)).toBe(null);
+  });
+
+  test("the arms that still fold answer what node answers", async () => {
+    const folds = `type A = { kind: "a"; n: number };
+type B = { kind: "b"; s: string };
+function f(x: A | B): void { console.log(x instanceof Array); }
+f({ kind: "a", n: 1 });
+f({ kind: "b", s: "z" });
+const s: string | undefined = "hi";
+console.log(s instanceof Map);
+`;
+    const oracle = runWithNode(folds);
+    const ours = await compileAndRun(folds);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("false\nfalse\nfalse\n");
   });
 
   test("the NT1022 nullable hint names a rewrite that compiles AND matches node", async () => {

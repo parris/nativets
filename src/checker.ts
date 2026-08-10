@@ -4285,32 +4285,44 @@ class Checker {
         // nothing is polymorphic), so the answer is the same one node computes.
         const ot = this.type(e.object, scope);
         const c = e.className;
-        // …but ONLY while the static type names one thing. A NULLABLE or UNION operand has
-        // more than one inhabitant and the fold answered `false` for every one of them —
-        // silently. `classTag("?UDog{…}")` reads the tag as `?UDog`, not an identifier, so
-        // it returns undefined and `classTag(ot) === c` is false; `isArrayTy` excludes
-        // nullables by construction (`!isNullableTy`), and `isMapTy`/`isSetTy`/`isBytesTy`
-        // anchor on a prefix that `?U`/`?N` displaces. So
+        // …and "a value's static type" is exactly ONE type only while the operand is
+        // neither nullable nor a union. The five arms below were applied to the WHOLE type
+        // regardless, and every one of them answers `false` on a compound spelling for
+        // structural reasons rather than semantic ones: `classTag("?UDog{…}")` reads the
+        // tag as `?UDog`, which is not an identifier, so it returns undefined; `isArrayTy`
+        // excludes nullables by construction (`!isNullableTy(t)`); `isMapTy`/`isSetTy`/
+        // `isBytesTy` anchor on a prefix that `?U`/`?N` displaces. So
         //
-        //     const d: Dog | undefined = new Dog("rex"); d instanceof Dog
+        //     const d: Dog | undefined = new Dog("rex"); d instanceof Dog   // node: true
+        //     const a: number[] | string = [1, 2];       a instanceof Array // node: true
         //
-        // printed `false` where node prints `true` — wrong stdout at exit 0, which is the
-        // worst outcome available. It cannot be repaired by widening the predicates: the
-        // answer depends on WHICH arm the value holds, and `e.result` is one compile-time
-        // boolean with nowhere to put a runtime test. Refuse, and name the test that
-        // decides it — for a nullable that is the null check the narrowing already needs.
-        if (isNullableTy(ot) || isUnionTy(ot) || isGeneralUnionTy(ot)) {
-          const nullish = isNullableTy(ot) ? nullishKind(ot) : "undefined";
-          throw nyi(NYI.INSTANCEOF, `'instanceof ${c}' on ${ot}`, isNullableTy(ot)
-            ? `\`instanceof\` is decided from the static type here, and ${ot} does not name one class — the value may be ${nullish}. Narrow first: \`x !== ${nullish}\` answers exactly this question for a nullable, and the narrowed binding is what the branch wanted anyway`
-            : "`instanceof` is decided from the static type here, and a union names more than one — compare the discriminant instead (e.g. `x.kind === \"…\"`), which also narrows the binding for the branch body", exprLoc(e.object));
+        // both printed FALSE at exit 0 — wrong stdout, the worst outcome available, and
+        // invisible to anything but a node diff.
+        //
+        // The repair is to decide the test PER ARM and only then fold. Where the arms
+        // agree the answer is still exact and still a constant (`x instanceof Array` on a
+        // union of record types is a real `false`, and stays compiled). Where they
+        // DISAGREE the answer depends on which arm the value holds at run time, and
+        // `e.result` is one compile-time boolean with nowhere to put a runtime test — so
+        // that case is refused, with the hint naming the test that does decide it.
+        const bt = baseTy(ot);
+        const arms: Ty[] = isUnionTy(bt) ? unionMembers(bt) : isGeneralUnionTy(bt) ? generalUnionMembers(bt) : [bt];
+        // A nullable's nullish arm votes `false` up front: `undefined instanceof C` is
+        // false in node for every C, which is why `d instanceof Dog` above is undecidable
+        // rather than simply `true`.
+        let anyTrue = false;
+        let anyFalse = isNullableTy(ot);
+        for (const arm of arms) {
+          if (this.instanceOfArm(arm, c)) anyTrue = true;
+          else anyFalse = true;
         }
-        if (c === "Array") e.result = isArrayTy(ot);
-        else if (c === "Uint8Array") e.result = isBytesTy(ot);
-        else if (c === "Map") e.result = isMapTy(ot);
-        else if (c === "Set") e.result = isSetTy(ot);
-        else if (this.functions.has(`${c}.constructor`)) e.result = classTag(ot) === c;
-        else throw nyi(NYI.INSTANCEOF, `'instanceof ${c}'${c === "Error" ? " (Error is modelled structurally as {message:string})" : ""}`);
+        if (anyTrue && anyFalse) {
+          const nullish = nullishKind(ot);
+          throw nyi(NYI.INSTANCEOF, `'instanceof ${c}' on ${ot}`, isNullableTy(ot)
+            ? `\`instanceof\` is decided from the static type here, and ${ot} has an arm that IS a ${c} and an arm that is ${nullish}. Narrow first — \`x !== ${nullish}\` answers exactly this question for a nullable, and the narrowed binding is what the branch body wanted anyway`
+            : `\`instanceof\` is decided from the static type here, and only some arms of ${ot} are a ${c}. Test the arms apart first (a discriminant field, \`typeof\`, or \`Array.isArray\`-style tag of your own), which also narrows the binding for the branch body`, exprLoc(e.object));
+        }
+        e.result = anyTrue;
         e.ty = "boolean";
         return "boolean";
       }
@@ -4327,6 +4339,33 @@ class Checker {
       }
       case "CallExpr": return this.inferCall(e, scope, hint, discard);
     }
+  }
+
+  /**
+   * `arm instanceof c` for ONE non-compound type — the five decidable constructors plus
+   * user classes. Split out of `InstanceOfExpr` so a nullable/union operand can ask it
+   * once per arm; on a plain type the caller's single-element loop reproduces exactly the
+   * `if/else` chain this replaced.
+   *
+   * A class name it cannot decide REFUSES here rather than returning a third state: the
+   * answer would be a guess, and `Error` is the case that matters — `new Error(m)` IS
+   * `{message:string}` in this subset, so an Error and a record carrying a `message` are
+   * the same static type and nothing distinguishes them.
+   */
+  private instanceOfArm(t: Ty, c: string): boolean {
+    if (c === "Array") return isArrayTy(t);
+    if (c === "Uint8Array") return isBytesTy(t);
+    if (c === "Map") return isMapTy(t);
+    if (c === "Set") return isSetTy(t);
+    // The tag is bound to a LOCAL before the comparison. `classTag` answers `?Ustring`,
+    // and comparing that with a `string` directly is NT2001 here — which is how the
+    // inline `classTag(ot) === c` this replaced sat outside the subset `src/` has to stay
+    // inside, hidden only because its enclosing body already failed for another reason.
+    if (this.functions.has(`${c}.constructor`)) {
+      const tag = classTag(t);
+      return tag !== undefined && tag === c;
+    }
+    throw nyi(NYI.INSTANCEOF, `'instanceof ${c}'${c === "Error" ? " (Error is modelled structurally as {message:string})" : ""}`);
   }
 
   /** Type of the first `throw` reachable in a body (for the catch binding). */
