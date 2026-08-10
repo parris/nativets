@@ -619,11 +619,18 @@ parameter and for a local `let`/`const`. Only the spellings that introduce a NEW
 `const q = e!`, `e ?? fallback` — worked before, because those bind a plain `U<…>`. A nullable
 RECORD (a single object type, not a union) was never affected.
 
-**Still refused, on purpose:** a bare nullable as a `&&` operand (`if (e && e.kind === "A")`) is
-`NT2001: '&&' operands must be matching …`. That is a different gap — node's `a && b` evaluates to
-`a` when `a` is falsy, so the expression's type is a general union — and it is not specific to
-unions (`if (o && o.n > 1)` on any `R | undefined` is refused the same way). Spell it
-`e !== undefined && e.kind === "A"`.
+**~~Still refused, on purpose:~~ NOW ACCEPTED.** A bare nullable as a `&&` operand
+(`if (e && e.kind === "A")`) used to be `NT2001: '&&' operands must be matching …`, and the
+reason given was the VALUE: node's `a && b` evaluates to `a` when `a` is falsy, so the
+expression's type is a general union we cannot represent. That reason is true and it is
+exactly the thing a CONDITION never asks for — `Boolean(a && b)` is `Boolean(a) && Boolean(b)`
+for every pair of JS values — so the refusal was wider than its own justification. In
+truthiness position (`if`/`while`/`do`/`for`, a `?:` test, the operand of `!`, and
+recursively the operands of a truthiness-position `&&`/`||`) the operands may now have any
+types; the result is `boolean` and codegen short-circuits on `truthyOf` of each side.
+`if (e && e.kind === "A")` and `if (o && o.n > 1)` both compile and match node.
+Outside a condition the value rule is unchanged — `const x = b && s` is still `NT2001`, for
+the reason above. See test/logical-condition.test.ts.
 
 **And the hint was fixed.** "Narrow it first" was one fixed sentence, and three shapes reached it
 with a tag test already written. `Checker.narrowAdvice` now says which one it is:
@@ -1600,13 +1607,24 @@ split three ways:
 |---|---|---|
 | `if` / `while` / `do…while` / `for` test | **silently wrong** (wrong arm; loops never exit) | `NT1606` |
 | `?:` test, `!x`, `!!x` | **silently wrong** | `NT1606` |
-| `&&` / `\|\|` operand (either side) | already `NT2001` (operands must be matching boolean/number/string) | unchanged |
+| `&&` / `\|\|` operand (either side) | was `NT2001` (operands must be matching boolean/number/string) | **`NT1606`** — see below |
 | `return` from a `: boolean` function | already `NT2001` (return type mismatch) | unchanged |
 | argument to a `boolean` parameter | already `NT2001` | unchanged |
 | `const b: boolean = m.delete(k)` | already `NT2001` | unchanged |
 | `m.delete(k) === true` | already `NT2001` (cannot compare) | unchanged |
 | `Boolean(m.delete(k))` | already `NT1003` (`Boolean` unsupported) | unchanged |
 | **`const r = m.delete(k)` with NO type annotation** | **silently wrong, and still is** | **open — see "STILL OPEN" below** |
+
+The `&&`/`||` row moved, and how it moved is worth recording. It said "already `NT2001`",
+which was true but ACCIDENTAL: the value rule refused every mismatched operand pair, so it
+happened to catch the collection case on its way past. When truthiness-position `&&`/`||`
+was widened to accept any operand types (see "NOW ACCEPTED" above), that accident stopped
+holding and `if (flag && m.delete("zz"))` printed `THEN` where node prints `ELSE` — with no
+diagnostic, in the widening's own first hour. The fix is that `rejectVacuousCollectionTest`
+now runs on the OPERANDS as well as on the whole condition; the `if` call site can no longer
+see through, because the condition's type is `boolean` by then. The lesson is the row's, not
+the rule's: a refusal that a DIFFERENT rule is incidentally producing is not a guarantee, and
+this table could not tell the two apart. Pinned in test/logical-condition.test.ts §4.
 
 Read that last row before trusting the six above it. Every "already `NT2001`" row is a
 **type-level** rescue: it fires because the *annotation* says `boolean` and `.delete` hands

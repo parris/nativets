@@ -2621,7 +2621,7 @@ class Checker {
         }
         return;
       case "IfStmt": {
-        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
+        refuseUnboxedUnion(this.typeCond(s.test, scope), "a truthiness test");
         this.rejectVacuousCollectionTest(s.test, "this `if` condition", "the `else` arm is unreachable");
         // Two INDEPENDENT narrowings apply to the same arms, and a guard can want both
         // (see checkBlock): nullable FACTS from the guard hold in the branch it selects,
@@ -2648,7 +2648,7 @@ class Checker {
         return;
       }
       case "WhileStmt": {
-        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
+        refuseUnboxedUnion(this.typeCond(s.test, scope), "a truthiness test");
         this.rejectVacuousCollectionTest(s.test, "this `while` condition", "the loop can never terminate");
         // The SAME composition `IfStmt` above does, with the loop BODY as the region: a
         // `while` condition dominates its body exactly as an `if` test dominates its
@@ -2675,7 +2675,7 @@ class Checker {
       }
       case "DoWhileStmt":
         this.loopDepth++; this.checkBlock(s.body, scope.child(), ret); this.loopDepth--;
-        refuseUnboxedUnion(this.type(s.test, scope), "a truthiness test");
+        refuseUnboxedUnion(this.typeCond(s.test, scope), "a truthiness test");
         this.rejectVacuousCollectionTest(s.test, "this `do`/`while` condition", "the loop can never terminate");
         return;
       case "ForStmt": {
@@ -2684,7 +2684,7 @@ class Checker {
           if ((s.init as VarDecl).kind === "VarDecl") this.checkStmt(s.init as VarDecl, inner, ret);
           else this.type(s.init as Expr, inner);
         }
-        if (s.test) { this.type(s.test, inner); this.rejectVacuousCollectionTest(s.test, "this `for` condition", "the loop can never terminate"); }
+        if (s.test) { this.typeCond(s.test, inner); this.rejectVacuousCollectionTest(s.test, "this `for` condition", "the loop can never terminate"); }
         if (s.update) this.type(s.update, inner);
         this.loopDepth++; this.checkBlock(s.body, inner.child(), ret); this.loopDepth--;
         return;
@@ -2863,9 +2863,42 @@ class Checker {
    * the type is produced makes the binding an ordinary union and every downstream pass
    * (narrowing, drops, codegen's layout) keeps working unchanged.
    */
-  type(e: Expr, scope: Scope, hint?: Ty): Ty { const t = this.unfold(this.infer(e, scope, hint)); e.ty = t; return t; }
+  type(e: Expr, scope: Scope, hint?: Ty, truthy: boolean = false): Ty {
+    const t = this.unfold(this.infer(e, scope, hint, truthy));
+    e.ty = t;
+    return t;
+  }
 
-  private infer(e: Expr, scope: Scope, hint?: Ty): Ty {
+  /**
+   * `type`, for an expression in TRUTHINESS position — an `if`/`while`/`do`/`for`
+   * condition, a `?:` test, or the operand of `!`.
+   *
+   * The only difference is `&&`/`||`, whose VALUE has no representation here when the
+   * operands differ (`b && s` on a `boolean` and a `string | undefined` is
+   * `false | string | undefined`, three arms, and the [tag,value] box carries two). In a
+   * condition the value is never materialized, and
+   *
+   *     Boolean(a && b) === (Boolean(a) && Boolean(b))
+   *     Boolean(a || b) === (Boolean(a) || Boolean(b))
+   *
+   * identically for every pair of JS values — so the un-representable join is also the
+   * join nobody asked for, and the result is plainly `boolean`. `!x` has accepted an
+   * operand of any type for exactly this reason since Stage 1; this is the same argument
+   * applied to the short-circuit pair.
+   *
+   * `??` is deliberately NOT routed here: it is a value operator whose result is the
+   * surviving arm, not a truthiness test (`(a ?? b)` as a condition means "a, unless a is
+   * nullish"), and its existing typing already handles the nullable shapes.
+   *
+   * Threaded as an argument rather than a flag on the checker or a mark on the node,
+   * because "in truthiness position" is a property of one node and its short-circuit
+   * operands — `if (a && (b || c))` propagates, while a call argument inside the same
+   * condition does not — and a walk-scoped flag would leak into both.
+   */
+  private typeCond(e: Expr, scope: Scope): Ty { return this.type(e, scope, undefined, true); }
+
+  /** `truthy` — see `typeCond`. Only `LogicalExpr` reads it. */
+  private infer(e: Expr, scope: Scope, hint?: Ty, truthy: boolean = false): Ty {
     // CAPTURE AND CLEAR (see `discardStmt`). Read into a local FIRST, store `false` back
     // BEFORE the switch: every recursive `this.type(…)` below therefore sees `false`, so
     // "the result is discarded" describes this node alone. Doing it here rather than at
@@ -3130,7 +3163,8 @@ class Checker {
         this.type(e.operand, scope);
         return "string";
       case "UnaryExpr": {
-        const t = this.type(e.operand, scope);
+        // `!` is a truthiness test, so a `&&`/`||` operand is one too — `!(a && b)`.
+        const t = e.op === "!" ? this.typeCond(e.operand, scope) : this.type(e.operand, scope);
         if (e.op === "!") { this.rejectVacuousCollectionTest(e.operand, "this `!` operand", "the `!` is always `false`"); return "boolean"; }
         if (e.op === "void") return "undefined";
         if (e.op === "~") { if (t !== "number") throw typeError(`'~' needs number`); return "number"; }
@@ -3249,7 +3283,11 @@ class Checker {
         return "number";
       }
       case "LogicalExpr": {
-        const l = this.type(e.left, scope);
+        // A truthiness-position `&&`/`||` makes its OPERANDS truthiness-position too, so
+        // `if (a && (b || c))` composes; `??` is a value operator and stops it (see
+        // `typeCond`).
+        const cond = truthy && e.op !== "??";
+        const l = this.type(e.left, scope, undefined, cond);
         // For `??` the LEFT operand is the context for the right (`maybeArr ?? []` gets
         // its element type from `maybeArr`'s base type); a definitely-nullish left falls
         // back to the surrounding context.
@@ -3287,7 +3325,7 @@ class Checker {
         }
         const r = this.withFacts(
           facts,
-          () => this.type(e.right, rscope, rhint),
+          () => this.type(e.right, rscope, rhint, cond),
         );
         if (e.op === "??") {
           // `??` collapses to the non-nullish arm. Left may be definitely-nullish
@@ -3323,10 +3361,38 @@ class Checker {
         // matching number/string operands (`0 || 5` → 5, `"" || "x"` → "x").
         if (l === "boolean" && r === "boolean") return "boolean";
         if (l === r && (l === "number" || l === "string")) return l;
+        // In TRUTHINESS position the value is never materialized, so the join that has no
+        // representation is also the join nobody asked for: `Boolean(a && b)` is exactly
+        // `Boolean(a) && Boolean(b)`, for every pair of JS values. Codegen reads the
+        // recorded `boolean` result type and short-circuits on `truthyOf` of each side
+        // rather than storing an operand into the slot (see its `LogicalExpr` case).
+        //
+        // The unboxed-union refusal is applied to the OPERANDS here, not just to the
+        // condition as a whole: `refuseUnboxedUnion` at the `if` sees only this node's
+        // `boolean`, and a general union's truthiness reads a [tag,value] box as if it
+        // were the value — the wrong answer that refusal exists to prevent.
+        //
+        // The COLLECTION rule is applied to the operands for the same reason and it is
+        // the sharper of the two: a non-nullable `Map`/`Set` handle is truthy for every
+        // input, so `if (flag && m.delete(k))` takes the THEN arm where node takes the
+        // ELSE — a silent wrong answer, which is precisely what
+        // `rejectVacuousCollectionTest` exists to stop. Before this widening the value
+        // rule refused that program as a type error and the hole did not exist; opening
+        // the position without moving the guard down to the operands re-opened it. The
+        // `if`/`while`/`?:` call sites still pass the WHOLE condition, whose type is now
+        // `boolean`, so this is the only place that can see it.
+        if (cond) {
+          refuseUnboxedUnion(l, "a truthiness test");
+          refuseUnboxedUnion(r, "a truthiness test");
+          const side = `this \`${e.op}\` operand`;
+          this.rejectVacuousCollectionTest(e.left, side, `the \`${e.op}\` is decided by the other operand alone`);
+          this.rejectVacuousCollectionTest(e.right, side, `the \`${e.op}\` is decided by the other operand alone`);
+          return "boolean";
+        }
         throw typeError(`'${e.op}' operands must be matching boolean/number/string (got ${l}, ${r})`);
       }
       case "ConditionalExpr": {
-        refuseUnboxedUnion(this.type(e.test, scope), "a truthiness test");
+        refuseUnboxedUnion(this.typeCond(e.test, scope), "a truthiness test");
         this.rejectVacuousCollectionTest(e.test, "this `?:` test", "the `:` arm is unreachable");
         // Each arm sees the surrounding context; additionally an empty `[]` arm takes
         // its element type from the OTHER arm (`flag ? [1, 2] : []`), so type the
@@ -3548,10 +3614,25 @@ class Checker {
       }
       case "NewExpr": {
         // Immutable collections (B2). `new Map<K,V>()` / `new Set<T>()`; bare
-        // `new Map()`/`new Set()` default to Map<string,number> / Set<string>.
+        // `new Map()`/`new Set()` take their type from CONTEXT, and fall back to
+        // Map<string,number> / Set<string> when there is none.
+        //
+        // The context is the same `hint` the empty ARRAY literal already consumes
+        // (`const xs: string[] = []`), and it is TypeScript's rule for the constructor
+        // too: an argument-less `new Map()` in a contextually typed position takes the
+        // contextual type. Without it the guess LOST to an annotation standing right next
+        // to it — `const m: Map<string, string> = new Map()` was "declared
+        // Map<string,string> but initialized with Map<string,number>", on a program node
+        // runs and tsc accepts. The parameter-default spelling of the same line
+        // (`= new Map()`) is five of this compiler's own functions.
+        //
+        // Written type ARGUMENTS still win: this fills a blank, it never overrides.
+        const ctxCollection = hint === undefined ? undefined : this.unfold(hint);
         if (e.callee === "Map") {
           if (e.args.length > 1) throw typeError("new Map expects at most one argument (an iterable)");
-          let k = e.typeArgs?.[0] ?? "string", v = e.typeArgs?.[1] ?? "number";
+          const ctxMap = ctxCollection !== undefined && isMapTy(ctxCollection) ? ctxCollection : undefined;
+          let k = e.typeArgs?.[0] ?? (ctxMap ? mapKeyTy(ctxMap) : "string");
+          let v = e.typeArgs?.[1] ?? (ctxMap ? mapValTy(ctxMap) : "number");
           if (e.args.length === 1) {
             // Only the Map-COPY form. The entries form needs a [K, V] tuple type we
             // do not have yet (`["a", 1]` is NT2001 on its own), so it stays refused.
@@ -3574,7 +3655,8 @@ class Checker {
         }
         if (e.callee === "Set") {
           if (e.args.length > 1) throw typeError("new Set expects at most one argument (an iterable)");
-          const declared = e.typeArgs?.[0];
+          const ctxSet = ctxCollection !== undefined && isSetTy(ctxCollection) ? ctxCollection : undefined;
+          const declared = e.typeArgs?.[0] ?? (ctxSet ? setElemTy(ctxSet) : undefined);
           let el = declared ?? "string";
           if (e.args.length === 1) {
             // `new Set(iterable)` — bulk construction. The element type comes from the
