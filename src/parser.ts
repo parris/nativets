@@ -989,11 +989,17 @@ class Parser {
     // such name". Reaching this line with an import name is exactly that condition.
     //
     // The silent wrong answer previously recorded here as motivation — a `lib.ts` recursive
-    // `type Node`, a `main.ts` doing `xs as Node[]` — is NOT caused by this erasure. It
-    // reproduces identically with a local, fully-resolved type and no import at all
-    // (`type T = {v:string}; const raw = {v:"hi"}; const n = raw as T; console.log(n.v)`
-    // traps: node prints `hi`, the binary takes SIGTRAP). That is the unchecked `as` retype
-    // on an identifier operand, not a resolution failure.
+    // `type Node`, a `main.ts` doing `xs as Node[]` — was NOT caused by this erasure. It
+    // reproduced identically with a local, fully-resolved type and no import at all
+    // (`type T = {v:string}; const raw = {v:"hi"}; const n = raw as T; console.log(n.v)`).
+    // Root cause, found and fixed by the `as` lane: a DOUBLE FREE, not a retype. `as`
+    // reinterprets a PLACE, so that declarator gives one allocation two owning names, and
+    // `Ownership.expr` hard-coded `consume: false` for `AsExpr` where `satisfies` and `!`
+    // both thread it — so the scope emitted two `nt_obj_free` calls for one pointer and the
+    // allocator's double-free check raised SIGTRAP. That is why only an IDENTIFIER operand
+    // failed (a cast object LITERAL has no other owner) and why stdout looked empty: the
+    // abort discarded the buffered `hi` rather than never producing it. Kept here because
+    // the misattribution, not the bug, is what would send the next reader to this line.
     if (this.isExternal(id)) return;
     // A global the program never had to declare — and one nothing above claimed, so
     // returning here would hand the caller its `number`. REFUSED instead (NT1035): the
