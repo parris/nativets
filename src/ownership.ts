@@ -19,6 +19,7 @@
  *   NT1603  mutate while borrowed / iter-inval(≈ E0502)
  *   NT1604  move out of borrowed content      (≈ E0507) — a for-of element or by-borrow param
  *   NT1605  move out of a linear array element(≈ E0508) — `arr[i]` where the element is linear
+ *   NT1608  assignment to a linear parameter  (≈ E0384) — a parameter is an immutable borrow
  * Deferred: move-out-of-borrow for the general (non-for-of) borrow, and Drop-typed moves (E0509).
  */
 
@@ -42,6 +43,7 @@ export const OWN_CODES = {
   MOVE_OUT_OF_BORROW: "NT1604",  // ≈ E0507 (move out of a for-of element / by-borrow param)
   MOVE_OUT_OF_ARRAY: "NT1605",   // ≈ E0508 (move out of a linear array element `arr[i]`)
   MUTATE_THROUGH_BORROW: "NT1607", // ≈ E0596 (`@@mutable` setter called on a handle we don't own)
+  ASSIGN_TO_BORROW_PARAM: "NT1608", // ≈ E0384 (assignment to an immutable parameter binding)
 } as const;
 
 /**
@@ -805,6 +807,33 @@ class Analyzer {
             message: `cannot assign to \`${e.target}\` because it is borrowed (an alias of it is still live)`,
             line: 0,
             hint: "an alias of a `@@mutable` value borrows from its owner for the rest of the scope; reassigning the owner would leave the alias dangling. Scope the alias more tightly, or mutate through the owner instead of rebinding it",
+          });
+          return;
+        }
+        // ASSIGNMENT TO A LINEAR PARAMETER (≈ rustc E0384: a parameter is an immutable
+        // binding unless declared `mut`). A parameter is a BORROW — the caller owns the
+        // value and frees it when its own scope ends. Rebinding one is a lost update in
+        // node (the caller never sees it), and it was a USE-AFTER-FREE here: `dropOld`
+        // below proved only "not moved, not captured", never "this scope owns it", so
+        // `out = ["z"]` freed the CALLER's array and every later read of it dangled.
+        //   function f(out: string[]): void { out = ["z"]; }
+        //   const acc: string[] = ["a", "b"]; f(acc); console.log(acc.length);
+        // node prints 2; this printed 3, then a fresh garbage integer per run, at exit 0.
+        //
+        // Suppressing `dropOld` alone is memory-safe and matches node exactly, but then
+        // nothing ever frees the value the callee allocated — the borrow is not this
+        // scope's to drop, and proving WHICH paths reassigned needs a per-parameter drop
+        // flag we do not have. A leak is the better of the two failures, and a REFUSAL is
+        // better than either: the pattern users write this for (an accumulator out-param)
+        // cannot work in node either, so the rebinding is never what they wanted.
+        // docs/self-hosting.md:2076 already decided the same question for a persistent
+        // Map — "RETURN the bindings".
+        if (this.borrowParams.has(e.target)) {
+          this.report({
+            code: OWN_CODES.ASSIGN_TO_BORROW_PARAM,
+            message: `cannot assign to \`${e.target}\`: a parameter is a BORROW, so this scope may not rebind it`,
+            line: lineOf(e.value),
+            hint: `the caller owns \`${e.target}\` and frees it when its own scope ends, so this assignment could not be visible to the caller — node discards it too. RETURN the new value and rebind at the call site (\`${e.target} = f(${e.target})\`), or take a copy first (\`let local = [...${e.target}]\`) and rebind that`,
           });
           return;
         }

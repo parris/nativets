@@ -298,3 +298,100 @@ console.log(__arrLive());`;
     expect(r.exitCode).toBe(0);
   });
 });
+
+/*
+ * ASSIGNING TO A LINEAR PARAMETER — NT1608 (≈ rustc E0384, "cannot assign twice to
+ * immutable variable"; a Rust parameter is an immutable binding unless declared `mut`).
+ *
+ * The bug this closes was the worst failure mode this project recognises: a silent wrong
+ * answer that did not reproduce identically.
+ *
+ *   function f(out: string[]): void { out = ["z"]; }
+ *   const acc: string[] = ["a", "b"];
+ *   f(acc);
+ *   console.log(acc.length);
+ *
+ * node prints `2`. This printed `3` on one run and `6875746259392517000` on the next, and
+ * both times EXIT 0 — so a differential test could pass by luck. `3` is not the length of
+ * anything in the program (`["z"]` is 1, `acc` is 2): the read was landing on freed
+ * storage, not on a stale header.
+ *
+ * CAUSE, one token wide. `AssignExpr` sets `dropOld` — "this scope frees the value being
+ * overwritten" — from `droppable()`, which proves only *not moved out* and *not captured
+ * by a closure*. It never asked whether this scope OWNS the binding. A linear parameter is
+ * in `linear` (so the move checker tracks it) but is deliberately NOT in the scope-exit
+ * drop set, because it is a BORROW: `paramBorrows`, ownership.ts. `dropOld` was the one
+ * place that read `linear` without also reading `borrowParams`, so `out = […]` freed the
+ * CALLER's array and every later read of `acc` dangled.
+ *
+ * WHY A REFUSAL AND NOT A FIX. Suppressing `dropOld` for a borrow param is memory-safe and
+ * matches node on all of these — but then nothing frees the value the callee allocated
+ * (measured: `__arrLive()` 2 where 1 is live for the straight-line case, 5 where 1 is live
+ * for the loop). Dropping it at scope exit instead needs a per-parameter drop flag for the
+ * paths that did not reassign, and getting that wrong is a double free. The pattern users
+ * reach for here — an accumulator out-param — cannot work in node either, so the rebinding
+ * was never what they wanted. docs/self-hosting.md decided the same question for a
+ * persistent Map: RETURN the value.
+ *
+ * Only LINEAR parameters (array / object / union / class instance) are affected. A
+ * `string` or `number` parameter is Copy, is not in `linear`, and is untouched — the
+ * `s = s.trim()` idiom keeps working.
+ */
+describe("drops: assignment to a linear parameter (NT1608)", () => {
+  test("rebinding an array parameter is refused, not miscompiled", () => {
+    expect(rejectCode(`
+function f(out: string[]): void { out = ["z"]; }
+const acc: string[] = ["a", "b"];
+f(acc);
+console.log(acc.length);`)).toBe("NT1608");
+  });
+
+  test("the spread/accumulator form is refused too — it was the NONDETERMINISTIC one", () => {
+    // This is the shape the NT1606 `.push` hint used to recommend verbatim. Before the
+    // refusal it printed a different garbage integer on every run, always at exit 0.
+    expect(rejectCode(`
+function collect(names: string[], out: string[]): void {
+  for (const n of names) out = [...out, n];
+}
+const acc: string[] = [];
+collect(["a", "b", "c"], acc);
+console.log(acc.length);`)).toBe("NT1608");
+  });
+
+  test("an OBJECT parameter is the same borrow (this one crashed with SIGTRAP)", () => {
+    // Heap corruption rather than a quiet wrong answer — the built binary died on signal
+    // 5 with nothing on stdout at all. Same cause, louder symptom.
+    expect(rejectCode(`
+function f(o: { n: number }): void { o = { n: 9 }; }
+const a = { n: 1 };
+f(a);
+console.log(a.n);`)).toBe("NT1608");
+  });
+
+  test("a STRING parameter is Copy, not linear — still accepted", async () => {
+    // The refusal must not swallow `s = s.trim()`. Strings are not in `linear`, so they
+    // never reach the borrow-param arm; this pins that the rule stayed narrow.
+    const src = `
+function f(s: string): string { s = s + "!"; return s; }
+const a = "hi";
+console.log(f(a), a);`;
+    await expectMatchesNode(src);
+  });
+
+  test("a LOCAL is still reassignable, and still freed exactly once", async () => {
+    // The guard is on `borrowParams`, not on `linear`, so RAII-on-reassignment for an
+    // ordinary local is untouched: one array live at the end, none leaked, none freed
+    // twice. Remove the `borrowParams.has` check and the parameter case above returns.
+    const src = `
+function f(): number {
+  let a: string[] = ["a", "b"];
+  a = ["z"];
+  return a.length;
+}
+console.log(f());
+console.log(__arrLive());`;
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe("1\n0\n"); // the superseded ["a","b"] was freed; no leak, no double free
+    expect(r.exitCode).toBe(0);
+  });
+});

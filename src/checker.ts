@@ -122,10 +122,20 @@ interface Binding {
    *  a plain nullish narrowing's are. Without this the member layout would be applied to
    *  the BOX pointer, which is the silent wrong answer, not a diagnostic. */
   nullBox?: boolean;
-  /** This binding is a PARAMETER — a borrow, whose value the CALLER owns. Assigning to it
-   *  can never be observed by the caller, which is why rebinding a persistent `Map`/`Set`
-   *  parameter from its own mutator is refused (node's mutator changes the receiver, ours
-   *  returns a new one, so the caller and we disagree). See `rejectParamRebind`. */
+  /** This binding is a PARAMETER, i.e. a BORROW — the caller owns the value, so assigning
+   *  to it can never be observed by them.
+   *
+   *  DIAGNOSTICS ONLY; the ownership pass computes borrows for itself, from the signature.
+   *  Two lanes arrived at this flag independently, from the same discovery in two data
+   *  types, which is the argument for keeping it ONE field rather than two:
+   *   - the array `.push` hint answered "accumulate with `acc = [...acc, x]`", which on a
+   *     parameter is NT1608 — a use-after-free until the ownership.ts guard landed;
+   *   - the `Map`/`Set` hint answered "write `out = out.add(n)`", which on a parameter
+   *     silently loses the update (node's mutator changes the receiver, ours returns a new
+   *     one, so the caller and we disagree). See `rejectParamRebind`.
+   *
+   *  A hint is trusted exactly when the reader is unsure, so one that routes into a refusal
+   *  — or into a wrong answer — is worse than none. */
   param?: boolean;
 }
 
@@ -176,7 +186,7 @@ class Scope {
   readonly hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
-  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty, mutable?: boolean, nullBox?: boolean, param?: boolean): void { this.vars.set(name, { ty, constant, len, narrowedFrom, mutable, nullBox, param }); }
+  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty, mutable?: boolean, nullBox?: boolean): void { this.vars.set(name, { ty, constant, len, narrowedFrom, mutable, nullBox }); }
   own(name: string): Binding | undefined { return this.vars.get(name); }
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
@@ -4270,8 +4280,27 @@ class Checker {
     if (method === "push") {
       const acc = this.accumulatorName(callee.object, scope);
       if (acc === null) {
+        // RECEIVER-AWARE. The general hint offers two accumulator spellings, and BOTH of
+        // them are wrong on a parameter: `@@mutable` never applied to one (it says so),
+        // and `out = [...out, x]` is NT1608 — a parameter is a borrow, so rebinding it is
+        // invisible to the caller and used to free the caller's array out from under it.
+        // Sending a reader there would hand them a use-after-free in answer to a
+        // diagnostic, which is the one thing a hint must never do. On a parameter the only
+        // true answer is the one docs/self-hosting.md already gives for a persistent Map:
+        // accumulate into a LOCAL and RETURN it.
+        // Inlined rather than a `isBorrowedParam` helper: a helper is one more function in
+        // the self-hosting denominator, refused for the same pre-existing reason
+        // `accumulatorName` beside it is, and the blocker metric would read the addition as
+        // a regression. Two lines here cost nothing.
+        // `Boolean(…)`, not `=== true`: comparing an OPTIONAL boolean against `boolean` is
+    // outside the subset `src/` must stay inside (NT2001, "Cannot compare ?Uboolean with
+    // boolean"). Latent rather than counted here — this function's first blocker was the
+    // `mutationError` Loc-width gap, now fixed — so it would have surfaced as the next one.
+    const recvIsParam = callee.object.kind === "Identifier" && Boolean(scope.lookup(callee.object.name)?.param);
         throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.push\` would mutate the array in place`,
-          "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage. To append with `.push` instead, declare the binding `@@mutable` (`//@@mutable` on the line above `let acc: T[] = []`) — that works only on a plain local, never on a field, a parameter or an element",
+          recvIsParam
+            ? "build a new array instead: `[...arr, x]` — the original is unchanged. This receiver is a PARAMETER, which is a borrow: the caller owns it, so neither `@@mutable` nor rebinding it (`out = [...out, x]`, which is NT1608) can append to it. Accumulate into a LOCAL and RETURN it — `let acc: T[] = []; acc = [...acc, x]; return acc` — and let the caller rebind"
+            : "build a new array instead: `[...arr, x]` — the original is unchanged. To accumulate in a loop, reassign a LOCAL: `let acc: T[] = []; acc = [...acc, x]` — that is not a copy per element, it appends in place (O(1) amortized) when nothing else shares the storage. To append with `.push` instead, declare the binding `@@mutable` (`//@@mutable` on the line above `let acc: T[] = []`) — that works only on a plain local, never on a field, a parameter or an element",
           exprLoc(callee.object) ?? callee.loc);
       }
       // test262 test/built-ins/Array/prototype/push/: `S15.4.4.7_A2` (the return value is
@@ -4435,7 +4464,10 @@ class Checker {
    *  is recorded for codegen. */
   private typeArrowBody(arrow: Extract<Expr, { kind: "ArrowFunction" }>, paramTypes: Ty[], scope: Scope): Ty {
     const inner = scope.child();
-    arrow.params.forEach((p, i) => inner.declare(p.name, paramTypes[i]!, false, undefined, undefined, undefined, undefined, /* param */ true));
+    // An ARROW's parameters are borrows too, so they carry the same flag, stamped the same
+    // way as `declareParams` does it (see `Binding.param`). `(out: Set<T>) => { out = out.add(x) }`
+    // loses the update exactly as the named-function form does.
+    arrow.params.forEach((p, i) => { inner.declare(p.name, paramTypes[i]!, false); inner.own(p.name)!.param = true; });
     arrow.paramTys = paramTypes;
     // Inlined or not, a value-arrow nested inside this callback needs this body in its
     // enclosing chain (NT1031) — the callback's own statements are one of the places an
@@ -4558,7 +4590,7 @@ class Checker {
     });
     arrow.paramTys = paramTys;
     const inner = scope.child();
-    arrow.params.forEach((p, i) => inner.declare(p.name, paramTys[i]!, false, undefined, undefined, undefined, undefined, /* param */ true));
+    arrow.params.forEach((p, i) => { inner.declare(p.name, paramTys[i]!, false); inner.own(p.name)!.param = true; });
     // An arrow used as a VALUE may escape and run long after the guard that narrowed an
     // enclosing binding, so a `let` narrowing stops at this boundary (a `const` one
     // cannot be invalidated, so it crosses). TypeScript draws the line in the same
@@ -4622,7 +4654,12 @@ class Checker {
           "`@@mutable` on a parameter marks an ARRAY the callee may `.push` to in place. For a record parameter use `@@mutable type`, for a class `@@mutable class`",
         );
       }
-      base.declare(p.name, tys[i]!, false, undefined, undefined, p.mutable, undefined, /* param */ true);
+      base.declare(p.name, tys[i]!, false, undefined, undefined, p.mutable);
+      // Stamped AFTER the fact rather than threaded through `declare` — an eighth
+      // positional argument on that signature is the kind of shared line a 3-way merge
+      // duplicates, and this flag feeds no lowering, only the hints. (It duly DID conflict:
+      // both lanes that needed this flag edited that one line. This is the canonical copy.)
+      base.own(p.name)!.param = true;
     });
   }
 
