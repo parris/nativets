@@ -4647,18 +4647,48 @@ class Checker {
     // (NT1003 — it is absent from `GLOBAL_FUNCS`, and appears nowhere else in `src/`), so
     // that swap trades a narrowing gap the checker could one day close for an unimplemented
     // global it never can. `?? false` compiles today and is node-exact.
-    const recvIsParam =
-      e.callee.object.kind === "Identifier" && (scope.lookup(e.callee.object.name)?.param ?? false);
+    const recvExpr = e.callee.object;
+    const recvIsParam = recvExpr.kind === "Identifier" && (scope.lookup(recvExpr.name)?.param ?? false);
+    // …AND THE RECEIVER DECIDES IT IN THE OTHER DIRECTION TOO. The paragraph above was
+    // learned for PARAMETERS and stopped there: every remaining receiver fell into the
+    // `else` arm and was told to write `X = X.<m>(…)`, which is a legal STATEMENT only
+    // when `X` is a plain binding or a class's OWN field. For a container path it is a
+    // line this very compiler refuses — advice that cannot be followed, on a refusal that
+    // is otherwise correct:
+    //
+    //     const b = { m: new Map<string, number>() };
+    //     b.m.set("a", 1);      // → "write `b.m = b.m.set("a", 1)`"
+    //                           //   → NT1606 "objects are immutable: `b.m = v`"
+    //     sets[0]!.add("a");    // → "write `sets[0]! = sets[0]!.add("a")`"
+    //                           //   → NT0001 "Invalid assignment target"
+    //
+    // Neither is detectable by reading: node runs both recommended lines (it strips the
+    // `!` and mutates in place) and tsc accepts even the `sets[0]! =` spelling, so only
+    // COMPILING the advice with nativets finds it. `this.<field>` is deliberately on the
+    // rebindable side — a `@@mutable` class assigns its own field in place, which is the
+    // form `src/` itself uses (`this.fnValues.set(…)`) — and it carries the `@@mutable`
+    // qualifier, because on an undecorated class the same line is NT1023.
+    const recvIsOwnField =
+      recvExpr.kind === "MemberExpr" && recvExpr.object.kind === "Identifier" && recvExpr.object.name === "this";
+    const rebindable = recvExpr.kind === "Identifier" || recvIsOwnField;
     const fix = recvIsParam && name !== undefined
       ? `\`${name}\` is a PARAMETER, so do NOT write \`${name} = ${name}.${m}(${args})\` — a parameter is a borrow and the CALLER, who owns the ` +
         `${kind.toLowerCase()}, would never see the update. Accumulate into a LOCAL seeded from it and RETURN that ` +
         `(\`let acc = ${name}; acc = acc.${m}(${args}); return acc;\`), then rebind at the CALL SITE (\`x = f(…, x)\`); ` +
         `a persistent collection cannot be an accumulator ARGUMENT. `
-      : name !== undefined
-        ? `write \`${name} = ${name}.${m}(${args})\` — the result IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. ` +
-          `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `
-        : `keep the result — it IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. ` +
-          `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `;
+      : !rebindable && name !== undefined
+        ? `\`${name}\` is inside a CONTAINER, so do NOT write \`${name} = ${name}.${m}(${args})\` — this compiler refuses that assignment ` +
+          `(an object field is NT1606, an array element is not an assignment target at all), even though node accepts it. ` +
+          `Seed a LOCAL from it, accumulate there, and rebuild the container: ` +
+          `\`let acc = ${name}; acc = acc.${m}(${args});\` then \`{ ...o, f: acc }\` or \`[...xs.slice(0, i), acc, ...xs.slice(i + 1)]\`. ` +
+          `To assign the field in place instead, declare the record \`@@mutable\` (docs/decorators.md). `
+        : name !== undefined
+          ? `write \`${name} = ${name}.${m}(${args})\` — the result IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. ` +
+            (recvIsOwnField
+              ? `The class must be \`@@mutable\` for a field assignment to stand (an undecorated one is NT1023)${chain}. `
+              : `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `)
+          : `keep the result — it IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. ` +
+            `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `;
     // THE TAIL HAS TO BE METHOD-AWARE, and saying "`.delete` … returns the receiver" was
     // simply FALSE: node's `.delete` answers a BOOLEAN (test262
     // built-ins/Map/prototype/delete/returns-{true,false}.js), which is the one §A

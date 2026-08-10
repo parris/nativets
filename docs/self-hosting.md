@@ -4680,3 +4680,112 @@ identical to the non-mutating control** and is clean under ASan+UBSan with
 `-fno-sanitize-recover=all` — built through `emitIRAsan`, the instrumented path that can see a
 stale READ and not only a double free. Verified on Linux (`scripts/docker-test.sh`), where
 LeakSanitizer actually exists: 159 pass / 0 fail across the four affected suites.
+
+## The `Set`/`Map` ACCUMULATOR PARAMETER — censused, measured, and DECLINED
+
+`NT1606` is still the compiler's own first blocker (`bindExpr`, `src/ast.ts:2192`), and the
+`Set`/`Map` half of it is the accumulator-passing walkers: `bindExpr`/`bindStmt`,
+`collectIdents`, `collectAssigned`, `collectAliases`, `collectVarTys`, `collectLinear`,
+`collectBoundNames`, threaded through the shared `walkExprChildren`/`walkStmtChildren`
+whose callback is `(x: Expr) => Expr` — there is nowhere to return an accumulator. The
+proposed route was to class-ify ~10 free functions across 4 modules onto a `@@mutable`
+collector, newly plausible now that recursive `@@mutable` classes land.
+
+**It was not taken. Two measurements say why, and they point the same way.**
+
+### The census — 55 sites, 23 of them parameters
+
+Discarded `.add`/`.set`/`.delete` statement sites in `src/`, at `c4d034e`:
+
+```
+sites: 55   local 26   param 23   this 6
+```
+
+The earlier "55 parameters" was the site TOTAL; the parameter share is **23**, in 12
+functions. As FIRST blockers the `Set`/`Map` share of `NT1606` is 21 of 58, and the
+parameter share of that is 12.
+
+### The ceiling — 5 functions of 693, and the refactor cannot reach 4 of them
+
+Neutering `rejectDiscardedMutator` for parameter receivers only (an experiment, reverted)
+moves `blocker-metric` **199/693 → 194/693 (28.7% → 28.0%)**. Removing the rule for EVERY
+receiver — locals, `this`, and parameters together, far more than any source rewrite could
+buy — moves it to **190/693**. So the whole `Set`/`Map` bucket is worth nine functions and
+this lane's half of it is worth **five**.
+
+The per-function diff says which, and it is the part that decides it. Eleven functions stop
+being `NT1606`; six of them land immediately on `NT2001` and stay failing:
+
+```
+CLEARED (5):   bindExpr  collectIdents  addCaptured  collectBlockLocals  noteEscapingWrite
+PROMOTED (6):  bindStmt  FnGen.collectBoundNames  collectAliases  collectVarTys
+               collectLinear  Analyzer.stmt          — all to NT2001 (the Stmt-union read)
+```
+
+Five of the six that promote are exactly the walkers a class-ification would touch most.
+Converting them buys nothing at all: they fail either way, behind the `Stmt` union blocker
+that is already the tree's dominant code at 108.
+
+### …and the mechanism the route depends on does not exist
+
+A `@@mutable` collector passed as a PARAMETER is a borrow, and mutating its field through
+that borrow is refused — both spellings, measured:
+
+```ts
+function collect(names: string[], c: Collector): void {
+  for (const n of names) c.note(n);          // NT1607 "cannot mutate `c` through a borrow"
+  for (const n of names) c.names = c.names.add(n);   // NT1607, the same
+}
+```
+
+So the walkers cannot stay free functions taking a collector. They would have to become
+METHODS, which does work — including the recursive `this`-capturing callback into the
+shared free-function walker, verified end-to-end against node — but that converts every
+CALL SITE too, and the accumulator has to be an owned local at the root of each chain.
+`collectAssigned(e, direct, closure, inArrow)` swaps in a FRESH inner set per arrow
+(`collectAssigned(body, inner, inner, true)`) and hands three distinct sets to
+`addCaptured(inner, own, closure)`; a single collector field cannot be re-pointed mid
+recursion and restored. That is a redesign of the analysis's data flow, not a
+transcription — for five functions, four of which it cannot reach.
+
+**Verdict: declined.** The `NT2001` `Stmt`-union read is the real term behind this bucket;
+clear that first and re-measure, because it is what five of these six functions hit next.
+
+### A LYING HINT this turned up, and fixed
+
+`rejectDiscardedMutator`'s own comment is "THE RECEIVER DECIDES THE HINT, and getting this
+wrong was a silent wrong answer the compiler INSTRUCTED people to write" — learned once,
+for PARAMETERS, and stopped there. Every other receiver fell into an `else` arm naming
+`X = X.<m>(…)`, which is a legal statement only for a plain binding or a class's own field.
+For a container path it is a line this compiler refuses:
+
+```
+const b = { m: new Map<string, number>() };
+b.m.set("a", 1);      → "write `b.m = b.m.set("a", 1)`"  → NT1606 objects are immutable
+sets[0]!.add("a");    → "write `sets[0]! = sets[0]!.add("a")`" → NT0001 Invalid assignment target
+```
+
+Neither is findable by reading: node RUNS both recommended lines (it strips the `!` and
+mutates), and `tsc` accepts even the `sets[0]! =` spelling. Only compiling the advice with
+nativets finds it — and an existing test asserted the `b.m` form, so the lie was pinned.
+A container receiver now names the shape that compiles (seed a local, rebuild the
+container), `this.<field>` keeps the rebind with the `@@mutable` qualifier it needs
+(undecorated, the same line is `NT1023`), and `test/mapset-immutable.test.ts` RUNS both
+recommended rebuilds against node.
+
+Frontier delta: **199/693 unchanged**, per-FUNCTION diff against `git archive c4d034e src
+runtime` — nothing cleared, **nothing added**, `rejectDiscardedMutator`'s own blocker
+byte-identical before and after. Green on Linux under ASan (`scripts/docker-test.sh`),
+34/0 in `mapset-immutable` and 159/0 across the four affected suites; `tsc -p
+tsconfig.src.json` clean; all three canary modules still reach IR standalone.
+
+### A SECOND pre-existing bug, reported not fixed
+
+A `@@mutable` class may not name a method `add` (or any `Map`/`Set` mutator) if it also
+stores into a `Set`/`Map` field — `setterProps` is keyed by the bare METHOD NAME across all
+classes, so `this.names = this.names.add(x)` inside such a class is `NT1607` "its receiver
+is not a binding whose ownership this scope can establish". `chainRoot(this.names)` is not
+an `Identifier`, so the arm fires on a receiver that has nothing to do with the class. The
+name-keying is documented as a deliberate over-refusal on `mutableArgProps`; the
+consequence for the natural spelling of a collector class is not, and it is precisely the
+landmine the route above would have walked into.

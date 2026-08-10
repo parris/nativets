@@ -90,16 +90,87 @@ describe("a DISCARDED .set/.add/.delete is refused, not silently dropped", () =>
   });
 
   /*
-   * A MEMBER receiver — the form that dominates the compiler's own source
+   * A `this.<field>` receiver — the form that dominates the compiler's own source
    * (`this.generics.set(fn.name, fn)`, `this.strings.set(s, sym)`). The hint has to name
-   * the whole path, not just the last segment, or it is not copy-pasteable.
+   * the whole path, not just the last segment, or it is not copy-pasteable. The rebind is
+   * genuinely right here: a `@@mutable` class's own field IS assignable in place.
    */
-  test("a member-path receiver is refused and the hint names the FULL path", () => {
+  test("a `this.<field>` receiver is refused and the hint names the FULL path", () => {
     const r = rejectionOf(
-      `type Box = { m: Map<string, number> };\nconst b: Box = { m: new Map<string, number>() };\nb.m.set("a", 1);\nconsole.log(b.m.size);\n`,
+      `//@@mutable\nclass Box {\n  m: Map<string, number> = new Map<string, number>();\n  note(): void { this.m.set("a", 1); }\n}\nconsole.log(new Box().m.size);\n`,
     );
     expect(r?.code).toBe("NT1606");
-    expect(r?.hint).toContain("b.m = b.m.set(");
+    expect(r?.hint).toContain("this.m = this.m.set(");
+  });
+
+  /*
+   * …AND THE REBIND STOPS BEING RECOMMENDED WHERE IT DOES NOT COMPILE.
+   *
+   * `THE RECEIVER DECIDES THE HINT` is already this rule's own comment, learned once for
+   * PARAMETERS. It was learned only half way: the `else` arm names `X = X.<m>(…)` for
+   * EVERY other receiver, and two of them are shapes this very compiler refuses.
+   *
+   *     const b = { m: new Map<string, number>() };
+   *     b.m.set("a", 1);       // hint: write `b.m = b.m.set("a", 1)`
+   *                            //   -> NT1606 "objects are immutable: `b.m = v`"
+   *
+   *     const sets: Set<string>[] = [new Set<string>()];
+   *     sets[0]!.add("a");     // hint: write `sets[0]! = sets[0]!.add("a")`
+   *                            //   -> NT0001 "Invalid assignment target"
+   *
+   * Both were measured by COMPILING the advice, which is the only way this class of defect
+   * is ever found: the hint reads plausible, node runs the recommended line (it strips the
+   * `!` and mutates), and tsc accepts even the `sets[0]! =` spelling. Only nativets says no
+   * — to advice nativets itself wrote. An unfollowable hint on a correct refusal is the
+   * same failure as a wrong answer with extra steps, so the arms below name a shape that
+   * compiles instead, and the tests that follow RUN it.
+   */
+  test("an OBJECT-FIELD receiver is not told to write a refused field assignment", () => {
+    const src = `type Box = { m: Map<string, number> };\nconst b: Box = { m: new Map<string, number>() };\nb.m.set("a", 1);\nconsole.log(b.m.size);\n`;
+    const r = rejectionOf(src);
+    expect(r?.code).toBe("NT1606");
+    // It must not RECOMMEND the rebind. Naming it as the thing NOT to write is what the
+    // PARAMETER arm already does, and is more useful than silence to someone who tried it.
+    expect(r?.hint).toContain("do NOT write `b.m = b.m.set(\"a\", 1)`");
+    expect(r?.hint).toContain("CONTAINER");
+    // …and what it recommends instead must compile. This is that line, verbatim.
+    expect(rejectionOf(
+      `type Box = { m: Map<string, number> };\nconst b: Box = { m: new Map<string, number>() };\nconst b2: Box = { ...b, m: b.m.set("a", 1) };\nconsole.log(b2.m.size);\n`,
+    )).toBeNull();
+  });
+
+  test("an ELEMENT receiver is not told to write an invalid assignment target", () => {
+    const r = rejectionOf(
+      `const sets: Set<string>[] = [new Set<string>()];\nsets[0]!.add("a");\nconsole.log(sets[0]!.size);\n`,
+    );
+    expect(r?.code).toBe("NT1606");
+    expect(r?.hint).toContain("do NOT write `sets[0]! = sets[0]!.add(\"a\")`");
+    expect(r?.hint).toContain("not an assignment target at all");
+    // The replacement — seed a LOCAL from the element, accumulate, rebuild the container.
+    // The `slice` spelling is the hint's own words, and it RUNS: node prints the same.
+    expect(r?.hint).toContain("[...xs.slice(0, i), acc, ...xs.slice(i + 1)]");
+    expect(rejectionOf(
+      `const xs: Set<string>[] = [new Set<string>(), new Set<string>()];\nconst i = 0;\nlet acc = xs[i]!;\nacc = acc.add("a");\nconst next: Set<string>[] = [...xs.slice(0, i), acc, ...xs.slice(i + 1)];\nconsole.log(next.length, next[0]!.size, next[1]!.size);\n`,
+    )).toBeNull();
+  });
+
+  test("the hint's rebuild spellings RUN, and agree with node", async () => {
+    const elem = `const xs: Set<string>[] = [new Set<string>(), new Set<string>()];
+const i = 0;
+let acc = xs[i]!;
+acc = acc.add("a");
+const next: Set<string>[] = [...xs.slice(0, i), acc, ...xs.slice(i + 1)];
+console.log(next.length, next[0]!.size, next[1]!.size);`;
+    const field = `type Box = { m: Map<string, number> };
+const b: Box = { m: new Map<string, number>() };
+const b2: Box = { ...b, m: b.m.set("a", 1) };
+console.log(b2.m.size, b2.m.get("a"));`;   // only b2 — b.m is the §A persistence divergence
+    for (const src of [elem, field]) {
+      const ours = await compileAndRun(src);
+      const theirs = await runWithNode(src);
+      expect(ours.stdout).toBe(theirs.stdout);
+      expect(ours.exitCode).toBe(theirs.exitCode);
+    }
   });
 
   /*
