@@ -252,6 +252,22 @@ which are **refusals or already-documented consequences**, never approximations:
   the day per-type destructors land, `.map(x => x)` over a heap element becomes a real double
   free, and so does every array-of-objects program in the tree. The guard that lane needs is an
   ownership rule about the arrow's result aliasing its parameter, near `searchBorrowBase`.
+
+  **That guard is necessary and nowhere near sufficient — `.map` is one of EIGHT, and the
+  other seven need no arrow at all.** Measured with a depth-1 element destructor spliced into
+  `emitDrops` and run under ASan: `.map(x => x)`, `.filter`, `.slice`, `[...xs]`, `.concat`,
+  `.toSorted`, `.toReversed` and `.with` each became an `attempting double-free`. Every one of
+  them builds a new array by COPYING SLOTS, so the same element pointers land in a second
+  header and both headers are then dropped — no callback, no aliasing rule, just the method.
+  A rule about an arrow's result would catch exactly one of the eight. The blocker is a list of
+  METHODS, each of which must deep-copy, consume its receiver, or be refused on a linear
+  element type. Pinned as allocation counts (which need no destructor to observe) in
+  `test/drops-obj.test.ts`, "array methods that ALIAS elements".
+
+  The shapes that let an element escape **by name** are, by contrast, already refused, and that
+  is why the list is methods-only: `const e = xs[0]` and `return xs[0]` are `NT1605`, a borrowed
+  parameter stored into a local array is `NT1604`, and one object named by two arrays is
+  `NT1601`. Pinned in the same block.
 - **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
   monotonic, whole milliseconds, plausible epoch range.
 

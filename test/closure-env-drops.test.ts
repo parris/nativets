@@ -40,7 +40,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-import { compileAndRun, emitIR, runWithNode } from "./harness.ts";
+import { compileAndRun, emitIR, runWithNode, emitIRAsan } from "./harness.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -390,7 +390,7 @@ console.log(run());`);
     const dir = mkdtempSync(join(tmpdir(), "nativets-closenvasan-"));
     try {
       const ll = join(dir, "module.ll");
-      writeFileSync(ll, emitIR(CLOSURE_CHURN));
+      writeFileSync(ll, emitIRAsan(CLOSURE_CHURN));
       const bin = join(dir, "prog");
       const built = spawnSync("clang", [
         "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",

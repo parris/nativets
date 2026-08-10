@@ -191,6 +191,45 @@ function encodeCString(s: string): { body: string; len: number } {
   return { body: body + "\\00", len: bytes.length + 1 };
 }
 
+/**
+ * ASAN INSTRUMENTATION OF THE GENERATED CODE — off unless `NATIVETS_ASAN=1`.
+ *
+ * Building with `clang -fsanitize=address` instruments the C in `runtime/`, and NOTHING
+ * ELSE. AddressSanitizer is an LLVM *pass* that only rewrites functions carrying the
+ * `sanitize_address` attribute; clang stamps that attribute on the code IT compiles from
+ * source, but a hand-written `.ll` fed to the same driver arrives without it, so every
+ * load and store nativets emits is left bare.
+ *
+ * The consequence is precisely inverted from what the ASan lane is for:
+ *  - a DOUBLE FREE is still caught, because that is detected inside `free()` — an
+ *    allocator interceptor in the ASan runtime, which does not care who called it;
+ *  - a HEAP-USE-AFTER-FREE **is not**, because catching it requires a poison check on
+ *    the READ, and the read is in uninstrumented generated code.
+ *
+ * A use-after-free read that returns stale memory at exit 0 is the exact "silent wrong
+ * answer" class the prime directive names as the worst outcome available, and it was the
+ * one thing the gate could not see. Measured on
+ * `{ const xs: B[] = [o.inner]; }  return t + o.inner.v;` with an element-freeing drop:
+ * node says 10, we said 5, exit 0, ASan "clean" — and with this attribute set, the same
+ * binary reports `heap-use-after-free` and exits 134. See test/asan-instrumentation.test.ts.
+ *
+ * Kept behind an env var rather than emitted always so that IR snapshots and the byte
+ * -identical-output guarantees elsewhere in this file do not move; the attribute is inert
+ * without `-fsanitize=address`, so turning it on costs nothing but the diff.
+ *
+ * An attribute-group id is a NUMBER in LLVM IR (`#0`), never a name — `#asan` is a parse
+ * error. 99 is used rather than 0 to stay clear of any group a later lane introduces.
+ *
+ * Read LAZILY, not captured into a module-level const: the flag has to be flippable
+ * inside one test process (test/asan-instrumentation.test.ts emits both ways).
+ */
+// `process.env.NAME`, not `process.env["NAME"]`: the self-host subset recognizes the
+// MemberExpr spelling only (src/checker.ts, "Host I/O"), and src/ must stay inside the
+// subset it compiles. Same spelling as driver.ts's `process.env.WASI_SDK_PATH`.
+export function asanOn(): boolean { return process.env.NATIVETS_ASAN === "1"; }
+function asanFnAttr(): string { return asanOn() ? " #99" : ""; }
+const ASAN_ATTR_DEF = "attributes #99 = { sanitize_address }";
+
 const DECLARES = [
   "declare void @js_print_num(double)",
   "declare void @js_print_bool(i32)",
@@ -585,7 +624,7 @@ class ModuleGen {
       : `%arg = inttoptr i64 %slot to ptr`;
     this.liftedFns.push(
       [
-        `define void @${name}(ptr %env, i64 %slot) {`,
+        `define void @${name}(ptr %env, i64 %slot)${asanFnAttr()} {`,
         `L:`,
         `  %fpi = load i64, ptr %env`,
         `  %fp = inttoptr i64 %fpi to ptr`,
@@ -633,7 +672,7 @@ class ModuleGen {
       lt === "double" ? `%${reg} = bitcast i64 %${slot} to double` : `%${reg} = inttoptr i64 %${slot} to ptr`;
     this.liftedFns.push(
       [
-        `define i32 @${name}(ptr %env, i64 %sa, i64 %sb) {`,
+        `define i32 @${name}(ptr %env, i64 %sa, i64 %sb)${asanFnAttr()} {`,
         `L:`,
         `  %fpi = load i64, ptr %env`,
         `  %fp = inttoptr i64 %fpi to ptr`,
@@ -698,6 +737,8 @@ class ModuleGen {
       ...fns.flatMap((f) => [f, ""]),
       main,
       "",
+      // The group every `define` above references under NATIVETS_ASAN=1 (see `asanOn`).
+      ...(asanOn() ? [ASAN_ATTR_DEF, ""] : []),
     ].filter((x) => x !== null).join("\n");
   }
 }
@@ -1204,7 +1245,7 @@ class FnGen {
 
   private assemble(header: string, firstBlock: number): string {
     //@@mutable
-    const out: string[] = [`${header} {`, "entry:"];
+    const out: string[] = [`${header}${asanFnAttr()} {`, "entry:"];
     for (const a of this.entryAllocas) out.push("  " + a);
     out.push(`  br label %${this.blocks[firstBlock]!.label}`);
     for (const b of this.blocks) {
