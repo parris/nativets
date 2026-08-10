@@ -753,8 +753,14 @@ class FnGen {
   private inMain = false;
   /** Active inlined-HOF callbacks (map/filter/reduce with a BLOCK body): a `return`
    *  inside stores the per-element result and branches to the callback's join, rather
-   *  than returning from the enclosing function. */
-  private hofReturnStack: { slot: string; done: string; ty: Ty }[] = [];
+   *  than returning from the enclosing function.
+   *
+   *  `.forEach` pushes a DISCARD frame instead (`slot` empty): node throws its callback's
+   *  result away, so there is nothing to store — the `return` only means "next element".
+   *  Storing it anyway would need a slot typed by the body, and a body of `void`
+   *  (`xs.forEach((x) => { return console.log(x); })`) has no such type: `alloca void` is
+   *  not IR LLVM accepts. The argument is still EVALUATED, for its side effects. */
+  private hofReturnStack: { slot: string; done: string; ty: Ty; discard?: boolean }[] = [];
   /** Per-inlining counter: gives each inlined HOF callback a frame-unique name suffix
    *  (see freshenHofArrow) so two sibling callbacks reusing a param/local name — possibly
    *  at DIFFERENT types — each get their own correctly-typed slot instead of colliding in
@@ -1238,6 +1244,13 @@ class FnGen {
         // result — store it and branch to the callback's join (not a function ret).
         if (this.hofReturnStack.length > 0 && this.finallyStack.length === 0) {
           const h = this.hofReturnStack[this.hofReturnStack.length - 1]!;
+          // `.forEach`: node discards the result, so there is no slot — but the returned
+          // expression is still evaluated, because it may be the effect the loop is for.
+          if (h.discard ?? false) {
+            if (s.argument) this.genExpr(s.argument);
+            this.terminate(`br label %${h.done}`);
+            return;
+          }
           const v = s.argument ? this.coerce(this.genExpr(s.argument), h.ty) : { v: defaultZero(h.ty), ty: h.ty };
           this.emit(`store ${llvmTy(h.ty)} ${v.v}, ptr ${h.slot}`);
           this.terminate(`br label %${h.done}`);
@@ -4530,6 +4543,7 @@ class FnGen {
       case "flatMap": return this.genFlatMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "some": case "every": case "find": case "findIndex": case "findLast": case "findLastIndex":
         return this.genSearchHof(method, recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
+      case "forEach": return this.genForEach(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "map": return this.genMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "filter": return this.genFilter(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
       case "reduce": return this.genReduce(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, args[1]!);
@@ -4758,6 +4772,41 @@ class FnGen {
     const v = this.fresh();
     this.emit(`${v} = load ${llvmTy(retTy)}, ptr ${slot}`);
     return { v, ty: retTy };
+  }
+
+  /**
+   * forEach — `genMap`'s loop with NO output array and the callback result DISCARDED.
+   *
+   * Every other step is map's, and deliberately so: `freshenHofArrow` gives this
+   * inlining its own slots, `prepHofLocals` null-initializes the block body's string
+   * locals before the loop, and the ownership pass computes this body's drops exactly as
+   * it does map's. An inlined body is a scope — a local the body allocates is freed per
+   * iteration, and a value it merely captures is not.
+   *
+   * The one difference from map is the body: nothing is pushed anywhere, and a `return`
+   * means "next element" rather than "here is this element's result".
+   */
+  private genForEach(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+    this.freshenHofArrow(arrow); // unique per-inlining slots — no cross-callback name collision
+    const el = elemTy(recv.ty);
+    const p = arrow.params[0]!.name;
+    this.addLocal(p, el);
+    this.prepHofLocals(arrow);
+    const L = this.hofLoop(recv, "each", () => {}); // no output array to build
+    L.elem(el, p);
+    if (arrow.exprBody) {
+      this.genExpr(arrow.body as Expr); // evaluated for effect, exactly as an ExprStmt is
+    } else {
+      const done = this.label("eachr");
+      this.hofReturnStack.push({ slot: "", done, ty: "void", discard: true });
+      this.genStmts(arrow.stmts as Stmt[]);
+      this.hofReturnStack.pop();
+      if (!this.isTerminated()) this.terminate(`br label %${done}`); // fall-through (no return hit)
+      this.to(this.block(done));
+    }
+    this.hofStep(L.idx, L.upd, L.cond);
+    this.to(this.block(L.end));
+    return { v: "", ty: "void" }; // node: `.forEach` returns undefined
   }
 
   private genMap(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {

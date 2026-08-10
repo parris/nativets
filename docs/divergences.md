@@ -894,6 +894,71 @@ if (i >= 0) console.log(xs[i]!.col);
 `.at` carries the identical element guard and has NOT been widened; it will need the same three
 decisions. Pinned in `test/find-borrow.test.ts`, both guards proved by mutation.
 
+### `.forEach` — the inline arrow compiles; only the POINT-FREE spelling needs a function value
+
+`.forEach` was refused unconditionally by `inferArrayMethod`, before it looked at the argument,
+with the message *"array .forEach (needs first-class function values)"*. That message was wrong
+for most of the calls it refused. A census of `src/` run through the compiler's **own parser**
+(line-based `grep` undercounts the multi-line spellings — it reads 55 where a real parse reads
+68) puts the split at:
+
+| spelling | sites in `src/` | verdict |
+|---|---|---|
+| `xs.forEach((x) => …)` — inline arrow | **78** | compiles (this entry) |
+| `xs.forEach(go)` — point-free | **32** | still `NT1003`, and it really does need a function value |
+
+An inline arrow is the shape `.map`/`.filter`/`.reduce` have always inlined into a loop, so it
+needs no function value at all: `.forEach` is `.map`'s loop with no output array and the callback
+result discarded. It reuses the same `hofLoop` skeleton, the same `freshenHofArrow` per-inlining
+slots and the same `prepHofLocals`, so an inlined `.forEach` body is a **scope** on exactly the
+terms a `.map` body is — its nested-block locals are freed per iteration, and a value it merely
+captures is not. Only the refusal's *message* changed for the point-free half, to one that names
+which spelling is which; `xs.forEach((x) => go(x))` is the hint, and it compiles.
+
+Two limits, both matching `.map` rather than inventing anything: the callback takes **`(elem)`
+only** (node's `index`/`array` parameters are separate work — binding `x` while leaving `i`
+unwritten would be a wrong answer, so it is refused), and `.forEach` itself evaluates to `void`.
+
+A callback `return` means **"next element"**, not "leave the enclosing function". Codegen carries
+that on `hofReturnStack`; `.forEach` pushes a *discard* frame, because node throws the result away
+and a body of type `void` has no slot to store into (`alloca void` is not IR LLVM accepts). The
+returned expression is still evaluated, for its side effects.
+
+Pinned in `test/foreach.test.ts`; the drop, capture and name-collision guards are proved by
+mutation (deleting `freshenHofArrow` reproduces the `2.1578754706e-314`-at-exit-0 shape).
+
+### `return` from under a `finally` in an INLINED callback is `NT1018` (it was a wrong answer)
+
+Found while landing `.forEach`, but **pre-existing and worse in `.map`**. Codegen routes an
+inlined callback's `return` to the per-element join only when no `finally` is live — the arm is
+gated on `finallyStack.length === 0`, and a `finally` outranks it. So the `return` compiled as an
+ordinary **function** return: it abandoned the rest of the loop *and* returned from the caller.
+
+```ts
+function run(): number {
+  const m: number[] = [1, 2, 3].map((x) => { try { if (x === 2) { return 99 } return x } finally { console.log("fin " + x) } });
+  console.log(m.join(","));
+  return 0;
+}
+console.log(run());
+```
+
+| | stdout | exit |
+|---|---|---|
+| node | `fin 1` / `fin 2` / `fin 3` / `1,99,3` / `0` | 0 |
+| nativets (before) | `fin 1` / `1` | **0** |
+
+Exit 0 on both sides — the silent wrong answer. The stray `1` is the giveaway: the first
+element's `return x` returned it from **`run`**, so `console.log(run())` printed `1` and neither
+the remaining elements nor `m.join(",")` ever happened. Refused now in `typeArrowBody`, the one entry
+every inlined HOF body passes through, so `.map`/`.filter`/`.reduce`/`.flatMap`/`.forEach`/the
+search HOFs are all covered by one guard. The `finally` itself is fine; only a `return` from
+under it is refused, and a `return` inside a `try` with **no** `finally` still compiles.
+
+Both remedies the hint names are compiled against node in `test/foreach.test.ts`: move the
+`try`/`finally` into a named helper the callback calls, or assign to a local inside the `try` and
+`return` it after the `try`/`finally` ends.
+
 ### Modules (SH1) — a whole-program link, and no import cycles
 
 `import`/`export` across `.ts` files are compiled by resolving the graph from the entry file and

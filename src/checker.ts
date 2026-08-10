@@ -146,6 +146,72 @@ function mapResultOk(t: Ty): boolean {
     || isObjectTy(t) || isArrayTy(t) || isUnionTy(t) || isTypeRefTy(t);
 }
 
+/**
+ * Does this inlined-HOF callback body `return` from inside a `try` that has a `finally`?
+ *
+ * Codegen routes a callback `return` to the per-element join via `hofReturnStack`, but
+ * ONLY when no `finally` is live (`finallyStack.length === 0`) — a `finally` outranks it
+ * and takes the ordinary function-return path, so the `return` leaves the ENCLOSING
+ * function and abandons the rest of the loop. Exit 0, wrong stdout. See NT1018.
+ *
+ * The region is the try BLOCK and the CATCH handler: codegen pops the `finallyStack`
+ * entry before emitting the finalizer, so a `return` in the finalizer itself already
+ * takes the HOF arm. A finalizer nested inside an OUTER protected region stays flagged,
+ * which is why the flag is threaded rather than recomputed.
+ *
+ * Nested `function`s and ARROWS are their own frames — their returns are not this
+ * callback's, so the walk stops there.
+ */
+function returnsUnderFinally(body: Stmt[], under = false): boolean {
+  for (const s of body) {
+    switch (s.kind) {
+      case "ReturnStmt": if (under) return true; break;
+      case "TryStmt": {
+        // `fin !== null` agrees with codegen's `!!s.finalizer` on every value `finalizer`
+        // can take, and the two MUST agree: this refusal is only honest where codegen
+        // actually pushes a `finallyStack` entry. Note `finalizer` is `Stmt[] | null`, so
+        // the `=== undefined` probe written here first was always false and flagged every
+        // `try`/`catch` in a callback — caught by the "try WITHOUT a finally" test.
+        //
+        // Each nullable arm is bound to a LOCAL before the null test. `s.handler` is a
+        // `Stmt[] | null` FIELD, and a field does not narrow through `&&` into an argument
+        // position here — passing `s.handler` straight in is NT2001 (`?NStmt[]` where
+        // `Stmt[]` is wanted), which would put this very function outside the subset `src/`
+        // has to stay inside. The locals narrow; the fields do not.
+        const fin = s.finalizer;
+        const has = fin !== null;
+        if (returnsUnderFinally(s.block, under || has)) return true;
+        const handler = s.handler;
+        if (handler !== null && returnsUnderFinally(handler, under || has)) return true;
+        if (fin !== null && returnsUnderFinally(fin, under)) return true;
+        break;
+      }
+      case "IfStmt": {
+        if (returnsUnderFinally(s.consequent, under)) return true;
+        const alt = s.alternate;
+        if (alt !== null && returnsUnderFinally(alt, under)) return true;
+        break;
+      }
+      // One `case` per kind, though all six read the same `.body`. A COMBINED
+      // `case "WhileStmt": case "ForStmt": …` narrows `s` only to the union of those
+      // members, and a field read on a general union is NT2001 here — which would put
+      // this function outside the subset `src/` compiles. Each label narrows to one member.
+      case "WhileStmt": if (returnsUnderFinally(s.body, under)) return true; break;
+      case "DoWhileStmt": if (returnsUnderFinally(s.body, under)) return true; break;
+      case "ForStmt": if (returnsUnderFinally(s.body, under)) return true; break;
+      case "ForOfStmt": if (returnsUnderFinally(s.body, under)) return true; break;
+      case "ForInStmt": if (returnsUnderFinally(s.body, under)) return true; break;
+      case "BlockStmt": if (returnsUnderFinally(s.body, under)) return true; break;
+      case "MultiStmt": if (returnsUnderFinally(s.stmts, under)) return true; break;
+      case "SwitchStmt":
+        for (const c of s.cases) if (returnsUnderFinally(c.body, under)) return true;
+        break;
+      default: break; // FuncDecl and any arrow inside an expression are their own frames
+    }
+  }
+  return false;
+}
+
 /** The length of an expression whose size is fixed at compile time, else undefined. */
 function literalLength(e: Expr): number | undefined {
   if (e.kind === "ArrayLiteral") {
@@ -4712,7 +4778,7 @@ class Checker {
     if (method === "map" || method === "filter" || method === "reduce" || method === "flatMap") return this.inferHof(el, method, args, scope);
     // stdlib Batch 1 (part 2): the predicate HOFs, same inline-arrow contract as map/filter.
     if (SEARCH_HOFS.has(method)) return this.inferSearchHof(recv, el, callee, args, scope);
-    if (["forEach"].includes(method)) throw nyi(NYI.CLOSURE, `array .${method} (needs first-class function values)`);
+    if (method === "forEach") return this.inferForEach(el, args, scope);
 
     // --- ordering primitives (ES2023, non-mutating: node is the oracle) --------
     // `.toSorted()` with no comparator uses node's default (compare the elements'
@@ -4977,6 +5043,35 @@ class Checker {
     return makeNullable("undefined", el); // .find / .findLast → T | undefined
   }
 
+  /**
+   * `.forEach` with an INLINE arrow — `.map`'s loop with the result discarded.
+   *
+   * The callback runs for EFFECT: node ignores whatever it returns and `.forEach` itself
+   * evaluates to `undefined`, so unlike every other HOF here there is no body type to
+   * check and nothing to constrain. `typeArrowBody` is still what types it, so an inlined
+   * `.forEach` body is a scope on exactly the same terms as a `.map` body — its locals,
+   * its captures and its nested arrows are all seen by the same machinery.
+   *
+   * A callback that is NOT an inline arrow (the point-free `xs.forEach(go)`) is the one
+   * shape that genuinely needs a first-class function value, and it stays refused. That
+   * used to be the message for ALL of them, which was wrong for most: 78 of the 110
+   * `.forEach` sites in `src/` pass an inline arrow, which needs no function value at all.
+   */
+  private inferForEach(el: Ty, args: Expr[], scope: Scope): Ty {
+    const arrow = args[0];
+    if (!arrow || arrow.kind !== "ArrowFunction") {
+      throw nyi(NYI.CLOSURE, `array .forEach with a callback that is not an inline arrow (function values need captured environments)`,
+        `write the callback INLINE — \`xs.forEach((x) => go(x))\` instead of \`xs.forEach(go)\`; an inline arrow is compiled as a loop and is supported`);
+    }
+    if (args.length !== 1) throw typeError(".forEach expects 1 argument");
+    // `(elem)` only, matching `.map`/`.filter`: the index and array parameters node also
+    // passes are a separate piece of work, and accepting `(x, i)` here while binding only
+    // `x` would read `i` out of an unwritten slot.
+    if (arrow.params.length !== 1) throw typeError(".forEach callback takes (elem)");
+    this.typeArrowBody(arrow, [el], scope); // result discarded — any body type is legal
+    return "void"; // node: `.forEach` returns undefined
+  }
+
   /** map/filter/reduce with an INLINE arrow callback (contextually typed). */
   private inferHof(el: Ty, method: string, args: Expr[], scope: Scope): Ty {
     const arrow = args[0];
@@ -5010,6 +5105,12 @@ class Checker {
    *  the generated loop and its `return` yields the element result. `arrow.retTy`
    *  is recorded for codegen. */
   private typeArrowBody(arrow: Extract<Expr, { kind: "ArrowFunction" }>, paramTypes: Ty[], scope: Scope): Ty {
+    // A `return` from under a `finally` inside an inlined callback compiles as a FUNCTION
+    // return, abandoning the loop and the caller (NT1018). Checked here because this is
+    // the one entry every inlined HOF body goes through.
+    if (!arrow.exprBody && returnsUnderFinally(arrow.stmts as Stmt[])) {
+      throw nyi(NYI.HOF_FINALLY_RETURN, "`return` inside a `try`/`finally` in an inlined callback (it would return from the ENCLOSING function, not just this element)");
+    }
     const inner = scope.child();
     // An ARROW's parameters are borrows too, so they carry the same flag, stamped the same
     // way as `declareParams` does it (see `Binding.param`). `(out: Set<T>) => { out = out.add(x) }`
