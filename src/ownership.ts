@@ -1376,10 +1376,11 @@ class Analyzer {
  *  scope-less group — the destructuring/swap desugaring — so it counts as direct).
  *  `aliases` (non-owning `@@mutable` handles) are never owners, so never dropped. */
 function declaredLinear(list: Stmt[], aliases: Set<string>): string[] {
+  //@@mutable
   const out: string[] = [];
   for (const s of list) {
     if (s.kind === "VarDecl") { for (const d of s.decls) if (isLinearTy(d.ty ?? "number") && !aliases.has(d.name)) out.push(d.name); }
-    else if (s.kind === "MultiStmt") out.push(...declaredLinear(s.stmts, aliases));
+    else if (s.kind === "MultiStmt") for (const n of declaredLinear(s.stmts, aliases)) out.push(n);
   }
   return out;
 }
