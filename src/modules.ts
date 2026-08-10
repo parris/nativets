@@ -219,7 +219,20 @@ class Renamer {
         if (s.update) this.expr(s.update);
         s.body.forEach((x) => this.stmt(x));
         return;
-      case "ForOfStmt": s.name = this.n(s.name); s.annot = this.t(s.annot); s.elemTy = this.t(s.elemTy); this.expr(s.iterable); s.body.forEach((x) => this.stmt(x)); return;
+      // `name2` is the VALUE binding of `for (const [k, v] of map)` and is renamed with
+      // `name`. Renaming one and not the other is not a cosmetic gap: the rename is
+      // UNIFORM (declarations AND uses, see the class header), so the body's reads of `v`
+      // became `_m0_v` while the binding stayed `v` — and in a non-entry module that
+      // declares its own top-level `v`, `_m0_v` is that module-level binding. The loop
+      // then read the CONST on every iteration and node's answer and ours differed with
+      // exit 0 on both sides. Same class as the `NonNullExpr`/`InExpr` miss below: a
+      // walker that visits the node and misses one of its fields.
+      case "ForOfStmt":
+        s.name = this.n(s.name);
+        if (s.name2) s.name2 = this.n(s.name2);
+        s.annot = this.t(s.annot); s.elemTy = this.t(s.elemTy);
+        this.expr(s.iterable); s.body.forEach((x) => this.stmt(x));
+        return;
       case "ForInStmt": s.name = this.n(s.name); this.expr(s.object); s.body.forEach((x) => this.stmt(x)); return;
       case "SwitchStmt": this.expr(s.discriminant); s.cases.forEach((c) => { if (c.test) this.expr(c.test); c.body.forEach((x) => this.stmt(x)); }); return;
       case "ThrowStmt": this.expr(s.argument); return;
@@ -291,8 +304,13 @@ class Renamer {
       // missing member and the `never` binding (which erases to `number` here, hence
       // NT2001) was pure self-host cost. This switch returns `void`, so tsc says nothing
       // without the binding — verified: delete it and the `CallExpr` arm together and
-      // `tsc -p tsconfig.src.json --noEmit` exits 0. And it is not on the meter anyway:
-      // this is a class METHOD, and blocker-metric's denominator is top-level `FuncDecl`s.
+      // `tsc -p tsconfig.src.json --noEmit` exits 0. It is the only guarantee here.
+      //
+      // It also costs nothing measurable today. A class member lowers to a top-level
+      // `FuncDecl` (`Renamer.expr`) at parse time, so this IS in blocker-metric's
+      // denominator — but the body's first blocker is the NT1606 on `e.ty = v` at the
+      // very top, so the NT2001 down here is masked. Clear that one and this becomes a
+      // real cost worth re-measuring.
       case "NumberLiteral": case "StringLiteral": case "BooleanLiteral":
       case "UndefinedLiteral": case "NullLiteral":
         return;

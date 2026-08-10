@@ -85,6 +85,16 @@ const CASES = [
   // TOP-LEVEL bindings, so every module's locals and parameters share one flat namespace
   // for any analysis keyed by bare name.
   "closure-name",
+  // A LOOP binding that shares a name with a top-level binding of its own module.
+  // `Renamer.stmt`'s `ForOfStmt` arm renamed `name` but not `name2` — the value binding
+  // of `for (const [k, v] of map)` — and the rename is uniform, so the body's reads of
+  // `v` were rewritten to the module's mangled `v` while the binding kept its source
+  // spelling. The loop read the module CONST every iteration: `a=999;b=999` where node
+  // says `a=1;b=2`, exit 0 on both sides. A MISCOMPILE, not a refusal, and the same
+  // shape as the `nonnull` case above (a walker that visits the node and misses one of
+  // its fields). The case also covers the `for…of` and `for…in` single bindings, which
+  // were already renamed, so the arm cannot be "fixed" by dropping those.
+  "loopvar",
 ];
 
 describe("modules (differential vs node)", () => {
