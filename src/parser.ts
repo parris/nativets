@@ -518,10 +518,10 @@ class Parser {
   private pendingDecorators: { attrs: string[]; wrappers: string[] } | null = null;
   /** Classes carrying `@@mutable` — TRUE in-place mutation (see docs/decorators.md).
    *  Published on the Program so the ownership pass and the checker can see it. */
-  private readonly mutableClasses = new Set<string>();
+  private mutableClasses = new Set<string>();
   /** `static` FIELD names, class-qualified (`C.f`) — the module-level bindings they
    *  lower to, and what a `C.f` read is rewritten to once the file is parsed. */
-  private readonly staticFieldNames = new Set<string>();
+  private staticFieldNames = new Set<string>();
   /** RECORD type names carrying `@@mutable` (`@@mutable type Cell = { n: number }`) —
    *  an extension of the class attribute to a `type`/`interface` declaration. The record
    *  is tagged with this name (`Cell{n:number}`), so mutability is NOMINAL rather than
@@ -538,19 +538,19 @@ class Parser {
   /** Host FFI (SH4): the canonical names imported from a `node:` builtin module, plus
    *  the `as`-alias→canonical map applied when an identifier is parsed. A `node:` import
    *  binds a compiler BUILTIN, so there is no module to link — it is erased like a type. */
-  private readonly hostImports = new Set<string>();
-  private readonly hostAliases = new Map<string, string>();
+  private hostImports = new Set<string>();
+  private hostAliases = new Map<string, string>();
   private exportValues = new Map<string, string>();
   private exportReexports = new Map<string, { source: string; imported: string; line: number }>();
   private exportTypes = new Set<string>();
   private file?: string;
   private collectTypes?: Map<string, Ty>;
   constructor(private toks: Token[], opts: ParseOpts = {}) {
-    if (opts.typeEnv) for (const [k, v] of opts.typeEnv) this.typeAliases.set(k, v);
-    if (opts.asyncEnv) for (const n of opts.asyncEnv) this.asyncFns.add(n);
+    if (opts.typeEnv) for (const [k, v] of opts.typeEnv) this.typeAliases = this.typeAliases.set(k, v);
+    if (opts.asyncEnv) for (const n of opts.asyncEnv) this.asyncFns = this.asyncFns.add(n);
     this.file = opts.file;
     this.collectTypes = opts.collectTypes;
-    if (opts.externalTypeNames) for (const n of opts.externalTypeNames) this.fragmentNames.add(n);
+    if (opts.externalTypeNames) for (const n of opts.externalTypeNames) this.fragmentNames = this.fragmentNames.add(n);
     // Pre-scan for declared type names. Lexical on purpose: `interface`/`type` followed by
     // an identifier is unambiguous in the token stream, and this has to run BEFORE any
     // parsing so a name's declaration is known no matter where it sits in the file.
@@ -560,19 +560,19 @@ class Parser {
       const n = toks[i + 1]!;
       if (t.type === "punct" && t.value === "{") depth++;
       else if (t.type === "punct" && t.value === "}") depth--;
-      else if (t.type === "ident" && t.value === "class" && n.type === "ident") this.declaredClassNames.add(n.value);
+      else if (t.type === "ident" && t.value === "class" && n.type === "ident") this.declaredClassNames = this.declaredClassNames.add(n.value);
       else if ((t.value === "interface" || t.value === "type") && t.type === "ident" && n.type === "ident") {
         // `type X =` only — `type` is not a reserved word, so `const type = 1` must not
         // register `= 1` as a declaration. `interface` is always a declaration.
         if (t.value === "interface" || toks[i + 2]?.value === "=" || toks[i + 2]?.value === "<") {
-          if (!this.declaredTypeLines.has(n.value)) this.declaredTypeLines.set(n.value, t.line);
+          if (!this.declaredTypeLines.has(n.value)) this.declaredTypeLines = this.declaredTypeLines.set(n.value, t.line);
           if (depth === 0 && !this.typeDeclStarts.has(n.value)) {
             // Walk back over the declaration's prefix so a re-parse from here sees the
             // whole thing: `export`, then any `@@attr` / `@wrapper` pair before it.
             let s = i;
             if (s > 0 && toks[s - 1]!.value === "export") s--;
             while (s >= 2 && toks[s - 1]!.type === "ident" && (toks[s - 2]!.value === "@@" || toks[s - 2]!.value === "@")) s -= 2;
-            this.typeDeclStarts.set(n.value, s);
+            this.typeDeclStarts = this.typeDeclStarts.set(n.value, s);
           }
         }
       }
@@ -621,7 +621,7 @@ class Parser {
         if (u.type === "ident" && u.value === "from") break;
         if (u.type !== "ident") continue;                     // `{` `}` `,` `*` punctuation
         if (u.value === "type" || u.value === "as") continue; // modifier keywords, not bindings
-        this.externalNames.add(u.value);
+        this.externalNames = this.externalNames.add(u.value);
       }
     }
   }
@@ -650,7 +650,7 @@ class Parser {
    */
   private hoistTypeDecls(): void {
     let pending = [...this.typeDeclStarts.keys()];
-    const blocker = new Map<string, string>(); // name -> the unresolved type it stopped on
+    let blocker = new Map<string, string>(); // name -> the unresolved type it stopped on
     while (pending.length) {
       const deferred: string[] = [];
       for (const name of pending) {
@@ -670,16 +670,16 @@ class Parser {
         } catch (e) {
           if (e instanceof NTError && e.diag.code === NYI.FORWARD_TYPE.code) {
             deferred.push(name);
-            if (sub.blockedOn !== undefined) blocker.set(name, sub.blockedOn);
+            if (sub.blockedOn !== undefined) blocker = blocker.set(name, sub.blockedOn);
             continue;
           }
           continue; // a real refusal — leave it to the main parse, where it belongs
         }
         const ty = sub.typeAliases.get(name);
-        if (ty !== undefined) this.typeAliases.set(name, ty);
+        if (ty !== undefined) this.typeAliases = this.typeAliases.set(name, ty);
         // A shape with a `@Name` back-edge is meaningless without the table that resolves
         // it, and the sub-parser is where both were produced. Carry it back with the alias.
-        for (const [n, shape] of sub.recTypes) this.recTypes.set(n, shape);
+        for (const [n, shape] of sub.recTypes) this.recTypes = this.recTypes.set(n, shape);
       }
       if (deferred.length < pending.length) { pending = deferred; continue; }
       // No progress. Everything left is stuck — but on WHAT matters: stuck on another
@@ -688,7 +688,7 @@ class Parser {
       const stuck = new Set(deferred);
       for (const name of deferred) {
         const b = blocker.get(name);
-        if (b !== undefined && stuck.has(b)) this.cyclicTypes.set(name, b);
+        if (b !== undefined && stuck.has(b)) this.cyclicTypes = this.cyclicTypes.set(name, b);
       }
       this.resolveCycle([...this.cyclicTypes.keys()]);
       return;
@@ -734,13 +734,13 @@ class Parser {
    */
   private resolveCycle(names: string[]): void {
     if (!names.length) return;
-    for (const n of names) this.cycleNames.add(n);
+    for (const n of names) this.cycleNames = this.cycleNames.add(n);
     const recBefore = new Map(this.recTypes); // restored wholesale if the round stalls
-    const resolved = new Map<string, Ty>();
+    let resolved = new Map<string, Ty>();
     let pending = names;
     while (pending.length) {
       const deferred: string[] = [];
-      const why = new Map<string, string>(); // residual member -> the error it stalled with
+      let why = new Map<string, string>(); // residual member -> the error it stalled with
       for (const name of pending) {
         const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
         sub.pos = this.typeDeclStarts.get(name)!;
@@ -752,12 +752,12 @@ class Parser {
           sub.parseStatement();
         } catch (e) {
           deferred.push(name); // may only need a member that has not settled yet
-          why.set(name, String((e as { message?: string }).message ?? e).split("\n")[0]!);
+          why = why.set(name, String((e as { message?: string }).message ?? e).split("\n")[0]!);
           continue;
         }
         const ty = sub.typeAliases.get(name);
         if (ty === undefined) { deferred.push(name); continue; }
-        resolved.set(name, ty);
+        resolved = resolved.set(name, ty);
       }
       if (deferred.length === 0) break;
       if (deferred.length === pending.length) {
@@ -776,12 +776,12 @@ class Parser {
         this.cycleStallSize = { total: names.length, left: deferred.length };
         for (const n of names) this.cycleNames.delete(n);
         this.recTypes.clear();
-        for (const [n, s] of recBefore) this.recTypes.set(n, s);
+        for (const [n, s] of recBefore) this.recTypes = this.recTypes.set(n, s);
         return;
       }
       pending = deferred;
     }
-    for (const [n, ty] of resolved) this.typeAliases.set(n, ty);
+    for (const [n, ty] of resolved) this.typeAliases = this.typeAliases.set(n, ty);
     // These names are no longer an ordering failure, so the NT1030 the main parse would
     // report for them is withdrawn.
     for (const n of names) this.cyclicTypes.delete(n);
@@ -1113,14 +1113,14 @@ class Parser {
     }
     // Host FFI (SH4) — attached only when the source imported a `node:` builtin.
     if (this.hostImports.size) program.hostImports = [...this.hostImports];
-    if (this.collectTypes) for (const [k, v] of this.typeAliases) this.collectTypes.set(k, v);
+    if (this.collectTypes) for (const [k, v] of this.typeAliases) this.collectTypes = this.collectTypes.set(k, v);
     // Only attach the module surface when the source actually used it, so a
     // single-file program's Program is byte-identical to what it always was.
     if (this.imports.length) program.imports = this.imports;
     if (this.textImports.length) program.textImports = this.textImports;
     if (this.exportValues.size || this.exportReexports.size || this.exportTypes.size) {
-      const types = new Map<string, Ty>();
-      for (const n of this.exportTypes) { const t = this.typeAliases.get(n); if (t) types.set(n, t); }
+      let types = new Map<string, Ty>();
+      for (const n of this.exportTypes) { const t = this.typeAliases.get(n); if (t) types = types.set(n, t); }
       program.exports = { values: this.exportValues, reexports: this.exportReexports, types, asyncValues: this.exportAsync } satisfies ExportTable;
     }
     return program;
@@ -1517,7 +1517,7 @@ class Parser {
     // The name belongs to the OTHER module, so "declared nowhere in this file" says nothing
     // about it — NT2003 would be a false refusal by construction. This escape suppresses it;
     // `erasedImportOf` is what stops the suppression from becoming a silent `number`.
-    this.externalNames.add(name);
+    this.externalNames = this.externalNames.add(name);
     this.erasedImportOf = path;
     try { return this.resolveNamed(name); } finally { this.erasedImportOf = undefined; }
   }
@@ -1780,7 +1780,7 @@ class Parser {
    * those are monomorphized for real and must keep working. File-wide rather than scoped
    * because it only has to be a reason to refuse the declaration, not a resolution.
    */
-  private skipGenerics(): void { for (const p of this.parseTypeParamList()) this.genericParamNames.add(p); }
+  private skipGenerics(): void { for (const p of this.parseTypeParamList()) this.genericParamNames = this.genericParamNames.add(p); }
 
   // `type X = <type>;` — record the alias, erase the declaration. RHS uses the normal
   // type grammar (so `type Dir = "n" | "s"` collapses to string; a general union throws NYI).
@@ -1801,7 +1801,7 @@ class Parser {
     this.declaringType = outer;
     this.declaringTypeIsRecursive = outerRec;
     if (this.at(";")) this.eat(";");
-    this.typeAliases.set(name, this.recordTypeDecl(name, this.applyRecordAttrs(dec, name, rhs, "type"), recursive));
+    this.typeAliases = this.typeAliases.set(name, this.recordTypeDecl(name, this.applyRecordAttrs(dec, name, rhs, "type"), recursive));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
   }
 
@@ -1838,7 +1838,7 @@ class Parser {
         "`@@mutable` marks a record whose fields may be assigned in place, so the declaration must be an object type — `@@mutable type Cell = { n: number }`. Arrays, scalars and aliases of another named record cannot carry it",
       );
     }
-    this.mutableRecords.add(name);
+    this.mutableRecords = this.mutableRecords.add(name);
     return `${name}${shape}` as Ty;
   }
 
@@ -1870,7 +1870,7 @@ class Parser {
     this.declaringType = outer;
     this.declaringTypeIsRecursive = outerRec;
     const shape = this.inheritFields(name, bases, own);
-    this.typeAliases.set(name, this.recordTypeDecl(name, this.applyRecordAttrs(dec, name, shape, "interface"), recursive));
+    this.typeAliases = this.typeAliases.set(name, this.recordTypeDecl(name, this.applyRecordAttrs(dec, name, shape, "interface"), recursive));
     return { kind: "MultiStmt", stmts: [] }; // erased (no runtime)
   }
 
@@ -1969,7 +1969,7 @@ class Parser {
         "`interface " + name + " { items: " + name + "[] }` — see docs/divergences.md",
       );
     }
-    this.recTypes.set(name, shape);
+    this.recTypes = this.recTypes.set(name, shape);
     return shape;
   }
 
@@ -2119,8 +2119,8 @@ class Parser {
       if (typeOnly || c.typeOnly) continue; // a type-only import binds no value
       if (!members.includes(c.name))
         throw nyi(NYI.HOSTMOD, `'${c.name}' from '${mod}' at ${kw.line}:${kw.col} (implemented: ${members.join(", ")})`);
-      this.hostImports.add(c.name);
-      if (c.alias !== c.name) this.hostAliases.set(c.alias, c.name);
+      this.hostImports = this.hostImports.add(c.name);
+      if (c.alias !== c.name) this.hostAliases = this.hostAliases.set(c.alias, c.name);
     }
   }
 
@@ -2134,7 +2134,7 @@ class Parser {
       if (this.at("from")) {
         this.eat("from");
         const source = this.parseSpecifier("from");
-        for (const c of clause) if (!c.typeOnly) this.exportReexports.set(c.alias, { source, imported: c.name, line: kw.line });
+        for (const c of clause) if (!c.typeOnly) this.exportReexports = this.exportReexports.set(c.alias, { source, imported: c.name, line: kw.line });
         // A re-export is also a dependency edge (the module must be loaded/ordered).
         this.imports.push({ source, specs: [], line: kw.line });
       } else {
@@ -2146,33 +2146,33 @@ class Parser {
     }
     // `export type X = …` / `export interface X { … }` — type-level, erased, but the
     // shape is published so an importing module's annotations resolve to it.
-    if (this.at("type") && this.peek(1).type === "ident") { const name = this.peek(1).value; const s = this.parseTypeAlias(); this.exportTypes.add(name); return s; }
-    if (this.at("interface")) { const name = this.peek(1).value; const s = this.parseInterface(); this.exportTypes.add(name); return s; }
+    if (this.at("type") && this.peek(1).type === "ident") { const name = this.peek(1).value; const s = this.parseTypeAlias(); this.exportTypes = this.exportTypes.add(name); return s; }
+    if (this.at("interface")) { const name = this.peek(1).value; const s = this.parseInterface(); this.exportTypes = this.exportTypes.add(name); return s; }
     // `export class C { … }` — the class name is BOTH a value (its ctor/methods lower
     // to `C.constructor` / `C.m`) and a type (the tagged instance shape).
-    if (this.at("class")) { const name = this.peek(1).value; const s = this.parseClass(); this.exportValues.set(name, name); this.exportTypes.add(name); return s; }
+    if (this.at("class")) { const name = this.peek(1).value; const s = this.parseClass(); this.exportValues = this.exportValues.set(name, name); this.exportTypes = this.exportTypes.add(name); return s; }
     // `export function f() {…}` — and `export async function f() {…}`, which is the
     // same thing: `async` is ERASED here exactly as at statement level (see the
     // async/await note above), so the export publishes an ordinary function.
     if (this.at("function") || (this.at("async") && this.peek(1).value === "function")) {
       const isAsync = this.at("async");
-      if (isAsync) { this.next(); this.asyncFns.add(this.peek(1).value); }
+      if (isAsync) { this.next(); this.asyncFns = this.asyncFns.add(this.peek(1).value); }
       const s = this.parseFuncDecl() as FuncDecl;
-      this.exportValues.set(s.name, s.name);
+      this.exportValues = this.exportValues.set(s.name, s.name);
       // Publish the async-ness: erasure makes it invisible in the exported value, and
       // an importing module needs it to refuse a call without `await` (NT1020).
-      if (isAsync) this.exportAsync.add(s.name);
+      if (isAsync) this.exportAsync = this.exportAsync.add(s.name);
       return s;
     }
     if (this.at("let") || this.at("const")) {
       const d = this.parseVarDecl();
       this.eat(";");
       for (const decl of d.decls) {
-        this.exportValues.set(decl.name, decl.name);
+        this.exportValues = this.exportValues.set(decl.name, decl.name);
         // `export const f = async () => …` is just as promise-returning as `export async
         // function f`, so it publishes async-ness the same way. parseDeclarator has
         // already put an async arrow (or an alias of one) into `asyncFns`.
-        if (this.asyncFns.has(decl.name)) this.exportAsync.add(decl.name);
+        if (this.asyncFns.has(decl.name)) this.exportAsync = this.exportAsync.add(decl.name);
       }
       return d;
     }
@@ -2289,7 +2289,7 @@ class Parser {
     // the body is compiled as an ordinary function and `await` inside it is identity.
     if (this.at("async") && this.peek(1).value === "function") {
       this.next();
-      this.asyncFns.add(this.peek(1).value); // the declared name (after `function`)
+      this.asyncFns = this.asyncFns.add(this.peek(1).value); // the declared name (after `function`)
       return this.parseFuncDecl();
     }
     if (this.at("return")) return this.parseReturn();
@@ -2334,12 +2334,12 @@ class Parser {
     // where the type does not carry it, refused at the argument (see checkAsyncEscapes).
     if (init !== undefined &&
         (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name)))) {
-      this.asyncFns.add(name);
+      this.asyncFns = this.asyncFns.add(name);
     }
     // `const run = (f: () => Promise<T>) => …` — bind the arrow's promise-typed parameters
     // to the name calls will actually use, so `run(one)` is a legal escape.
     if (init !== undefined && this.promiseParamsByArrow.has(init)) {
-      this.promiseParamsByFn.set(name, this.promiseParamsByArrow.get(init)!);
+      this.promiseParamsByFn = this.promiseParamsByFn.set(name, this.promiseParamsByArrow.get(init)!);
     }
     return { name, annot, annotHead, init };
   }
@@ -2477,8 +2477,8 @@ class Parser {
     this.eat("(");
     //@@mutable
     const params: Param[] = [];
-    const promiseIdx = new Set<number>();
-    const promiseNames = new Set<string>();
+    let promiseIdx = new Set<number>();
+    let promiseNames = new Set<string>();
     if (!this.at(")")) {
       do {
         if (this.at(")")) break; // trailing comma in the param list
@@ -2533,7 +2533,7 @@ class Parser {
           // A `(…) => Promise<T>` parameter holds an async function, whoever passed it.
           // Calling it is exactly `one()` on an `async function one`, so it gets the same
           // floating-async guard — scoped to this body (see asyncParamScopes).
-          if (t.asyncFn) { promiseNames.add(pname); promiseIdx.add(params.length); }
+          if (t.asyncFn) { promiseNames = promiseNames.add(pname); promiseIdx = promiseIdx.add(params.length); }
         }
         let def: Expr | undefined;
         if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
@@ -2560,7 +2560,7 @@ class Parser {
     if (typeParams.length) this.typeParamScopes.push(new Set(typeParams));
     try {
       const params = this.parseParamList();
-      if (this.lastPromiseParams.size) this.promiseParamsByFn.set(name, this.lastPromiseParams);
+      if (this.lastPromiseParams.size) this.promiseParamsByFn = this.promiseParamsByFn.set(name, this.lastPromiseParams);
       const promiseNames = this.lastPromiseParamNames;
       const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
       let returnAnnot: Ty | undefined;
@@ -2572,7 +2572,7 @@ class Parser {
         // `function pick(): () => Promise<T>` hands an async function BACK: `pick()()` is
         // then a call to an async function, and gets the same floating-async guard.
         retAsyncFn = t.asyncFn;
-        if (retAsyncFn) this.returnsAsyncFn.add(name);
+        if (retAsyncFn) this.returnsAsyncFn = this.returnsAsyncFn.add(name);
       }
       this.returnsAsyncFnStack.push(retAsyncFn);
       this.asyncParamScopes.push(promiseNames);
@@ -2619,7 +2619,7 @@ class Parser {
     // and every handle observes it. Without it a field-assigning method is COPY-ON-WRITE
     // (it returns a new instance). See docs/decorators.md.
     const isMutable = !!dec?.attrs.includes("mutable");
-    if (isMutable) this.mutableClasses.add(name);
+    if (isMutable) this.mutableClasses = this.mutableClasses.add(name);
     if (this.at("<")) throw nyi(NYI.CLASS_FEATURE, `generic class '${name}' (type parameters)`);
     // Only `extends Error` is supported: nativets models Error as `{message:string}`, so the
     // subclass inherits a `message` field and `super(msg)` sets it. General user-class
@@ -2637,7 +2637,7 @@ class Parser {
     // class name resolves to a self MARKER inside its own body and is substituted for the
     // real instance type once it exists (below). Without this, `Counter` erased to `number`.
     const selfMarker = `#self:${name}#` as Ty;
-    this.typeAliases.set(name, selfMarker);
+    this.typeAliases = this.typeAliases.set(name, selfMarker);
     this.eat("{");
     const fields: { key: string; ty: Ty }[] = [];
     const fieldInits: { field: string; value: Expr }[] = []; // declared-and-initialized fields → ctor prelude
@@ -2798,7 +2798,7 @@ class Parser {
       if (isStatic) {
         if (init === undefined) throw nyi(NYI.CLASS_FEATURE, `static field '${name}.${member}' has no initializer (it would read as \`undefined\`)`);
         staticFields.push({ kind: "VarDecl", declKind: "const", decls: [{ name: `${name}.${member}`, annot: ty, init }] });
-        this.staticFieldNames.add(`${name}.${member}`);
+        this.staticFieldNames = this.staticFieldNames.add(`${name}.${member}`);
         continue;
       }
       fields.push({ key: member, ty });
@@ -2883,8 +2883,8 @@ class Parser {
     }
     const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
     if (selfRecursive && isMutable) throw recursiveMutableError(name, "class");
-    if (selfRecursive) this.recTypes.set(name, objTy);
-    this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
+    if (selfRecursive) this.recTypes = this.recTypes.set(name, objTy);
+    this.typeAliases = this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
     let emitted: FuncDecl[] = [];
     /** `const __dec_C_m = w(…)` statements — the ONE-TIME decorator applications. */
@@ -3266,8 +3266,8 @@ class Parser {
   private parseArrow(): Expr {
     //@@mutable
     const params: Param[] = [];
-    const arrowPromiseIdx = new Set<number>();
-    const arrowPromiseNames = new Set<string>();
+    let arrowPromiseIdx = new Set<number>();
+    let arrowPromiseNames = new Set<string>();
     if (this.at("(")) {
       this.eat("(");
       if (!this.at(")")) {
@@ -3283,7 +3283,7 @@ class Parser {
             const t = this.parseTypeAsyncAware();
             annot = t.ty;
             // see parseParamList — same rule, arrow syntax
-            if (t.asyncFn) { arrowPromiseNames.add(name); arrowPromiseIdx.add(params.length); }
+            if (t.asyncFn) { arrowPromiseNames = arrowPromiseNames.add(name); arrowPromiseIdx = arrowPromiseIdx.add(params.length); }
           }
           let def: Expr | undefined;
           if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
@@ -3298,7 +3298,7 @@ class Parser {
     // Which parameters are `(…) => Promise<T>` — recorded against the arrow NODE, since an
     // arrow has no name of its own until parseDeclarator binds it (see promiseParamsByFn).
     const promiseIdx = arrowPromiseIdx;
-    const mk = (a: Expr): Expr => { if (promiseIdx.size) this.promiseParamsByArrow.set(a, promiseIdx); return a; };
+    const mk = (a: Expr): Expr => { if (promiseIdx.size) this.promiseParamsByArrow = this.promiseParamsByArrow.set(a, promiseIdx); return a; };
     let retAsyncFn = false;
     // `(x): T => …` — the DECLARED return type. This used to keep only `asyncFn` and drop
     // `ty` on the floor, which is why an arrow was the one function form whose declared
@@ -3330,7 +3330,7 @@ class Parser {
       // Remember WHICH node this is: erasure loses the `async`, but a `const` binding
       // this arrow is every bit as promise-returning as an `async function`, and the
       // floating-async guard is by NAME. parseDeclarator turns this back into a name.
-      this.asyncFnExprs.add(arrow);
+      this.asyncFnExprs = this.asyncFnExprs.add(arrow);
       return arrow;
     }
     if (this.at("<")) {
@@ -3555,7 +3555,7 @@ class Parser {
     if (this.at("await") && this.startsExpression(this.peek(1))) {
       this.eat("await");
       const operand = this.parseUnary();
-      this.awaitedCalls.add(operand); // marks a `await f()` call as legitimately consumed
+      this.awaitedCalls = this.awaitedCalls.add(operand); // marks a `await f()` call as legitimately consumed
       return operand;
     }
     if (this.at("typeof")) { this.eat("typeof"); return { kind: "TypeofExpr", operand: this.parseUnary() }; }
@@ -3727,14 +3727,14 @@ class Parser {
           // name, so the name-based path above cannot see it; the callee NODE is the
           // identity. Recorded under a descriptive name so the guard reads the same.
           this.identCalls.push({ node: expr, name: "(async arrow)", line: callLoc.line, col: callLoc.col });
-          this.asyncFns.add("(async arrow)"); // not a legal identifier, so it collides with nothing
+          this.asyncFns = this.asyncFns.add("(async arrow)"); // not a legal identifier, so it collides with nothing
         } else if (expr.callee.kind === "CallExpr" && expr.callee.callee.kind === "Identifier" &&
                    this.returnsAsyncFn.has(expr.callee.callee.name)) {
           // `pick()()`, where `pick(): () => Promise<T>` — the callee is the RESULT of a
           // call, so there is no name; the declared return type is the identity.
           const label = `${expr.callee.callee.name}()`;
           this.identCalls.push({ node: expr, name: label, line: callLoc.line, col: callLoc.col });
-          this.asyncFns.add(label); // `pick()` is not an identifier, so it collides with nothing
+          this.asyncFns = this.asyncFns.add(label); // `pick()` is not an identifier, so it collides with nothing
         }
         // Record every argument that could hand an ASYNC function VALUE across this call —
         // the one place the guard's name tracking ends. Resolved after the file is parsed

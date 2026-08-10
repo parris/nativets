@@ -578,7 +578,7 @@ class ModuleGen {
     const existing = this.actorEntries.get(key);
     if (existing) return existing;
     const name = `nt_actor_entry_${this.actorEntries.size}`;
-    this.actorEntries.set(key, name);
+    this.actorEntries = this.actorEntries.set(key, name);
     // slot(i64) -> param: number is a bit-cast double; heap types are inttoptr.
     const conv = argTy === "number"
       ? `%arg = bitcast i64 %slot to double`
@@ -609,7 +609,7 @@ class ModuleGen {
     const existing = this.msgRenderers.get(key);
     if (existing) return existing;
     const name = `nt_msg_render_${this.msgRenderers.size}`;
-    this.msgRenderers.set(key, name);
+    this.msgRenderers = this.msgRenderers.set(key, name);
     this.liftedFns.push(new FnGen(this).genMsgRender(name, ty));
     return name;
   }
@@ -628,7 +628,7 @@ class ModuleGen {
     const existing = this.cmpShims.get(lt);
     if (existing) return existing;
     const name = `nt_cmp_shim_${this.cmpShims.size}`;
-    this.cmpShims.set(lt, name);
+    this.cmpShims = this.cmpShims.set(lt, name);
     const conv = (reg: string, slot: string) =>
       lt === "double" ? `%${reg} = bitcast i64 %${slot} to double` : `%${reg} = inttoptr i64 %${slot} to ptr`;
     this.liftedFns.push(
@@ -657,7 +657,7 @@ class ModuleGen {
     const sym = `@.str.${this.strings.size}`;
     const { body, len } = encodeCString(s);
     this.strDefs.push(`${sym} = private unnamed_addr constant [${len} x i8] c"${body}"`);
-    this.strings.set(s, sym);
+    this.strings = this.strings.set(s, sym);
     return sym;
   }
 
@@ -1036,7 +1036,7 @@ class FnGen {
 
   private addLocal(name: string, ty: Ty): void {
     if (this.varTypes.has(name)) return;
-    this.varTypes.set(name, ty);
+    this.varTypes = this.varTypes.set(name, ty);
     // A promoted module-level binding lives in its LLVM global, not a frame slot.
     if (!this.globalVars.has(name)) this.alloca(name, ty);
   }
@@ -1047,7 +1047,7 @@ class FnGen {
         case "VarDecl":
           for (const d of s.decls) {
             this.addLocal(d.name, d.ty ?? "number");
-            if ((d.ty ?? "number") === "string") this.strLocals.add(d.name);
+            if ((d.ty ?? "number") === "string") this.strLocals = this.strLocals.add(d.name);
           }
           break;
         case "IfStmt":
@@ -1092,7 +1092,7 @@ class FnGen {
     const sig = this.mod.functions.get(fn.name)!;
     fn.params.forEach((p, i) => {
       const ty = sig.params[i]!;
-      this.varTypes.set(p.name, ty);
+      this.varTypes = this.varTypes.set(p.name, ty);
       this.alloca(p.name, ty);
     });
     this.collectLocals(fn.body);
@@ -1164,7 +1164,7 @@ class FnGen {
     this.retTy = arrow.retTy ?? "number";
     const paramTys = arrow.paramTys ?? [];
     this.captures = new Map((arrow.captures ?? []).map((c, i) => [c.name, { index: i, ty: c.ty }]));
-    arrow.params.forEach((p, i) => { this.varTypes.set(p.name, paramTys[i]!); this.alloca(p.name, paramTys[i]!); });
+    arrow.params.forEach((p, i) => { this.varTypes = this.varTypes.set(p.name, paramTys[i]!); this.alloca(p.name, paramTys[i]!); });
     if (!arrow.exprBody) this.collectLocals(arrow.stmts as Stmt[]);
     const b0 = this.block(this.label("L"));
     this.to(b0);
@@ -2102,7 +2102,7 @@ class FnGen {
         const nfields = objectFields(ty).length;
         const obj = this.fresh();
         this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(nfields)})`);
-        const written = new Set<string>();
+        let written = new Set<string>();
         // store by MERGED field index (spread + overrides mean property order != slot order)
         for (const p of e.properties) {
           if (p.spread) {
@@ -2116,7 +2116,7 @@ class FnGen {
               const dg = this.fresh();
               this.emit(`${dg} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, f.key)}`);
               this.emit(`store i64 ${val}, ptr ${dg}`);
-              written.add(f.key);
+              written = written.add(f.key);
             }
           } else {
             const ft = fieldType(ty, p.key) ?? (p.value.ty as Ty);
@@ -2124,7 +2124,7 @@ class FnGen {
             const g = this.fresh();
             this.emit(`${g} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, p.key)}`);
             this.emit(`store i64 ${slot}, ptr ${g}`);
-            written.add(p.key);
+            written = written.add(p.key);
           }
         }
         // An OMITTED optional field must still hold a valid `undefined` box so a later
@@ -4639,12 +4639,12 @@ class FnGen {
    *  left untouched, so they still resolve to the enclosing frame. */
   private freshenHofArrow(arrow: Extract<Expr, { kind: "ArrowFunction" }>): void {
     const suffix = `.h${this.hofSeq++}`;
-    const bound = new Set<string>();
-    for (const p of arrow.params) bound.add(p.name);
+    let bound = new Set<string>();
+    for (const p of arrow.params) bound = bound.add(p.name);
     if (!arrow.exprBody) this.collectBoundNames(arrow.stmts as Stmt[], bound);
     if (bound.size === 0) return;
-    const map = new Map<string, string>();
-    for (const n of bound) map.set(n, n + suffix);
+    let map = new Map<string, string>();
+    for (const n of bound) map = map.set(n, n + suffix);
     for (const p of arrow.params) { if (p.default) this.subExpr(p.default, map); p.name = map.get(p.name)!; }
     if (arrow.exprBody) this.subExpr(arrow.body as Expr, map);
     else this.subStmts(arrow.stmts as Stmt[], map);
@@ -4653,8 +4653,8 @@ class FnGen {
   /** The names a nested arrow/function binds — remove from the active rename map for its
    *  subtree so an inner re-binding (shadow) isn't rewritten to the outer's fresh name. */
   private childRenameMap(params: { name: string }[], stmts: Stmt[] | undefined, map: Map<string, string>): Map<string, string> {
-    const shadow = new Set<string>();
-    for (const p of params) shadow.add(p.name);
+    let shadow = new Set<string>();
+    for (const p of params) shadow = shadow.add(p.name);
     // An EXPRESSION body binds nothing beyond the parameters, so `stmts` is absent and
     // there is nothing to collect — which is what `exprBody` used to be passed in to say.
     if (stmts !== undefined) this.collectBoundNames(stmts, shadow);

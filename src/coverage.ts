@@ -71,7 +71,7 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   // essentially untouched (one statement per top-level statement).
   const pre = preprocessForCoverage(source);
 
-  const found = new Map<string, Blocker>();
+  let found = new Map<string, Blocker>();
   const flag = (spec: Spec, feature: string) => {
     const key = spec.code;
     const b = found.get(key) ?? { code: spec.code, feature, milestone: spec.milestone, hint: spec.hint, count: 0 };
@@ -84,7 +84,7 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   for (const b of stripped) {
     const e = found.get(b.code);
     if (e) e.count += b.count;
-    else found.set(b.code, { ...b });
+    else found = found.set(b.code, { ...b });
   }
 
   let statements = 0;
@@ -165,8 +165,8 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   let imports: ImportDecl[] = [];
   if (!linked) { try { imports = parse(source).imports ?? []; } catch { /* preamble does not parse; no names to recover */ } }
   const typeEnv = new Map<string, Ty>();
-  const mutableClasses = new Set<string>();
-  const mutableRecords = new Set<string>();
+  let mutableClasses = new Set<string>();
+  let mutableRecords = new Set<string>();
   for (const st of linked ? [] : pre.statements) {
     let prog: Program;
     try {
@@ -175,8 +175,8 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
       // statements, so without handing them back the parser would refuse a name (NT2003)
       // the file does declare — a refusal invented by the strip.
       prog = parse(st.text, { typeEnv, collectTypes: typeEnv, externalTypeNames: pre.erasedNames });
-      for (const c of prog.mutableClasses ?? []) mutableClasses.add(c);
-      for (const r of prog.mutableRecords ?? []) mutableRecords.add(r);
+      for (const c of prog.mutableClasses ?? []) mutableClasses = mutableClasses.add(c);
+      for (const r of prog.mutableRecords ?? []) mutableRecords = mutableRecords.add(r);
     } catch (e) {
       parseFailures++;
       const diag = e instanceof NTError ? e.diag : { code: "NT0001", message: String(e) };
