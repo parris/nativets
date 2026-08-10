@@ -33,7 +33,7 @@ import { unionDiscriminant, unionTagValues, unionWidenedMembers, objectLayoutFit
 import { exprLoc } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
 import type { ArrowFunction, AssignExpr } from "./ast.ts";
-import { nyi, NYI, internalError } from "./diagnostics.ts";
+import { nyi, NYI, internalError, NTError } from "./diagnostics.ts";
 
 export function llvmDouble(n: number): string {
   const dv = new DataView(new ArrayBuffer(8));
@@ -845,8 +845,17 @@ class FnGen {
   /** String-typed VarDecl locals in this frame — reference-counted: retained on
    *  bind/alias, released at scope exit. Params are excluded (the caller owns them). */
   private strLocals = new Set<string>();
-  /** Active catch targets (a `throw` branches to the innermost). */
-  private tryHandlers: { catchLbl: string; excVar: string | null; eType: Ty }[] = [];
+  /**
+   * Active `try` scopes in this frame; a `throw` branches to the innermost one's
+   * `catchLbl`.
+   *
+   * `catchless` marks a `try` that has only a `finally`. It is NOT a handler — node
+   * runs the finalizer and keeps propagating — and its `catchLbl` block is therefore
+   * never emitted. Entries for it are still pushed so the innermost-scope lookup can
+   * SEE it and refuse (`escapesCatchlessTry`); branching to the label instead produced
+   * `br label %catchN` with no such block, i.e. invalid IR and a raw clang error.
+   */
+  private tryHandlers: { catchLbl: string; excVar: string | null; eType: Ty; catchless: boolean }[] = [];
   /** Active finally blocks (a `return` inside runs finally first, mode=1). */
   private finallyStack: { finallyLbl: string; modeSlot: string; retSlot: string | null }[] = [];
   /**
@@ -1632,6 +1641,11 @@ class FnGen {
         // `try`), where node answers `undefined` and nativets PANICS on the read. The
         // `!h` arm below is the one that must stay reachable. See test/tsc.test.ts.
         const h = this.tryHandlers.length > 0 ? this.tryHandlers[this.tryHandlers.length - 1]! : null;
+        // The innermost `try` is `finally`-only: it catches nothing, and its catch block is
+        // never emitted. Refuse before anything branches to it. (Not folded into `!h` below:
+        // an outer `catch` may exist, and skipping the `finally` on the way to it would drop
+        // the finalizer's side effects — node runs it.)
+        if (this.escapesCatchlessTry()) throw this.catchlessTryError(`\`throw\`${where(s)}`);
         // A `throw` is lowered as a BRANCH to the enclosing `try`'s catch block, so the
         // try must be in the same function frame. Crossing a frame — the ordinary "raise
         // in the callee, handle at the call site" idiom — needs real unwinding, which does
@@ -1675,7 +1689,7 @@ class FnGen {
           if (hasFinally) this.emit(`store double ${llvmDouble(0)}, ptr ${modeSlot}`); // mode 0 = normal
           this.terminate(`br label %${finallyLbl}`);
         };
-        this.tryHandlers.push({ catchLbl, excVar: s.param, eType });
+        this.tryHandlers.push({ catchLbl, excVar: s.param, eType, catchless: !s.handler });
         if (hasFinally) this.finallyStack.push({ finallyLbl, modeSlot, retSlot: retSlot || null });
         this.genStmts(s.block);
         this.tryHandlers.pop();
@@ -3376,6 +3390,10 @@ class FnGen {
    * the lexical throw model — no unwinder — while making runtime throws catchable.
    */
   private emitExcCheck(): void {
+    // Same refusal as `ThrowStmt`, for the same reason: a host failure inside a
+    // `finally`-only `try` has no catch block to branch to. Raised BEFORE the check is
+    // emitted, so no half-formed branch survives.
+    if (this.escapesCatchlessTry()) throw this.catchlessTryError("a call that can raise");
     const p = this.fresh();
     this.emit(`${p} = call i32 @nt_exc_pending()`);
     const cond = this.fresh();
@@ -3423,6 +3441,28 @@ class FnGen {
    */
   private uncatchable(): boolean {
     return this.inMain || !this.mod.hasTry;
+  }
+
+  /**
+   * Would an exception raised HERE have to leave a `try` that has a `finally` and no
+   * `catch`? Such a `try` catches nothing (node runs the finalizer and keeps
+   * propagating), so the only correct lowering runs the finalizer on the exceptional
+   * path — which the lexical branch-to-catch throw model cannot express. Refuse.
+   *
+   * Only the INNERMOST scope is consulted, and that is exact: if the innermost `try`
+   * has a `catch`, the exception never reaches an outer `finally` in this frame.
+   */
+  private escapesCatchlessTry(): boolean {
+    const n = this.tryHandlers.length;
+    return n > 0 && this.tryHandlers[n - 1]!.catchless;
+  }
+
+  /** The NT1004 refusal for the case above — RETURNED, not thrown, so the signature stays
+   *  inside the self-hosting subset (`never` in return position is NT2003 here). `what`
+   *  names the raising construct. */
+  private catchlessTryError(what: string): NTError {
+    return nyi(NYI.EXCEPTION, `${what} inside a \`try\` that has a \`finally\` and no \`catch\``,
+      "a `finally` does not CATCH — node runs it and keeps propagating, and a `throw` is lowered as a branch to the enclosing `catch` block, which a `finally`-only `try` does not have. Give the `try` a `catch` clause, or move the raising code out of the `try`");
   }
 
   /**

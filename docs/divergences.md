@@ -3024,7 +3024,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1001 | arrays: empty `[]`, nested/object element types | M1 | (basic `number[]`/`string[]` are ✅ supported; `console.log(arr)` is ✅ node-exact — see the util.inspect section above) |
 | NT1002 | objects: nested object fields, object methods | M1 | (flat objects, `.f`/`o["f"]`, `Object.keys`, `for-in` are ✅ supported) |
 | NT1003 | arrow functions / function values / closures | M2 | captured environments |
-| NT1004 | a `throw` that CROSSES A CALL BOUNDARY | M2 | propagation (see below); `try`/`catch`/`throw` within one frame ✅, and an UNCAUGHT `throw` ✅ |
+| NT1004 | a `throw` with no `catch` IN THE SAME FRAME, unless the WHOLE PROGRAM contains no `try` (or the throw is at top level); and any raise inside a `finally`-only `try` | M2 | propagation (see below); `try`/`catch`/`throw` within one frame ✅, and an UNCAUGHT `throw` ✅ where the gate above allows it |
 | NT1005 | `JSON` | M3 | `JSON.stringify` ✅ and `JSON.parse` + `dyn as T` runtime typecheck ✅ (scalars/objects/arrays, nested); code reused to reject un-validatable narrow targets (functions, unions). A compound `Dyn` now PRINTS node-exactly (util.inspect, see above) |
 | NT1006 | spread | M2 | arrays/objects; spreading a VALUE into a call is supported only where the arity is known or the fold has an identity — see below |
 | NT1007 | destructuring | M2 | arrays/objects |
@@ -3067,6 +3067,63 @@ survive the return, which means a checked error return at every call site of eve
 may-throw function, a live-set drop at each of those sites, and an interprocedural type for
 the `catch (e)` binding. Also refused: `throw 42` / `throw { … }` with no `message` string,
 because there is nothing to raise and inventing text would be a wrong answer.
+
+#### The second shape is WHOLE-PROGRAM, and narrowing it to the per-throw rule buys nothing
+
+Read the second bullet literally: the gate is `scanHasTry(program)`, a structural walk of the
+entire linked program, not a property of the throw. So an uncaught throw that crosses nothing
+is refused because **an unrelated function elsewhere in the program contains a `try`**:
+
+```ts
+function boom(n: number): number { if (n < 0) throw "negative"; return n * 2; }
+function unrelated(): string { try { return "ok"; } catch (e) { return "bad"; } }
+console.log(boom(1));            // node: 2. nativets: NT1004 at the throw.
+```
+
+Delete `unrelated`'s `try` and the identical throw compiles and prints `2`.
+
+That over-approximation was measured rather than assumed, because the header above promises a
+per-throw property (*crosses a call boundary*) that the code does not implement. The honest
+rule is implementable — build the call graph, mark every function transitively reachable from
+a call site inside a `try` block, and a throw in a function outside that set can be lowered as
+uncaught. **On the compiler's own linked program it clears zero of the 123 NT1004 functions**,
+under an over-approximating (therefore sound) call graph:
+
+- `parser.ts`'s `tokenize` does `try { tokens = lex(source) } catch`, so `lex` and
+  `decodeEscapeAt` — the two NT1004 refusals that make `lexer.ts` dirty when linked, though it
+  reaches IR standalone — are **genuinely** caught across a frame. They are the documented
+  rule working, not the over-approximation misfiring;
+- `coverage.ts` wraps `parse`, `linkProgram` and `check` in `try`/`catch` for its recovery
+  path, which puts essentially every function in the lexer, parser, linker and checker inside
+  a live handler's dynamic extent;
+- what is left over is reached through function-valued calls (`try { return f(); } finally`),
+  which no sound analysis can resolve without whole-program closure typing.
+
+So for **this** program the whole-program bit is very nearly exact, and the refusal count is a
+statement about `try`-based error recovery in the compiler, not about the gate's precision.
+For ORDINARY programs the over-approximation is real and it does refuse working code — the
+snippet above — which is the honest cost of the current gate and the reason it is written down
+here instead of only in a code comment.
+
+#### A `finally` with no `catch` is NOT a handler
+
+`try { … } finally { … }` catches nothing: node runs the finalizer and keeps propagating. The
+lowering has no way to express that — a `throw` is a branch to a catch block, and there is no
+catch block — so a `throw`, or any call that can raise, inside a `finally`-only `try` is
+`NT1004`. Give the `try` a `catch` clause, or move the raising code out of it.
+
+This was a **raw clang error** before it was a refusal. `TryStmt` pushed a handler entry
+unconditionally but only emitted the block it names when the `try` had a `catch`, so the throw
+terminated its block with `br label %catchN` for a `%catchN` that does not exist:
+
+```
+build error: clang failed (1): … error: use of undefined value '%catch1'
+```
+
+— a temp path and a line of our own IR, from three ordinary shapes: a `throw` in a catch-less
+`try`, the same nested inside an outer `try`/`catch`, and a `JSON.parse` failure in a
+catch-less `try` (the last through `emitExcCheck`, the host-failure path). No miscompile —
+clang rejects the module either way — but no `NT****` and no hint either.
 
 ### `catch (e)` takes ONE type — a `try` with throws of two types is `NT1004`
 

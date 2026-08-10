@@ -82,6 +82,47 @@ so a source edit invalidates no layer at all). A full `bun test` inside it takes
   `NATIVETS_DOCKER_PLATFORM=linux/amd64` (emulated, much slower).
 - **Load-dependent races.** A loaded CI runner is not reproduced by an idle container;
   raise `NATIVETS_SCHED_THREADS` and re-run repeatedly to hunt those.
+- **`test/tsc.test.ts`** — and it fails rather than skipping, which is worse. See below.
+
+## `tsc.test.ts` fails in here, and the reason is the bind mount
+
+`node_modules` is part of the bind-mounted tree, so the container runs whatever your HOST
+`bun install` produced. `typescript@7.0.2` is the native port: `node_modules/typescript`
+is a shim that resolves a **platform-specific** binary package at run time, and a
+`bun install` on macOS/arm64 fetches only `@typescript/typescript-darwin-arm64`. Inside
+the image that shim throws —
+
+```
+$ scripts/docker-test.sh --run node_modules/.bin/tsc --version
+Error: Unable to resolve @typescript/typescript-linux-arm64. Either your platform is
+unsupported, or you are missing the package on disk.
+```
+
+— so `runTsc` collects **no diagnostics at all**, and the five assertions that expect a
+specific error (`the ROOT config reports syntax errors ONLY`, plus the three
+`dropAnArm` exhaustiveness mutations and their harness) fail with `codes: {}`. Nothing is
+wrong with the tree; `bun test test/tsc.test.ts` on the host is green.
+
+**Its own installed-check does not catch this**, and that is the part worth remembering:
+`the type-checker is installed (a skipped gate is a vacuous one)` asserts that
+`node_modules/.bin/tsc` EXISTS. The shim exists. It is the binary behind it that is
+missing — a vacuous gate inside the test written to prevent vacuous gates. A gate that
+asserts a file is present proves nothing about whether the tool RUNS; the honest form
+runs it once and requires output.
+
+**The obvious workaround does not work** — tried, not assumed. `bun add -d
+@typescript/typescript-linux-arm64@7.0.2` prints `installed`, writes the lockfile, and
+puts *nothing* on disk: the package declares `os: ["linux"]`, so bun resolves it and then
+skips extraction on a darwin host. `node_modules/@typescript/` still holds only
+`typescript-darwin-arm64`, and the container fails identically. (Reverted; the lockfile
+in the tree is unchanged.)
+
+So the fix has to be on the test's side, and it is the same shape as the hole above:
+teach `tsc.test.ts` to run `tsc --version` and **`skip` when it does not answer — skip,
+never pass**, since a silently-passing type check is the exact failure mode that file
+exists to prevent. Until then, treat these five as a known non-result of this lane, run
+`bun test test/tsc.test.ts` on the host, and let CI's ubuntu job (which installs inside
+Linux) be the real gate.
 
 ## No Docker?
 
