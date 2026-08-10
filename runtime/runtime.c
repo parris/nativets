@@ -489,6 +489,80 @@ int64_t nt_union_arm(const int64_t *box, double want, const char *what, const ch
   abort();
 }
 
+/* ---- `expr as T` — the CHECKED type assertion ----
+ *
+ * These two exist because `as` is NOT a compile-time proof the way flow narrowing is.
+ * `tsc` ACCEPTS a union-to-member downcast, so the checker has nothing to reject and
+ * nothing to prove; the assertion is the programmer's claim, and it can be wrong. That
+ * is why the messages below blame the ASSERTION rather than the compiler, unlike
+ * nt_union_arm / nt_nonnull directly above, whose checks really should never fire.
+ *
+ * A failed assertion PANICS, which is a deliberate divergence from node — node erases
+ * `as` and hands back `undefined`, letting the program compute on from a value that was
+ * never there. Same reasoning, and the same stderr + exit-134 shape, as `!` and as
+ * Stage 41's out-of-range index. Recorded in docs/divergences.md. */
+
+static void nt_as_fail(const char *what, const char *detail, const char *loc) {
+  fflush(stdout);
+  fprintf(stderr, "panic: type assertion failed: the value is not %s\n", what ? what : "?");
+  if (detail && *detail) fprintf(stderr, "  %s\n", detail);
+  if (loc && *loc) fprintf(stderr, "  at %s\n", loc);
+  fprintf(stderr, "  help: `as` does not convert a value — it reinterprets the bytes at "
+                  "the asserted type's layout, so nativets checks the assertion rather "
+                  "than trusting it. Narrow with a `switch` on the discriminant, an "
+                  "`x.kind === \"...\"` test, or `typeof`, instead of asserting\n");
+  fflush(stderr);
+  abort();
+}
+
+/* `expr as T` where T is a member of a DISCRIMINATED union. A `U<…>` value IS the member
+ * pointer, the tag living inside it as the discriminant field at slot `index` — so the
+ * assertion is checkable, and must be checked: retyping one member to another
+ * reinterprets the same bytes at a different member's field layout and hands back a
+ * NEIGHBOURING SLOT, typically a `char *` loaded as a `double`, rather than anything
+ * that looks wrong.
+ *
+ * `allowed` is a COMMA-SEPARATED list of tag values the assertion accepts. It holds more
+ * than one when several members widen to the same shape — which makes them
+ * layout-identical, and so equally safe to read. A comma cannot occur inside a tag value
+ * (TAG_FORBIDDEN, ast.ts), so the list never needs escaping. */
+void nt_as_tag(const int64_t *obj, double index, const char *allowed,
+               const char *what, const char *loc) {
+  const char *tag = obj ? (const char *)(intptr_t)obj[(int64_t)index] : NULL;
+  if (tag) {
+    size_t n = strlen(tag);
+    for (const char *p = allowed; p && *p;) {
+      const char *c = strchr(p, ',');
+      size_t len = c ? (size_t)(c - p) : strlen(p);
+      if (len == n && memcmp(p, tag, n) == 0) return;
+      if (!c) break;
+      p = c + 1;
+    }
+  }
+  char detail[256];
+  snprintf(detail, sizeof(detail), "its tag is \"%s\"; the assertion requires one of: %s",
+           tag ? tag : "(none)", allowed ? allowed : "");
+  nt_as_fail(what, detail, loc);
+}
+
+/* `expr as T` across a BOX boundary. A general union `G<…>` and a nullable `?U…` are both
+ * 2-slot [tag, value] blocks, so the assertion is a tag test and the result is the
+ * unboxed slot. `want >= 0` is a general union's member index; `want < 0` means "any
+ * value that is PRESENT", the nullable case, where tags 0 and 1 are undefined and null.
+ *
+ * Without this an `as` across the boundary was not merely unchecked, it did not COMPILE:
+ * the identity retype handed a `ptr` to an instruction expecting a `double`, and the user
+ * saw clang's verifier error with no NT code and no location in their own program. */
+int64_t nt_as_unbox(const int64_t *box, double want, const char *what, const char *loc) {
+  int64_t w = (int64_t)want;
+  if (box && (w < 0 ? box[0] >= 2 : box[0] == w)) return box[1];
+  const char *detail = !box ? "it is empty"
+                     : w >= 0 ? "it holds a different arm of the union"
+                     : box[0] == 1 ? "it is null" : "it is undefined";
+  nt_as_fail(what, detail, loc);
+  return 0; /* unreachable — nt_as_fail aborts */
+}
+
 /* ---- console.log building blocks ---- */
 
 /* The same conversion, exported for the other runtime translation units (the

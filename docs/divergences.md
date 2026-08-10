@@ -2129,6 +2129,79 @@ escapes and lone surrogates are not yet decoded (BMP `\uXXXX` is); D7 `-0` print
 print but `0` via `JSON.stringify`. A **compound `Dyn` printed directly** (`console.log(parsed)`
 of an array/object) would need `util.inspect` emulation and is deferred — scalars print correctly.
 
+### A STATIC `expr as T` is CHECKED too — a false assertion PANICS
+
+The entry above is `Dyn`-only. The same reasoning applies to `as` on an ORDINARY static value,
+and until this landed it did not: `Checker.type`'s `AsExpr` case was
+`{ this.type(e.expr, scope); return e.ty; }` — an identity retype with no check — and codegen
+handed the same pointer back under the new type.
+
+That is memory REINTERPRETATION, and `tsc` cannot save us from it: tsc **accepts** a
+union-to-member downcast (the member is a subtype of the union), so no diagnostic anywhere fired.
+This is one of the places the two type systems genuinely disagree, because tsc reasons about
+types and nativets reasons about LAYOUT. Where tsc's unsoundness costs an `undefined`, ours cost
+a slot read at the wrong offset:
+
+```ts
+type Shape = { kind: "circle"; r: number } | { kind: "square"; label: string };
+function bad(s: Shape): number { const c = s as { kind: "circle"; r: number }; return c.r; }
+console.log(bad({ kind: "square", label: "hello" }));
+```
+
+node prints `undefined`. nativets printed **`2.1241009864e-314`** — the `label` string POINTER
+loaded as a `double`. With two same-shaped arms it printed a perfectly plausible `3`.
+
+**Now:** the assertion is checked and a false one aborts, with the same stderr + exit-134 shape as
+the headline out-of-bounds panic and for the same stated reason — a wrong-but-plausible value that
+the program keeps computing from is the worst outcome available.
+
+```
+panic: type assertion failed: the value is not {kind:string,r:number}
+  its tag is "square"; the assertion requires one of: circle
+  at examples/thing.ts:2:43
+  help: `as` does not convert a value — it reinterprets the bytes at the asserted type's
+        layout, so nativets checks the assertion rather than trusting it. Narrow with a
+        `switch` on the discriminant, an `x.kind === "..."` test, or `typeof`, instead of asserting
+```
+
+**Refusing `as` outright was not available.** A lexer-accurate census counts **217** `as`
+assertions in `src/` alone (51 `as Ty`, 28 `as Expr`, 26 `as Stmt`, 18 `as Stmt[]`, 16
+`as VarDecl`, seven `as Extract<…>`), so a blanket refusal would break the compiler's own source
+many times over. Hence a checked cast, reusing the machinery that already existed.
+
+**What is checked, and what stays free** — the case analysis is entirely about representation,
+so only the directions that can actually be wrong pay anything:
+
+| Cast | Representation change | Cost |
+|---|---|---|
+| `U<…>` → one of its MEMBERS | none (a union IS the member pointer) | `nt_as_tag`: one slot load + a string compare |
+| member → `U<…>` (widening) | none, and always TRUE | **free** — no check emitted |
+| `G<…>` → an arm, `?U T` → `T` | UNBOX a 2-slot `[tag, value]` block | `nt_as_unbox`: one tag test |
+| arm → `G<…>`, `T` → `?U T` | BOX | the ordinary store-boundary `coerce` |
+| identical layouts (`42 as number`, same-shape objects) | none | **free** |
+
+When several members widen to the same shape they are layout-identical, so the check accepts any
+of their tags; when EVERY member matches, no check is emitted at all.
+
+**A panic is not an exception**, exactly as for the out-of-bounds rule: `try { x as T } catch {}`
+still aborts. The escape hatch is to narrow rather than assert — a `switch` on the discriminant,
+an `x.kind === "…"` test, or `typeof` — all of which are proved at compile time and cost nothing.
+
+Two further defects were closed by the same lane and are NOT divergences, just bugs:
+
+- **A double free.** `as` reinterprets a PLACE, so `const b = a as T;` gives one allocation two
+  names — and ownership did not know it, leaving `a` owned while `b` became an owner too. The
+  scope freed the same pointer twice, out of safe TypeScript with no `@@mutable` and no `unsafe`
+  construct anywhere, and SILENTLY: the allocator's abort discards buffered stdout, so the
+  program printed nothing rather than a wrong answer. `b` is now an ALIAS of `a` (the rule
+  `const b = a.reverse()` already used), which also keeps `as` legal on a borrowed PARAMETER —
+  the shape `src/` is full of. Letting the alias ESCAPE is still `NT1604`.
+- **A raw clang error.** `as` across a box boundary emitted IR that did not verify, so the user
+  saw `'%t0' defined with type 'ptr' but expected 'double'` — no `NT****` code, no location in
+  their own program, no hint.
+
+`test/as-cast.test.ts` is the full spec; `test/unions.test.ts` pins the union case.
+
 ### `async` / `await` are real syntax, but there is NO concurrency (networking tier)
 
 nativets has no event loop and no promises. The decision (deliberate, and the reason `fetch`

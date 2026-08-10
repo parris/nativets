@@ -105,6 +105,27 @@ function retainedReceiver(e: Expr): string | null {
 }
 
 /**
+ * `s as T` ⇒ `"s"`: a type ASSERTION over a plain binding. `as` reinterprets a PLACE at
+ * another type — it allocates nothing and copies nothing — so the result is a second name
+ * for the operand's allocation, exactly as `retainedReceiver` above describes for
+ * `a.reverse()`.
+ *
+ * `satisfies` and `!` are looked through for the same reason: all three are type-layer
+ * operators that `Ownership.expr` already flows straight through, so a binding
+ * initialized from one of them must be an alias rather than a second owner.
+ *
+ * An assertion over anything that is NOT a binding (`{a:1} as T`, `f() as T`) answers
+ * null: the operand is a temporary nobody else owns, so the new binding really does own
+ * the result and gets the usual drop.
+ */
+function assertedPlaceRoot(e: Expr): string | null {
+  if (e.kind !== "AsExpr" && e.kind !== "SatisfiesExpr" && e.kind !== "NonNullExpr") return null;
+  const inner = (e as { expr: Expr }).expr;
+  if (inner.kind === "Identifier") return inner.name;
+  return assertedPlaceRoot(inner); // `s as A as B` — chained assertions name one place
+}
+
+/**
  * `o.lines` ⇒ `"o"` when `o` is a BORROW — a field read whose result is a second name for
  * storage the receiver still owns. `this.lines` answers `"this"`, which is a borrow in
  * every method body (the receiver belongs to the caller).
@@ -908,7 +929,16 @@ class Analyzer {
         for (let i = 0; i < e.args.length; i++) this.expr(e.args[i]!, state, consuming !== undefined && consuming.has(i));
         return;
       }
-      case "AsExpr": this.expr(e.expr, state, false); return;
+      /**
+       * `expr as T` is a type-layer assertion, so ownership flows straight THROUGH it —
+       * exactly as it does for its two neighbours below. This used to hard-code
+       * `consume: false`, which made `as` the only expression form that turned a MOVE
+       * into a BORROW: `const b = a as T;` left `a` live and owned while `b` became an
+       * owner too, so the object was freed TWICE at end of scope. A double free out of
+       * safe TypeScript — and a silent one, since the allocator's abort discards
+       * buffered stdout. `as` retypes a value; it does not duplicate it.
+       */
+      case "AsExpr": this.expr(e.expr, state, consume); return;
       // `satisfies` is a pure type-layer check; ownership flows straight through it.
       case "SatisfiesExpr": this.expr(e.expr, state, consume); return;
       // `expr!` is a type-level assertion; ownership flows straight through it.
@@ -1169,6 +1199,24 @@ function collectAliases(stmts: Stmt[], isMutableTy: (t: Ty) => boolean, out: Map
           // RECEIVER, so `b` names the allocation `a` already owns. Recording it as an
           // alias is what stops the scope freeing that one pointer through BOTH names.
           // Independent of `@@mutable`: this applies to plain arrays.
+          // `const c = s as T` — a type ASSERTION names the very same allocation `s`
+          // does; `as` reinterprets a place, it does not produce a value. So `c` is an
+          // ALIAS, by the same rule and for the same reason as `a.reverse()` below.
+          //
+          // This is what stopped the scope freeing one pointer through BOTH names: `as`
+          // used to leave `s` owned AND make `c` an owner, so the object was freed twice
+          // (a double free out of safe TypeScript — test/as-cast.test.ts).
+          //
+          // ALIAS rather than MOVE, and the distinction is the whole point: `s` is very
+          // often a borrowed PARAMETER, and `const c = s as Extract<Expr, …>` is the
+          // single most common shape in this compiler's own source. Moving would refuse
+          // every one of them with NT1604 — correct, but it would reject the pattern
+          // `Extract<T, U>` exists to serve. Letting the handle ESCAPE is the unsafe
+          // part, and that is still caught: an alias is a borrow binding, so `return c`
+          // is the existing NT1604. Deliberately NOT gated on `isMutableTy` — the double
+          // free it prevents is the plain immutable-object shape.
+          const asRoot = assertedPlaceRoot(d.init);
+          if (asRoot !== null) { out.set(d.name, asRoot); continue; }
           const retained = retainedReceiver(d.init);
           if (retained !== null) { out.set(d.name, retained); continue; }
           // `const b = o.f` / `const b = this.f` on a LINEAR field of a BORROWED receiver:
