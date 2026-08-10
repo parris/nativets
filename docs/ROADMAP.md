@@ -268,12 +268,28 @@ a progress report and never the test of whether a fix is worth landing.
 **The remaining NT1606 debt, by sub-bucket** — none of it is "`.push` is refused", and each needs
 a different answer:
 
-- **`Map`/`Set` mutator result discarded — 50, now the largest.** Not an array problem at all:
+- **`Map`/`Set` mutator result discarded — 51, the largest.** Not an array problem at all:
   `Map`/`Set` here are PERSISTENT (§A), so `m.set(k, v)` as a statement is a no-op and is refused.
-  The rewrite `m = m.set(k, v)` is **free under bun** (node's `.set` returns the receiver, so the
-  reassignment is the identity) and correct under both — but it needs a rebindable `let` for the
-  23 local receivers, and a mutable class FIELD for the other 23 (`this.generics.set(…)`), and
-  `.delete` returns a **boolean** under node so those 3 sites need a real rewrite, not a rebind.
+
+  > **RE-MEASURED, and the paragraph that used to be here was wrong in both directions.** It
+  > said "23 local receivers, 23 `this.<field>`, 3 `.delete`" and that the rewrite
+  > `m = m.set(k, v)` is "correct under both". Classifying all 51 by their enclosing signature
+  > gives **26 `this.<field>`, 12 an out-PARAMETER, 12 true locals, 1 a field of a local, and 1
+  > (`(inArrow ? closure : direct).add(…)`, checker.ts) that names no binding at all**.
+  >
+  > **The `this.<field>` half needs nothing built** — `//@@mutable class` + `this.f = this.f.set(k, v)`
+  > compiles today and matches node. Same story as the array bucket one section up: the
+  > mechanism existed and was unapplied. Do not design a "mutable class field" feature for it.
+  >
+  > **The out-PARAMETER group is the real blocker, and the recommended rewrite is a silent
+  > wrong answer there.** A parameter is a borrow, so `out = out.add(n)` cannot reach the
+  > caller: node prints 3, we printed 0, exit 0 both sides. That is now refused (§A), and the
+  > `NT1606` hint — which recommended it verbatim for every receiver — is receiver-aware. The
+  > sanctioned spelling is a local seeded from the parameter, returned, rebound at the call site.
+  >
+  > `.delete` is a **third**, independent problem in the opposite direction: it breaks under
+  > **bun** (boolean), where the out-parameter rebind breaks under **nativets**. No single rule
+  > covers both.
 - **`.push` on `this.<field>` — 14, plus 1 on `b.lines` (a field of a local)** (was 38 sites
   tree-wide). Unchanged: a field
   names no binding. `this.f = [...this.f, v]` compiles on a `@@mutable` class and is O(1)

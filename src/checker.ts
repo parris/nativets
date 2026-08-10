@@ -122,6 +122,11 @@ interface Binding {
    *  a plain nullish narrowing's are. Without this the member layout would be applied to
    *  the BOX pointer, which is the silent wrong answer, not a diagnostic. */
   nullBox?: boolean;
+  /** This binding is a PARAMETER — a borrow, whose value the CALLER owns. Assigning to it
+   *  can never be observed by the caller, which is why rebinding a persistent `Map`/`Set`
+   *  parameter from its own mutator is refused (node's mutator changes the receiver, ours
+   *  returns a new one, so the caller and we disagree). See `rejectParamRebind`. */
+  param?: boolean;
 }
 
 /**
@@ -171,7 +176,7 @@ class Scope {
   readonly hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
-  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty, mutable?: boolean, nullBox?: boolean): void { this.vars.set(name, { ty, constant, len, narrowedFrom, mutable, nullBox }); }
+  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty, mutable?: boolean, nullBox?: boolean, param?: boolean): void { this.vars.set(name, { ty, constant, len, narrowedFrom, mutable, nullBox, param }); }
   own(name: string): Binding | undefined { return this.vars.get(name); }
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
@@ -2303,7 +2308,7 @@ class Checker {
         return;
       case "ExprStmt":
         this.type(s.expr, scope);
-        this.rejectDiscardedMutator(s.expr);
+        this.rejectDiscardedMutator(s.expr, scope);
         return;
     }
   }
@@ -2817,6 +2822,9 @@ class Checker {
         const vt = this.type(e.value, scope, e.op === "=" ? b.ty : undefined); // assignment target is the context (e.g. `a = []`)
         if (e.op === "=") {
           if (vt !== b.ty && !this.assignable(b.ty, vt)) throw typeError(`Cannot assign ${vt} to ${b.ty} '${e.target}'`);
+          // Types first, so a genuinely ill-typed assignment still reports as one; this
+          // rule is about a WELL-TYPED assignment whose effect the caller never sees.
+          this.rejectParamRebind(e.target, b, e.value);
         } else if (e.op === "+=" && b.ty === "string") {
           if (vt !== "string" && vt !== "number") throw typeError(`Cannot += ${vt} to string`);
         } else if (b.ty !== "number" || vt !== "number") {
@@ -3849,7 +3857,7 @@ class Checker {
    * (measured). Non-mutating methods (`.toSorted`, `.with`, string methods) are no-ops as
    * statements under node too, so discarding them is not a divergence.
    */
-  private rejectDiscardedMutator(e: Expr): void {
+  private rejectDiscardedMutator(e: Expr, scope: Scope): void {
     if (e.kind !== "CallExpr" || e.callee.kind !== "MemberExpr") return;
     const m = e.callee.property;
     const recv = e.callee.object.ty;
@@ -3879,13 +3887,130 @@ class Checker {
     // would be advice that does not typecheck as a fix for anything.
     const chain = m === "delete" ? "" :
       `, or build it in one chain: \`new ${kind}${isMap ? "<K, V>" : "<T>"}().${m}(…).${m}(…)\``;
+    // THE RECEIVER DECIDES THE HINT, and getting this wrong was a silent wrong answer the
+    // compiler INSTRUCTED people to write. The rebind below is right for a local and for a
+    // `@@mutable` class field, and WRONG for a parameter: a parameter is a borrow, so the
+    // caller — who owns the collection — never sees the rebind, while under node's
+    // mutating `.add`/`.set` they see every update. `collect(names, acc)` accumulating with
+    // `out = out.add(n)` prints 3 under node and 0 here, at exit 0. `rejectParamRebind`
+    // now refuses that program, so recommending it here would also be advice this very
+    // compiler rejects. Point at the shape that actually works instead: RETURN the
+    // collection and rebind at the call site (docs/self-hosting.md settled this).
+    const recvIsParam =
+      e.callee.object.kind === "Identifier" && Boolean(scope.lookup(e.callee.object.name)?.param);
+    const fix = recvIsParam && name !== undefined
+      ? `\`${name}\` is a PARAMETER, so do NOT write \`${name} = ${name}.${m}(${args})\` — a parameter is a borrow and the CALLER, who owns the ` +
+        `${kind.toLowerCase()}, would never see the update. Accumulate into a LOCAL seeded from it and RETURN that ` +
+        `(\`let acc = ${name}; acc = acc.${m}(${args}); return acc;\`), then rebind at the CALL SITE (\`x = f(…, x)\`); ` +
+        `a persistent collection cannot be an accumulator ARGUMENT. `
+      : name !== undefined
+        ? `write \`${name} = ${name}.${m}(${args})\` — the result IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. ` +
+          `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `
+        : `keep the result — it IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. ` +
+          `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `;
+    // THE TAIL HAS TO BE METHOD-AWARE, and saying "`.delete` … returns the receiver" was
+    // simply FALSE: node's `.delete` answers a BOOLEAN (test262
+    // built-ins/Map/prototype/delete/returns-{true,false}.js), which is the one §A
+    // divergence where the rebind this hint recommends does not merely become redundant
+    // under node — it means something ELSE there. `m = m.delete(k)` leaves `m` as `true`
+    // under node/bun, and bun is stage 0 of the bootstrap, so a reader porting `src/`
+    // needs that said out loud rather than inferred. The doc comment on this method and
+    // docs/divergences.md both had it right; only the emitted hint did not.
+    const tail = m === "delete"
+      ? `Unlike node, \`Map\`/\`Set\` here are persistent — and \`.delete\` is the sharpest case: node's \`.delete\` MUTATES the receiver and returns a BOOLEAN, ` +
+        `not a collection, so the discarded spelling works there and cannot here. BEWARE if this source must also run under node/bun: ` +
+        `\`x = x.delete(k)\` leaves \`x\` as \`true\` there, not a ${kind.toLowerCase()} (docs/divergences.md §A)`
+      : `Unlike node, \`Map\`/\`Set\` here are persistent — node's \`.${m}\` mutates and returns the receiver, so the discarded spelling works there and cannot here (docs/divergences.md §A)`;
     throw mutationError(
       `\`${kind}\` is persistent: \`.${m}\` returns a NEW ${kind.toLowerCase()} and leaves the receiver unchanged, so discarding the result here does NOTHING`,
-      (name !== undefined
-        ? `write \`${name} = ${name}.${m}(${args})\` — the result IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. `
-        : `keep the result — it IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. `) +
-      `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. ` +
-      `Unlike node, \`Map\`/\`Set\` here are persistent — node's \`.${m}\` mutates and returns the receiver, so the discarded spelling works there and cannot here (docs/divergences.md §A)`,
+      fix + tail,
+      loc,
+    );
+  }
+
+  /**
+   * The mutator a `Map`/`Set` call chain applies, if the chain bottoms out at the binding
+   * `target`; `undefined` for anything else. `out.add(a).add(b)` with `target` `"out"`
+   * answers `"add"` (the OUTERMOST method, which is the one to name in a hint).
+   *
+   * Recursive rather than a `while` loop walking a reassigned `let`: an early
+   * `kind !== "CallExpr"` return narrows a PARAMETER, which the checker propagates, while
+   * a `let` reassigned in a loop body it does not — and `src/` has to stay inside the
+   * subset this compiler parses (see the blocker metric).
+   */
+  private mutatorChainOn(e: Expr, target: string): string | undefined {
+    if (e.kind === "Identifier") return e.name === target ? "" : undefined;
+    if (e.kind !== "CallExpr") return undefined;
+    const callee = e.callee;
+    if (callee.kind !== "MemberExpr") return undefined;
+    const m = callee.property;
+    if (m !== "set" && m !== "add" && m !== "delete") return undefined;
+    const inner = this.mutatorChainOn(callee.object, target);
+    return inner === undefined ? undefined : m;
+  }
+
+  /**
+   * Rebinding a `Map`/`Set` PARAMETER from its own mutator (NT1606).
+   *
+   * The exact fix `rejectDiscardedMutator` above used to recommend, and a silent wrong
+   * answer whenever the receiver is a parameter rather than a local:
+   *
+   *     function collect(names: string[], out: Set<string>): void {
+   *       for (const n of names) out = out.add(n);     // what the hint said to write
+   *     }
+   *     let acc = new Set<string>();
+   *     collect(["a", "b", "c"], acc);
+   *     console.log(acc.size);      // node: 3.  here, before this rule: 0, at exit 0.
+   *
+   * A parameter is a BORROW — the caller owns the collection. node's `.add`/`.set`
+   * MUTATES the receiver, so the caller observes every append and the rebind is
+   * incidental; ours returns a NEW collection, so the rebind is purely local and the
+   * caller's handle never changes. Same source, both exit 0, different stdout.
+   *
+   * NOTE THE DIRECTION, because it is the reverse of the `.delete` rule below. A `.delete`
+   * rebind (`m = m.delete(k)`) is wrong under BUN, where `.delete` answers a boolean. This
+   * one is wrong under NATIVETS. Two independent refusals; neither implies the other, and
+   * a single blanket rule would have to be wrong for one of them.
+   *
+   * THE RULE IS DELIBERATELY NARROW: only an assignment whose VALUE is a mutator call
+   * rooted at the parameter itself. `out = new Set<string>()` on a parameter is NOT
+   * refused — node agrees that one is invisible to the caller, so there is no divergence
+   * to report. The divergence exists only because node's mutator has a side effect on the
+   * receiver that ours does not, so that is exactly what this looks for. The chained form
+   * (`out = out.add(a).add(b)`) roots at the same parameter and is caught too.
+   *
+   * The sanctioned spelling was already settled in docs/self-hosting.md — "a persistent
+   * `Map` cannot be an accumulator argument; RETURN the bindings" — and the compiler's own
+   * `src/` uses the out-parameter shape in 12 places. Only the diagnostic had not learned
+   * it, which is why the hint here names the call-site rebind rather than a local one.
+   */
+  private rejectParamRebind(target: string, b: Binding, value: Expr): void {
+    // Truthiness, not `!== true`: `param` is an OPTIONAL boolean, and comparing one
+    // against `boolean` is outside the subset `src/` must stay inside (NT2001).
+    if (!b.param) return;
+    if (!isMapTy(b.ty) && !isSetTy(b.ty)) return;
+    // Walk down the call chain to the root receiver: `out.add(a).add(b)` bottoms out at
+    // `out`. Anything that is not a mutator call on a member path stops the walk, so an
+    // unrelated value (`out = other.add(x)`, `out = new Set()`) never matches.
+    const kind = isMapTy(b.ty) ? "Map" : "Set";
+    // The OUTERMOST call carries the position a reader scans for — the statement's own
+    // line — so it is captured before the walk descends past it. Via `exprLoc` rather
+    // than a `kind === "CallExpr"` narrowing: `exprLoc` reads `.loc` structurally, which
+    // keeps this function inside the self-host subset (the narrowing form is the tree's
+    // most-hit NT2001).
+    const loc = exprLoc(value);
+    const method = this.mutatorChainOn(value, target);
+    // `""` means the value was the BARE parameter (`out = out`), which applies no mutator
+    // and diverges from nothing.
+    if (method === undefined || method === "") return;
+    throw mutationError(
+      `\`${target}\` is a PARAMETER, so \`${target} = ${target}.${method}(…)\` silently loses the update: ` +
+        `a parameter is a borrow, the CALLER owns the ${kind.toLowerCase()}, and rebinding it here cannot reach them`,
+      `accumulate into a LOCAL seeded from the parameter and RETURN it: ` +
+        `\`let acc = ${target}; acc = acc.${method}(…); return acc;\` — then rebind at the CALL SITE (\`x = f(…, x)\`). ` +
+        `Unlike node, \`Map\`/\`Set\` here are persistent: node's \`.${method}\` MUTATES the receiver, so the caller sees the ` +
+        `update there and cannot here, which is why a persistent collection cannot be an accumulator ARGUMENT ` +
+        `(docs/divergences.md §A)`,
       loc,
     );
   }
@@ -4310,7 +4435,7 @@ class Checker {
    *  is recorded for codegen. */
   private typeArrowBody(arrow: Extract<Expr, { kind: "ArrowFunction" }>, paramTypes: Ty[], scope: Scope): Ty {
     const inner = scope.child();
-    arrow.params.forEach((p, i) => inner.declare(p.name, paramTypes[i]!, false));
+    arrow.params.forEach((p, i) => inner.declare(p.name, paramTypes[i]!, false, undefined, undefined, undefined, undefined, /* param */ true));
     arrow.paramTys = paramTypes;
     // Inlined or not, a value-arrow nested inside this callback needs this body in its
     // enclosing chain (NT1031) — the callback's own statements are one of the places an
@@ -4433,7 +4558,7 @@ class Checker {
     });
     arrow.paramTys = paramTys;
     const inner = scope.child();
-    arrow.params.forEach((p, i) => inner.declare(p.name, paramTys[i]!, false));
+    arrow.params.forEach((p, i) => inner.declare(p.name, paramTys[i]!, false, undefined, undefined, undefined, undefined, /* param */ true));
     // An arrow used as a VALUE may escape and run long after the guard that narrowed an
     // enclosing binding, so a `let` narrowing stops at this boundary (a `const` one
     // cannot be invalidated, so it crosses). TypeScript draws the line in the same
@@ -4497,7 +4622,7 @@ class Checker {
           "`@@mutable` on a parameter marks an ARRAY the callee may `.push` to in place. For a record parameter use `@@mutable type`, for a class `@@mutable class`",
         );
       }
-      base.declare(p.name, tys[i]!, false, undefined, undefined, p.mutable);
+      base.declare(p.name, tys[i]!, false, undefined, undefined, p.mutable, undefined, /* param */ true);
     });
   }
 

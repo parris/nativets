@@ -1174,6 +1174,70 @@ is the *correct* rendering, indistinguishable from `console.log(m.set(k, v))`. T
 fix is the one the discarded-mutator section names: box the handle so `.delete` can return
 node's boolean.
 
+#### Rebinding a `Map`/`Set` PARAMETER from its own mutator is refused (`NT1606`)
+
+The three rules above all police the *discarded* result. This one polices the fix they
+**recommended**, which was right for a local and a silent wrong answer for a parameter:
+
+```ts
+function collect(names: string[], out: Set<string>): void {
+  for (const n of names) out = out.add(n);   // exactly what the hint told you to write
+}
+let acc = new Set<string>();
+collect(["a", "b", "c"], acc);
+console.log(acc.size);        // node: 3.  here, before this rule: 0, at exit 0.
+```
+
+A parameter is a **borrow** — the caller owns the collection. node's `.add`/`.set` MUTATES
+the receiver, so the caller observes every append and the rebind is incidental; ours returns
+a NEW collection, so the rebind is purely local and the caller's handle never changes.
+
+**Note the direction, because it is the reverse of the `.delete` rule.** A `.delete` rebind
+is wrong under **bun**, where `.delete` answers a boolean. This one is wrong under
+**nativets**. They are independent refusals and neither implies the other — a single blanket
+rule would have to be wrong for one of them.
+
+The rule is **narrow on purpose**: only an assignment whose VALUE is a mutator call rooted at
+the parameter itself (the chained `out = out.add(a).add(b)` roots at the same parameter and
+is caught too). `out = new Set<string>()` on a parameter is **not** refused — node agrees
+that one is invisible to the caller, so there is no divergence to report. The divergence
+exists only because node's mutator has a side effect on the receiver that ours does not.
+
+The sanctioned spelling — accumulate into a **local** seeded from the parameter, return it,
+and rebind at the **call site** — matches node exactly and is what the hint now names:
+
+```ts
+function collect(names: string[], out: Set<string>): Set<string> {
+  let r = out;
+  for (const n of names) { r = r.add(n); }
+  return r;
+}
+let acc = new Set<string>();
+acc = collect(["a", "b", "c"], acc);   // 3 under both
+```
+
+This is what docs/self-hosting.md already meant by "a persistent `Map` cannot be an
+accumulator argument — RETURN the bindings"; `src/` uses the out-parameter shape in **12**
+places, which is the largest sub-bucket of the remaining `Map`/`Set` `NT1606` debt.
+
+#### Two corrections to the `NT1606` hint itself — the diagnostic was the delivery mechanism
+
+Both of these were *wrong text*, not wrong analysis, and both are worse than an ordinary bug
+because a diagnostic is trusted precisely when the reader is uncertain:
+
+1. The hint said `write \`out = out.add(n)\`` for **every** receiver alike, so following it on
+   an out-parameter produced the lost update above. It is now receiver-aware and names the
+   return-and-rebind spelling for a parameter.
+2. The tail claimed **"node's `.delete` mutates and returns the receiver"**. node's `.delete`
+   returns a **BOOLEAN** (test262 `built-ins/Map/prototype/delete/returns-{true,false}.js`;
+   re-measured: after `m = m.delete("a")` node reports `typeof m === "boolean"`, value
+   `true`). `.delete` is the one case where the recommended rebind does not merely become
+   redundant under node — it means something *else* there, and bun is stage 0 of the
+   bootstrap, so the hint now says so out loud.
+
+In both cases this file and the checker's own doc comments were already correct; only the
+emitted text disagreed with them.
+
 ### `Record<K, V>` is a `Map`, not an object — and an object literal cannot initialize one
 
 In TypeScript `Record<K, V>` is an **object** type, so `const o: Record<string, string> = { a: "1" }`

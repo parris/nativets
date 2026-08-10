@@ -8,7 +8,7 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { compileAndRun, emitIR } from "./harness.ts";
+import { compileAndRun, emitIR, runWithNode } from "./harness.ts";
 
 /** Compile-only: the diagnostic a source is rejected with (or null if it compiles). */
 function rejectionOf(source: string): { code: string; message: string; hint?: string } | null {
@@ -380,6 +380,163 @@ console.log(base.get("k0"), changed.get("k0"), bigger.has("k40"), base.has("k40"
     const r = await compileAndRun(src);
     // base: 40 entries, k0==0, no k40. bigger: 41, has k40. changed: 40, k0==500.
     expect(r.stdout).toBe("40 41 40\n0 500 true false\n");
+    expect(r.exitCode).toBe(0);
+  });
+});
+
+/*
+ * REBINDING A PARAMETER — the fix the discarded-mutator hint used to RECOMMEND, and a
+ * silent wrong answer in the opposite direction from every other case in this file.
+ *
+ * The refusal above says "write `out = out.add(n)`" with no test of what `out` IS. On a
+ * local that advice is exactly right and costs nothing (node's `.add` returns the
+ * receiver, so the rebind is the identity there). On a PARAMETER it is wrong, because a
+ * parameter is a BORROW — the caller owns the collection and the callee's rebind cannot
+ * reach it:
+ *
+ *     function collect(names: string[], out: Set<string>): void {
+ *       for (const n of names) out = out.add(n);   // what the hint told you to write
+ *     }
+ *     let acc = new Set<string>(); collect(["a","b","c"], acc); console.log(acc.size);
+ *
+ * node prints 3 — its `.add` MUTATES the receiver, so the caller observes every append
+ * and the rebind is incidental. We print 0: `.add` returns a new set, the rebind is
+ * local, and the caller's `acc` never changes. Exit 0 on both sides, stdout wrong.
+ *
+ * Note the DIRECTION, because it is the reverse of `.delete`. A discarded `.delete`
+ * rebind (`m = m.delete(k)`) breaks under BUN, where `.delete` answers a boolean. This
+ * one breaks under NATIVETS. They are two different refusals and neither rule implies
+ * the other.
+ *
+ * The rule is narrow on purpose: only an assignment whose VALUE is a mutator call on the
+ * parameter itself. A plain `m = new Map()` on a parameter is NOT refused — node agrees
+ * that one is invisible to the caller, so there is no divergence to report. The
+ * divergence exists only because node's mutator has a side effect on the receiver that
+ * ours does not.
+ *
+ * The sanctioned spelling was already decided in docs/self-hosting.md ("a persistent Map
+ * cannot be an accumulator argument — RETURN the bindings"); only the diagnostic had not
+ * learned it.
+ */
+describe("rebinding a Map/Set PARAMETER from its own mutator is refused", () => {
+  test("`out = out.add(n)` on a parameter is NT1606, not a lost update", () => {
+    const r = rejectionOf(
+      `function collect(names: string[], out: Set<string>): void {\n  for (const n of names) out = out.add(n);\n}\nconst acc = new Set<string>();\ncollect(["a"], acc);\nconsole.log(acc.size);\n`,
+    );
+    expect(r?.code).toBe("NT1606");
+    expect(r?.message).toContain("parameter");
+  });
+
+  /*
+   * THE HINT IS THE DELIVERY MECHANISM, and this is the test that matters most in the
+   * file. A wrong answer a user stumbles into is bad; a wrong answer the compiler
+   * INSTRUCTS them to write is worse, because a diagnostic is trusted exactly when
+   * someone is uncertain. The discarded-mutator refusal used to print
+   * "write `out = out.add(n)`" for every receiver alike — so following the hint on an
+   * out-parameter produced the lost update above, and after the rule above it would be
+   * recommending a program this same compiler now rejects.
+   */
+  test("the DISCARDED-mutator hint does not recommend the rebind on a parameter", () => {
+    const r = rejectionOf(
+      `function collect(names: string[], out: Set<string>): void {\n  for (const n of names) out.add(n);\n}\nconst acc = new Set<string>();\ncollect(["a"], acc);\nconsole.log(acc.size);\n`,
+    );
+    expect(r?.code).toBe("NT1606");
+    // It must not RECOMMEND the rebind. It may still name it, and it does — as the thing
+    // NOT to write — which is more useful than silence to someone who already tried it.
+    expect(r?.hint).toContain("do NOT write `out = out.add(n)`");
+    expect(r?.hint).toContain("PARAMETER");
+    // …and it must name a spelling that works: a local, returned, rebound by the caller.
+    expect(r?.hint).toContain("let acc = out;");
+    expect(r?.hint).toContain("return acc;");
+  });
+
+  /*
+   * THE SAME HINT STATED A FLAT FALSEHOOD ABOUT `.delete`, and it is the third instance of
+   * this lane's theme. The tail read "node's `.delete` mutates and returns the receiver".
+   * node's `.delete` answers a BOOLEAN (test262
+   * built-ins/Map/prototype/delete/returns-{true,false}.js — re-measured here: after
+   * `m = m.delete("a")` node reports `typeof m === "boolean"`, value `true`).
+   *
+   * That matters more than a wording slip, because `.delete` is the one case where the
+   * recommended rebind does not merely become redundant under node — it means something
+   * ELSE. bun is stage 0 of the bootstrap and runs `src/`, so a hint that hides this is a
+   * hint that breaks the compiler's own source. divergences.md §A and this method's own
+   * doc comment always had it right; only the emitted text did not.
+   */
+  test("the `.delete` hint does not claim node returns the receiver, and warns about bun", () => {
+    const r = rejectionOf(`let m = new Map<string, number>().set("a", 1);\nm.delete("a");\nconsole.log(m.size);\n`);
+    expect(r?.code).toBe("NT1606");
+    expect(r?.hint).not.toContain("`.delete` mutates and returns the receiver");
+    expect(r?.hint).toContain("BOOLEAN");
+    expect(r?.hint).toContain("`true`");
+  });
+
+  /* …while `.set`/`.add` genuinely DO return the receiver under node, so that tail stays. */
+  test("the `.set` hint still says node returns the receiver, which is true", () => {
+    const r = rejectionOf(`const m = new Map<string, number>();\nm.set("a", 1);\nconsole.log(m.size);\n`);
+    expect(r?.hint).toContain("node's `.set` mutates and returns the receiver");
+    expect(r?.hint).not.toContain("BOOLEAN");
+  });
+
+  /* A LOCAL receiver is the case the old hint was written for, and it must be untouched. */
+  test("a LOCAL receiver still gets the rebind hint", () => {
+    const r = rejectionOf(`const s = new Set<number>();\ns.add(1);\nconsole.log(s.size);\n`);
+    expect(r?.code).toBe("NT1606");
+    expect(r?.hint).toContain("s = s.add(1)");
+    expect(r?.hint).not.toContain("PARAMETER");
+  });
+
+  /*
+   * NO FALSE POSITIVES on the assignment rule. Assigning something that is NOT derived
+   * from the parameter's own mutator is invisible to the caller under node TOO, so there
+   * is no divergence and nothing to refuse. Refusing it would be over-refusal with an
+   * untrue hint.
+   */
+  test("`out = new Set()` on a parameter is NOT refused — node agrees it is invisible", async () => {
+    const src =
+      `function reset(out: Set<string>): number {\n  out = new Set<string>();\n  return out.size;\n}\n` +
+      `const acc = new Set<string>().add("a");\nconsole.log(reset(acc), acc.size);\n`;
+    expect(rejectionOf(src)).toBeNull();
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe(runWithNode(src).stdout);
+    expect(r.exitCode).toBe(0);
+  });
+
+  /* The CHAINED rebind roots at the same parameter and is caught too. */
+  test("`out = out.add(a).add(b)` on a parameter is refused", () => {
+    const r = rejectionOf(
+      `function collect(out: Set<string>): void {\n  out = out.add("a").add("b");\n}\nconst acc = new Set<string>();\ncollect(acc);\nconsole.log(acc.size);\n`,
+    );
+    expect(r?.code).toBe("NT1606");
+  });
+
+  /*
+   * A LOCAL rebind is the whole point of the persistent model and must stay legal — this
+   * is the 12-site group in `src/` for which the ROADMAP's advice was always correct.
+   */
+  test("rebinding a LOCAL from its own mutator still compiles and matches node", async () => {
+    const src =
+      `let s = new Set<string>();\nfor (const n of ["a", "b", "c"]) { s = s.add(n); }\nconsole.log(s.size);\n`;
+    expect(rejectionOf(src)).toBeNull();
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe(runWithNode(src).stdout);
+    expect(r.exitCode).toBe(0);
+  });
+
+  /*
+   * THE SANCTIONED SPELLING, end to end, against node. This is what the new hint tells
+   * you to write, so it has to actually work — a hint is only as good as the program it
+   * produces, which is the failure this whole block exists to close.
+   */
+  test("the LOCAL-seeded-from-the-parameter spelling the hint names matches node", async () => {
+    const src =
+      `function collect(names: string[], out: Set<string>): Set<string> {\n` +
+      `  let r = out;\n  for (const n of names) { r = r.add(n); }\n  return r;\n}\n` +
+      `let acc = new Set<string>();\nacc = collect(["a", "b", "c"], acc);\nconsole.log(acc.size);\n`;
+    expect(rejectionOf(src)).toBeNull();
+    const r = await compileAndRun(src);
+    expect(r.stdout).toBe(runWithNode(src).stdout);
+    expect(r.stdout).toBe("3\n");
     expect(r.exitCode).toBe(0);
   });
 });
