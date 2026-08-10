@@ -605,12 +605,62 @@ mutation — remove the `iterationPath` arm and `6 6` comes back.
 the inlined-HOF lowering agrees with node exactly (`this.xs.forEach(x => this.xs.push(…))`
 matches, verified differentially).
 
+#### …and `.pop`, when the result is DISCARDED
+
+`push` and `pop` are **one idiom** — push on the way in, pop in the matching `finally` —
+and legalizing half of it was measured as **nine** refusals in this compiler's own source
+(`parser.ts`'s `returnsAsyncFnStack`/`typeParamScopes`, `checker.ts`'s `narrowStack`,
+`codegen.ts`'s `hofReturnStack`, plus `this.pending.shift`). So `xs.pop();` **as its own
+statement** is legal on every accumulator shape — a `@@mutable` local, a marked parameter,
+`this.<field>` of a `@@mutable` class.
+
+**Taking the value is not**, and that boundary is load-bearing rather than merely cautious:
+
+| | |
+|---|---|
+| `xs.pop();` | legal — nothing leaves the array, so no second owner and no second free |
+| `const x = xs.pop();` | `NT1606` |
+| `xs.pop() + 1;` / `f(xs.pop());` | `NT1606` — the *statement*'s result is discarded, the *pop*'s is not |
+
+Two independent reasons, either sufficient. **Ownership:** `.push` appends, so the array
+gains an owner (`arrPush` consumes the argument); `.pop` removes *and returns*, so
+ownership would travel **out** — the tree's first move-out-of-an-array-element, landing on
+a path where `nt_obj_free` is `free(o)` and never walks slots. **node's return value:**
+`pop(): T | undefined`, and `[].pop()` is `undefined`, while `nt_arr_pop` answers
+`return 0` and codegen types the result as bare `T`. Proved by mutation — delete the
+discard condition and `const n = xs.pop()` on an empty array prints `0` (node:
+`undefined`), and on a `string[]` prints `(null)`, both at **exit 0**.
+
+The discarded rule needs neither fact to stay true. An empty-array `pop` is a no-op on
+both sides (`nt_arr_pop` returns early; the length never goes negative), and on the day
+element freeing lands, a discarded pop simply *drops* the element — the array is where
+that drop belongs, and nothing here mints a second owner to double-free it.
+
+Iterator invalidation is the pre-existing `NT1603`: `MUTATING` in `src/ownership.ts`
+already held `"pop"`. Proved by mutation — remove it and
+`for (const x of this.xs) { this.xs.pop(); … }` over five elements prints `60 0` where
+node prints `60 2` (node's iterator re-reads `length` and stops early; the lowered loop
+runs the entry count and `nt_arr_get` answers 0 past the new end). The `NT1603` hint is
+now method-aware: the push text ("reallocates it", "the growth being SEEN", "append after
+the loop") was three false statements about a method that removes.
+
 #### What it does NOT legalize
 
-`.pop`, `.shift`, `.unshift`, `.splice`, `.fill`, `.copyWithin` on a field are still
-`NT1606`, exactly as on a local accumulator — the attribute legalizes **append**, nothing
-else. `this.blocks[i].lines.push(…)` (an element path) also stays refused: the receiver is
-not `this.<field>`.
+`.shift`, `.unshift`, `.splice`, `.fill`, `.copyWithin` on a field are still `NT1606`,
+exactly as on a local accumulator. `.shift` in particular gets **no** share of the `.pop`
+opt-in and not by association: it removes from the **front**, so every remaining element
+moves (O(n) per call), and there is no `nt_arr_shift` in the runtime — `nt_arr_pop` is a
+decrement. `this.blocks[i].lines.push(…)` (an element path) also stays refused: the
+receiver is not `this.<field>`.
+
+**Two hints were repaired here, both in the "recommends a worse divergence" class.** The
+`.pop` refusal offered `arr[arr.length - 1]` "for the last element" and `.shift` offered
+`arr[0]` "for the first": on an **empty** array node gives `undefined` for all four
+spellings, while ours **panics** (Stage 41). `test/no-index-last.test.ts` lints for exactly
+that shape and carried an explicit carve-out for the `.pop` hint's string, which is how it
+survived. Both now name `.at(-1)` / `.at(0)`, which really do answer `undefined`, and
+every rewrite the hints recommend is compiled against node in
+`test/pop-accumulator.test.ts`.
 
 ### The attribute is on the BINDING, not the type
 
@@ -657,7 +707,9 @@ Only the owner may mutate. For an accumulator the compiler already had everythin
 | `this.f`, `xs[0]`, `f()` | name **no binding** — never match the opt-in, so `NT1606` |
 | a **captured** accumulator | **`NT1607`** — the one hole the three facts above do not cover |
 | pushing while a `for-of` borrows it | `NT1603` (iterator invalidation), the pre-existing rule |
+| **popping** while a `for-of` borrows it | `NT1603` too — `MUTATING` already held `"pop"`; the hint is now method-aware |
 | `.push`'s **argument** | **CONSUMED**, exactly as an array-literal element is |
+| `.pop`'s **result** | **NOT** an owner — which is why only the DISCARDED spelling is legal |
 
 The closure rule is the only new one, and it is the only one that had to be. Our closure
 environment is a heap block filled **by value** when the closure is built (see `NT1031`), so an

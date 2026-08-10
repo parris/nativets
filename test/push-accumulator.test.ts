@@ -905,8 +905,20 @@ console.log(acc.join(","));
 `);
   });
 
+  /*
+   * `pop()` HAS SINCE MOVED OFF THIS LIST, and the move is the point rather than an
+   * exception to it: `.push` and `.pop` are ONE idiom (push on the way in, pop in the
+   * matching `finally`), and legalizing half of it was measured as nine refusals in this
+   * compiler's own source. A DISCARDED `.pop()` on an accumulator is legal now —
+   * test/pop-accumulator.test.ts owns that rule and the reason it stops at "discarded".
+   * Taking the value (`const x = xs.pop()`) is still NT1606 and is asserted there.
+   *
+   * Everything else on the list stays refused for its own reason, not by association:
+   * `.shift`/`.unshift` move every remaining element, `.splice`/`.fill`/`.copyWithin`
+   * overwrite in place, and none of them has a runtime primitive here.
+   */
   test("the OTHER in-place mutators are untouched by the opt-in", () => {
-    for (const m of ["pop()", "shift()", "unshift(1)", "splice(0, 1)", "fill(0)", "copyWithin(0, 1)"]) {
+    for (const m of ["shift()", "unshift(1)", "splice(0, 1)", "fill(0)", "copyWithin(0, 1)"]) {
       const got = rejectionOf(`//@@mutable\nlet xs: number[] = [1, 2, 3];\nxs.${m};\nconsole.log(xs.length);\n`);
       expect(got?.code).toBe("NT1606");
     }

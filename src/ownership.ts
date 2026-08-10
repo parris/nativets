@@ -994,7 +994,20 @@ class Analyzer {
               code: OWN_CODES.MUTATE_WHILE_BORROWED,
               message: `cannot mutate \`${path}\` while it is borrowed (iterator invalidation)`,
               line: e.callee.object.loc?.line ?? 0,
-              hint: `a \`for-of\` over \`${path}\` reads through the array's storage, and \`.${e.callee.property}\` reallocates it — so the loop would keep reading the old block, and node's answer depends on the growth being SEEN. Collect into a local first (\`let add: T[] = []\` … \`add.push(v)\`), then append after the loop`,
+              // METHOD-AWARE, because `MUTATING` holds two methods that invalidate for
+              // OPPOSITE reasons and the push text was being printed for both. `.pop`
+              // reallocates nothing — it decrements the length — so "reallocates it" and
+              // "the growth being SEEN" were each false on a pop, and "append after the
+              // loop" is not a fix for a program that removes. Measured, with this guard
+              // off: `for (const x of this.xs) { this.xs.pop(); s = s + x; }` over five
+              // elements prints `60 2` under node (the iterator re-reads `length` and
+              // stops early, leaving two) and `60 0` here (the lowered loop runs the
+              // ENTRY length, `nt_arr_get` answers 0 for the indices past the shrunken
+              // end, and every iteration pops). Same sum by coincidence, different array,
+              // exit 0 both times — the silent-wrong-answer class.
+              hint: e.callee.property === "pop"
+                ? `a \`for-of\` over \`${path}\` snapshots the length before the first step, and \`.pop\` changes it underneath — node's iterator re-reads \`length\` every step and STOPS EARLY, while this loop would run the original count and read past the new end. Take the elements you want inside the loop and shrink AFTER it (\`for (const x of ${path}) { … }\` then the \`.pop()\` calls), or iterate an index yourself with \`while (${path}.length > 0)\``
+                : `a \`for-of\` over \`${path}\` reads through the array's storage, and \`.push\` reallocates it — so the loop would keep reading the old block, and node's answer depends on the growth being SEEN. Collect into a local first (\`let add: T[] = []\` … \`add.push(v)\`), then append after the loop`,
             });
           }
         }
