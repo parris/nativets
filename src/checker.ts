@@ -2562,8 +2562,96 @@ class Checker {
     return { text, stable: true, already: this.narrowedTy(p.binding, p.path) !== undefined, root: p.name };
   }
 
+  /**
+   * WHICH of `unionCommonField`'s three clauses the read tripped, named, with the member
+   * that tripped it — or `undefined` when the shape is one this cannot account for.
+   *
+   * THE SENTENCE THIS REPLACES WAS FALSE, and expensively so. It read
+   *
+   *     'e' is narrowed here to MORE THAN ONE member ("A", "B"), so only the shared tag
+   *     'kind' is readable — give each tag its own arm
+   *
+   * which asserts the rule "narrowed to more than one member ⇒ only the tag is readable".
+   * `test/unions/shared-field.ts` disproves that on every run: `case "Bin": case "Log":
+   * return depth(n.left)` reads a NON-tag field off a two-member narrowing, because
+   * `unionCommonField` accepts a field that is in every member, at the SAME slot, with the
+   * SAME type. Multi-member narrowing is not the cause of anything; one of those three
+   * clauses is, and the old sentence named none of them.
+   *
+   * The cost is on the record one file over. `src/ast.ts` carries a comment explaining
+   * that five blockers in `src/` came from `WhileStmt` and `DoWhileStmt` declaring
+   * `test`/`body` in different ORDERS, and were cleared by making the two layouts agree —
+   * "Nothing in the compiler needed changing; the layouts just had to agree." That fix is
+   * invisible to a reader who has just been told the only option is to split the arm, and
+   * splitting five arms is what the old advice would have bought instead.
+   *
+   * So the SLOT case is the one that gains a second option, because it is the only one
+   * with a layout fix: a field at differing offsets can be brought into line by reordering
+   * the declarations. Differing TYPES cannot (there is no single interpretation of the
+   * loaded bits — this is the type confusion the project exists to refuse), and an ABSENT
+   * field cannot (there is nothing at any offset). Those two keep "split the arm" as the
+   * whole answer, which for them it is.
+   *
+   * SLOTS ARE REPORTED BEFORE TYPES when both disagree: a reader fixes one thing at a
+   * time, and the slot report is the one with an actionable second option attached.
+   */
+  private fieldDisagreement(base: Ty, prop: string): string | undefined {
+    const members = unionMembers(base);
+    const values = unionTagValues(base);
+    if (members.length === 0 || values.length !== members.length) return undefined;
+    // Accumulated as STRINGS rather than arrays: `push` onto a local would be an aliased
+    // mutation here, and a plain `+=` keeps this function inside the subset it compiles.
+    let missing = "";
+    let slotList = "";
+    let typeList = "";
+    let slotsAgree = true;
+    let typesAgree = true;
+    let firstSlot = -1;
+    let firstTy: Ty = "number";
+    let i = 0;
+    for (const m of members) {
+      // `values[i]` with a `??`, not `values[i]!`: an out-of-range index PANICS here
+      // (Stage 41) rather than yielding undefined, and this runs while the compiler is
+      // already reporting an error — the one place a spurious panic is least welcome.
+      const tag = `"${values[i] ?? "?"}"`;
+      const fs = objectFields(m);
+      const at = fs.findIndex((f) => f.key === prop);
+      if (at < 0) { missing += missing === "" ? tag : `, ${tag}`; i++; continue; }
+      // Read THROUGH the index — binding `const f = fs[at]!` makes the local a second
+      // owner of a slot the array still holds (NT1605), the same reason `objectLayoutFits`
+      // and `fieldType` in src/ast.ts spell their reads this way. In bounds: `at >= 0`
+      // came from `findIndex` on this very array.
+      const w = widenLiteralTys(fs[at]!.ty);
+      slotList += (slotList === "" ? "" : ", ") + `${tag} slot ${at}`;
+      typeList += (typeList === "" ? "" : ", ") + `${tag} ${w}`;
+      if (firstSlot < 0) { firstSlot = at; firstTy = w; i++; continue; }
+      if (at !== firstSlot) slotsAgree = false;
+      if (w !== firstTy) typesAgree = false;
+      i++;
+    }
+    if (missing !== "") {
+      return `'${prop}' is not in every surviving member — ${missing} does not have it, so there ` +
+        `is no offset that reads it for all of them`;
+    }
+    if (!slotsAgree) {
+      return `'${prop}' is in every surviving member with the same type, but at DIFFERENT slots ` +
+        `(${slotList}) — a field read compiles to ONE constant offset, so there is no single ` +
+        `offset to load it from. Either make the layouts AGREE (declare '${prop}' at the same ` +
+        `position in every member) or`;
+    }
+    if (!typesAgree) {
+      return `'${prop}' is in every surviving member at the same slot, but at DIFFERENT types ` +
+        `(${typeList}) — there is no single way to interpret the loaded bits, which is exactly ` +
+        `the type confusion this refuses, so`;
+    }
+    // All three clauses hold, so `unionCommonField` accepted the read and we are not on
+    // this path. Defensive: a shape this cannot account for gets the generic advice rather
+    // than a confident wrong explanation.
+    return undefined;
+  }
+
   /** The truthful half of the union field diagnostic — see `recvHint`. */
-  private narrowAdvice(base: Ty, key: string, recv?: RecvHint): string {
+  private narrowAdvice(base: Ty, key: string, prop: string, recv?: RecvHint): string {
     const x = recv === undefined ? "x" : recv.text;
     const values = unionTagValues(base);
     const tags = values.map((v) => `"${v}"`).join(", ");
@@ -2574,9 +2662,14 @@ class Checker {
         `read runs — so bind it first (\`const v = ${x};\`) and narrow \`v\` (\`if (v.${key} === ${one})\`)`;
     }
     if (recv !== undefined && recv.already) {
-      return `'${x}' is narrowed here to MORE THAN ONE member (${tags}), so only the shared tag ` +
-        `'${key}' is readable — give each tag its own arm (one \`case\` body per tag, or a further ` +
+      const why = this.fieldDisagreement(base, prop);
+      const arm = `give each tag its own arm (one \`case\` body per tag, or a further ` +
         `\`if (${x}.${key} === ${one})\`)`;
+      // The `why` clauses are written to end where the advice begins ("…or", "…so", or a
+      // full stop), so the two halves join without a connective of their own.
+      if (why !== undefined) return `${why} ${arm}`;
+      return `'${x}' is narrowed here to MORE THAN ONE member (${tags}), so only the shared tag ` +
+        `'${key}' is readable — ${arm}`;
     }
     // A dotted path DOES narrow, so "no test written" is no longer the only way to get
     // here with one: the fact is also dropped when the root is rebound between the proof
@@ -2619,7 +2712,7 @@ class Checker {
       const c = unionCommonField(base, prop);
       if (c) return c.ty;
       const d = unionDiscriminant(base)!;
-      throw typeError(`Property '${prop}' does not exist on ${showUnion(base)} — ${this.narrowAdvice(base, d.key, recv)}`, at, undefined, "this read");
+      throw typeError(`Property '${prop}' does not exist on ${showUnion(base)} — ${this.narrowAdvice(base, d.key, prop, recv)}`, at, undefined, "this read");
     }
     if ((base === "string" || isArrayTy(base)) && prop === "length") return "number";
     if (isObjectTy(base)) {
