@@ -1332,7 +1332,13 @@ export function setBlockDrops(
 }
 export interface IfStmt { kind: "IfStmt"; test: Expr; consequent: Stmt[]; alternate: Stmt[] | null; }
 export interface WhileStmt { kind: "WhileStmt"; test: Expr; body: Stmt[]; }
-export interface DoWhileStmt { kind: "DoWhileStmt"; body: Stmt[]; test: Expr; }
+// Field order MATCHES `WhileStmt` deliberately: `test` then `body`. A field is readable off
+// a union narrowed to several members only when it sits at the SAME SLOT INDEX in each (a
+// read compiles to a constant offset), so the two declarations disagreeing made every
+// `case "WhileStmt": case "DoWhileStmt":` arm that touches `.test` or `.body` a blocker —
+// five of them in `src/`. Nothing in the compiler needed changing; the layouts just had to
+// agree. Source order here is the layout, so keep these two in step.
+export interface DoWhileStmt { kind: "DoWhileStmt"; test: Expr; body: Stmt[]; }
 export interface ForStmt {
   kind: "ForStmt";
   init: VarDecl | Expr | null;
