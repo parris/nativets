@@ -28,6 +28,25 @@
  *      them fails the run aborts and this tool says so instead of reporting a number.
  *   2. FIRST BLOCKER PER FUNCTION. A second refusal in the same body is masked until the
  *      first clears — so a bucket can shrink by less than a lane's site count suggests.
+ *
+ *      IT CUTS BOTH WAYS, and this half is the one that catches people. Masking hides
+ *      blockers a lane ADDS, not just ones it fails to remove: edit a function that
+ *      already fails, introduce a fresh refusal below its first blocker, and this tool
+ *      reports the change as free. Two lanes hit exactly that within an hour of each
+ *      other in opposite directions — one swapped an NT2001 for an NT1003 (an
+ *      unimplemented global, strictly worse and permanent) in a body whose first blocker
+ *      was elsewhere, and the review that caught it was reading the diff, not this
+ *      number. So a flat count is NOT evidence that an edit was harmless. To check a
+ *      line you actually touched, ask for that function's blockers directly rather than
+ *      reading the total:
+ *
+ *          check(linkProgram(src, entry), blockers);   // then filter blockers by b.fn
+ *
+ *      Clearing an earlier blocker can also PROMOTE a masked one into view, which is why
+ *      a bucket total can rise while the tree strictly improves (see the NT1606 +1 in the
+ *      `mutationError`/`Loc` commit). The failing-FUNCTION count is the number to track;
+ *      per-code totals move under each other and neither direction is a regression on
+ *      its own.
  *   3. THE CHECKER ONLY. The ownership pass and codegen never run, so no NT16xx ownership
  *      diagnostic and no codegen refusal is counted. A function at 0 here is not a
  *      function that compiles.
