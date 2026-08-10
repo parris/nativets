@@ -533,18 +533,21 @@ function run(cc: string, args: string[]): void {
 
 export async function buildBinary(source: string, outPath: string, opts: BuildOpts = {}): Promise<void> {
   const target = opts.target ?? "host";
-  // Resolved BEFORE any scratch dir exists — `ccFor` hunts for the Android NDK / wasi-sdk
-  // and throws when they are absent, which used to leak the dir `writeIR` had just made.
-  const cc = ccFor(target);
   const { dir, ll, rt, actor, extra } = writeIR(source, opts.entryPath);
-  // Actors need the ucontext-based cooperative scheduler (nt_actor.c); wasm32-wasi has no
-  // ucontext, so gate here with a clear error instead of a cryptic link failure. Ordinary
-  // (non-actor) programs link fine — the actor runtime is only pulled in when used.
-  if (target === "wasm" && actor) {
-    rmSync(dir, { recursive: true, force: true });
-    throw new BuildError("the wasm (WASI) target does not support actors (spawn/send/receive): the actor runtime needs ucontext, which wasm32-wasi lacks");
-  }
+  // Everything that can throw lives inside the `try`, so the scratch dir is reclaimed on
+  // EVERY exit — a stronger guarantee than ordering the throwing calls before it, because
+  // it also covers a failure the ordering cannot anticipate.
   try {
+    // The SEMANTIC gate runs before the TOOLCHAIN probe, and the order matters. Actors need
+    // the ucontext-based cooperative scheduler (nt_actor.c) and wasm32-wasi has no ucontext,
+    // so this is permanent — telling someone to install wasi-sdk would send them after a
+    // toolchain that cannot fix it. Ordinary (non-actor) programs link fine; the actor
+    // runtime is only pulled in when used.
+    if (target === "wasm" && actor) {
+      throw new BuildError("the wasm (WASI) target does not support actors (spawn/send/receive): the actor runtime needs ucontext, which wasm32-wasi lacks");
+    }
+    // `ccFor` hunts for the Android NDK / wasi-sdk and throws when they are absent.
+    const cc = ccFor(target);
     const { args, warning } = linkArgv(target, { ll, rt, actor, extra, out: outPath }, { static: opts.static });
     if (warning) console.error(`warning: ${warning}`);
     run(cc, args);
