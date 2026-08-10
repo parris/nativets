@@ -557,3 +557,138 @@ describe("NT1606 carries a source location", () => {
     expect(out).toContain("= help:");
   });
 });
+
+/*
+ * A diagnostic must render the source of the file the error is IN.
+ *
+ * `linkProgram` merges the whole import graph into one `Program`, but each module is
+ * parsed on its own, so a `loc` produced inside an imported module carries THAT module's
+ * line number. src/cli.ts then rendered every diagnostic against a single `source` — the
+ * ENTRY file it read at startup — so a cross-module error printed the imported module's
+ * line NUMBER against the entry file's TEXT, and never named the real file:
+ *
+ *     error[NT2001]: return type string does not match declared number at 4:64
+ *       4 | const innocentMainLine4 = "perfectly fine code on main line 4";
+ *         | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returned here
+ *
+ * The caret underlines correct, unrelated code in a file that has no error in it. That is
+ * strictly worse than no frame at all: a frame is read as evidence, so the reader is sent
+ * to the wrong file with an authoritative-looking pointer. It was actively corrupting
+ * triage — one underlying blocker surfaced quoting three different entry-file lines and
+ * was nearly recorded as three separate blockers.
+ *
+ * node is NOT the oracle here (this is our own diagnostic output). The oracle is: does the
+ * text under the caret come from the file and line the error is actually in? So the
+ * fixture makes the two files disagree at the same line number, and the assertions pin
+ * BOTH halves — the right text is shown, and the entry file's same-numbered line is not.
+ */
+describe("a diagnostic renders the file the error is in", () => {
+  /** Write a module graph to a temp dir and compile the entry through the real CLI. */
+  function cliMulti(files: Record<string, string>, entry: string): { out: string; code: number } {
+    const dir = mkdtempSync(join(tmpdir(), "ntdiagloc-"));
+    try {
+      for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+      const r = spawnSync("bun", ["run", join(HERE, "..", "src", "cli.ts"), "emit", join(dir, entry)], {
+        encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+      });
+      return { out: `${r.stdout ?? ""}${r.stderr ?? ""}`, code: r.status ?? -1 };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // The error is on lib.ts:4. main.ts:4 is a different, perfectly valid line — so if the
+  // renderer reaches for the entry source, the assertions below can tell.
+  const LIB = [
+    "// lib line 1",
+    "// lib line 2",
+    "// lib line 3",
+    "export function boom(): number { const s: string = \"x\"; return s; }",
+    "",
+  ].join("\n");
+  const MAIN = [
+    "import { boom } from \"./lib.ts\";",
+    "const a = 1;",
+    "const b = 2;",
+    "const innocentMainLine4 = \"perfectly fine code on main line 4\";",
+    "console.log(boom(), a, b, innocentMainLine4);",
+    "",
+  ].join("\n");
+
+  test("the caret underlines the IMPORTED module's line, not the entry file's", () => {
+    const { out, code } = cliMulti({ "lib.ts": LIB, "main.ts": MAIN }, "main.ts");
+    expect(code).toBe(1);
+    expect(out).toContain("error[NT2001]");
+    // The frame shows the line the error is actually on...
+    expect(out).toContain("export function boom(): number");
+    // ...and NOT the entry file's same-numbered line, which is valid code.
+    expect(out).not.toContain("perfectly fine code on main line 4");
+  });
+
+  test("the frame names the file the error is in", () => {
+    const { out } = cliMulti({ "lib.ts": LIB, "main.ts": MAIN }, "main.ts");
+    // rustc's `--> file:line:col` locator. Without it the reader has a line number and no
+    // way to know which of the program's files it indexes.
+    expect(out).toContain("--> ");
+    expect(out).toContain("lib.ts:4:");
+    // and it must name lib.ts, not the entry.
+    const locator = out.split("\n").find((l) => l.includes("--> "))!;
+    expect(locator).toContain("lib.ts");
+    expect(locator).not.toContain("main.ts");
+  });
+
+  test("a big type mismatch names the DIFFERENCE instead of dumping both types", () => {
+    // The two types here are ~390 characters and differ by exactly two: `?U`. Dumped in
+    // full, twice, the signal is 0.5% of the message — and that is the small version of
+    // the real one, where the same union is printed twice at ~2,700 characters each and
+    // the whole difference is a `?N` prefix. It is not a cosmetic complaint: an agent
+    // sent to minimize that blocker read the message, looked straight at the `, got`
+    // clause, and reported that the message "never states the type it actually got".
+    // A diagnostic nobody can read is one nobody acts on.
+    const big = [
+      "interface Big {",
+      ...Array.from({ length: 30 }, (_, i) => `  f${String(i + 1).padStart(2, "0")}: number;`),
+      "}",
+      "function pick(xs: Big[]): Big | undefined { if (xs.length > 0) return xs[0]; return undefined; }",
+      "function collect(src: Big[]): number {",
+      "  //@@mutable",
+      "  let acc: Big[] = [];",
+      "  const got = pick(src);",
+      "  acc.push(got);",
+      "  return acc.length;",
+      "}",
+      "console.log(collect([]));",
+      "",
+    ].join("\n");
+    const { out } = cliMulti({ "big.ts": big }, "big.ts");
+    expect(out).toContain("error[NT2001]");
+    // The expected type is still named — eliding it entirely would hide the `?U` too,
+    // which is the mistake truncation would have made.
+    expect(out).toContain("f01:number");
+    // ...but the SAME type is not dumped a second time. One occurrence, not two.
+    const dumps = out.split("f30:number").length - 1;
+    expect(dumps).toBe(1);
+    // and the difference is stated in words.
+    expect(out).toContain("?U");
+    expect(out.length).toBeLessThan(600);
+  });
+
+  test("a SHORT type mismatch is left exactly as it was", () => {
+    // The elision is gated on size on purpose: every ordinary mismatch — including the one
+    // recorded in test/selfhost-ratchet.baseline.json, whose two types are 68 characters —
+    // must render byte-identically, so this lane changes no message anyone is reading.
+    const src = ["function f(): number {", "  const s: string = \"x\";", "  return s;", "}", "console.log(f());", ""].join("\n");
+    const { out } = cliMulti({ "short.ts": src }, "short.ts");
+    expect(out).toContain("error[NT2001]: return type string does not match declared number");
+    expect(out).not.toContain("the SAME type");
+  });
+
+  test("a single-file program still renders its own frame, unchanged", () => {
+    const bad = ["const a = 1;", "const xs: number[] = [];", "xs.push(a);", ""].join("\n");
+    const { out, code } = cliMulti({ "solo.ts": bad }, "solo.ts");
+    expect(code).toBe(1);
+    expect(out).toContain("error[NT1606]");
+    expect(out).toContain("  3 | xs.push(a);");
+    expect(out).toContain("mutated here");
+  });
+});

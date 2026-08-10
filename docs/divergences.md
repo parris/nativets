@@ -4204,5 +4204,48 @@ case compiles to `1 1e-323` at exit 0 against node's `1 30` — a MISCOMPILE, no
 The single biggest unlock is **M1 (a heap value model → arrays + objects)**, which in turn
 unblocks much of M2. That is the next architectural push.
 
+### OPEN DEFECT — a module-level nullable assigned by a function emits invalid IR
+
+**Do not "fix" this by making the constant well-formed. That converts a loud build failure
+into a SEGFAULT.** Verified twice, independently.
+
+```ts
+let g: number | undefined = 5;
+function clear(): void { g = undefined; }
+clear();
+console.log(g ?? 0);          // node prints 0
+```
+
+`emit` exits **0** (10,622 bytes), and clang then refuses to parse it:
+
+```
+@nt.g.g = internal global ptr null     ; line 254 — the slot is a ptr
+store double 0, ptr @nt.g.g            ; line 260 — "integer constant must have integer type"
+store ptr %t1, ptr @nt.g.g             ; line 276 — the CORRECT boxed store, same slot
+```
+
+Line 276 shows codegen already knows how to store into this slot. The `g = undefined`
+assignment at 260 skips the boxing and writes a raw scalar into a pointer slot.
+
+**What happens if you only fix the constant.** Patching `double 0` → `double 0.0` gives:
+`clang -x ir -c` exit 0 → link exit 0 → **run exit 139 (SIGSEGV), empty stdout**, where node
+prints `0`. Under opaque pointers `store double 0.0, ptr @g` is well-formed IR that **LLVM's
+own verifier accepts**, so no IR-level validator — including `verifyModule` — can catch it.
+In a variant where the slot is never dereferenced, the same change would yield a **silent
+wrong answer** instead of a crash.
+
+So today the parse error is the only thing enforcing "reject, never miscompile" here. The real
+fix belongs in codegen: `g = undefined` must box exactly as the initializing store does.
+
+**Its diagnostic is also circular**, which is how this stayed hidden. The NT2001 nullable-read
+hint advises `if (g) { … }`; writing exactly that reproduces the identical error *and* the
+identical hint. The hint's other advice (`g?.x`) and the honest alternative (bind a local copy)
+both hit this same bug for a module-level nullable — so **every route the hint offers fails to
+build**. All three were compiled, not reasoned about.
+
+**Related boundary worth stating explicitly:** `verifyModule` passing means *the module
+parses*, explicitly **not** that it is correct. The segfault above is the proof, and the
+distinction has to stay written down or the check becomes a licence to trust.
+
 When a feature ships: delete its row here, move its corpus case out of `KNOWN_UNSUPPORTED`
 in the relevant `test/*conformance*`/`test/gap.test.ts` allow-list, and drop the `NYI` entry.

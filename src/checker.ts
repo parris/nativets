@@ -559,10 +559,19 @@ export const SPAWN_INHERIT_TY = "{status:number}";
  * anything else. Read from the SOURCE so the checker (which types the result) and
  * codegen (which picks the runtime entry point) derive the same answer from the same
  * function — the `planConsoleFormat` discipline.
+ *
+ * The LENGTH test, not a `!== undefined` test on the value: `checkHostCall` runs BEFORE
+ * `checkArgs` (see the host-FFI branch of `type`), so a short call — `spawnSync("ls")` —
+ * arrives here with fewer than three arguments and `args[2]` is OUT OF RANGE. node answers
+ * that read `undefined` and the guard this used to spell (`opts !== undefined && …`) worked;
+ * nativets PANICS on the read itself (Stage 41), so the guard could never run and a
+ * self-hosted compiler would abort instead of printing the NT1028 the guard exists to
+ * reach. The rewrite never FORMS the index. See test/no-index-last.test.ts.
  */
 export function spawnMode(args: Expr[]): "capture" | "inherit" | null {
-  const opts = args[2];
-  const props = opts !== undefined && opts.kind === "ObjectLiteral" ? opts.properties : null;
+  if (args.length < 3) return null;
+  const opts = args[2]!;
+  const props = opts.kind === "ObjectLiteral" ? opts.properties : null;
   if (props === null || props.length !== 1) return null;
   const p = props[0]!;
   if (p.value.kind !== "StringLiteral") return null;
@@ -3202,11 +3211,27 @@ class Checker {
             // `value`) and point at the `.` that is not allowed, so the reader can find
             // it. Getting both wrong is what once hid this rejection in `diagnostics.ts`.
             const what = exprText(e.object);
+            // A DOTTED receiver `accessPath` declines is one no guard can ever narrow —
+            // `this`, a `@@mutable` object, a `?.` link, a computed index — so no fact is
+            // ever recorded for it and `if (x.f)` one line up changed nothing. Saying
+            // "prove it non-nullish first — `if (x.f) { … }`" there names the code the
+            // author has ALREADY written, which is the untruthful-hint shape this tree
+            // keeps finding; `narrowAdvice` learned the same lesson for the union-field
+            // read and its wording is reused deliberately. The replacement is COMPILED in
+            // test/mutable-narrowing.test.ts rather than asserted, because advice that
+            // does not build is the failure this clause exists to remove.
+            const unstable = e.object.kind === "MemberExpr" && this.accessPath(e.object, scope) === undefined;
             throw typeError(
               `${what === undefined ? "this value" : `'${what}'`} is possibly ${nullishKind(ot)}`,
               e.loc,
-              `use '?.' (\`${what ?? "value"}?.${e.property}\` short-circuits the whole chain to undefined), ` +
-              `or prove it non-nullish first — \`if (${what ?? "value"}) { … }\`, an early \`return\`, or \`!\``,
+              unstable && what !== undefined
+                ? `narrowing needs a STABLE access path and '${what}' is not one — a '@@mutable' object, ` +
+                  `'this', a '?.' link and a computed index can each hold something else by the time this ` +
+                  `read runs, so \`if (${what}) { … }\` records nothing here even when it is already ` +
+                  `written. BIND IT FIRST and test the local: \`const v = ${what}; if (v) { … v.${e.property} … }\` ` +
+                  `— or use '?.' (\`${what}?.${e.property}\` short-circuits the whole chain to undefined), or \`!\``
+                : `use '?.' (\`${what ?? "value"}?.${e.property}\` short-circuits the whole chain to undefined), ` +
+                  `or prove it non-nullish first — \`if (${what ?? "value"}) { … }\`, an early \`return\`, or \`!\``,
               "this read is not proved non-nullish",
             );
           }
@@ -6155,7 +6180,14 @@ class Checker {
    * deny-list would let the next unhandled type do it again. See NYI.STRINGIFY for what is
    * refused and why each one is a refusal rather than a feature.
    */
-  private checkStringCoercion(t: Ty, what: string, at?: { line: number; col: number }): void {
+  /* `at` is spelled to match `ast.ts`'s `Loc` STRUCTURALLY — including the `file` this
+   * helper only forwards — for the reason `mutationError` (src/diagnostics.ts) records at
+   * length: every caller passes an `exprLoc(...)` result, i.e. a `Loc`, and in the
+   * self-host subset a pass-through parameter written narrower than what it is handed (or
+   * than what it hands on) is an NT2001 in one direction or the other. tsc accepts both,
+   * so only the compiler compiling ITSELF can see it. Keep this shape in step with the
+   * `nyi`/`typeError` parameters it forwards to. */
+  private checkStringCoercion(t: Ty, what: string, at?: { line: number; col: number; file?: string }): void {
     if (t === "string" || t === "number" || t === "boolean" || t === "undefined" || t === "null" || t === "void") return;
     // The box branches on its tag, so it coerces iff its base does.
     if (isNullableTy(t)) { this.checkStringCoercion(baseTy(t), what, at); return; }
@@ -6388,8 +6420,16 @@ class Checker {
    */
   private checkHostCall(name: string, args: Expr[]): void {
     if (name === "readFileSync") {
-      const enc = args[1];
-      if (!enc || enc.kind !== "StringLiteral" || enc.value !== "utf8")
+      // Length-first, for the reason `spawnMode` records: this method runs BEFORE the
+      // arity check, so `readFileSync(path)` reaches here and `args[1]` is out of range —
+      // `undefined` under node, a PANIC under nativets. The `!enc` guard this replaces
+      // could never run.
+      let ok = false;
+      if (args.length > 1) {
+        const enc = args[1]!;
+        ok = enc.kind === "StringLiteral" && enc.value === "utf8";
+      }
+      if (!ok)
         throw nyi(NYI.HOSTMOD, `readFileSync without the literal encoding "utf8" (node returns a Buffer, which has no representation here — write \`readFileSync(path, "utf8")\`)`);
     }
     if (name === "rmSync" && args.length === 2) {

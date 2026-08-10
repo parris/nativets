@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "53da9af"
+    "rev": "1d19b28"
   },
   "modules": {
     "ast.ts": {
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "36c4a3f458d8111b",
+      "sha256": "c0de7bf95d1b2609",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,12 +26,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] 'Buffer' is not defined"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `s.returnTy = v` would mutate the object in place at L:C"
       }
     },
     "cli.ts": {
-      "sha256": "00f3186158a99ba6",
+      "sha256": "39b8f92225009c03",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -40,12 +40,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] .push expects U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasi…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'walk' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "codegen.ts": {
-      "sha256": "e363c35eec310dc0",
+      "sha256": "dda6034aaad3e4b3",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] 'Buffer' is not defined"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `s.returnTy = v` would mutate the object in place at L:C"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,12 +80,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] .push expects U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasi…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'walk' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "diagnostics.ts": {
-      "sha256": "52cb0d5e40671baa",
+      "sha256": "3517de58d673ba5e",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -98,7 +98,7 @@
       }
     },
     "driver.ts": {
-      "sha256": "4a40eb7a8f7e8ca8",
+      "sha256": "9a3b75ea2f6311e1",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] .push expects U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasi…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'walk' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "lexer.ts": {
@@ -133,12 +133,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] .push expects U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasi…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'walk' (function values / unknown callee) is not supported yet at L:C"
       }
     },
     "ownership.ts": {
-      "sha256": "9682c439db09f49b",
+      "sha256": "68895fc3483b8b28",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] 'Buffer' is not defined"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `s.returnTy = v` would mutate the object in place at L:C"
       }
     },
     "parser.ts": {
-      "sha256": "e3b386546e958ea7",
+      "sha256": "88a000cedc9944d4",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] .push expects U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasi…"
+        "code": "NT1003",
+        "message": "[NT1003] call to 'walk' (function values / unknown callee) is not supported yet at L:C"
       }
     }
   }
