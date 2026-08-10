@@ -3906,8 +3906,13 @@ class Checker {
     // now refuses that program, so recommending it here would also be advice this very
     // compiler rejects. Point at the shape that actually works instead: RETURN the
     // collection and rebind at the call site (docs/self-hosting.md settled this).
+    // `?? false`, not `=== true` and NOT `Boolean(…)`: comparing an OPTIONAL boolean against
+    // `boolean` is NT2001 in the self-host subset, and `Boolean` is not implemented at all
+    // (NT1003 — it is absent from `GLOBAL_FUNCS`, and appears nowhere else in `src/`), so
+    // that swap trades a narrowing gap the checker could one day close for an unimplemented
+    // global it never can. `?? false` compiles today and is node-exact.
     const recvIsParam =
-      e.callee.object.kind === "Identifier" && Boolean(scope.lookup(e.callee.object.name)?.param);
+      e.callee.object.kind === "Identifier" && (scope.lookup(e.callee.object.name)?.param ?? false);
     const fix = recvIsParam && name !== undefined
       ? `\`${name}\` is a PARAMETER, so do NOT write \`${name} = ${name}.${m}(${args})\` — a parameter is a borrow and the CALLER, who owns the ` +
         `${kind.toLowerCase()}, would never see the update. Accumulate into a LOCAL seeded from it and RETURN that ` +
@@ -4213,7 +4218,11 @@ class Checker {
    */
   private accumulatorName(recv: Expr, scope: Scope): string | null {
     if (recv.kind !== "Identifier") return null;
-    return scope.lookup(recv.name)?.mutable === true ? recv.name : null;
+    // `?? false` rather than `=== true`, for the reason spelled out in
+    // `rejectDiscardedMutator`: `?Uboolean === boolean` is NT2001 in the self-host subset.
+    // Semantically identical — `undefined`, `true`, `false` map to `false`, `true`, `false`
+    // either way. Pre-existing; it was the only other site of this shape in `src/`.
+    return (scope.lookup(recv.name)?.mutable ?? false) ? recv.name : null;
   }
 
   private inferArrayMethod(recv: Ty, callee: MemberExpr, args: Expr[], scope: Scope): Ty {
@@ -4292,11 +4301,9 @@ class Checker {
         // the self-hosting denominator, refused for the same pre-existing reason
         // `accumulatorName` beside it is, and the blocker metric would read the addition as
         // a regression. Two lines here cost nothing.
-        // `Boolean(…)`, not `=== true`: comparing an OPTIONAL boolean against `boolean` is
-    // outside the subset `src/` must stay inside (NT2001, "Cannot compare ?Uboolean with
-    // boolean"). Latent rather than counted here — this function's first blocker was the
-    // `mutationError` Loc-width gap, now fixed — so it would have surfaced as the next one.
-    const recvIsParam = callee.object.kind === "Identifier" && Boolean(scope.lookup(callee.object.name)?.param);
+        // `?? false` — see the identical note in `rejectDiscardedMutator`. `=== true` on an
+    // optional boolean is NT2001 and `Boolean(…)` is NT1003; only this spelling compiles.
+    const recvIsParam = callee.object.kind === "Identifier" && (scope.lookup(callee.object.name)?.param ?? false);
         throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.push\` would mutate the array in place`,
           recvIsParam
             ? "build a new array instead: `[...arr, x]` — the original is unchanged. This receiver is a PARAMETER, which is a borrow: the caller owns it, so neither `@@mutable` nor rebinding it (`out = [...out, x]`, which is NT1608) can append to it. Accumulate into a LOCAL and RETURN it — `let acc: T[] = []; acc = [...acc, x]; return acc` — and let the caller rebind"
