@@ -99,3 +99,78 @@ describe("the catch binding is typed from the throw, exactly or not at all", () 
     ).toThrow(/catch/i);
   });
 });
+
+/*
+ * A `try` WITH A `finally` AND NO `catch` IS NOT A HANDLER — a pre-existing raw-clang-error
+ * bug in the same lowering.
+ *
+ * `TryStmt` pushed `{catchLbl, …}` onto `tryHandlers` unconditionally, but only EMITTED the
+ * block named by `catchLbl` when the try had a `catch`. So a `throw` (or any fallible host
+ * call, through `emitExcCheck`) inside a `try { … } finally { … }` terminated its block with
+ * `br label %catchN` where `%catchN` never exists — and the failure surfaced as
+ *
+ *     build error: clang failed (1): … error: use of undefined value '%catch1'
+ *
+ * naming a temp path and a line of our own IR. That is precisely the outcome CLAUDE.md
+ * forbids (an NT**** with a hint, always), and it was reachable from three ordinary shapes:
+ * a `throw` in a catch-less `try`, the same nested inside an outer `try`/`catch`, and a
+ * `JSON.parse` failure in a catch-less `try`.
+ *
+ * node's semantics here are unambiguous — `finally` does not CATCH, it runs on the way out
+ * and the exception keeps propagating — and reproducing that means running the finalizer on
+ * the exceptional path, which the lexical (branch-to-catch) throw model has no way to do.
+ * So it is REFUSED, with a message that says which construct it is. The refusal is strictly
+ * better than the clang error, and it is where NT1004's boundary actually falls.
+ */
+describe("a catch-less `try` is not a handler (was: invalid IR, raw clang error)", () => {
+  test("a `throw` inside `try { … } finally { … }` is NT1004, not a clang error", async () => {
+    const { emitIR } = await import("./harness.ts");
+    expect(() =>
+      emitIR(`try {\n  console.log(1);\n  throw new Error("b");\n} finally {\n  console.log(2);\n}\n`),
+    ).toThrow(/finally/);
+  });
+
+  test("nested: the inner catch-less `try` is refused even under an outer `catch`", async () => {
+    const { emitIR } = await import("./harness.ts");
+    expect(() =>
+      emitIR(`try {\n  try {\n    throw "boom";\n  } finally {\n    console.log("inner");\n  }\n} catch (e) {\n  console.log(e);\n}\n`),
+    ).toThrow(/finally/);
+  });
+
+  test("a fallible HOST call inside a catch-less `try` is refused the same way", async () => {
+    const { emitIR } = await import("./harness.ts");
+    expect(() =>
+      emitIR(`try {\n  const v = JSON.parse("{oops");\n  console.log(1);\n} finally {\n  console.log(2);\n}\n`),
+    ).toThrow(/finally/);
+  });
+
+  // THE HINT MUST COMPILE. It tells the reader to give the `try` a `catch`; this is that
+  // program, run against node.
+  test("the hint's advice — add a `catch` — compiles and matches node", async () => {
+    await differential(`try {\n  console.log(1);\n  throw new Error("b");\n} catch (e) {\n  console.log(e.message);\n} finally {\n  console.log(2);\n}\n`);
+  });
+
+  test("the hint's advice compiles for the HOST-call shape too", async () => {
+    await differential([
+      `function f(): number {`,
+      `  try {`,
+      `    const v = JSON.parse("{oops");`,
+      `    return 1;`,
+      `  } catch (e) {`,
+      `    console.log("caught");`,
+      `    return 0;`,
+      `  } finally {`,
+      `    console.log("finally ran");`,
+      `  }`,
+      `}`,
+      `console.log(f());`,
+      ``,
+    ].join("\n"));
+  });
+
+  // The catch-less `try` itself is untouched when nothing throws out of it, including the
+  // `return`-through-`finally` path the mode slot exists for.
+  test("`try`/`finally` with no exception still works, including `return`", async () => {
+    await differential(`function f(n: number): number {\n  try {\n    return n * 2;\n  } finally {\n    console.log("cleanup");\n  }\n}\nconsole.log(f(3));\n`);
+  });
+});
