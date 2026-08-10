@@ -111,12 +111,36 @@ function runTsc(project: string): string {
 }
 
 describe("tsc type-checks this project", () => {
-  test("the type-checker is installed (a skipped gate is a vacuous one)", () => {
+  test("the type-checker is installed AND ANSWERS (a skipped gate is a vacuous one)", () => {
     // Deliberately NOT `test.skipIf(...)`. A lint that silently disappears when its tool
     // is missing is exactly the failure mode this whole file exists to correct: it
     // reports success for a check it did not run. `typescript` is a devDependency and
     // CI installs with `--frozen-lockfile`, so absence here is a real breakage.
     expect(existsSync(TSC)).toBe(true);
+
+    // ...and EXISTING IS NOT RUNNING, which is how this guard went vacuous in the very
+    // file written to prevent vacuous gates. `typescript@7` ships a shim that dispatches
+    // to a PLATFORM-SPECIFIC binary package (`@typescript/typescript-<os>-<arch>`). A host
+    // `bun install` on darwin/arm64 fetches only the darwin build, so in the Linux
+    // container the shim is present, `existsSync` said yes — and `tsc` threw, emitted ZERO
+    // diagnostics, and every "expect N diagnostics" assertion below failed for a reason
+    // that looked like a compiler regression. Five tests, all environmental.
+    //
+    // `bun add -d @typescript/typescript-linux-arm64` does NOT fix it: the package declares
+    // `os: ["linux"]`, so bun resolves it, writes the lockfile, and skips extraction on a
+    // darwin host. That was verified before being written down rather than after.
+    //
+    // So assert the tool ANSWERS. Failing here is correct and deliberate: it converts five
+    // confusing assertion failures into one that names the cause. See docs/docker-linux.md.
+    const v = spawnSync(TSC, ["--version"], {
+      cwd: ROOT, encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+    });
+    const version = `${v.stdout ?? ""}${v.stderr ?? ""}`;
+    expect(
+      /Version \d+\.\d+/.test(version),
+      `\`${TSC} --version\` did not answer with a version — the shim resolved but its ` +
+        `platform binary is missing (see docs/docker-linux.md). It printed:\n${version.slice(0, 400)}`,
+    ).toBe(true);
   });
 
   /*
