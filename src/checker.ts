@@ -3079,6 +3079,49 @@ class Checker {
         };
         let [a, b] = typeArms(true);
         let j = joinTernary(a, b);
+        // THE CONTEXTUAL UNION. `joinTernary` is a free function over the two ARM types, and
+        // there is a whole family of legal joins whose answer is not in its inputs at all:
+        //
+        //     init: s.init.kind === "VarDecl" ? (fs(s.init) as VarDecl) : fe(s.init)
+        //
+        // — `src/ast.ts` `walkStmtChildren`, where `ForStmt.init` is declared
+        // `VarDecl | Expr | null`. NEITHER ARM IS THE UNION: one is a MEMBER, the other a
+        // SUB-UNION, and the union they belong to is the CONTEXT. Nothing derivable from
+        // `{kind:string,name:string}` and `U<NumLit|StrLit>` names it — and it cannot be
+        // synthesized either, because an arm's tag arrives already WIDENED to `string` while
+        // a union needs the string-LITERAL tags to have a discriminant at all. The hint is
+        // the only place that spelling survives, so the rule reads the hint.
+        //
+        // Sound for the reason `fitsParam`'s union arm and `genAsCast` case (3) already rely
+        // on: THERE IS NO BOX. Both arms are already pointers to objects with a member's
+        // layout, codegen's `coerce` is the identity for member -> `U<…>`, and the predicate
+        // is `assignable`'s union arm — IDENTITY against `unionWidenedMembers`, never the
+        // structural-object rule — so a record that merely LOOKS like a member stays refused.
+        // Mutating that predicate to a structural test compiles a `?:` between two records
+        // with the same field NAMES in different SLOT ORDERS, and the binary exits 255 having
+        // printed nothing where node prints an answer. Pinned in test/unions.test.ts.
+        //
+        // `isUnionTy` only, and the hint's BASE: a `G<…>` general union is a box and joining
+        // an arm into one needs a coercion the ternary does not emit for its arms, so it
+        // keeps being refused. Taking `baseTy` of a nullable hint (`?NU<…>`, which is how
+        // `VarDecl | Expr | null` spells) is a precision gain, not a loss: neither arm can be
+        // nullish here — `assignable` to a `U<…>` is membership, and no nullish literal is a
+        // member — and the bare union is assignable to the nullable the context wants.
+        //
+        // BEFORE the un-narrowed fallback below, and that ORDER IS LOAD BEARING for the
+        // reason the next comment gives in full: reaching the fallback MUTATES the AST.
+        if (j === undefined && hint !== undefined) {
+          // UNFOLD a back-edge, because that is the only spelling the compiler's own AST
+          // uses: `Declarator.init` is `Expr | undefined` and `Expr` is recursive, so the
+          // hint arrives as `?U@Expr` rather than `?UU<…>`. `assignable` already treats a
+          // `@N` and its shape as ONE type (its equirecursive fold/unfold rule), so refusing
+          // here would make the join depend on whether the union happens to have a
+          // self-referential field. `unfold` is the WIDENING one and deliberately does not
+          // descend into a `U<…>`, so the members keep the string-literal tags.
+          const base = baseTy(hint);
+          const h = isTypeRefTy(base) ? this.unfold(base) : base;
+          if (isUnionTy(h) && this.assignable(h, a) && this.assignable(h, b)) j = h;
+        }
         // A tag-narrowed arm can be MORE PRECISE than the join understands, and that is a
         // way for a widening to REMOVE programs rather than add them. `e.kind === "A" ? e : f`
         // used to type both arms as the whole union and join trivially; narrowed, the arms
@@ -6184,6 +6227,12 @@ function thisNarrowHint(e: Extract<Expr, { kind: "ConditionalExpr" }>, a: Ty, b:
  * Sound because codegen's `coerce` can build the box from exactly these two sources —
  * the matching nullish literal (tag 0/1) and a value of the base type (tag 2) — the
  * same pair, and the same argument, as the nullable-assignability arm in `fitsParam`.
+ *
+ * NOT THE ONLY JOIN. `ConditionalExpr` runs a second rule when this one declines: two arms
+ * that are each a member (or a sub-union) of ONE CONTEXTUAL union join to that union. It
+ * lives at the call site rather than here because its answer is not a function of `a` and
+ * `b` at all — it needs the hint, which is where the union's string-literal tags still
+ * exist. Widening THIS function to cover it is not possible, so do not try.
  */
 function joinTernary(a: Ty, b: Ty): Ty | undefined {
   if (a === b) return a;

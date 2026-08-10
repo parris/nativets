@@ -1493,13 +1493,22 @@ console.log(f({ inner: { kind: "C", other: 9 } }));
  * Asserted on the AST rather than through a compiled program precisely BECAUSE the defect
  * is unreachable today: there is no source text that can observe it yet, and a test that
  * waits for one is a test that arrives after the regression.
+ *
+ * THE SOURCE HAS NO CONTEXTUAL TYPE, and that is now load bearing rather than incidental.
+ * This case was originally written at a `return` inside `function f(x: E): E`, where the
+ * declared return type is a hint — and the contextual-union rule below rescues exactly
+ * that join, so the fallback is never reached and the arms are never re-typed. Binding to
+ * an un-annotated `const` instead leaves `hint` undefined, which is still a live path (a
+ * `?:` in an intermediate binding, an argument to an untyped position) and the only one
+ * that reaches the fallback at all. If a later lane makes THIS shape join too, the
+ * fallback becomes genuinely dead and should be deleted rather than re-propped.
  */
 describe("the `?:` un-narrowed fallback restores the AST when it does not take", () => {
   const SRC = `interface Neg { kind: "Neg"; inner: E }
 interface Lit { kind: "Lit"; v: number }
 type E = Neg | Lit;
-function f(x: E): E { return x.kind === "Neg" ? x.inner : x; }
-console.log(f({ kind: "Lit", v: 1 }).kind);
+function f(x: E): string { const y = x.kind === "Neg" ? x.inner : x; return y.kind; }
+console.log(f({ kind: "Lit", v: 1 }));
 `;
 
   /** The `ty` the checker left on the CONSEQUENT's receiver (`x` in `x.inner`). */
@@ -1530,5 +1539,178 @@ console.log(f({ kind: "Lit", v: 1 }).kind);
     // "not at one slot in every member".
     expect(String(ty)).toContain("inner");
     expect(String(ty)).not.toContain("U<");
+  });
+});
+
+/*
+ * THE CONTEXTUAL-UNION `?:` JOIN — the last of the three ternary blockers on the stage-1
+ * frontier, and the one that stalled `src/ast.ts`'s `walkStmtChildren`:
+ *
+ *     init: s.init === null ? null
+ *         : s.init.kind === "VarDecl" ? (fs(s.init) as VarDecl) : fe(s.init),
+ *
+ * where `ForStmt.init` is declared `VarDecl | Expr | null`. NOTE WHAT THE ARMS ARE. This is
+ * NOT "a union member joined with its own union", the shape a CALL already accepts through
+ * `fitsParam` — NEITHER ARM IS THE UNION. One arm is a MEMBER (`VarDecl`), the other is a
+ * SUB-UNION (`Expr`, itself two members), and the union they both belong to is the CONTEXT:
+ * the declared type of the place the `?:` is written into. `joinTernary` is a free function
+ * over the two ARM types alone, so this answer is not derivable from its inputs at all — a
+ * widening that only inspects the arms cannot close it, and one that tried was measured
+ * closing zero blockers.
+ *
+ * Nor is it recoverable by synthesizing `U<a|b>` from the arms: an arm's type arrives with
+ * its tag already WIDENED (`{kind:string,name:string}`), and a union needs the string-
+ * LITERAL tags to have a discriminant at all. The contextual type is the only place that
+ * literal spelling still exists, which is why the rule reads the hint rather than the arms.
+ *
+ * SOUND for the reason `fitsParam`'s union arm and `genAsCast`'s case (3) already rely on:
+ * THERE IS NO BOX. A `U<…>` value is the member object pointer, codegen's `coerce` is the
+ * identity for member -> union, and membership is decided by `assignable`'s union arm,
+ * which is IDENTITY against `unionWidenedMembers` and never the structural-object rule — so
+ * a record that merely LOOKS like a member stays refused (`over-accept` below).
+ */
+describe("a `?:` whose arms are members of ONE CONTEXTUAL union joins to that union", () => {
+  // Minimized from `src/ast.ts` `walkStmtChildren`, `case "ForStmt"`. The two arms are a
+  // MEMBER and a SUB-UNION of the field's declared union; node runs it unchanged.
+  test("a member arm and a sub-union arm, written into a declared union field", async () => {
+    const src = `interface NumLit { kind: "NumLit"; value: number }
+interface StrLit { kind: "StrLit"; text: string }
+type Expr = NumLit | StrLit;
+interface VarDecl { kind: "VarDecl"; name: string }
+interface ForStmt { kind: "ForStmt"; init: VarDecl | Expr | null; label: string }
+type Stmt = VarDecl | ForStmt;
+function fe(x: Expr): Expr { return x.kind === "NumLit" ? { kind: "NumLit", value: x.value + 1 } : { kind: "StrLit", text: x.text }; }
+function fs(x: Stmt): Stmt { return x.kind === "VarDecl" ? { kind: "VarDecl", name: x.name } : { kind: "ForStmt", init: null, label: x.label }; }
+function walk(s: Stmt): Stmt {
+  if (s.kind === "VarDecl") return { kind: "VarDecl", name: s.name };
+  return { kind: "ForStmt", label: s.label,
+    init: s.init === null ? null : s.init.kind === "VarDecl" ? (fs(s.init) as VarDecl) : fe(s.init) };
+}
+function show(s: Stmt): string {
+  if (s.kind === "VarDecl") return "decl";
+  return s.init === null ? "null" : s.init.kind;
+}
+console.log(show(walk({ kind: "ForStmt", label: "L1", init: null })));
+console.log(show(walk({ kind: "ForStmt", label: "L2", init: { kind: "VarDecl", name: "i" } })));
+console.log(show(walk({ kind: "ForStmt", label: "L3", init: { kind: "NumLit", value: 7 } })));
+`;
+    expect(codeOf(src)).toBe(null);
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  /*
+   * ...AND THROUGH A RECURSIVE BACK-EDGE, which is the only spelling the compiler's own AST
+   * actually uses. Minimized from `src/parser.ts` `parsePatternParam`:
+   *
+   *     init: rest ? { kind: "CallExpr", … } : { kind: "IndexExpr", … }
+   *
+   * Both arms are object LITERALS retyped to members of `Expr`. But `Declarator.init` is
+   * declared `Expr | undefined` and `Expr` is RECURSIVE, so the hint arrives as `?U@Expr` —
+   * a nominal back-edge, not a `U<…>`. Non-recursive `Expr` in the same shape already joined
+   * by the rule above; the identical program with one self-referential field did not, which
+   * is a difference in how the type is SPELLED and not in what it is. `assignable` already
+   * treats `@N` and its shape as one type (the equirecursive fold/unfold rule at its top),
+   * so the hint is unfolded to match. `unfold` is the widening one and it deliberately does
+   * NOT descend into a `U<…>`, so the members keep the string-literal tags the discriminant
+   * is proved from.
+   */
+  test("the contextual union reached through a recursive `@N` back-edge", async () => {
+    const src = `interface CallExpr { kind: "CallExpr"; callee: string; args: Expr[] }
+interface IndexExpr { kind: "IndexExpr"; index: number; of: Expr[] }
+type Expr = CallExpr | IndexExpr;
+interface Declarator { name: string; init?: Expr }
+function build(rest: boolean, name: string): Declarator[] {
+  //@@mutable
+  let decls: Declarator[] = [];
+  decls.push({
+    name,
+    init: rest ? { kind: "CallExpr", callee: "slice", args: [] } : { kind: "IndexExpr", index: 0, of: [] },
+  });
+  return decls;
+}
+function tag(ds: Declarator[]): string {
+  const d = ds[0].init;
+  return d === undefined ? "none" : d.kind;
+}
+console.log(tag(build(true, "x")));
+console.log(tag(build(false, "y")));
+`;
+    expect(codeOf(src)).toBe(null);
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  /*
+   * THE OVER-ACCEPT GATE, and it carries the whole soundness argument for the rule above.
+   * `Decoy` has the same field NAMES as member `A` but in the opposite SLOT ORDER, so it is
+   * structurally "compatible" and layout-incompatible at the same time. Reading the union's
+   * discriminant off one loads the number 999 out of slot 0 and reinterprets it as a string
+   * pointer.
+   *
+   * MEASURED, not asserted. Replacing `assignable(h, …)` in the rule above with a structural
+   * object test COMPILES both programs below, and they fail in the two ways this project
+   * keeps a list of:
+   *
+   *   - slot 0 holds a NUMBER (`Decoy.n`): the binary exits 255 having printed NOTHING —
+   *     no stdout, no stderr — where node prints "Decoy" then "after" at exit 0;
+   *   - slot 0 holds a STRING (`Decoy.payload`): no trap at all. It prints "WRONG" and
+   *     exits 0, where node prints "Decoy". The silent wrong answer, which is worse.
+   *
+   * So `assignable`'s union arm being IDENTITY against `unionWidenedMembers` rather than the
+   * structural-object rule is load bearing, and these two tests are what keep it that way.
+   */
+  test("REFUSED: an arm that merely LOOKS like a member (same fields, different slots)", () => {
+    const src = `interface A { kind: "A"; n: number }
+interface B { kind: "B"; s: string }
+type U = A | B;
+interface Decoy { n: number; kind: "Decoy" }
+function pick(flag: boolean): string {
+  const d: Decoy = { n: 999, kind: "Decoy" };
+  const a: A = { kind: "A", n: 1 };
+  const r: U = flag ? d : a;
+  return r.kind;
+}
+console.log(pick(true));
+`;
+    expect(codeOf(src)).toBe("NT2001");
+  });
+
+  test("REFUSED: ...and the decoy whose slot 0 is a STRING, which would not even trap", () => {
+    const src = `interface A { kind: "A"; n: number }
+interface B { kind: "B"; s: string }
+type U = A | B;
+interface Decoy { payload: string; kind: "Decoy" }
+function pick(flag: boolean): string {
+  const d: Decoy = { payload: "WRONG", kind: "Decoy" };
+  const a: A = { kind: "A", n: 1 };
+  const r: U = flag ? d : a;
+  return r.kind;
+}
+console.log(pick(true));
+`;
+    expect(codeOf(src)).toBe("NT2001");
+  });
+
+  /*
+   * A GENERAL union (`G<…>`) is a BOX, not a bare pointer, so an arm joined into one needs
+   * a `coerceGeneralUnion` the ternary's own `coerce` would apply to `e.ty` — but the ARMS
+   * are coerced to `e.ty` individually and a sub-union arm has no single tag. Kept out of
+   * the rule by `isUnionTy` alone; pinned so a later "and general unions too" does not slip
+   * in without its own boxing story.
+   */
+  test("REFUSED: the contextual union is a GENERAL (boxed) union", () => {
+    const src = `type G = number | string;
+function pick(flag: boolean): G {
+  const g: G = flag ? [1] : 2;
+  return g;
+}
+console.log(pick(true));
+`;
+    expect(codeOf(src)).not.toBe(null);
   });
 });
