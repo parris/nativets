@@ -21,7 +21,7 @@ import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, typeofTagOf } from "./ast.ts";
 import { isTypeRefTy, unfoldTypeRef, recTypeTable } from "./ast.ts";
-import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
+import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, isUrlRefTy, DATE_GETTERS } from "./ast.ts";
 // SH2 (discriminated unions): a union value IS its member's object block, so every
@@ -190,6 +190,45 @@ function encodeCString(s: string): { body: string; len: number } {
   }
   return { body: body + "\\00", len: bytes.length + 1 };
 }
+
+/**
+ * ASAN INSTRUMENTATION OF THE GENERATED CODE — off unless `NATIVETS_ASAN=1`.
+ *
+ * Building with `clang -fsanitize=address` instruments the C in `runtime/`, and NOTHING
+ * ELSE. AddressSanitizer is an LLVM *pass* that only rewrites functions carrying the
+ * `sanitize_address` attribute; clang stamps that attribute on the code IT compiles from
+ * source, but a hand-written `.ll` fed to the same driver arrives without it, so every
+ * load and store nativets emits is left bare.
+ *
+ * The consequence is precisely inverted from what the ASan lane is for:
+ *  - a DOUBLE FREE is still caught, because that is detected inside `free()` — an
+ *    allocator interceptor in the ASan runtime, which does not care who called it;
+ *  - a HEAP-USE-AFTER-FREE **is not**, because catching it requires a poison check on
+ *    the READ, and the read is in uninstrumented generated code.
+ *
+ * A use-after-free read that returns stale memory at exit 0 is the exact "silent wrong
+ * answer" class the prime directive names as the worst outcome available, and it was the
+ * one thing the gate could not see. Measured on
+ * `{ const xs: B[] = [o.inner]; }  return t + o.inner.v;` with an element-freeing drop:
+ * node says 10, we said 5, exit 0, ASan "clean" — and with this attribute set, the same
+ * binary reports `heap-use-after-free` and exits 134. See test/asan-instrumentation.test.ts.
+ *
+ * Kept behind an env var rather than emitted always so that IR snapshots and the byte
+ * -identical-output guarantees elsewhere in this file do not move; the attribute is inert
+ * without `-fsanitize=address`, so turning it on costs nothing but the diff.
+ *
+ * An attribute-group id is a NUMBER in LLVM IR (`#0`), never a name — `#asan` is a parse
+ * error. 99 is used rather than 0 to stay clear of any group a later lane introduces.
+ *
+ * Read LAZILY, not captured into a module-level const: the flag has to be flippable
+ * inside one test process (test/asan-instrumentation.test.ts emits both ways).
+ */
+// `process.env.NAME`, not `process.env["NAME"]`: the self-host subset recognizes the
+// MemberExpr spelling only (src/checker.ts, "Host I/O"), and src/ must stay inside the
+// subset it compiles. Same spelling as driver.ts's `process.env.WASI_SDK_PATH`.
+export function asanOn(): boolean { return process.env.NATIVETS_ASAN === "1"; }
+function asanFnAttr(): string { return asanOn() ? " #99" : ""; }
+const ASAN_ATTR_DEF = "attributes #99 = { sanitize_address }";
 
 const DECLARES = [
   "declare void @js_print_num(double)",
@@ -585,7 +624,7 @@ class ModuleGen {
       : `%arg = inttoptr i64 %slot to ptr`;
     this.liftedFns.push(
       [
-        `define void @${name}(ptr %env, i64 %slot) {`,
+        `define void @${name}(ptr %env, i64 %slot)${asanFnAttr()} {`,
         `L:`,
         `  %fpi = load i64, ptr %env`,
         `  %fp = inttoptr i64 %fpi to ptr`,
@@ -633,7 +672,7 @@ class ModuleGen {
       lt === "double" ? `%${reg} = bitcast i64 %${slot} to double` : `%${reg} = inttoptr i64 %${slot} to ptr`;
     this.liftedFns.push(
       [
-        `define i32 @${name}(ptr %env, i64 %sa, i64 %sb) {`,
+        `define i32 @${name}(ptr %env, i64 %sa, i64 %sb)${asanFnAttr()} {`,
         `L:`,
         `  %fpi = load i64, ptr %env`,
         `  %fp = inttoptr i64 %fpi to ptr`,
@@ -649,6 +688,68 @@ class ModuleGen {
       ].join("\n"),
     );
     return name;
+  }
+
+  private fnValues = new Map<string, string>();
+  private fnValueDefs: string[] = [];
+
+  /**
+   * The VALUE of a top-level function declaration — `@dbl` used where a function value is
+   * wanted. Returns the symbol of a block whose slot 0 holds a callable fn pointer, which
+   * is the one thing `callClosure` requires of a function value.
+   *
+   * TWO pieces, and each is forced by an ABI difference rather than chosen:
+   *
+   *  1. A TRAMPOLINE, because the two calling conventions differ by exactly one leading
+   *     argument. `callClosure` passes the block itself as an implicit `ptr` first
+   *     parameter (a lifted arrow reads its captures out of it); a top-level function has
+   *     no such parameter. Storing `@dbl` in slot 0 directly would therefore shift every
+   *     real argument by one — a silent wrong answer, not a crash. The shim takes the env,
+   *     IGNORES it (a declaration captures nothing, which is the whole reason this is
+   *     cheaper than a closure) and tail-calls the real symbol.
+   *
+   *  2. A private CONSTANT global for the block, not `nt_obj_new`. With no captures the
+   *     block's contents are known at compile time, so there is nothing to allocate per
+   *     evaluation — which also settles the ownership question by removing it: no heap
+   *     block means nothing to own, nothing to drop, no leak on the argument path and no
+   *     double free if the same function is passed twice. One block per function, shared.
+   *
+   * Keyed by name, so `f(dbl); g(dbl)` emits one shim and one block. Lazy, on the same
+   * pattern as `cmpShim` and `actorEntry`: a program that never uses a function as a value
+   * emits neither and its IR is unchanged.
+   */
+  fnValue(name: string, fnTy: Ty): string {
+    const existing = this.fnValues.get(name);
+    if (existing) return existing;
+    const idx = this.fnValues.size;
+    const blk = `@nt_fnval_blk_${idx}`;
+    this.fnValues.set(name, blk);
+    const shim = `nt_fnval_${idx}`;
+    const ps = funcParams(fnTy);
+    const ret = funcRet(fnTy);
+    // ONE list: an LLVM parameter and the argument forwarding it are spelled identically
+    // (`double %a0`), so the declaration and the call share it. Built with an index loop
+    // rather than `.map((p, i) => …)` — `.map` binds `(elem)` only in the subset `src/`
+    // must stay inside, and the point-free spelling put this function outside it.
+    const slots: string[] = [];
+    for (let i = 0; i < ps.length; i++) slots.push(`${llvmTy(ps[i]!)} %a${i}`);
+    const list = slots.join(", ");
+    const retLl = ret === "void" ? "void" : llvmTy(ret);
+    const body = ret === "void"
+      ? [`  call void @${name}(${list})`, `  ret void`]
+      : [`  %r = call ${retLl} @${name}(${list})`, `  ret ${retLl} %r`];
+    this.fnValueDefs.push(
+      [
+        `define ${retLl} @${shim}(ptr %__env${slots.length ? ", " + list : ""}) {`,
+        `L:`,
+        ...body,
+        `}`,
+      ].join("\n"),
+    );
+    // Slot 0 is the fn pointer — the layout `callClosure` loads from. A constant
+    // expression, so the block needs no runtime initialization from `main`.
+    this.fnValueDefs.push(`${blk} = private constant [1 x i64] [i64 ptrtoint (ptr @${shim} to i64)]`);
+    return blk;
   }
 
   intern(s: string): string {
@@ -694,10 +795,15 @@ class ModuleGen {
       // written by `main` when the declaration executes, in module (dependency) order.
       ...[...this.globals].map(([n, t]) => `${ModuleGen.globalSym(n)} = internal global ${llvmTy(t)} ${defaultZero(t)}`),
       this.globals.size ? "" : null,
+      // Function-declaration VALUES: the trampoline + its constant block, per function
+      // used that way. Empty (and so absent from the IR) for every program that uses none.
+      ...this.fnValueDefs.flatMap((f) => [f, ""]),
       ...this.liftedFns.flatMap((f) => [f, ""]), // lifted arrows (populated during gen)
       ...fns.flatMap((f) => [f, ""]),
       main,
       "",
+      // The group every `define` above references under NATIVETS_ASAN=1 (see `asanOn`).
+      ...(asanOn() ? [ASAN_ATTR_DEF, ""] : []),
     ].filter((x) => x !== null).join("\n");
   }
 }
@@ -1204,7 +1310,7 @@ class FnGen {
 
   private assemble(header: string, firstBlock: number): string {
     //@@mutable
-    const out: string[] = [`${header} {`, "entry:"];
+    const out: string[] = [`${header}${asanFnAttr()} {`, "entry:"];
     for (const a of this.entryAllocas) out.push("  " + a);
     out.push(`  br label %${this.blocks[firstBlock]!.label}`);
     for (const b of this.blocks) {
@@ -2179,6 +2285,18 @@ class FnGen {
         // proved present, and the union case below keeps the binding's storage while
         // taking the checker's MEMBER type (same pointer, different layout).
         if (this.captures.has(e.name)) return this.narrowRead(e, this.readCapture(e.name));
+        // A function DECLARATION read as a value. Checked AFTER the binding tables, so a
+        // local, a parameter or a capture of the same name still SHADOWS the function —
+        // which is what node does, and what keeps this from changing any existing program.
+        // Without it the name reached `this.addr`, which invented a frame slot that was
+        // never allocated (`use of undefined value '%dbl.addr'` out of clang).
+        if (!this.isBound(e.name)) {
+          const sig = this.mod.functions.get(e.name);
+          if (sig !== undefined) {
+            const fnTy = makeFuncTy(sig.params, sig.ret);
+            return { v: this.mod.fnValue(e.name, fnTy), ty: fnTy };
+          }
+        }
         const declared = this.varTypes.get(e.name) ?? (e.ty ?? "number");
         const ty = isUnionTy(declared) && e.ty !== undefined && e.ty !== declared ? e.ty : declared;
         const t = this.fresh();

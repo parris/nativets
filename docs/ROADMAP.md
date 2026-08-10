@@ -363,6 +363,52 @@ stdout, visible only as a nonzero exit, the exact signature of the shipped `nt_a
 Each needs to be consumed-and-invalidated or refused first. Both are pinned as passing tests so
 the hazard cannot be rediscovered by accident.
 
+> **THE BLOCKER LIST IS ELEVEN, NOT TWO, AND THE OTHER NINE ARE ARRAY METHODS.** The two above
+> are the OBJECT-shaped ones. Measured by splicing a depth-1 element destructor into `emitDrops`
+> and running the result under ASan: `.map(x => x)`, `.filter`, `.slice`, `[...xs]`, `.concat`,
+> `.toSorted`, `.toReversed` and `.with` each produce an `attempting double-free`, and so does an
+> array built from a field read inside a LOOP (`for (…) { const xs = [o.inner]; }`). All eight
+> methods build a new array by copying slots, so one set of element pointers ends up in two
+> headers that are both dropped; none of them involves a callback, so an ownership rule about
+> arrow results — the guard docs/divergences.md proposes for `.map` — closes exactly one of
+> them. Each needs to deep-copy, consume its receiver, or be refused on a linear element type.
+> Pinned as allocation counts in `test/drops-obj.test.ts`, "array methods that ALIAS elements".
+>
+> The escape-BY-NAME shapes are already refused and need nothing (`NT1605` for `const e = xs[0]`
+> and `return xs[0]`, `NT1604` for a borrowed parameter stored into a local array, `NT1601` for
+> one object named by two arrays) — which is the good news, and the reason the list is methods.
+>
+> **The measurement also found a shape that is WORSE than a double free, and it is the one the
+> gate could not see.** A block-scoped array holding a field read (`{ const xs: B[] = [o.inner]; }`
+> then `o.inner.v`) freed the field and read it back: node `10`, nativets `5`, **exit 0 on both
+> sides**, and ASan reported the run CLEAN. See "the sanitizer never watched the generated code"
+> below — anyone building the destructor must fix the gate first, or they are working blind on
+> precisely the fault they are most likely to introduce.
+
+### The sanitizer never watched the generated code (fixed: `NATIVETS_ASAN=1`)
+
+`clang -fsanitize=address` instruments `runtime/*.c` and **nothing else**. ASan is an LLVM pass
+that only rewrites functions carrying the `sanitize_address` attribute; clang stamps it on code
+it compiles FROM SOURCE, and the `.ll` nativets emits arrives already in IR form with no
+attribute on any `define`. So every load and store the compiler generates was left bare, and the
+gate was asymmetric in the worst possible direction:
+
+| fault | caught before? | why |
+|---|---|---|
+| double free | **yes** | detected inside `free()`, an allocator interceptor — it never asks who called |
+| heap-use-after-free | **no** | needs a poison check on the READ, and the read is in uninstrumented code |
+
+That is why every ASan finding in this repo's history has been a double free or a crash and never
+a stale read: a use-after-free READ, which returns garbage at exit 0, was invisible to the one
+instrument meant to catch it. It is also the fault an ownership lane is most likely to ship —
+every rule in `ownership.ts` exists to stop one name reading what another name freed.
+
+`NATIVETS_ASAN=1` now emits `sanitize_address` on every generated function (`asanOn`,
+src/codegen.ts). It is inert without `-fsanitize=address`, and opt-in only so IR snapshots do not
+move. **Set it in any lane that builds with ASan.** Pinned in `test/asan-instrumentation.test.ts`,
+including the negative control (a double free is caught either way) and the same UAF being missed
+without the attribute and reported with it.
+
 ---
 
 ## Example apps (north-star targets — drive the roadmap)

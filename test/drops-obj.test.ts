@@ -10,6 +10,18 @@
 
 import { test, expect, describe } from "bun:test";
 import { compileAndRun, runWithNode } from "./harness.ts";
+import { sourceToIR } from "../src/driver.ts";
+
+/** The NT code a program is REFUSED with (`""` if it compiles) — diagnostics are thrown,
+ *  so a rejection cannot be observed through `compileAndRun`. Same helper as drops.test.ts. */
+function rejectCode(source: string): string {
+  try {
+    sourceToIR(source);
+    return "";
+  } catch (e) {
+    return (e as { diag?: { code?: string } }).diag?.code ?? "";
+  }
+}
 
 describe("object drops (deterministic free)", () => {
   test("owned object is freed at scope exit", async () => {
@@ -371,5 +383,108 @@ describe("a fresh `new C(…)` receiver is dropped after a chain call", () => {
     expect(ours.stdout).toBe(oracle.stdout);
     expect(ours.exitCode).toBe(oracle.exitCode);
     expect(oracle.stdout).toBe("a|b / 2\na|b\n");
+  });
+});
+
+/*
+ * THE ARRAY HALF OF THE BLOCKER LIST — eight methods that ALIAS the receiver's elements.
+ *
+ * The `double free` block above lists the blockers a recursive free must clear, and all
+ * three are OBJECT-shaped: `{...o}`, `const t = o.a`, `return o.a`. The array side was
+ * represented only by the `.map(x => x)` note in docs/divergences.md, and it is much
+ * wider than that: every method that builds a new array by COPYING SLOTS hands the same
+ * element pointers to a second header, and both headers are then dropped.
+ *
+ * Each test below pins the aliasing as an ALLOCATION COUNT, which needs no destructor to
+ * observe: if the result had copied its elements the live count would double, and it does
+ * not. The contrast case is `.map(x => ({...}))`, whose callback really does allocate —
+ * 2 elements in, 4 live — against `.map(x => x)`'s 2.
+ *
+ * MEASURED with a depth-1 element destructor spliced into `emitDrops` (lane-elemfree's
+ * probe, reverted): every one of these became an ASan `attempting double-free`, while the
+ * shapes that own their elements outright went correctly to `__objLive() === 0`:
+ *
+ *   .map(x => x)  .filter  .slice  [...xs]  .concat  .toSorted  .toReversed  .with
+ *
+ * So the array blocker list is EIGHT entries, not one, and it is a list of METHODS rather
+ * than of ownership rules — each needs to deep-copy, consume the receiver, or be refused
+ * on a linear element type before elements can be freed. Discovered while scoping the
+ * per-type destructor described in docs/ROADMAP.md, "Why ELEMENTS is not a one-line fix".
+ */
+describe("array methods that ALIAS elements (blockers for a per-type destructor)", () => {
+  const B = `type B = { v: number };\n`;
+
+  /** The control: a callback that ALLOCATES doubles the count. Everything below does not. */
+  test("`.map` with an allocating callback really copies — 2 in, 4 live", async () => {
+    const r = await compileAndRun(`${B}function f(): number { const xs: B[] = [{v:1},{v:2}]; const ys = xs.map(x => ({v: x.v + 1})); return ys[0].v; }\nconsole.log(f());\nconsole.log(__objLive());\nconsole.log(__arrLive());\n`);
+    expect(r.stdout).toBe("2\n4\n0\n"); // 4 objects, both headers freed
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("`.map(x => x)` aliases — 2 in, 2 live, and BOTH headers are freed", async () => {
+    const r = await compileAndRun(`${B}function f(): number { const xs: B[] = [{v:1},{v:2}]; const ys = xs.map(x => x); return ys[0].v; }\nconsole.log(f());\nconsole.log(__objLive());\nconsole.log(__arrLive());\n`);
+    expect(r.stdout).toBe("1\n2\n0\n"); // `__arrLive() === 0` is the hazard: two owners, both dropped
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("`.filter` aliases every surviving element", async () => {
+    const r = await compileAndRun(`${B}function f(): number { const xs: B[] = [{v:1},{v:2}]; const ys = xs.filter(x => x.v > 0); return ys.length; }\nconsole.log(f());\nconsole.log(__objLive());\nconsole.log(__arrLive());\n`);
+    expect(r.stdout).toBe("2\n2\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("`.slice` aliases the elements it keeps", async () => {
+    const r = await compileAndRun(`${B}function f(): number { const xs: B[] = [{v:1},{v:2}]; const ys = xs.slice(0, 1); return ys.length; }\nconsole.log(f());\nconsole.log(__objLive());\nconsole.log(__arrLive());\n`);
+    expect(r.stdout).toBe("1\n2\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("array spread `[...xs]` aliases every element", async () => {
+    const r = await compileAndRun(`${B}function f(): number { const xs: B[] = [{v:1},{v:2}]; const ys: B[] = [...xs]; return ys.length; }\nconsole.log(f());\nconsole.log(__objLive());\nconsole.log(__arrLive());\n`);
+    expect(r.stdout).toBe("2\n2\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("`.concat` aliases the elements of BOTH operands", async () => {
+    const r = await compileAndRun(`${B}function f(): number { const xs: B[] = [{v:1}]; const zs: B[] = [{v:2}]; const ys = xs.concat(zs); return ys.length; }\nconsole.log(f());\nconsole.log(__objLive());\nconsole.log(__arrLive());\n`);
+    expect(r.stdout).toBe("2\n2\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("`.toReversed` aliases — the non-mutating twin of the in-place `.reverse`", async () => {
+    const r = await compileAndRun(`${B}function f(): number { const xs: B[] = [{v:2},{v:1}]; const ys = xs.toReversed(); return ys[0].v; }\nconsole.log(f());\nconsole.log(__objLive());\n`);
+    expect(r.stdout).toBe("1\n2\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("`.toSorted` aliases", async () => {
+    const r = await compileAndRun(`${B}function f(): number { const xs: B[] = [{v:2},{v:1}]; const ys = xs.toSorted((p, q) => p.v - q.v); return ys[0].v; }\nconsole.log(f());\nconsole.log(__objLive());\n`);
+    expect(r.stdout).toBe("1\n3\n"); // 3 = the two elements + the comparator's lifted env
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("`.with` aliases every element it did NOT replace", async () => {
+    const r = await compileAndRun(`${B}function f(): number { const xs: B[] = [{v:2},{v:1}]; const ys = xs.with(0, {v:9}); return ys[0].v; }\nconsole.log(f());\nconsole.log(__objLive());\n`);
+    expect(r.stdout).toBe("9\n3\n"); // 2 originals + the fresh replacement; slot 1 is shared
+    expect(r.exitCode).toBe(0);
+  });
+
+  /*
+   * NOT a blocker, and worth pinning as the boundary: the ownership pass ALREADY refuses
+   * the shapes that would let an element pointer escape by name. These four are why the
+   * blocker list is methods-only rather than methods plus bindings.
+   */
+  test("the escape-by-name shapes are already refused", () => {
+    const cases: [string, string][] = [
+      // binding an element is a second owner
+      [`${B}function f(): number { const xs: B[] = [{v:1}]; const e = xs[0]; return e.v; }`, "NT1605"],
+      // returning an element out of the array's scope
+      [`${B}function g(): B { const xs: B[] = [{v:8}]; return xs[0]; }`, "NT1605"],
+      // putting a BORROWED object (a parameter) into a locally-owned array
+      [`${B}function g(o: B): number { const xs: B[] = [o]; return xs[0].v; }`, "NT1604"],
+      // the same element named by two arrays
+      [`${B}function f(): number { const a: B = {v:1}; const xs: B[] = [a]; const ys: B[] = [a]; return xs[0].v + ys[0].v; }`, "NT1601"],
+    ];
+    for (const [src, code] of cases) expect(rejectCode(src)).toBe(code);
   });
 });
