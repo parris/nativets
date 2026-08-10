@@ -278,6 +278,31 @@ export function emitIR(source: string): string {
   return sourceToIR(source);
 }
 
+/**
+ * Emit IR for a build that is about to pass `-fsanitize=address`.
+ *
+ * USE THIS, NOT `emitIR`, ANYWHERE THE RESULT IS COMPILED UNDER ASAN. AddressSanitizer is
+ * an LLVM pass that only rewrites functions carrying the `sanitize_address` attribute, and
+ * clang stamps that attribute on code it compiles from SOURCE — so a plain `emitIR` build
+ * instruments `runtime/*.c` and not one instruction nativets generated. The result is a gate
+ * that catches a double free (detected inside `free()`, which does not care who called it)
+ * but is BLIND to a heap-use-after-free, because that needs a poison check on the read and
+ * the read is in uninstrumented code. A stale read returning garbage at exit 0 is the
+ * silent-wrong-answer class, and it was the one fault the sanitizer lane could not see.
+ *
+ * See src/codegen.ts (`asanOn`) and test/asan-instrumentation.test.ts.
+ */
+export function emitIRAsan(source: string): string {
+  const prev = process.env["NATIVETS_ASAN"];
+  process.env["NATIVETS_ASAN"] = "1";
+  try {
+    return sourceToIR(source);
+  } finally {
+    if (prev === undefined) delete process.env["NATIVETS_ASAN"];
+    else process.env["NATIVETS_ASAN"] = prev;
+  }
+}
+
 /** Compile `source` to a host binary and run it. */
 export async function compileAndRun(source: string): Promise<RunResult> {
   const dir = scratch("run");

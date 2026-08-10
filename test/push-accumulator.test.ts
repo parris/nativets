@@ -29,9 +29,18 @@
  *   - a PARAMETER is a borrow and cannot carry the attribute (it is on a `let`/`const`);
  *   - `this.f`, `xs[0]` and `f()` name no binding, so they never match the opt-in.
  *
- * The one hole those do not cover is a CLOSURE — an arrow copies the array POINTER into a
- * heap env this scope cannot null, and the closure may outlive the binding — so a push to
- * a captured accumulator is NT1607.
+ * The one hole those do not cover is a CLOSURE WITH AN ENV — a BOUND arrow copies the
+ * array POINTER into a heap env this scope cannot null, and the closure may outlive the
+ * binding — so a push to such a captured accumulator is NT1607.
+ *
+ * That rule used to be stated over "any arrow", which was wrong for the shape people
+ * actually write: an INLINED HOF callback (`xs.forEach((x) => out.push(x))`) gets no env
+ * at all — codegen emits its statements into the enclosing frame as a loop — so the
+ * premise did not hold and the refusal cost a correct program for nothing. The two
+ * describe blocks that follow are the split: what the relaxation buys, and the closure
+ * shapes that keep the refusal because for THEM the premise is real (proved by mutation —
+ * with the guard off, the returned-closure case is an ASan `heap-use-after-free` in
+ * `nt_arr_push`, and the reassigned-binding case is a silent wrong answer at exit 0).
  *
  * node is the oracle for stdout AND exit code on every behavioural test here, because a
  * double free presents as a NONZERO EXIT with CORRECT STDOUT. The behaviours are mined
@@ -39,7 +48,15 @@
  */
 
 import { test, expect, describe } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+
 import { compileAndRun, runWithNode, emitIR } from "./harness.ts";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Compile-only: the diagnostic a source is rejected with (or null if it compiles). */
 function rejectionOf(source: string): { code: string; message: string; hint?: string } | null {
@@ -60,6 +77,361 @@ async function expectMatches(source: string) {
   expect(ours.exitCode).toBe(oracle.exitCode);
   expect(ours.stdout.length).toBeGreaterThan(0);
 }
+
+/*
+ * THE INLINED-HOF ARROW. `.forEach`/`.map`/… take an INLINE arrow literal (the checker
+ * requires one — `inferForEach`, `inferHof`) and codegen emits its body straight into
+ * the enclosing frame as a loop (`genForEach`, `genMap`). No `nt_obj_new` env is
+ * allocated, no pointer is snapshotted, and the body cannot outlive the statement it is
+ * written in: it IS the statement. So the closure rule's premise — "an arrow copies the
+ * array pointer into an env this scope cannot null, and the closure may outlive the
+ * binding" — is simply false here, and the shape below is exactly the `for-of` loop two
+ * tests down, which has always compiled.
+ */
+describe("`.push` into an accumulator captured by an INLINED HOF arrow", () => {
+  test("`src.forEach((x) => { out.push(x) })` — the most idiomatic accumulator shape", async () => {
+    await expectMatches(`
+const src: number[] = [1, 2, 3];
+//@@mutable
+const out: number[] = [];
+src.forEach((x) => { out.push(x * 2); });
+console.log(out.join(","), out.length);
+`);
+  });
+
+  /*
+   * EVERY inlined HOF, in ONE program, with the accumulator recording the callback's own
+   * call order. The order is the load-bearing half: `.some`/`.find`/`.findIndex` STOP at
+   * the first hit and `.every` stops at the first miss, so a lowering that ran the body
+   * the wrong number of times would print a different log even with the right result.
+   * `.toSorted`'s comparator is deliberately absent — it is a real closure (see below).
+   */
+  test("all nine inlined HOFs append to the same accumulator, in node's call order", async () => {
+    await expectMatches(`
+const src: number[] = [1, 2, 3, 4];
+//@@mutable
+const log: string[] = [];
+const m = src.map((x) => { log.push("m" + String(x)); return x * 2; });
+const f = src.filter((x) => { log.push("f" + String(x)); return x > 2; });
+const r = src.reduce((acc: number, x: number) => { log.push("r" + String(x)); return acc + x; }, 0);
+const fm = src.flatMap((x) => { log.push("x" + String(x)); return [x, -x]; });
+const s = src.some((x) => { log.push("s" + String(x)); return x > 2; });
+const e = src.every((x) => { log.push("e" + String(x)); return x > 0; });
+const fd = src.find((x) => { log.push("d" + String(x)); return x === 3; });
+const fi = src.findIndex((x) => { log.push("i" + String(x)); return x === 3; });
+console.log(m.join(","), f.join(","), r, fm.join(","));
+console.log(s, e, fd, fi);
+console.log(log.join("|"), log.length);
+`);
+  });
+
+  test("a STRING accumulator (the elements are heap values the array takes over)", async () => {
+    await expectMatches(`
+const src: string[] = ["a", "b"];
+//@@mutable
+const out: string[] = [];
+src.forEach((x) => { out.push(x + "!"); });
+console.log(out.join(","), out.length);
+`);
+  });
+
+  test("NESTED inlined callbacks both append to an accumulator of the outer scope", async () => {
+    await expectMatches(`
+const a: number[] = [1, 2];
+const b: number[] = [10, 20];
+//@@mutable
+const out: number[] = [];
+a.forEach((x) => { b.forEach((y) => { out.push(x + y); }); });
+console.log(out.join(","), out.length);
+`);
+  });
+
+  /*
+   * Appending to the array BEING iterated. node snapshots `length` before the walk, so the
+   * callback runs exactly 3 times and never sees what it appended; `hofLoop` reads
+   * `nt_arr_len` once into the pre-loop block, which is the same rule. Included because it
+   * is the one shape where the accumulator and the receiver are the SAME allocation, and
+   * `nt_arr_push` may reallocate `a->data` underneath the very loop that is reading it —
+   * safe only because the NtArray HEADER is mutated in place and `arr_at` re-reads it.
+   */
+  test("`xs.forEach((x) => xs.push(x))` — length is snapshotted, exactly as node does", async () => {
+    await expectMatches(`
+//@@mutable
+const xs: number[] = [1, 2, 3];
+xs.forEach((x) => { xs.push(x); });
+console.log(xs.join(","), xs.length);
+`);
+  });
+
+  test("an accumulator of ARRAYS: each callback-local row MOVES into it and reads back", async () => {
+    await expectMatches(`
+function build(): number {
+  const src: number[] = [1, 2, 3];
+  //@@mutable
+  const out: number[][] = [];
+  src.forEach((x) => { const row: number[] = [x, x + 1]; out.push(row); });
+  return out.length + out[2][1];
+}
+console.log(build(), build());
+`);
+  });
+
+  test("the accumulator is handed OUT of the function by move, and dropped by its new owner", async () => {
+    await expectMatches(`
+function doubled(src: number[]): number[] {
+  //@@mutable
+  const out: number[] = [];
+  src.forEach((x) => { out.push(x * 2); });
+  return out;
+}
+const r = doubled([1, 2, 3, 4]);
+console.log(r.join(","), r.length);
+`);
+  });
+});
+
+/*
+ * THE CONTROLS — the closure shapes that keep the refusal, and WHY each one has to.
+ *
+ * These are the load-bearing half of the relaxation above: the rule was narrowed from
+ * "any arrow mentions it" to "an arrow WITH AN ENV mentions it", and if the second set
+ * were empty the first row here would be a use-after-free rather than a diagnostic.
+ * Proved by mutation — with the guard forced off, this exact source compiles and ASan
+ * reports `heap-use-after-free ... READ of size 8 ... in nt_arr_push runtime.c`, freed by
+ * `nt_arr_free`. The second row is the same guard catching a SILENT WRONG ANSWER instead:
+ * with the guard off it exits 0 and prints `9 1` where node prints `9,1 2`.
+ */
+describe("closures that still get an ENV keep the NT1607 refusal", () => {
+  test("a returned closure OUTLIVES the accumulator's scope — the use-after-free", () => {
+    const got = rejectionOf(`
+function mk(): (n: number) => number {
+  //@@mutable
+  const out: number[] = [];
+  return (n: number) => out.push(n);
+}
+const g = mk();
+console.log(g(1), g(2));
+`);
+    expect(got?.code).toBe("NT1607");
+  });
+
+  test("a bound arrow holds a STALE pointer once the binding is reassigned", () => {
+    const got = rejectionOf(`
+//@@mutable
+let out: number[] = [];
+const f = (n: number): number => out.push(n);
+out = [9];
+f(1);
+console.log(out.join(","), out.length);
+`);
+    expect(got?.code).toBe("NT1607");
+  });
+
+  /* `.toSorted(cmp)` is NOT an inlined HOF: the comparator goes through `Module.cmpShim`,
+   * which loads a `fn_ptr` out of a real `[fn_ptr, caps…]` env. It is a closure in every
+   * sense the rule cares about, which is why `INLINED_HOFS` leaves it out. */
+  test("the `.toSorted` COMPARATOR gets a real env, so it is not an inlined callback", () => {
+    const got = rejectionOf(`
+const src: number[] = [3, 1, 2];
+//@@mutable
+const log: number[] = [];
+const out = src.toSorted((a: number, b: number) => { log.push(a); return a - b; });
+console.log(out.join(","), log.length);
+`);
+    expect(got?.code).toBe("NT1607");
+  });
+
+  test("an inlined push is still refused when SOME OTHER arrow in the scope captures the name", () => {
+    const got = rejectionOf(`
+const src: number[] = [1, 2];
+//@@mutable
+const out: number[] = [];
+const peek = (): number => out.length;
+src.forEach((x) => { out.push(x); });
+console.log(out.join(","), peek());
+`);
+    expect(got?.code).toBe("NT1607");
+    // …and it says so, instead of prescribing the spelling the author already used.
+    expect(got?.message).toContain("ANOTHER arrow");
+    expect(got?.hint).toContain("the `.push` itself is fine");
+  });
+
+  /*
+   * THE METHOD-NAME COLLISION, which is the trap this whole relaxation could have fallen
+   * into: `INLINED_HOFS` matches on the method NAME, and a user class may declare its own
+   * `.forEach` taking a real function value. `isInlinedHofArrow` therefore also requires
+   * the RECEIVER to be an array — the same test `genExpr` uses to route into
+   * `genArrayMethod` at all — and that guard is load-bearing, not decorative: with it
+   * removed, this exact source compiles, because the arrow drops out of `envArrowNames`
+   * and takes the whole refusal with it. Here the arrow really is a closure with an env
+   * (`liftArrow` + `nt_obj_new`), so the premise holds and the refusal is right.
+   */
+  test("a USER CLASS's own `.forEach` is not an inlined HOF — the receiver type decides", () => {
+    const got = rejectionOf(`
+class Box {
+  items: number[] = [];
+  forEach(f: (n: number) => number): void {
+    for (const x of this.items) f(x);
+  }
+}
+const b = new Box();
+//@@mutable
+const out: number[] = [];
+b.forEach((x) => { out.push(x); });
+console.log(out.length);
+`);
+    expect(got?.code).toBe("NT1607");
+  });
+
+  test("a bound arrow inside an INLINED body re-raises the boundary (nesting is honoured)", () => {
+    const got = rejectionOf(`
+const src: number[] = [1, 2];
+//@@mutable
+const out: number[] = [];
+src.forEach((x) => { const g = (): number => out.push(x); console.log(g()); });
+console.log(out.join(","));
+`);
+    expect(got?.code).toBe("NT1607");
+  });
+
+  /* Advice a diagnostic gives has to be true, so both hints are compiled here. */
+  test("the BOUND-arrow hint's prescribed fix compiles and matches node", async () => {
+    await expectMatches(`
+const src: number[] = [1, 2, 3];
+//@@mutable
+const out: number[] = [];
+src.forEach((x) => { out.push(x); });
+console.log(out.join(","), out.length);
+`);
+  });
+
+  test("the OTHER-arrow hint's prescribed fix compiles and matches node", async () => {
+    await expectMatches(`
+const src: number[] = [1, 2];
+//@@mutable
+const out: number[] = [];
+src.forEach((x) => { out.push(x); });
+console.log(out.join(","), out.length);
+`);
+  });
+});
+
+/*
+ * MEMORY for the newly-accepted shape. An inlined callback allocates no env, so the
+ * counters must land exactly where the `for-of` spelling lands — that equality is the
+ * claim, since the accepted program IS the loop it desugars to.
+ */
+describe("memory: an inlined-HOF accumulator drops exactly like the `for-of` loop", () => {
+  test("__arrLive()/__objLive() return to 0 after the scope exits", async () => {
+    const r = await compileAndRun(`
+function build(n: number): number {
+  const src: number[] = [1, 2, 3];
+  //@@mutable
+  const out: number[] = [];
+  src.forEach((x) => { out.push(x * n); });
+  return out.length + out[0];
+}
+console.log(build(2), build(3));
+console.log(__arrLive(), __objLive(), __strLive());
+`);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("5 6\n0 0 0\n");
+  });
+
+  test("200 build-and-drop rounds through `.forEach` exit 0 and leak no headers", async () => {
+    const r = await compileAndRun(`
+function build(n: number): number[] {
+  const src: number[] = [1, 2, 3, 4, 5];
+  //@@mutable
+  const out: number[] = [];
+  src.forEach((x) => { out.push(x * n); });
+  return out;
+}
+let sum = 0;
+for (let k = 0; k < 200; k++) {
+  const a = build(k);
+  sum = sum + a[4];
+}
+console.log(sum, __arrLive());
+`);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("99500 0\n");
+  });
+
+  /*
+   * The `.forEach` spelling and the `for-of` spelling must leak the SAME amount — here,
+   * the 6 inner rows that `nt_obj_free`/`nt_arr_free` never walk (array ELEMENTS are not
+   * freed today; `lane-elemfree` owns that). Asserting the shared number rather than 0 is
+   * deliberate: it pins the equality that makes this relaxation a desugaring rather than a
+   * new leak, and it will fail loudly — on BOTH halves at once — when element freeing lands.
+   */
+  test("the element leak is identical to the `for-of` spelling's (pre-existing, not new)", async () => {
+    const body = (loop: string) => `
+function build(): number {
+  const src: number[] = [1, 2, 3];
+  //@@mutable
+  const out: number[][] = [];
+  ${loop}
+  return out.length + out[2][1];
+}
+console.log(build(), build());
+console.log(__arrLive());
+`;
+    const hof = await compileAndRun(body(`src.forEach((x) => { const row: number[] = [x, x + 1]; out.push(row); });`));
+    const forOf = await compileAndRun(body(`for (const x of src) { const row: number[] = [x, x + 1]; out.push(row); }`));
+    expect(hof.exitCode).toBe(0);
+    expect(forOf.exitCode).toBe(0);
+    expect(hof.stdout).toBe(forOf.stdout);
+    expect(hof.stdout).toBe("7 7\n6\n");
+  });
+
+  /*
+   * The sanitizer gate — the only assertion here that can see a double free or a
+   * use-after-free (the counters above balance to zero just as happily while the program
+   * reads freed memory). Same construction as test/hof-drops.test.ts: ASan + UBSan,
+   * `-fno-sanitize-recover` so every finding is fatal, LSan off (macOS has none).
+   */
+  test("ASan + UBSan: the inlined-HOF accumulator path is free of UAF and double frees", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nativets-pushasan-"));
+    try {
+      const ll = join(dir, "module.ll");
+      writeFileSync(ll, emitIR(`
+function build(n: number): number[] {
+  const src: number[] = [1, 2, 3, 4, 5];
+  //@@mutable
+  const out: number[] = [];
+  src.forEach((x) => { out.push(x * n); });
+  //@@mutable
+  const rows: number[][] = [];
+  out.forEach((x) => { const row: number[] = [x, x]; rows.push(row); });
+  return out;
+}
+let sum = 0;
+for (let k = 0; k < 50; k++) { const a = build(k); sum = sum + a[4]; }
+//@@mutable
+const self: number[] = [1, 2, 3];
+self.forEach((x) => { self.push(x); });
+console.log(sum, self.length);
+`));
+      const bin = join(dir, "prog");
+      const built = spawnSync("clang", [
+        "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+        ll, join(ROOT, "runtime/runtime.c"), "-lm", "-o", bin,
+      ], { encoding: "utf8" });
+      expect(built.status).toBe(0);
+      const run = spawnSync(bin, [], {
+        encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+        env: { ...process.env, ASAN_OPTIONS: "detect_leaks=0" },
+      });
+      expect(run.stderr).not.toContain("AddressSanitizer");
+      expect(run.stderr).not.toContain("runtime error");
+      expect(run.status).toBe(0);
+      expect(run.stdout).toBe("6125 6\n"); // node agrees: 5·Σ(0..49) = 6125, and 3 + 3 appends
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+});
 
 describe("`.push` on a `@@mutable` accumulator — node is the oracle", () => {
   /**

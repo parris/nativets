@@ -923,6 +923,45 @@ class Checker {
    * object has no such property, so calling it is a TypeError, never a receiver-less call).
    */
   readonly statics = new Set<string>();
+
+  /**
+   * The TYPE of a function DECLARATION referenced as a value — `undefined` when the name
+   * is not a plain top-level function, so the caller can fall through to its own error.
+   *
+   * The refusal is an ABI fact, not a missing case. A call through a function value goes
+   * `callClosure`, which passes exactly the arguments the function TYPE spells; the
+   * DEFAULTS for the omitted ones are materialized at the direct call site and exist
+   * nowhere else. So `function f(a: number, b: number = 2)` reached through a value would
+   * enter with `b` reading an argument register nobody wrote — a silent wrong answer, the
+   * worst outcome available. Same for `rest`, which the direct path lowers by packing the
+   * tail into an array before the call. Both are refused rather than guessed.
+   *
+   * `required !== params.length` covers optional parameters too: the parser gives `a?: T`
+   * a default, so one test catches both spellings.
+   *
+   * The hint's argument list is accumulated into a STRING, which reads worse than
+   * `params.map((_, i) => `a${i}`).join(", ")` and is the spelling that keeps this function
+   * inside the subset `src/` must stay within. Both obvious forms are refused here, and
+   * `blocker-metric` caught each in turn: `.map((_, i) => …)` because `.map` binds `(elem)`
+   * only (NT2001), then `names.push(…)` because arrays are immutable (NT1606). Same rule
+   * and the same reason as the note on `unionWidenedMembers` in src/ast.ts.
+   */
+  private functionValueTy(name: string): Ty | undefined {
+    const sig = this.functions.get(name);
+    if (sig === undefined) return undefined;
+    if (sig.rest) {
+      throw nyi(NYI.CLOSURE, `function '${name}' has a REST parameter, so it cannot be used as a value`,
+        `a call through a function value passes exactly the arguments its type spells, and the rest array is packed at the direct call site — wrap it in an arrow of the arity the callee wants instead: \`(a0) => ${name}(a0)\``);
+    }
+    if (sig.required !== sig.params.length) {
+      let list = "";
+      for (let i = 0; i < sig.required; i++) list += i === 0 ? `a${i}` : `, a${i}`;
+      throw nyi(NYI.CLOSURE, `function '${name}' has an optional or defaulted parameter, so it cannot be used as a value`,
+        `the defaults are applied at the direct call site, so a call through the value would leave them unwritten — wrap it instead: \`(${list}) => ${name}(${list})\``);
+    }
+    return makeFuncTy(sig.params, sig.ret);
+  }
+
   constructor(
     private functions: Map<string, Sig>,
     /** Tags whose values mutate IN PLACE — `@@mutable` classes and `@@mutable` records.
@@ -2802,7 +2841,21 @@ class Checker {
         if (!b && this.generics.has(e.name)) {
           throw nyi(NYI.GENERIC, `generic function '${e.name}' used as a value; a generic is specialized at its CALL site — call it directly (\`${e.name}(…)\`) or wrap it in a concrete arrow`);
         }
-        if (!b) throw typeError(`'${e.name}' is not defined`);
+        // A function DECLARATION referenced as a value. Its name lives in the SIGNATURE
+        // table, which is keyed by name and read only at direct CALL sites — it was never
+        // bound in the value `Scope`, so this fell through to "'dbl' is not defined". That
+        // message was FALSE (the same name calls fine one line later), which is the defect
+        // worth fixing whatever else is decided here.
+        //
+        // Resolved HERE rather than by declaring the name in `moduleScope`, deliberately:
+        // `Scope.lookup` records a `hit`, and every module-scope hit read from a function
+        // body is PROMOTED to an LLVM global. Binding 680 function names there would emit
+        // a global apiece for a table codegen already has (`this.mod.functions`).
+        if (!b) {
+          const fnv = this.functionValueTy(e.name);
+          if (fnv !== undefined) return fnv;
+          throw typeError(`'${e.name}' is not defined`);
+        }
         // Control-flow narrowing: on this path the binding was PROVED non-nullish, so it
         // reads as its base type and codegen unwraps the tagged pair here. Always
         // written, so a `true` stamped by an earlier typing pass cannot go stale.

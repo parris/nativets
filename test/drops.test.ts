@@ -15,7 +15,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-import { compileAndRun, expectMatchesNode, emitIR } from "./harness.ts";
+import { compileAndRun, expectMatchesNode, emitIR, emitIRAsan } from "./harness.ts";
 import { sourceToIR } from "../src/driver.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -535,7 +535,7 @@ console.log(__arrLive());`;
     const dir = mkdtempSync(join(tmpdir(), "nativets-ternasan-"));
     try {
       const ll = join(dir, "module.ll");
-      writeFileSync(ll, emitIR(CHURN));
+      writeFileSync(ll, emitIRAsan(CHURN));
       const bin = join(dir, "prog");
       const built = spawnSync("clang", [
         "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",

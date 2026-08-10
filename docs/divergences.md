@@ -252,6 +252,22 @@ which are **refusals or already-documented consequences**, never approximations:
   the day per-type destructors land, `.map(x => x)` over a heap element becomes a real double
   free, and so does every array-of-objects program in the tree. The guard that lane needs is an
   ownership rule about the arrow's result aliasing its parameter, near `searchBorrowBase`.
+
+  **That guard is necessary and nowhere near sufficient — `.map` is one of EIGHT, and the
+  other seven need no arrow at all.** Measured with a depth-1 element destructor spliced into
+  `emitDrops` and run under ASan: `.map(x => x)`, `.filter`, `.slice`, `[...xs]`, `.concat`,
+  `.toSorted`, `.toReversed` and `.with` each became an `attempting double-free`. Every one of
+  them builds a new array by COPYING SLOTS, so the same element pointers land in a second
+  header and both headers are then dropped — no callback, no aliasing rule, just the method.
+  A rule about an arrow's result would catch exactly one of the eight. The blocker is a list of
+  METHODS, each of which must deep-copy, consume its receiver, or be refused on a linear
+  element type. Pinned as allocation counts (which need no destructor to observe) in
+  `test/drops-obj.test.ts`, "array methods that ALIAS elements".
+
+  The shapes that let an element escape **by name** are, by contrast, already refused, and that
+  is why the list is methods-only: `const e = xs[0]` and `return xs[0]` are `NT1605`, a borrowed
+  parameter stored into a local array is `NT1604`, and one object named by two arrays is
+  `NT1601`. Pinned in the same block.
 - **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
   monotonic, whole milliseconds, plausible epoch range.
 
@@ -909,6 +925,71 @@ name is used nowhere but as the callee of a direct call — so an env that ESCAP
 aliased, passed as an argument, stored, captured by another closure) is still never freed. The
 naive version of this — putting function types back into `isLinearTy` — was measured and frees
 the escaping-counter idiom's live env: exit 255. See docs/ROADMAP.md's Phase C.
+
+### A function DECLARATION used as a VALUE — the diagnostic was FALSE, and the fix is a shim
+
+```ts
+function dbl(n: number): number { return n * 2; }
+apply(dbl, 21);        // was: error[NT2001]: 'dbl' is not defined
+```
+
+`dbl` **is** defined — it calls fine as `dbl(21)` on the next line. The cause was a two-table
+split. `check` registers every top-level `FuncDecl` in the SIGNATURE table (`functions`), which
+is keyed by name and consulted only at direct CALL sites, and it never binds the name in the
+value `Scope`; so `scope.lookup("dbl")` missed and the `Identifier` case reported the one thing
+that was certainly untrue. The same program written `const dbl = (n: number) => n * 2` always
+worked, which localizes it to BINDING rather than codegen — the machinery to *call* a function
+value already existed and was exercised, only the machinery to *produce* one from a declaration
+did not.
+
+Across a module boundary the message was worse still, because the linker has renamed the symbol
+by then: `'_m0_eraseOne' is not defined`, naming a spelling that appears nowhere in the source
+and cannot be grepped for.
+
+**Why a shim.** A function value is a heap block `[fn_ptr, cap0, …]` and `callClosure` passes
+that block as an implicit leading `ptr` argument. A top-level function has no such parameter, so
+its symbol cannot go into slot 0 directly — storing it there would shift every real argument by
+one, which is a wrong answer rather than a crash. Codegen therefore emits one trampoline per
+function used this way (`ModuleGen.fnValue`, the lazy pattern `cmpShim`/`actorEntry` already
+use), taking the env and ignoring it.
+
+**Why it is cheaper than a closure.** A declaration captures nothing, so its block is a
+compile-time constant: a `private constant [1 x i64]` global, not an `nt_obj_new`. That removes
+the ownership question instead of answering it — no allocation, so nothing to own, nothing to
+drop, no leak on the argument path and no double free when the same function is passed twice.
+One block per function, which is also a CORRECTNESS requirement and not merely a saving: node
+says `dbl === dbl`, so both references must yield the same pointer. Verified clean under
+ASan+UBSan with `-fno-sanitize-recover=all`.
+
+**Hoisting is supported.** node hoists function declarations, so a reference may precede the
+textual definition; the signature table is fully populated in pass 1, before any body is checked,
+so this costs nothing and refusing it would have been the divergence.
+
+Two shapes stay refused (`NT1003`), and both are ABI facts rather than missing cases — a call
+through a function value passes exactly the arguments the function TYPE spells, while the
+machinery that supplies a **default** or packs a **rest** array lives at the direct call site
+and nowhere else:
+
+| shape | verdict |
+|---|---|
+| `function f(a, b = 2)` / optional `b?` | `NT1003` — `b` would enter unwritten. Hint: wrap in `(a0) => f(a0)` |
+| `function f(...ns: number[])` | `NT1003` — the rest array is packed at the call site. Same hint |
+| generic `function f<T>(…)` | `NT1013`, its own pre-existing and more precise message |
+| point-free `xs.map(f)` | unchanged — refused a layer earlier by the INLINE-ARROW rule above, not by this |
+
+That last row is why the `src/` census reads the way it does. Of 8 value-position references to
+a top-level declaration in the LINKED stage-1 program, **7 are point-free array HOFs** blocked by
+`.map`/`.every`/`.some` demanding a literal arrow — a `const` bound to an arrow cannot pass those
+either, which is what proves the two defects independent — and exactly **1** is unblocked here:
+`mapTypesDeepExpr(arrow, eraseTypeParams)` at `src/parser.ts:3359`. `blocker-metric` cannot show
+even that one clearing, because `Parser.parseAssign` is masked by an `NT1606` twenty-six lines
+above it; the cross-module fixture in `test/modules/fndecl-value/` verifies it directly instead.
+The value of this entry is the false diagnostic, not the count.
+
+Both hints are RUN in `test/fndecl-value.test.ts` and asserted against node. Shadowing is proved
+by mutation: a function-typed parameter named `dbl` that is forwarded onward as a value resolves
+to the function's constant block if the `isBound` check is hoisted, printing **42 at exit 0**
+where node prints 22.
 
 ### `.find` / `.findLast` — one element shape opens, two stay refused, and the result is a BORROW
 
@@ -1963,9 +2044,38 @@ established — but not by a new analysis. Three facts the compiler already has 
   the attribute is on a `let`/`const`;
 - `this.f`, `xs[0]` and `f()` name **no binding**, so they never match the opt-in.
 
-The one hole those do not cover is a **CLOSURE**: an arrow copies the array POINTER into a heap env
-this scope cannot null, and the closure may outlive the binding. A push to a captured accumulator is
-`NT1607`.
+The one hole those do not cover is a **CLOSURE WITH AN ENV**: a *bound* arrow copies the array
+POINTER into a heap env this scope cannot null, and the closure may outlive the binding. A push to
+such a captured accumulator is `NT1607`.
+
+**An INLINED HOF callback is not that, and is allowed.** The rule was originally stated over "any
+arrow", which refused the most idiomatic accumulator shape there is —
+`src.forEach((x) => { out.push(x); })` — for a reason that does not apply to it. `.forEach`, `.map`,
+`.filter`, `.reduce`, `.flatMap`, `.some`, `.every`, `.find`, `.findIndex`, `.findLast` and
+`.findLastIndex` take an arrow **literal** (the checker requires one) and codegen emits its
+statements straight into the enclosing frame as a loop: **no env is allocated, no pointer is
+snapshotted, and the body cannot outlive the statement it is written in, because it IS the
+statement.** The accepted program is exactly the `for-of` loop it desugars to, which always
+compiled, and `nt_arr_push` mutates the `NtArray` header in place (only `a->data` is reallocated),
+so the accumulator's pointer does not move under the loop either.
+
+Two guards keep that narrow, and both are load-bearing rather than decorative:
+
+- the **receiver must be an array** — a user class may declare its own `.forEach` taking a real
+  function value, and *its* argument is an ordinary closure with an env. Remove this test and that
+  program compiles;
+- `.toSorted(cmp)` is **excluded**: its comparator goes through `Module.cmpShim`, which loads a
+  `fn_ptr` out of a real `[fn_ptr, caps…]` env, so it is a closure in every sense the rule cares
+  about.
+
+The **drop** decisions (`droppable`, `dropOld`) deliberately keep consulting the wider,
+conservative "mentioned inside any arrow" set. Relaxing a refusal costs a leak at worst; relaxing a
+drop is the direction that mints a use-after-free, and the two are not relaxed together.
+
+**The closure shapes that keep the refusal**, proved by mutation — with the guard forced off, a
+returned closure over the accumulator compiles and ASan reports `heap-use-after-free … READ of size
+8 … in nt_arr_push`, freed by `nt_arr_free`; and a reassigned binding compiles, exits **0**, and
+prints `9 1` where node prints `9,1 2` — the silent wrong answer.
 
 **The receiver shapes that stay refused**, each pinned in `test/push-accumulator.test.ts`:
 
@@ -1975,7 +2085,9 @@ this scope cannot null, and the closure may outlive the binding. A push to a cap
 | an **unmarked parameter** | `NT1606` |
 | `this.<field>` | `NT1606` |
 | a container **element** (`g[0].push(v)`) | `NT1606` |
-| a **captured** accumulator | `NT1607` |
+| an accumulator captured by a **bound arrow** (one that gets an env) | `NT1607` |
+| an accumulator captured by a `.toSorted` **comparator** | `NT1607` |
+| an accumulator a **user class's** own `.forEach`/`.map` receives an arrow over | `NT1607` |
 | an accumulator already **moved out** | `NT1601` |
 | the accumulator while a `for-of` **borrows** it (iterator invalidation) | `NT1603` |
 | `@@mutable` on a non-array, or on a multi-name declaration | `NT1023` |

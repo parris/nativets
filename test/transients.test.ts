@@ -34,7 +34,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-import { compileAndRun, expectMatchesNode, emitIR } from "./harness.ts";
+import { compileAndRun, expectMatchesNode, emitIR, emitIRAsan } from "./harness.ts";
 import { ownershipCheck } from "../src/driver.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -400,7 +400,7 @@ console.log(revAlias.join(",") + "|" + rev.join(",") + "|" + [4, 5, 6].reverse()
     const dir = mkdtempSync(join(tmpdir(), "nativets-asan-"));
     try {
       const ll = join(dir, "module.ll");
-      writeFileSync(ll, emitIR(PROGRAM));
+      writeFileSync(ll, emitIRAsan(PROGRAM));
       const bin = join(dir, "prog");
       const built = spawnSync("clang", [
         "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
