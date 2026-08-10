@@ -987,6 +987,75 @@ console.log(isP({ kind: "punct", value: "+" }, "+"), isP(undefined, "+"), t, dou
   });
 
   /*
+   * ...and the same question asked of a LOOP binding — the shape that gates most of the
+   * compiler's own source.
+   *
+   * `ownBindings` models a body's parameters and its TOP-LEVEL declarations, so it sees a
+   * `for (const s of …)` variable from NEITHER side: the producer side leaks it (a `let s`
+   * in a BLOCK of `other` below escapes into the program-wide set, exactly as
+   * src/lexer.ts's `lex` leaks its `let s = ""` from inside the number-literal branch),
+   * and the consumer side cannot localize it (`bindingFrame` finds no body that binds `s`
+   * and falls back to the whole program). Both halves have to miss for the bug to bite,
+   * and on `s` they do: it was the FIRST BLOCKER of five of the twelve compiler modules,
+   * at src/parser.ts's `valueReturns` — `case "ReturnStmt": if (s.argument) …`.
+   */
+  test("a loop binding narrows, though a block-scoped local elsewhere shares its name", async () => {
+    await expectNode(`
+function use(s: string): number { return s.length; }
+function other(k: number): number {
+  if (k > 0) { let s = 0; s = s + 1; return s; }
+  return 0;
+}
+function f(xs: (string | undefined)[]): number {
+  let n = 0;
+  for (const s of xs) { if (s !== undefined) n = n + use(s); }
+  return n;
+}
+console.log(f(["ab", undefined, "c"]), other(1));
+`);
+  });
+
+  /*
+   * ...and the two halves of the loop-binding rule that keep it sound. A block or loop
+   * binding covers only its block, so localizing to the body that contains it is correct
+   * only when nothing OUTSIDE that body could be the `name` being read.
+   *
+   * Both were proved by mutation, not by argument. Dropping the enclosing-frame check
+   * below compiles the first case, and node THROWS on it (`Cannot read properties of
+   * undefined`); dropping it accidentally — `blockBindings` seeded from the frame's own
+   * `binds`, where `Set.add` mutates under bun though it is persistent in the subset this
+   * compiler compiles itself in — did exactly that for one build here.
+   */
+  test("REFUSED: an OUTER binding of the same name is still judged program-wide", () => {
+    expectRejected(`
+let s: string | undefined = "hi";
+function clear(): void { s = undefined; }
+function f(xs: number[]): number {
+  let seen = 0;
+  for (const s of xs) { seen = seen + s; }
+  if (s !== undefined) { clear(); return s.length + seen; }
+  return -1;
+}
+console.log(f([1, 2]));
+`, "NT2001", "'s' is possibly undefined");
+  });
+
+  test("REFUSED: an arrow in the SAME body that assigns the loop binding", () => {
+    expectRejected(`
+function use(t: string): number { return t.length; }
+function f(xs: (string | undefined)[]): number {
+  let n = 0;
+  for (let s of xs) {
+    const clear = (): void => { s = undefined; };
+    if (s !== undefined) { clear(); n = n + use(s); }
+  }
+  return n;
+}
+console.log(f(["ab", undefined]));
+`, "NT1031", "captured binding");
+  });
+
+  /*
    * The safe direction, pinned: a MODULE-LEVEL binding is still judged against the whole
    * program, because any arrow anywhere in it can reach one.
    */

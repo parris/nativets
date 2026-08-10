@@ -332,13 +332,26 @@ interface AccessPath { name: string; binding: Binding; path: string; ty: Ty }
  * to find WHICH body owns a given name — the scope-aware replacement for asking a
  * name-keyed, program-wide question. `closureAssigned` is the per-body answer to "which
  * names does some arrow inside this body assign?", computed on first use because most
- * bodies are never asked.
+ * bodies are never asked. `innerBinds` is `binds` widened to the body's BLOCKS and LOOPS
+ * (`blockBindings`), used only as a fallback and only when no enclosing body could bind
+ * the name too — see `bindingFrame`. It is computed EAGERLY, unlike `closureAssigned`:
+ * it walks statements only (no expression descent, no nested function bodies), so it is
+ * far cheaper than the assignment scan, and a lazy cache would have to write the field
+ * back on the frame — which is NT1606 in the subset the compiler compiles itself in.
  */
-interface BodyFrame { body: Stmt[]; binds: Set<string>; closureAssigned?: Set<string> }
+interface BodyFrame { body: Stmt[]; binds: Set<string>; innerBinds: Set<string>; closureAssigned?: Set<string> }
 
 /** A `bodyChain` frame for a body, recording the names it binds itself. */
 function bodyFrame(params: { name: string }[], body: Stmt[]): BodyFrame {
-  return { body, binds: ownBindings(params, body) };
+  const binds = ownBindings(params, body);
+  // A SECOND, independent `ownBindings` call seeds `innerBinds` — deliberately NOT `binds`.
+  // `blockBindings` accumulates with `out = out.add(n)`, which reads as persistent (it is,
+  // in the subset this compiler compiles ITSELF in) but MUTATES under the bun that runs it
+  // today, so handing it `binds` folded every block and loop name straight into `binds` and
+  // made the two sets the same object. That silently turned the fallback into the exact
+  // unsound rule it is written to avoid: a module-level `s` an outer function assigns
+  // stopped poisoning a same-named loop variable, and the program compiled.
+  return { body, binds, innerBinds: blockBindings(body, ownBindings(params, body)) };
 }
 
 /** How a union field read's receiver was written — see `Checker.recvHint`. */
@@ -5825,10 +5838,29 @@ class Checker {
    */
   private bindingFrame(name: string): BodyFrame {
     for (let i = this.bodyChain.length - 1; i > 0; i--) if (this.bodyChain[i]!.binds.has(name)) return this.bodyChain[i]!;
+    // No body on the chain declares the name at its TOP level — but it may still be bound
+    // in a BLOCK or by a LOOP of one of them, and that is the shape the walkers in this
+    // compiler are made of: `for (const s of stmts) switch (s.kind) …`. Landing on frame 0
+    // for those puts them back on the program-wide answer, which is the bug the whole
+    // function exists to close, one scope short.
+    //
+    // WHY THE SECOND LOOP AND NOT JUST A WIDER `binds`. A top-level declaration owns the
+    // WHOLE body, so `binds` can be trusted directly: every `name` written inside that
+    // body is that binding. A block one owns only its block, so a reference elsewhere in
+    // the same body resolves OUTWARD — and scanning the inner body would then miss the
+    // assignment that invalidates the fact, which is a wrong answer, not a refusal. So a
+    // block binder is accepted only when no ENCLOSING body could bind the name at all,
+    // top-level or block: then there is nowhere else for a `name` in scope here to have
+    // come from, and scanning this body is scanning a superset of what can matter.
+    for (let i = this.bodyChain.length - 1; i > 0; i--) {
+      if (!this.bodyChain[i]!.innerBinds.has(name)) continue;
+      for (let j = 0; j < i; j++) if (this.bodyChain[j]!.innerBinds.has(name)) return this.bodyChain[0]!;
+      return this.bodyChain[i]!;
+    }
     // The chain is EMPTY during the pre-`check` return-type inference pass, which the note
     // on `checkCapturedWrites` covers: nothing to scan means nothing observed, and the
     // arrow is judged again for real once the chain exists.
-    return this.bodyChain[0] ?? { body: [], binds: new Set<string>() };
+    return this.bodyChain[0] ?? { body: [], binds: new Set<string>(), innerBinds: new Set<string>() };
   }
 
   /**
@@ -6709,6 +6741,53 @@ function ownBindings(params: { name: string }[], body: Stmt[]): Set<string> {
   for (const s of body) {
     if (s.kind === "VarDecl") for (const d of s.decls) out = out.add(d.name);
     else if (s.kind === "FuncDecl") out = out.add(s.name);
+  }
+  return out;
+}
+
+/**
+ * `own` widened with every name the body binds in a nested BLOCK, LOOP or `catch` — the
+ * loop variable of `for (const s of stmts)` above all, which `ownBindings` does not see
+ * from either side.
+ *
+ * It deliberately does NOT descend into a nested function or arrow: those bodies get their
+ * own `BodyFrame`, and folding their bindings in here would make an inner frame's own
+ * variable look like the enclosing one's — the exact confusion `bindingFrame` is for.
+ *
+ * This is a "could this body bind the name" question, never a "this body owns every use of
+ * the name" one; `bindingFrame` is where that distinction is enforced, and it is the whole
+ * reason this is a separate set rather than a wider `ownBindings`.
+ *
+ * `own` is taken BY OWNERSHIP — see `bodyFrame` for why that has to be said out loud.
+ */
+function blockBindings(body: Stmt[], own: Set<string>): Set<string> {
+  let out = own;
+  for (const s of body) {
+    switch (s.kind) {
+      case "VarDecl": for (const d of s.decls) out = out.add(d.name); break;
+      case "FuncDecl": out = out.add(s.name); break; // named, but its BODY is another frame
+      case "IfStmt": out = blockBindings(s.consequent, out); if (s.alternate) out = blockBindings(s.alternate, out); break;
+      case "WhileStmt": case "DoWhileStmt": out = blockBindings(s.body, out); break;
+      case "ForStmt":
+        if (s.init && (s.init as Stmt).kind === "VarDecl") out = blockBindings([s.init as Stmt], out);
+        out = blockBindings(s.body, out);
+        break;
+      // ForOf and ForIn are spelled out separately, not grouped: a case list narrows to a
+      // SUB-union whose `kind` is plain `string`, and a field read off one of those is an
+      // NT2001 — src/ has to stay inside the subset it compiles.
+      case "ForOfStmt": out = blockBindings(s.body, out.add(s.name)); break;
+      case "ForInStmt": out = blockBindings(s.body, out.add(s.name)); break;
+      case "SwitchStmt": for (const c of s.cases) out = blockBindings(c.body, out); break;
+      case "TryStmt":
+        out = blockBindings(s.block, out);
+        if (s.param) out = out.add(s.param);
+        if (s.handler) out = blockBindings(s.handler, out);
+        if (s.finalizer) out = blockBindings(s.finalizer, out);
+        break;
+      case "BlockStmt": out = blockBindings(s.body, out); break;
+      case "MultiStmt": out = blockBindings(s.stmts, out); break;
+      default: break;
+    }
   }
   return out;
 }
