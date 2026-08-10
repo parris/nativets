@@ -203,7 +203,10 @@ function sdkPath(sdk: string): string {
 export function androidClang(): string {
   const ndkBase = join(homedir(), "Library/Android/sdk/ndk");
   if (!existsSync(ndkBase)) throw new BuildError("Android NDK not found");
-  const versions = readdirSync(ndkBase).sort();
+  // `.toSorted`, not `.sort`: `freshArray` does not know `readdirSync` mints a new array,
+  // so the in-place spelling is NT1606 in our own subset. Same value either way — the
+  // `.filter(…).sort()` below is already fresh by construction and stays as it is.
+  const versions = readdirSync(ndkBase).toSorted();
   const ndk = versions[versions.length - 1]!;
   const bin = join(ndkBase, ndk, "toolchains/llvm/prebuilt/darwin-x86_64/bin");
   const wanted = `aarch64-linux-android${ANDROID_API}-clang`;

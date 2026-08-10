@@ -2630,18 +2630,28 @@ class FnGen {
           return { v: t, ty };
         }
         // `&&` / `||` — value-returning short-circuit (result type = operand type).
+        //
+        // …except in TRUTHINESS position, where the checker types the node `boolean`
+        // whatever its operands are (see its `typeCond`): `Boolean(a && b)` is exactly
+        // `Boolean(a) && Boolean(b)`. There the value stored is each operand's
+        // TRUTHINESS, not the operand — storing a `string | undefined` box into an `i1`
+        // slot is not a representation the slot has. Keyed off the result type rather
+        // than a flag, and it subsumes the old path rather than sitting beside it:
+        // `truthyOf` of a `boolean` is that boolean, so a plain `b1 && b2` emits exactly
+        // what it emitted before.
         const ty = (e.ty ?? "boolean") as Ty;
         const slot = this.slot(ty);
         const l = this.genExpr(e.left);
-        this.emit(`store ${llvmTy(ty)} ${l.v}, ptr ${slot}`);
+        if (ty !== "boolean") this.emit(`store ${llvmTy(ty)} ${l.v}, ptr ${slot}`);
         const cond = this.truthyOf(l);
+        if (ty === "boolean") this.emit(`store i1 ${cond}, ptr ${slot}`);
         const evalLbl = this.label("rhs");
         const endLbl = this.label("logend");
         if (e.op === "&&") this.terminate(`br i1 ${cond}, label %${evalLbl}, label %${endLbl}`);
         else this.terminate(`br i1 ${cond}, label %${endLbl}, label %${evalLbl}`);
         this.to(this.block(evalLbl));
         const r = this.genExpr(e.right);
-        this.emit(`store ${llvmTy(ty)} ${r.v}, ptr ${slot}`);
+        this.emit(`store ${llvmTy(ty)} ${ty === "boolean" ? this.truthyOf(r) : r.v}, ptr ${slot}`);
         this.terminate(`br label %${endLbl}`);
         this.to(this.block(endLbl));
         const t = this.fresh();
