@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "5e155da"
+    "rev": "f3bc8d3"
   },
   "modules": {
     "ast.ts": {
@@ -9,16 +9,16 @@
       "standalone": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
+        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustr…"
       },
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
+        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustr…"
       }
     },
     "checker.ts": {
-      "sha256": "12e8991c5c82a14f",
+      "sha256": "1eccbe22a71ed20a",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -27,7 +27,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
+        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nt_m0_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,t…"
       }
     },
     "cli.ts": {
@@ -41,7 +41,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
+        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nts0_m2_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean…"
       }
     },
     "codegen.ts": {
@@ -54,7 +54,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
+        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nt_m0_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,t…"
       }
     },
     "coverage-preprocess.ts": {
@@ -81,7 +81,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
+        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nts0_m0_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean…"
       }
     },
     "diagnostics.ts": {
@@ -108,7 +108,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
+        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nts0_m2_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean…"
       }
     },
     "lexer.ts": {
@@ -134,7 +134,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
+        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nts0_m2_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean…"
       }
     },
     "ownership.ts": {
@@ -148,7 +148,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
+        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nt_m0_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,t…"
       }
     },
     "parser.ts": {
@@ -161,7 +161,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] return type {name:string,annot:?Ustring,default:?UU<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Us…"
+        "message": "[NT2001] Ternary branches differ: {kind:string,declKind:string,decls:@_nt_m2_Declarator[],mutable:?Uboolean} vs U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,t…"
       }
     }
   }

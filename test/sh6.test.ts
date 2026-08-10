@@ -1241,7 +1241,23 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // What stops stage-1 now is the SAME shape that turned out to be behind the last
       // one: `?UU<<UNION>>` vs `?U@2_Expr` — one type with two spellings, a `@N` back-edge
       // comparing unequal to its own one-level unfolding.
-      expect(m.error).toContain("does not match declared");
+      // TWENTY-FOURTH — and there was no over-eager unfold to delete. BOTH spellings are
+      // what the `@Name` invariant REQUIRES at their own site: a value's own type must be
+      // EXPANDED (or no pass can read a field off it), and a back-edge nested inside a
+      // shape must stay FOLDED (or the encoding does not terminate). They collide the
+      // instant a value goes back into a field of its own type, so EQUALITY is what had to
+      // normalize — not the spellings. One line: `fitsParam`, the return/argument gate, was
+      // pure `===`, while `assignable` had carried the coinductive fold/unfold rule all
+      // along. `sameShape` is identity modulo `@N`, deliberately NOT a widening: fields
+      // match in count/key/ORDER (a field list is a slot order), union members in
+      // count/order (index is the tag), and unfolding is ONE-SIDED so `@A` vs `@B` stays
+      // false — this did not make the encoding equirecursive.
+      //
+      // What stops stage-1 now is `joinTernary`: a union MEMBER does not fit its own union
+      // through a join, though `fitsParam` accepts the identical value through a call.
+      // Already diagnosed once and deliberately parked, because widening the join exposed
+      // an ownership hole in `?:` that has since been closed.
+      expect(m.error).toContain("Ternary branches differ");
       expect(m.code).toBe("NT2001");
       return;
     }
