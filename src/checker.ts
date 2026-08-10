@@ -4297,11 +4297,13 @@ class Checker {
         // the self-hosting denominator, refused for the same pre-existing reason
         // `accumulatorName` beside it is, and the blocker metric would read the addition as
         // a regression. Two lines here cost nothing.
-        // `Boolean(…)`, not `=== true`: comparing an OPTIONAL boolean against `boolean` is
-    // outside the subset `src/` must stay inside (NT2001, "Cannot compare ?Uboolean with
-    // boolean"). Latent rather than counted here — this function's first blocker was the
-    // `mutationError` Loc-width gap, now fixed — so it would have surfaced as the next one.
-    const recvIsParam = callee.object.kind === "Identifier" && Boolean(scope.lookup(callee.object.name)?.param);
+    // `?? false` — NOT `=== true` (comparing an OPTIONAL boolean against `boolean` is
+    // outside the subset `src/` must stay inside: NT2001 "Cannot compare ?Uboolean with
+    // boolean"), and NOT `Boolean(…)`, which is unimplemented in this compiler
+    // (docs/divergences.md) and would trade that NT2001 for an NT1003. Latent rather than
+    // counted here — this function's first blocker was the `mutationError` Loc-width gap,
+    // now fixed — so it would otherwise have surfaced as the next one.
+    const recvIsParam = callee.object.kind === "Identifier" && (scope.lookup(callee.object.name)?.param ?? false);
         throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.push\` would mutate the array in place`,
           recvIsParam
             ? "build a new array instead: `[...arr, x]` — the original is unchanged. This receiver is a PARAMETER, which is a borrow: the caller owns it, so neither `@@mutable` nor rebinding it (`out = [...out, x]`, which is NT1608) can append to it. Accumulate into a LOCAL and RETURN it — `let acc: T[] = []; acc = [...acc, x]; return acc` — and let the caller rebind"
