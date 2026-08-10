@@ -4285,6 +4285,26 @@ class Checker {
         // nothing is polymorphic), so the answer is the same one node computes.
         const ot = this.type(e.object, scope);
         const c = e.className;
+        // …but ONLY while the static type names one thing. A NULLABLE or UNION operand has
+        // more than one inhabitant and the fold answered `false` for every one of them —
+        // silently. `classTag("?UDog{…}")` reads the tag as `?UDog`, not an identifier, so
+        // it returns undefined and `classTag(ot) === c` is false; `isArrayTy` excludes
+        // nullables by construction (`!isNullableTy`), and `isMapTy`/`isSetTy`/`isBytesTy`
+        // anchor on a prefix that `?U`/`?N` displaces. So
+        //
+        //     const d: Dog | undefined = new Dog("rex"); d instanceof Dog
+        //
+        // printed `false` where node prints `true` — wrong stdout at exit 0, which is the
+        // worst outcome available. It cannot be repaired by widening the predicates: the
+        // answer depends on WHICH arm the value holds, and `e.result` is one compile-time
+        // boolean with nowhere to put a runtime test. Refuse, and name the test that
+        // decides it — for a nullable that is the null check the narrowing already needs.
+        if (isNullableTy(ot) || isUnionTy(ot) || isGeneralUnionTy(ot)) {
+          const nullish = isNullableTy(ot) ? nullishKind(ot) : "undefined";
+          throw nyi(NYI.INSTANCEOF, `'instanceof ${c}' on ${ot}`, isNullableTy(ot)
+            ? `\`instanceof\` is decided from the static type here, and ${ot} does not name one class — the value may be ${nullish}. Narrow first: \`x !== ${nullish}\` answers exactly this question for a nullable, and the narrowed binding is what the branch wanted anyway`
+            : "`instanceof` is decided from the static type here, and a union names more than one — compare the discriminant instead (e.g. `x.kind === \"…\"`), which also narrows the binding for the branch body", exprLoc(e.object));
+        }
         if (c === "Array") e.result = isArrayTy(ot);
         else if (c === "Uint8Array") e.result = isBytesTy(ot);
         else if (c === "Map") e.result = isMapTy(ot);
