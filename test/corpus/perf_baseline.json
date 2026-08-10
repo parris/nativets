@@ -4,122 +4,122 @@
     "base64.ts": {
       "instrs": 69,
       "funcs": 1,
-      "bytes": 11878
+      "bytes": 12542
     },
     "brainfuck.ts": {
       "instrs": 319,
       "funcs": 6,
-      "bytes": 22528
+      "bytes": 23192
     },
     "calculator.ts": {
-      "instrs": 593,
+      "instrs": 594,
       "funcs": 9,
-      "bytes": 32450
+      "bytes": 33147
     },
     "csv.ts": {
-      "instrs": 495,
+      "instrs": 496,
       "funcs": 2,
-      "bytes": 30613
+      "bytes": 31317
     },
     "diff.ts": {
       "instrs": 325,
       "funcs": 3,
-      "bytes": 23735
+      "bytes": 24399
     },
     "infixcalc.ts": {
-      "instrs": 770,
+      "instrs": 771,
       "funcs": 11,
-      "bytes": 39929
+      "bytes": 40625
     },
     "jobs.ts": {
       "instrs": 754,
       "funcs": 10,
-      "bytes": 41132
+      "bytes": 41786
     },
     "json-pretty.ts": {
       "instrs": 347,
       "funcs": 3,
-      "bytes": 25468
+      "bytes": 26126
     },
     "life.ts": {
       "instrs": 482,
       "funcs": 9,
-      "bytes": 27937
+      "bytes": 28601
     },
     "markdown.ts": {
-      "instrs": 502,
+      "instrs": 512,
       "funcs": 4,
-      "bytes": 31569
+      "bytes": 32603
     },
     "matrix.ts": {
       "instrs": 621,
       "funcs": 10,
-      "bytes": 35135
+      "bytes": 35799
     },
     "maze.ts": {
-      "instrs": 638,
+      "instrs": 646,
       "funcs": 1,
-      "bytes": 35236
+      "bytes": 36183
     },
     "primes.ts": {
       "instrs": 123,
       "funcs": 1,
-      "bytes": 14041
+      "bytes": 14705
     },
     "roman.ts": {
       "instrs": 292,
       "funcs": 4,
-      "bytes": 21631
+      "bytes": 22295
     },
     "router.ts": {
-      "instrs": 434,
+      "instrs": 436,
       "funcs": 9,
-      "bytes": 27967
+      "bytes": 28699
     },
     "rpn.ts": {
       "instrs": 219,
       "funcs": 4,
-      "bytes": 17894
+      "bytes": 18558
     },
     "rule110.ts": {
       "instrs": 226,
       "funcs": 6,
-      "bytes": 18228
+      "bytes": 18892
     },
     "stackvm.ts": {
-      "instrs": 421,
+      "instrs": 429,
       "funcs": 2,
-      "bytes": 27812
+      "bytes": 28738
     },
     "sudoku.ts": {
       "instrs": 577,
       "funcs": 8,
-      "bytes": 34411
+      "bytes": 35075
     },
     "tictactoe.ts": {
-      "instrs": 664,
+      "instrs": 672,
       "funcs": 9,
-      "bytes": 37611
+      "bytes": 38586
     },
     "todo.ts": {
       "instrs": 230,
       "funcs": 2,
-      "bytes": 17932
+      "bytes": 18596
     },
     "units.ts": {
       "instrs": 348,
       "funcs": 7,
-      "bytes": 24681
+      "bytes": 25345
     },
     "vigenere.ts": {
-      "instrs": 284,
+      "instrs": 286,
       "funcs": 2,
-      "bytes": 20123
+      "bytes": 20858
     },
     "wordfreq.ts": {
       "instrs": 355,
       "funcs": 4,
-      "bytes": 22677
+      "bytes": 23341
     }
   },
   "alloc": {
@@ -182,14 +182,14 @@
   },
   "binarySize": {
     "darwin-arm64": {
-      "primes.ts": 132192,
-      "matrix.ts": 132624,
-      "sudoku.ts": 132592,
-      "life.ts": 132584,
-      "maze.ts": 151816,
-      "wordfreq.ts": 151904,
-      "stackvm.ts": 132272,
-      "json-pretty.ts": 132304
+      "primes.ts": 150000,
+      "matrix.ts": 150416,
+      "sudoku.ts": 150368,
+      "life.ts": 150360,
+      "maze.ts": 186264,
+      "wordfreq.ts": 169856,
+      "stackvm.ts": 150048,
+      "json-pretty.ts": 150096
     }
   },
   "anchors": {
