@@ -1399,3 +1399,64 @@ switch (cur.kind) {
 `, "NT2001", "does not exist on");
   });
 });
+
+/*
+ * Narrowing a nullable FUNCTION-typed binding, and then CALLING it.
+ *
+ * This was reported as the closure gap — NT1003 "call to 'f' (function values / unknown
+ * callee) is not supported yet", whose hint sends the reader at "captured environments".
+ * The diagnostic is wrong about its own cause. Function values are fully implemented:
+ * a REQUIRED `f: (x: number) => number` parameter compiles, is called through
+ * `genCallValueFrom`, and prints the right answer. So does the identical program with the
+ * narrowed value first rebound to a `const` of function type — which is the same value,
+ * the same closure, and the same call, proving codegen was never the missing part.
+ *
+ * The one thing missing was NARROWING. `?U(number)=>number` is not `isFuncTy` (that
+ * wants a leading `(`), and the call path read the binding's DECLARED type straight out
+ * of the scope instead of the type proved on this path — the only read of a binding in
+ * the checker that skipped `narrowedTy`. So `if (f !== undefined) f(n)` fell past the
+ * function-value case to the unknown-name case and blamed closures.
+ *
+ * That is what blocks `src/ast.ts`'s `onAssign?: (name, at) => never` — the compiler's
+ * own frontier — and it is a narrowing bug, not a missing feature.
+ *
+ * node erases the type layer entirely, so every case here is node-differential.
+ */
+describe("narrowing 12 — a nullable FUNCTION-typed binding is callable once narrowed", () => {
+  test("`f !== undefined` narrows an optional callback parameter enough to call it", async () => {
+    await expectNode(`
+function apply(n: number, f?: (x: number) => number): number {
+  if (f !== undefined) return f(n);
+  return n;
+}
+console.log(apply(21, (x: number): number => x * 2));
+console.log(apply(7));
+`);
+  });
+
+  // Same program with the `if` deleted. tsc refuses this too (TS2722, "cannot invoke an
+  // object which is possibly 'undefined'"), so refusing is right — what was wrong is that
+  // it was refused as the CLOSURE gap, telling the reader to wait for a feature that had
+  // already shipped when the fix is one `if`. The boundary is the point of the test: the
+  // narrowing must be what admits the call, not the function type alone.
+  test("REFUSED: calling the same optional callback WITHOUT narrowing it", () => {
+    expectRejected(`
+function apply(n: number, f?: (x: number) => number): number {
+  return f(n);
+}
+console.log(apply(21, (x: number): number => x * 2));
+`, "NT2001", "possibly undefined");
+  });
+
+  // The `else` arm proves the fact is POLARITY-correct: on the branch where `f` IS
+  // nullish the call must still be refused, or the narrowing would be unsound in the
+  // one direction that produces a null dereference rather than a diagnostic.
+  test("REFUSED: calling it on the branch where the guard proved it ABSENT", () => {
+    expectRejected(`
+function apply(n: number, f?: (x: number) => number): number {
+  if (f !== undefined) { return n; } else { return f(n); }
+}
+console.log(apply(21));
+`, "NT2001", "possibly undefined");
+  });
+});

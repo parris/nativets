@@ -4137,9 +4137,28 @@ class Checker {
       }
 
       // calling a function VALUE (a variable/param whose type is a function type)
+      //
+      // Read the type proved on THIS path, not the declared one. This was the only read
+      // of a binding in the checker that skipped `narrowedTy`, and it cost a feature: an
+      // OPTIONAL callback (`f?: (x: number) => number`) is stored `?U(number)=>number`,
+      // which `isFuncTy` rejects — it wants a leading `(` — so `if (f !== undefined) f(n)`
+      // fell all the way past this case to the unknown-name case below and was blamed on
+      // closures ("function values / unknown callee"). Function values themselves were
+      // never missing: the same program with a REQUIRED parameter compiles, and so does
+      // the narrowed value rebound to a `const` of function type, which is the identical
+      // value through the identical `genCallValueFrom`. That is what blocked `src/ast.ts`'s
+      // `onAssign?: (name, at) => never` — a narrowing gap wearing a closure's diagnostic.
       const bound = scope.lookup(e.callee.name);
-      if (bound && isFuncTy(bound.ty)) {
-        const ps = funcParams(bound.ty);
+      const boundTy = bound === undefined ? undefined : this.narrowedTy(bound, "") ?? bound.ty;
+      if (bound && boundTy !== undefined && isFuncTy(boundTy)) {
+        // Stamp the callee exactly as an ordinary identifier READ is stamped (`type()`'s
+        // `Identifier` case): when the storage is a nullable pair, codegen must unwrap it
+        // at this read before calling through it. Written UNCONDITIONALLY — the flag is
+        // documented as set on every read so a stale `true` from an earlier typing pass
+        // cannot survive, and this callee is typed more than once (`typeArg` re-runs).
+        callee.narrowed = isNullableTy(bound.ty);
+        callee.ty = boundTy;
+        const ps = funcParams(boundTy);
         if (e.args.length !== ps.length) throw typeError(`'${e.callee.name}' expects ${ps.length} arguments, got ${e.args.length}`);
         e.args.forEach((a, i) => {
           const at = this.typeArg(a, ps[i]!, scope);
@@ -4150,7 +4169,22 @@ class Checker {
           // the direct-call path does.
           if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
         });
-        return funcRet(bound.ty);
+        return funcRet(boundTy);
+      }
+
+      // The same binding, NOT proved present here. This is a permanent TYPE error, not a
+      // missing feature — tsc says the same thing (TS2722, "cannot invoke an object which
+      // is possibly 'undefined'") — so it must not be reported as the closure gap, which
+      // would tell the reader to wait for a feature that already shipped and is one `if`
+      // away. The refusal itself is unchanged; only its explanation is now true.
+      if (bound && boundTy !== undefined && isNullableTy(boundTy) && isFuncTy(baseTy(boundTy))) {
+        throw typeError(
+          `'${e.callee.name}' is possibly ${nullishKind(boundTy)}, so it cannot be called`,
+          exprLoc(e),
+          `narrow it first (\`if (${e.callee.name} !== ${nullishKind(boundTy)}) ${e.callee.name}(…)\`), ` +
+            `or give the parameter a default. Calling it once narrowed is supported`,
+          "this call",
+        );
       }
 
       // M3: a call to a GENERIC declaration resolves its type arguments, instantiates the

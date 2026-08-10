@@ -3114,6 +3114,19 @@ class FnGen {
         this.emit(`${clo} = load ptr, ptr ${this.addr(e.callee.name)}`);
         return this.genCallValueFrom(clo, vt, e.args);
       }
+      // An OPTIONAL callback (`f?: (x: number) => number`) the checker proved present on
+      // this path. Its STORAGE is the nullable `[tag,value]` pair, so neither branch above
+      // matches — `?U(number)=>number` is not `isFuncTy` — and without this it fell into
+      // `genUserCall`, which looked the name up among the module's FUNCTIONS, found
+      // nothing, and dereferenced `undefined`. Read it through `genExpr` rather than a
+      // bare load: that is the ordinary identifier read, so `narrowRead` unwraps the pair
+      // with the same `nt_nonnull` that `x!` uses — a wrong proof PANICS at the call with
+      // a location instead of calling through a phantom pointer — and it works for a
+      // CAPTURED optional callback too, which a load off `addr()` would not.
+      const dt = vt ?? this.captures.get(e.callee.name)?.ty;
+      if (dt !== undefined && isNullableTy(dt) && isFuncTy(baseTy(dt)) && (e.callee.narrowed ?? false)) {
+        return this.genCallValueFrom(this.genExpr(e.callee).v, baseTy(dt), e.args);
+      }
       return this.genUserCall(e.callee.name, e.args);
     }
     // arbitrary expression callee of function type, e.g. compose(f,g)(x)
