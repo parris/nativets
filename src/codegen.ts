@@ -2311,7 +2311,24 @@ class FnGen {
             return { v: this.mod.fnValue(e.name, fnTy), ty: fnTy };
           }
         }
-        const declared = this.varTypes.get(e.name) ?? (e.ty ?? "number");
+        /**
+         * The binding's DECLARED type, which is what its STORAGE is laid out as — and
+         * therefore the type this load must use. `e.ty` is the checker's type for this
+         * READ, which control-flow narrowing may have already sharpened to the present
+         * arm; falling back to it directly loses the box.
+         *
+         * `varTypes` does not hold a module-level binding promoted to a global (SH1) in
+         * any frame but `main`, so `mod.globals` has to answer for one here, exactly as
+         * `addr` consults it for the address. Without it, `if (g) { g.length }` on a
+         * module-level `string | undefined` read `e.ty` = `string`, loaded the A2 BOX
+         * pointer and passed it to `js_str_len` as if it were the string: node prints
+         * `3`, we printed `1` — the length of the box's first word read as UTF-8. Exit 0,
+         * no diagnostic, valid IR. `narrowRead` below is what unwraps the box, and it is
+         * gated on seeing a nullable, so it only ever fires once the type is right.
+         * `alphaRenameShadows` has already renamed any inner binding of the same name, so
+         * a global's name here can only mean the global.
+         */
+        const declared = this.varTypes.get(e.name) ?? this.mod.globals.get(e.name) ?? (e.ty ?? "number");
         const ty = isUnionTy(declared) && e.ty !== undefined && e.ty !== declared ? e.ty : declared;
         const t = this.fresh();
         this.emit(`${t} = load ${llvmTy(ty)}, ptr ${this.addr(e.name)}`);
