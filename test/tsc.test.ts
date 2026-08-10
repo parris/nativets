@@ -53,7 +53,9 @@
 
 import { test, expect, describe } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -179,6 +181,147 @@ describe("tsc type-checks this project", () => {
    */
   test("the excluded surface was measured, not assumed", () => {
     expect(WHOLE_TREE_ERRORS_INCLUDING_FIXTURE_NOISE).toBeGreaterThan(Object.keys(ALLOWED).length);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * SWITCH EXHAUSTIVENESS, AND WHO ACTUALLY CHECKS IT.
+ *
+ * `src/` used the TypeScript idiom `default: { const impossible: never = e; return
+ * impossible; }` as a compile-time exhaustiveness witness in four places. `never` ERASES
+ * TO `number` in this compiler's own subset, so every one of them is an NT2001 blocker
+ * against self-compilation — a real, permanent tax in `src/ast.ts`, the module every
+ * other one is measured through.
+ *
+ * The tax is only worth paying where the witness is the ONLY thing checking. It is not,
+ * everywhere. `walkExprChildren` and `walkStmtChildren` RETURN from every arm and declare
+ * a non-nullable return type, so a `Stmt`/`Expr` member with no arm lets control reach
+ * the end of the body and tsc rejects it on its own: TS2366. There the witness bought
+ * nothing and both were deleted (blocker metric 258 -> 257; `walkExprChildren` went from
+ * its one blocker to zero, and `walkStmtChildren`'s was masked behind an earlier NT2001
+ * so it moved no number today and would have surfaced the moment that one cleared).
+ *
+ * `bindStmt` is the counterexample and the reason this is a measurement rather than a
+ * rule: its arms `break` into a shared tail return, so tsc has nothing to object to and
+ * deleting its witness is SILENT. It stays.
+ *
+ * THIS BLOCK IS THE EVIDENCE FOR BOTH HALVES, and it is written so it can go red. It
+ * MUTATES a copy of `src/ast.ts` — deleting one self-contained `case` arm — and asserts
+ * what tsc says. A guarantee nobody can watch fail is not a guarantee; the control run
+ * (unmutated, clean) is what keeps a green here from being an artifact of a probe that
+ * silently checked nothing.
+ *
+ * `src/ast.ts` imports NOTHING, which is what makes a single-file probe legitimate rather
+ * than a stub-shaped approximation of the real check. That is asserted, not assumed.
+ *
+ * The regression this guards is subtle and would otherwise be invisible: add a
+ * `default:` arm to either walker "for safety" and TS2366 stops firing forever, because
+ * the body can no longer fall out the bottom. The switch stays exhaustive-looking and
+ * stops being exhaustive-checked.
+ * ------------------------------------------------------------------ */
+describe("switch exhaustiveness in src/ast.ts", () => {
+  const AST = join(ROOT, "src/ast.ts");
+  const source = readFileSync(AST, "utf8");
+
+  /** The `{ … }` span of top-level `function NAME(`, brace-counted (arms nest braces). */
+  function bodySpan(src: string, name: string): [number, number] {
+    const at = src.indexOf(`\nfunction ${name}(`);
+    expect(at).toBeGreaterThan(-1);
+    const open = src.indexOf("{", at);
+    let depth = 0;
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}" && --depth === 0) return [open, i];
+    }
+    throw new Error(`unbalanced body for ${name}`);
+  }
+
+  /**
+   * Delete the first SELF-CONTAINED one-line arm (`case "K": …;`) from `name`'s switch,
+   * and say which kind went. Deliberately not a pinned line of text — `test/sh6.test.ts`
+   * records what pinning a position costs when an unrelated lane reformats above you.
+   * One-line arms only, because dropping the LABEL of a multi-line arm would leave its
+   * body attached to the previous arm and produce TS2339 noise instead of the answer.
+   */
+  function dropAnArm(src: string, name: string): { mutated: string; kind: string } {
+    const [a, b] = bodySpan(src, name);
+    for (const line of src.slice(a, b).split("\n")) {
+      const m = /^[ \t]*case "(\w+)":[ \t]+\S.*;[ \t]*$/.exec(line);
+      // Balanced on the line, so `case "X": return { …` (an arm that continues below) is
+      // not mistaken for a complete one.
+      if (!m) continue;
+      const balanced = (o: string, c: string) => line.split(o).length === line.split(c).length;
+      if (!balanced("{", "}") || !balanced("(", ")")) continue;
+      return { mutated: src.slice(0, a) + src.slice(a, b).replace(`${line}\n`, "") + src.slice(b), kind: m[1]! };
+    }
+    throw new Error(`no self-contained one-line arm in ${name}`);
+  }
+
+  /** Type-check one standalone module. `ast.ts` has no imports — see the assertion below. */
+  function checkAlone(text: string, tag: string): Record<string, number> {
+    const dir = mkdtempSync(join(tmpdir(), "nt-exhaustive-"));
+    const file = join(dir, `${tag}.ts`);
+    writeFileSync(file, text);
+    // `--ignoreConfig`: with files named on the command line, tsc 7 refuses to run at all
+    // while a tsconfig.json is visible (TS5112) — which would come back as "no TS2366"
+    // and read as a passing test.
+    const r = spawnSync(TSC, [
+      "--ignoreConfig", "--noEmit", "--strict", "--noUncheckedIndexedAccess", "--skipLibCheck",
+      "--target", "esnext", "--module", "esnext", "--moduleResolution", "bundler", "--types", "",
+      file,
+    ], { cwd: ROOT, encoding: "utf8", timeout: 300_000, killSignal: "SIGKILL" });
+    if (r.error) throw r.error;
+    const tally = tallyDiagnostics(`${r.stdout ?? ""}${r.stderr ?? ""}`);
+    // Re-key on the code alone; the temp path is machine- and run-specific.
+    const out: Record<string, number> = {};
+    for (const [k, n] of Object.entries(tally)) {
+      const code = k.slice(k.indexOf("|") + 1);
+      out[code] = (out[code] ?? 0) + n;
+    }
+    return out;
+  }
+
+  test("ast.ts imports nothing, so checking it alone is the real check", () => {
+    expect(source.split("\n").filter((l) => /^\s*import\b/.test(l))).toEqual([]);
+  });
+
+  test("CONTROL: unmutated, the standalone check is clean", () => {
+    // Without this, every "TS2366 fires" below could be satisfied by a probe that reports
+    // an error for an unrelated reason, and every "tsc is silent" by one that never ran.
+    expect(checkAlone(source, "control")).toEqual({});
+  });
+
+  for (const fn of ["walkExprChildren", "walkStmtChildren"]) {
+    test(`${fn}: no default: arm — one would disable TS2366 permanently`, () => {
+      const [a, b] = bodySpan(source, fn);
+      expect(source.slice(a, b)).not.toContain("default:");
+    });
+
+    test(`${fn}: dropping a case is TS2366, which is the whole guarantee`, () => {
+      const { mutated, kind } = dropAnArm(source, fn);
+      // `kind` in the assertion so a failure says WHICH member stopped being covered
+      // rather than only that a number moved.
+      expect({ kind: kind.length > 0, codes: checkAlone(mutated, fn) })
+        .toEqual({ kind: true, codes: { TS2366: 1 } });
+    });
+  }
+
+  test("bindStmt: its `never` witness is what catches a dropped case (TS2322)", () => {
+    const { mutated } = dropAnArm(source, "bindStmt");
+    expect(checkAlone(mutated, "bindStmt")).toEqual({ TS2322: 1 });
+  });
+
+  test("bindStmt: and NOTHING else does — delete the witness and tsc goes quiet", () => {
+    // The measurement that keeps the witness in the tree. `bindStmt`'s arms `break` into
+    // a shared tail return, so there is no TS2366 to fall back on: removing the witness
+    // turns a type error into a silently-unbound name at run time, which is exactly the
+    // failure the comment above that switch describes. If this test ever goes RED —
+    // because someone gave `bindStmt` a returning switch — the witness has become free to
+    // delete and one more NT2001 leaves ast.ts.
+    const { mutated } = dropAnArm(source, "bindStmt");
+    const witness = "    default: { const impossible: never = s; return impossible; }\n";
+    expect(mutated).toContain(witness);
+    expect(checkAlone(mutated.replace(witness, ""), "bindStmt-nowitness")).toEqual({});
   });
 });
 

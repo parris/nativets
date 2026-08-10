@@ -1887,7 +1887,20 @@ function mapParams(params: Param[], fe: (x: Expr) => Expr, ft: (t: Ty) => Ty): P
 
 /**
  * Every child of an expression, rewritten — the parent stores what comes back.
- * `default:` binds `never` — add an `Expr` member and this stops compiling.
+ *
+ * NO `default:` ARM, and that is what makes the switch exhaustive. Every arm returns and
+ * the declared return type is `Expr`, so a new `Expr` member with no arm lets control
+ * reach the end of the body and tsc rejects it: TS2366, "function lacks ending return
+ * statement and return type does not include 'undefined'". test/tsc.test.ts proves it by
+ * deleting an arm from a copy of this file and reading tsc's answer.
+ *
+ * The `default: { const impossible: never = e; return impossible; }` witness that used to
+ * stand here was REDUNDANT with that check and not free: `never` erases to `number` in
+ * this compiler's own subset, so the arm was an NT2001 blocker — and it was the ONLY
+ * blocker this function carried. The exhaustiveness is unchanged; the blocker is gone.
+ * Note the asymmetry — the same deletion in `bindStmt` below is SILENT under tsc, because
+ * its arms `break` into a shared tail return, so that witness stays. Measured per site,
+ * not applied as a rule.
  *
  * Each arm restates its own `kind` even though `...e` already carries it. That is NOT
  * redundant here: a spread does not carry a string-LITERAL type, so `{ ...e, ty: … }`
@@ -1957,13 +1970,18 @@ function walkExprChildren(e: Expr, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt,
         captures: e.captures === undefined ? undefined
           : e.captures.map((c: { name: string; ty: Ty }): { name: string; ty: Ty } => ({ ...c, ty: ft(c.ty) })),
         ty: mapTy(e.ty, ft) };
-    default: { const impossible: never = e; return impossible; }
   }
 }
 
 /**
  * Every child of a statement, rewritten — the parent stores what comes back.
- * `default:` binds `never` — add a `Stmt` member and this stops compiling.
+ *
+ * NO `default:` ARM, for the reason on `walkExprChildren`: every arm returns and the
+ * declared return type is `Stmt`, so a missing arm is TS2366 at this line. The `never`
+ * witness that used to stand here was an NT2001 blocker (this compiler erases `never` to
+ * `number`) buying nothing tsc was not already checking. It was MASKED behind this
+ * function's first blocker, so removing it moved no number today — it was a blocker that
+ * would have surfaced the moment the one above it cleared.
  */
 function walkStmtChildren(s: Stmt, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Stmt {
   switch (s.kind) {
@@ -2023,7 +2041,6 @@ function walkStmtChildren(s: Stmt, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt,
     case "BreakStmt": return s;
     case "ContinueStmt": return s;
     case "BlockDrops": return s;
-    default: { const impossible: never = s; return impossible; }
   }
 }
 
@@ -2118,6 +2135,17 @@ function bindStmt(s: Stmt, out: Set<string>): Stmt {
     case "SwitchStmt": case "ThrowStmt": case "ExprStmt": case "BlockStmt": case "MultiStmt":
     case "BreakStmt": case "ContinueStmt": case "BlockDrops":
       break;
+    // KEPT, unlike the two walkers above, and the difference is measured rather than
+    // stylistic. Those switches RETURN from every arm, so tsc catches a missing member on
+    // its own (TS2366) and the witness was pure cost. These arms `break` into the shared
+    // tail return below, so deleting this `default` is SILENT under tsc — drop the
+    // `FuncDecl` arm with this line gone and the check exits 0, which is exactly the
+    // missed-binding failure the comment above describes. test/tsc.test.ts pins both
+    // halves, and will go RED if this switch ever becomes a returning one — at which
+    // point this witness is free to delete and one more NT2001 leaves ast.ts.
+    //
+    // It costs nothing measurable meanwhile: this body's first blocker is the NT1606 on
+    // `out.add` at the top, so the NT2001 here is masked either way.
     default: { const impossible: never = s; return impossible; }
   }
   return walkStmtChildren(s, (x: Expr): Expr => bindExpr(x, out), (y: Stmt): Stmt => bindStmt(y, out), KEEP_TY);

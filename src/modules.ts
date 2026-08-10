@@ -285,6 +285,14 @@ class Renamer {
       // have existed: a walker whose fall-through means "nothing to do" cannot tell a
       // leaf from a node someone forgot. The `never` binding below makes a new `Expr`
       // kind a TYPE error here instead of a missed rename at run time.
+      //
+      // KEPT. `walkExprChildren`/`walkStmtChildren` in ast.ts dropped the same idiom
+      // because those switches return from every arm, so tsc's TS2366 already refuses a
+      // missing member and the `never` binding (which erases to `number` here, hence
+      // NT2001) was pure self-host cost. This switch returns `void`, so tsc says nothing
+      // without the binding — verified: delete it and the `CallExpr` arm together and
+      // `tsc -p tsconfig.src.json --noEmit` exits 0. And it is not on the meter anyway:
+      // this is a class METHOD, and blocker-metric's denominator is top-level `FuncDecl`s.
       case "NumberLiteral": case "StringLiteral": case "BooleanLiteral":
       case "UndefinedLiteral": case "NullLiteral":
         return;
