@@ -2733,7 +2733,25 @@ class FnGen {
           this.writeCapture(e.target, { v: t0, ty: "number" });
           return { v: t0, ty: "number" };
         }
-        const ty = this.varTypes.get(e.target) ?? "number";
+        /**
+         * The TYPE of the assignment target. `varTypes` only knows the frame's own
+         * bindings, so for a module-level binding promoted to a global (SH1) it is empty
+         * in every frame but `main` — and the old `?? "number"` fallback then lowered
+         * EVERY such write as a bare `double`, at whatever the global's real layout was.
+         * `addr()` already consults `mod.globals` for the same reason; the type had to,
+         * or the address and the value it stores describe different cells.
+         *
+         * It was not one bug but the whole family: `g = undefined` on a module-level
+         * `number | undefined` skipped the nullable BOXING (`store double 0, ptr @g`),
+         * a `string`/`boolean`/array global stored a pointer as a `double`, and `s += "b"`
+         * on a `string` global took the ARITHMETIC path (`fadd double %t, @.str.0`). Most
+         * of those are caught by clang's parser — but `g = 7` on a `number | undefined`
+         * global is `store double 7.0, ptr @g` into a box slot, which is well-formed IR
+         * that LLVM's own verifier accepts and SEGFAULTS on the next read. That one shape
+         * was a silent miscompile with nothing anywhere to catch it, which is why the type
+         * has to be right here rather than the constant made well-formed downstream.
+         */
+        const ty = this.varTypes.get(e.target) ?? this.mod.globals.get(e.target) ?? "number";
         if (e.op === "=") {
           const consume = this.consumingSpread(e, ty);
           if (consume) { this.consumeNode = consume; }
