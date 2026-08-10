@@ -907,28 +907,6 @@ function dictHint(annot: Ty, head: string | undefined, got: Ty): string | undefi
     `Annotating the exact shape instead (\`{ ${sample}: ${v} }\`) also works, but ONLY if every read uses a LITERAL key — an object is indexed by a string literal here, so \`o[someVariable]\` stays refused`;
 }
 
-/**
- * The NOMINAL-TAG half of a type mismatch: `Cell{n:number}` wanted, `{n:number}` given.
- *
- * A class instance type and a `@@mutable` record are object types with a leading TAG
- * (`classTag`), and `isMutableTy` — like method resolution — reads the tag, not the
- * shape. So the two types above are different, and print four characters apart with the
- * difference at the FRONT of a body that may be hundreds of characters long. Without a
- * hint the message reads as if the compiler is refusing a type to itself.
- *
- * It is reachable by following this compiler's OWN advice. NT1606 on a field store says
- * "declare the record `@@mutable`"; doing that tags the annotation and leaves every
- * already-untagged value in the program behind, so the next stop is here. That is the
- * same walked-in-a-circle failure `allUnionMembersMutable` exists to break, one step
- * further along, and the fix is likewise a spelling the reader cannot guess: a literal
- * takes its tag from CONTEXT, so the annotation belongs where the value is CREATED.
- *
- * Fires only when the bodies are IDENTICAL. Two records that differ in their fields have
- * an ordinary shape mismatch, and telling that author to add an annotation would send
- * them to write one that changes nothing — test/mutable-records.test.ts asserts both
- * halves. `what` is the value as the source spells it, so the suggested line is the one
- * they can paste.
- */
 /** Is `s` a bare identifier — something a `const <s>: T = …` line could be written about? */
 function plainName(s: string): boolean {
   if (s.length === 0) return false;
@@ -942,25 +920,6 @@ function plainName(s: string): boolean {
   return true;
 }
 
-function tagHint(want: Ty, got: Ty, what: string | undefined): string | undefined {
-  if (!isObjectTy(want) || !isObjectTy(got)) return undefined;
-  const tag = classTag(want);
-  if (tag === undefined || tag === classTag(got)) return undefined;
-  const w = String(want), g = String(got);
-  if (w.slice(w.indexOf("{")) !== g.slice(g.indexOf("{"))) return undefined;
-  // A NAME only. `exprText` also answers for `xs[0]` and `f(x)`, and `const xs[0]: Cell`
-  // is not a line anyone can paste — the hint falls back to `v` rather than print one.
-  // A character loop, not a regex: `src/` must stay inside the subset it compiles, and
-  // regex literals are not in it (the same reason `t.replace(/[^A-Za-z0-9_]/g, …)` in
-  // `mangle` below is spelled out by hand).
-  const v = what !== undefined && plainName(what) ? what : "v";
-  return `'${tag}' is NOMINAL here — the leading tag is part of the type, not decoration — so a structurally identical ` +
-    `untagged \`${g.slice(g.indexOf("{"))}\` is a DIFFERENT type and never becomes one by having the right fields. ` +
-    `An object literal takes the tag from its CONTEXT, so annotate the value where it is CREATED ` +
-    `(\`const ${v}: ${tag} = { … }\`), or pass the literal straight into the '${tag}' position. ` +
-    `On a value you cannot re-annotate, \`${what ?? "v"} as ${tag}\` is exact — the bodies are identical, so the ` +
-    `assertion is a pure retag and stays field-checked`;
-}
 
 /**
  * Decide `k in o` from the static type, or refuse — the `instanceof` split applied to key
@@ -1213,6 +1172,126 @@ class Checker {
    * this of the type string and takes the answer as a parameter instead.
    */
   hasToJson(tag: string): boolean { return this.functions.has(`${tag}.toJSON`); }
+
+  /** Class tags that declare at least one METHOD. Built once — `assignable` is hot and a
+   *  prefix scan of every function name per call is not. */
+  private methodTags: Set<string> | undefined = undefined;
+
+  /**
+   * The NOMINAL-TAG half of a type mismatch: `Cell{n:number}` wanted, `{n:number}` given.
+   *
+   * A class instance type and a `@@mutable` record are object types with a leading TAG
+   * (`classTag`), and `isMutableTy` — like method resolution — reads the tag, not the
+   * shape. So the two types above are different, and print four characters apart with the
+   * difference at the FRONT of a body that may be hundreds of characters long. Without a
+   * hint the message reads as if the compiler is refusing a type to itself.
+   *
+   * It is reachable by following this compiler's OWN advice. NT1606 on a field store says
+   * "declare the record `@@mutable`"; doing that tags the annotation and leaves every
+   * already-untagged value in the program behind, so the next stop is here. That is the
+   * same walked-in-a-circle failure `allUnionMembersMutable` exists to break, one step
+   * further along, and the fix is likewise a spelling the reader cannot guess: a literal
+   * takes its tag from CONTEXT, so the annotation belongs where the value is CREATED.
+   *
+   * Fires only when the bodies are IDENTICAL. Two records that differ in their fields have
+   * an ordinary shape mismatch, and telling that author to add an annotation would send
+   * them to write one that changes nothing — test/mutable-records.test.ts asserts both
+   * halves. `what` is the value as the source spells it, so the suggested line is the one
+   * they can paste.
+   */
+  private tagHint(want: Ty, got: Ty, what: string | undefined): string | undefined {
+    if (!isObjectTy(want) || !isObjectTy(got)) return undefined;
+    const tag = classTag(want);
+    if (tag === undefined) return undefined;
+    // Bound first, then compared. `tag === classTag(got)` is `string` against `?Ustring`,
+    // which this compiler refuses in its own source — the self-host subset rule bites the
+    // diagnostics as readily as the analysis.
+    const gotTag = classTag(got);
+    if (gotTag !== undefined && gotTag === tag) return undefined;
+    const w = String(want), g = String(got);
+    if (w.slice(w.indexOf("{")) !== g.slice(g.indexOf("{"))) return undefined;
+    // A NAME only. `exprText` also answers for `xs[0]` and `f(x)`, and `const xs[0]: Cell`
+    // is not a line anyone can paste — the hint falls back to `v` rather than print one.
+    // A character loop, not a regex: `src/` must stay inside the subset it compiles, and
+    // regex literals are not in it (the same reason `t.replace(/[^A-Za-z0-9_]/g, …)` in
+    // `mangle` below is spelled out by hand).
+    const v = what !== undefined && plainName(what) ? what : "v";
+    const body = g.slice(g.indexOf("{"));
+    // A class WITH METHODS is the case where every spelling below is wrong, so it gets its
+    // own sentence rather than the generic one. `classHasMethods` is exactly the predicate
+    // `assignable` refuses on, so the hint and the rule can never drift apart: annotating
+    // and `as` are the two things that do NOT work here, and recommending either would be
+    // the untruthful-hint shape this file keeps finding.
+    if (this.classHasMethods(tag)) {
+      return `'${tag}' is a CLASS, and its methods are not part of \`${body}\` — they are resolved from the tag, not ` +
+        `carried by the value — so an object with the right fields still has no \`.${this.someMethodOf(tag)}()\`. ` +
+        `node agrees and is harsher about it: a plain object has no prototype, so the call throws ` +
+        `\`TypeError: ….${this.someMethodOf(tag)} is not a function\` at runtime. CONSTRUCT one — \`new ${tag}(…)\` — ` +
+        `rather than annotating or asserting a record into the type`;
+    }
+    return `'${tag}' is NOMINAL here — the leading tag is part of the type, not decoration — so a structurally identical ` +
+      `untagged \`${body}\` is a DIFFERENT type and never becomes one by having the right fields. ` +
+      `An object literal takes the tag from its CONTEXT, so annotate the value where it is CREATED ` +
+      `(\`const ${v}: ${tag} = { … }\`), or pass the literal straight into the '${tag}' position. ` +
+      `On a value you cannot re-annotate, \`${what ?? "v"} as ${tag}\` is exact — the bodies are identical, so the ` +
+      `assertion is a pure retag and stays field-checked`;
+  }
+
+  /** One method name of class `t`, for the hint to name a call that would fail. The
+   *  alphabetically FIRST, so the message is the same on every run — carried in a single
+   *  binding rather than a sorted array, which keeps this inside the subset `src/` must
+   *  stay in (`.push` is NT1606 here). */
+  private someMethodOf(t: string): string {
+    let best: string | undefined = undefined;
+    for (const name of this.functions.keys()) {
+      if (!name.startsWith(`${t}.`)) continue;
+      const m = name.slice(t.length + 1);
+      if (m === "constructor") continue; // see `classHasMethods`
+      if (best === undefined || m < best) best = m;
+    }
+    return best ?? "method";
+  }
+
+  /**
+   * Does the tag `t` name a class with methods?
+   *
+   * The distinction a structural rule cannot see. A class instance is encoded as its
+   * FIELDS with a leading tag (`Point{x:number,y:number}`) and nothing else — the methods
+   * are top-level functions named `Point.sum`, resolved from the TAG. So an object literal
+   * with the same fields satisfies the body exactly, and used to be accepted:
+   *
+   *     class Point { x = 0; y = 0; sum(): number { return this.x + this.y } }
+   *     const q: Point = { x: 1, y: 2 };
+   *     q.sum()   // we printed 3; node throws `TypeError: q.sum is not a function`
+   *
+   * A plain object has no prototype, so node has no method to call and tsc rejects the
+   * initializer outright ("Property 'sum' is missing"). We compiled it, dispatched
+   * statically off the tag, and answered — a silent wrong answer, the one outcome this
+   * project ranks worst. A tagless class (a pure data class) has nothing to lose and is
+   * left accepted, which is what `test/fixtures` and the record tests rely on.
+   */
+  private classHasMethods(t: string): boolean {
+    // Read the cache into a CONST and answer from that. `if (this.methodTags === undefined)`
+    // then `this.methodTags.has(t)` does not narrow — `accessPath` records no fact through
+    // `this`, whose fields a setter can rewrite — so the read was NT1002 on a `?USet`.
+    const cached = this.methodTags;
+    if (cached !== undefined) return cached.has(t);
+    // `s = s.add(…)`, not `s.add(…)`: a Set is PERSISTENT in the subset `src/` compiles
+    // to, so a discarded result is NT1606. Safe on a fresh local — the two runtimes
+    // disagree about whether `.add` also mutates, and nobody else holds this one.
+    let s = new Set<string>();
+    for (const name of this.functions.keys()) {
+      const dot = name.indexOf(".");
+      // NOT the constructor. Every class has one in the table whether or not the source
+      // writes it, so counting it would make "has methods" mean "is a class" and refuse
+      // a pure DATA class — which loses nothing to a record, because there is no method
+      // for the plain object to be missing. Measured: the first cut named
+      // `.constructor()` as the call that would fail, which is a call nobody makes.
+      if (dot > 0 && name.slice(dot + 1) !== "constructor") s = s.add(name.slice(0, dot));
+    }
+    this.methodTags = s;
+    return s.has(t);
+  }
 
   /** The tagged record type a literal should take from its context, if any. */
   private contextualRecordTy(hint: Ty | undefined): Ty | undefined {
@@ -2177,6 +2256,19 @@ class Checker {
       return this.assignable(baseTy(target), source, assumed);    // a present value of the base type
     }
     if (isObjectTy(target) && isObjectTy(source)) {
+      // A class TAG is not structural when the class has METHODS — they are not in the
+      // body, so a plain record satisfies every field and still has no `.sum`. See
+      // `classHasMethods` for the program this used to compile to a wrong answer.
+      //
+      // UNTAGGED sources only, and that is measured rather than cautious. Comparing the
+      // two tags instead refused `Scope`'s own constructor in this compiler
+      // (`this.parent = parent`, field `?N@Scope` against value `?NScope{…}`): one side
+      // arrives FOLDED as a type reference and the other unfolded, so the tags legitimately
+      // differ on the same type. A source that carries any tag is a class-vs-class
+      // question the field loop below already answers; the hole this closes is the one a
+      // record walks through.
+      const tt = classTag(target);
+      if (tt !== undefined && classTag(source) === undefined && this.classHasMethods(tt)) return false;
       for (const tf of objectFields(target)) {
         const sf = fieldType(source, tf.key);
         if (sf === undefined) { if (!isNullableTy(tf.ty)) return false; continue; } // absent → must be optional
@@ -2743,7 +2835,7 @@ class Checker {
           const t = this.type(d.init, scope, d.annot); // annotation is the context (e.g. `const a: T[] = []`)
           if (d.annot && d.annot !== t && (!this.assignable(d.annot, t) || !this.reshapable(d.init, d.annot, t))) {
             throw typeError(`'${d.name}' declared ${asWritten(d.annot, d.annotHead)} but initialized with ${t}`,
-              undefined, dictHint(d.annot, d.annotHead, t) ?? tagHint(d.annot, t, exprText(d.init)));
+              undefined, dictHint(d.annot, d.annotHead, t) ?? this.tagHint(d.annot, t, exprText(d.init)));
           }
           // Reshape the initializer literal to the declared slot layout (fill omitted
           // optional fields, box scalars into nullable fields) — runs AFTER inference,
@@ -3912,7 +4004,7 @@ class Checker {
           e.args.forEach((a, i) => {
             const exp = ctor.params[i + 1]!;
             const at = this.typeArg(a, exp, scope);
-            if (!this.fitsArg(exp, at, a)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`, exprLoc(a), tagHint(exp, at, exprText(a)), "this argument");
+            if (!this.fitsArg(exp, at, a)) throw typeError(`new ${e.callee} arg ${i} expects ${exp}, got ${at}`, exprLoc(a), this.tagHint(exp, at, exprText(a)), "this argument");
           });
           return objTy;
         }
@@ -3988,6 +4080,19 @@ class Checker {
         // adding or reordering a field is not. Unions are exempt — a `U<…>` is not an
         // object type here, and its member downcast is tag-checked in codegen instead.
         if (isObjectTy(from) && isObjectTy(e.ty) && from !== e.ty) {
+          // A CLASS TAG is not a layout question, so the slot loop below cannot see it: a
+          // class's methods are resolved from the tag and are nowhere in the body, so a
+          // record with identical fields passes every check here and then answers a call
+          // node cannot make. `assignable` refuses the annotated spelling of the same
+          // program for the same reason — see `classHasMethods`, and the note there on
+          // why this asks whether the operand is UNTAGGED rather than comparing tags.
+          const tt = classTag(e.ty);
+          if (tt !== undefined && classTag(from) === undefined && this.classHasMethods(tt)) {
+            throw typeError(
+              `'${e.ty}' is not a valid assertion for '${from}': '${tt}' is a class with methods`,
+              exprLoc(e), this.tagHint(e.ty, from, exprText(e.expr)),
+            );
+          }
           const src = objectFields(from);
           const want = objectFields(e.ty);
           for (let n = 0; n < want.length; n++) {
@@ -4584,7 +4689,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = msig.params[i + 1]!;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${callee.property}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), tagHint(exp, at, exprText(a)), "this argument");
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${cls}.${callee.property}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), this.tagHint(exp, at, exprText(a)), "this argument");
         });
         return msig.ret;
       }
@@ -4770,7 +4875,7 @@ class Checker {
           // named function (no union arm, no nullable arm, no literal reshape). Safe because
           // `genCallValueFrom` now coerces each argument to the parameter type, exactly as
           // the direct-call path does.
-          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), tagHint(ps[i]!, at, exprText(a)), "this argument");
+          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), this.tagHint(ps[i]!, at, exprText(a)), "this argument");
         });
         return funcRet(boundTy);
       }
@@ -4812,7 +4917,7 @@ class Checker {
         if (e.args.length !== ps.length) throw typeError(`'${e.callee.name}' expects ${ps.length} arguments, got ${e.args.length}`);
         e.args.forEach((a, i) => {
           const at = this.typeArg(a, ps[i]!, scope);
-          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), tagHint(ps[i]!, at, exprText(a)), "this argument");
+          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), this.tagHint(ps[i]!, at, exprText(a)), "this argument");
         });
         callee.ty = self.ty;
         return funcRet(self.ty);
@@ -4838,7 +4943,7 @@ class Checker {
         e.args.forEach((a, i) => {
           const exp = i < fixed ? sig.params[i]! : restElem;
           const at = this.typeArg(a, exp, scope);
-          if (!this.fitsArg(exp, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), tagHint(exp, at, exprText(a)), "this argument");
+          if (!this.fitsArg(exp, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${exp}, got ${at}`, exprLoc(a), this.tagHint(exp, at, exprText(a)), "this argument");
         });
         return sig.ret;
       }
@@ -4847,7 +4952,7 @@ class Checker {
       }
       e.args.forEach((a, i) => {
         const at = this.typeArg(a, sig.params[i]!, scope); // contextual: function-typed params type their arrow args
-        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`, exprLoc(a), tagHint(sig.params[i]!, at, exprText(a)), "this argument");
+        if (!this.fitsArg(sig.params[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${sig.params[i]}, got ${at}`, exprLoc(a), this.tagHint(sig.params[i]!, at, exprText(a)), "this argument");
       });
       return sig.ret;
     }
@@ -4856,7 +4961,7 @@ class Checker {
     if (isFuncTy(ct)) {
       const ps = funcParams(ct);
       if (e.args.length !== ps.length) throw typeError(`call expects ${ps.length} arguments, got ${e.args.length}`);
-      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), tagHint(ps[i]!, at, exprText(a)), "this argument"); });
+      e.args.forEach((a, i) => { const at = this.typeArg(a, ps[i]!, scope); if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), this.tagHint(ps[i]!, at, exprText(a)), "this argument"); });
       return funcRet(ct);
     }
     throw nyi(NYI.CLOSURE, "unsupported call target");
@@ -6561,7 +6666,7 @@ class Checker {
       // forcing case. `null` in argTys means "any type", hence no hint.
       const want = sig.argTys[i];
       const at = want ? this.type(a, scope, want) : this.type(a, scope);
-      if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`, exprLoc(a), tagHint(want, at, exprText(a)), "this argument");
+      if (want && at !== want) throw typeError(`${label} arg ${i} expects ${want}, got ${at}`, exprLoc(a), this.tagHint(want, at, exprText(a)), "this argument");
     });
   }
 }

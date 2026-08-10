@@ -384,3 +384,99 @@ console.log(g(false));
     expect(r.status).toBe(0);
   });
 });
+
+/*
+ * A RECORD IS NOT AN INSTANCE — the silent wrong answer this class encoding invites.
+ *
+ * A class instance is compiled as its FIELDS with a leading tag (`Point{x:number,y:number}`)
+ * and nothing else: the methods are top-level functions named `Point.sum`, resolved from
+ * the tag at the call site. So an object literal with the same fields satisfied every
+ * structural check the compiler had, and this program COMPILED and printed `3`:
+ *
+ *     class Point { x = 0; y = 0; sum(): number { return this.x + this.y } }
+ *     const q: Point = { x: 1, y: 2 };
+ *     q.sum();
+ *
+ * node throws `TypeError: q.sum is not a function` — a plain object has no prototype, so
+ * there is no method to call — and `tsc` rejects the initializer outright ("Property
+ * 'sum' is missing"). Both toolchains say no and we answered, which is the one outcome
+ * this project ranks worst. Two spellings reached it, the annotation and `as`, and both
+ * are asserted below because closing only the first left the second compiling.
+ *
+ * A class with NO methods keeps working. There is nothing for the plain object to be
+ * missing, node agrees field-for-field, and the fixtures rely on it — that case is the
+ * mutation guard: widen the rule to "is a class" and the last test here fails.
+ */
+describe("an object literal is not a class instance", () => {
+  const WITH_METHOD = `
+class Point {
+  x: number = 0;
+  y: number = 0;
+  sum(): number { return this.x + this.y; }
+}
+function use(p: Point): number { return p.sum(); }
+`;
+
+  /** The diagnostic a source is rejected with, or null if it compiles. */
+  function rejectionOf(source: string): Diagnostic | null {
+    try {
+      sourceToIR(source);
+      return null;
+    } catch (e) {
+      if (e instanceof NTError) return e.diag;
+      throw e;
+    }
+  }
+
+  test("ANNOTATING a record as a class with methods is refused", () => {
+    const d = rejectionOf(`${WITH_METHOD}
+const q: Point = { x: 1, y: 2 };
+console.log(use(q));
+`);
+    expect(d).not.toBeNull();
+    expect(d!.code).toBe("NT2001");
+    // The hint must not send them back to the line they just wrote. It names the one
+    // thing that works.
+    expect(d!.hint ?? "").toContain("new Point(…)");
+    expect(d!.hint ?? "").toContain(".sum()");
+  });
+
+  test("ASSERTING a record as a class with methods is refused too", () => {
+    const d = rejectionOf(`${WITH_METHOD}
+const q = { x: 1, y: 2 };
+console.log(use(q as Point));
+`);
+    expect(d).not.toBeNull();
+    expect(d!.code).toBe("NT2001");
+    expect(d!.message).toContain("class with methods");
+    expect(d!.hint ?? "").toContain("new Point(…)");
+  });
+
+  test("constructing it is the spelling the hint names, and it runs", async () => {
+    const r = await run(`
+class Point {
+  constructor(public x: number, public y: number) {}
+  sum(): number { return this.x + this.y; }
+}
+const q = new Point(1, 2);
+console.log(q.sum());
+`);
+    expect(r.stdout).toBe("3\n");
+    expect(r.status).toBe(0);
+  });
+
+  // THE MUTATION GUARD. Every class carries a `constructor` in the function table whether
+  // or not the source writes one, so a rule that counted it would mean "is a class" and
+  // would refuse this — a pure DATA class, where node and we agree field-for-field.
+  test("a class with NO methods still accepts a record (node agrees)", async () => {
+    const source = `
+class Point { x: number = 0; y: number = 0; }
+function len(p: Point): number { return p.x + p.y; }
+const q: Point = { x: 1, y: 2 };
+console.log(len(q));
+`;
+    const r = await run(source);
+    expect(r.stdout).toBe("3\n");
+    expect(r.status).toBe(0);
+  });
+});
