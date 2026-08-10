@@ -627,7 +627,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // The rule still refuses the exact shape that was removed (verified by mutation).
     //
     // ast.ts is now at RUNG 3 -- four modules reach IR where three did.
-    ["NT2001"],
+    ["NT1003", "NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -863,9 +863,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // through the link. ast.ts is at zero failing functions now, so these eight are
     // on their own source -- blame reads `self`/`parser.ts`/`checker.ts` -- and the
     // set measures eight distinct walls for the first time.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    // ...and NT2001 EMPTIES tree-wide, splitting into TWO buckets rather than moving to
+    // one. The eight modules did not share a single term after all: five were behind
+    // `parser.ts`'s `valueReturns` (a for-of loop binding that a block-scoped `let s` in
+    // `lexer.ts` made unnarrowable program-wide -- fixed, and they advanced one line to
+    // the self-recursive local arrow, NT1003), while three were behind `checker.ts`'s
+    // `spawnMode` (an out-of-range `args[2]` read, fixed, advancing to NT1606's
+    // `s.returnTy = ret`). Recorded as two memberships, not one, because that split is
+    // the finding: the "one shared blocker" reading was first-blocker reasoning.
+    expect((byCode["NT1003"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
     );
+    expect(byCode["NT2001"] ?? []).toEqual([]);
     // NT1001 EMPTIES, and it is worth being precise about what did NOT happen: `.find`
     // over a heap element is still refused. What cleared is the one shape where the
     // element already IS a nullable box (`(T | undefined)[]`), so `.find` hands the
@@ -926,7 +935,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // borrowed receiver, NT1607; a record write is a field store named in the signature,
     // which `checkOwnedReceiver` admits). A prior lane measured the class case and
     // reported the constraint as parameter-specific; it was class-specific.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    // ...and it REFILLS with three, which is the other half of the NT2001 split recorded
+    // above: `checker.ts`'s `spawnMode` cleared, and what it was masking is `s.returnTy =
+    // ret` -- an object field store. Not a regression and not new code; the mutation class
+    // was always behind it. Diagnosed since: the 64 NT1606 sites are THREE problems with
+    // costs two orders of magnitude apart, and tagging the records `//@@mutable` is
+    // measured NET NEGATIVE (clears one function, breaks four) because the tag is nominal
+    // and `accessPath` declines a `@@mutable` receiver -- so field writes and optional-field
+    // narrowing are mutually exclusive today, and an AST walker needs both.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(["checker.ts", "codegen.ts", "ownership.ts"]);
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -1151,7 +1168,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // borrowed receiver, NT1607; a record write is a field store named in the signature,
     // which `checkOwnedReceiver` admits). A prior lane measured the class case and
     // reported the constraint as parameter-specific; it was class-specific.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    // ...and it REFILLS with three, which is the other half of the NT2001 split recorded
+    // above: `checker.ts`'s `spawnMode` cleared, and what it was masking is `s.returnTy =
+    // ret` -- an object field store. Not a regression and not new code; the mutation class
+    // was always behind it. Diagnosed since: the 64 NT1606 sites are THREE problems with
+    // costs two orders of magnitude apart, and tagging the records `//@@mutable` is
+    // measured NET NEGATIVE (clears one function, breaks four) because the tag is nominal
+    // and `accessPath` declines a `@@mutable` receiver -- so field writes and optional-field
+    // narrowing are mutually exclusive today, and an AST walker needs both.
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(["checker.ts", "codegen.ts", "ownership.ts"]);
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
@@ -1259,9 +1284,18 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `ast.ts` left the table. Recorded twice on purpose -- the two assertions measure
     // different passes, and having both move together is the evidence that ast.ts was
     // a shared blocker rather than nine independent ones.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    // ...and NT2001 EMPTIES tree-wide, splitting into TWO buckets rather than moving to
+    // one. The eight modules did not share a single term after all: five were behind
+    // `parser.ts`'s `valueReturns` (a for-of loop binding that a block-scoped `let s` in
+    // `lexer.ts` made unnarrowable program-wide -- fixed, and they advanced one line to
+    // the self-recursive local arrow, NT1003), while three were behind `checker.ts`'s
+    // `spawnMode` (an out-of-range `args[2]` read, fixed, advancing to NT1606's
+    // `s.returnTy = ret`). Recorded as two memberships, not one, because that split is
+    // the finding: the "one shared blocker" reading was first-blocker reasoning.
+    expect((byCode["NT1003"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
     );
+    expect(byCode["NT2001"] ?? []).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a
