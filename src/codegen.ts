@@ -2501,10 +2501,28 @@ class FnGen {
             this.emit(`${back} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
             return { v: back, ty: "number" };
           }
-          const m = tgt as Extract<Expr, { kind: "MemberExpr" }>;
-          const obj = this.genExpr(m.object);
+          // NARROW on the TAG, do not assert it. This was
+          //   const m = tgt as Extract<Expr, { kind: "MemberExpr" }>;
+          // an `as` that claims a shape rather than checking one — the same defect shape
+          // the `(e.callee as {name: string}).name` family had, and with the same result:
+          // the cast is erased, so a `tgt` of any OTHER kind is read as if it had an
+          // `object` slot. It did happen. `resolveStaticFieldReads` rewrote the `C.n` in
+          // `C.n++` into a bare Identifier (its write-detection missed `UpdateExpr` —
+          // fixed in src/ast.ts `staticExpr`), that Identifier arrived here, and
+          // `m.object` was `undefined`: `TypeError: undefined is not an object (evaluating
+          // 'e.kind')` from inside `genExprInner`, with a bun stack trace and no NT code.
+          //
+          // The checker fix makes THAT program unreachable; this makes the next one a
+          // report instead of a crash. `internalError` and not an NT code on purpose: if
+          // a target that is neither MemberExpr nor IndexExpr ever reaches here again, the
+          // frontend admitted something codegen cannot lower and the bug is ours — see the
+          // note on `InternalError` in src/diagnostics.ts.
+          if (tgt.kind !== "MemberExpr") {
+            throw internalError(`no update lowering for a target of kind ${tgt.kind} — \`${e.op}\` on a member/index target reaches codegen only as a MemberExpr or an IndexExpr, so the frontend rewrote this one (a static field's \`C.f\` read becomes a bare Identifier) without refusing the write first`);
+          }
+          const obj = this.genExpr(tgt.object);
           const slot = this.fresh();
-          this.emit(`${slot} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, m.property)}`);
+          this.emit(`${slot} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, tgt.property)}`);
           const raw = this.fresh();
           this.emit(`${raw} = load i64, ptr ${slot}`);
           const old = this.fresh();

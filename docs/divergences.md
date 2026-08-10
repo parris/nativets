@@ -3269,9 +3269,32 @@ plus `test/modules/statics/` across a module boundary). What is refused:
 
 - **A static field with no initializer** (`static f: number;`) — it would read as `undefined`,
   which is not a value this language has for a `const`. `NT1015`.
-- **Assignment to a static field** (`C.f = v`) — it is a `const`, like every other module-level
-  binding here (§A, immutable-by-default). `NT1606`, pointing at a static method instead. node
-  allows the write.
+- **Writing a static field** — it is a `const`, like every other module-level binding here
+  (§A, immutable-by-default). `NT1606`. node allows every one of these:
+
+  | spelling | node | nativets |
+  |---|---|---|
+  | `C.f = v`, and every compound (`+=`, `*=`, `<<=`, …) | writes | `NT1606` |
+  | `C.f++`, `++C.f`, `C.f--`, `--C.f` | writes | `NT1606` |
+  | `C.xs.push(x)` / `C.xs[0] = v` / `C.o.g = v` | writes | `NT1606`, from the array/object
+    immutability rule for the value the static holds — not from this one |
+
+  The hint names both fixes and both were run: a static **method** that returns the value, for
+  a constant; a module-level **`let`** or a field of a **`@@mutable`** class instance, for state
+  that actually changes. A pure static method cannot express `C.f++`, which is why the second
+  half of the hint exists.
+
+  **The four update spellings used to CRASH the compiler** rather than refuse — an internal
+  `TypeError: undefined is not an object (evaluating 'e.kind')` with a bun stack trace and no
+  `NT` code, which is neither of the two acceptable outcomes. `resolveStaticFieldReads`
+  detected a write by matching `FieldAssign` alone, so `C.f = v` *and* `C.f += v` were caught
+  (a compound store is one `FieldAssign` with an `op`) while `UpdateExpr` fell through to the
+  read rewrite, which turned the `C.f` in `targetExpr` into a bare `Identifier`. Codegen's
+  update arm asserted `tgt as Extract<Expr, {kind:"MemberExpr"}>` and read `.object` off it.
+  Both halves are fixed: `staticExpr` has an `UpdateExpr` arm, and the `as` is a checked
+  narrowing that raises `internalError` — the `as` was the same lying-cast shape as the
+  `(e.callee as {name:string}).name` family, and would have handed `undefined` to `genExpr`
+  for any future node that reached it.
 - **A binding that shadows a class with static fields** — a read of `C.f` is resolved by NAME
   (that is what makes it a module binding rather than a slot on a receiver), so a parameter
   named after the class would silently redirect the read to the static. Refused with `NT1015`

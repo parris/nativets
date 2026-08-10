@@ -1089,7 +1089,7 @@ class Parser {
       }
       body = resolveStaticFieldReads(body, this.staticFieldNames, (n, at) => {
         throw mutationError(`assignment to the static field '${n}'`,
-          "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead",
+          "a static field is module-level storage initialized once where the class is declared — it is a `const`, so give the class a static METHOD that returns the value you want instead; for state that CHANGES (`C.f++`, `C.f += 1`), use a module-level `let`, or a field of a `@@mutable` class instance",
           at);
       });
     }

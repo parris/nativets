@@ -188,6 +188,41 @@ console.log(Sym.width);
     expect(msg).toContain("Sym.width");
     expect(msg).not.toContain("'Sym' is not defined");
   });
+  /*
+   * `Sym.width++` is the SAME write as `Sym.width = …`, and it used to CRASH the compiler
+   * with an internal `TypeError: undefined is not an object (evaluating 'e.kind')` and a
+   * bun stack trace — no NT code, no location, nothing a user can act on.
+   *
+   * The mechanism: `resolveStaticFieldReads` refuses a write it recognizes and rewrites
+   * every OTHER `C.f` MemberExpr into the bare Identifier `"C.f"`. Its write-detection
+   * matched `FieldAssign` only, so an `UpdateExpr` was not a write to it — the walk
+   * descended into `targetExpr` and rewrote the MemberExpr there into an Identifier.
+   * Codegen's UpdateExpr arm then took its member/index path, whose `else` leg asserts
+   * `tgt as Extract<Expr, {kind:"MemberExpr"}>` and reads `.object` off it. An Identifier
+   * has no `.object`, so `genExpr(undefined)` blew up.
+   *
+   * `+=` was caught and `++` was not because the enumeration was written by LISTING the
+   * write forms rather than by exhaustiveness over them. All four update spellings are
+   * asserted here, not just the one that was reported: the op and the fix are orthogonal.
+   */
+  test("UPDATING a static field is refused like assigning one — not an internal crash", () => {
+    for (const write of ["Sym.width++", "++Sym.width", "Sym.width--", "--Sym.width"]) {
+      const msg = reject(`
+class Sym {
+  static width = 4;
+}
+${write};
+console.log(Sym.width);
+`);
+      expect(msg).toContain("NT1606");
+      expect(msg).toContain("Sym.width");
+      // The crash signature, in both the shapes it reached a caller as: `sourceToIR`
+      // threw a raw TypeError, and `reject` stringifies a non-NTError rather than
+      // rethrowing — so an assertion on the message alone would have passed it.
+      expect(msg).not.toContain("TypeError");
+      expect(msg).not.toContain("e.kind");
+    }
+  });
 });
 
 /*

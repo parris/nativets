@@ -2136,6 +2136,18 @@ export function mapTypesDeepExpr(e: Expr, f: (t: Ty) => Ty): Expr { return tyExp
 
 /* ---- pass 2: `C.f` static-field reads → the `C.f` module binding ----------- */
 
+/**
+ * The dotted name `C.f` for a `Ident.prop` member expression, or `""` for anything else —
+ * the one shape a static field can be reached by, since the rewrite below is by NAME.
+ *
+ * `""` rather than `undefined` as the miss: the caller tests it against `names`, and an
+ * empty string is not a binding name any more than a dotted one is a source identifier.
+ */
+function staticDottedName(t: Expr): string {
+  if (t.kind === "MemberExpr" && t.object.kind === "Identifier") return `${t.object.name}.${t.property}`;
+  return "";
+}
+
 function staticExpr(e: Expr, names: Set<string>, onAssign?: (name: string, at: Loc | undefined) => never): Expr {
   // `C.f = v` — a WRITE to a static field. Not a read, so never rewritten; the caller
   // refuses it by name (a static field lowers to a `const`).
@@ -2156,6 +2168,37 @@ function staticExpr(e: Expr, names: Set<string>, onAssign?: (name: string, at: L
   if (onAssign !== undefined && e.kind === "FieldAssign" && e.object.kind === "Identifier"
       && names.has(`${e.object.name}.${e.field}`)) {
     onAssign(`${e.object.name}.${e.field}`, exprLoc(e));
+  }
+  // `C.f++` / `++C.f` / `C.f--` / `--C.f` — the SAME write, in the other spelling, and it
+  // has to be caught HERE, above the read rewrite, for the same reason `FieldAssign` is.
+  //
+  // This arm was missing, and its absence was a compiler CRASH rather than a wrong answer
+  // or a missing refusal. An `UpdateExpr` was not a write to this pass, so the walk fell
+  // through to the rewrite below, which found the `C.f` MemberExpr sitting in `targetExpr`
+  // and replaced it with the bare Identifier `"C.f"`. Codegen's UpdateExpr arm dispatches
+  // `targetExpr` on `IndexExpr` and then ASSERTS MemberExpr for everything else, so it
+  // read `.object` off an Identifier and handed `undefined` to `genExpr` — an internal
+  // `TypeError`, no NT code, no location. (Codegen's assertion is now a checked narrowing
+  // that raises `internalError` instead; this arm is what keeps it unreachable.)
+  //
+  // WHY IT WAS MISSED, since the same hole is worth not re-cutting: the write forms were
+  // enumerated by LISTING them, not by exhausting them. `C.f = v` and `C.f += v` both
+  // parse to `FieldAssign` (a compound store is one node with an `op`), so a single arm
+  // covered two spellings and looked complete; `++`/`--` parse to a different node and
+  // fell through. `C.f[i] = v`, `C.f.g = v` and `C.f.push(x)` do NOT need an arm — they
+  // are refused downstream, by the immutability rules for the array/object the static
+  // holds, and a census of all four update spellings × top level / function body / static
+  // method body found no other form that reached codegen.
+  if (onAssign !== undefined && e.kind === "UpdateExpr") {
+    // The optional child is unwrapped with a TERNARY, not by binding it to an
+    // `Expr`-typed local behind an `if (… !== undefined)`. This file must stay inside the
+    // subset it compiles, and that narrowing is not in it: `const tgt: Expr = e.targetExpr`
+    // is `NT2001 'tgt' declared Expr<<UNION>> but initialized with ?UU<<UNION>>` — the
+    // guard does not reach a member path. It took `ast.ts` from 0 blockers to 1, measured.
+    // `tyExpr`'s own `UpdateExpr` arm (`e.targetExpr === undefined ? undefined : fe(…)`)
+    // is the spelling that works, so this matches it.
+    const name = e.targetExpr === undefined ? "" : staticDottedName(e.targetExpr);
+    if (name !== "" && names.has(name)) onAssign(name, exprLoc(e));
   }
   // A `?.` link is left alone (rewriting it would silently drop the optional; a class name
   // is never nullish, so the read is rejected instead).
