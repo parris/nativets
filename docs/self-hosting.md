@@ -4789,3 +4789,70 @@ an `Identifier`, so the arm fires on a receiver that has nothing to do with the 
 name-keying is documented as a deliberate over-refusal on `mutableArgProps`; the
 consequence for the natural spelling of a collector class is not, and it is precisely the
 landmine the route above would have walked into.
+
+## `@@mutable` on records does not scale to the AST — the census
+
+`NT1606 objects are immutable: X would mutate the object in place` is the largest single
+blocker shape in the tree at **21 of 693 functions**, all 21 from one `throw` in
+`Checker.type`'s `FieldAssign` case (`src/checker.ts`). Every one of them writes an
+annotation onto an AST node: `e.ty = v`, `d.name = v`, `p.name = v`, `arrow.liftedName = v`.
+
+**The mechanism they would need already exists.** `//@@mutable` on an `interface` is
+supported, documented (`docs/decorators.md`), and already applied inside `src/ast.ts` —
+`ThisHit`, and `BlockDropsStmt` whose `setBlockDrops` does `last.names = names` in place.
+The hint that points at it is TRUE for a plain record: the undecorated/decorated pair was
+compiled both ways and the decorated one prints `2`, matching node. So this bucket is not
+waiting on a compiler feature.
+
+**But applying it does not pay, and that is the finding.** Two numbers, both measured
+rather than argued:
+
+1. **The ceiling is 8 functions, not 21.** With the refusal neutered outright (`git archive`
+   base + the one `if` disabled), the linked stage-1 program goes **199 → 191 failing of
+   693**. Thirteen of the twenty-one promote straight to an unrelated blocker in the same
+   body — mostly `NT2001` on optional/union arguments (`arg 0 expects {name:string}[], got
+   {name:string,annot:?Ustring,…}`), plus `Array.from expects 1 argument` and a `.find` over
+   a 30-member union. Clearing the whole shape buys **1.2% of the denominator**.
+2. **Applying `@@mutable` reaches nowhere near even that.** `@@mutable` is **NOMINAL** — it
+   tags the type — so marking a widely-shared AST interface breaks *structural*
+   assignability at every call site that passes one. Marking `Param` (which holds 3 of the 8
+   clearable sites) cleared exactly **one** function, introduced a **new** failure in
+   `ast.ts:mapParams`, and converted the other two sites from `NT1606` into `NT2001`
+   argument-type mismatches. Net ≈ zero. The nominal tag costs about what it buys.
+
+**And the biggest sub-shape cannot be reached this way at all.** Eight of the twenty-one
+write through a receiver typed as the `Expr`/`Stmt` **union** (`Renamer.expr`,
+`Checker.type`, `Checker.retypeLiteral`, `FnGen.subExpr`, …). Tagging those members makes
+the receiver a real `U<…>`, and a union field **store** is unimplemented — see "The union
+field WRITE is refused too" in `docs/divergences.md`. So the route ends in a different
+missing feature, one lane away from where it started.
+
+**What would actually move this bucket** is the union field store, not more `@@mutable`.
+The read half already works (`unionCommonField` proves the constant slot), the narrowed
+write already works, and the un-narrowed write is the only piece absent. That is a
+contained, checkable change with a real constituency; per-record `@@mutable` tagging of the
+AST is not.
+
+### The pre-existing bug this turned up, and fixed
+
+NT1606's hint sent users round a **three-step loop** with no working program at the end:
+*"declare the record `@@mutable`"* → doing so makes the hint's `isObjectTy(ot)` branch go
+false → the `@@mutable` sentence silently disappears and the bare-spread fallback is printed
+→ that spread is itself `NT2001` on a tagged union. Meanwhile the message opened with
+"objects are immutable" about records the user had *just* declared mutable. The full table,
+the mechanical cause, and the two spellings that do compile are in `docs/divergences.md`.
+This is the ninth lying hint found this session and, like the other eight, it is invisible to
+reading — `tsc` accepts the advice and node runs it. Only compiling it with nativets finds
+it. All eight assertions in the new `test/mutable-records.test.ts` block RUN their advice.
+
+Frontier delta: **199/694 — nothing cleared, nothing added.** Per-FUNCTION diff, before and
+after, of `check(linkProgram(src, entry), blockers)` filtered by `b.fn`: all 21 target sites
+keep a byte-identical message (line numbers shift only), 0 new failures. The denominator
+moves 693 → 694 because `allUnionMembersMutable` is itself a new function *inside* the
+subset — confirmed by re-running the neutered ceiling on the post-edit tree, 191 → 191 with
+0 new failures, so the added code hides no blocker behind `Checker.type`'s existing one.
+Green on Linux under ASan (`scripts/docker-test.sh`), 61/0 in `mutable-records`; 61/0
+`mutable-records`, 164/0 across decorators/diagnostics/immutable/sharing, 137/0
+unions+classes, 95/0 drops/ownership, 393/0 fixtures with snapshots unchanged; `tsc -p
+tsconfig.src.json` clean; all three canary modules still reach IR standalone (164628 /
+119501 / 149960 bytes, redirected to files — a pipe truncates at 65536).

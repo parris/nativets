@@ -1110,6 +1110,41 @@ class Checker {
   }
 
   /**
+   * Is `ot` a union whose EVERY member carries a `@@mutable` tag?
+   *
+   * Purely for the DIAGNOSTIC — it changes no decision. `isMutableTy` is correctly
+   * `false` on a union and the field store stays refused either way. But the REASON is
+   * not immutability, and it is not representation either: a union field STORE is simply
+   * unimplemented. That was worth checking rather than assuming, and the check says so —
+   * the READ works. `unionCommonField` already proves a shared field sits at one constant
+   * slot in every member, and `e.f` on an un-narrowed `U<…>` compiles and agrees with
+   * node today (`ty` at slot 1 in both members of the fixture in the tests below). So the
+   * machinery a store would need mostly exists; nobody has built the write half. Stating
+   * that plainly is the point — the old message named a cause that was not the real one,
+   * which is the failure mode this tree keeps re-finding in its own diagnostics.
+   *
+   * Telling the two apart matters because the generic message walked users in a CIRCLE.
+   * `e.f = v` on an UNDECORATED union hit `isObjectTy` (structurally identical members
+   * collapse to one object type) and advised "declare the record `@@mutable`"; doing that
+   * TAGS the members, so the type is now a real `U<…>`, `isObjectTy` goes false, and the
+   * hint silently fell back to bare spread — while still opening with "objects are
+   * immutable" about two records the user had just declared mutable. And the spread it
+   * fell back to does not compile on a tagged union at all: `{ ...e, f: v }` is NT2001,
+   * "an object literal for A{…} | B{…} must set 'kind' to one of the literals". Three
+   * steps, no working program, and the spelling that DOES work never mentioned.
+   *
+   * `false` for a non-union, and for a union with even one undecorated member — that one
+   * really is the immutability rule and keeps the original message.
+   */
+  private allUnionMembersMutable(ot: Ty): boolean {
+    if (!this.mutable.size || !isUnionTy(ot)) return false;
+    const members = unionMembers(ot);
+    if (members.length === 0) return false;
+    for (let i = 0; i < members.length; i++) if (!this.isMutableTy(members[i]!)) return false;
+    return true;
+  }
+
+  /**
    * Every nominal NAME a `Ty` mentions. The encoding is flat text and a name appears in
    * exactly two spellings, so one scan finds every occurrence at every depth — through
    * `{…}`, `[]`, `?N`/`?U`, `U<…>`, `G<…>` and function types alike:
@@ -3470,8 +3505,28 @@ class Checker {
         // node and defers here. The ownership pass then decides WHO may mutate (NT1607).
         const ot = this.type(e.object, scope);
         if (!e.viaThis && !this.isMutableTy(ot)) {
+          const target = exprText(e.object) === undefined ? "o.f" : `${exprText(e.object)}.${e.field}`;
+          // A union of `@@mutable` members is refused for a DIFFERENT reason than the
+          // Stage-29 immutability rule, and saying "objects are immutable" there is
+          // simply untrue — see `allUnionMembersMutable` for the three-step loop the
+          // generic message used to send people round. The refusal is unchanged.
+          if (this.allUnionMembersMutable(ot)) {
+            const d = unionDiscriminant(ot);
+            const key = d === undefined ? "kind" : d.key;
+            throw mutationError(
+              `\`${target} = v\` writes a field of the union receiver ${showUnion(ot)}, which is not supported. ` +
+                `Every member here IS \`@@mutable\`, so this is NOT the immutability rule — a union field STORE is ` +
+                `simply not implemented. (The READ is: \`unionCommonField\` proves a shared field sits at one ` +
+                `constant slot in every member, and \`e.f\` on an un-narrowed union compiles today.)`,
+              `narrow on the discriminant first, then assign — \`if (${exprText(e.object) ?? "e"}.${key} === …) { ${target} = v; }\`, ` +
+                `or a \`switch\` over \`${key}\`. Inside the arm the member is known, the store lands in place, and every ` +
+                `handle observes it. Do NOT use \`{ ...o, f: v }\` here: an object literal for a tagged union must set ` +
+                `\`${key}\` to one of its literals, so the spread spelling is refused (NT2001)`,
+              exprLoc(e.object),
+            );
+          }
           throw mutationError(
-            `objects are immutable: \`${exprText(e.object) === undefined ? "o.f" : `${exprText(e.object)}.${e.field}`} = v\` would mutate the object in place`,
+            `objects are immutable: \`${target} = v\` would mutate the object in place`,
             isObjectTy(ot)
               ? "use `{ ...o, f: v }` — returns a NEW object; the original is unchanged. To assign in place instead, declare the record `@@mutable` (docs/decorators.md)"
               : "use `{ ...o, f: v }` — returns a NEW object; the original is unchanged",

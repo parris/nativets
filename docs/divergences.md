@@ -681,6 +681,55 @@ read). Neither is needed for the shape that actually blocks self-hosting, and a 
 rule beats a risky complete one. The `narrowAdvice` row above therefore fires only when the
 receiver *is* narrowed to several members AND the field fails one of the three clauses.
 
+#### The union field WRITE is refused too — and it is a gap, not a representation limit
+
+Everything above is about the **read**. `e.f = v` on an un-narrowed union receiver is also
+refused, and until now it was refused *with the wrong reason attached*. The refusal stays; only
+the diagnostic changed.
+
+**What was wrong.** The hint walked users in a circle, and each step is reproducible:
+
+| step | source | what nativets says |
+|---|---|---|
+| 1 | `interface A {kind:"A";ty?:string}` / `B`, `e.ty = "n"` on `A\|B` | `NT1606` — *"objects are immutable … To assign in place instead, declare the record `@@mutable`"* |
+| 2 | take that advice: `//@@mutable` on both members | `NT1606` **again** — and the `@@mutable` sentence has silently **vanished** |
+| 3 | take what is left, `{ ...e, ty: "n" }` | `NT2001` — *"an object literal for `A{…} \| B{…}` must set 'kind' to one of the literals"* |
+
+Step 2 is the mechanical cause: the hint chose its branch on `isObjectTy(ot)`. Two structurally
+identical *undecorated* members collapse to a single object type, so step 1 took the object
+branch; adding `@@mutable` **tags** them, the type becomes a real `U<…>`, `isObjectTy` goes
+false, and the hint dropped to the bare-spread fallback — while still opening with "objects are
+immutable" about two records the user had just declared mutable. The spelling that actually
+works was never mentioned at any step.
+
+**The reason is a missing feature, not an unrepresentable one** — which is worth stating because
+the old message implied otherwise. The **read** of that same field compiles today and agrees
+with node: `ty` sits at slot 1 in both members, `unionCommonField` proves the constant slot, and
+`e.ty` on an un-narrowed `U<…>` works. So most of the machinery a store needs already exists;
+nobody has built the write half. `Checker.allUnionMembersMutable` exists purely to tell the two
+causes apart in the message and changes no decision.
+
+**The fix that compiles**, and what the hint now names — narrow on the discriminant first, then
+assign. Both spellings are run against node in `test/mutable-records.test.ts`:
+
+```ts
+function annotate(e: E): void {
+  if (e.kind === "Num") { e.ty = "number"; } else { e.ty = "string"; }   // works
+}
+function annotate2(e: E): void {
+  switch (e.kind) { case "Num": e.ty = "number"; break; case "Str": e.ty = "string"; break; }
+}                                                                        // also works
+```
+
+Inside the arm the member is known, the store lands in place, and every handle observes it. The
+dead-end spread of step 3 is pinned as `NT2001` in the same file, so the hint cannot drift back
+to it.
+
+**Why this matters beyond the message.** It is the shape the compiler's own source is built out
+of: `Renamer.expr`, `Checker.type`, `Checker.retypeLiteral` and five other functions all write
+`e.ty = v` on an `Expr`. Those sites are *not* covered by the fix above — see the census under
+"`@@mutable` on records does not scale to the AST" in `docs/self-hosting.md`.
+
 ### `break` is not `return` — one conflation, one false refusal and four wrong answers (closed)
 
 Two passes asked "does this code leave?" and both got `break` wrong, in opposite directions.
