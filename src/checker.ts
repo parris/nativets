@@ -4240,13 +4240,20 @@ class Checker {
         return "void";
       }
       // spawn(body, arg): body is (msg) => void; returns the new pid (number).
+      //
+      // The ARITY CHECK LEADS. It used to sit five lines down, below the `e.args[0]!` read
+      // it is the only thing guarding, and `spawn()` therefore reached `typeArg` with
+      // `args[0]` out of range — which did not even need nativets' Stage-41 panic to be
+      // wrong: bun read it `undefined` and `typeArg`'s `a.kind` then crashed the compiler
+      // with a raw TypeError, no NT code, exit 1. Every other actor primitive above already
+      // spells it this way; this one was the exception. See test/no-index-last.test.ts.
+      if (e.args.length !== 2) throw typeError("spawn(body, arg) takes two arguments");
       const expected = makeFuncTy(["number"], "void"); // default message type
       const bodyTy = this.typeArg(e.args[0]!, expected, scope);
       if (!isFuncTy(bodyTy) || funcParams(bodyTy).length !== 1) throw typeError("spawn: body must be a one-argument function");
       // The body's return value is ignored (the actor entry trampoline discards it),
       // so any inferred return type is fine — nativets defaults empty blocks to number.
       const msgTy = actorSendTy(funcParams(bodyTy)[0]!);
-      if (e.args.length !== 2) throw typeError("spawn(body, arg) takes two arguments");
       if (this.type(e.args[1]!, scope) !== msgTy) throw typeError(`spawn: arg type must match the body's parameter (${msgTy})`);
       return "number"; // pid
     }
@@ -4369,7 +4376,10 @@ class Checker {
       if (p === "assign" || p === "defineProperty" || p === "setPrototypeOf")
         throw mutationError(`Object.${p} mutates its target object`,
           "objects are immutable — build a new one with spread: `const merged = { ...a, ...b }`",
-          exprLoc(e.args[0]) ?? e.loc);
+          // The caret points at the TARGET when there is one. `Object.assign()` has none, so
+          // the length test comes first: nativets panics on the out-of-range read where node
+          // would have handed `exprLoc` an `undefined` and let the `??` pick the fallback.
+          (e.args.length > 0 ? exprLoc(e.args[0]!) : undefined) ?? e.loc);
       if (p !== "keys" && p !== "values" && p !== "entries" && p !== "getOwnPropertyNames") throw nyi(NYI.OBJECT, `Object.${p}`);
       if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
       const ot = this.type(e.args[0]!, scope);
@@ -4630,6 +4640,19 @@ class Checker {
     // Host FFI (SH4) — in scope only because a `node:` import brought it in.
     if (e.callee.kind === "Identifier" && this.hostImports.has(e.callee.name)) {
       const h = HOST_FUNCS.get(e.callee.name)!;
+      // ORDER, and it is DELIBERATE: the value constraints run BEFORE the arity/type check,
+      // so `checkHostCall` sees calls that are too SHORT and every `args[i]` it reads is a
+      // read it must prove in range first. That is worth knowing before adding a validator
+      // there — but note it is not a general rule about this file, and swapping these two
+      // lines is not the fix for the class. Measured: the swap repairs nothing (both host
+      // validators are already length-first) and moves 28 of 195 host-call diagnostics,
+      // including `readFileSync(path)` — the commonest real mistake — from the NT1028 that
+      // says "write `readFileSync(path, \"utf8\")`" to a bare arity count.
+      //
+      // THE RULE IS PER-READ, NOT PER-ORDERING: read `args[i]` only after proving
+      // `i < args.length`, with a test that never FORMS the index. Most validators that
+      // broke it (`inferHof`, `inferForEach`, `inferSearchHof`, `Object.assign`, `spawn`)
+      // never call `checkArgs` at all, so no reordering could ever have reached them.
       this.checkHostCall(e.callee.name, e.args);
       this.checkArgs(e.args, h, scope, e.callee.name);
       // The one host builtin whose RESULT SHAPE depends on its options: an inherited
@@ -5624,7 +5647,19 @@ class Checker {
    *  arrow over the elements. `.find`/`.findLast` return `T | undefined` like node. */
   private inferSearchHof(recv: Ty, el: Ty, callee: MemberExpr, args: Expr[], scope: Scope): Ty {
     const method = callee.property;
-    const arrow = args[0];
+    // `e.args.length > 0` decides the BINDING, exactly as the `String(…)` coercion at the
+    // global-builtin branch does. `xs.find()` makes `args[0]` a read at index == length:
+    // node answers `undefined` and the `!arrow` test below then works, but nativets PANICS
+    // on the read itself (Stage 41), so the guard could never run and a self-hosted checker
+    // would abort here instead of printing this NT1003.
+    //
+    // The ternary is what makes it a bounds fix and nothing more. Testing `args[0]!.kind`
+    // directly also avoids the panic, but a COMPUTED INDEX IS NOT A NARROWABLE ACCESS PATH
+    // (the `.pop` comment above says so in as many words), so the discriminant no longer
+    // reaches `typeArrowBody` and all three HOFs became NT2001 blockers in the self-host
+    // metric — this fix's own first draft did exactly that. A local binding narrows; an
+    // index expression does not. See test/no-index-last.test.ts.
+    const arrow = args.length > 0 ? args[0] : undefined;
     if (!arrow || arrow.kind !== "ArrowFunction") throw nyi(NYI.CLOSURE, `array .${method} needs an inline arrow (function values are not inlined yet)`);
     if (args.length !== 1) throw typeError(`.${method} expects 1 argument`);
     const bodyTy = this.typeArrowBody(arrow, hofCallbackParams(method, arrow, [el]), scope);
@@ -5690,7 +5725,10 @@ class Checker {
    * `.forEach` sites in `src/` pass an inline arrow, which needs no function value at all.
    */
   private inferForEach(el: Ty, args: Expr[], scope: Scope): Ty {
-    const arrow = args[0];
+    // Length-guarded BINDING, for both reasons `inferSearchHof` records: `xs.forEach()`
+    // reads `args[0]` at index == length (a panic under nativets), and the guard has to
+    // stay on a local binding or the narrowing that feeds `typeArrowBody` is lost.
+    const arrow = args.length > 0 ? args[0] : undefined;
     if (!arrow || arrow.kind !== "ArrowFunction") {
       throw nyi(NYI.CLOSURE, `array .forEach with a callback that is not an inline arrow (function values need captured environments)`,
         `write the callback INLINE — \`xs.forEach((x) => go(x))\` instead of \`xs.forEach(go)\`; an inline arrow is compiled as a loop and is supported`);
@@ -5702,7 +5740,10 @@ class Checker {
 
   /** map/filter/reduce with an INLINE arrow callback (contextually typed). */
   private inferHof(el: Ty, method: string, args: Expr[], scope: Scope): Ty {
-    const arrow = args[0];
+    // Length-guarded BINDING, for both reasons `inferSearchHof` records: `xs.map()` reads
+    // `args[0]` at index == length (a panic under nativets), and the guard has to stay on a
+    // local binding or the narrowing that feeds `typeArrowBody` is lost.
+    const arrow = args.length > 0 ? args[0] : undefined;
     if (!arrow || arrow.kind !== "ArrowFunction") throw nyi(NYI.CLOSURE, `array .${method} needs an inline arrow (first-class functions not yet supported)`);
 
     if (method === "reduce") {

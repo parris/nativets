@@ -572,16 +572,42 @@ describe("src/ never depends on a string read at index == length", () => {
  * to a readonly property, and the compiler pushes onto empty arrays constantly. The
  * process-wide move breaks the subject rather than observing it.
  *
- * So this instrument is SCOPED instead of global: parse the program, then swap just the
- * `args` array of each HOST call for a Proxy that panics out of range, exactly as Stage 41
- * does. `rmSync` is in the table as the CONTROL — it has always tested `args.length === 2`
- * first, so it must stay green, which is what shows the tripwire is discriminating rather
- * than firing on everything.
+ * So this instrument is SCOPED instead of global: parse the program, then swap a call's
+ * `args` array for a Proxy that panics out of range, exactly as Stage 41 does. `rmSync` is
+ * in the table as the CONTROL — it has always tested `args.length === 2` first, so it must
+ * stay green, which is what shows the tripwire is discriminating rather than firing on
+ * everything.
+ *
+ * ---- CORRECTION: it was SCOPED TO HOST CALLS, and the whitelist WAS the blind spot ----
+ * It armed only eleven `node:` builtin names, on the theory that `checkHostCall` running
+ * before `checkArgs` was the root cause. That is not the root cause. The host-FFI branch is
+ * one of many bespoke validators, and its ordering is not even the general shape of the
+ * bug. The rule is simply READ `args[i]` ONLY AFTER PROVING `i < args.length`, and most
+ * validators that break it never call `checkArgs` at all — so no reordering can reach them.
+ * (Reordering was measured before being rejected: it fixes none of the sites below, and it
+ * moves 28 of 195 host-call diagnostics, including turning `readFileSync(path)`'s NT1028 —
+ * which tells you to write `readFileSync(path, "utf8")` — into a bare arity count.)
+ *
+ * Arming EVERY call, which the whitelist prevented, found five more sites, none a host call:
+ *
+ *   checker.ts  inferSearchHof    `const arrow = args[0]; if (!arrow || …)`   `xs.find()`
+ *   checker.ts  inferForEach      the same shape                              `xs.forEach()`
+ *   checker.ts  inferHof          the same shape                              `xs.map()`
+ *   checker.ts  inferCall/Object  `exprLoc(e.args[0]) ?? e.loc`               `Object.assign()`
+ *   checker.ts  inferCall/spawn   `this.typeArg(e.args[0]!, …)`, five lines
+ *                                 above the arity check that guards it        `spawn()`
+ *
+ * Three of those guard on the TRUTHINESS of the value (`!arrow`). A truthiness guard raises
+ * no diagnostic, so the self-host frontier metric cannot see it at all — grep for the READ,
+ * never for the diagnostic. And `spawn()` did not need nativets' semantics to be wrong: it
+ * crashed the compiler under bun with a raw `TypeError: undefined is not an object`, no NT
+ * code, exit 1 — "reject, never miscompile" broken in the loudest way available.
+ *
+ * The instrument is GENERAL now: every `CallExpr`/`NewExpr` in the program is armed. A
+ * whitelist can only re-confirm the theory that drew it up; this class is found by the
+ * sweep that has no theory.
  */
-describe("src/ never reads a host call's argument list past its length", () => {
-  const HOST_CALLS = new Set(["readFileSync", "writeFileSync", "existsSync", "mkdtempSync",
-    "readdirSync", "rmSync", "spawnSync", "join", "dirname", "basename", "resolve"]);
-
+describe("src/ never reads a call's argument list past its length", () => {
   const panicOutOfRange = (xs: unknown[]): unknown[] =>
     new Proxy(xs, {
       get(t, p, r) {
@@ -594,22 +620,21 @@ describe("src/ never reads a host call's argument list past its length", () => {
       },
     });
 
-  /** Replace every host `CallExpr`'s `args` with a panicking Proxy, in place. */
-  const armHostArgs = (n: unknown, seen: Set<unknown> = new Set()): void => {
+  /** Replace EVERY call's `args` with a panicking Proxy, in place. */
+  const armCallArgs = (n: unknown, seen: Set<unknown> = new Set()): void => {
     if (n === null || typeof n !== "object" || seen.has(n)) return;
     seen.add(n);
-    if (Array.isArray(n)) { for (const v of n) armHostArgs(v, seen); return; }
+    if (Array.isArray(n)) { for (const v of n) armCallArgs(v, seen); return; }
     const o = n as Record<string, unknown>;
-    const callee = o["callee"] as Record<string, unknown> | undefined;
-    if (o["kind"] === "CallExpr" && Array.isArray(o["args"]) && callee &&
-        callee["kind"] === "Identifier" && HOST_CALLS.has(String(callee["name"]))) {
+    if ((o["kind"] === "CallExpr" || o["kind"] === "NewExpr") && Array.isArray(o["args"])) {
       // Arm AFTER walking the children: the Proxy would panic on nothing here, but the
       // walk reads indices and there is no reason to route it through the tripwire.
-      for (const v of o["args"] as unknown[]) armHostArgs(v, seen);
+      for (const v of o["args"] as unknown[]) armCallArgs(v, seen);
+      for (const k of Object.keys(o)) if (k !== "args") armCallArgs(o[k], seen);
       o["args"] = panicOutOfRange(o["args"] as unknown[]);
       return;
     }
-    for (const k of Object.keys(o)) armHostArgs(o[k], seen);
+    for (const k of Object.keys(o)) armCallArgs(o[k], seen);
   };
 
   /**
@@ -631,12 +656,49 @@ describe("src/ never reads a host call's argument list past its length", () => {
      'import { rmSync } from "node:fs";\nrmSync("/tmp/nt-idxnull");\n', null],
     ["the well-formed spawnSync, three args",
      'import { spawnSync } from "node:child_process";\nconst r = spawnSync("ls", [], { encoding: "utf8" });\nconsole.log(r.status);\n', null],
+
+    /* --- The five the HOST-ONLY whitelist could not see. None is a host call, so the
+     * `checkArgs`/`checkHostCall` ordering is irrelevant to every one of them. --- */
+    ["xs.find() — no callback, `args[0]` out of range (inferSearchHof)",
+     "const xs: number[] = [1, 2];\nconsole.log(xs.find());\n", "NT1003"],
+    ["xs.some() — the same site, a different method name",
+     "const xs: number[] = [1, 2];\nconsole.log(xs.some());\n", "NT1003"],
+    ["xs.forEach() — no callback (inferForEach)",
+     "const xs: number[] = [1, 2];\nxs.forEach();\n", "NT1003"],
+    ["xs.map() — no callback (inferHof)",
+     "const xs: number[] = [1, 2];\nconsole.log(xs.map());\n", "NT1003"],
+    ["xs.filter() — the same site, a different method name",
+     "const xs: number[] = [1, 2];\nconsole.log(xs.filter());\n", "NT1003"],
+    ["Object.assign() — no target, `exprLoc(e.args[0])` for the caret",
+     "Object.assign();\n", "NT1606"],
+    // The one that was ALREADY broken under bun: a raw TypeError, no NT code, exit 1.
+    ["spawn() — the arity check sits five lines BELOW the read it guards",
+     "spawn();\n", "NT2001"],
+
+    /* CONTROLS for the five: the well-formed spellings, which must stay green both before
+     * and after the fix. Without these the table cannot tell "stopped panicking" from
+     * "stopped checking". */
+    ["the well-formed xs.map, one inline arrow — CONTROL",
+     "const xs: number[] = [1, 2];\nconsole.log(xs.map((x: number) => x + 1));\n", null],
+    ["the well-formed xs.find, one inline arrow — CONTROL",
+     "const xs: number[] = [1, 2];\nconsole.log(xs.find((x: number) => x > 1));\n", null],
+    ["the well-formed xs.forEach, one inline arrow — CONTROL",
+     "const xs: number[] = [1, 2];\nxs.forEach((x: number) => { console.log(x); });\n", null],
+    ["the well-formed xs.reduce, callback AND initial value — CONTROL",
+     "const xs: number[] = [1, 2];\nconsole.log(xs.reduce((a: number, b: number) => a + b, 0));\n", null],
+    // `xs.forEach(go)` — a ONE-argument call, so nothing is out of range. It must keep the
+    // NT1003 that test/foreach.test.ts pins, which is what shows the fix is a bounds fix
+    // and not a rewrite of what these methods accept.
+    ["xs.forEach(go) — point-free, in range, still NT1003 — CONTROL",
+     "function go(x: number): void { console.log(x); }\nconst xs: number[] = [1, 2];\nxs.forEach(go);\n", "NT1003"],
+    ["Object.assign(a, b) — in range, keeps its NT1606 — CONTROL",
+     "const a = { x: 1 };\nconst b = { y: 2 };\nconsole.log(Object.assign(a, b));\n", "NT1606"],
   ];
 
   for (const [name, src, want] of CASES) {
     test(name, () => {
       const program = linkProgram(src, "/tmp/nt-idxnull-hostargs.ts");
-      armHostArgs(program);
+      armCallArgs(program);
       let got: string | null = null;
       try { check(program); }
       catch (e) {
@@ -656,5 +718,30 @@ describe("src/ never reads a host call's argument list past its length", () => {
     expect(() => (args as { kind: string }[])[2] !== undefined).toThrow(RangeError);
     // ...and the length-first spelling that replaced it never forms the index.
     expect(args.length < 3).toBe(true);
+  });
+
+  /*
+   * `spawn()` needs NO instrument. Every other member of this class is latent — correct
+   * under bun, a panic only once self-hosted — but this one dereferenced the `undefined`
+   * that bun handed back (`typeArg`'s `a.kind`) and so crashed the COMPILER outright:
+   *
+   *   $ nativets run spawn.ts
+   *   TypeError: undefined is not an object (evaluating 'a.kind')   ... exit 1
+   *
+   * A raw stack trace with no NT code is "reject, never miscompile" broken in the loudest
+   * way available, and it survived because nothing calls `spawn` with zero arguments on
+   * purpose. Asserted here WITHOUT the Proxy so a future edit cannot pass by disarming the
+   * instrument, and the message is pinned because the fix is exactly "the arity check that
+   * was already written five lines below now leads".
+   */
+  test("`spawn()` is a DIAGNOSTIC, not a compiler crash — no tripwire involved", () => {
+    let msg = "";
+    try { sourceToIR("spawn();\n", "/tmp/nt-arityorder-spawn0.ts"); }
+    catch (e) { msg = String((e as Error).message); }
+    expect(msg).toContain("NT2001");
+    expect(msg).toContain("spawn(body, arg) takes two arguments");
+    // The exact shape of the crash, named so it cannot come back wearing a passing test:
+    // a bare TypeError carries no NT code, and `toContain("NT2001")` above is what fails.
+    expect(msg).not.toContain("undefined is not an object");
   });
 });
