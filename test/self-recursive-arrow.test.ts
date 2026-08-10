@@ -105,7 +105,8 @@ console.log(total(0));
   test("SHADOWS an outer binding of the same name and still calls ITSELF", async () => {
     // The self-name must not become a capture. If it did, this arrow would capture the
     // OUTER `pick` and print 100 — node prints 3, at exit 0 either way, so only the
-    // oracle catches it.
+    // oracle catches it. On 99c8d60 this exact source produced EMPTY STDOUT at exit 255;
+    // see the note above `describe("shadowing, …")` for the three shapes it was wrong in.
     await same(`
 const pick = (n: number): number => 100;
 function run(): number {
@@ -125,7 +126,150 @@ console.log(f(7));
   });
 });
 
+/*
+ * Each test below was written because MUTATING the guard it covers left every other test
+ * in this file green. They are the cases that make each rule load-bearing rather than
+ * decorative, and the mutation each one catches is named on it.
+ */
+/*
+ * A PRE-EXISTING SILENT WRONG ANSWER, closed here as a side effect — and it is the most
+ * valuable thing this lane found, because nothing in the suite was looking for it.
+ *
+ * A self-recursive arrow that SHADOWS a binding of the same name was not refused at all
+ * before this change. The checker types a `VarDecl` initializer before declaring the
+ * binding, so the body's own name resolved OUTWARD to the shadowed binding and the call
+ * compiled — as a call to the WRONG FUNCTION. Measured on 99c8d60, against node:
+ *
+ *     const f = (n: number): number => n * 100;      // block-shadowed
+ *     { const f = (n: number): number => n <= 0 ? 0 : 1 + f(n - 1); return f(3); }
+ *         node 3   |   nativets 201   |   exit 0 on both
+ *
+ *     ...with a second level of shadowing:   node 3   |   nativets 15    | exit 0
+ *     ...shadowing a MODULE-level binding:   node 3   |   nativets: empty stdout, exit 255
+ *
+ * So the shape was not "refused pending closures" — it was three different wrong answers
+ * wearing exit 0, plus a trap. The NT1003 the lane was pointed at only fired where NOTHING
+ * of that name was in scope to absorb the reference; add a shadow and the refusal vanished
+ * along with the correctness. That is why these cases are `same()` against node rather
+ * than IR assertions, and why `alphaRenameShadows` had to move too.
+ */
+describe("shadowing, where every one of these rules is actually load-bearing", () => {
+  // MUTATION: drop codegen's `!arrow.params.some(p => p.name === selfName)` in `genArrow`.
+  // Then `f(1)` in the body calls `%__clo` — the arrow itself — instead of the PARAMETER
+  // that shadows the name. It emitted `call double %t2(ptr %__clo, ptr 0x3FF…)`, passing a
+  // double where the closure signature wants a pointer. node calls the parameter.
+  test("a PARAMETER of the same name shadows the binding and is what gets called", async () => {
+    await same(`
+const f = (f: (n: number) => number): number => f(1);
+const dbl = (n: number): number => n * 2;
+console.log(f(dbl));
+`);
+  });
+
+  // MUTATION: revert `alphaRenameShadows` to walking the initializer before binding.
+  // TWO levels of shadowing are needed: the body's \`f\` then resolves to the MIDDLE
+  // binding, which alpha-renaming has already moved to \`f$1\`, while \`selfName\` still
+  // says \`f\` — so codegen stops recognising the self-call and falls into \`genUserCall\`
+  // with a name no signature table has. One level is not enough: nothing is renamed there,
+  // so the two spellings agree by accident and the bug hides.
+  test("TWO levels of shadowing still call the innermost arrow itself", async () => {
+    await same(`
+function run(): number {
+  const f = (n: number): number => n * 100;
+  {
+    const f = (n: number): number => n * 7;
+    {
+      const f = (n: number): number => n <= 0 ? 0 : 1 + f(n - 1);
+      return f(3);
+    }
+  }
+}
+console.log(run());
+`);
+  });
+
+  // MUTATION: drop `computeCaptures`'s self-name exclusion. `scope` is the ENCLOSING
+  // scope, so with an outer binding of the same name in it the self-name resolves and is
+  // captured — a slot naming the OUTER closure. stdout stays correct (codegen still calls
+  // through `%__clo`), and the only visible effect is that the outer binding is now
+  // "mentioned" and loses its own drop: `__objLive()` goes 0 -> 1.
+  test("a shadowed self-recursive arrow captures nothing, so nothing leaks", async () => {
+    const r = await compileAndRun(`
+function run(): number {
+  const pick = (n: number): number => n * 100;
+  {
+    const pick = (n: number): number => n <= 0 ? 0 : 1 + pick(n - 1);
+    return pick(3);
+  }
+}
+console.log(run());
+console.log(__objLive());`);
+    expect(r.stdout).toBe("3\n0\n");
+    expect(r.exitCode).toBe(0);
+  });
+});
+
 describe("still refused — the boundary this lane deliberately did NOT cross", () => {
+  // MUTATION: let `inferCall` search the whole `selfArrows` stack instead of its top.
+  // `outer` is then accepted inside `inner`, but codegen's `%__clo` there is INNER's
+  // environment and `outer` is not a capture, so it fell into `genUserCall` and crashed
+  // with a TypeError. A clean NT1003 is the correct answer until closures over enclosing
+  // arrow bindings actually work.
+  test("an inner arrow calling the ENCLOSING self-recursive arrow is still NT1003", () => {
+    const d = rejectionOf(`
+function run(): number {
+  const outer = (n: number): number => {
+    const inner = (k: number): number => k <= 0 ? 0 : outer(k - 1);
+    return n <= 0 ? 0 : 1 + inner(n);
+  };
+  return outer(3);
+}
+console.log(run());
+`);
+    expect(d?.code).toBe("NT1003");
+  });
+
+  // MUTATION: drop the `bound === undefined` guard in `inferCall`, so the self-frame is
+  // consulted even when the name IS in scope. This is the one mutation whose damage is a
+  // SILENT WRONG ANSWER rather than a crash: a local `const f = 5` shadows the arrow, so
+  // node throws `TypeError: f is not a function` and exits 1 — and the mutated compiler
+  // printed `0` at exit 0. The self-frame is deliberately the LAST thing consulted, after
+  // every real binding, which is what JS shadowing does.
+  test("a LOCAL shadowing the self-name is not silently turned into a self-call", () => {
+    const d = rejectionOf(`
+function run(): number {
+  const f = (n: number): number => {
+    const f = 5;
+    return n <= 0 ? 0 : f(n - 1);
+  };
+  return f(3);
+}
+console.log(run());
+`);
+    expect(d?.code).toBe("NT1003");
+  });
+
+  // The self-name is legal in CALL position only. As a value it has no lowering: codegen
+  // emitted `load ptr, ptr %down.addr` inside the LIFTED function, where that alloca does
+  // not exist, and clang rejected the whole module — a build failure with no NT code at
+  // all. Tracking the name on `selfArrows` (read only by `inferCall`) instead of declaring
+  // it in the body scope is what keeps this a diagnostic.
+  test("the self-name read as a VALUE is refused, not miscompiled", () => {
+    const d = rejectionOf(`
+function run(): number {
+  const down = (n: number): number => {
+    const g = down;
+    return n <= 0 ? 0 : g(n - 1) + 1;
+  };
+  return down(5);
+}
+console.log(run());
+`);
+    expect(d).not.toBeNull();
+    expect(d?.code).toBe("NT2001");
+    expect(d?.message).toContain("'down' is not defined");
+  });
+
   test("a `let` arrow may be reassigned, so its self-call is still NT1003", () => {
     const d = rejectionOf(`
 let g = (n: number): number => n <= 0 ? 0 : g(n - 1);
