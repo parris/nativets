@@ -15,7 +15,7 @@ import { join } from "node:path";
 
 import { sourceToIR, buildBinary, BuildError, type Target } from "./driver.ts";
 import { coverage, renderCoverage } from "./coverage.ts";
-import { NTError, formatDiagnostic } from "./diagnostics.ts";
+import { NTError, formatDiagnostic, type Diagnostic, type SourceFile } from "./diagnostics.ts";
 
 /**
  * Run a compile action, printing NT diagnostics cleanly instead of a stack trace.
@@ -29,12 +29,50 @@ import { NTError, formatDiagnostic } from "./diagnostics.ts";
  * promise values, so the rule is the same everywhere and `await` at the inner call site
  * is the fix it prescribes. It was stage-1's own first blocker.
  */
+/**
+ * The text of every file a diagnostic points into.
+ *
+ * `linkProgram` merges the import graph into ONE Program while each module keeps its OWN
+ * line numbers, so rendering everything against the entry source — which is all this file
+ * used to have — printed an imported module's line number over the entry file's text. The
+ * caret then underlined unrelated, valid code and the real file was never named.
+ *
+ * The spans say which files they mean, so we read exactly those. Reading here rather than
+ * plumbing a source map out of the linker keeps `src/modules.ts` unchanged and works for
+ * every producer, including the ones that run before linking. An unreadable file is
+ * skipped, not fatal: `formatDiagnostic` then prints the `-->` locator with no frame,
+ * which is honest about what we know.
+ */
+function diagSources(diag: Diagnostic, entryFile: string, entryText: string): SourceFile[] {
+  let out: SourceFile[] = [{ file: entryFile, text: entryText }];
+  const spans = diag.spans;
+  if (spans === undefined) return out;
+  for (const s of spans) {
+    const f = s.file;
+    if (f === undefined) continue;
+    if (out.some((x) => x.file === f)) continue;
+    try {
+      out = [...out, { file: f, text: readFileSync(f, "utf8") }];
+    } catch {
+      // Unreadable (deleted, or a synthetic path): the locator still names it.
+    }
+  }
+  return out;
+}
+
 async function guard<T>(fn: () => Promise<T> | T): Promise<T> {
   try {
     return await fn();
   } catch (e) {
-    // Render multi-span diagnostics against the source (rustc-style caret underlines).
-    if (e instanceof NTError) { console.error(formatDiagnostic(e.diag, source)); process.exit(1); }
+    // Render multi-span diagnostics against the source (rustc-style caret underlines) —
+    // each span against ITS OWN file, so a cross-module error quotes the module it is in.
+    //
+    // `file!`: `guard` is DECLARED above the `if (!cmd || !file) usage()` guard but only
+    // ever CALLED below it, and `usage()` returns `never` — so `file` is a string by the
+    // time this line can run. TypeScript cannot see that (the closure predates the
+    // narrowing), and `?? ""` would quietly key the entry source under a path no span can
+    // ever name, which is the kind of silent mismatch this whole lane is about.
+    if (e instanceof NTError) { console.error(formatDiagnostic(e.diag, source, diagSources(e.diag, file!, source))); process.exit(1); }
     // Toolchain/link failures (missing raylib/curl/SDK, cross-target limits) — a clear one-liner.
     if (e instanceof BuildError) { console.error(`build error: ${e.message}`); process.exit(1); }
     throw e;
