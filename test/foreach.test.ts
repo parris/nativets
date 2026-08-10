@@ -22,7 +22,7 @@
 
 import { test, expect, describe } from "bun:test";
 
-import { compileAndRun, expectMatchesNode, emitIR } from "./harness.ts";
+import { compileAndRun, expectMatchesNode } from "./harness.ts";
 import { ownershipCheck, sourceToIR } from "../src/driver.ts";
 
 /** The NT codes the ownership pass refuses a program with (`[]` if it compiles). */
@@ -367,6 +367,36 @@ console.log(run());
     const { ours, oracle } = await expectMatchesNode(src);
     expect(ours.stdout).toBe(oracle.stdout);
     expect(oracle.stdout).toBe("10\n");
+  });
+
+  /* The BOUNDARY, recorded because `.forEach` + a push accumulator is the most idiomatic
+   * shape there is and it does NOT compile. `.push` to a `@@mutable` accumulator from an
+   * inlined callback is NT1607 ("a closure captures it"). That reasoning does not hold for
+   * an inlined arrow — there is no env and nothing that can outlive the binding — but the
+   * rule is PRE-EXISTING and fires identically for `.map`, which is the control below.
+   * Relaxing it is a separate lane's call; this test pins that `.forEach` inherits the
+   * rule rather than dodging or widening it. */
+  test("`.push` to a @@mutable accumulator is NT1607 — same as .map, not new here", () => {
+    const each = `
+function run(): number {
+  @@mutable let out: number[] = [];
+  const xs: number[] = [1, 2, 3];
+  xs.forEach((x) => { out.push(x * 2); });
+  return out.length;
+}
+console.log(run());
+`;
+    const map = `
+function run(): number {
+  @@mutable let out: number[] = [];
+  const xs: number[] = [1, 2, 3];
+  const m: number[] = xs.map((x) => { out.push(x * 2); return x; });
+  return m.length;
+}
+console.log(run());
+`;
+    expect(ownCodes(each)).toEqual(["NT1607"]);
+    expect(ownCodes(map)).toEqual(["NT1607"]); // the control: pre-existing, not forEach's
   });
 
   test("an empty array runs the body zero times", async () => {
