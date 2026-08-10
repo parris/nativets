@@ -3916,6 +3916,62 @@ case "TemplateLiteral": return e.exprs.map((x) => exprLoc(x)).find((l) => l !== 
 one function of `src/ast.ts` has been the wall for nine modules, and this round's next term is
 not a union construct at all.
 
+### `.map` producing a nullable — cleared, and the guard was NOT the ownership rule it looked like
+
+The message named a nullable RECORD, so it read as though records were the hard part. They were
+not. Measured on the three axes separately, before any code changed:
+
+| `.map` body type | on `main` (2c4445f) |
+|---|---|
+| `{v:number}` | **compiles** (since "arrays-of-objects first-class") |
+| `number[]` | **compiles** |
+| `?Unumber` | `NT1001`, same line |
+| `?U{v:number}` | `NT1001`, same line |
+
+The blocked axis was **nullability alone**. Arrays of nullable elements already worked end to
+end from an annotation (`(string|null)[]` — literals, reads, iteration, `JSON.stringify`), so
+the array machinery was never the gap; only the `.map` result path was.
+
+**The guard's provenance is the whole finding.** `git log -L` on the line shows it arrived in
+the Stage-19 baseline as a three-way allow-list and was widened exactly once, for objects and
+arrays. It is NOT the ownership rule its neighbours carry. `.at` and `.find` say "a heap element
+would alias its owner" because they hand back a **borrow** of an element the receiver still
+owns; `.map` **constructs** a fresh array that owns its elements outright. Reading the two as
+one rule is what made a one-token gap look like a memory-safety frontier for four rounds.
+
+**Verified on the risk axis, because "it prints right" is not the question.** The aliasing shape
+`xs.map(x => x)` over a heap element was *already* allowed, so the new spelling is measured
+against it rather than argued about:
+
+- `__strLive()` balances to **0** on both spellings over 100 iterations — a refcounted payload is
+  the one where a missing retain is a UAF and a spurious retain is a leak, and neither moves.
+- `__arrLive()` is **0** on both; the leftover object/box leak is the pre-existing shallow-drop
+  class already pinned in `test/nullable-element.test.ts`, and a nullable ARRAY result leaks at
+  exactly the same rate (1 inner array per iteration) as the non-nullable spelling with the same
+  inner-array count.
+- ASan + UBSan on **Linux** (macOS has neither) report nothing on a program that lets a mapped
+  array outlive the source it aliased, across 300 intervening allocations.
+
+**The one guard added was probed by mutation and is CONSERVATIVE, not load-bearing** — worth
+recording plainly, since a rule nobody can make fail is the `.push` situation again. `?U`
+recurses into the same list, so `?U<union>` stays refused for the union's reason. Replacing that
+with a blanket "any nullable" was still node-exact on `?U` of a discriminated union, a `Map`, a
+`Date` and a `Uint8Array`, through narrowing, whole-array `console.log` and `JSON.stringify`. It
+stays because a refusal is always acceptable and an unexercised widening is not — not because
+those bases are known unsound.
+
+**Frontier delta.** `blocker-metric` reads **268/661**, from 268/660 — the denominator gained the
+one new helper and the failing count did not move, because this blocker MOVED rather than
+cleared. That is the instrument's documented promotion effect, not a null result: `exprLoc`'s
+`e.exprs.map((x) => exprLoc(x)).find(…)` now builds its array and stops at the `.find`.
+
+**The next term is the same line's other half, and it IS the ownership rule.** It also carries a
+trap worth stating before someone lifts it: `.find` returns `makeNullable("undefined", el)`, and
+on a `(string|null)[]` that is `baseTy("?Nstring")` rewrapped as `?Ustring` — the null arm is
+lost from the static type. Harmless at *this* site, whose elements are already `?U`; a silent
+wrong answer waiting on a `?N` element. Widening `.find` means handling the two arms, not just
+deleting the element check.
+
 **The bucket this came out of is much smaller than "union field before narrowing" suggests.**
 Measured over the linked stage-1 program, 38 of 136 remaining `NT2001` blockers are union field
 reads, and they split three ways:

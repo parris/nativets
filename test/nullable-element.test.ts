@@ -123,6 +123,72 @@ console.log([...a].reverse());`);
   });
 
   /*
+   * `.map` PRODUCING a nullable. The three tests below are the axes, separated on
+   * purpose, because the message that reported this (`.map producing ?U{…}` — the
+   * stage-1 first blocker, at `exprLoc` in src/ast.ts) names a nullable RECORD and so
+   * reads as if the record were the hard part. It is not: `.map` producing a plain
+   * `{v:number}` has compiled since "arrays-of-objects first-class", and producing a
+   * plain `number` since Stage 19. The blocked axis is NULLABILITY ALONE — `?Unumber`
+   * was refused by the identical line.
+   *
+   * The guard was an ALLOW-LIST written before nullables existed and widened exactly
+   * once (for objects and arrays); it is NOT the ownership rule its neighbours carry.
+   * `.at`/`.find` refuse a heap element because they hand back a BORROW of an element
+   * the receiver still owns; `.map` CONSTRUCTS a fresh array whose elements it owns
+   * outright, so the aliasing question those two answer does not arise here. Nothing
+   * about a nullable RESULT is newly aliased that an object result did not already
+   * alias — see the drop tests below, which run the two spellings side by side.
+   */
+  test("`.map` producing a nullable NUMBER — the axis is nullability, not the record", async () => {
+    await sameAsNode(`
+const xs = [1, 2, 3];
+const ys = xs.map((x) => (x > 1 ? x : undefined));
+console.log(ys.length, ys[0], ys[2]);
+console.log(ys);`);
+  });
+
+  test("`.map` producing a nullable RECORD — the stage-1 first blocker's own shape", async () => {
+    await sameAsNode(`
+const xs = [1, 2, 3];
+const ys = xs.map((x) => (x > 1 ? { v: x } : undefined));
+console.log(ys.length, ys[0] === undefined, ys[2]!.v);
+console.log(ys);`);
+  });
+
+  test("both nullish arms, a nullable ARRAY element, and JSON", async () => {
+    await sameAsNode(`
+const xs = [1, 2, 3];
+console.log(xs.map((x) => (x > 1 ? "big" : null)));
+console.log(xs.map((x) => (x > 2 ? [x] : undefined)));
+console.log(JSON.stringify(xs.map((x) => (x > 1 ? x : null))));
+const src: (string | null)[] = ["a", null, "c"];
+console.log(src.map((s) => (s === null ? null : s + "!")));`);
+  });
+
+  /*
+   * What the widening newly makes REACHABLE, swept rather than assumed: a nullable-element
+   * array that came out of `.map` is fed to every downstream array operation the annotated
+   * one already supports. The point is that the two origins are indistinguishable
+   * afterwards — a `.map` result must not be a second-class array.
+   */
+  test("a MAP-PRODUCED nullable array survives slice / reverse / filter / spread / re-map", async () => {
+    await sameAsNode(`
+const xs = [1, 2, 3, 4];
+const ys = xs.map((x) => (x % 2 === 0 ? x : undefined));
+console.log(ys.length, ys);
+console.log(ys.slice(1));
+console.log([...ys].reverse());
+console.log(ys.filter((y) => y !== undefined).length);
+console.log(JSON.stringify(ys));
+console.log([...ys].length);
+for (const y of ys) { if (y === undefined) { console.log("-"); } else { console.log(y * 10); } }
+console.log(ys.map((y) => (y === undefined ? 0 : y)));
+let n = 0;
+for (let i = 0; i < ys.length; i = i + 1) { const v = ys[i]; if (v !== undefined) { n = n + v; } }
+console.log(n);`);
+  });
+
+  /*
    * THE ENCODING BUG ITSELF, as a program with no `null` value in it. Before the paren
    * element encoding this was `error[NT2001]: 'a' is possibly null` — the annotation had
    * been read as `string[] | null`, so the ARRAY, not an element, was the nullable thing.
@@ -210,6 +276,83 @@ console.log(__objLive());`);
     expect(r.stdout).toBe("49\n100\n");
     expect(r.exitCode).toBe(0);
   });
+
+  /*
+   * `.map` PRODUCING a nullable, on the risk axis rather than the typing one. Widening
+   * that guard removes a refusal whose neighbours (`.at`, `.find`) exist to stop a heap
+   * element aliasing its owner, so the question that has to be answered is not "does it
+   * print right" — it is "does anything get freed twice, or freed and then read".
+   *
+   * The answer is that this spelling is INDISTINGUISHABLE from the object-producing
+   * spelling that has been allowed since "arrays-of-objects first-class", and the next
+   * two tests are that comparison run as a pair rather than asserted in prose. The
+   * string case is the sharp one: a string is REFCOUNTED, so it is the payload where a
+   * missing retain shows up as a use-after-free and a spurious retain shows up as a
+   * leak — and both spellings measure `__strLive() === 0`, exactly balanced, over 100
+   * iterations. Exit code is asserted because a double free is a nonzero exit with
+   * correct stdout, which this project has shipped before.
+   */
+  test("mapping to a nullable frees exactly as the object spelling does", async () => {
+    const r = await compileAndRun(`
+function f(): number {
+  let t = 0;
+  for (let i = 0; i < 100; i = i + 1) {
+    const xs = [1, 2];
+    const ys = xs.map((x) => (x > 1 ? { v: x } : undefined));
+    if (ys[1] !== undefined) { t = t + 1; }
+  }
+  return t;
+}
+console.log(f());
+console.log(__arrLive());`);
+    expect(r.stdout).toBe("100\n0\n"); // both arrays per iteration, freed once each
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("a REFCOUNTED payload balances to zero — identical to the non-nullable spelling", async () => {
+    const body = (map: string) => `
+function f(): number {
+  let t = 0;
+  for (let i = 0; i < 100; i = i + 1) {
+    const xs = ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"];
+    const ys = xs.map(${map});
+    ${map.includes("undefined") ? "if (ys[1] === undefined) { t = t + 1; }" : "if (ys[1]!.length > 3) { t = t + 1; }"}
+  }
+  return t;
+}
+console.log(f());
+console.log(__arrLive());
+console.log(__strLive());`;
+    // The NEW spelling, and the one it has to match.
+    const nullable = await compileAndRun(body(`(x) => (x.length > 40 ? x : undefined)`));
+    const plain = await compileAndRun(body(`(x) => x`));
+    expect(nullable.stdout).toBe("100\n0\n0\n");
+    expect(plain.stdout).toBe("100\n0\n0\n");
+    expect(nullable.exitCode).toBe(0);
+    expect(plain.exitCode).toBe(0);
+  });
+
+  /*
+   * The mapped array OUTLIVING the source it aliased — the shape a wrong widening turns
+   * into a use-after-free rather than a leak. `xs` dies at `mk`'s return; `ys` holds what
+   * its elements pointed at, and is read after 200 unrelated allocations have had every
+   * chance to reuse the freed block.
+   */
+  test("the mapped array outlives its source and still reads correctly", async () => {
+    await sameAsNode(`
+function mk(n: number): (string | undefined)[] {
+  const xs = ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" + n, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" + n];
+  return xs.map((x) => (x.length > 3 ? x : undefined));
+}
+function churn(): number {
+  let t = 0;
+  for (let i = 0; i < 200; i = i + 1) { const junk = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC" + i; t = t + junk.length; }
+  return t;
+}
+const ys = mk(7);
+churn();
+console.log(ys[0], ys[1]);`);
+  });
 });
 
 /*
@@ -243,6 +386,36 @@ describe("nullable-element boundaries (refused, never guessed)", () => {
 
   test("a nullish literal is not assignable to the OTHER arm's element", () => {
     expectRejected(`const a: (string | null)[] = ["x", undefined];\nconsole.log(a.length);`, "NT2001", "undefined");
+  });
+
+  /*
+   * `.map` producing a nullable is now allowed; producing a UNION is not, and the two
+   * must not travel together. `mapResultOk` recurses through `?U` into the SAME list, so
+   * `?U<union>` is refused for the union's reason — which is what keeps this boundary
+   * where the non-nullable one already is (`.map producing U<…>` is the live blocker in
+   * `materializeTextImports`, src/modules.ts). Without the recursion this widening would
+   * have silently taken unions with it.
+   */
+  test("`.map` producing a nullable UNION stays refused, for the UNION's reason", () => {
+    expectRejected(
+      `type N = { kind: "a"; v: number } | { kind: "b"; s: string };
+function pick(x: number): N | undefined { if (x === 1) { return { kind: "a", v: x }; } return undefined; }
+const ys = [1, 2].map((x) => pick(x));
+console.log(ys.length);`,
+      "NT1001",
+      ".map producing ?UU<",
+    );
+  });
+
+  test("the non-nullable union is refused identically — the recursion changed nothing", () => {
+    expectRejected(
+      `type N = { kind: "a"; v: number } | { kind: "b"; s: string };
+function pick(x: number): N { if (x === 1) { return { kind: "a", v: x }; } return { kind: "b", s: "z" }; }
+const ys = [1, 2].map((x) => pick(x));
+console.log(ys.length);`,
+      "NT1001",
+      ".map producing U<",
+    );
   });
 });
 

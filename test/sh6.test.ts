@@ -1098,7 +1098,33 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // `e.exprs.map((x) => exprLoc(x)).find(…)` at ast.ts:1518, an array of NULLABLE
       // elements (NT1001). Not a union problem at all — the union bucket's remaining
       // shapes are elsewhere (see below).
-      expect(m.error).toContain(".map producing");
+      // NINETEENTH — the `.map` HALF of that line, cleared. The message named a nullable
+      // RECORD (`.map producing ?U{line,col,file}`), which reads as if the record were
+      // the hard part; it was not. `.map` producing a plain `{…}` has compiled since
+      // "arrays-of-objects first-class", and the identical line refused `?Unumber` too.
+      // The blocked axis was NULLABILITY ALONE, and the guard turned out to be an
+      // allow-list from the Stage-19 baseline rather than the OWNERSHIP rule its
+      // neighbours carry — `.at`/`.find` refuse a heap element because they hand back a
+      // BORROW of an element the receiver still owns, whereas `.map` builds a fresh array
+      // that owns its elements outright.
+      //
+      // Widened the way the risk deserved rather than the diff suggested: the aliasing
+      // shape (`xs.map(x => x)` over a heap element) was ALREADY allowed, so the two
+      // spellings are measured side by side in test/nullable-element.test.ts and agree —
+      // `__strLive()` balances to 0 on both over 100 iterations, and ASan+UBSan on Linux
+      // reports nothing on a program that lets a mapped array outlive the source it
+      // aliased. The one guard added (recursing through `?U` into the same list, so
+      // `?U<union>` stays refused for the UNION's reason) was probed by MUTATION and is
+      // CONSERVATIVE rather than load-bearing: blanket-accepting every nullable was
+      // node-exact on `?U` of a union, a Map, a Date and a Uint8Array. It stays because a
+      // refusal is always acceptable and an untested widening is not.
+      //
+      // So this line's blocker MOVED rather than cleared — `.find` on the nullable-element
+      // array it now successfully builds is next, and that one IS the ownership rule.
+      // Note the `?N` trap waiting there: `.find` returns `makeNullable("undefined", el)`,
+      // which on a `(string|null)[]` collapses `?Nstring` to `?Ustring` and loses the null
+      // arm. Fine for the `?U` elements THIS site has; not fine in general.
+      expect(m.error).toContain(".find on (?U{");
       expect(m.code).toBe("NT1001");
       return;
     }
