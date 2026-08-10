@@ -3891,6 +3891,17 @@ class Parser {
       if (raw[i] === "$" && raw[i + 1] === "{") {
         quasis.push(cur); cur = "";
         i += 2;
+        // Where this substitution BEGINS in the real file. `raw` is the template's inner
+        // text, so `raw[0]` sits one column past the opening backtick, and walking to `i`
+        // gives the `${`'s own position — which `parseExpressionFrom` rebases the fragment
+        // onto so its nodes carry file-absolute positions instead of fragment-relative
+        // ones. Counted here rather than inside the scan below because the scan CONSUMES
+        // escapes and quoted runs in jumps and would lose track of the newlines in them.
+        let subLine = tok.line;
+        let subCol = tok.col + 1;
+        for (let k = 0; k < i; k++) {
+          if (raw[k] === "\n") { subLine++; subCol = 1; } else { subCol++; }
+        }
         // Find the substitution's matching `}`. Braces inside a nested template's TEXT
         // or inside a quoted string are not delimiters, so skip both wholesale — the
         // lexer captured them verbatim and `parseExpressionFrom` re-lexes them below.
@@ -3905,7 +3916,7 @@ class Parser {
           src += ch; i++;
         }
         i++;
-        exprs.push(parseExpressionFrom(src));
+        exprs.push(parseExpressionFrom(src, subLine, subCol));
         continue;
       }
       cur += raw[i]; i++;
@@ -4031,6 +4042,44 @@ export function parse(source: string, opts: ParseOpts = {}): Program {
   return new Parser(tokenize(source), opts).parseProgram();
 }
 
-export function parseExpressionFrom(source: string): Expr {
-  return new Parser(tokenize(source)).parseExpression();
+/**
+ * Re-base a fragment's token stream onto the position the fragment occupies in the REAL
+ * file, so every node parsed from it carries a file-absolute `loc`.
+ *
+ * THE FRAGMENT OFFSET, threaded. A template substitution is lexed from its own source
+ * text (`buildTemplate` slices `${…}` out and hands it here), so without this every node
+ * inside one is at line 1 of a one-line file. That is not a cosmetic problem: it is a
+ * WRONG position rather than a missing one, and it printed the file's first line under
+ * the caret — `// line 1` — for a read three lines further down. `src/checker.ts`'s
+ * string-coercion arm worked around it by passing NO location at all, on the (correct)
+ * grounds that a wrong line is worse than none, and left a note saying this was the fix
+ * to make. Every OTHER diagnostic reachable inside a substitution kept the wrong one;
+ * NT2001 on `` `${b.missing}` `` reported 1:2 in a 10-line file.
+ *
+ * Shifting the TOKENS rather than the parsed nodes is what keeps this to one function.
+ * Writing `loc` onto the tree afterwards would need one arm per `Expr` member — `loc`
+ * sits at slot 3 on `Identifier` and slot 5 on the four call/member forms, and a
+ * duck-typed `(e as {loc?: Loc}).loc = …` window names slot 0, i.e. the DISCRIMINANT
+ * (see test/cast-write.test.ts, where exactly that corrupted every member it touched).
+ * A token is a flat 4-field record with nothing to get wrong.
+ *
+ * Only relative line 1 takes the column shift: it is the line the `${` sits on, so the
+ * fragment's columns are measured from partway across it. Every later line of a
+ * multi-line substitution starts at column 1 in both frames.
+ */
+function rebaseTokens(tokens: Token[], line: number, col: number): Token[] {
+  return tokens.map((t) => ({
+    type: t.type,
+    value: t.value,
+    line: line + t.line - 1,
+    col: t.line === 1 ? col + t.col - 1 : t.col,
+  }));
+}
+
+/**
+ * `line`/`col` are where `source` STARTS in the enclosing file (1-based). They default to
+ * the identity so the standalone callers — and test/diagnostics.test.ts — are unchanged.
+ */
+export function parseExpressionFrom(source: string, line: number = 1, col: number = 1): Expr {
+  return new Parser(rebaseTokens(tokenize(source), line, col)).parseExpression();
 }

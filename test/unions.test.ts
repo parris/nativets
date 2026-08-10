@@ -183,9 +183,14 @@ function mkBox(): Box { return { inner: mkA(7) }; }
       expect(codeOf(`${E}function f(): number { const v: E = mkBox().inner; if (v.kind === "A") return v.left; return 0; }\nconsole.log(f());\n`)).toBe(null);
     });
 
-    test("a receiver already narrowed to a SUB-union is told there are several members left", () => {
+    test("a receiver already narrowed to a SUB-union is told WHICH member lacks the field", () => {
       const bad = `${E}function f(e: E): number { switch (e.kind) { case "A": case "B": return e.left; } }\nconsole.log(f(mkA(7)));\n`;
-      expect(messageOf(bad)).toContain("MORE THAN ONE member");
+      // This used to assert only "MORE THAN ONE member" — the receiver having several
+      // members left is TRUE here but is not the reason the read is refused, and saying it
+      // instead of the reason is what made this diagnostic untruthful (see the three-rule
+      // tests below). `left` is B's missing field; that is the fact the reader needs.
+      expect(messageOf(bad)).toContain("'left' is not in every surviving member");
+      expect(messageOf(bad)).toContain(`"B" does not have it`);
       expect(codeOf(`${E}function f(e: E): number { switch (e.kind) { case "A": return e.left; case "B": return e.right; } }\nconsole.log(f(mkA(7)));\n`)).toBe(null);
     });
 
@@ -230,7 +235,7 @@ function f(u: U): number { if (u.kind === "C") return -1; return u.n; }
 console.log(f({ kind: "B", other: 111, n: 222 }));
 `;
       expect(codeOf(bad)).toBe("NT2001");
-      expect(messageOf(bad)).toContain("MORE THAN ONE member");
+      expect(messageOf(bad)).toContain("DIFFERENT slots");
     });
 
     test("same slot but DIFFERENT types ⇒ still refused (this is the type confusion)", () => {
@@ -257,6 +262,223 @@ function f(u: U): number { return u.v; }
 console.log(f({ kind: "C", z: 1 }));
 `;
       expect(codeOf(bad)).toBe("NT2001");
+    });
+
+    /*
+     * ...and the REFUSAL HAS TO SAY WHICH of the three rules it tripped, because the fix
+     * differs per rule and only one of the three is "split the arm".
+     *
+     * The message used to be one fixed sentence for all of them:
+     *
+     *     'u' is narrowed here to MORE THAN ONE member ("A", "B"), so only the shared tag
+     *     'kind' is readable — give each tag its own arm
+     *
+     * which states a rule that is FALSE, and `test/unions/shared-field.ts` is the passing
+     * fixture that disproves it: `case "Bin": case "Log": return depth(n.left)` reads a
+     * NON-tag field off a two-member narrowing every run. Narrowing to more than one
+     * member is not what makes a field unreadable — disagreeing SLOTS, disagreeing TYPES,
+     * or being ABSENT is, and the sentence named none of them.
+     *
+     * The cost of that was not theoretical and it is recorded in `src/ast.ts`: five
+     * blockers in `src/` came from `WhileStmt`/`DoWhileStmt` declaring `test`/`body` in
+     * different orders, and were cleared by making the two layouts AGREE — "Nothing in the
+     * compiler needed changing; the layouts just had to agree." A reader following the old
+     * advice would have split five arms instead, and never found that.
+     *
+     * So each rule now names itself and the field it is about. Asserted as several
+     * separate expectations rather than one golden string: what is being pinned is that
+     * the reader is told WHICH rule and WHICH field, not the prose around it.
+     */
+    test("the refusal names the SLOT disagreement, not a false 'only the tag is readable'", () => {
+      const bad = `interface A { kind: "A"; n: number; other: number }
+interface B { kind: "B"; other: number; n: number }
+interface C { kind: "C"; z: number }
+type U = A | B | C;
+function f(u: U): number { if (u.kind === "C") return -1; return u.n; }
+console.log(f({ kind: "B", other: 111, n: 222 }));
+`;
+      expect(codeOf(bad)).toBe("NT2001");
+      const m = messageOf(bad);
+      // It must say the field IS there — the reader's next move depends on knowing that.
+      expect(m).toContain("'n' is in every");
+      expect(m).toContain("slot");
+      // ...and must NOT claim the tag is the only readable field, which shared-field.ts
+      // disproves on every run.
+      expect(m).not.toContain("so only the shared tag");
+    });
+
+    /*
+     * BOTH FIXES THE SLOT HINT PRESCRIBES ARE COMPILED HERE, against node, because a hint
+     * is a claim about what will work and this repo has caught twelve that were false. The
+     * message offers "make the layouts AGREE" or "give each tag its own arm"; each is run
+     * below on the very fixture that produced it, stdout AND exit code against node.
+     *
+     * The layout half is not hypothetical: it is the fix that cleared the compiler's own
+     * first self-hosting blocker (`body` at slots 2/2/4/4/3/1 across the six body-carrying
+     * statements in `src/ast.ts`), and it works because a field read wants one constant
+     * offset and reordering the DECLARATIONS gives it one. Object LITERALS are unaffected —
+     * the checker reorders a literal to its contextual type — which is why `mk` below
+     * still writes its fields in the original order and still compiles.
+     */
+    test("...and BOTH prescribed fixes actually compile and match node", async () => {
+      // Fix 1 — make the layouts agree. `B` now declares `n` at slot 1, as `A` does. The
+      // literal in `mk` deliberately keeps the OLD field order, to pin that a literal does
+      // not have to match its interface.
+      const agreed = `interface A { kind: "A"; n: number; other: number }
+interface B { kind: "B"; n: number; other: number }
+interface C { kind: "C"; z: number }
+type U = A | B | C;
+function mk(): U { return { kind: "B", other: 111, n: 222 }; }
+function f(u: U): number { if (u.kind === "C") return -1; return u.n; }
+console.log(f(mk()));
+`;
+      expect(codeOf(agreed)).toBe(null);
+      const oracle1 = runWithNode(agreed);
+      const ours1 = await compileAndRun(agreed);
+      expect(ours1.stdout).toBe(oracle1.stdout);
+      expect(ours1.exitCode).toBe(oracle1.exitCode);
+
+      // Fix 2 — give each tag its own arm. Layouts still disagree; each arm resolves its
+      // own member's offset, so there is nothing to agree about.
+      const split = `interface A { kind: "A"; n: number; other: number }
+interface B { kind: "B"; other: number; n: number }
+interface C { kind: "C"; z: number }
+type U = A | B | C;
+function mk(): U { return { kind: "B", other: 111, n: 222 }; }
+function f(u: U): number {
+  switch (u.kind) {
+    case "A": return u.n;
+    case "B": return u.n;
+    case "C": return -1;
+  }
+}
+console.log(f(mk()));
+`;
+      expect(codeOf(split)).toBe(null);
+      const oracle2 = runWithNode(split);
+      const ours2 = await compileAndRun(split);
+      expect(ours2.stdout).toBe(oracle2.stdout);
+      expect(ours2.exitCode).toBe(oracle2.exitCode);
+      // Both fixes must agree with each other as well as with node — the two spellings
+      // read the same field off the same value and differ only in layout.
+      expect(ours2.stdout).toBe(ours1.stdout);
+    });
+
+    test("the refusal names the TYPE disagreement, and which types", () => {
+      const bad = `interface A { kind: "A"; v: number }
+interface B { kind: "B"; v: string }
+interface C { kind: "C"; z: number }
+type U = A | B | C;
+function f(u: U): void { if (u.kind === "C") return; console.log(u.v); }
+f({ kind: "B", v: "hello" });
+`;
+      expect(codeOf(bad)).toBe("NT2001");
+      const m = messageOf(bad);
+      expect(m).toContain("'v' is in every");
+      // The two conflicting types are the whole content of this refusal.
+      expect(m).toContain("number");
+      expect(m).toContain("string");
+      expect(m).not.toContain("so only the shared tag");
+    });
+
+    test("the refusal names the member the field is MISSING from", () => {
+      const bad = `interface A { kind: "A"; v: number }
+interface B { kind: "B"; v: number }
+interface C { kind: "C"; z: number }
+type U = A | B | C;
+function f(u: U): number { if (u.kind === "A") return 0; return u.v; }
+console.log(f({ kind: "C", z: 1 }));
+`;
+      expect(codeOf(bad)).toBe("NT2001");
+      const m = messageOf(bad);
+      // `C` is the one without `v`; naming it is the difference between a two-second fix
+      // and re-reading a 26-member union dump by hand.
+      expect(m).toContain(`"C"`);
+      expect(m).toContain("does not have it");
+    });
+
+    /*
+     * The genuinely-only-the-tag case KEEPS the original sentence. It is the one shape
+     * where "give each tag its own arm" is the whole truth: no field but the tag is
+     * common to the surviving members at all, so there is nothing to make agree.
+     */
+    test("no shared field at all ⇒ the original 'give each tag its own arm' advice stands", () => {
+      const bad = `interface A { kind: "A"; a: number }
+interface B { kind: "B"; b: number }
+interface C { kind: "C"; c: number }
+type U = A | B | C;
+function f(u: U): number { if (u.kind === "C") return -1; return u.a; }
+console.log(f({ kind: "A", a: 7 }));
+`;
+      expect(codeOf(bad)).toBe("NT2001");
+      expect(messageOf(bad)).toContain("give each tag its own arm");
+    });
+
+    /*
+     * THE LAYOUT INVARIANT IN `src/ast.ts`, gated rather than merely commented.
+     *
+     * `body` sits at slot 1 in all six body-carrying statements, and that is what makes
+     * `src/parser.ts`'s `valueReturns` — the first blocker of `cli`, `coverage`, `driver`,
+     * `modules`, `parser` and of stage-1 itself — compile:
+     *
+     *     case "WhileStmt": case "DoWhileStmt": case "ForStmt":
+     *     case "ForOfStmt": case "ForInStmt": case "BlockStmt": walk(s.body);
+     *
+     * It used to be slots 2, 2, 4, 4, 3 and 1. Every member had the field, all six at
+     * `Stmt[]`; six declarations had simply drifted apart.
+     *
+     * A COMMENT DOES NOT GATE. The identical invariant for `WhileStmt`/`DoWhileStmt` was
+     * documented in `src/ast.ts` and drifted anyway — which is how four more sites came to
+     * carry it. Adding a field before `body`, or a new loop form that declares `body`
+     * anywhere but second, silently costs a self-hosting rung and nothing else in the tree
+     * would say so: the blocker metric REPORTS and never gates. So it is asserted here,
+     * textually, against the real file, the way test/no-index-last.test.ts audits `src/`.
+     *
+     * `BlockStmt` is why the slot is 1 and not something else: it is `{kind, body}` and
+     * can put `body` nowhere else, so slot 1 is the only value that lets it join a group.
+     */
+    test("`body` is declared at slot 1 in every body-carrying statement in src/ast.ts", () => {
+      const AST = readFileSync(join(HERE, "..", "src", "ast.ts"), "utf8");
+      /** Field names of an `export interface X { … }`, in DECLARATION order = slot order. */
+      function fieldsOf(name: string): string[] {
+        const head = `export interface ${name} {`;
+        const start = AST.indexOf(head);
+        expect(start).toBeGreaterThanOrEqual(0);
+        let i = start + head.length - 1;
+        let depth = 0;
+        let end = -1;
+        // Brace COUNTING, not a `[^}]*` regex: `ForStmt`'s members contain no nested
+        // braces today but a future `{ … }` type literal would silently truncate the scan
+        // and make this assert about the wrong field list.
+        while (i < AST.length) {
+          if (AST[i] === "{") depth++;
+          else if (AST[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
+          i++;
+        }
+        expect(end).toBeGreaterThan(start);
+        return AST.slice(start + head.length, end)
+          .split(";")
+          .map((part) => part.trim().split(":")[0]!.trim().replace("?", ""))
+          .filter((k) => k !== "" && !k.startsWith("//") && !k.startsWith("*"));
+      }
+
+      const carriers = ["WhileStmt", "DoWhileStmt", "ForStmt", "ForOfStmt", "ForInStmt", "BlockStmt"];
+      for (const name of carriers) {
+        const fs = fieldsOf(name);
+        // Slot 0 is the discriminant in every AST node; slot 1 is `body` in these six.
+        expect([name, fs[0]]).toEqual([name, "kind"]);
+        expect([name, fs[1]]).toEqual([name, "body"]);
+      }
+
+      // The pair that has to agree on `test` as well keeps agreeing — it moved from slot 1
+      // to slot 2 in BOTH, which is what `case "WhileStmt": case "DoWhileStmt": goE(s.test)`
+      // depends on (five such arms across checker.ts and ownership.ts).
+      expect(fieldsOf("WhileStmt")[2]).toBe("test");
+      expect(fieldsOf("DoWhileStmt")[2]).toBe("test");
+      // ...and `name` lands at slot 2 in both `for…of` and `for…in`, which is what
+      // src/modules.ts's `case "ForOfStmt": case "ForInStmt": out.push(s.name)` depends on.
+      expect(fieldsOf("ForOfStmt")[2]).toBe("name");
+      expect(fieldsOf("ForInStmt")[2]).toBe("name");
     });
   });
 
@@ -1285,7 +1507,11 @@ function f(u: U): string {
 console.log(f({ kind: "B", pad: 1, v: "hi" }));
 `;
     expect(codeOf(src)).toBe("NT2001");
-    expect(messageOf(src)).toContain("MORE THAN ONE member");
+    // The SLOT is the whole point of this test — `v` is at 1 in A and 2 in B — so the
+    // message has to name it. Asserting "MORE THAN ONE member" (what this used to check)
+    // passed even while the diagnostic attributed the refusal to the wrong cause.
+    expect(messageOf(src)).toContain("DIFFERENT slots");
+    expect(messageOf(src)).toContain(`"A" slot 1, "B" slot 2`);
   });
 
   /*

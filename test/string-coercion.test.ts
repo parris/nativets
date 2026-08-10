@@ -221,14 +221,38 @@ describe("the refusal's LOCATION is the offending expression, or absent — neve
   });
 
   /*
-   * A template SUBSTITUTION is re-lexed from its own source fragment
-   * (`parseExpressionFrom`, src/parser.ts), so every node inside it carries a
-   * fragment-relative `loc` — this one used to be reported at `1:1`, three lines off.
-   * No position at all is the honest answer until the fragment offset is threaded.
+   * A template SUBSTITUTION used to be re-lexed from its own source fragment
+   * (`parseExpressionFrom`, src/parser.ts), so every node inside it carried a
+   * fragment-relative `loc` — this one was reported at `1:1`, three lines off. The
+   * workaround was to pass NO position, on the grounds that a wrong line is worse than a
+   * missing one, and to note that the real fix was to thread the fragment offset.
+   *
+   * THREADED. `parseExpressionFrom` now takes the origin of the fragment and rebases its
+   * token stream onto it, so a substitution's nodes carry file-absolute positions like any
+   * others and the checker passes `exprLoc` here as every other caller does. `o` really is
+   * at line 4, column 18 — `console.log(` is 12 characters, then `` ` ``, `v`, `=`, `$`,
+   * `{`. The exact column is asserted rather than just the line: an off-by-one in the
+   * rebase (the fragment starts one past the backtick, and only its FIRST line takes the
+   * column shift) is precisely the kind of error a line-only check would wave through.
    */
-  test("a template substitution reports no position rather than a wrong one", () => {
+  test("a template substitution reports the substitution's own line and column", () => {
     const r = rejectionOf('const x = 1;\nconst y = 2;\nconst o = { a: 1 };\nconsole.log(`v=${o}`);\n');
     expect(r?.code).toBe("NT1032");
-    expect(r?.message).not.toContain("1:1");
+    expect(r?.message).toContain("4:18");
+  });
+
+  /*
+   * The MULTI-LINE case, which is the half the single-line test cannot see: only relative
+   * line 1 of a fragment takes the column shift, because every later line starts at
+   * column 1 in the fragment and in the file alike. Getting that wrong shows up only when
+   * a substitution spans lines — as they do throughout `src/`, which is full of multi-line
+   * template diagnostics.
+   */
+  test("a substitution spanning lines locates on its OWN line, not the template's", () => {
+    const r = rejectionOf('const o = { a: 1 };\nconst s = `head ${\n  o\n} tail`;\nconsole.log(s);\n');
+    expect(r?.code).toBe("NT1032");
+    // `o` is on line 3, indented two spaces — so column 3, NOT a column measured from the
+    // `${` back on line 2.
+    expect(r?.message).toContain("3:3");
   });
 });

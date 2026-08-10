@@ -1443,20 +1443,53 @@ export function setBlockDrops(
   list.push({ kind: "BlockDrops", names: [...names] });
 }
 export interface IfStmt { kind: "IfStmt"; test: Expr; consequent: Stmt[]; alternate: Stmt[] | null; }
-export interface WhileStmt { kind: "WhileStmt"; test: Expr; body: Stmt[]; }
-// Field order MATCHES `WhileStmt` deliberately: `test` then `body`. A field is readable off
-// a union narrowed to several members only when it sits at the SAME SLOT INDEX in each (a
-// read compiles to a constant offset), so the two declarations disagreeing made every
-// `case "WhileStmt": case "DoWhileStmt":` arm that touches `.test` or `.body` a blocker —
-// five of them in `src/`. Nothing in the compiler needed changing; the layouts just had to
-// agree. Source order here is the layout, so keep these two in step.
-export interface DoWhileStmt { kind: "DoWhileStmt"; test: Expr; body: Stmt[]; }
+
+/* ---- `body` IS SLOT 1 IN EVERY BODY-CARRYING STATEMENT. Keep it that way. ----------
+ *
+ * A field is readable off a union narrowed to several members only when it sits at the
+ * SAME SLOT INDEX in each, with the same type (`unionCommonField`) — a read compiles to
+ * one `getelementptr` at a constant offset, and members that disagree give it no single
+ * offset to use. Source order here IS the layout.
+ *
+ * This started as `WhileStmt`/`DoWhileStmt` alone, which had disagreed on `test` vs
+ * `body` and thereby made every `case "WhileStmt": case "DoWhileStmt":` arm touching
+ * either one a blocker — five in `src/`. Nothing in the compiler needed changing; the
+ * layouts just had to agree.
+ *
+ * The SAME defect, one size up, was the compiler's whole first self-hosting blocker.
+ * `src/parser.ts`'s `valueReturns` walks a loop or block body with
+ *
+ *     case "WhileStmt": case "DoWhileStmt": case "ForStmt":
+ *     case "ForOfStmt": case "ForInStmt": case "BlockStmt": walk(s.body);
+ *
+ * and `body` sat at slot 2, 2, 4, 4, 3 and 1 respectively — every member has it, all six
+ * at `Stmt[]`, and it was unreadable purely because six declarations had drifted. That
+ * arm is the first blocker of `cli`, `coverage`, `driver`, `modules` and `parser`, and of
+ * the stage-1 program itself. It is fixed here, by declaration order, and not by splitting
+ * the arm six ways: `BlockStmt` is `{kind, body}` and can only ever put `body` at slot 1,
+ * so slot 1 is the only choice that lets it join any group at all.
+ *
+ * Falling out of the same move, `body` at 1 pushes `name` to slot 2 in BOTH `ForOfStmt`
+ * and `ForInStmt`, which is what makes `src/modules.ts`'s
+ * `case "ForOfStmt": case "ForInStmt": out.push(s.name); walk(s.body);` legal on both
+ * fields at once. `WhileStmt`/`DoWhileStmt` keep their agreement too — `test` moves from
+ * 1 to 2 in both together.
+ *
+ * SO: a new field goes AFTER `body`, never before it, and a new body-carrying statement
+ * declares `kind` then `body`. Getting it wrong is a refusal, not a wrong answer, which
+ * is the point — but it is a refusal that costs a self-hosting rung.
+ *
+ * Field order in an object LITERAL does not have to match (the checker reorders a literal
+ * to its contextual type), so none of the construction sites in `src/parser.ts` moved.
+ */
+export interface WhileStmt { kind: "WhileStmt"; body: Stmt[]; test: Expr; }
+export interface DoWhileStmt { kind: "DoWhileStmt"; body: Stmt[]; test: Expr; }
 export interface ForStmt {
   kind: "ForStmt";
+  body: Stmt[];
   init: VarDecl | Expr | null;
   test: Expr | null;
   update: Expr | null;
-  body: Stmt[];
 }
 /**
  * `for (const x of it)`, plus the Map-entries form `for (const [k, v] of m)` /
@@ -1464,8 +1497,8 @@ export interface ForStmt {
  * `iterable` to the MAP itself (the loop walks its insertion-ordered keys and
  * looks each value up — no tuple type required).
  */
-export interface ForOfStmt { kind: "ForOfStmt"; name: string; annot?: Ty; iterable: Expr; body: Stmt[]; elemTy?: Ty; name2?: string; valTy?: Ty; }
-export interface ForInStmt { kind: "ForInStmt"; name: string; object: Expr; body: Stmt[]; }
+export interface ForOfStmt { kind: "ForOfStmt"; body: Stmt[]; name: string; annot?: Ty; iterable: Expr; elemTy?: Ty; name2?: string; valTy?: Ty; }
+export interface ForInStmt { kind: "ForInStmt"; body: Stmt[]; name: string; object: Expr; }
 export interface SwitchCase { test: Expr | null; body: Stmt[]; } // test null === default
 export interface SwitchStmt { kind: "SwitchStmt"; discriminant: Expr; cases: SwitchCase[]; }
 /** `line`/`col` are the `throw` keyword's own position — codegen refuses a throw it cannot

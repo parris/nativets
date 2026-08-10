@@ -639,9 +639,27 @@ with a tag test already written. `Checker.narrowAdvice` now says which one it is
 |---|---|
 | a plain name, never narrowed | narrow it first — `if (e.kind === "A")` or `switch (e.kind)` |
 | a PATH (`o.inner`, `this.e`) | narrowing tracks a plain NAME — bind it first (`const v = o.inner;`) and narrow `v` |
-| already narrowed to a SUB-union (`case "A": case "B":` sharing a body) | narrowed here to MORE THAN ONE member (`"A"`, `"B"`), so only the shared tag is readable — give each tag its own arm |
+| already narrowed to a SUB-union (`case "A": case "B":` sharing a body) | *which of the three clauses below the field fails*, and the member that fails it — see the next row |
 
 Each of the three workarounds it prescribes was verified to compile and match node.
+
+**The sub-union row was itself untruthful, and is now split three ways.** It used to read
+"narrowed here to MORE THAN ONE member (`"A"`, `"B"`), so only the shared tag is readable — give
+each tag its own arm". That asserts a *rule*, and the rule is false:
+`test/unions/shared-field.ts` reads a non-tag field off a two-member narrowing on every run
+(`case "Bin": case "Log": return depth(n.left)`). Narrowing to several members is not what makes
+a field unreadable; failing one of the three clauses below is. So the message now names the
+clause and the member:
+
+| Why the read fails | What it says |
+|---|---|
+| absent from a member | `'v' is not in every surviving member — "C" does not have it` — give each tag its own arm |
+| present everywhere, **different slots** | `'n' is in every surviving member with the same type, but at DIFFERENT slots ("A" slot 1, "B" slot 2)` — either make the layouts agree **or** give each tag its own arm |
+| present everywhere, **different types** | `'v' is in every surviving member at the same slot, but at DIFFERENT types ("A" number, "B" string)` — give each tag its own arm |
+
+Only the slot row offers the layout option, because it is the only one with a layout fix.
+**Both of the fixes that row prescribes are compiled against node** — stdout and exit code — in
+`test/unions.test.ts`, on the very fixture that produces the message.
 
 ### A SHARED field is readable on an un-narrowed union — but only at an agreeing slot
 
@@ -651,8 +669,9 @@ read, in `src/ast.ts`:
 
 ```ts
 case "BinaryExpr": case "LogicalExpr": return exprLoc(e.left);
-//                                                     ^ NT2001 — narrowed here to MORE THAN
-//                                                       ONE member, so only the tag is readable
+//                                                     ^ NT2001 (as it read at the time) —
+//                                                       narrowed here to MORE THAN ONE member,
+//                                                       so only the tag is readable
 ```
 
 That now compiles. **Our rule is tsc's plus two clauses, and they are a REPRESENTATION question
@@ -681,12 +700,32 @@ Both are permanent tests in `test/unions.test.ts`; the accepting side runs again
 `test/unions/shared-field.ts`.
 
 **What stays refused, and what would lift it.** A field at DIFFERENT slots, or with different
-types, keeps its `NT2001`. Two strictly wider designs exist and neither is taken: laying a
-union's members out so common fields agree on a slot (a layout change, so it reaches every
-object mechanism), and branching on the tag to pick the slot (a runtime test on every such
-read). Neither is needed for the shape that actually blocks self-hosting, and a sound partial
-rule beats a risky complete one. The `narrowAdvice` row above therefore fires only when the
-receiver *is* narrowed to several members AND the field fails one of the three clauses.
+types, keeps its `NT2001`. Two strictly wider *compiler* designs exist and neither is taken:
+making the compiler lay a union's members out so common fields agree on a slot (a layout change
+reaching every object mechanism), and branching on the tag to pick the slot (a runtime test on
+every such read). A sound partial rule beats a risky complete one. The `narrowAdvice` row above
+therefore fires only when the receiver *is* narrowed to several members AND the field fails one
+of the three clauses.
+
+**But agreeing slots can be arranged in the SOURCE, and for `src/` they are — this is how the
+stage-1 first blocker was cleared.** The rule is about layout, and layout is declaration order,
+so a program that wants a shared read can simply declare the field at the same position in every
+member. Nothing in the compiler moves. `src/ast.ts` now does this deliberately: **`body` is slot
+1 in all six body-carrying statements** (`WhileStmt`, `DoWhileStmt`, `ForStmt`, `ForOfStmt`,
+`ForInStmt`, `BlockStmt`). It had drifted to slots 2, 2, 4, 4, 3 and 1, which made
+
+```ts
+case "WhileStmt": case "DoWhileStmt": case "ForStmt":
+case "ForOfStmt": case "ForInStmt": case "BlockStmt": walk(s.body);
+```
+
+in `src/parser.ts`'s `valueReturns` an `NT2001` — and that arm was the **first blocker of
+`cli`, `coverage`, `driver`, `modules`, `parser` and of the stage-1 program itself**. Every one
+of the six had the field, all six at `Stmt[]`; six declarations had simply drifted apart. Slot 1
+is the only value available, since `BlockStmt` is `{kind, body}` and can put `body` nowhere else.
+Object *literals* are unaffected — the checker reorders a literal to its contextual type — so no
+construction site changed. The invariant is gated by a test, not left to a comment: the identical
+rule for `WhileStmt`/`DoWhileStmt` was documented in `ast.ts` and drifted anyway.
 
 #### The union field WRITE is refused too — and it is a gap, not a representation limit
 
@@ -747,7 +786,7 @@ through*, so the next case was narrowed to both tags and its member read refused
 ```ts
 switch (n.kind) {
   case "A": { const x = n.a; return "A" + x; }
-  case "B": return "B" + n.b;   // NT2001 — narrowed here to MORE THAN ONE member
+  case "B": return "B" + n.b;   // NT2001 — 'b' is not in every surviving member
 }
 ```
 
