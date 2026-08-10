@@ -478,6 +478,19 @@ async function measureLink(): Promise<Record<string, LinkStats>> {
       const [, arrLive, objLive, strLive, pvNodes, pvAllocs] = line.split(" ").map(Number) as number[];
 
       out[name] = {
+        // ON-DISK SIZE IS PAGE-QUANTIZED, and both failure directions are live. The linker
+        // rounds `__TEXT` to a 16,384-byte page on macOS, so this number moves in ~16KB
+        // steps regardless of how much code actually changed:
+        //   - a ~1.1KB change reports as ~+17KB and trips the 15% gate (measured: the
+        //     checked-`as` lane's `__text` grew 107,468 -> 108,596 while the `__TEXT`
+        //     SEGMENT grew exactly 16,384 and on-disk grew 16,640);
+        //   - and the dangerous direction: a genuine ~15KB regression that lands inside an
+        //     already-allocated page reports as FREE.
+        // The trap is that quantization LOOKS like corroboration — "nearly identical
+        // +17,776..+17,952 across eight unrelated programs" reads as a fixed runtime cost,
+        // which is exactly the wrong conclusion. The constant is the page size, not a cost.
+        // The quantization-free number is the `__text` SECTION (`size -m` on macOS,
+        // `size -A` on ELF). Cross-check there before accepting or explaining a move here.
         bytes: statSync(bin).size,
         arrLive: arrLive!, objLive: objLive!, strLive: strLive!, pvNodes: pvNodes!, pvAllocs: pvAllocs!,
       };
