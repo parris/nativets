@@ -261,35 +261,21 @@ const RECURSIVE_TYPE_HINT =
   "a type is encoded STRUCTURALLY, as a string (`Ty` in src/ast.ts), so a type that contains itself has no finite encoding. " +
   "Reordering cannot help; nominal recursive types are not implemented — see docs/divergences.md";
 
-/**
- * `@@mutable` + RECURSIVE — the one combination that can build a real CYCLE, refused.
+/*
+ * `@@mutable` + RECURSIVE used to be refused HERE, for the whole DECLARATION, in both
+ * spellings — `recursiveMutableError`. Neither is refused at the declaration any more:
+ * the record split at the field in piece 2, the class in piece 4, and both now land on
+ * `Checker.checkCycleCapableField`, which refuses the one WRITE that can close a cycle.
  *
- * A recursive value is a TREE as long as nobody can write into it: linearity forbids a
- * second owner, so `a.next = b; b.next = a` is NT1601 and `link(o: N) { this.next = o }` is
- * NT1604. `@@mutable class N { next?: N; loop() { this.next = this } }` compiled and ran,
- * and `this` is not a second owner — so the graph closes.
- *
- * MEASURED, and the measurement corrected the reason this was written down for. The
- * predicted cost was a LEAK (drop is shallow, so a cycle is never freed). Against a control
- * it is not: `__objLive()` is 1 after the identical class WITHOUT the cycle, so that leak is
- * the pre-existing shallow-drop one and the cycle adds nothing. What a cycle actually costs
- * is a SILENT WRONG ANSWER, which is worse — `console.log` prints
+ * What the old refusal was right about, and what the new one still carries: a cycle here
+ * is not a leak, it is a SILENT WRONG ANSWER. Measured against a control, `__objLive()`
+ * is 1 with and without the cycle — the leak is the pre-existing shallow-drop one and the
+ * cycle adds nothing. What it costs is `console.log`:
  *   node:     <ref *1> N { v: 7, next: [Circular *1] }
  *   nativets: N { v: 7, next: N { v: 7, next: N { v: 7, next: [N] } } }
- * because `genInspect` unfolds the back-edge and stops on util.inspect's DEPTH limit, which
- * is a cap on nesting and not a cycle detector. Every walk over a value assumes a tree.
+ * because `genInspect` unfolds the back-edge and stops on util.inspect's DEPTH limit,
+ * which is a cap on nesting and not a cycle detector. Every walk here assumes a tree.
  */
-function recursiveMutableError(name: string, what: string): NTError {
-  return nyi(
-    NYI.FORWARD_TYPE,
-    `'@@mutable ${what} ${name}' is RECURSIVE — it contains itself, and it can be mutated in place`,
-    "in-place mutation of a self-containing value can close a CYCLE (`this.next = this`), and every walk over a " +
-    "value here assumes a tree: `console.log` unfolds until util.inspect's depth limit and prints nesting where " +
-    "node prints `[Circular *1]`, and the deep copies (structuredClone, an actor message) have no seen-set either. " +
-    "Drop the `@@mutable` and rebuild the value (`{ ...n, next: x }`), or make the recursive field non-recursive — " +
-    "see docs/divergences.md",
-  );
-}
 
 /** Truncate for a diagnostic: a type dump is unbounded and a hint has to stay readable. */
 function clip(s: string, n: number): string { return s.length <= n ? s : `${s.slice(0, n)}…`; }
@@ -451,6 +437,16 @@ class Parser {
   private thisWritable = false;
   /** Set when the member body currently being parsed assigned `this.f` at least once. */
   private thisAssigned = false;
+  /**
+   * True while parsing a CONSTRUCTOR body, as opposed to a method's. Both may assign
+   * `this.f`, but only one of them can close a cycle: a constructor writes into a block
+   * that nothing else can reach yet, so the value it stores cannot already point back at
+   * the receiver — unless it names the receiver itself. The checker's cycle rule reads
+   * this to exempt the constructor (see `cycleCapableThisWrite`), which it MUST: a field
+   * initializer and a parameter property both desugar into constructor field writes, and
+   * a recursive field's initializer (`parent: Scope | null = null`) is exactly one of them.
+   */
+  private inCtorBody = false;
   /**
    * async/await (networking tier). nativets has no event loop and no promises, so
    * `async` is ERASED and `await` is an IDENTITY pass-through over an
@@ -1954,9 +1950,10 @@ class Parser {
     // refused any more: the hazard is not the declaration, it is the one ASSIGNMENT that can
     // close a cycle, and the checker refuses exactly that (`cycleCapableField`). `n.label = s`
     // on a recursive node cannot make a cycle; `n.next = m` can. Refusing the declaration
-    // refused both — see docs/decorators.md and the note above `recursiveMutableError`,
-    // which is still the CLASS spelling's refusal (`parseClass`), where the receiver is
-    // `this` inside a method and the split has not been made.
+    // refused both — see docs/decorators.md. The CLASS spelling was held back one more
+    // lane and then split the same way (piece 4, `parseClass`): a `this.f = v` write in a
+    // METHOD is checked, one in a CONSTRUCTOR is not, because a constructor writes into a
+    // block nothing else can reach yet.
     // A DISCRIMINATED UNION is also a legal carrier, and it is the one src/ast.ts's `Expr`
     // needs. It qualifies for exactly the reason an object does: there is no box, so a
     // `U<…>` value IS the member's object block and the reference has a pointer to be.
@@ -2732,9 +2729,9 @@ class Parser {
         const patternPrelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
         for (const p of ctorParams) if (p.rest) throw nyi(NYI.CLASS_FEATURE, "rest parameter in a constructor");
         if (this.at(":")) { this.eat(":"); this.parseType(); } // ctor return annot (ignored)
-        this.thisWritable = true; this.inErrorCtor = extendsError;
+        this.thisWritable = true; this.inErrorCtor = extendsError; this.inCtorBody = true;
         ctorBody = [...patternPrelude, ...this.parseBlock()];
-        this.thisWritable = false; this.inErrorCtor = false;
+        this.thisWritable = false; this.inErrorCtor = false; this.inCtorBody = false;
         continue;
       }
       if (this.at("(")) {
@@ -2825,12 +2822,12 @@ class Parser {
       fields.push({ key: p.name, ty: p.annot ?? "number" });
       // `paramProp: true` marks this as the DEFINITIONAL store — the reason a parameter
       // property is a CONSUMING parameter rather than a borrow (src/ownership.ts).
-      paramPropInits.push({ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: p.name, value: this.ident(p.name), viaThis: true, paramProp: true } });
+      paramPropInits.push({ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: p.name, value: this.ident(p.name), viaThis: true, paramProp: true, inCtor: true } });
     }
     // Field initializers (`name = init`): `this.name = init`, in declaration order, prepended
     // after the parameter-property inits and before the explicit ctor body (TS field-init order).
     const fieldInitStmts: Stmt[] = fieldInits.map(fi => ({
-      kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: fi.field, value: fi.value, viaThis: true },
+      kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: fi.field, value: fi.value, viaThis: true, inCtor: true },
     }) as Stmt);
     const prelude = [...paramPropInits, ...fieldInitStmts];
     // A class with initializers but no explicit constructor gets a synthesized zero-arg ctor
@@ -2845,7 +2842,7 @@ class Parser {
     // works and `x.message === "m"` — matching node's implicit `super(...arguments)`.
     if (extendsError && ctorParams === null && fields.length === 1) {
       ctorParams = [{ name: "message", annot: "string" }];
-      ctorBody = [{ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: "message", value: this.ident("message"), viaThis: true } }];
+      ctorBody = [{ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: "message", value: this.ident("message"), viaThis: true, inCtor: true } }];
     }
 
     // Reject-don't-miscompile: fields are only initialized by the constructor. Without an
@@ -2882,7 +2879,13 @@ class Parser {
       f.ty = f.ty.split(selfMarker).join(typeRefTy(name)) as Ty;
     }
     const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
-    if (selfRecursive && isMutable) throw recursiveMutableError(name, "class");
+    // `@@mutable` + recursive is no longer refused HERE either (piece 4). The class
+    // spelling now goes the same way the RECORD spelling went in piece 2: the hazard is
+    // not the declaration, it is the one WRITE that can close a cycle, and the checker
+    // refuses exactly that (`cycleCapableField`, via `cycleCapableThisWrite`). The reason
+    // the class was held back — "the receiver is `this`, not a binding the rule can reason
+    // about" — did not survive reading the rule: it is TYPE-level (receiver type, field
+    // name, field type), and `this` has the class's own tagged instance type right here.
     if (selfRecursive) this.recTypes = this.recTypes.set(name, objTy);
     this.typeAliases = this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
@@ -3391,9 +3394,10 @@ class Parser {
         // the same NT1606 it used to throw here when it is not mutable.
         const viaThis = this.thisWritable && left.object.kind === "Identifier" && left.object.name === "this";
         if (viaThis) this.thisAssigned = true;
+        const inCtor = viaThis && this.inCtorBody;
         const op = this.next().value;
         const value = this.parseAssign();
-        if (op === "=") return { kind: "FieldAssign", object: left.object, field: left.property, value, viaThis };
+        if (op === "=") return { kind: "FieldAssign", object: left.object, field: left.property, value, viaThis, inCtor };
         // Compound `o.f op= v` desugars to `o.f = o.f op v`, which re-evaluates the
         // RECEIVER — sound only for a side-effect-free path (`a`, `this`, `a.b.c`).
         if (!isSimplePath(left.object)) {
@@ -3405,7 +3409,7 @@ class Parser {
         }
         const bin = op.slice(0, -1) as BinaryOp;
         return {
-          kind: "FieldAssign", object: left.object, field: left.property, viaThis,
+          kind: "FieldAssign", object: left.object, field: left.property, viaThis, inCtor,
           value: { kind: "BinaryExpr", op: bin, left: { ...left }, right: value },
         };
       }
@@ -3794,7 +3798,7 @@ class Parser {
         if (!this.at(")")) { do { if (this.at(")")) break; args.push(this.parseAssign()); } while (this.at(",") && (this.eat(","), true)); }
         this.eat(")");
         if (args.length !== 1) throw nyi(NYI.CLASS_FEATURE, `super(...) with ${args.length} arguments (an Error subclass takes a single message)`);
-        return { kind: "FieldAssign", object: this.ident("this"), field: "message", value: args[0]!, viaThis: true };
+        return { kind: "FieldAssign", object: this.ident("this"), field: "message", value: args[0]!, viaThis: true, inCtor: true };
       }
       this.next();
       // SH4: `import { readFileSync as rfs }` renames a HOST BUILTIN, which has no

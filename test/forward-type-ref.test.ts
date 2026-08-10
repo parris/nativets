@@ -930,8 +930,16 @@ console.log(JSON.stringify(o));`);
    * cap on nesting and not a cycle detector — node tracks identity and prints `[Circular]`.
    * Every walk over a value (inspect, and the deep copies above) assumes a tree. Refused
    * until one of them can see a cycle.
+   *
+   * SPLIT AT THE FIELD, like the record spelling below (piece 4). Everything above still
+   * holds — this exact program still produces exactly that wrong answer with the rule
+   * removed — but the DECLARATION is no longer what carries the refusal. `this.next = this`
+   * does, in the method that writes it. The two programs the declaration refusal also took
+   * down, and should not have, are a recursive `@@mutable` class that never writes its
+   * recursive field (`Scope` in src/checker.ts) and the constructor write that a field
+   * initializer or a parameter property desugars to. See test/mutable-records.test.ts.
    */
-  test("a @@mutable class with a recursive field is refused", () => {
+  test("a @@mutable class with a recursive field: the FIELD WRITE is refused, not the class", () => {
     const r = reject(`
 //@@mutable
 class N { v: number; next?: N; constructor(v: number) { this.v = v; } loop(): void { this.next = this; } }
@@ -939,9 +947,11 @@ const b = new N(7);
 b.loop();
 console.log(b);`);
     expect(r.code).toBe("NT1030");
-    expect(r.message).toContain("'@@mutable class N' is RECURSIVE");
-    expect(r.hint).toContain("CYCLE");
+    expect(r.message).toContain("'next' of '@@mutable N' is a RECURSIVE field");
+    expect(r.message).toContain("CYCLE");
     expect(r.hint).toContain("[Circular *1]"); // what node prints, and we cannot
+    // The CLASS advice, not the record's: `{ ...n, next: v }` is not an `N`.
+    expect(r.hint).toContain("new N(");
   });
 
   /*

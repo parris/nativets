@@ -2929,7 +2929,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1010 | `for-in` | M1 | objects |
 | NT1011 | `for-of` over non-strings | M1 | arrays/iterables |
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
-| NT1030 | a recursive type with nowhere to put a back-edge (`type P = Q[]`), an in-place write to a **cycle-capable FIELD** of a `@@mutable` record, a `@@mutable` recursive CLASS declaration, or a cycle one of whose members is refused for its own reason | later | self- AND mutually-recursive object/union declarations now COMPILE via the nominal `@Name` back-edge; ordering was never the problem — see below |
+| NT1030 | a recursive type with nowhere to put a back-edge (`type P = Q[]`), an in-place write to a **cycle-capable FIELD** of a `@@mutable` record **or class** (in a method always; in a CONSTRUCTOR only when the value names `this`, since a constructor writes into a block nothing else can reach yet), or a cycle one of whose members is refused for its own reason | later | self- AND mutually-recursive object/union declarations now COMPILE via the nominal `@Name` back-edge; ordering was never the problem — see below |
 
 ### An UNCAUGHT `throw` compiles; a throw that CROSSES A FRAME is still `NT1004`
 

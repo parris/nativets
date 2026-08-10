@@ -312,8 +312,62 @@ a slot of a value already reachable from the value being written, and any such w
 must type-reach the receiver's own type. CONSTRUCTION cannot make one — a literal's fields are
 values that already exist.
 
-A `@@mutable` **class** that is recursive stays refused at the declaration: its write is
-`this.f = v` inside a method, a different receiver question.
+### The CLASS spelling, split the same way
+
+A `@@mutable` **class** that is recursive used to stay refused at the declaration, on the ground
+that "its write is `this.f = v` inside a method, a different receiver question". **That reason was
+wrong**, and it is worth recording why, because it is the shape of error this project keeps
+finding: the rule above is **TYPE-level** — receiver type, field name, field type — and inside a
+member body `this` has the class's own `classTag`-tagged instance type. It was never a different
+receiver question. The only thing separating the two spellings was a `!e.viaThis` guard on the
+call site.
+
+Measured with the declaration refusal neutered, both directions:
+
+```ts
+//@@mutable class N { next: N | null = null; loop(): void { this.next = this; } }
+// compiles, and prints N { v: 7, next: N { v: 7, next: N { v: 7, next: [N] } } }
+// where node prints <ref *1> N { v: 7, next: [Circular *1] }   — so SOMETHING must refuse
+
+//@@mutable class S { vars = new Map(); parent: S | null = null;
+//                    declare(k, v): void { this.vars = this.vars.set(k, v); } }
+// compiles, runs, matches node exactly — nothing here can close a cycle
+```
+
+So the refusal moves to the write, exactly as it did for records. Two carve-outs, both load-bearing:
+
+**The CONSTRUCTOR is exempt unless the value names `this`.** A constructor writes into a freshly
+allocated block nothing else holds a pointer to, so the value it stores cannot already reach the
+receiver — the only way in is to name the block, and `this` is the only name it has. This is not a
+convenience: a field initializer (`next: N | null = null`) and a parameter property
+(`constructor(private parent: S | null = null)`) both **desugar into constructor writes of the
+recursive field**, so without the carve-out the field rule would refuse every recursive `@@mutable`
+class at its own declaration and the split would be vacuous. Both halves verified —
+`constructor() { this.next = this }` reproduced the wrong answer above, and the aliased spelling
+`constructor() { const t = this; this.next = t }` is already `NT1604` ("cannot move out of `t`: it
+is borrowed"), so it cannot reach the hole. The check is `mentionsThis` (src/ast.ts), a syntactic
+scan of one expression tree — no fixpoint, nothing that can diverge.
+
+**UNDECORATED classes are untouched.** An ordinary class's field-assigning method COPIES the
+instance and hands the copy back (Stage 29, `NT1023`), so `this.next = this` there stores the
+ORIGINAL into a fresh copy and no cycle exists. The rule fires only on a `@@mutable` receiver,
+which is exactly when the write lands in place — so the blast radius on everything that compiled
+before is zero, per-function.
+
+**What it unlocked:** `Scope` in `src/checker.ts`, whose `parent: Scope | null` made it recursive
+and therefore un-`@@mutable`. It never writes `parent` after construction — the chain points up and
+nothing points down — so the field rule is silent on it, and it now carries the attribute.
+`Scope.declare` left the blocker list. `Scope.lookup` did not: its `hits` `Set` still uses the
+discarded-mutator spelling, and rebinding it replaces an object read from outside the class, which
+is a real aliasing question rather than a transcription.
+
+**The leak position, stated.** A cycle that does get built through some future hole would LEAK,
+because refcounting cannot free cycles and drop here is shallow anyway. That is acceptable — leaks
+are the user's problem, use-after-free is not, and C and Rust both take this position. What is NOT
+acceptable, and what this rule actually protects, is the silent wrong answer out of `console.log`.
+The freeing side is gated separately: `test/mutable-records.test.ts` churns a recursive
+`@@mutable` class 200 times under ASan+UBSan built through `emitIRAsan` (the instrumented path
+that can see a stale READ, not just a double free) and against a live-object CONTROL.
 
 ### The ownership rule is the SAME one
 

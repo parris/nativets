@@ -2887,6 +2887,18 @@ what tagging an AST node would fix. Tagging is blocked twice:
    the actor deep-copy have no seen-set. An AST walker writing `e.object = …` is exactly the
    cycle-closing operation.
 
+   > **SUPERSEDED, in both spellings, and `recursiveMutableError` no longer exists.** The
+   > diagnosis above is right about the hazard and wrong about its LOCATION — it is the one
+   > cycle-closing WRITE, not the declaration. The record spelling split at the field first;
+   > the class spelling followed once the stated reason for holding it back ("the receiver is
+   > `this`, not a binding the rule can reason about") was checked and found not to be true of
+   > the rule, which is type-level and reads `this`'s tagged instance type like any other. A
+   > constructor is exempt unless the value names `this`, because it writes into a block
+   > nothing else can reach yet — without that carve-out a field initializer and a parameter
+   > property would put the declaration refusal back under a different code. What this DOES
+   > still refuse is the last sentence above verbatim: an AST walker writing `e.object = …`
+   > where the field can type-reach the receiver. See docs/decorators.md.
+
 **SOUNDNESS of mutation through a borrow, stated plainly, because it is better than it looks.**
 The question is not "what stops a double free" — nothing had to. Probed by disabling
 `checkOwnedReceiver` and running the program:
@@ -4597,3 +4609,74 @@ which was masked behind `exprText` and is an ownership decision, not a narrowing
 **Next terms, now that they are separate.** The five other missing narrowing forms in the census
 table are each one lane; the `while`-condition one covers two sites in `ownership.ts` and looks
 like the cheapest.
+
+## A recursive class CAN be `@@mutable` — the refusal was over-broad, and `Scope` moves
+
+The refusal `docs/decorators.md` and the entry above both recorded — *"a `@@mutable` class that is
+recursive stays refused at the declaration: its write is `this.f = v` inside a method, a different
+receiver question"* — was **not true of the rule it deferred to.** `Checker.checkCycleCapableField`
+takes a receiver TYPE, a field name and a field TYPE and asks whether the field can type-reach the
+receiver's own tag. Inside a member body `this` has the class's own `classTag`-tagged instance
+type. Nothing in the rule wants a binding. The whole distance between the record spelling (split at
+the field one lane earlier) and the class spelling was a `!e.viaThis` guard on the call site.
+
+That makes **six consecutive frontier refusals this session** whose stated reason was not the
+actual cause. The pattern is now specific enough to act on: a refusal that names a *mechanism* it
+cannot support is worth re-reading against the mechanism, because the note was usually written
+before the mechanism existed.
+
+**Established by mutation, both directions, before anything was changed.** With the declaration
+refusal neutered:
+
+| program | result |
+|---|---|
+| `//@@mutable class N { next: N \| null = null; loop() { this.next = this } }` | compiles; prints `N { v: 7, next: N { v: 7, next: N { v: 7, next: [N] } } }` where node prints `<ref *1> N { v: 7, next: [Circular *1] }` — **the corruption is real** |
+| `//@@mutable class S { vars = new Map(); parent: S \| null = null; declare(k, v) { this.vars = this.vars.set(k, v) } }` | compiles, runs, **matches node exactly** — `parent` is never written, so nothing can close a cycle |
+| `constructor() { this.next = this }` | same corruption — so the constructor carve-out **needs** the `mentionsThis` guard |
+| `constructor() { const t = this; this.next = t }` | already `NT1604` — the aliased route cannot reach the hole |
+| undecorated `class P { next: P \| null; loop(): P { this.next = this; return this } }` | `7 false` on **both** sides — a copy-on-write setter cannot build a cycle, which is why the new rule is gated on `@@mutable` |
+
+**The constructor carve-out is load-bearing, not a convenience.** A field initializer
+(`parent: Scope | null = null`) and a parameter property (`constructor(private parent: Scope | null
+= null)`) both desugar into constructor writes of the recursive field. Applying the field rule to
+them would refuse every recursive `@@mutable` class at its own declaration — the same wall under a
+different message, which is the vacuous-fix failure mode this repo has shipped before.
+
+### The census is ONE, and it is `Scope`
+
+Twelve classes in `src/`; six already carry `@@mutable` (`Parser`, `Checker`, `ModuleGen`, `FnGen`,
+`Analyzer`, and none of them recursive — they could not have been); five are error types that never
+mutate. The only recursive class that wants the attribute is `Scope` in `src/checker.ts`, which is
+also the one that matters most: every binding in the checker goes through it.
+
+`Scope` never writes `parent` after construction — the chain points **up** and nothing points down
+— so the field rule is silent on it. It now carries `//@@mutable`, and `Scope.declare` uses the
+rebind spelling (`this.vars = this.vars.set(…)`, identical under node, whose `.set` returns the
+receiver).
+
+### Frontier delta, measured
+
+`blocker-metric` **218/689 → 217/692 (31.6% → 31.4%; the denominator rises by three for `mentionsThis`
+and its two walk helpers, minus `recursiveMutableError` which is deleted, plus
+`cycleCapableThisWrite`)**. Per-FUNCTION diff against `git archive 7a13197 src runtime`:
+exactly one line changed — `Scope.declare` cleared (`NT1606`) — **nothing else moved, nothing was
+added, no function changed its code.** The first intermediate version of this lane added two
+blockers in its OWN new code (`out.hit = v` on an undecorated accumulator record; `e.inCtor !==
+true` comparing `?Uboolean` with `boolean`), caught only by the per-function diff, since the totals
+moved by the same amount the denominator did. Both fixed by staying inside the subset — the
+accumulator is now a `//@@mutable interface`, which is this lane's own machinery eating itself.
+
+**What did NOT move, and why it is the next term.** `Scope.lookup` is still `NT1606`: its `hits`
+`Set` uses the discarded-mutator spelling, and rebinding it replaces the Set OBJECT, which is read
+from outside the class — a genuine aliasing question rather than a transcription. `Scope.child` is
+`NT2001`, `new Scope(this)` arg 0 expecting the expanded `?NScope{…}` shape where the back-edge
+`@Scope` is passed; that is the recursive-type argument-matching gap, not this one.
+
+### Memory safety
+
+The ownership line held without needing the leak concession: a recursive `@@mutable` class churned
+200 times (build a parent chain, mutate both nodes, drop) shows **`__objLive()`/`__arrLive()`
+identical to the non-mutating control** and is clean under ASan+UBSan with
+`-fno-sanitize-recover=all` — built through `emitIRAsan`, the instrumented path that can see a
+stale READ and not only a double free. Verified on Linux (`scripts/docker-test.sh`), where
+LeakSanitizer actually exists: 159 pass / 0 fail across the four affected suites.
