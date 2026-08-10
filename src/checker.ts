@@ -92,9 +92,15 @@ function arrayElementOk(el: Ty, allowDate: boolean): boolean {
  * It is not the same question. `arrayElementOk` asks what an annotated or literal array
  * may HOLD; this asks what the inlined map loop can BUILD, which additionally needs
  * codegen to have a store for the body's value. `U<…>` unions, `@N` back-edges and `Date`
- * are the three that differ, and all three are still `NT1001` here (`.map producing U<…>`
- * is the live blocker in `materializeTextImports`, src/modules.ts) — widening this to the
- * other predicate would silently take them with it, unmeasured.
+ * were the three that differed. TWO OF THE THREE ARE NOW HERE: a `U<…>` and a `@N` are
+ * each ONE POINTER, the identical slot an object result already stores, so the store
+ * codegen needs was the object store all along and nothing had to be added for them.
+ * `G<…>` is deliberately NOT here and is not an oversight — a general union is a BOX, not
+ * a bare pointer, and `isGeneralUnionTy` is still missing from `isLinearTy`
+ * (src/ownership.ts) and from the `free` selection in `emitDrops`, so a `G<…>` leaks both
+ * box and payload (docs/ROADMAP.md, "Why ELEMENTS is not a one-line fix"). `Date` stays
+ * refused too: it is the pre-existing `allowDate` asymmetry noted on `arrayElementOk`, a
+ * different question from this one, and moving it would move a blocker nobody measured.
  *
  * The NULLABLE arm RECURSES on the base, so `?U` of a refused base stays refused for the
  * base's own reason. That recursion is CONSERVATIVE RATHER THAN LOAD-BEARING, and saying
@@ -113,10 +119,31 @@ function arrayElementOk(el: Ty, allowDate: boolean): boolean {
  * fresh array that owns its elements outright, so aliasing is not what this line is for —
  * a nullable result aliases nothing an object result did not already alias. `.map(x => x)`
  * over an object array is the same aliasing shape and has been allowed since that widening.
+ *
+ * THE ALIASING WORRY IS MOOT UNDER THE CURRENT MEMORY MODEL, and that — not the arrow's
+ * shape — is why this widening is safe. It is tempting to reach for the rule "allow when
+ * the arrow CONSTRUCTS, refuse when it ALIASES the receiver", and the checker cannot
+ * implement it anyway (all five `src/` sites are `list.map(x => f(x))`, so the arrow's
+ * body is a CALL and freshness is a property of a function this predicate cannot see).
+ * It does not need to: `nt_obj_free` is `free(o)` and never walks the slots, so an
+ * ARRAY'S ELEMENTS ARE NEVER FREED AT ALL — measured here as `__objLive() === 2` after a
+ * plain `const xs: Box[] = [{v:1},{v:2}]` with no `.map` anywhere in the program. The
+ * element is never freed once, so it cannot be freed twice, which is the same argument
+ * docs/ROADMAP.md already makes for nullable boxes. `.map(x => x)` over an object array
+ * therefore leaks exactly what the receiver already leaked and double-frees nothing.
+ *
+ * SO THIS PREDICATE IS NOT WHAT MAKES ELEMENT ALIASING SAFE, and must not be left here as
+ * if it were. The day per-type destructors land (the ELEMENTS work in docs/ROADMAP.md),
+ * `xs.map(x => x)` over a heap element becomes a genuine double free — but so does the
+ * `.map(x => x)` over an OBJECT array that has compiled since the Stage-19 widening, and
+ * so does every array-of-object program in the tree. The guard that lane needs is an
+ * ownership-pass rule about the arrow's RESULT aliasing its parameter, next to
+ * `searchBorrowBase`; it is not this line, and narrowing this line back would not buy it.
  */
 function mapResultOk(t: Ty): boolean {
   if (isNullableTy(t)) return mapResultOk(baseTy(t));
-  return t === "number" || t === "string" || t === "boolean" || isObjectTy(t) || isArrayTy(t);
+  return t === "number" || t === "string" || t === "boolean"
+    || isObjectTy(t) || isArrayTy(t) || isUnionTy(t) || isTypeRefTy(t);
 }
 
 /** The length of an expression whose size is fixed at compile time, else undefined. */

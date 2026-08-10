@@ -232,6 +232,26 @@ which are **refusals or already-documented consequences**, never approximations:
   object keys must be compile-time known. Both are `NT1002` refusals with hints.
 - **`Array#at` / `Array#find` / `#findLast` are restricted to scalar elements** — handing back a
   heap element would alias its owner under the linear model (`NT1001`).
+- **`Array#map` is NOT restricted that way, and the neighbouring bullet is why people think it
+  is.** `.at`/`.find` hand back a BORROW of an element the receiver still owns; `.map`
+  CONSTRUCTS a fresh array. Its callback may produce any slot-sized value — scalars, objects,
+  arrays, nullables, a discriminated union `U<…>`, or a `@N` back-edge — because the question
+  `mapResultOk` (src/checker.ts) asks is whether codegen has a STORE for the body's value, and
+  every one of those is one pointer. Still `NT1001`: a GENERAL union `G<…>`, which is a heap
+  BOX rather than a bare pointer and whose drop schedule is known-wrong (`isGeneralUnionTy` is
+  missing from `isLinearTy`, so it leaks box *and* payload — see docs/ROADMAP.md, "Why ELEMENTS
+  is not a one-line fix"), and `Date` (the pre-existing `allowDate` asymmetry).
+
+  **`xs.map(x => x)` aliases the receiver's elements and is allowed** — not because it is
+  checked and found safe, but because an array's elements are **never freed at all**
+  (`nt_obj_free` is `free(o)` and never walks the slots), so the receiver and the result leak
+  one set of elements between them rather than double-freeing it. Measured: a plain
+  `const xs: Box[] = [{v:1},{v:2}]` with no `.map` in the program leaves `__objLive() === 2`.
+  This is the same "never freed once, so it cannot be freed twice" argument ROADMAP already
+  makes for nullable boxes, and it is a property of the MEMORY MODEL, not of this predicate —
+  the day per-type destructors land, `.map(x => x)` over a heap element becomes a real double
+  free, and so does every array-of-objects program in the tree. The guard that lane needs is an
+  ownership rule about the arrow's result aliasing its parameter, near `searchBorrowBase`.
 - **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
   monotonic, whole milliseconds, plausible epoch range.
 

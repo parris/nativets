@@ -389,32 +389,106 @@ describe("nullable-element boundaries (refused, never guessed)", () => {
   });
 
   /*
-   * `.map` producing a nullable is now allowed; producing a UNION is not, and the two
-   * must not travel together. `mapResultOk` recurses through `?U` into the SAME list, so
-   * `?U<union>` is refused for the union's reason — which is what keeps this boundary
-   * where the non-nullable one already is (`.map producing U<…>` is the live blocker in
-   * `materializeTextImports`, src/modules.ts). Without the recursion this widening would
-   * have silently taken unions with it.
+   * `.map` producing a UNION — these two tests PINNED THE REFUSAL until the `U<…>`/`@N`
+   * widening, and they are kept (rewritten as differential runs) rather than deleted,
+   * because the boundary they were guarding is the interesting part of the story.
+   *
+   * The refusal they pinned was never an ownership rule, though its neighbours `.at`/
+   * `.find` are ("a heap element would alias its owner"). `mapResultOk` is about whether
+   * codegen has a STORE for the body's value, and a `U<…>` is one pointer — the identical
+   * slot an object result already stored — so nothing had to be added to allow it. The
+   * recursion through `?U` these tests were written to protect still does exactly what it
+   * did: `?U<union>` is allowed now for the UNION's reason, the same way it was refused
+   * for the union's reason before. The recursion is still load-bearing for `G<…>`, which
+   * stays refused (a general union is a BOX, and `isGeneralUnionTy` is still missing from
+   * `isLinearTy`), so the two must still not travel together.
    */
-  test("`.map` producing a nullable UNION stays refused, for the UNION's reason", () => {
-    expectRejected(
+  test("`.map` producing a nullable UNION runs, and matches node", async () => {
+    await sameAsNode(
       `type N = { kind: "a"; v: number } | { kind: "b"; s: string };
 function pick(x: number): N | undefined { if (x === 1) { return { kind: "a", v: x }; } return undefined; }
 const ys = [1, 2].map((x) => pick(x));
 console.log(ys.length);`,
-      "NT1001",
-      ".map producing ?UU<",
     );
   });
 
-  test("the non-nullable union is refused identically — the recursion changed nothing", () => {
-    expectRejected(
+  test("the non-nullable union runs identically — the recursion changed nothing", async () => {
+    await sameAsNode(
       `type N = { kind: "a"; v: number } | { kind: "b"; s: string };
 function pick(x: number): N { if (x === 1) { return { kind: "a", v: x }; } return { kind: "b", s: "z" }; }
 const ys = [1, 2].map((x) => pick(x));
 console.log(ys.length);`,
+    );
+  });
+
+  /*
+   * `.length` alone would pass on an array of garbage pointers, so the shape that matters
+   * is READING the members back out through a narrow. This is the `mapExprList` /
+   * `mapStmtList` shape from src/ast.ts — the five sites this widening was for — reduced
+   * to two arms: an inlined `.map` whose arrow CALLS a rewriter that returns a fresh node
+   * of a discriminated union, then a narrow on the tag per element.
+   *
+   * A wrong result here is the seven-instance house signature, a string pointer read as a
+   * double printing `2.1e-314` at exit 0, so stdout and exit code are both asserted.
+   */
+  test("a mapped union's members read back correctly through a narrow", async () => {
+    await sameAsNode(
+      `interface Num { kind: "Num"; value: number }
+interface Str { kind: "Str"; text: string }
+type Node = Num | Str;
+function bump(n: Node): Node {
+  if (n.kind === "Num") { return { kind: "Num", value: n.value + 1 }; }
+  return { kind: "Str", text: n.text + "!" };
+}
+const xs: Node[] = [{ kind: "Num", value: 1 }, { kind: "Str", text: "a" }];
+const ys: Node[] = xs.map((x) => bump(x));
+for (const y of ys) {
+  if (y.kind === "Num") { console.log(y.value); } else { console.log(y.text); }
+}`,
+    );
+  });
+
+  /*
+   * The ALIASING arm, pinned because it is the one a reader expects to be refused. It is
+   * not, and it was not before this widening either: `.map(x => x)` over an OBJECT array
+   * has compiled since the Stage-19 widening, and this is the same shape one encoding
+   * along. It is safe for a reason that has nothing to do with `mapResultOk` — an array's
+   * elements are never freed at all (`nt_obj_free` does not walk slots), so the receiver
+   * and the result leak one set of elements between them rather than double-freeing it.
+   * Both arrays are read AFTER the map, which is what would catch a use-after-free.
+   */
+  test("`.map(x => x)` over a union array aliases without double-freeing", async () => {
+    await sameAsNode(
+      `interface Num { kind: "Num"; value: number }
+interface Str { kind: "Str"; text: string }
+type Node = Num | Str;
+function show(list: Node[]): void {
+  for (const y of list) {
+    if (y.kind === "Num") { console.log(y.value); } else { console.log(y.text); }
+  }
+}
+const xs: Node[] = [{ kind: "Num", value: 5 }, { kind: "Str", text: "b" }];
+const ys: Node[] = xs.map((x) => x);
+show(ys);
+show(xs);`,
+    );
+  });
+
+  /*
+   * The line is drawn at `U<…>`, not at "any union". A GENERAL union (`G<…>`, arms that
+   * are not all object types) is a heap BOX rather than a bare pointer, and `isLinearTy`
+   * (src/ownership.ts) still omits `isGeneralUnionTy` — so it leaks both box and payload
+   * (docs/ROADMAP.md, "Why ELEMENTS is not a one-line fix"). Refusing is free; allowing it
+   * would bank a shape whose drop schedule is known-wrong. Deleting this test is the
+   * signal that someone widened `mapResultOk` past what was measured.
+   */
+  test("`.map` producing a GENERAL union stays refused", () => {
+    expectRejected(
+      `function pick(x: number): number | string { if (x === 1) { return x; } return "z"; }
+const ys = [1, 2].map((x) => pick(x));
+console.log(ys.length);`,
       "NT1001",
-      ".map producing U<",
+      ".map producing G<",
     );
   });
 });
