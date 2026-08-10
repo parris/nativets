@@ -1286,6 +1286,16 @@ export interface ArrowFunction {
    *  body's CONTEXT and reject a body that does not fit (NT2001). */
   retAnnot?: Ty;
   retTy?: Ty;
+  /** The name this arrow is bound to, when it is the initializer of a fully-annotated
+   *  `const` and may therefore call ITSELF — `const walk = (s: Stmt): void => { … walk(…) … }`.
+   *  Set by the checker's `VarDecl` arm (which types an initializer BEFORE it declares the
+   *  binding, so the name would otherwise not be in scope inside its own body) and read by
+   *  three places that must agree: `typeArrow` declares it in the arrow's OWN body scope,
+   *  `computeCaptures` EXCLUDES it (capturing it would snapshot the binding's slot while
+   *  the closure is still being built), and codegen lowers a call to it as a call through
+   *  `%__clo`, which already holds this very closure. `alphaRenameShadows` rewrites it in
+   *  lockstep with the declarator so a shadowed self-call keeps pointing at itself. */
+  selfName?: string;
   captures?: { name: string; ty: Ty }[];
   liftedName?: string; // @arrow_N assigned during codegen
 }
