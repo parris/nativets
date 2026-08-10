@@ -1015,6 +1015,19 @@ class Checker {
    */
   bodyChain: BodyFrame[] = [];
   /**
+   * One frame per enclosing ARROW, innermost last: the name that arrow may call ITSELF by
+   * and the type of that call, or `null` when it may not (see `typeArrow`, which pushes
+   * every arrow so that only the immediately enclosing one is ever matched).
+   *
+   * Deliberately a stack of its own rather than a binding in the arrow's body scope: the
+   * self-name is legal ONLY as the callee of a direct call, because that is the only
+   * position codegen can lower (a call through `%__clo`, which already holds this very
+   * closure). `inferCall` is the sole reader, so `const g = down;` inside `down` keeps the
+   * NT1003 it always had instead of reaching codegen and emitting a load from an alloca
+   * that does not exist in the lifted function.
+   */
+  private selfArrows: ({ name: string; ty: Ty } | null)[] = [];
+  /**
    * Call nodes allowed to be a Map/Set ITERATOR (`m.keys()/.values()/.entries()`).
    * node returns a lazy Iterator object there; we return a real array, so the two
    * agree exactly in `for-of` / `[...it]` / `Array.from(it)` and nowhere else
@@ -2641,6 +2654,27 @@ class Checker {
               scope.declare(d.name, d.ty, /* isConst */ false, undefined, undefined, s.mutable);
               continue;
             }
+          }
+          // A `const` bound to a FULLY-ANNOTATED arrow may call ITSELF. Nothing below is
+          // in the way of that except ORDER: `this.type(d.init, …)` runs before the
+          // `scope.declare` at the bottom of this arm, so the name is not in scope while
+          // its own body is typed, the self-call falls past `inferCall`'s function-VALUE
+          // path, and it was reported as NT1003 "function values / closures need captured
+          // environments" — a hint that is false twice over here, since a CAPTURING arrow
+          // called by name already compiles. `typeArrow` declares this name in the arrow's
+          // own body scope; see `ArrowFunction.selfName` for the three sites that agree.
+          //
+          // `const` ONLY: a `let` may be reassigned, so a self-call would have to re-read
+          // the binding instead of reusing the environment it is already running in.
+          // FULLY ANNOTATED only: the pre-declared type is built from the syntax alone, so
+          // every parameter and the return type must be written down — inferring a return
+          // type through the recursion needs a fixpoint we do not have. Type PARAMETERS are
+          // excluded because an arrow's `#T` markers are resolved from the contextual type
+          // at the use site, so the syntactic type is not yet the real one.
+          if (s.declKind === "const" && d.init.kind === "ArrowFunction"
+              && d.init.retAnnot !== undefined && !hasTypeParam(d.init.retAnnot)
+              && d.init.params.every((p) => p.annot !== undefined && !hasTypeParam(p.annot))) {
+            d.init.selfName = d.name;
           }
           const t = this.type(d.init, scope, d.annot); // annotation is the context (e.g. `const a: T[] = []`)
           if (d.annot && d.annot !== t && (!this.assignable(d.annot, t) || !this.reshapable(d.init, d.annot, t))) {
@@ -4653,6 +4687,29 @@ class Checker {
         );
       }
 
+      // A SELF-CALL: the innermost enclosing arrow calling itself by the name it is being
+      // bound to. This is the case the checker's own ORDER hid — `checkStmt`'s `VarDecl`
+      // arm types an initializer before it declares the binding, so the name is not in
+      // scope inside its own body and the call fell all the way to the NT1003 below, whose
+      // hint sent the reader at captured environments. Captures were never the problem: a
+      // capturing arrow called by name already compiled, and the self-call needs no capture
+      // at all (see `computeCaptures`, which excludes this name on purpose).
+      //
+      // AFTER the `bound` lookup above, so anything genuinely in scope — a parameter, a
+      // local, an enclosing binding — still wins, which is what JS does with a shadowing
+      // declaration. Only the innermost frame is consulted; see `selfArrows`.
+      const self = this.selfArrows.length > 0 ? this.selfArrows[this.selfArrows.length - 1] : null;
+      if (self && bound === undefined && self.name === e.callee.name) {
+        const ps = funcParams(self.ty);
+        if (e.args.length !== ps.length) throw typeError(`'${e.callee.name}' expects ${ps.length} arguments, got ${e.args.length}`);
+        e.args.forEach((a, i) => {
+          const at = this.typeArg(a, ps[i]!, scope);
+          if (!this.fitsArg(ps[i]!, at, a)) throw typeError(`'${callee.name}' arg ${i} expects ${ps[i]}, got ${at}`, exprLoc(a), undefined, "this argument");
+        });
+        callee.ty = self.ty;
+        return funcRet(self.ty);
+      }
+
       // M3: a call to a GENERIC declaration resolves its type arguments, instantiates the
       // matching specialization, and rewrites the callee to it — after which the argument
       // checking below is exactly the ordinary concrete-signature path.
@@ -5808,11 +5865,36 @@ class Checker {
     // `computeCaptures`, which asks about the bodies OUTSIDE this arrow.
     this.bodyChain.push(bodyFrame(arrow.params, arrowBody(arrow)));
     const declared = this.arrowRetAnnot(arrow, expected);
+    // SELF-RECURSION — pushed as a frame on `selfArrows`, NOT declared in `inner`, and the
+    // difference is the whole safety argument. A scope binding makes the name readable
+    // everywhere the body can see, and the self-name has exactly ONE legal position: the
+    // callee of a direct call, which codegen lowers through `%__clo`. As a VALUE it has no
+    // lowering at all — `const g = down;` inside `down`'s own body emitted
+    // `load ptr, ptr %down.addr` in the LIFTED function, where that alloca does not exist,
+    // and clang rejected the module ("use of undefined value '%down.addr'"). A scope
+    // binding therefore trades one refusal for a build failure with no NT code; the frame
+    // is read only by `inferCall`, so every other position keeps its existing NT1003.
+    //
+    // A frame is pushed for EVERY arrow, self-recursive or not — `null` when it does not
+    // qualify — so only the IMMEDIATELY enclosing arrow can be self-called. An enclosing
+    // one must not be: codegen's `%__clo` is this arrow's environment, and the outer
+    // arrow's is not reachable from it (it is deliberately not a capture either).
+    // A parameter of the same name SHADOWS the binding, exactly as in JS
+    // (`const f = (f: number): number => f` reads the parameter), so it disqualifies too.
+    // `const` first, then compare — `p.name === arrow.selfName` is `string` against
+    // `string | undefined`, which is NT2001 in the self-host subset. See `computeCaptures`.
+    const selfName = arrow.selfName;
+    const selfFrame = selfName !== undefined && declared !== undefined
+      && !arrow.params.some((p) => p.name === selfName)
+      ? { name: selfName, ty: makeFuncTy(paramTys, declared) }
+      : null;
+    this.selfArrows.push(selfFrame);
     let retTy: Ty;
     try {
       retTy = this.inArrow(() => this.typeArrowReturn(arrow, inner, declared));
     } finally {
       this.bodyChain.pop();
+      this.selfArrows.pop();
     }
     arrow.retTy = retTy;
     arrow.captures = this.computeCaptures(arrow, scope);
@@ -5911,6 +5993,12 @@ class Checker {
   }
 
   private computeCaptures(arrow: ArrowFunction, scope: Scope): { name: string; ty: Ty }[] {
+    // Hoisted to a `const` rather than compared as `n === arrow.selfName` in the loop:
+    // comparing `string` with `string | undefined` is NT2001 in the subset this compiler
+    // compiles, and writing it that way put a NEW blocker in this very function (measured
+    // per-function against the base, which is the only way to see it — the module total was
+    // masked). A local `const` narrows; a property read does not.
+    const selfName = arrow.selfName;
     const params = new Set(arrow.params.map((p) => p.name));
     const locals = new Set<string>();
     const free = new Set<string>();
@@ -5920,6 +6008,17 @@ class Checker {
     const caps: { name: string; ty: Ty }[] = [];
     for (const n of free) {
       if (params.has(n) || locals.has(n) || BUILTIN_NUMBERS.includes(n)) continue;
+      // THE SELF-NAME IS NEVER A CAPTURE, and this line is the memory-safety half of
+      // self-recursion. A capture is a by-VALUE snapshot taken while the closure block is
+      // being BUILT (codegen's `ArrowFunction` case reads each captured name into a slot) —
+      // but the binding this arrow is the initializer of is not stored until that block is
+      // finished, so the snapshot would read an unwritten slot and every self-call would go
+      // through a garbage function pointer. It is also wrong under SHADOWING even when the
+      // slot happens to hold something: `scope` is the ENCLOSING scope, so an outer binding
+      // of the same name would be captured and called instead of this arrow — a wrong
+      // answer at exit 0, which only the node oracle catches (test/self-recursive-arrow).
+      // The self-call needs no capture at all: it runs with `%__clo` already in hand.
+      if (selfName !== undefined && n === selfName) continue;
       const b = scope.lookup(n); // bound in an enclosing scope ⇒ captured
       if (b) caps.push({ name: n, ty: b.ty });
     }
@@ -7870,9 +7969,25 @@ export function alphaRenameShadows(body: Stmt[]): void {
     switch (s.kind) {
       case "VarDecl":
         for (const d of s.decls) {
+          // A SELF-RECURSIVE arrow is the one initializer that is NOT evaluated before the
+          // binding exists — only the closure is built here; its body runs at CALL time,
+          // when the binding is initialized — so a `name` inside it resolves to THIS
+          // declarator, not outward. Bind first for that case so the rename inside the body
+          // lands on the new name, and carry `selfName` across with it, since codegen
+          // recognises the self-call by comparing the callee against exactly that string.
+          // Without this the shadowed case silently retargets: `run`'s inner `pick` would be
+          // renamed while its self-call kept the outer spelling and called the outer arrow.
+          const self = d.init !== undefined && d.init.kind === "ArrowFunction" && d.init.selfName !== undefined
+            ? d.init : undefined;
+          if (self) {
+            bind(scopes, used, d.name, false);
+            d.name = lookup(scopes, d.name) ?? d.name;
+            self.selfName = d.name;
+          }
           // The initializer is evaluated BEFORE the binding exists, so it is walked
           // first: `const a = a` reads the outer `a` (and is a TDZ error in node).
           if (d.init) walkExpr(d.init, scopes, used);
+          if (self) continue;
           bind(scopes, used, d.name, false);
           d.name = lookup(scopes, d.name) ?? d.name;
         }

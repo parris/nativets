@@ -985,6 +985,7 @@ class FnGen {
     this.strLocals = new Set();
     this.globalVars = new Set();
     this.inMain = false;
+    this.selfArrow = null;
     this.consumeNode = null; this.consumeTaken = false;
   }
 
@@ -1033,6 +1034,14 @@ class FnGen {
    *  undefined `%x.addr` (clang: "use of undefined value"). Suppress drops in a lifted
    *  arrow: conservative (the enclosing owner still frees at its own scope exit). */
   private liftedArrow = false;
+
+  /** In a lifted arrow that may call ITSELF (`const walk = (s: Stmt): void => { … walk(…) … }`):
+   *  the name it is bound to, and its function type. The self-call needs NO new machinery —
+   *  `%__clo` is already the first parameter of every lifted arrow and already holds this
+   *  very closure, so the call is the ordinary `callClosure` sequence with `%__clo` as the
+   *  receiver. Deliberately NOT a capture: see `computeCaptures` in src/checker.ts for why
+   *  snapshotting the name instead would read the binding's slot before it is stored. */
+  private selfArrow: { name: string; ty: Ty } | null = null;
 
   /** Suppress preemption safepoints in this function (B3 v5 message renderers run from
    *  inside the runtime's crash-record printer — yielding there would be catastrophic). */
@@ -1279,6 +1288,15 @@ class FnGen {
     this.retTy = arrow.retTy ?? "number";
     const paramTys = arrow.paramTys ?? [];
     this.captures = new Map((arrow.captures ?? []).map((c, i) => [c.name, { index: i, ty: c.ty }]));
+    // A parameter of the same name SHADOWS the binding (JS, and `typeArrow` agrees by not
+    // declaring it), so it is not a self-call site — `%__clo` would be the wrong callee.
+    // `const` first, then compare: `p.name === arrow.selfName` would be `string` against
+    // `string | undefined`, which is NT2001 in the subset this compiler compiles.
+    const selfName = arrow.selfName;
+    const selfTy = arrow.ty;
+    this.selfArrow = selfName !== undefined && selfTy !== undefined
+      && !arrow.params.some((p) => p.name === selfName)
+      ? { name: selfName, ty: selfTy } : null;
     arrow.params.forEach((p, i) => { this.varTypes = this.varTypes.set(p.name, paramTys[i]!); this.alloca(p.name, paramTys[i]!); });
     if (!arrow.exprBody) this.collectLocals(arrow.stmts as Stmt[]);
     const b0 = this.block(this.label("L"));
@@ -3273,6 +3291,14 @@ class FnGen {
       if (this.mod.hostImports.has(e.callee.name)) return this.genHost(e.callee.name, e.args);
       const g = this.genGlobal(e.callee.name, e.args, e.ty);
       if (g) return g;
+      // A SELF-CALL inside a lifted arrow. Checked before the capture and local paths on
+      // purpose: at MODULE level the same name is also a promoted global whose slot happens
+      // to hold this closure, so the fallthrough would work by luck and diverge the moment
+      // the arrow is a function-local — and under shadowing it would find the OUTER binding.
+      // `%__clo` is this closure, so this is a plain closure call with no load at all.
+      if (this.selfArrow && e.callee.name === this.selfArrow.name) {
+        return this.genCallValueFrom("%__clo", this.selfArrow.ty, e.args);
+      }
       const cap = this.captures.get(e.callee.name);
       if (cap && isFuncTy(cap.ty)) return this.genCallValueFrom(this.readCapture(e.callee.name).v, cap.ty, e.args);
       // A function VALUE held in a local, a capture, or — decorators lane — a MODULE-LEVEL

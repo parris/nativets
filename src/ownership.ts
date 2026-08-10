@@ -1421,7 +1421,12 @@ function declaredLinear(list: Stmt[], aliases: Set<string>): string[] {
  *  (`BlockDrops.names`, `ReturnStmt.drops`, `FuncDecl.endDrops`), which would otherwise
  *  read as mentions of the very names they schedule. Everything NOT listed here
  *  disqualifies on a match, so the omission of a key is the conservative direction. */
-const NOT_A_MENTION = new Set(["kind", "ty", "elemTy", "retTy", "key", "property", "field", "names", "drops", "endDrops"]);
+/*  `selfName` joins them for the same reason: it is an ArrowFunction ANNOTATION naming the
+ *  declarator that binds the arrow (`ArrowFunction.selfName`, set for a self-recursive
+ *  `const`), not a use of it. Left off the list it disqualified every self-recursive
+ *  closure from its own drop — the annotation read as a mention of the very name it
+ *  describes, exactly like `drops` and `endDrops` above. */
+const NOT_A_MENTION = new Set(["kind", "ty", "elemTy", "retTy", "key", "property", "field", "names", "drops", "endDrops", "selfName"]);
 
 /**
  * KEPT AS A CAST, deliberately — the one duck-typed window in `src/` that is sound, and
@@ -1450,23 +1455,55 @@ function isIdentNode(x: unknown): boolean {
  */
 function scanMentions(
   node: unknown, key: string, cands: Set<string>, ownDecls: Set<object>, inArrow: boolean,
-  seen: Set<object>, out: Set<string>,
+  selfOf: string | undefined, inSelfCallee: boolean, seen: Set<object>, out: Set<string>,
 ): void {
-  if (typeof node === "string") { if (!NOT_A_MENTION.has(key) && cands.has(node)) out.add(node); return; }
+  if (typeof node === "string") {
+    if (NOT_A_MENTION.has(key) || !cands.has(node)) return;
+    // THE SELF-CALL, and the only mention inside an arrow body that is still not one. See
+    // `inSelfCallee` at the recursion below for why this is exact rather than a blanket
+    // exemption: only the arrow's OWN name, only directly under a call's callee.
+    // `selfOf !== undefined` first: comparing `string` with `string | undefined` is NT2001
+    // in the subset this compiler compiles (see `computeCaptures` in src/checker.ts).
+    if (inSelfCallee && key === "name" && selfOf !== undefined && node === selfOf) return;
+    out.add(node);
+    return;
+  }
   if (node === null || typeof node !== "object") return;
   const obj = node as Record<string, unknown>;
   if (seen.has(obj)) return;
   seen.add(obj);
-  if (Array.isArray(node)) { for (const el of node) scanMentions(el, key, cands, ownDecls, inArrow, seen, out); return; }
+  if (Array.isArray(node)) { for (const el of node) scanMentions(el, key, cands, ownDecls, inArrow, selfOf, inSelfCallee, seen, out); return; }
   // An arrow BODY copies what it names into a second env that may outlive this scope,
   // so inside one even a call callee is a mention.
   const arrow = inArrow || obj["kind"] === "ArrowFunction";
   const skipCallee = !arrow && obj["kind"] === "CallExpr" && isIdentNode(obj["callee"]);
+  // ...with ONE exception, the arrow's own name. A self-call copies the pointer nowhere:
+  // `computeCaptures` (src/checker.ts) deliberately does not capture the self-name, and
+  // codegen lowers the call through `%__clo`, the environment the arrow is already running
+  // in — so the pointer still lives in exactly the one slot this scope owns and drops.
+  //
+  // ENTERING AN ARROW REPLACES `selfOf` rather than adding to it, so an ENCLOSING arrow's
+  // name mentioned inside a NESTED one is still a mention: that one genuinely is captured
+  // into the nested arrow's env, and the nested env may outlive this scope. Replacing also
+  // means an arrow with no `selfName` clears it, which is the conservative direction (a
+  // leak, never a free of something still live).
+  const self = obj["kind"] === "ArrowFunction"
+    ? (typeof obj["selfName"] === "string" ? obj["selfName"] : undefined)
+    : selfOf;
+  // Descended INTO rather than skipped outright, unlike `skipCallee`: the string test above
+  // exempts only a `name` equal to `self`, so any other candidate reachable under the same
+  // callee still disqualifies.
+  const selfCallee = arrow && self !== undefined && obj["kind"] === "CallExpr" && isIdentNode(obj["callee"]);
+  // The flag is set on the CallExpr's `callee` KEY, but the string it has to reach is one
+  // level further down — the callee `Identifier`'s own `name`. So it survives exactly that
+  // one hop, and is cleared at anything that is not that Identifier, which keeps the
+  // exemption from leaking into a subtree where a same-named binding could really escape.
+  const underCallee = inSelfCallee && obj["kind"] === "Identifier";
   const ownDecl = ownDecls.has(obj);
   for (const k of Object.keys(obj)) {
     if (skipCallee && k === "callee") continue;
     if (ownDecl && k === "name") continue; // the candidate's own declarator, not a use
-    scanMentions(obj[k], k, cands, ownDecls, arrow, seen, out);
+    scanMentions(obj[k], k, cands, ownDecls, arrow, self, underCallee || (selfCallee && k === "callee"), seen, out);
   }
 }
 
@@ -1558,7 +1595,7 @@ function nonEscapingClosures(list: Stmt[], shadowed: Set<string>): string[] {
   if (decls.size === 0) return [];
   const cands = new Set(decls.keys());
   const escaped = new Set<string>();
-  scanMentions(list, "", cands, new Set(decls.values()), false, new Set(), escaped);
+  scanMentions(list, "", cands, new Set(decls.values()), false, undefined, false, new Set(), escaped);
   return [...cands].filter((n) => !escaped.has(n) && !shadowed.has(n));
 }
 
