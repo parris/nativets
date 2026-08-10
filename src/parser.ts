@@ -1082,8 +1082,7 @@ class Parser {
       // The rewrite is by NAME and has no scope, so a binding that shadows the class name
       // would redirect `C.f` to the static instead of the shadowing value — a silent wrong
       // answer. Refuse the program instead (reject, never miscompile).
-      const bound = new Set<string>();
-      collectBindingNames(body, bound);
+      const bound = collectBindingNames(body);
       for (const f of this.staticFieldNames) {
         const cls = f.slice(0, f.indexOf("."));
         if (bound.has(cls)) throw nyi(NYI.CLASS_FEATURE, `a binding shadows class '${cls}', which has static fields (\`${f}\`); rename it`);

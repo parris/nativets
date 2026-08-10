@@ -201,9 +201,19 @@ describe("tsc type-checks this project", () => {
  * its one blocker to zero, and `walkStmtChildren`'s was masked behind an earlier NT2001
  * so it moved no number today and would have surfaced the moment that one cleared).
  *
- * `bindStmt` is the counterexample and the reason this is a measurement rather than a
- * rule: its arms `break` into a shared tail return, so tsc has nothing to object to and
- * deleting its witness is SILENT. It stays.
+ * `bindStmt` USED to be the counterexample: its arms `break`-ed into a shared tail return,
+ * so tsc had nothing to object to and deleting its witness was SILENT — the test below
+ * measured exactly that, and said in so many words that if it ever went red "because
+ * someone gave `bindStmt` a returning switch", the witness had become free to delete. It
+ * did, and it was. The shared tail is now the named helper `bindChildren`, so every arm
+ * RETURNS it and the switch joins the two walkers on TS2366; the witness is gone and its
+ * NT2001 with it. `src/ast.ts` is at 0 failing functions as of that change.
+ *
+ * The measurement it stood for is unchanged and is still the point: the tax is worth
+ * paying only where the witness is the ONLY thing checking. It was not, in all four
+ * places — but that was established per site, by mutating the file and reading tsc, not
+ * assumed. Restore a `break`-into-tail shape here and TS2366 goes quiet again, at which
+ * point a witness has to come back.
  *
  * THIS BLOCK IS THE EVIDENCE FOR BOTH HALVES, and it is written so it can go red. It
  * MUTATES a copy of `src/ast.ts` — deleting one self-contained `case` arm — and asserts
@@ -291,7 +301,7 @@ describe("switch exhaustiveness in src/ast.ts", () => {
     expect(checkAlone(source, "control")).toEqual({});
   });
 
-  for (const fn of ["walkExprChildren", "walkStmtChildren"]) {
+  for (const fn of ["walkExprChildren", "walkStmtChildren", "bindStmt"]) {
     test(`${fn}: no default: arm — one would disable TS2366 permanently`, () => {
       const [a, b] = bodySpan(source, fn);
       expect(source.slice(a, b)).not.toContain("default:");
@@ -306,22 +316,30 @@ describe("switch exhaustiveness in src/ast.ts", () => {
     });
   }
 
-  test("bindStmt: its `never` witness is what catches a dropped case (TS2322)", () => {
-    const { mutated } = dropAnArm(source, "bindStmt");
-    expect(checkAlone(mutated, "bindStmt")).toEqual({ TS2322: 1 });
+  test("no `never` witness survives in src/ast.ts — each one was an NT2001", () => {
+    // The four are gone, one site at a time and each with the mutation test above standing
+    // in for it. Asserted over the WHOLE file rather than per function, so a fifth cannot
+    // arrive quietly: `never` erases to `number` in the subset this file must compile
+    // inside, so any new one is a fresh blocker in the module every other one links
+    // through. If a switch genuinely cannot be made returning, the witness is the right
+    // answer and this line is the place to say so — with the measurement, as before.
+    // Line-based, and NOT a bare `.toContain`: three of the comments above these switches
+    // quote the idiom verbatim to explain why it went, and a substring scan cannot tell a
+    // live witness from its own obituary.
+    expect(source.split("\n").filter((l) => /^\s*default:.*impossible: never/.test(l))).toEqual([]);
   });
 
-  test("bindStmt: and NOTHING else does — delete the witness and tsc goes quiet", () => {
-    // The measurement that keeps the witness in the tree. `bindStmt`'s arms `break` into
-    // a shared tail return, so there is no TS2366 to fall back on: removing the witness
-    // turns a type error into a silently-unbound name at run time, which is exactly the
-    // failure the comment above that switch describes. If this test ever goes RED —
-    // because someone gave `bindStmt` a returning switch — the witness has become free to
-    // delete and one more NT2001 leaves ast.ts.
-    const { mutated } = dropAnArm(source, "bindStmt");
-    const witness = "    default: { const impossible: never = s; return impossible; }\n";
-    expect(mutated).toContain(witness);
-    expect(checkAlone(mutated.replace(witness, ""), "bindStmt-nowitness")).toEqual({});
+  test("bindStmt binds through a @@mutable RECORD, which is why it needs no out-param", () => {
+    // Guards the pairing the returning switch depends on. `Set` is persistent, so
+    // `out.add(n)` on a bare `Set<string>` parameter did nothing AND was NT1606; the fix
+    // was a `//@@mutable` record (`BoundNames`) whose field is assigned through the
+    // borrow. A `@@mutable` CLASS in the same position is NT1607 — the ownership pass's
+    // signature arm covers records only — so the record spelling is load-bearing, not
+    // cosmetic, and a future tidy-up to `class BoundNames` would re-break self-compilation
+    // silently (the blocker metric never runs the ownership pass and would not see it).
+    expect(source).toContain("//@@mutable\ninterface BoundNames { names: Set<string> }");
+    const [a, b] = bodySpan(source, "bindStmt");
+    expect(source.slice(a, b)).not.toContain("out.add(");  // the discarded-append shape
   });
 });
 

@@ -1176,3 +1176,98 @@ console.log(c.n);
     await expectMatches(fixed, await runWithNodeAttrs(fixed));
   });
 });
+
+/*
+ * THE SHAPE `src/ast.ts` NEEDED: a persistent-`Set` accumulator threaded down a shared
+ * tree walk, through a parameter, mutated inside a CAPTURING arrow.
+ *
+ * This is the pattern behind `collectBindingNames`, and it is the one that took `ast.ts`
+ * to zero blockers. Every other accumulator answer in the tree is "return the new value
+ * and rebind at the call site", and it is structurally unavailable here: the walk goes
+ * through `walkExprChildren`/`walkStmtChildren`, whose callbacks are `(x: Expr) => Expr`
+ * and `(y: Stmt) => Stmt`, so there is no channel to return a set on. `out.add(name)` on
+ * a bare `Set<string>` parameter is the shape that fits, and it is both refused (NT1606)
+ * and WRONG — `Set` is persistent here, so the append is discarded.
+ *
+ * Three claims, each measured rather than reasoned about, because the surrounding lore
+ * had it that a collector parameter could not be mutated at all:
+ *   1. a `@@mutable` RECORD parameter CAN carry it, even when a nested arrow captures it;
+ *   2. a `@@mutable` CLASS in the same position CANNOT — `checkOwnedReceiver`'s signature
+ *      arm is restricted to `mutable.records`, so the setter call is NT1607. This is the
+ *      distinction, and it is invisible to the blocker metric (which never runs the
+ *      ownership pass), so it needs a real compile to stay true;
+ *   3. node agrees with us on the ANSWER, which is the only thing that finally matters.
+ */
+describe("a persistent-Set accumulator threaded through a walker (src/ast.ts's shape)", () => {
+  const WALKER = `
+interface Node { kind: string; name: string; kids: Node[] }
+const tree: Node[] = [
+  { kind: "decl", name: "a", kids: [{ kind: "decl", name: "b", kids: [] }] },
+  { kind: "expr", name: "z", kids: [{ kind: "decl", name: "c", kids: [] }] },
+];
+`;
+
+  test("a `@@mutable` RECORD carries it — through a parameter AND a capturing arrow", async () => {
+    const source = `${WALKER}
+//@@mutable
+interface BoundNames { names: Set<string> }
+function walkKids(n: Node, f: (x: Node) => Node): Node {
+  return { ...n, kids: n.kids.map((x: Node): Node => f(x)) };
+}
+function bind(n: Node, out: BoundNames): Node {
+  if (n.kind === "decl") out.names = out.names.add(n.name);
+  return walkKids(n, (x: Node): Node => bind(x, out));
+}
+function collect(list: Node[]): Set<string> {
+  const out: BoundNames = { names: new Set<string>() };
+  for (const n of list) bind(n, out);
+  return out.names;
+}
+const got = collect(tree);
+console.log(got.has("a"), got.has("b"), got.has("c"), got.has("z"), got.size);
+`;
+    await expectMatches(source, await runWithNodeAttrs(source));
+  });
+
+  test("the bare `Set` parameter it replaced is NT1606 — and would have been a no-op", () => {
+    const r = rejectionOf(`${WALKER}
+function walkKids(n: Node, f: (x: Node) => Node): Node {
+  return { ...n, kids: n.kids.map((x: Node): Node => f(x)) };
+}
+function bind(n: Node, out: Set<string>): Node {
+  if (n.kind === "decl") out.add(n.name);
+  return walkKids(n, (x: Node): Node => bind(x, out));
+}
+const out = new Set<string>();
+for (const n of tree) bind(n, out);
+console.log(out.size);
+`);
+    expect(r?.code).toBe("NT1606");
+    // Refusing it is not pedantry: node prints 3 and a `.add`-discarding lowering would
+    // print 0, which is the silent-wrong-answer class this whole rule exists to close.
+    expect(r?.message ?? "").toContain("persistent");
+  });
+
+  test("a `@@mutable` CLASS in the same position is NT1607 — the record spelling is load-bearing", () => {
+    const r = rejectionOf(`${WALKER}
+//@@mutable
+class BoundNames {
+  names: Set<string> = new Set<string>();
+  note(n: string): void { this.names = this.names.add(n); }
+}
+function walkKids(n: Node, f: (x: Node) => Node): Node {
+  return { ...n, kids: n.kids.map((x: Node): Node => f(x)) };
+}
+function bind(n: Node, out: BoundNames): Node {
+  if (n.kind === "decl") out.note(n.name);
+  return walkKids(n, (x: Node): Node => bind(x, out));
+}
+const out = new BoundNames();
+for (const n of tree) bind(n, out);
+console.log(out.names.size);
+`);
+    // A class's write is a SETTER CALL on a borrowed receiver; a record's is a field
+    // store named in the signature. Only the second has the signature arm.
+    expect(r?.code).toBe("NT1607");
+  });
+});

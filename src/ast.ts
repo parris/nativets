@@ -2188,61 +2188,112 @@ export function resolveStaticFieldReads(list: Stmt[], names: Set<string>, onAssi
 
 /* ---- pass 3: every name the program binds --------------------------------- */
 
-function bindExpr(e: Expr, out: Set<string>): Expr {
-  if (e.kind === "ArrowFunction") for (const p of e.params) if (p.name) out.add(p.name);
+/**
+ * The name accumulator this pass threads down the walk — a RECORD around the set rather
+ * than the bare `Set<string>` it used to be, and the difference is the whole reason both
+ * binders now compile.
+ *
+ * `Set` here is PERSISTENT: `.add` returns a new set and leaves the receiver alone, so
+ * `out.add(name)` on a bare parameter did nothing at all and was refused NT1606. There is
+ * nowhere to return the updated set to either — the accumulator is threaded through
+ * `walkExprChildren`/`walkStmtChildren`, whose callbacks are `(x: Expr) => Expr` and
+ * `(y: Stmt) => Stmt`, so the "rebind at the call site" answer the rest of the tree uses
+ * is structurally unavailable here.
+ *
+ * `//@@mutable` on a RECORD is the answer, and it is the one `ThisHit` below already
+ * uses: a by-borrow parameter whose type is a `@@mutable` record may be assigned in place
+ * (src/ownership.ts, `checkOwnedReceiver`'s signature arm — docs/decorators.md piece 3),
+ * so `out.names = out.names.add(n)` is legal where `out.add(n)` was both refused and
+ * wrong. The tag is NOMINAL, so it travels in the signature and every call site can see
+ * that this parameter is written through.
+ *
+ * A `@@mutable` CLASS in the same position does NOT work, which is the distinction that
+ * makes this a record: a class's write is a SETTER CALL on a borrowed receiver, and
+ * `checkOwnedReceiver`'s signature arm is restricted to `mutable.records`. `out.note(n)`
+ * on a `@@mutable class` collector is NT1607 "cannot mutate `out` through a borrow".
+ * Measured both ways before this was written.
+ */
+//@@mutable
+interface BoundNames { names: Set<string> }
+
+function bindExpr(e: Expr, out: BoundNames): Expr {
+  if (e.kind === "ArrowFunction") for (const p of e.params) if (p.name) out.names = out.names.add(p.name);
   return walkExprChildren(e, (x: Expr): Expr => bindExpr(x, out), (s: Stmt): Stmt => bindStmt(s, out), KEEP_TY);
 }
-function bindStmt(s: Stmt, out: Set<string>): Stmt {
+/** The shared tail of every `bindStmt` arm. Spelled as a function rather than left as the
+ *  statement after the switch so that EVERY arm can `return` it — see `bindStmt`. */
+function bindChildren(s: Stmt, out: BoundNames): Stmt {
+  return walkStmtChildren(s, (x: Expr): Expr => bindExpr(x, out), (y: Stmt): Stmt => bindStmt(y, out), KEEP_TY);
+}
+/**
+ * NO `default:` ARM, for the reason `walkExprChildren` gives above: every arm RETURNS and
+ * the declared return type is `Stmt`, so a new `Stmt` member with no arm lets control
+ * reach the end of the body and tsc rejects it (TS2366).
+ *
+ * It used to `break` into a shared tail return, which made that check unavailable — tsc
+ * has nothing to object to when the body ends in a statement — so it carried a
+ * `default: { const impossible: never = s; return impossible; }` witness instead. That
+ * witness was not free: `never` erases to `number` in the subset this file must stay
+ * inside, so it was an NT2001 blocker in `src/ast.ts`, the module every other one is
+ * measured through. Returning from each arm buys the same guarantee from tsc for nothing.
+ * test/tsc.test.ts proves it by deleting an arm from a copy of this file and reading
+ * tsc's answer, exactly as it does for the two walkers.
+ */
+function bindStmt(s: Stmt, out: BoundNames): Stmt {
   switch (s.kind) {
     // Parameters BEFORE the declared name, which is the order the old walk produced.
-    case "FuncDecl": for (const p of s.params) if (p.name) out.add(p.name); out.add(s.name); break;
-    case "VarDecl": for (const d of s.decls) out.add(d.name); break;
-    case "ForOfStmt": out.add(s.name); if (s.name2) out.add(s.name2); break;
-    case "ForInStmt": out.add(s.name); break;
-    case "TryStmt": if (s.param) out.add(s.param); break;
+    case "FuncDecl": {
+      for (const p of s.params) if (p.name) out.names = out.names.add(p.name);
+      out.names = out.names.add(s.name);
+      return bindChildren(s, out);
+    }
+    case "VarDecl": {
+      for (const d of s.decls) out.names = out.names.add(d.name);
+      return bindChildren(s, out);
+    }
+    case "ForOfStmt": {
+      out.names = out.names.add(s.name);
+      if (s.name2) out.names = out.names.add(s.name2);
+      return bindChildren(s, out);
+    }
+    case "ForInStmt": out.names = out.names.add(s.name); return bindChildren(s, out);
+    case "TryStmt": if (s.param) out.names = out.names.add(s.param); return bindChildren(s, out);
     // Every other statement kind binds NOTHING. Enumerated rather than defaulted, so a
     // new statement kind that DOES bind a name cannot slip past this pass in silence —
     // which is exactly the failure the old reflective spelling could not detect.
     case "ReturnStmt": case "IfStmt": case "WhileStmt": case "DoWhileStmt": case "ForStmt":
     case "SwitchStmt": case "ThrowStmt": case "ExprStmt": case "BlockStmt": case "MultiStmt":
     case "BreakStmt": case "ContinueStmt": case "BlockDrops":
-      break;
-    // KEPT, unlike the two walkers above, and the difference is measured rather than
-    // stylistic. Those switches RETURN from every arm, so tsc catches a missing member on
-    // its own (TS2366) and the witness was pure cost. These arms `break` into the shared
-    // tail return below, so deleting this `default` is SILENT under tsc — drop the
-    // `FuncDecl` arm with this line gone and the check exits 0, which is exactly the
-    // missed-binding failure the comment above describes. test/tsc.test.ts pins both
-    // halves, and will go RED if this switch ever becomes a returning one — at which
-    // point this witness is free to delete and one more NT2001 leaves ast.ts.
-    //
-    // It costs nothing measurable meanwhile: this body's first blocker is the NT1606 on
-    // `out.add` at the top, so the NT2001 here is masked either way.
-    default: { const impossible: never = s; return impossible; }
+      return bindChildren(s, out);
   }
-  return walkStmtChildren(s, (x: Expr): Expr => bindExpr(x, out), (y: Stmt): Stmt => bindStmt(y, out), KEEP_TY);
 }
 /**
  * Every name the program BINDS — declarations, function/arrow parameters, loop and catch
- * bindings. A pure VISITOR: it collects into `out` and the reconstructed tree it builds on
- * the way is discarded, so no caller has to rebind anything.
+ * bindings. A pure VISITOR: the reconstructed tree it builds on the way is discarded, so
+ * no caller has to rebind anything; the SET is what comes back.
+ *
+ * It RETURNS the set rather than filling one the caller passes in, which is not a style
+ * choice: `Set` is persistent here, so a caller's set could never have observed an append
+ * made inside this call at all. The old out-parameter spelling only ever "worked" under
+ * node, where `.add` mutates.
  *
  * Used to protect the static-field rewrite above: that rewrite is name-based and
  * has no scope, so a binding that shadows a class name would silently redirect `C.f` to
  * the class's static instead of the shadowing value. Collecting the binders lets the
  * parser refuse that program outright rather than answer it wrongly.
  */
-export function collectBindingNames(list: Stmt[], out: Set<string>): void {
+export function collectBindingNames(list: Stmt[]): Set<string> {
+  const out: BoundNames = { names: new Set<string>() };
   for (const s of list) bindStmt(s, out);
+  return out.names;
 }
 
 /* ---- pass 4: does an expression name the receiver? ------------------------- */
 
 /** The one-bit accumulator `mentionsThis` threads down the walk. `//@@mutable` because it
  *  IS mutated in place through a by-borrow parameter, which is exactly what the attribute
- *  legalizes for a record (docs/decorators.md, piece 3) — the undecorated spelling is the
- *  NT1606 that `collectBindingNames`'s `Set` accumulator still carries. Non-recursive, so
- *  the cycle rule this very type serves is inert on it. */
+ *  legalizes for a record (docs/decorators.md, piece 3) — the same reason `BoundNames`
+ *  above carries it. Non-recursive, so the cycle rule this very type serves is inert. */
 //@@mutable
 interface ThisHit { hit: boolean }
 
