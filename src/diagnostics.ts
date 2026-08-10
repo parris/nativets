@@ -96,6 +96,96 @@ export function internalError(detail: string): InternalError {
   return new InternalError(detail);
 }
 
+/* ------------------------------------------------- large type-mismatch elision */
+
+/**
+ * A type mismatch whose two types are LARGE and NEARLY IDENTICAL says almost nothing.
+ *
+ * The stage-1 self-hosting blocker on `src/parser.ts` reads, in full:
+ *
+ *     .push expects  U<{kind:"NumberLiteral",…30 members…}>
+ *              , got ?NU<{kind:"NumberLiteral",…the same 30 members…}>
+ *
+ * That is 5,527 bytes. The same union is dumped twice at ~2,700 characters each and the
+ * ENTIRE difference is the two-character `?N` prefix — the value is a nullable. The signal
+ * is 0.04% of the message.
+ *
+ * This is not a cosmetic complaint. An agent sent to minimize that blocker read the
+ * message, looked directly at the `, got` clause, and reported that the message "never
+ * states the type it actually got". The clause was right there. It could not be seen.
+ *
+ * TRUNCATION IS THE WRONG FIX and was explicitly considered and rejected: eliding 2,700
+ * characters would hide the `?N` along with everything else, destroying the one thing the
+ * reader needs. So this DIFFS the two types instead — the expected type is still shown
+ * (abbreviated), and the difference is stated in words.
+ *
+ * Gated hard on SIZE and on SIMILARITY, so every ordinary mismatch renders byte-identically
+ * and no message anyone is currently reading moves. Two types that genuinely differ get
+ * the full dump, because then the dump is the answer.
+ */
+const ELIDE_MIN_TYPE = 200;
+const ELIDE_MAX_DELTA = 120;
+
+/** How many leading characters `a` and `b` share. */
+function commonPrefixLen(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+  return i;
+}
+
+/** How many trailing characters `a` and `b` share, stopping after `cap` of them. */
+function commonSuffixLen(a: string, b: string, cap: number): number {
+  let i = 0;
+  while (i < cap && a.charCodeAt(a.length - 1 - i) === b.charCodeAt(b.length - 1 - i)) i++;
+  return i;
+}
+
+/** Show a long type as its head and tail, with the length, so it stays identifiable. */
+function abbreviateType(t: string): string {
+  if (t.length <= 180) return t;
+  return `${t.slice(0, 140)}…${t.slice(t.length - 24)} (${t.length} chars)`;
+}
+
+/**
+ * Rewrite `… expects <X>, got <Y>` as `… expects <X>, got the SAME type with <delta>` when
+ * `X` and `Y` are both large and mostly equal. Any other message is returned UNCHANGED —
+ * including every short one, which is why this changes no existing diagnostic text.
+ *
+ * Exported for the test that pins the gating: the boundary is the contract here, not the
+ * wording.
+ */
+export function elideSharedType(message: string): string {
+  const g = message.lastIndexOf(", got ");
+  if (g < 0) return message;
+  const head = message.slice(0, g);
+  const e = head.lastIndexOf(" expects ");
+  if (e < 0) return message;
+  const exp = head.slice(e + 9);   // " expects ".length
+  const got = message.slice(g + 6); // ", got ".length
+  if (exp.length < ELIDE_MIN_TYPE || got.length < ELIDE_MIN_TYPE) return message;
+
+  const p = commonPrefixLen(exp, got);
+  const cap = Math.min(exp.length, got.length) - p;
+  const s = commonSuffixLen(exp, got, cap);
+  const a = exp.slice(p, exp.length - s);
+  const b = got.slice(p, got.length - s);
+  // A difference too big to read is not a difference worth summarizing, and two types
+  // that share little are not "the same type" — both fall back to the full dump.
+  if (a.length > ELIDE_MAX_DELTA || b.length > ELIDE_MAX_DELTA) return message;
+  if ((p + s) * 4 < exp.length) return message;
+
+  let delta = `\`${a}\` replaced by \`${b}\` at character ${p}`;
+  if (a.length === 0) delta = `\`${b}\` INSERTED at character ${p}`;
+  if (b.length === 0) delta = `\`${a}\` REMOVED at character ${p}`;
+  // The overwhelmingly common case, and the one the stage-1 blocker is: a nullable box
+  // wrapping exactly the expected type. `?N`/`?U` are how `Ty` (src/ast.ts) spells one.
+  if (p === 0 && a.length === 0 && (b === "?N" || b === "?U")) {
+    delta = `the \`${b}\` NULLABLE prefix — the value may be undefined, so narrow it first`;
+  }
+  return `${message.slice(0, e)} expects ${abbreviateType(exp)}, got the SAME type with ${delta}`;
+}
+
 /**
  * How many leading whitespace characters `s` has — the `^\s*` of ECMAScript's `\s`
  * (WhiteSpace + LineTerminator), scanned by code unit. nativets deliberately has no
@@ -571,10 +661,15 @@ export function decoratorError(message: string, hint: string): NTError {
 // src/diagnostics.ts is compiled by nativets — SH6 blocker 3 of 6, docs/self-hosting.md.
 // The annotation is a no-op for TypeScript and can come out once that inference lands.
 export function typeError(message: string, at?: { line: number; col: number; file?: string }, hint?: string, label: string = "here"): NTError {
-  if (at === undefined) return new NTError({ code: "NT2001", message, hint });
+  // Applied HERE rather than at the ~20 producers that assemble `expects X, got Y`, so it
+  // reaches every one of them (including any added later) without touching src/checker.ts —
+  // the tree's hottest merge file. It is a no-op for every message that is not a large,
+  // nearly-identical pair; see `elideSharedType`.
+  const msg = elideSharedType(message);
+  if (at === undefined) return new NTError({ code: "NT2001", message: msg, hint });
   return new NTError({
     code: "NT2001",
-    message: `${message} at ${at.line}:${at.col}`,
+    message: `${msg} at ${at.line}:${at.col}`,
     hint,
     spans: [{ line: at.line, label, primary: true, file: at.file, col: at.col }],
   });

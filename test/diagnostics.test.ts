@@ -637,6 +637,52 @@ describe("a diagnostic renders the file the error is in", () => {
     expect(locator).not.toContain("main.ts");
   });
 
+  test("a big type mismatch names the DIFFERENCE instead of dumping both types", () => {
+    // The two types here are ~390 characters and differ by exactly two: `?U`. Dumped in
+    // full, twice, the signal is 0.5% of the message — and that is the small version of
+    // the real one, where the same union is printed twice at ~2,700 characters each and
+    // the whole difference is a `?N` prefix. It is not a cosmetic complaint: an agent
+    // sent to minimize that blocker read the message, looked straight at the `, got`
+    // clause, and reported that the message "never states the type it actually got".
+    // A diagnostic nobody can read is one nobody acts on.
+    const big = [
+      "interface Big {",
+      ...Array.from({ length: 30 }, (_, i) => `  f${String(i + 1).padStart(2, "0")}: number;`),
+      "}",
+      "function pick(xs: Big[]): Big | undefined { if (xs.length > 0) return xs[0]; return undefined; }",
+      "function collect(src: Big[]): number {",
+      "  //@@mutable",
+      "  let acc: Big[] = [];",
+      "  const got = pick(src);",
+      "  acc.push(got);",
+      "  return acc.length;",
+      "}",
+      "console.log(collect([]));",
+      "",
+    ].join("\n");
+    const { out } = cliMulti({ "big.ts": big }, "big.ts");
+    expect(out).toContain("error[NT2001]");
+    // The expected type is still named — eliding it entirely would hide the `?U` too,
+    // which is the mistake truncation would have made.
+    expect(out).toContain("f01:number");
+    // ...but the SAME type is not dumped a second time. One occurrence, not two.
+    const dumps = out.split("f30:number").length - 1;
+    expect(dumps).toBe(1);
+    // and the difference is stated in words.
+    expect(out).toContain("?U");
+    expect(out.length).toBeLessThan(600);
+  });
+
+  test("a SHORT type mismatch is left exactly as it was", () => {
+    // The elision is gated on size on purpose: every ordinary mismatch — including the one
+    // recorded in test/selfhost-ratchet.baseline.json, whose two types are 68 characters —
+    // must render byte-identically, so this lane changes no message anyone is reading.
+    const src = ["function f(): number {", "  const s: string = \"x\";", "  return s;", "}", "console.log(f());", ""].join("\n");
+    const { out } = cliMulti({ "short.ts": src }, "short.ts");
+    expect(out).toContain("error[NT2001]: return type string does not match declared number");
+    expect(out).not.toContain("the SAME type");
+  });
+
   test("a single-file program still renders its own frame, unchanged", () => {
     const bad = ["const a = 1;", "const xs: number[] = [];", "xs.push(a);", ""].join("\n");
     const { out, code } = cliMulti({ "solo.ts": bad }, "solo.ts");
