@@ -627,7 +627,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // The rule still refuses the exact shape that was removed (verified by mutation).
     //
     // ast.ts is now at RUNG 3 -- four modules reach IR where three did.
-    ["NT1003", "NT1606"],
+    ["NT1606", "NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -871,10 +871,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `spawnMode` (an out-of-range `args[2]` read, fixed, advancing to NT1606's
     // `s.returnTy = ret`). Recorded as two memberships, not one, because that split is
     // the finding: the "one shared blocker" reading was first-blocker reasoning.
-    expect((byCode["NT1003"] ?? []).slice().sort()).toEqual(
+    // ...and NT1003 lasted ONE round: the self-recursive arrow was a scoping gap, not the
+    // closure gap its hint named, and clearing it moved the same five modules one line down
+    // to a union read where only the shared tag is narrowable. NT2001 is back, holding
+    // exactly the five it held before the split -- so this bucket has now emptied and
+    // refilled with the same membership, which is what a CONJUNCTION looks like from here.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
       ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
     );
-    expect(byCode["NT2001"] ?? []).toEqual([]);
+    expect(byCode["NT1003"] ?? []).toEqual([]);
     // NT1001 EMPTIES, and it is worth being precise about what did NOT happen: `.find`
     // over a heap element is still refused. What cleared is the one shape where the
     // element already IS a nullable box (`(T | undefined)[]`), so `.find` hands the
@@ -1292,10 +1297,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // `spawnMode` (an out-of-range `args[2]` read, fixed, advancing to NT1606's
     // `s.returnTy = ret`). Recorded as two memberships, not one, because that split is
     // the finding: the "one shared blocker" reading was first-blocker reasoning.
-    expect((byCode["NT1003"] ?? []).slice().sort()).toEqual(
+    // ...and NT1003 lasted ONE round: the self-recursive arrow was a scoping gap, not the
+    // closure gap its hint named, and clearing it moved the same five modules one line down
+    // to a union read where only the shared tag is narrowable. NT2001 is back, holding
+    // exactly the five it held before the split -- so this bucket has now emptied and
+    // refilled with the same membership, which is what a CONJUNCTION looks like from here.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
       ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
     );
-    expect(byCode["NT2001"] ?? []).toEqual([]);
+    expect(byCode["NT1003"] ?? []).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a
