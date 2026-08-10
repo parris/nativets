@@ -561,7 +561,20 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // saying plainly, because the bucket this came out of was named "union field before
     // narrowing": the union work is NOT what stands between these nine modules and the
     // next rung, and this set is the instrument that says so.
-    ["NT1001"],
+    //
+    // ...and NT1001 LEAVES, replaced by NT2001 — the TWELFTH refill, and for the FIFTH
+    // round running the holder is one function of `src/ast.ts` that nine modules inherit.
+    // Both halves of `exprLoc`'s `.map(…).find(…)` are now gone: the `.map` in one lane,
+    // the `.find` in the next. The `.find` half was the one that really was an OWNERSHIP
+    // question, and it opened for exactly one element shape — `(T | undefined)[]`, where
+    // the element already IS the `[tag,value]` box the answer needs, so the hit path
+    // hands that box straight back and allocates nothing. A plain object element still
+    // needs a second owner and is still NT1001; a `(T | null)[]` is now refused by name,
+    // because its result wants two nullish arms and the encoding carries one.
+    // What holds the nine now is `exprText`, ~20 lines further on: `e.optional === true`,
+    // comparing an optional boolean field with a boolean. Five rounds, one region of one
+    // file, and this time the construct is not about ownership either.
+    ["NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -770,14 +783,21 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // (`unionCommonField`, src/ast.ts). Different slots, or different types, stay refused
     // — each guard has a mutation test, and deleting the type one prints a string pointer
     // as a double.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
-    // The bucket the same nine moved INTO, and it is the same FUNCTION 22 lines further
-    // down: `exprLoc`'s `e.exprs.map((x) => exprLoc(x)).find(…)`, an array of NULLABLE
-    // elements. Four rounds running, one function of src/ast.ts has been the wall for
-    // nine modules — and this round it is not a union construct at all.
-    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual(
+    // ...and it REFILLS with the same nine, one round later, when `exprLoc` cleared
+    // entirely. `exprText` is the new holder: `e.optional === true`, an optional boolean
+    // field compared with a boolean. NOTE THE OWNER CHANGE — NT2001 was last held here by
+    // `exprLoc`'s two-member field read, which is gone; a code that empties and refills is
+    // the pattern this file keeps recording, and the tree-wide set cannot see it. The
+    // per-module move is in test/selfhost-ratchet.baseline.json.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
       ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
+    // NT1001 EMPTIES, and it is worth being precise about what did NOT happen: `.find`
+    // over a heap element is still refused. What cleared is the one shape where the
+    // element already IS a nullable box (`(T | undefined)[]`), so `.find` hands the
+    // existing box back instead of building a second owner around a borrowed pointer.
+    // Five rounds running, one region of src/ast.ts has been the wall for nine modules.
+    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual([]);
     // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
     // This is the DECISION the entry above named, arrived at: the typed walkers in
     // src/ast.ts write `e.ty = f(e.ty)` exactly where the reflective ones wrote
@@ -1098,7 +1118,15 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // above, which carries the reasoning.
     // ...and EMPTY again, on `exprLoc`'s two-member sub-union field read. Same bucket
     // above, which carries the reasoning; the nine moved to NT1001, also asserted above.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    // ...and REFILLED with the same nine — the fourth time this bucket has emptied and
+    // refilled, and the fourth time the holder is a different construct in the same file.
+    // NT1001 cleared (`exprLoc`'s `.find` over a `(T | undefined)[]` hands the element's
+    // existing box back rather than building a second owner), so `exprText`'s
+    // `e.optional === true` — an optional boolean compared with a boolean — is what the
+    // nine now sit on. Same bucket above, which carries the reasoning.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+      ["ast.ts", "checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
+    );
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
     // captured BINDING (a field of an owned local is not one). NT1031 has never had a

@@ -350,7 +350,26 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // again, NT2001 -> NT1001, and the next term is 22 LINES FURTHER DOWN THE SAME
   // FUNCTION: `e.exprs.map((x) => exprLoc(x))` at ast.ts:1518, an array of NULLABLE
   // elements. Still rung 0, still nine modules.
-  "ast.ts": { rung: 0, code: "NT1001", blame: "self" },
+  //
+  // ...and the `.find` HALF of that same line is now cleared too, so all nine rows move
+  // together for the third consecutive round: NT1001 -> NT2001, still rung 0. Unlike the
+  // `.map` half this one WAS the ownership rule, and it opened for exactly one element
+  // shape rather than in general. `.find` over a `(T | undefined)[]` hands back the
+  // element's own `[tag,value]` box — node cannot tell "found `undefined`" from "found
+  // nothing" either, so one arm is the whole answer and the hit path allocates nothing.
+  // A plain object element stays refused (that one really would need a fresh box owning
+  // a pointer the array still holds) and a `(T | null)[]` stays refused for a NEW and
+  // better reason: its result is `T | null | undefined` and the `?N`/`?U` encoding
+  // carries one nullish arm, not two. That refusal is what disarms the collapse the
+  // previous round left armed.
+  //
+  // Both guards proved by MUTATION, both silent wrong answers at EXIT 0:
+  //   - re-box the already-boxed element: node `r 7 14`, nativets `r 1e-323 2.14e-314`;
+  //   - drop the borrow rule: `const h: Loc = hit` becomes a second owner and frees the
+  //     array's element, so `xs[1].line` prints `1e-323` where node prints `3`.
+  // The next term is `exprText`, ~20 lines further on: `e.optional === true`, comparing
+  // an optional boolean field with a boolean (NT2001).
+  "ast.ts": { rung: 0, code: "NT2001", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -412,7 +431,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. parser.ts's own 18
   // `this.<field>` push sites are NOT cleared — a field names no binding the ownership
   // pass can prove unique, so they stay NT1606 behind this.
-  "parser.ts": { rung: 0, code: "NT1001", blame: "ast.ts" },
+  "parser.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -456,7 +475,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `.push` legal on a `@@mutable` accumulator, nothing stops here any more and all four
   // walk through to ast.ts's ONE `trimEnd` site (NT1002). driver.ts goes to lexer.ts's
   // NT2001 instead. Neither lane could have measured this alone.
-  "checker.ts": { rung: 0, code: "NT1001", blame: "ast.ts" },
+  "checker.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -467,7 +486,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
   // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
   // fires first through the link. Its own tables are the same shape and sit behind it.
-  "codegen.ts": { rung: 0, code: "NT1001", blame: "ast.ts" },
+  "codegen.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
   // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
   // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
@@ -482,7 +501,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Both rows moved to their real blockers, and the blame column is the interesting part:
   // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
   // below; coverage-preprocess.ts finally has one of its OWN.
-  "coverage.ts": { rung: 0, code: "NT1001", blame: "ast.ts" },
+  "coverage.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -499,8 +518,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // The Map spread in `clone` was the one blocker this module ever owned in the STANDALONE
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
-  "ownership.ts": { rung: 0, code: "NT1001", blame: "ast.ts" },
-  "driver.ts": { rung: 0, code: "NT1001", blame: "ast.ts" },
+  "ownership.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "driver.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
   //
@@ -529,14 +548,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
   // and it only ever held it because this lane had not landed yet. Sixth time a merge here
   // produced a frontier neither side could have computed from its own diff.
-  "cli.ts": { rung: 0, code: "NT1001", blame: "ast.ts" },
+  "cli.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
   // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
   // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
-  "modules.ts": { rung: 0, code: "NT1001", blame: "ast.ts" },
+  "modules.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
@@ -674,7 +693,7 @@ const STAGE1: Entry = { file: "cli.ts", path: () => pathOf("cli.ts"), argv: () =
 // (`unionCommonField`). Stage-1 inherits ast.ts's `exprLoc` either way: the blocker moved
 // 22 lines down that one function, from the `e.left` read to the `.map` over its own
 // recursive calls. Still rung 0, still nine modules — the conjunction, again.
-const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT1001" };
+const STAGE1_BASELINE: { rung: Rung; code: string } = { rung: 0, code: "NT2001" };
 
 describe("SH6: the instrument itself — the upper rungs are exercised, not dead code", () => {
   /**
@@ -1124,8 +1143,24 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // Note the `?N` trap waiting there: `.find` returns `makeNullable("undefined", el)`,
       // which on a `(string|null)[]` collapses `?Nstring` to `?Ustring` and loses the null
       // arm. Fine for the `?U` elements THIS site has; not fine in general.
-      expect(m.error).toContain(".find on (?U{");
-      expect(m.code).toBe("NT1001");
+      //
+      // TWENTIETH — that `.find`, and the trap with it. The ownership rule was real here
+      // in a way it was not for `.map`, and it was answered rather than deleted: `.find`
+      // over a `(T | undefined)[]` hands back the element's OWN box (allocation-free,
+      // node cannot distinguish "found `undefined`" from "found nothing"), and the
+      // resulting binding is a BORROW, so moving it out is NT1604 exactly as a `for-of`
+      // element over a linear array already is. The `?N` collapse became an explicit
+      // refusal naming the real cause — `T | null | undefined` needs two nullish arms and
+      // the encoding carries one — so lifting the element guard later cannot silently
+      // resurrect it. A plain object element is still refused, and its hint now names the
+      // index-search spelling `fieldType` (src/ast.ts) already uses, COMPILED by
+      // test/find-borrow.test.ts rather than merely asserted.
+      //
+      // Two silent wrong answers were removed on the way, both found by mutation and both
+      // exit 0 on BOTH sides — see test/find-borrow.test.ts for the numbers. The line
+      // now clears entirely; `exprText`'s `e.optional === true` is what stops ast.ts next.
+      expect(m.error).toContain("Cannot compare ?Uboolean with boolean");
+      expect(m.code).toBe("NT2001");
       return;
     }
 

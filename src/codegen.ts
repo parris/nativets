@@ -4850,6 +4850,22 @@ class FnGen {
     this.emit(`${es} = call i64 @nt_arr_get(ptr ${src}, double ${h})`);
     const miss = this.fresh();
     this.emit(`${miss} = xor i1 ${found}, true`);
+    // A NULLABLE element is ALREADY a `[tag, value]` box, so boxing it again would build
+    // a box holding a box while the static type (`el`, one level) described one. Reading
+    // a field off the result then loaded the inner box's TAG and bitcast it to a double:
+    //     node `r 7 14`   nativets `r 1e-323 2.1326037835e-314`   exit 0 on BOTH sides.
+    // Hand the element's own box back instead — allocation-free, and node cannot tell
+    // "found `undefined`" from "found nothing" anyway, so one arm is all the answer has.
+    // Optional chaining reached the identical conclusion at `genOptionalChain` ("keep it
+    // if the final field type is itself nullable"); this is that rule, one method over.
+    if (isNullableTy(el)) {
+      const ep = this.fromSlot(es, el);
+      const sel = this.fresh();
+      // A `select` and not a branch: both arms are already materialised, and the miss box
+      // is a constant-shaped allocation whose cost is a miss the loop already paid for.
+      this.emit(`${sel} = select i1 ${miss}, ptr ${this.nullBox("0", "0")}, ptr ${ep}`);
+      return { v: sel, ty: el };
+    }
     return { v: this.nullBox(this.nullTagIf(miss), es), ty: makeNullable("undefined", el) };
   }
 

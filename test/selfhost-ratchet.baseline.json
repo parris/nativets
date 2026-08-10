@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "2c4445f"
+    "rev": "5456cc5"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "d1e8d591c33ed5ac",
+      "sha256": "f5d36e2d72be5762",
       "standalone": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
       }
     },
     "checker.ts": {
-      "sha256": "328afe73eebfc5e3",
+      "sha256": "baa6ebb75834b510",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
       }
     },
     "cli.ts": {
@@ -40,12 +40,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
       }
     },
     "codegen.ts": {
-      "sha256": "0961b5f5b6db1a8a",
+      "sha256": "0e04e3367dd27413",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
       }
     },
     "coverage-preprocess.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
       }
     },
     "lexer.ts": {
@@ -133,12 +133,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
       }
     },
     "ownership.ts": {
-      "sha256": "353673343508701f",
+      "sha256": "c32f59e9a132ae65",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
       }
     },
     "parser.ts": {
-      "sha256": "7ec18495b6301a7b",
+      "sha256": "4e54e0685fb02f85",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Cannot compare ?Uboolean with boolean at L:C"
       }
     }
   }

@@ -828,6 +828,52 @@ aliased, passed as an argument, stored, captured by another closure) is still ne
 naive version of this — putting function types back into `isLinearTy` — was measured and frees
 the escaping-counter idiom's live env: exit 255. See docs/ROADMAP.md's Phase C.
 
+### `.find` / `.findLast` — one element shape opens, two stay refused, and the result is a BORROW
+
+`.find` over a `(T | undefined)[]` compiles. Over anything else heap-shaped it is `NT1001`, and
+the three cases have three different reasons — which is the whole content of this entry, because
+they had one shared (and partly wrong) reason before.
+
+| element | verdict | why |
+|---|---|---|
+| `number` / `string` / `boolean` | compiles | the result is a freshly boxed **copy**; it owns itself |
+| `(T \| undefined)[]` | compiles | the element **is** a `[tag,value]` box; hand that box back |
+| `(T \| null)[]` | `NT1001` | the result is `T \| null \| undefined` — **two** nullish arms |
+| `Loc[]`, `Loc[][]`, `U<…>[]` | `NT1001` | a fresh box owning a pointer the array still holds |
+
+**Why `(T | undefined)[]` is not a relaxation of the aliasing rule.** node's `.find` cannot
+distinguish "found `undefined`" from "found nothing" — both answer `undefined` — so one nullish
+arm is the entire answer and the hit path returns the element's own box unchanged. Nothing is
+allocated and nothing is re-wrapped. Re-wrapping it *was* the bug: a box holding a box, described
+by a static type with one level, so a field read loaded the inner box's **tag** and bit-cast it
+to a double. `node r 7 14` against `nativets r 1e-323 2.1326037835e-314`, **exit 0 on both
+sides**.
+
+**Why `(T | null)[]` is refused rather than answered.** `?N`/`?U` is a one-arm encoding, and node
+tells the arms apart (`x === null` against `x === undefined`). The old code path did not refuse —
+it called `makeNullable("undefined", el)`, which computes `baseTy("?Nstring")` first and answers
+`?Ustring`, dropping the null arm from the static type with no diagnostic. Unreachable at the
+time because the element guard sat in front of it; refused by name now, so lifting that guard
+cannot resurrect it.
+
+**The result is a BORROW.** `const hit = xs.find(p)` over a linear element type binds a name that
+aliases an element the array still owns, so moving it out is `NT1604` — the same answer a `for-of`
+element over a linear array already gives (rustc E0507). Without that rule
+`const h: Loc = hit` under a narrowing becomes a second owner and frees the array's element:
+`node after 3 4` against `nativets after 1e-323 1e-323`, again exit 0 on both sides.
+
+**The refused case has a compilable hint**, and it is not the obvious one. `const hit = xs[i]!`
+is `NT1605` — binding an element is a second owner — so the hint says to *read through* the
+index, which is the spelling `fieldType` (`src/ast.ts`) already uses for exactly this reason:
+
+```ts
+const i = xs.findIndex((l) => l.line === 3);
+if (i >= 0) console.log(xs[i]!.col);
+```
+
+`.at` carries the identical element guard and has NOT been widened; it will need the same three
+decisions. Pinned in `test/find-borrow.test.ts`, both guards proved by mutation.
+
 ### Modules (SH1) — a whole-program link, and no import cycles
 
 `import`/`export` across `.ts` files are compiled by resolving the graph from the entry file and

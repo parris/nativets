@@ -4346,3 +4346,78 @@ Two things follow for whoever clears `ast.ts`'s `NT2001`:
   cross-compiling driver is *for*, so the options are a `process.platform` builtin, a
   compile-time target constant, or hoisting both branches into the runtime. Worth settling
   before someone reaches for the quickest of the three.
+
+---
+
+## `.find` over a `(T | undefined)[]` — the other half of `exprLoc`'s line
+
+The `.map` half of `exprLoc`'s `e.exprs.map((x) => exprLoc(x)).find((l) => l !== undefined)`
+cleared last round and handed the frontier 22 lines along to the `.find`. That entry warned that
+this one **is** the ownership rule and that a `?N` trap was armed behind it. Both were true, and
+the answer to each is worth recording because they pull in opposite directions: one widened, one
+tightened.
+
+**What opened, and why it is a difference in kind rather than degree.** `.find` over a
+`(T | undefined)[]` returns the element's **own** `[tag, value]` box. Nothing is allocated on the
+hit path and nothing is rewrapped, because node cannot distinguish "found `undefined`" from
+"found nothing" either — both answer `undefined`, so one nullish arm is the entire answer. That
+is the same conclusion optional chaining reached independently at `genOptionalChain` ("keep it if
+the final field type is itself nullable"); this is that rule one method over.
+
+**What stayed shut.** A plain object element is still `NT1001`. That case genuinely needs a fresh
+box owning a pointer the array still holds — a second owner — which is exactly what the
+refusal's original text ("a heap element would alias its owner") always said. It was a red
+herring for `.map`, which builds a fresh array that owns its elements; it is accurate here.
+
+**The `?N` trap, disarmed rather than inherited.** `(T | null)[]` is now refused *by name*: its
+result is `T | null | undefined`, node can tell those apart (`x === null` against
+`x === undefined`), and the `?N`/`?U` encoding carries one nullish arm, not two. Previously it
+fell through to `makeNullable("undefined", el)`, which computes `baseTy("?Nstring")` first and
+answers `?Ustring` — the null arm gone with no diagnostic, latent only because the element guard
+made it unreachable. A refusal that names the real cause cannot be silently re-armed by the next
+lane to touch the guard.
+
+**Both guards proved by MUTATION, both silent wrong answers at exit 0 on both sides.**
+
+| Guard removed | node | nativets |
+|---|---|---|
+| codegen re-boxes the already-boxed element | `r 7 14` | `r 1e-323 2.1326037835e-314` |
+| ownership borrow rule dropped | `after 3 4` | `after 1e-323 1e-323` |
+
+The first is type confusion: a box holding a box, read as one level, so a field load returned the
+inner box's **tag** bit-cast to a double. The second is a use-after-free: `const h: Loc = hit`
+became a second owner and freed the array's element at block exit. `.find`'s result over a linear
+element is therefore a **borrow** — `searchBorrowBase` (`src/ownership.ts`) makes moving it out
+`NT1604`, the same answer a `for-of` element over a linear array already gives.
+
+**The hint is compiled, not asserted.** The object-element refusal now names the index-search
+spelling `fieldType` (`src/ast.ts`) already uses, and `test/find-borrow.test.ts` runs it against
+node. The trap it avoids is specific: the obvious rewrite `const hit = xs[i]!` is `NT1605`
+(binding an element is a second owner), so the hint has to say *read through* the index.
+
+**Frontier delta.** `blocker-metric` reads **268/667**, from 268/666. Flat again, and again
+that is promotion rather than a null result — but the LINKED column moved for **every module at
+once**: `.find` was the recorded blocker for all nine of `ast.ts`, `parser.ts`, `checker.ts`,
+`codegen.ts`, `coverage.ts`, `ownership.ts`, `driver.ts`, `cli.ts` and `modules.ts`, because they
+all import `ast.ts`. Three rounds running, one site in `exprLoc` has gated nine modules.
+
+**Next term, same function, ~20 lines on.** `exprText`'s `e.optional === true` — `NT2001`,
+comparing an optional boolean field (`?Uboolean`) with a `boolean`. Not an ownership question at
+all.
+
+**A pre-existing hole found on the way, and NOT fixed here.** The move-out corruption above is
+reachable with no `.find` anywhere, through an optional object field:
+
+```ts
+interface Loc { line: number; col: number }
+interface Box { loc?: Loc }
+const b: Box = { loc: { line: 3, col: 4 } };
+const hit = b.loc;
+if (hit !== undefined) { const h: Loc = hit; console.log(h.line, h.col); }
+console.log(b.loc!.line, b.loc!.col);   // node: 3 4    nativets: 1e-323 1e-323
+```
+
+Exit 0 on both sides. A narrowed nullable binding that ALIASES a field is not registered as a
+borrow the way a `for-of` element is, so rebinding it under the narrowing creates a second owner.
+`collectAliases` already handles the non-nullable spelling (`const b = o.lines`); the nullable
+one falls through. That is a general ownership gap, not a `.find` gap, and it wants its own lane.
