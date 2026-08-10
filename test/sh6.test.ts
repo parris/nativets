@@ -369,7 +369,37 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   //     array's element, so `xs[1].line` prints `1e-323` where node prints `3`.
   // The next term is `exprText`, ~20 lines further on: `e.optional === true`, comparing
   // an optional boolean field with a boolean (NT2001).
-  "ast.ts": { rung: 0, code: "NT2001", blame: "self" },
+  //
+  // ...and `exprText` IS CLEARED, and this is the round where the BLAME COLUMN moved for
+  // the first time in this file's history: eight rows stopped blaming `ast.ts`. Read that
+  // column, not the code column — `ast.ts` was the deepest shared term in the conjunction,
+  // and every module that imports it (which is every module) inherited this one line.
+  // They now stop on their own blockers, or on `parser.ts`/`checker.ts`.
+  //
+  // The line was `if (e.kind === "AsExpr" || e.kind === "SatisfiesExpr") return exprText(e.expr);`
+  // and it had been read as a LAYOUT problem — evidence that `unionCommonField`'s
+  // same-slot rule was too narrow, needing either agreeing layouts or a runtime tag test
+  // per read. It was neither. A census of every union-field refusal the checker reaches
+  // over the linked stage-1 program (15 sites, instrumented at the throw) showed the
+  // receiver arriving here with all 26 members still live: `narrowTagsInto` handled the
+  // CONJUNCTION polarities only (`&&` when true, `||` when false), so the `||` proved
+  // nothing at all and the read was tested against the whole union. `AsExpr` and
+  // `SatisfiesExpr` both carry `expr` at slot 1 with type `Expr`, so the shipped
+  // same-slot rule accepted the read the instant the narrowing was right.
+  //
+  // The census is the part worth keeping, because it retires the premise rather than one
+  // site. Of the 15: SIX are not layout at all (the field is absent from 24-29 of 30
+  // members, so tsc refuses too — each is a DIFFERENT missing narrowing form: this `||`,
+  // a while-condition that does not reach the loop body, assignment narrowing, a ternary
+  // condition, and a `?.` receiver ruled unstable). TWO are pure slot disagreements, and
+  // both are gratuitous field-ORDER accidents in `src/ast.ts`'s own interfaces
+  // (`WhileStmt {kind,test,body}` vs `DoWhileStmt {kind,body,test}`) — fixable in the
+  // source declaration, with no compiler change at all. SEVEN are `.ty` on `Expr`, which
+  // differs in slot (1..5) AND in type (`?Ustring` everywhere except `AsExpr`/
+  // `SatisfiesExpr`, where `ty: Ty` is required) — so neither agreeing layouts nor a
+  // runtime tag test reaches them on its own; the TYPE must be unified first. ZERO of
+  // the 15 need a runtime tag test per read. Nobody should build one on this evidence.
+  "ast.ts": { rung: 0, code: "NT1001", blame: "self" },
   // Was NT1014 (`new Set([...])` for REGEX_AFTER_KEYWORD) until the collections lane made
   // `new Set(iterable)` compile. It then sat on NT2001 for two rounds, and the recorded
   // reason ("the ESCAPES object literal") was WRONG — measured, the first blocker was
@@ -431,7 +461,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. parser.ts's own 18
   // `this.<field>` push sites are NOT cleared — a field names no binding the ownership
   // pass can prove unique, so they stay NT1606 behind this.
-  "parser.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "parser.ts": { rung: 0, code: "NT2001", blame: "self" },
   // THE CRUX MOVED, then moved again. `Record<string, number | "var">` compiles, so
   // checker.ts left NT1009; it then stopped on `delete o.k` (NT1606), which the delete
   // lane established must STAY refused — node distinguishes an absent key from a
@@ -475,7 +505,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // `.push` legal on a `@@mutable` accumulator, nothing stops here any more and all four
   // walk through to ast.ts's ONE `trimEnd` site (NT1002). driver.ts goes to lexer.ts's
   // NT2001 instead. Neither lane could have measured this alone.
-  "checker.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "checker.ts": { rung: 0, code: "NT2001", blame: "self" },
   // Left NT1015 (static members) and reached further — an unnamed parse error at 582:33.
   // ...then NT1023 on `ModuleGen.build`, same accumulator shape, same `//@@mutable` fix,
   // and behind it NT1015 again — this time a `get` accessor in `FnGen`, ~165 lines deeper.
@@ -486,7 +516,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Left NT1002 when `in` landed. MEASURED, not assumed: the lane predicted codegen.ts
   // would stop on its OWN four `Record` tables, and it does not — ast.ts's HOST_MODULES
   // fires first through the link. Its own tables are the same shape and sit behind it.
-  "codegen.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "codegen.ts": { rung: 0, code: "NT2001", blame: "checker.ts" },
   // The NT1702 is GONE, and it was never a missing language feature — it was a defect in
   // the compiler's OWN module graph. `coverage.ts → coverage-preprocess.ts → coverage.ts`,
   // closed by `import type { Blocker }`. node and bun erase that edge, so the cycle did not
@@ -501,7 +531,7 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // Both rows moved to their real blockers, and the blame column is the interesting part:
   // coverage.ts is clean on its own and inherits ast.ts's, exactly as this file predicted
   // below; coverage-preprocess.ts finally has one of its OWN.
-  "coverage.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "coverage.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
   // Still inherits checker.ts's blocker, and has now followed it through THREE codes —
   // NT1009 -> NT1606 -> NT1027 — without ever having a blocker of its own under the link.
   // The long-standing "ownership.ts is credited with checker.ts's problem" attribution
@@ -518,8 +548,8 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // The Map spread in `clone` was the one blocker this module ever owned in the STANDALONE
   // column, and clearing it makes that column BLIND: what it reports now is the unlinked-import
   // artifact (see the ratchet baseline). Linked, it still inherits, as it always has.
-  "ownership.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
-  "driver.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "ownership.ts": { rung: 0, code: "NT2001", blame: "checker.ts" },
+  "driver.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
   // Stage-1's entry point now stops on its OWN code for the first time: calling the async
   // `buildBinary` without `await`. Not a dependency's blocker.
   //
@@ -548,14 +578,14 @@ const BASELINE: Record<string, { rung: Rung; code: string; blame: string }> = {
   // reflective `mapTypesDeep`. NT2001 is now EMPTY tree-wide — cli.ts was its last holder,
   // and it only ever held it because this lane had not landed yet. Sixth time a merge here
   // produced a frontier neither side could have computed from its own diff.
-  "cli.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "cli.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
   // Followed parser.ts through the link: when parser.ts stopped blaming itself, the three
   // modules that inherited its `?.[]` all moved to ast.ts's NT1030 together.
   // Followed ast.ts off the entries form onto ast.ts's `HOST_MODULES` Record literal.
   // Followed lexer.ts off `.push` onto lexer.ts's NT2001. Its own accumulators are pushed
   // from inside CAPTURING arrows (`const walk = (list) => { out.push(…) }`), which the
   // accumulator opt-in refuses — see the closure rule in src/ownership.ts.
-  "modules.ts": { rung: 0, code: "NT2001", blame: "ast.ts" },
+  "modules.ts": { rung: 0, code: "NT2001", blame: "parser.ts" },
   // `line++` inside `advance` — a write to a captured binding, the SAME blocker lexer.ts
   // sat on for two rounds. Its own, not inherited: this module is now a true leaf, since
   // the type-only import cycle that used to mask it moved out of the way.
@@ -1167,13 +1197,20 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // NOT `Boolean(…)`, which is unimplemented here (NT1003) and would trade a narrowing
       // gap the checker could one day close for a global it never can.
       //
-      // What stops `ast.ts` now is the union-field-before-narrowing shape: `exprText`
-      // reading `.expr` off a receiver narrowed to 26 members at once. That is the largest
-      // measured remaining bucket, and it is a genuine gap rather than a spelling — the
-      // field must sit at the SAME SLOT INDEX in every surviving member for a read to
-      // compile to one offset, which is a condition tsc never has to check.
-      expect(m.error).toContain("does not exist on");
-      expect(m.error).toContain("narrowed here to MORE THAN ONE member");
+      // TWENTY-SECOND — and `exprText` clears too. The note this replaces said the
+      // 26-member union field read was "a genuine gap rather than a spelling" and that
+      // the SAME SLOT INDEX rule was what stood in the way. Both halves were wrong, and
+      // the correction is recorded at the `ast.ts` BASELINE row above: the `||` of two
+      // tag tests proved NOTHING (`narrowTagsInto` handled the conjunction polarities
+      // only), so the read never saw the two-member sub-union it was written for — on
+      // which `expr` is at slot 1 in both members and the shipped rule accepts it. A
+      // first-blocker line is a poor place to diagnose from; the census in the BASELINE
+      // note is what settled it.
+      //
+      // What stops stage-1 now is a RETURN TYPE mismatch between the same union spelled
+      // through a module alias and spelled directly (`@Expr` vs `@_nts0_m2_Expr` in the
+      // dump) — a linker/type-identity question, not a narrowing one.
+      expect(m.error).toContain("does not match declared");
       expect(m.code).toBe("NT2001");
       return;
     }

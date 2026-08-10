@@ -1179,3 +1179,271 @@ console.log(f());
     expect(messageOf(src)).toContain("'o' is assigned between it and this read");
   });
 });
+
+/*
+ * DISJUNCTION NARROWING — `if (e.kind === "A" || e.kind === "B")`.
+ *
+ * WHY THIS IS A NARROWING LANE AND NOT A LAYOUT ONE. The compiler's own headline
+ * self-hosting blocker reads
+ *
+ *     [NT2001] Property 'expr' does not exist on <26-member union> — 'e' is narrowed
+ *     here to MORE THAN ONE member, so only the shared tag 'kind' is readable
+ *
+ * at `src/ast.ts`'s `exprText`, on the line
+ *
+ *     if (e.kind === "AsExpr" || e.kind === "SatisfiesExpr") return exprText(e.expr);
+ *
+ * and it was read as evidence that the same-slot rule in `unionCommonField` is too
+ * narrow. It is not. A census of every union-field refusal the checker reaches while
+ * checking the linked stage-1 program (15 sites) showed the receiver there arriving
+ * with all 26 members still live: the `||` proved NOTHING, so the read was tested
+ * against the whole union rather than against `{AsExpr, SatisfiesExpr}`. Both of those
+ * members carry `expr` at slot 1 with type `Expr`, so `unionCommonField` accepts the
+ * read the instant the narrowing is right. The layout rule was never the blocker.
+ *
+ * `narrowTagsInto` handled the CONJUNCTION polarities only — `&&` when true, `||` when
+ * false (De Morgan) — and returned `false` for the other two, which is sound but
+ * vacuous. The two missing polarities are the DISJUNCTION: `a || b` when true, and
+ * `!(a && b)`. What a disjunction proves is the UNION of what its arms prove, and the
+ * multi-tag sub-union that produces is not a new representation — `switch` with
+ * fall-through `case`s (`case "A": case "B":`) has produced exactly it since SH2.
+ *
+ * SOUNDNESS, and it is the whole rule: a disjunction proves something only when EVERY
+ * arm constrains the SAME access path. `a.kind === "A" || b.kind === "B"` proves
+ * nothing about `a` (the `b` arm may be the true one and `a` may be any member), and
+ * keeping one arm's constraint is a wrong-slot read. The two REFUSED tests below are
+ * mutation tests for exactly that, and for the union-vs-first-arm error.
+ */
+describe("a disjunction of tag tests narrows to the SUB-UNION of its arms", () => {
+  const AB = `interface A { kind: "A"; expr: string; n: number }
+interface B { kind: "B"; expr: string; z: boolean }
+interface C { kind: "C"; other: number }
+type U = A | B | C;
+`;
+
+  test("`||` of two tag tests makes the SHARED field readable in the arm", async () => {
+    const src = `${AB}function f(u: U): string {
+  if (u.kind === "A" || u.kind === "B") return u.expr;
+  return "c" + String(u.other);
+}
+console.log(f({ kind: "A", expr: "aa", n: 1 }));
+console.log(f({ kind: "B", expr: "bb", z: true }));
+console.log(f({ kind: "C", other: 7 }));
+`;
+    expect(codeOf(src)).toBe(null);
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  /*
+   * MUTATION 1 — the union, not the first arm.
+   *
+   * `disjunctTags` merges both arms' tag sets. Returning only the LEFT arm's set instead
+   * (`return l;` in place of the merge) narrows `u` to `A` alone, and the program below
+   * then BUILDS CLEAN and the binary dies with SIGSEGV (exit 139) where node prints `hi`
+   * at exit 0 — `u` is a `B`, whose slot 1 is the double `pad`, loaded as `A`'s `v`
+   * string pointer. Merging keeps `{A, B}`, on which `v` sits at slot 1 in one member
+   * and slot 2 in the other, so `unionCommonField` refuses the read. The refusal below
+   * is the evidence that the sub-union really is the UNION of the arms.
+   */
+  test("REFUSED: the sub-union's shared field must still agree on a slot", () => {
+    const src = `interface A { kind: "A"; v: string; pad: number }
+interface B { kind: "B"; pad: number; v: string }
+interface C { kind: "C"; other: number }
+type U = A | B | C;
+function f(u: U): string {
+  if (u.kind === "A" || u.kind === "B") return u.v;
+  return "c";
+}
+console.log(f({ kind: "B", pad: 1, v: "hi" }));
+`;
+    expect(codeOf(src)).toBe("NT2001");
+    expect(messageOf(src)).toContain("MORE THAN ONE member");
+  });
+
+  /*
+   * MUTATION 2 — every arm must constrain the SAME path.
+   *
+   * Dropping the `l.p.binding !== r.p.binding || l.p.path !== r.p.path` guard makes the
+   * program below compile and print `2.156035505e-314` AT EXIT 0 where node prints
+   * `hello` — the sixth appearance of that exact shape (a string pointer loaded as a
+   * double) in this project's history. The `b` arm is the true one and proves nothing
+   * whatsoever about `a`, which is a `B`.
+   *
+   * The same mutant on the `string`-valued spelling of this fixture SIGSEGVs instead
+   * (a double loaded as a pointer), which is only the same defect pointing the other
+   * way; the printable direction is kept here because a silent wrong answer at exit 0
+   * is the outcome this project ranks worst and a test should pin the worst one.
+   */
+  test("REFUSED: a disjunction over two DIFFERENT receivers proves nothing", () => {
+    const src = `interface A { kind: "A"; v: number }
+interface B { kind: "B"; v: string }
+type U = A | B;
+function f(a: U, b: U): number {
+  if (a.kind === "A" || b.kind === "A") return a.v;
+  return -1;
+}
+console.log(f({ kind: "B", v: "hello" }, { kind: "A", v: 3 }));
+`;
+    expect(codeOf(src)).toBe("NT2001");
+  });
+
+  /* An arm that proves nothing makes the WHOLE disjunction prove nothing — it does not
+   * merely contribute no tags. `u.kind === "A" || flag` is true for every member when
+   * `flag` is, so keeping the `A` from the left arm is mutation 2 wearing a disguise. */
+  test("REFUSED: one non-tag arm sinks the whole disjunction", () => {
+    const src = `interface A { kind: "A"; v: number }
+interface B { kind: "B"; v: string }
+type U = A | B;
+function f(u: U, flag: boolean): number {
+  if (u.kind === "A" || flag) return u.v;
+  return -1;
+}
+console.log(f({ kind: "B", v: "hello" }, true));
+`;
+    expect(codeOf(src)).toBe("NT2001");
+  });
+
+  test("three arms merge, and the ELSE arm still sees the complement", async () => {
+    const src = `interface A { kind: "A"; v: string; a: number }
+interface B { kind: "B"; v: string; b: number }
+interface C { kind: "C"; v: string; c: number }
+interface D { kind: "D"; d: number }
+type U = A | B | C | D;
+function f(u: U): string {
+  if (u.kind === "A" || u.kind === "B" || u.kind === "C") return u.v;
+  return "d" + String(u.d);
+}
+console.log(f({ kind: "A", v: "a", a: 1 }));
+console.log(f({ kind: "B", v: "b", b: 2 }));
+console.log(f({ kind: "C", v: "c", c: 3 }));
+console.log(f({ kind: "D", d: 4 }));
+`;
+    expect(codeOf(src)).toBe(null);
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  /* The OTHER missing polarity. `!(a && b)` is `!a || !b`, so the `if` arm of a negated
+   * conjunction is a disjunction and goes down the same path. */
+  test("a negated conjunction narrows as the disjunction it is", async () => {
+    const src = `interface A { kind: "A"; v: string; a: number }
+interface B { kind: "B"; v: string; b: number }
+interface C { kind: "C"; other: number }
+type U = A | B | C;
+function f(u: U): string {
+  if (!(u.kind !== "A" && u.kind !== "B")) return u.v;
+  return "c";
+}
+console.log(f({ kind: "A", v: "aa", a: 1 }));
+console.log(f({ kind: "B", v: "bb", b: 2 }));
+console.log(f({ kind: "C", other: 9 }));
+`;
+    expect(codeOf(src)).toBe(null);
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  /* A disjunction nested under a conjunction reads against what the conjuncts before it
+   * already proved — the sequential rule `narrowTagsInto` documents, unchanged. */
+  test("a disjunction inside a conjunction composes with it", async () => {
+    const src = `interface A { kind: "A"; v: string; a: number }
+interface B { kind: "B"; v: string; b: number }
+interface C { kind: "C"; other: number }
+type U = A | B | C;
+function f(u: U): string {
+  if (u.kind !== "C" && (u.kind === "A" || u.kind === "B")) return u.v;
+  return "c";
+}
+console.log(f({ kind: "A", v: "aa", a: 1 }));
+console.log(f({ kind: "B", v: "bb", b: 2 }));
+console.log(f({ kind: "C", other: 9 }));
+`;
+    expect(codeOf(src)).toBe(null);
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  /*
+   * PRE-EXISTING BUG, found by widening onto it and reproduced on the BASE tree without
+   * any of this lane's changes — `switch (o.inner.kind) { case "A": case "B": … }` is
+   * enough, and has been since SH2.
+   *
+   *     InternalError: internal compiler error: .v is not at one slot in every member
+   *     of U<{kind:"A",…}|{kind:"B",…}|{kind:"C",…}>
+   *
+   * The checker and codegen disagreed about the type of a narrowed dotted PATH. The
+   * checker types `o.inner` through `narrowedPath`, so `fieldOnBase` sees the two-member
+   * SUB-union and `unionCommonField` accepts `.v` at slot 1. Codegen re-derives the base
+   * type from the FIELD (`fieldType(Box, "inner")`), which is the full three-member
+   * union, and `narrowRead` — which exists precisely to apply the checker's narrowing at
+   * the read — handled a nullable and a general (boxed) union but had no arm for a plain
+   * discriminated one. So it handed the un-narrowed type back and the `unionCommonField`
+   * assertion one frame up fired.
+   *
+   * That assertion is the reason this was a loud crash rather than a wrong slot, and it
+   * is why it stayed hidden: it fires in CODEGEN, and every self-hosting instrument in
+   * the tree (`blocker-metric`, `coverage`, `self-host-coverage`) runs the CHECKER only
+   * and stops there — the metric's own header says so under "THE CHECKER ONLY". A defect
+   * that lives strictly downstream of the checker is invisible to all of them.
+   *
+   * The retype is FREE and needs no tag test: a discriminated union value IS the member
+   * pointer (see `src/ast.ts` `isUnionTy`), so narrowing changes only the layout the
+   * slots are read with. `narrowRead`'s own nullable arm already did exactly this for
+   * the union INSIDE a box (`isUnionTy(base) && e.ty !== base ? e.ty : base`); the bare
+   * case was simply missing.
+   */
+  test("a dotted PATH narrowed to a sub-union by a `switch` no longer crashes codegen", async () => {
+    const src = `interface A { kind: "A"; v: string; a: number }
+interface B { kind: "B"; v: string; b: number }
+interface C { kind: "C"; other: number }
+type U = A | B | C;
+interface Box { inner: U }
+function f(o: Box): string {
+  switch (o.inner.kind) {
+    case "A": case "B": return o.inner.v;
+    default: return "c";
+  }
+}
+console.log(f({ inner: { kind: "A", v: "aa", a: 1 } }));
+console.log(f({ inner: { kind: "B", v: "bb", b: 2 } }));
+console.log(f({ inner: { kind: "C", other: 9 } }));
+`;
+    expect(codeOf(src)).toBe(null);
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  /* A disjunction over a dotted PATH takes the `NarrowFact` road, not the shadow-binding
+   * one, and so inherits the stability rules `narrowPathInto` already enforces. */
+  test("a disjunction narrows a dotted PATH too", async () => {
+    const src = `interface A { kind: "A"; v: string; a: number }
+interface B { kind: "B"; v: string; b: number }
+interface C { kind: "C"; other: number }
+type U = A | B | C;
+interface Box { inner: U }
+function f(o: Box): string {
+  if (o.inner.kind === "A" || o.inner.kind === "B") return o.inner.v;
+  return "c";
+}
+console.log(f({ inner: { kind: "A", v: "aa", a: 1 } }));
+console.log(f({ inner: { kind: "B", v: "bb", b: 2 } }));
+console.log(f({ inner: { kind: "C", other: 9 } }));
+`;
+    expect(codeOf(src)).toBe(null);
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});

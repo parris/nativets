@@ -1,24 +1,24 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "eadf20b"
+    "rev": "a74a33e"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "c35a4dda79a2d759",
+      "sha256": "ca1a3484efec32be",
       "standalone": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
+        "code": "NT1001",
+        "message": "[NT1001] .map producing U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
       }
     },
     "checker.ts": {
-      "sha256": "4705d56becd29520",
+      "sha256": "e5c693d9e874e8c6",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -27,7 +27,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
+        "message": "[NT2001] return type U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:…"
       }
     },
     "cli.ts": {
@@ -41,11 +41,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
+        "message": "[NT2001] return type U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:…"
       }
     },
     "codegen.ts": {
-      "sha256": "0e04e3367dd27413",
+      "sha256": "7d9c7a76272d320f",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -54,7 +54,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
+        "message": "[NT2001] return type U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:…"
       }
     },
     "coverage-preprocess.ts": {
@@ -81,7 +81,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
+        "message": "[NT2001] return type U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:…"
       }
     },
     "diagnostics.ts": {
@@ -108,7 +108,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
+        "message": "[NT2001] return type U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:…"
       }
     },
     "lexer.ts": {
@@ -134,11 +134,11 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
+        "message": "[NT2001] return type U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:…"
       }
     },
     "ownership.ts": {
-      "sha256": "bfc30638815ae728",
+      "sha256": "d730fd725daa408a",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -148,7 +148,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
+        "message": "[NT2001] return type U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:…"
       }
     },
     "parser.ts": {
@@ -161,7 +161,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] Property 'expr' does not exist on {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],expr…"
+        "message": "[NT2001] return type U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:…"
       }
     }
   }

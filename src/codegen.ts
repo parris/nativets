@@ -2208,7 +2208,24 @@ class FnGen {
         // read with changes — so take the checker's answer wherever it narrowed. Done on
         // the MemberExpr (not on the Identifier) so it covers every producer of a union
         // value alike: a local, a closure capture, a `for-of` element, a call result.
-        if (isUnionTy(obj.ty) && e.object.ty !== undefined && isObjectTy(e.object.ty)) obj = { v: obj.v, ty: e.object.ty };
+        //
+        // A narrowed receiver is a SUB-UNION as often as it is a single member, and that
+        // second case was missing here — `isObjectTy` alone. `switch (o.inner.kind) {
+        // case "A": case "B": return o.inner.v; }` has produced one since SH2, and the
+        // checker accepts `.v` on it whenever `unionCommonField` does; codegen then
+        // re-derived the receiver type from the FIELD (`fieldType(Box, "inner")`, the
+        // WHOLE union), asked `unionCommonField` about that instead, and died on the
+        // assertion below. A loud InternalError rather than a wrong slot, because that
+        // assertion is there — but a crash on a program the checker had blessed.
+        //
+        // Only a discriminated union may be retyped this way, and only from a union: the
+        // move is sound exactly because a `U<…>` value IS the member pointer, so the
+        // retype emits nothing. When nothing was narrowed the checker's stamp is the same
+        // type and this is a no-op.
+        const narrowedRecv = e.object.ty;
+        if (isUnionTy(obj.ty) && narrowedRecv !== undefined && (isObjectTy(narrowedRecv) || isUnionTy(narrowedRecv))) {
+          obj = { v: obj.v, ty: narrowedRecv };
+        }
         if (obj.ty === "Dyn") { // dynamic field access: nt_dyn_get_field returns a Dyn
           const t = this.fresh();
           this.emit(`${t} = call ptr @nt_dyn_get_field(ptr ${obj.v}, ptr ${this.mod.intern(e.property)})`);
