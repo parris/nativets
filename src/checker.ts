@@ -20,7 +20,7 @@ import { isTypeRefTy, containsTypeRef, unfoldTypeRef, recTypeTable } from "./ast
 // `k in o`: node's prototype chain is the whole reason `"valueOf" in {}` is true.
 import { OBJECT_PROTO_KEYS } from "./ast.ts";
 // SH2 (discriminated unions): the tagged-union encoding and its tag machinery.
-import { isUnionTy, unionDiscriminant, unionCommonField, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys } from "./ast.ts";
+import { isUnionTy, unionDiscriminant, unionCommonField, unionMemberFor, unionMembers, unionTagValues, unionWidenedMembers, makeUnionTy, widenLiteralTys, objectLayoutFits } from "./ast.ts";
 // The GENERAL (non-object) union encoding — arms with no discriminant field, tagged
 // by `typeof` instead. Distinct from the discriminated-union machinery imported above.
 import { isGeneralUnionTy, generalUnionMembers, makeGeneralUnionTy, typeofTagOf } from "./ast.ts";
@@ -3039,14 +3039,59 @@ class Checker {
        * identity retype, which is how it became a hole through the value model.
        *
        * Most of the work is codegen's (`genAsCast`), which tests a `U<…>` tag or unboxes
-       * a `G<…>` / nullable at runtime. What has to be caught HERE is the one shape no
-       * runtime check can rescue: asserting a plain object to a WIDER plain object. A
-       * field the operand does not have is not merely untagged, it is not THERE — the
-       * read runs off the end of the allocation. node answers `undefined`; we printed
-       * `(null)`, out of bounds, at exit 0.
+       * a `G<…>` / nullable at runtime. What has to be caught HERE are the two shapes no
+       * runtime check can rescue, both of them slot arithmetic rather than tagging:
+       *
+       *   a. a plain object asserted to a WIDER plain object. A field the operand does
+       *      not have is not merely untagged, it is not THERE — the read runs off the end
+       *      of the allocation. node answers `undefined`; we printed `(null)` at exit 0.
+       *
+       *   b. a union asserted to an object that is NOT one of its members. Codegen can
+       *      only tag-check an assertion naming a MEMBER; a structural target has no tag
+       *      to compare, so it fell through to a bare retype and read whatever sat at the
+       *      target's slot indices. This is the `(e as {name: string}).name` duck-typing
+       *      shape, and it is worth stating plainly because it is `src/`'s own idiom: it
+       *      is currently masked there only because `Ty`/`Expr`/`Stmt` are unseeded
+       *      imports that erase to `number`, so it will BECOME reachable exactly when
+       *      `Extract<T, U>` and import seeding land. Reading `{x:number}` off
+       *      `{kind:"a",x:number}|{kind:"b",y:string}` returned `2.12e-314`, the `kind`
+       *      pointer as a double, where node returns `7`.
+       *
+       * The (b) rule is `unionCommonField`'s, which already encodes exactly the condition
+       * that makes such a read sound: the field must sit at the SAME index with the SAME
+       * type in EVERY member. When it does, the read is safe and costs nothing.
        */
       case "AsExpr": {
         const from = this.type(e.expr, scope);
+        // (b) union -> a NON-MEMBER object. A member target is exempt: codegen tag-checks
+        // it, and its layout is the union's by construction.
+        if (isUnionTy(from) && isObjectTy(e.ty)) {
+          // Refuse ONLY when no member can be read through this shape at all. If some
+          // member fits, codegen tag-checks against exactly those; if every member fits,
+          // the read is sound whatever the tag and costs nothing. A blanket "must be a
+          // member" rule was tried first and was too blunt — it refused
+          // `retainedReceiver`'s `e as {callee: {object: Expr}}`, which is guarded by a
+          // predicate the checker cannot see through but is a perfectly readable window
+          // onto the members that DO have a `callee`.
+          const widened = unionWidenedMembers(from);
+          let fits = 0;
+          for (let n = 0; n < widened.length; n++) {
+            if (widened[n] === e.ty || objectLayoutFits(e.ty, widened[n]!)) fits++;
+          }
+          if (fits === 0) {
+            throw typeError(
+              `'${e.ty}' is not a valid assertion for the union '${from}': no member of `
+                + `the union can be read through that shape`,
+              exprLoc(e),
+              "`as` reinterprets the operand's memory at the asserted type's layout, so "
+                + "every field must sit at the same slot, with the same type, in some "
+                + "member of the union — otherwise the read takes whatever happens to be "
+                + "at that offset. Assert to one of the union's members (checked at "
+                + "runtime), or narrow with a `switch` on the discriminant or an "
+                + "`x.kind === \"...\"` test, which costs nothing",
+            );
+          }
+        }
         // Both plain objects: every field read through `T` must land on a real slot of
         // the operand, at the SAME index and the same type. Narrowing to a PREFIX is
         // therefore fine (`{a,b} as {a}` reads slot 0 and is exactly node's answer);

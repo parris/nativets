@@ -4029,6 +4029,34 @@ Two further defects fell out of the same lane, neither of them union-specific:
 - **`as` across a box boundary did not COMPILE.** The identity retype handed a `ptr` where a
   `double` was wanted, and the user saw clang's verifier error rather than an `NT****` code.
 
+#### Two `src/` sites now carry an explicit layout refusal — both are real, and both need a rewrite
+
+Asserting a union to an object that is NOT one of its members is the `(e as {name: string}).name`
+duck-typing idiom, and `src/` uses it. It is CHECKABLE whenever the asserted shape is a layout
+window onto some member — the tag is compared against exactly those members (`objectLayoutFits`),
+and when every member fits it costs nothing. What cannot be rescued is a shape no member can be
+read through at all, and two sites are in that class:
+
+| Site | Assertion | Why it cannot work |
+|---|---|---|
+| `exprLoc` (`src/ast.ts`) | `(e as { loc?: Loc }).loc` | every `Expr` member has `kind` at slot 0, so this reads a string POINTER as an `?ULoc` box |
+| `retainedReceiver` (`src/ownership.ts`) | `e as { callee: { object: Expr } }` | same — `callee` is at slot 1 of `CallExpr`, never slot 0 |
+
+Both functions were ALREADY failing for other reasons, so the failing count is unchanged (268
+before and after, verified per function via `check(linkProgram(…), blockers)` — the `firstBlocker`
+field in `--json` is a single overall blocker, NOT a per-function map, and reading it as one will
+tell you nothing changed when things have). `retainedReceiver` is guarded by a predicate that
+makes it safe in PRACTICE, but the checker cannot see through a `boolean`-returning helper, so
+the refusal stands. Both need rewriting to a tag `switch` before self-hosting — `exprLoc`
+especially, since it is what computes every diagnostic's location.
+
+A cautionary note for whoever writes the next rule of this kind: the first version of this one was
+a blanket "the target must BE a member", which refused `retainedReceiver` outright and cost a
+blocker for no safety gain. Measuring which `src/` sites it hit is what produced the
+`objectLayoutFits` rule that keeps the idiom working. The lane's own new helper
+(`assertedPlaceRoot`) was also caught by its own rule and had to be respelled as positive tag
+tests — `src/` stays inside the subset it compiles, and that now includes this.
+
 
 ---
 

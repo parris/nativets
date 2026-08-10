@@ -306,6 +306,88 @@ console.log(w.b);
 });
 
 /* ------------------------------------------------------------------ *
+ * 4b. A union asserted to a NON-MEMBER object — the duck-typing shape.
+ *
+ * `(e as {name: string}).name` on a union. Codegen can only tag-check an assertion that
+ * names a MEMBER; a structural target has no tag to compare, so this fell through to a
+ * bare retype and read whatever sat at the target's slot indices — a SECOND silent wrong
+ * answer, left open by the first version of this lane's own fix and found by testing the
+ * fallthrough rather than the reported case.
+ *
+ * It matters out of proportion to how exotic it looks: it is `src/`'s own idiom, masked
+ * there today only because `Ty`/`Expr`/`Stmt` are unseeded imports that erase to
+ * `number`. It becomes reachable exactly when `Extract<T, U>` and import seeding land —
+ * i.e. the lane this one is a prerequisite for. (Thanks to lane-externalnames, whose note
+ * about those 144 assertion-position sites resolving to `number` prompted the check.)
+ * ------------------------------------------------------------------ */
+describe("`as` from a union to a NON-MEMBER object", () => {
+  test("a field at a DIFFERENT slot than the members put it is refused", () => {
+    // Returned `2.12e-314` — the `kind` pointer as a double — where node returns `7`.
+    let err: unknown;
+    try {
+      emitIR(`
+type Node = { kind: "a"; x: number } | { kind: "b"; y: string };
+function xOf(e: Node): number { const n = e as { x: number }; return n.x; }
+console.log(xOf({ kind: "a", x: 7 }));
+`);
+    } catch (e) { err = e; }
+    expect(String(err)).toContain("NT2001");
+    expect(String(err)).toContain("no member of the union can be read through that shape");
+  });
+
+  test("a structural WINDOW onto SOME members is tag-checked, not refused", async () => {
+    // `src/`'s own idiom — `retainedReceiver` casts an `Expr` to `{callee: …}`, guarded
+    // by a predicate the checker cannot see through. Refusing it outright was the first
+    // thing this lane tried, and it cost a blocker in src/ for no safety gain: the shape
+    // is a readable window onto the members that DO have that field, so the tag is
+    // checkable. Here the value IS such a member, so it must simply work.
+    await expectNode(`
+type Node = { kind: "call"; callee: string; n: number } | { kind: "lit"; value: number };
+function calleeOf(e: Node): string { const c = e as { kind: string; callee: string }; return c.callee; }
+console.log(calleeOf({ kind: "call", callee: "f", n: 1 }));
+`);
+  });
+
+  test("…and that window PANICS when the value is a member it does not fit", async () => {
+    const ours = await compileAndRun(`
+type Node = { kind: "call"; callee: string; n: number } | { kind: "lit"; value: number };
+function calleeOf(e: Node): string { const c = e as { kind: string; callee: string }; return c.callee; }
+console.log(calleeOf({ kind: "lit", value: 9 }));
+`);
+    expect(ours.stdout).toBe("");
+    expect(ours.stderr).toContain("type assertion failed");
+  });
+
+  test("a field at ONE agreeing slot in EVERY member is allowed, and free", async () => {
+    // `kind` is index 0 with type string in both members, so the read is sound.
+    await expectNode(`
+type Node = { kind: "a"; x: number } | { kind: "b"; y: string };
+function kindOf(e: Node): string { const n = e as { kind: string }; return n.kind; }
+console.log(kindOf({ kind: "b", y: "hi" }));
+`);
+  });
+
+  test("the agreeing-slot cast emits NO tag check", () => {
+    const ir = emitIR(`
+type Node = { kind: "a"; x: number } | { kind: "b"; y: string };
+function kindOf(e: Node): string { const n = e as { kind: string }; return n.kind; }
+console.log(kindOf({ kind: "b", y: "hi" }));
+`);
+    expect(ir).not.toContain("call void @nt_as_tag");
+  });
+
+  test("a target that IS a widened member is still tag-checked, not refused", async () => {
+    const ours = await compileAndRun(`
+type Node = { kind: "id"; name: string } | { kind: "num"; value: number };
+function nameOf(e: Node): string { const n = e as { kind: string; name: string }; return n.name; }
+console.log(nameOf({ kind: "num", value: 42 }));
+`);
+    expect(ours.stdout).toBe("");
+    expect(ours.stderr).toContain("type assertion failed");
+  });
+});
+
+/* ------------------------------------------------------------------ *
  * 5. The forms that were already fine must stay free of any new cost.
  * ------------------------------------------------------------------ */
 describe("`as` on identical layouts stays a no-op", () => {
