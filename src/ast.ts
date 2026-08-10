@@ -1346,7 +1346,13 @@ export interface FuncDecl {
   params: Param[];
   returnAnnot?: Ty;
   body: Stmt[];
-  returnTy?: Ty; // resolved
+  // NO `returnTy` HERE. The RESOLVED return type lives in the checker's signature table
+  // (`Sig.ret`), keyed by this declaration's name, and both readers — `Checker.checkFunction`
+  // and codegen's `genFunction` — already had that table in hand at the point they used to
+  // read the field. It was a second copy kept in sync by four `o.f = v` writes, which is a
+  // shape this compiler refuses (NT1606: records are immutable), and it was also the
+  // documented "latent trap" in the `mapTypesDeep` note below — a `Ty`-bearing field the
+  // type rewrite deliberately skipped. One home, no trap, no mutation.
   endDrops?: string[]; // owned linear locals to free at fall-through exit
   // M3: declared type parameters (`function f<T, U>(…)`). A decl carrying these is a
   // TEMPLATE — it is never checked or emitted itself; the checker replaces it with one
@@ -1969,12 +1975,15 @@ export function exprText(e: Expr): string | undefined {
  * `name`/`property`/string-literal `value`, so a program that happens to contain the text
  * `#T` in a string is untouched, exactly as before.
  *
- * TWO ASYMMETRIES ARE PRESERVED ON PURPOSE, because they were in the old tables and this
- * rewrite is meant to be observationally null: `FuncDecl.returnTy` and `ForOfStmt.valTy`
- * hold a `Ty` and are NOT rewritten (their siblings `ArrowFunction.retTy` and
- * `ForOfStmt.elemTy` are). Both are checker-RESOLVED types, set after the only pass that
- * substitutes type parameters has run, so nothing observable depends on them today —
- * but they are a latent trap for anyone who adds a `Ty` rewrite that runs later.
+ * ONE ASYMMETRY IS PRESERVED ON PURPOSE, because it was in the old tables and this
+ * rewrite is meant to be observationally null: `ForOfStmt.valTy` holds a `Ty` and is NOT
+ * rewritten (its sibling `ForOfStmt.elemTy` is). It is a checker-RESOLVED type, set after
+ * the only pass that substitutes type parameters has run, so nothing observable depends
+ * on it today — but it is a latent trap for anyone who adds a `Ty` rewrite that runs later.
+ *
+ * `FuncDecl.returnTy` was the other half of that pair and is GONE: the resolved return
+ * type is `Sig.ret` in the checker's signature table and nowhere else, so there is no
+ * second copy for a later `Ty` rewrite to miss.
  */
 
 /** The identity `Ty` rewrite, for the two passes that only WALK the type fields.

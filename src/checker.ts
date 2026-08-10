@@ -761,7 +761,6 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
     const required = s.params.slice(0, fixed).filter((p) => !p.default).length;
     const defaults = s.params.map((p) => p.default ?? null);
     const ret = s.returnAnnot ?? "number";
-    s.returnTy = ret;
     functions = functions.set(s.name, { params, ret, required, defaults, rest });
     if (s.isStatic) c.statics.add(s.name); // `static m()` → reachable only as `C.m(…)`
   }
@@ -788,8 +787,12 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
   for (const s of program.body) {
     if (s.kind === "FuncDecl" && !s.typeParams?.length && !s.returnAnnot) {
       const inferred = c.inferReturnType(s, moduleScope.child());
-      s.returnTy = inferred;
-      functions.get(s.name)!.ret = inferred;
+      // REPLACE the signature rather than assigning `sig.ret` in place. `Sig` is a plain
+      // record, so the write was `NT1606` — and it was the LINKED first blocker of
+      // checker.ts, codegen.ts and ownership.ts alike, together with the `s.returnTy = …`
+      // it sat next to. The resolved return type now has exactly ONE home (this table);
+      // `FuncDecl.returnTy` was a second copy of it that four in-place writes kept in sync.
+      functions = functions.set(s.name, { ...functions.get(s.name)!, ret: inferred });
     }
   }
 
@@ -2000,17 +2003,25 @@ class Checker {
     const params: Ty[] = spec.params.map((p) => p.annot ?? (p.default ? this.type(p.default, this.genericBase!()) : "number"));
     spec.params.forEach((p, i) => { if (p.default && p.annot) this.type(p.default, this.genericBase!(), params[i]); });
     const fixed = spec.params.length - (spec.params.at(-1)?.rest ? 1 : 0);
-    const sig: Sig = {
+    const provisional: Sig = {
       params,
       ret: spec.returnAnnot ?? "number",
       required: spec.params.slice(0, fixed).filter((p) => !p.default).length,
       defaults: spec.params.map((p) => p.default ?? null),
       rest: !!spec.params.at(-1)?.rest,
     };
-    spec.returnTy = sig.ret;
-    this.functions = this.functions.set(mangled, sig);
+    // REGISTERED BEFORE the return type is inferred, and that order is load-bearing:
+    // inferring an unannotated specialization's return type checks its body, which can
+    // reach this same specialization again (self-recursion), and that inner call resolves
+    // through the table. So the entry goes in with the PROVISIONAL `ret` and is REPLACED
+    // once inference lands — the entry is what every reader consults, so replacing it is
+    // what the old in-place `sig.ret = …` was doing, minus the record mutation.
+    this.functions = this.functions.set(mangled, provisional);
     this.specialized.push(spec);
-    if (!spec.returnAnnot) { sig.ret = this.inferReturnType(spec, this.genericBase!()); spec.returnTy = sig.ret; }
+    const sig: Sig = spec.returnAnnot
+      ? provisional
+      : { ...provisional, ret: this.inferReturnType(spec, this.genericBase!()) };
+    if (sig !== provisional) this.functions = this.functions.set(mangled, sig);
     this.pending.push(spec); // body checked in the drain loop (keeps recursion finite)
     this.retarget(e, mangled, recvOffset);
     return sig;
@@ -2149,8 +2160,13 @@ class Checker {
     }
     this.declareParams(fn, base);
     this.bodyChain.push(bodyFrame(fn.params, fn.body));
-    try { this.checkBlock(fn.body, base, fn.returnTy ?? "number"); } finally { this.bodyChain.pop(); }
-    this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
+    // The RESOLVED return type, read from the signature table — the one place it is
+    // recorded. `check` registers every top-level `FuncDecl` there before any body is
+    // checked, and `monomorphize` registers each specialization before draining it, so the
+    // lookup is total; the fallbacks are for a `checkFunction` reached some other way.
+    const ret = this.functions.get(fn.name)?.ret ?? fn.returnAnnot ?? "number";
+    try { this.checkBlock(fn.body, base, ret); } finally { this.bodyChain.pop(); }
+    this.checkExhaustiveTailSwitch(fn, ret);
   }
 
   /**
