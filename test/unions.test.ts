@@ -1011,3 +1011,171 @@ console.log(f({}));
     expect(ours.exitCode).toBe(oracle.exitCode);
   });
 });
+
+/*
+ * A TAG TEST IN A TERNARY CONDITION — the fifth call site of the one tag-narrowing rule.
+ *
+ * `if`, `switch`, and the `&&`/`||` short circuit all routed their condition through
+ * `Checker.narrowTagsWith`; `ConditionalExpr` was the one conditional form that never
+ * did. It already had the NULLISH half (`factsFor`, so `x !== undefined ? x.f : …`
+ * worked), which is why the gap read as a nullable problem and is not one: a tag test
+ * failed to narrow a ternary whether or not a nullable was anywhere in sight.
+ *
+ *     function f(e: E): number { return e.kind === "A" ? e.left : 0; }   // NT2001
+ *     function g(e: E): number { if (e.kind === "A") return e.left; return 0; }  // fine
+ *
+ * Two spellings of one program, one accepted — an arbitrary difference in surface
+ * syntax, not a soundness line. 54 of the 454 ternaries in `src/` have a tag test in
+ * the condition (counted with the compiler's own parser; a line-based grep undercounts
+ * the multi-line spellings).
+ *
+ * The arms take SEPARATE fact frames and SEPARATE child scopes: the consequent is
+ * proved the tested tag, the alternate the remaining members. The REFUSALS below are
+ * the point of the lane — widening what compiles is where an unsound read gets in —
+ * and the path one is verified by MUTATION exactly as the block above is: passing an
+ * empty `blocked` set to `narrowTagsWith` makes `neg4` compile and print
+ * `2.126700047e-314`, the string pointer `"zzzz"` read as a double, where node prints
+ * `undefined`.
+ */
+describe("a tag test in a `?:` CONDITION narrows both arms", () => {
+  const E = `interface A { kind: "A"; left: number }
+interface B { kind: "B"; text: string }
+type E = A | B;
+`;
+  /** Run a `?:` body against both members and assert node agrees byte-for-byte. */
+  const expectMatches = async (src: string) => {
+    expect(codeOf(src)).toBe(null);
+    const ours = await compileAndRun(src);
+    const oracle = runWithNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  };
+  const prog = (body: string) => `${E}function f(e: E): string { return ${body}; }
+console.log(f({ kind: "A", left: 7 }));
+console.log(f({ kind: "B", text: "hi" }));
+`;
+
+  test("the CONSEQUENT gets the tested member (the reported program)", async () => {
+    await expectMatches(prog(`e.kind === "A" ? "n" + e.left : "-"`));
+  });
+
+  test("the ALTERNATE gets the remaining members — both arms narrow, differently", async () => {
+    await expectMatches(prog(`e.kind === "A" ? "n" + e.left : "s" + e.text`));
+  });
+
+  test("a NEGATED test swaps which arm gets which", async () => {
+    await expectMatches(prog(`e.kind !== "A" ? "s" + e.text : "n" + e.left`));
+  });
+
+  test("a NESTED ternary narrows over a three-member union", async () => {
+    const src = `interface A { kind: "A"; left: number }
+interface B { kind: "B"; text: string }
+interface C { kind: "C"; on: boolean }
+type E = A | B | C;
+function f(e: E): string {
+  return e.kind === "A" ? "n" + e.left : e.kind === "B" ? "s" + e.text : "f" + e.on;
+}
+console.log(f({ kind: "A", left: 7 }));
+console.log(f({ kind: "B", text: "hi" }));
+console.log(f({ kind: "C", on: true }));
+`;
+    await expectMatches(src);
+  });
+
+  test("a tag test as an `&&` operand of the condition narrows the consequent", async () => {
+    await expectMatches(prog(`e.kind === "A" && e.left > 3 ? "big" : "other"`));
+  });
+
+  test("a STRING field reads as a string — the wrong slot would print garbage", async () => {
+    await expectMatches(prog(`e.kind === "B" ? e.text.toUpperCase() : "NONE"`));
+  });
+
+  test("a dotted PATH condition narrows, under the same stability rules", async () => {
+    const src = `${E}interface Box { inner: E }
+function f(o: Box): string { return o.inner.kind === "A" ? "n" + o.inner.left : "s" + o.inner.text; }
+console.log(f({ inner: { kind: "A", left: 7 } }));
+console.log(f({ inner: { kind: "B", text: "hi" } }));
+`;
+    await expectMatches(src);
+  });
+
+  test("nullish and tag narrowing COMPOSE in one `?:` condition, in that order", async () => {
+    const src = `${E}function f(e: E | undefined): string {
+  return e !== undefined && e.kind === "A" ? "n" + e.left : "none";
+}
+console.log(f({ kind: "A", left: 5 }));
+console.log(f({ kind: "B", text: "q" }));
+console.log(f(undefined));
+`;
+    await expectMatches(src);
+  });
+
+  /*
+   * THE JOIN REGRESSION this lane caused and had to fix. Narrowing makes an arm MORE
+   * PRECISE, and that is a way for a widening to REMOVE programs instead of adding them:
+   * `e.kind === "A" ? e : f` typed both arms as the whole union before, and joined
+   * trivially; narrowed, the arms are the A member and the union, which `joinTernary`
+   * (deliberately narrow — only a nullish literal joins with a present arm) reads as two
+   * unrelated object types. `e.kind === "A" ? e : e` is worse: `restrictUnion` widens the
+   * tag literal away, so nothing downstream can tell the two members share a union.
+   * Both compiled on the base tree and were verified to fail with the naive wiring, which
+   * is why `ConditionalExpr` falls back to the UN-NARROWED typing when the join fails.
+   */
+  test("an arm that is the RECEIVER ITSELF still joins with the union", async () => {
+    const src = `${E}function pick(e: E, f: E): E { return e.kind === "A" ? e : f; }
+console.log(pick({ kind: "A", left: 1 }, { kind: "B", text: "x" }).kind);
+console.log(pick({ kind: "B", text: "y" }, { kind: "B", text: "x" }).kind);
+`;
+    await expectMatches(src);
+  });
+
+  test("both arms narrowed to DIFFERENT members of one union still join", async () => {
+    const src = `${E}function tag(e: E): string { return (e.kind === "A" ? e : e).kind; }
+console.log(tag({ kind: "A", left: 1 }));
+console.log(tag({ kind: "B", text: "z" }));
+`;
+    await expectMatches(src);
+  });
+
+  /* ---- the REFUSALS ---- */
+
+  test("REFUSED: the WRONG member's field inside an arm", () => {
+    const src = prog(`e.kind === "A" ? e.text : "-"`);
+    expect(codeOf(src)).toBe("NT2001");
+    // Narrowed, and narrowed CORRECTLY: the receiver is the A member here, not the union.
+    expect(messageOf(src)).toContain("Property 'text' does not exist on {kind:string,left:number}");
+  });
+
+  test("REFUSED: the narrowing does not leak OUTSIDE the ternary", () => {
+    const src = `${E}function f(e: E): number { return (e.kind === "A" ? 1 : 2) + e.left; }
+console.log(f({ kind: "A", left: 1 }));
+`;
+    expect(codeOf(src)).toBe("NT2001");
+    expect(messageOf(src)).toContain("narrow it first");
+  });
+
+  test("REFUSED: the receiver is REASSIGNED inside the arm", () => {
+    const src = `${E}function f(): number {
+  let e: E = { kind: "A", left: 1 };
+  return e.kind === "A" ? ((e = { kind: "B", text: "x" }), e.left) : 0;
+}
+console.log(f());
+`;
+    expect(codeOf(src)).toBe("NT2001");
+    expect(messageOf(src)).toContain("it is NARROWED to");
+  });
+
+  test("REFUSED: a PATH condition whose ROOT is reassigned inside the arm", () => {
+    // The mutation case. Without `unstableNames` this compiles and prints a string
+    // pointer as a double; node prints `undefined`.
+    const src = `${E}interface Box { inner: E }
+function f(): number {
+  let o: Box = { inner: { kind: "A", left: 1 } };
+  return o.inner.kind === "A" ? ((o = { inner: { kind: "B", text: "zzzz" } }), o.inner.left) : 0;
+}
+console.log(f());
+`;
+    expect(codeOf(src)).toBe("NT2001");
+    expect(messageOf(src)).toContain("'o' is assigned between it and this read");
+  });
+});
