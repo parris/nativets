@@ -25,7 +25,7 @@
 
 import type { CheckedProgram } from "./checker.ts";
 import type { Program, Stmt, Expr, FuncDecl, Ty } from "./ast.ts";
-import { isArrayTy, isObjectTy, isUnionTy, isTypeRefTy, isFuncTy, setBlockDrops, classTag, mutableTags, RETAINS_RECEIVER } from "./ast.ts";
+import { isArrayTy, isObjectTy, isUnionTy, isTypeRefTy, isFuncTy, isNullableTy, baseTy, setBlockDrops, classTag, mutableTags, RETAINS_RECEIVER } from "./ast.ts";
 
 /** The linear (single-owner, move-checked + dropped) types: heap aggregates. A
  *  DISCRIMINATED UNION (SH2) is one of them: its value IS a member's object block, so
@@ -183,6 +183,44 @@ function borrowedFieldRoot(e: Expr, borrowRoots: Set<string>): string | null {
   const root = fieldRootName(e.object);
   if (root === null || !borrowRoots.has(root)) return null;
   return root;
+}
+
+/**
+ * `xs.find(p)` / `xs.findLast(p)` over a `(T | undefined)[]` — the LINEAR base `T` when
+ * the result BORROWS an element the receiver still owns, else null.
+ *
+ * READ OFF THE TYPES ALREADY THERE, deliberately, rather than stamped by the checker on
+ * a new AST field. The stamp was written first and it cost `inferSearchHof` its place in
+ * the self-hosting subset: `callee.searchElemTy = …` is NT1606, "objects are immutable",
+ * so the compiler stopped being able to compile the function that taught it this rule.
+ * The subset rule is not a formality — a helper that reads existing `ty` fields is both
+ * smaller and better placed.
+ *
+ * It is not yet self-compiling EITHER, and for a reason worth naming rather than
+ * hiding: `e.callee.object.ty` reads a field off the `Expr` union, which is the same
+ * NT2001 its two neighbours `retainsReceiver` and `retainedReceiver` already carry —
+ * they do the identical job one screen up and are written the identical way. This is
+ * that gap, not a new one, and it clears when that one does. Inlining the body into
+ * `stmt` would have made the blocker count flat by hiding it under a function that
+ * already fails, which is precisely the masking test/blocker-metric.ts warns about.
+ *
+ * The three conditions are each doing work:
+ *  - an ARRAY receiver, so a user method that merely happens to be named `find` is not
+ *    swept up and refused;
+ *  - a NULLABLE result, which for `.find` is always true;
+ *  - a LINEAR base. This is the whole discrimination. A scalar `(number|undefined)[]`
+ *    element is copied into a fresh box that owns itself, so calling it a borrow would
+ *    refuse safe programs; only a linear payload is a pointer the array still holds.
+ *    Every OTHER `.find` element shape (a plain object, a `?N` element) is refused by
+ *    the checker before it can reach here.
+ */
+function searchBorrowBase(e: Expr): Ty | null {
+  if (e.kind !== "CallExpr" || e.callee.kind !== "MemberExpr") return null;
+  if (e.callee.property !== "find" && e.callee.property !== "findLast") return null;
+  if (!isArrayTy(e.callee.object.ty ?? "number")) return null;
+  const t = e.ty ?? "number";
+  if (!isNullableTy(t) || !isLinearTy(baseTy(t))) return null;
+  return baseTy(t);
 }
 
 export interface OwnDiag { code: string; message: string; line: number; movedAt?: number; hint?: string; }
@@ -531,6 +569,17 @@ class Analyzer {
           // declaration; the binding becomes owned at its first ASSIGNMENT.
           if (d.init) this.expr(d.init, state, !this.aliasOf.has(d.name));
           if (isLinearTy(d.ty ?? "number")) state.set(d.name, { moved: false, must: false });
+          // `const hit = xs.find(p)` over a `(T | undefined)[]`: the hit path hands back
+          // the ELEMENT BOX the array still owns, so this name is a BORROW for the rest
+          // of the scope — the same rule a `for-of` element over a linear array gets
+          // above, spelled the same way. Without it, narrowing and rebinding
+          // (`const h: T = hit`) makes `h` a second owner and frees the array's element
+          // at the block's exit: `xs[1].line` then read freed memory and printed
+          // `1e-323` where node prints `3`, exit 0 on both sides.
+          //
+          // Never DELETED again, unlike the for-of case: a for-of binding dies with its
+          // loop, and this one lives to the end of the function like any other `const`.
+          if (d.init && searchBorrowBase(d.init) !== null) this.borrowBindings.add(d.name);
         }
         return;
       case "ExprStmt": this.expr(s.expr, state, false); return;

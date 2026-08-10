@@ -4402,7 +4402,7 @@ class Checker {
     const el = elemTy(recv);
     if (method === "map" || method === "filter" || method === "reduce" || method === "flatMap") return this.inferHof(el, method, args, scope);
     // stdlib Batch 1 (part 2): the predicate HOFs, same inline-arrow contract as map/filter.
-    if (SEARCH_HOFS.has(method)) return this.inferSearchHof(recv, el, method, args, scope);
+    if (SEARCH_HOFS.has(method)) return this.inferSearchHof(recv, el, callee, args, scope);
     if (["forEach"].includes(method)) throw nyi(NYI.CLOSURE, `array .${method} (needs first-class function values)`);
 
     // --- ordering primitives (ES2023, non-mutating: node is the oracle) --------
@@ -4599,7 +4599,8 @@ class Checker {
 
   /** some/every/find/findIndex/findLast/findLastIndex — one inline boolean-returning
    *  arrow over the elements. `.find`/`.findLast` return `T | undefined` like node. */
-  private inferSearchHof(recv: Ty, el: Ty, method: string, args: Expr[], scope: Scope): Ty {
+  private inferSearchHof(recv: Ty, el: Ty, callee: MemberExpr, args: Expr[], scope: Scope): Ty {
+    const method = callee.property;
     const arrow = args[0];
     if (!arrow || arrow.kind !== "ArrowFunction") throw nyi(NYI.CLOSURE, `array .${method} needs an inline arrow (function values are not inlined yet)`);
     if (args.length !== 1) throw typeError(`.${method} expects 1 argument`);
@@ -4608,8 +4609,47 @@ class Checker {
     if (bodyTy !== "boolean") throw typeError(`.${method} callback must return boolean`);
     if (method === "some" || method === "every") return "boolean";
     if (method === "findIndex" || method === "findLastIndex") return "number";
-    if (el !== "number" && el !== "string" && el !== "boolean")
-      throw nyi(NYI.ARRAY, `.${method} on ${recv} (only number/string/boolean elements — a heap element would alias its owner)`);
+    // `(T | undefined)[]` — the ONE heap element `.find` may hand back, and it is a
+    // difference in KIND rather than degree.
+    //
+    // node's `.find` cannot distinguish "found `undefined`" from "found nothing": both
+    // answer `undefined`. The element is ALREADY a `[tag, value]` box, so the hit path
+    // returns that very box and the miss path a fresh `undefined` one — the result type
+    // is `el` UNCHANGED. Nothing is allocated on the hit path and nothing is rewrapped,
+    // which is what keeps this arm out of both traps below.
+    //
+    // It is still a BORROW of an element the array owns, and moving it out is NT1604
+    // exactly as a `for-of` element over a linear array already is. Nothing is stamped for that
+    // here: `searchBorrowBase` (src/ownership.ts) reads it back off the types this call
+    // already carries, which keeps `isLinearTy` that pass's private business AND keeps
+    // this function inside the subset the compiler can compile — writing an AST field
+    // from here is NT1606, "objects are immutable".
+    if (isNullableTy(el) && nullishKind(el) === "undefined") return el;
+    // `(T | null)[]` — REFUSED, and not for the reason its neighbours are.
+    //
+    // node's answer here is `T | null | undefined` and it can TELL THOSE APART
+    // (`x === null` against `x === undefined`). The `?N`/`?U` encoding carries exactly
+    // ONE nullish arm, so there is no `Ty` to return. Falling through to
+    // `makeNullable("undefined", el)` was the silent version of this: it computes
+    // `baseTy("?Nstring")` first and rewraps as `?Ustring`, so the null arm disappeared
+    // from the static type with no diagnostic. Latent only because the element guard
+    // below made it unreachable — this is the refusal that disarms it, so lifting that
+    // guard later cannot turn it back into a wrong answer.
+    if (isNullableTy(el)) {
+      throw nyi(NYI.ARRAY, `.${method} on ${recv} (its result is \`${baseTy(el)} | null | undefined\`, and a nullable carries one nullish arm, not two)`,
+        `search for the INDEX instead — \`.findIndex(…)\` returns a number, and reading through \`xs[i]\` keeps both arms on the element`);
+    }
+    if (el !== "number" && el !== "string" && el !== "boolean") {
+      // A plain heap element would need a FRESH box owning a pointer the array still
+      // owns — a second owner, which is the aliasing this text has always named. The
+      // `(T | undefined)[]` arm above escapes it by allocating nothing.
+      //
+      // The hint is the spelling src/ast.ts `fieldType` already uses and it is COMPILED
+      // by this file's test suite, because the obvious alternative is not: binding the
+      // element (`const hit = xs[i]!`) is NT1605, so the hint says READ THROUGH it.
+      throw nyi(NYI.ARRAY, `.${method} on ${recv} (only number/string/boolean elements — a heap element would alias its owner)`,
+        `search for the INDEX instead: \`const i = xs.findIndex(p)\`, then read through \`xs[i]!\` — a field read is a borrow, where binding the element would be a second owner (NT1605)`);
+    }
     return makeNullable("undefined", el); // .find / .findLast → T | undefined
   }
 
