@@ -34,7 +34,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-import { compileAndRun, emitIR } from "./harness.ts";
+import { compileAndRun, emitIR, emitIRAsan } from "./harness.ts";
 import { ownershipCheck } from "../src/driver.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -240,7 +240,7 @@ console.log(__objLive());`);
     const dir = mkdtempSync(join(tmpdir(), "nativets-hofasan-"));
     try {
       const ll = join(dir, "module.ll");
-      writeFileSync(ll, emitIR(HOF_CHURN));
+      writeFileSync(ll, emitIRAsan(HOF_CHURN));
       const bin = join(dir, "prog");
       const built = spawnSync("clang", [
         "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
