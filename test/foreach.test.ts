@@ -110,16 +110,23 @@ xs.forEach((x) => go(x));
     expect(oracle.stdout).toBe("1\n2\n3\n");
   });
 
-  /* node passes (elem, index, array). Only `(elem)` is bound, exactly as `.map`/`.filter`
-   * do — accepting `(x, i)` while binding only `x` would read `i` out of a slot nothing
-   * ever wrote. Refused rather than miscompiled. */
-  test("a two-parameter callback is refused, not silently mis-bound", () => {
-    const d = refusal(`
+  /* node passes (elem, index, array). `(elem, index)` is now BOUND — see
+   * test/hof-index.test.ts, which owns that boundary and its refusal messages. The
+   * assertion that used to live here ("a two-parameter callback is refused") was correct
+   * for its time and is deliberately retired rather than deleted: the refusal it pinned
+   * was safe but named a TYPE error on valid TypeScript, and it blocked 17 of the
+   * compiler's own functions. What survives of it is the half that is still true — the
+   * index must be BOUND, never left to read an unwritten slot, which is what this checks
+   * against node here rather than restating the old refusal. */
+  test("a two-parameter callback binds the index, and agrees with node", async () => {
+    const src = `
 const xs: number[] = [1, 2, 3];
 xs.forEach((x, i) => console.log(x + i));
-`);
-    expect(d).not.toBeNull();
-    expect(d?.message).toContain("takes (elem)");
+`;
+    const { ours, oracle } = await expectMatchesNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("1\n3\n5\n");
   });
 });
 

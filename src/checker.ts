@@ -147,6 +147,53 @@ function mapResultOk(t: Ty): boolean {
 }
 
 /**
+ * The parameter TYPES for an inlined HOF callback, arity-checked — the ONE copy of that
+ * rule, shared by `.map`/`.filter`/`.flatMap`, `.forEach`, `.reduce` and the search HOFs.
+ *
+ * `leading` is what the method binds before the index: `[elem]` everywhere except
+ * `.reduce`, whose callback is `(acc, elem, index, array)` and NOT `(elem, index, …)` —
+ * one rule does not cover both, so the caller supplies the prefix and this supplies the
+ * index. The index is OPTIONAL and everything before it required — narrower than node,
+ * which lets a callback drop any trailing parameter, but the shorter forms (`.map(() =>
+ * 0)`, `.reduce((acc) => acc, 0)`) were already refused before this and nothing in `src/`
+ * writes one, so widening them is a separate question from the one this answers.
+ *
+ * The trailing ARRAY parameter is refused. It is the receiver the loop is walking, so
+ * binding it would hand the body a second owner of an array the caller still owns — the
+ * aliasing `.find` on a heap element already refuses one method over. Zero of the ~90 HOF
+ * callbacks in `src/` use it, so the refusal costs nothing real; what it must not do is
+ * blame the INDEX, which is exactly what the old `takes (elem)` message did for every
+ * `(x, i)` site — a TYPE error reported on valid TypeScript, and the reason 17 of the
+ * compiler's own functions were blocked. Note the shape of the guard: it runs AFTER the
+ * caller has established there IS an inline arrow, so it can only ever describe one.
+ *
+ * TOO FEW and TOO MANY are separate messages, and that separation is the whole lesson of
+ * the refusal being replaced. `xs.map(() => 1)` and `xs.map((x, i, a) => …)` are refused
+ * for unrelated reasons — one binds nothing the loop offers, the other asks for the array
+ * — and a single message covering both told the zero-parameter site to "drop the last
+ * parameter" and lectured it about an `array` argument it had never written. That is the
+ * same defect as the old one (a guard whose text describes a case other than the one that
+ * fired), just one arity over, so it does not get to survive the fix.
+ */
+function hofCallbackParams(method: string, arrow: Extract<Expr, { kind: "ArrowFunction" }>, leading: Ty[]): Ty[] {
+  const n = arrow.params.length;
+  const acc = leading.length === 2; // `.reduce`, and only `.reduce`
+  const shape = `(${acc ? "acc, elem" : "elem"}, index)`;
+  const got = `${n} parameter${n === 1 ? "" : "s"}`;
+  if (n > leading.length + 1) {
+    throw nyi(NYI.ARRAY, `the \`array\` parameter of a .${method} callback (node passes \`${acc ? "acc, elem" : "elem"}, index, array\`, and this one declares ${got})`,
+      `drop the last parameter — \`${shape}\` is bound. The array is the receiver this loop is walking, so binding it inside the callback would make the body a second owner of an array the caller still owns; name the receiver outside the callback and read it from there instead`);
+  }
+  if (n < leading.length) {
+    throw nyi(NYI.ARRAY, `a .${method} callback that declares ${got} (its parameters bind positionally, so \`${acc ? "acc, elem" : "elem"}\` cannot be skipped)`,
+      `write every parameter out and underscore the ones you do not use — \`(${acc ? "acc, _elem" : "_elem"})\` at minimum, and \`${shape}\` is the most this callback can bind`);
+  }
+  // Index bound only when the callback asks for it — an arrow that stops short of it gets
+  // exactly the prefix it wrote, so nothing is declared that the body cannot name.
+  return arrow.params.length > leading.length ? [...leading, "number"] : leading;
+}
+
+/**
  * Does this inlined-HOF callback body `return` from inside a `try` that has a `finally`?
  *
  * Codegen routes a callback `return` to the per-element join via `hofReturnStack`, but
@@ -5052,8 +5099,7 @@ class Checker {
     const arrow = args[0];
     if (!arrow || arrow.kind !== "ArrowFunction") throw nyi(NYI.CLOSURE, `array .${method} needs an inline arrow (function values are not inlined yet)`);
     if (args.length !== 1) throw typeError(`.${method} expects 1 argument`);
-    if (arrow.params.length !== 1) throw typeError(`.${method} callback takes (elem)`);
-    const bodyTy = this.typeArrowBody(arrow, [el], scope);
+    const bodyTy = this.typeArrowBody(arrow, hofCallbackParams(method, arrow, [el]), scope);
     if (bodyTy !== "boolean") throw typeError(`.${method} callback must return boolean`);
     if (method === "some" || method === "every") return "boolean";
     if (method === "findIndex" || method === "findLastIndex") return "number";
@@ -5122,11 +5168,7 @@ class Checker {
         `write the callback INLINE — \`xs.forEach((x) => go(x))\` instead of \`xs.forEach(go)\`; an inline arrow is compiled as a loop and is supported`);
     }
     if (args.length !== 1) throw typeError(".forEach expects 1 argument");
-    // `(elem)` only, matching `.map`/`.filter`: the index and array parameters node also
-    // passes are a separate piece of work, and accepting `(x, i)` here while binding only
-    // `x` would read `i` out of an unwritten slot.
-    if (arrow.params.length !== 1) throw typeError(".forEach callback takes (elem)");
-    this.typeArrowBody(arrow, [el], scope); // result discarded — any body type is legal
+    this.typeArrowBody(arrow, hofCallbackParams("forEach", arrow, [el]), scope); // result discarded — any body type is legal
     return "void"; // node: `.forEach` returns undefined
   }
 
@@ -5137,15 +5179,16 @@ class Checker {
 
     if (method === "reduce") {
       if (args.length !== 2) throw typeError(".reduce expects (callback, initialValue)");
-      if (arrow.params.length !== 2) throw typeError(".reduce callback takes (acc, elem)");
       const initTy = this.type(args[1]!, scope);
-      const bodyTy = this.typeArrowBody(arrow, [initTy, el], scope);
+      // `(acc, elem, index, array)` — the accumulator comes FIRST, so `.reduce`'s index is
+      // parameter 2 where every other HOF's is parameter 1. `hofCallbackParams` is told the
+      // prefix rather than deriving it, which is the whole reason it takes one.
+      const bodyTy = this.typeArrowBody(arrow, hofCallbackParams("reduce", arrow, [initTy, el]), scope);
       if (bodyTy !== initTy) throw typeError(`.reduce callback must return the accumulator type ${initTy}, got ${bodyTy}`);
       return initTy;
     }
     if (args.length !== 1) throw typeError(`.${method} expects 1 argument`);
-    if (arrow.params.length !== 1) throw typeError(`.${method} callback takes (elem)`);
-    const bodyTy = this.typeArrowBody(arrow, [el], scope);
+    const bodyTy = this.typeArrowBody(arrow, hofCallbackParams(method, arrow, [el]), scope);
     if (method === "flatMap") { // callback returns an array; the results are concatenated (one level)
       if (!isArrayTy(bodyTy)) throw typeError(".flatMap callback must return an array");
       return bodyTy;
