@@ -21,10 +21,14 @@
 
 import { test, expect, describe } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { compileAndRun, compileAndRunFile, runWithNode, runWithNodeAttrs, runWithNodeFile, stripAttributes } from "./harness.ts";
-import { emitIR } from "./harness.ts";
+import { emitIR, emitIRAsan } from "./harness.ts";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Compile-only: return the diagnostic code a source is rejected with (or null). */
 function rejectionOf(source: string): { code: string; message: string; hint?: string } | null {
@@ -607,23 +611,242 @@ console.log(__objLive(), __arrLive());
     expect(mutated.exitCode).toBe(0);
     expect(control.exitCode).toBe(0);
   });
-  test("`recursiveMutableError` is NOT a decoy — the CLASS spelling is still refused", () => {
-    // Piece 2 split the RECORD case only. A class's mutation goes through `this.f = v`
-    // inside a method, where the receiver is not a binding this rule can reason about, so
-    // the declaration-level refusal stays and the diagnostic stays reachable.
+});
+
+/*
+ * PIECE 4 — the CLASS spelling, split at the FIELD as well.
+ *
+ * Piece 2 split the RECORD case and left the class declaration refused wholesale, on the
+ * stated ground that "a class's mutation goes through `this.f = v` inside a method, where
+ * the receiver is not a binding this rule can reason about". That reason does not survive
+ * contact with the code: `checkCycleCapableField` is a TYPE-level rule — it takes the
+ * receiver's type, the field name and the field's type, and asks whether the field can
+ * type-reach the receiver's own tag. `this` has a perfectly good type (the class's own
+ * instance shape, `classTag`-tagged), so the rule reads it exactly as it reads `a.next`.
+ * Nothing about it needs a binding. The only thing standing between the two spellings was
+ * the `!e.viaThis` guard on the call site.
+ *
+ * MEASURED with the declaration refusal neutered, not argued:
+ *   - `//@@mutable class S { vars = new Map(); parent: S | null = null;
+ *      declare(k, v) { this.vars = this.vars.set(k, v) } }` — compiles, runs, and matches
+ *     node exactly. Nothing about it can close a cycle: `parent` is never written.
+ *   - `//@@mutable class N { next: N | null = null; loop() { this.next = this } }` —
+ *     compiles and prints `N { v: 7, next: N { v: 7, next: N { v: 7, next: [N] } } }`
+ *     where node prints `<ref *1> N { v: 7, next: [Circular *1] }`. The corruption is
+ *     real, so SOMETHING has to refuse — but only that one write.
+ *
+ * THE CONSTRUCTOR IS NOT THE SAME QUESTION, and it cannot simply inherit the rule. A
+ * field initializer (`next: N | null = null`) and a parameter property
+ * (`constructor(private parent: S | null = null)`) both DESUGAR into `this.<field> = v`
+ * in the constructor body, and both write the recursive field. Refusing those would put
+ * the declaration back where it was under a different code — vacuous.
+ *
+ * They are also genuinely safe, and for a reason, not by luck: a constructor writes into
+ * a FRESH block that nothing else can reach yet, so the assigned value cannot already
+ * point at it. The one escape is naming the fresh block itself, and `this` is the only
+ * name it has — VERIFIED both ways:
+ *   - `constructor() { this.next = this }` under a neutered guard produced the same
+ *     unfolded nesting as the method spelling, so the guard is NECESSARY;
+ *   - `constructor() { const t = this; this.next = t }` is already NT1604 ("cannot move
+ *     out of `t`: it is borrowed"), so the aliased spelling cannot reach the hole.
+ * So the constructor carve-out is "unless the value mentions `this`", which is a
+ * syntactic scan of one expression tree — no fixpoint, nothing to diverge.
+ *
+ * UNDECORATED classes are untouched, deliberately. Their setter COPIES the instance
+ * (Stage 29), so `this.next = this` there stores the ORIGINAL into a copy and no cycle
+ * exists; `RmPlain2` above returns `7 false` on both sides. The new rule fires only when
+ * the receiver is `@@mutable`, which is exactly when the write lands in place.
+ */
+describe("a `@@mutable` RECURSIVE class — split at the field (piece 4)", () => {
+  test("a recursive `@@mutable` class DECLARES, and a NON-recursive field mutates in place", async () => {
+    // `Scope` in src/checker.ts, in miniature: `parent` makes it recursive and is never
+    // written after construction; everything the methods touch is a non-recursive field.
+    const source = `
+//@@mutable
+class Scope {
+  n: number = 0;
+  label: string = "root";
+  parent: Scope | null = null;
+  bump(): void { this.n++; }
+  rename(s: string): void { this.label = s; }
+}
+const s = new Scope();
+s.bump();
+s.bump();
+s.rename("inner");
+console.log(s.n, s.label, s.parent === null);
+`;
+    await expectMatches(source, runWithNode(source));
+  });
+
+  test("`this.next = this` in a METHOD is refused — the write that actually closes the cycle", () => {
+    // The mutation proof for the whole lane. With the old declaration refusal removed and
+    // nothing put in its place, this exact program compiled and printed
+    //   RmNode { v: 7, next: RmNode { v: 7, next: RmNode { v: 7, next: [RmNode] } } }
+    // where node prints `<ref *1> RmNode { v: 7, next: [Circular *1] }` — exit 0 on both
+    // sides, so a silent wrong answer. The refusal is now the RECORD's, at the field.
     const r = rejectionOf(`
 //@@mutable
 class Node {
-  n: number = 0;
+  v: number = 7;
   next: Node | null = null;
-  bump(): Node { this.n++; return this; }
+  loop(): void { this.next = this; }
 }
 const a = new Node();
-console.log(a.bump().n);
+a.loop();
+console.log(a.v);
 `);
     expect(r?.code).toBe("NT1030");
-    expect(r?.message).toContain("'@@mutable class Node' is RECURSIVE");
+    expect(r?.message).toContain("'next' of '@@mutable Node' is a RECURSIVE field");
   });
+
+  test("`this.next = this` in the CONSTRUCTOR is refused too — the carve-out is not a hole", () => {
+    // A constructor is exempt because it writes into a block nothing else can reach. That
+    // stops being true the moment the value NAMES the block, and this spelling produced
+    // the identical unfolded nesting under a neutered guard. Same code, same message.
+    const r = rejectionOf(`
+//@@mutable
+class Node {
+  v: number = 1;
+  next: Node | null = null;
+  constructor() { this.v = 7; this.next = this; }
+}
+const a = new Node();
+console.log(a.v);
+`);
+    expect(r?.code).toBe("NT1030");
+    expect(r?.message).toContain("'next' of '@@mutable Node' is a RECURSIVE field");
+  });
+
+  test("a PARAMETER PROPERTY of the recursive type still constructs — `Scope`'s own spelling", async () => {
+    // `constructor(private parent: Scope | null = null)` desugars to a constructor write of
+    // the RECURSIVE field. If the carve-out did not exist this would be refused, the class
+    // would be undeclarable, and the split would be vacuous — the failure mode this lane
+    // was warned about by name. `child()` builds the chain, which is a TREE: children point
+    // up, nothing points down.
+    const source = `
+//@@mutable
+class Scope {
+  n: number = 0;
+  parent: Scope | null;
+  constructor(parent: Scope | null = null) { this.parent = parent; }
+  bump(): void { this.n++; }
+}
+const root = new Scope();
+root.bump();
+const kid = new Scope(root);
+console.log(kid.n, kid.parent === null, root.n);
+`;
+    await expectMatches(source, runWithNode(source));
+  });
+
+  test("an UNDECORATED recursive class is untouched — its setter copies, so there is no cycle", async () => {
+    // The reason the new rule is gated on `@@mutable` rather than applied to every
+    // `this.f = v`. An ordinary class's field-assigning method copy-on-writes (Stage 29),
+    // so `this.next = this` puts the ORIGINAL inside a fresh copy — a tree, one level deep.
+    const source = `
+class Plain {
+  v: number = 7;
+  next: Plain | null = null;
+  loop(): Plain { this.next = this; return this; }
+}
+const a = new Plain();
+const b = a.loop();
+console.log(b.v, b.next === null);
+`;
+    await expectMatches(source, runWithNode(source));
+  });
+
+  test("mutating a recursive `@@mutable` CLASS adds no leak and no double free (vs the control)", async () => {
+    // The same bar the record case set, for the same reason: a recursive class has a
+    // nullable field, and a `?N` tag/value box is an allocation that shallow drop never
+    // frees, so ZERO is the wrong number to measure against. "Identical to not mutating"
+    // is the statement that rules out a double free or a NEW leak, and it is the one that
+    // matters — the ownership line is that a leak is acceptable and a use-after-free is
+    // not. A chain is built and dropped here, so both the parent link and the mutation
+    // are in scope of the count.
+    const body = (mutate: string) => `
+//@@mutable
+class Node {
+  n: number = 0;
+  label: string = "a";
+  parent: Node | null;
+  constructor(parent: Node | null = null) { this.parent = parent; }
+}
+function scope(): string {
+  const root = new Node();
+  const alias = root;
+${mutate}
+  return alias.label;
+}
+console.log(scope());
+console.log(__objLive(), __arrLive());
+`;
+    const control = await compileAndRun(body(""));
+    const mutated = await compileAndRun(body(`  root.label = "mutated";\n  root.n = 7;`));
+    expect(control.exitCode).toBe(0);
+    expect(mutated.exitCode).toBe(0);
+    // Same counts on both sides: the mutation allocated nothing and freed nothing extra.
+    expect(mutated.stdout.split("\n")[1]).toBe(control.stdout.split("\n")[1]);
+    expect(control.stdout.split("\n")[0]).toBe("a");
+    expect(mutated.stdout.split("\n")[0]).toBe("mutated"); // observed through the alias
+  });
+
+  /*
+   * The sanitizer gate. `__objLive()` above answers the LEAK half; this one answers the
+   * half that is not negotiable — a use-after-free or a double free. It is built through
+   * `emitIRAsan`, NOT `emitIR`, and that distinction is the whole point: ASan only rewrites
+   * functions carrying `sanitize_address`, and until that attribute was emitted a plain
+   * build instrumented `runtime/*.c` and not one instruction nativets generated — catching
+   * double frees but BLIND to a stale read. The parent chain here is built, mutated and
+   * dropped 200 times, so every drop path this lane newly admits is exercised.
+   */
+  test("ASan + UBSan: a recursive `@@mutable` class churns with no double free or stale read", () => {
+    const CHURN = `
+//@@mutable
+class Node {
+  n: number = 0;
+  label: string = "a";
+  parent: Node | null;
+  constructor(parent: Node | null = null) { this.parent = parent; }
+  bump(): void { this.n++; }
+  rename(s: string): void { this.label = s; }
+}
+function chain(i: number): number {
+  const root = new Node();
+  root.bump();
+  root.rename("root");
+  const kid = new Node(root);
+  kid.bump();
+  kid.rename("kid");
+  return kid.n + kid.label.length + (i % 2);
+}
+let n = 0;
+for (let i = 0; i < 200; i = i + 1) { n = n + chain(i); }
+console.log(n);
+console.log(__arrLive());`;
+    const dir = mkdtempSync(join(tmpdir(), "nativets-recmutasan-"));
+    try {
+      const ll = join(dir, "module.ll");
+      writeFileSync(ll, emitIRAsan(CHURN));
+      const bin = join(dir, "prog");
+      const built = spawnSync("clang", [
+        "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+        ll, join(ROOT, "runtime/runtime.c"), "-lm", "-o", bin,
+      ], { encoding: "utf8" });
+      expect(built.status).toBe(0);
+      const run = spawnSync(bin, [], {
+        encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+        env: { ...process.env, ASAN_OPTIONS: "detect_leaks=0" },
+      });
+      expect(run.stderr).not.toContain("AddressSanitizer");
+      expect(run.stderr).not.toContain("runtime error");
+      expect(run.status).toBe(0);
+      expect(run.stdout).toBe("900\n0\n"); // node agrees on 900
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });
 
 /*

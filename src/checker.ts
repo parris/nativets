@@ -7,7 +7,8 @@
  * supported programs.
  */
 
-import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, Declarator } from "./ast.ts";
+import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, FieldAssign, Declarator } from "./ast.ts";
+import { mentionsThis } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray, stringLiteralValue, exprTy } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
@@ -351,11 +352,19 @@ interface RecvHint {
   root?: string;
 }
 
-// NOT `//@@mutable`, and it cannot become so: `parent: Scope | null` makes this class
-// RECURSIVE, and an `@@mutable` recursive class is refused (NT1030 — mutating one in
-// place could close a cycle). So the two tables below keep the DISCARDED-mutator
-// spelling that NT1606 refuses, and `Scope.declare`/`Scope.lookup` stay self-hosting
-// blockers until either the cycle rule or a non-recursive scope representation lands.
+// `//@@mutable`, which it could NOT be until the cycle rule landed. `parent: Scope | null`
+// makes this class RECURSIVE, and a recursive `@@mutable` class used to be refused at its
+// DECLARATION (NT1030). That refusal was over-broad in exactly the way the RECORD spelling's
+// was: the hazard is the one WRITE that can close a cycle, not the declaration. `Scope`
+// never writes `parent` after construction — the chain points up and nothing points down —
+// so the field-level rule is silent here and the attribute is admissible. See
+// `cycleCapableThisWrite` and test/mutable-records.test.ts (piece 4).
+//
+// `hits` still keeps the DISCARDED-mutator spelling NT1606 refuses, so `Scope.lookup` stays
+// a blocker: rebinding it (`this.hits = this.hits.add(name)`) replaces the Set OBJECT, and
+// this field is read from outside the class, so that is a real aliasing question rather than
+// a transcription — left to the lane that owns `Set` accumulators.
+//@@mutable
 class Scope {
   private vars = new Map<string, Binding>();
   /** Names of THIS scope's own bindings that some lookup resolved to. Used on the
@@ -365,7 +374,10 @@ class Scope {
   readonly hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
-  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty, mutable?: boolean, nullBox?: boolean): void { this.vars.set(name, { ty, constant, len, narrowedFrom, mutable, nullBox }); }
+  // `this.vars = this.vars.set(…)`, not the discarded `this.vars.set(…)`. Identical under
+  // node — its `.set` mutates and returns the receiver, so the rebind is a self-assignment
+  // — and the only spelling that says what it means here, where a Map is PERSISTENT.
+  declare(name: string, ty: Ty, constant: boolean, len?: number, narrowedFrom?: Ty, mutable?: boolean, nullBox?: boolean): void { this.vars = this.vars.set(name, { ty, constant, len, narrowedFrom, mutable, nullBox }); }
   own(name: string): Binding | undefined { return this.vars.get(name); }
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
@@ -1145,6 +1157,40 @@ class Checker {
   }
 
   /**
+   * Does a `this.f = v` write need the cycle rule (piece 4 — the CLASS spelling)?
+   *
+   * `checkCycleCapableField` below reasons about the RECEIVER'S TYPE, not about the
+   * receiver's spelling, so `this` was never the obstacle the class refusal claimed it was:
+   * inside a member body `this` has the class's own `classTag`-tagged instance type, which
+   * is exactly what that rule reads. Two things do have to be decided here, though.
+   *
+   * MUTABLE ONLY. An undecorated class's field-assigning method COPIES the instance and
+   * hands the copy back (Stage 29, NT1023), so `this.next = this` stores the ORIGINAL into
+   * a fresh copy and no cycle exists — verified, it prints `7 false` on both sides. Only a
+   * `@@mutable` receiver's write lands in place, so only it can close one. This also keeps
+   * the blast radius at zero for every class that compiled before.
+   *
+   * THE CONSTRUCTOR IS EXEMPT, unless the value names `this`. A constructor writes into a
+   * freshly allocated block that nothing else holds a pointer to, so the value it stores
+   * cannot already reach the receiver — the only way in is to name the block itself. The
+   * exemption is not a convenience: a field initializer (`next: N | null = null`) and a
+   * parameter property (`constructor(private parent: S | null = null)`) both DESUGAR into
+   * constructor writes of the recursive field, so without it the field-level rule would
+   * refuse every recursive `@@mutable` class at its own declaration and the split would be
+   * vacuous. Both halves are measured, not argued: with the declaration refusal neutered,
+   * `constructor() { this.next = this }` reproduced the unfolded-nesting wrong answer, and
+   * `constructor() { const t = this; this.next = t }` is already NT1604.
+   */
+  private cycleCapableThisWrite(e: FieldAssign, ot: Ty): boolean {
+    if (!this.isMutableTy(ot)) return false;
+    // `?? false` rather than `!== true`: `inCtor` is optional, so its type is `?Uboolean`
+    // and comparing that with a `boolean` is NT2001 in this compiler's own subset. Coalesce
+    // first, then negate — src/ must stay inside the subset it compiles.
+    const inCtor = e.inCtor ?? false;
+    return !inCtor || mentionsThis(e.value);
+  }
+
+  /**
    * THE CYCLE RULE. May field `field` of the `@@mutable` receiver type `ot` be assigned?
    *
    * Only if writing it cannot close a cycle — i.e. the field's declared type cannot
@@ -1157,24 +1203,33 @@ class Checker {
    * reachable from the value being written, and any such write's field type must type-reach
    * the receiver's own type. CONSTRUCTION cannot make one — a literal's fields are values
    * that already exist. So refusing every cycle-capable write is exactly the tree invariant.
+   * That is also why a CONSTRUCTOR is exempt (`cycleCapableThisWrite`): it IS construction.
    *
    * This is a TYPE-level over-approximation of a VALUE-level question, so it also refuses
    * writes that happen not to close a cycle. That is the side to be wrong on.
    *
-   * A NON-recursive `@@mutable` record has no nominal reference in any field, so the
-   * fixpoint is empty and nothing that compiled before changes — `Cell.n = 1` is untouched.
+   * A NON-recursive `@@mutable` record or class has no nominal reference in any field, so
+   * the fixpoint is empty and nothing that compiled before changes — `Cell.n = 1` is
+   * untouched, and so is every `@@mutable` class in src/.
    */
   private checkCycleCapableField(ot: Ty, field: string, ft: Ty): void {
     const tag = classTag(ot);
     if (tag === undefined || !this.typeReaches(ft, tag)) return;
+    // The two spellings need different ADVICE. A record is rebuilt with a spread; a class
+    // instance is not (`{ ...c }` is not a `C`), so it is pointed at construction instead —
+    // `new C(child)` cannot close a cycle for the same reason a constructor write cannot.
+    const rebuild = this.recordTags.has(tag)
+      ? "To replace a recursive CHILD, rebuild the node instead — `{ ...n, " + field + ": v }` — which cannot close a cycle."
+      : `To attach a recursive CHILD, pass it to the CONSTRUCTOR instead — \`new ${tag}(…, child)\`, or a parameter ` +
+        `property \`constructor(readonly ${field}: …)\` — which cannot close a cycle, because a constructor writes ` +
+        "into a block nothing else can reach yet.";
     throw nyi(
       NYI.FORWARD_TYPE,
       `'${field}' of '@@mutable ${tag}' is a RECURSIVE field (its type '${ft}' can contain a ${tag}), so assigning it in place could close a CYCLE`,
       "every walk over a value here assumes a TREE and none carries a seen-set: `console.log` unfolds a back-edge " +
       "until util.inspect's depth limit and prints nesting where node prints `[Circular *1]`, and `structuredClone` " +
-      "and an actor message would alias or diverge. A NON-recursive field of the same record (a `string`, a `number`, " +
-      "a type) may still be assigned in place. To replace a recursive CHILD, rebuild the node instead — " +
-      "`{ ...n, " + field + ": v }` — which cannot close a cycle. See docs/decorators.md",
+      "and an actor message would alias or diverge. A NON-recursive field of the same value (a `string`, a `number`, " +
+      "a type) may still be assigned in place. " + rebuild + " See docs/decorators.md",
     );
   }
 
@@ -3398,11 +3453,12 @@ class Checker {
         if (!isObjectTy(ot)) throw typeError(`cannot assign field on non-object type ${ot}`);
         const ft = fieldType(ot, e.field);
         if (!ft) throw typeError(`Property '${e.field}' does not exist on ${ot}`);
-        // THE CYCLE RULE (piece 2). A recursive `@@mutable` record DECLARES — the refusal
-        // that used to sit on the whole declaration sits on this one field instead. Inert
-        // for a non-recursive record, and for `this.f = v` inside a class, whose recursive
-        // spelling is still refused at the declaration.
-        if (!e.viaThis) this.checkCycleCapableField(ot, e.field, ft);
+        // THE CYCLE RULE (piece 2 for records, piece 4 for classes). A recursive
+        // `@@mutable` record or class DECLARES — the refusal that used to sit on the whole
+        // declaration sits on this one field instead. Inert for a non-recursive receiver
+        // (the fixpoint is empty), and for `this.f = v` on an undecorated class, whose
+        // setter copies rather than mutating; see `cycleCapableThisWrite`.
+        if (!e.viaThis || this.cycleCapableThisWrite(e, ot)) this.checkCycleCapableField(ot, e.field, ft);
         const vt = this.type(e.value, scope, baseTy(ft)); // field type is the context (e.g. `items: number[] = []`)
         if (vt !== ft && !this.assignable(ft, vt)) throw typeError(`cannot assign ${vt} to field '${e.field}' of type ${ft}`);
         return ft;

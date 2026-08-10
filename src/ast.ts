@@ -1132,6 +1132,18 @@ export interface FieldAssign {
    * src/ownership.ts reads this to keep the store from being a move-out-of-borrow (NT1604).
    */
   paramProp?: boolean;
+  /**
+   * This `viaThis` write is in a CONSTRUCTOR body rather than a method's — including the
+   * two the parser synthesizes there, a field initializer and a parameter property.
+   *
+   * It is the CYCLE rule that needs the distinction (`Checker.cycleCapableThisWrite`). A
+   * constructor writes into a freshly allocated block that nothing else can reach yet, so
+   * the value it stores cannot already point back at the receiver; a method's receiver
+   * already exists and can be pointed at. Without the distinction the rule would refuse
+   * `parent: Scope | null = null`, which desugars to a constructor write of the recursive
+   * field and is the whole reason recursive `@@mutable` classes exist.
+   */
+  inCtor?: boolean;
 }
 
 export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
@@ -2222,4 +2234,41 @@ function bindStmt(s: Stmt, out: Set<string>): Stmt {
  */
 export function collectBindingNames(list: Stmt[], out: Set<string>): void {
   for (const s of list) bindStmt(s, out);
+}
+
+/* ---- pass 4: does an expression name the receiver? ------------------------- */
+
+/** The one-bit accumulator `mentionsThis` threads down the walk. `//@@mutable` because it
+ *  IS mutated in place through a by-borrow parameter, which is exactly what the attribute
+ *  legalizes for a record (docs/decorators.md, piece 3) — the undecorated spelling is the
+ *  NT1606 that `collectBindingNames`'s `Set` accumulator still carries. Non-recursive, so
+ *  the cycle rule this very type serves is inert on it. */
+//@@mutable
+interface ThisHit { hit: boolean }
+
+function thisExpr(e: Expr, out: ThisHit): Expr {
+  if (e.kind === "Identifier" && e.name === "this") out.hit = true;
+  return walkExprChildren(e, (x: Expr): Expr => thisExpr(x, out), (s: Stmt): Stmt => thisStmt(s, out), KEEP_TY);
+}
+function thisStmt(s: Stmt, out: ThisHit): Stmt {
+  return walkStmtChildren(s, (x: Expr): Expr => thisExpr(x, out), (y: Stmt): Stmt => thisStmt(y, out), KEEP_TY);
+}
+/**
+ * Does this expression name `this` ANYWHERE inside it? A pure VISITOR, in the shape
+ * `collectBindingNames` established: it walks with the shared rewriter and throws the
+ * rebuilt tree away.
+ *
+ * The one caller is the CYCLE rule (`Checker.cycleCapableThisWrite`). A constructor writes
+ * into a block nothing else can reach yet, so `this.f = v` there cannot close a cycle —
+ * unless `v` names the block being built, and `this` is the only name it has at that
+ * point. (An aliased spelling, `const t = this; this.next = t`, does not need catching
+ * here: it is already NT1604, "cannot move out of `t`: it is borrowed".)
+ *
+ * Terminates trivially — the AST is a finite TREE, and this walk predates any value-level
+ * back-edge. It answers a SYNTACTIC question and must stay syntactic for that reason.
+ */
+export function mentionsThis(e: Expr): boolean {
+  const out: ThisHit = { hit: false };
+  thisExpr(e, out);
+  return out.hit;
 }
