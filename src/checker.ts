@@ -3900,7 +3900,9 @@ class Checker {
     // compiler rejects. Point at the shape that actually works instead: RETURN the
     // collection and rebind at the call site (docs/self-hosting.md settled this).
     const recvIsParam =
-      e.callee.object.kind === "Identifier" && Boolean(scope.lookup(e.callee.object.name)?.param);
+      // `?? false`, not `Boolean(...)` (unimplemented here, docs/divergences.md) and not
+      // `=== true` (comparing `?Uboolean` with `boolean` is itself outside the subset).
+      e.callee.object.kind === "Identifier" && (scope.lookup(e.callee.object.name)?.param ?? false);
     const fix = recvIsParam && name !== undefined
       ? `\`${name}\` is a PARAMETER, so do NOT write \`${name} = ${name}.${m}(${args})\` — a parameter is a borrow and the CALLER, who owns the ` +
         `${kind.toLowerCase()}, would never see the update. Accumulate into a LOCAL seeded from it and RETURN that ` +
