@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "e0a1da5"
+    "rev": "1d19b28"
   },
   "modules": {
     "ast.ts": {
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "83e4a8cfe58fe052",
+      "sha256": "c0de7bf95d1b2609",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot compare U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `s.returnTy = v` would mutate the object in place at L:C"
       }
     },
     "cli.ts": {
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot compare U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `s.returnTy = v` would mutate the object in place at L:C"
       }
     },
     "coverage-preprocess.ts": {
@@ -138,7 +138,7 @@
       }
     },
     "ownership.ts": {
-      "sha256": "9682c439db09f49b",
+      "sha256": "68895fc3483b8b28",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -147,8 +147,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot compare U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quas…"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `s.returnTy = v` would mutate the object in place at L:C"
       }
     },
     "parser.ts": {

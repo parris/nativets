@@ -1329,19 +1329,34 @@ describe("SH6: differential self-compilation (bun-run compiler is the oracle)", 
       // refusing all of them would have broken four homogeneous `checker.ts` sites and
       // pushed that module further from self-hosting to buy no soundness.
       //
-      // What stops stage-1 now gates FIVE modules at once — `parser`, `modules`, `driver`,
-      // `coverage`, `cli` — and is one line in `valueReturns`:
-      //     case "ReturnStmt": if (s.argument) out.push(s.argument); break;
-      // A truthiness guard on an OPTIONAL FIELD inside a `switch` case does not narrow.
-      // Every conditional form funnels through one mechanism (`narrowTagsWith` →
-      // `narrowTagsInto`), and each form wired into it this session cost a handful of
-      // lines, so this is very likely an unwired call site rather than absent logic.
+      // TWENTY-NINTH — and the diagnosis in the paragraph this replaces was WRONG, which is
+      // the entry worth reading. It said the blocker was "a truthiness guard on an OPTIONAL
+      // FIELD inside a `switch` case does not narrow", and that it was very likely an
+      // unwired call site. Three agents then failed to reproduce it: `valueReturns` copied
+      // character-for-character against the real `Expr`/`Stmt` COMPILES. Sweeps of union arm
+      // count (2..32), self- and mutual recursion, cross-module declaration, `switch` vs
+      // `if`, and the `//@@mutable` accumulator all came back negative.
       //
-      // Note the message itself: it prints all 30 union members TWICE, ~4,000 characters
-      // for one error. Worth its own fix — a diagnostic nobody can read is a diagnostic
-      // nobody acts on, which is how several lying hints survived this long.
-      expect(m.error).toContain(".push expects");
-      expect(m.code).toBe("NT2001");
+      // The cause was `closureAssigned` frames, and it needed BOTH halves of `ownBindings`
+      // to miss: a BLOCK-scoped producer (`let s` inside a branch of `lexer.ts::lex` — a
+      // top-level one is subtracted) and a FOR-OF LOOP BINDING consumer (also unmodelled,
+      // so `bindingFrame` falls back to frame 0, the whole program). An earlier probe
+      // "ruled this out" with a top-level `let s` in a `forEach` arrow; that falsification
+      // was too weak, and the negative was relayed to three lanes before it was caught.
+      // Fixed by giving `BodyFrame` an `innerBinds` set, consulted only after the exact
+      // top-level walk fails and only when no ENCLOSING body could bind the name either.
+      //
+      // Note the message itself: it printed all 30 union members TWICE, ~5,500 characters
+      // whose expected and got differed by the two characters `?N` — and three agents
+      // independently concluded it "never states what it got" while the clause sat at byte
+      // 2,733. It now elides the common part (5,479 -> 301 bytes). A diagnostic nobody can
+      // read is a diagnostic nobody acts on, which is how several lying hints survived.
+      //
+      // Stage-1 advanced exactly one line, to `walk(s.consequent)` — a self-recursive
+      // locally-bound arrow. Five modules moved with it; NONE reached IR, which is this
+      // file's recurring lesson stated a fifth time.
+      expect(m.error).toContain("call to 'walk'");
+      expect(m.code).toBe("NT1003");
       return;
     }
 
