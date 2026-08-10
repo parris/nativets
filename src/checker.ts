@@ -85,6 +85,40 @@ function arrayElementOk(el: Ty, allowDate: boolean): boolean {
     || isObjectTy(el) || isArrayTy(el) || isUnionTy(el) || (allowDate && isDateTy(el));
 }
 
+/**
+ * What `.map`'s callback may PRODUCE — deliberately NARROWER than `arrayElementOk`, and
+ * kept next to it so the gap is visible rather than looking like drift.
+ *
+ * It is not the same question. `arrayElementOk` asks what an annotated or literal array
+ * may HOLD; this asks what the inlined map loop can BUILD, which additionally needs
+ * codegen to have a store for the body's value. `U<…>` unions, `@N` back-edges and `Date`
+ * are the three that differ, and all three are still `NT1001` here (`.map producing U<…>`
+ * is the live blocker in `materializeTextImports`, src/modules.ts) — widening this to the
+ * other predicate would silently take them with it, unmeasured.
+ *
+ * The NULLABLE arm RECURSES on the base, so `?U` of a refused base stays refused for the
+ * base's own reason. That recursion is CONSERVATIVE RATHER THAN LOAD-BEARING, and saying
+ * so is the point of this paragraph: replacing it with a blanket `isNullableTy(t) → true`
+ * was run against node on `?U` of a discriminated union, a `Map`, a `Date` and a
+ * `Uint8Array`, through element narrowing, whole-array `console.log` and
+ * `JSON.stringify`, and every one was byte-exact at exit 0. A nullable is a heap
+ * `[tag, value]` box, so the result slot is ONE pointer no matter what the base is —
+ * which is why nothing broke. The arm stays because a refusal is always acceptable and a
+ * widening nothing exercises is not; it is not evidence that those bases are unsound.
+ *
+ * The list is otherwise the Stage-19 original, widened once for objects/arrays. That
+ * lineage matters, because it is easy to read this as the OWNERSHIP rule its neighbours
+ * `.at`/`.find` carry ("a heap element would alias its owner") and then be afraid of it.
+ * Those two hand back a BORROW of an element the receiver still owns; `.map` constructs a
+ * fresh array that owns its elements outright, so aliasing is not what this line is for —
+ * a nullable result aliases nothing an object result did not already alias. `.map(x => x)`
+ * over an object array is the same aliasing shape and has been allowed since that widening.
+ */
+function mapResultOk(t: Ty): boolean {
+  if (isNullableTy(t)) return mapResultOk(baseTy(t));
+  return t === "number" || t === "string" || t === "boolean" || isObjectTy(t) || isArrayTy(t);
+}
+
 /** The length of an expression whose size is fixed at compile time, else undefined. */
 function literalLength(e: Expr): number | undefined {
   if (e.kind === "ArrayLiteral") {
@@ -4468,7 +4502,7 @@ class Checker {
       if (bodyTy !== "boolean") throw typeError(".filter callback must return boolean");
       return makeArrayTy(el);
     }
-    if (bodyTy !== "number" && bodyTy !== "string" && bodyTy !== "boolean" && !isObjectTy(bodyTy) && !isArrayTy(bodyTy)) throw nyi(NYI.ARRAY, `.map producing ${bodyTy}`);
+    if (!mapResultOk(bodyTy)) throw nyi(NYI.ARRAY, `.map producing ${bodyTy}`);
     return makeArrayTy(bodyTy);
   }
 

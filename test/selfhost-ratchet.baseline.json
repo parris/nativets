@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-10",
-    "rev": "a6dcc2f"
+    "rev": "2c4445f"
   },
   "modules": {
     "ast.ts": {
@@ -9,16 +9,16 @@
       "standalone": {
         "stage": "check",
         "code": "NT1001",
-        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
+        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
       },
       "linked": {
         "stage": "check",
         "code": "NT1001",
-        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
+        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
       }
     },
     "checker.ts": {
-      "sha256": "f2fda204e72f1c6a",
+      "sha256": "328afe73eebfc5e3",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -27,7 +27,7 @@
       "linked": {
         "stage": "check",
         "code": "NT1001",
-        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
+        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
       }
     },
     "cli.ts": {
@@ -41,11 +41,11 @@
       "linked": {
         "stage": "check",
         "code": "NT1001",
-        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
+        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
       }
     },
     "codegen.ts": {
-      "sha256": "3f7c85c4c6a0285c",
+      "sha256": "0961b5f5b6db1a8a",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -54,7 +54,7 @@
       "linked": {
         "stage": "check",
         "code": "NT1001",
-        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
+        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
       }
     },
     "coverage-preprocess.ts": {
@@ -71,7 +71,7 @@
       }
     },
     "coverage.ts": {
-      "sha256": "140a8e6c3f6dcc0c",
+      "sha256": "d8c0c2632712c6a8",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -81,11 +81,11 @@
       "linked": {
         "stage": "check",
         "code": "NT1001",
-        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
+        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
       }
     },
     "diagnostics.ts": {
-      "sha256": "88ccc3c46adbfbc0",
+      "sha256": "c1af8fa23c113575",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -108,7 +108,7 @@
       "linked": {
         "stage": "check",
         "code": "NT1001",
-        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
+        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
       }
     },
     "lexer.ts": {
@@ -134,11 +134,11 @@
       "linked": {
         "stage": "check",
         "code": "NT1001",
-        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
+        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
       }
     },
     "ownership.ts": {
-      "sha256": "6343151e9079c4ed",
+      "sha256": "353673343508701f",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -148,11 +148,11 @@
       "linked": {
         "stage": "check",
         "code": "NT1001",
-        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
+        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
       }
     },
     "parser.ts": {
-      "sha256": "2a05c1643d738b2f",
+      "sha256": "7ec18495b6301a7b",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -161,7 +161,7 @@
       "linked": {
         "stage": "check",
         "code": "NT1001",
-        "message": "[NT1001] .map producing ?U{line:number,col:number,file:?Ustring} is not supported yet"
+        "message": "[NT1001] .find on (?U{line:number,col:number,file:?Ustring})[] (only number/string/boolean elements — a heap element would alias its owner) is not supported yet"
       }
     }
   }
