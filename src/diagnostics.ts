@@ -522,7 +522,15 @@ export function unknownTypeName(name: string, at?: { line: number; col: number }
  * message text; that spelling is retired in favour of this parameter, which produces the
  * same suffix AND the source frame the hand-rolled one could not.
  */
-export function mutationError(message: string, hint: string, at?: { line: number; col: number }, label: string = "mutated here"): NTError {
+/* `at` is spelled to match `ast.ts`'s `Loc` STRUCTURALLY — including the optional `file`
+ * this function never reads — rather than as the two fields it uses. Every caller passes an
+ * `exprLoc(...)` result, i.e. a `Loc`, and the narrower spelling made each of those an
+ * NT2001 ("expects ?U{line,col}, got ?U{line,col,file:?Ustring}") in the self-host subset,
+ * which is how it surfaced: it was the first blocker on functions in two different lanes.
+ * tsc never complained — structural subtyping lets a wider object through a narrower
+ * parameter — so only the compiler compiling ITSELF could see it. `Loc` is not imported
+ * because ast.ts imports THIS module; naming the shape inline keeps the graph acyclic. */
+export function mutationError(message: string, hint: string, at?: { line: number; col: number; file?: string }, label: string = "mutated here"): NTError {
   if (at === undefined) return new NTError({ code: "NT1606", message, milestone: "later", hint });
   return new NTError({
     code: "NT1606",

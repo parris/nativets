@@ -115,6 +115,31 @@ describe("immutable-by-default: in-place mutation is rejected (NT1606)", () => {
     expect(hint).toContain("not a copy per element");
   });
 
+  /*
+   * …but NOT on a PARAMETER receiver, where that same advice was a use-after-free.
+   *
+   * `out.push(n)` on `out: string[]` used to answer "accumulate with `acc = [...acc, x]`",
+   * and applying it literally to `out` gave `out = [...out, n]` — which freed the caller's
+   * array on the first iteration and then read it. It printed a different garbage integer
+   * on every run, at exit 0, so a differential test could pass by luck. It is NT1608 now
+   * (see test/drops.test.ts), but a hint whose advice is another refusal is still a dead
+   * end, and this one is read exactly when someone is unsure. So the parameter receiver
+   * gets the true answer instead: accumulate into a local and RETURN it.
+   */
+  test("the .push rejection does NOT recommend rebinding when the receiver is a PARAMETER", () => {
+    const hint = rejectHint(`
+function collect(names: string[], out: string[]): void { for (const n of names) out.push(n); }
+const acc: string[] = [];
+collect(["a"], acc);
+console.log(acc.length);`);
+    expect(hint).toContain("PARAMETER");
+    expect(hint).toContain("NT1608");
+    expect(hint).toContain("RETURN it");
+    // The load-bearing negative: the accumulator spelling must not be offered here as
+    // something to do to `out` itself. It appears only as the named-and-refused form.
+    expect(hint).not.toContain("To accumulate in a loop, reassign");
+  });
+
   test("immutable replacements still compile (spread append, .with, object spread)", () => {
     expect(rejectCode(`const a: number[] = [1, 2]; const b: number[] = [...a, 3]; console.log(b.length);`)).toBeNull();
     expect(rejectCode(`const a: number[] = [1, 2]; const b: number[] = a.with(0, 9); console.log(b[0]);`)).toBeNull();

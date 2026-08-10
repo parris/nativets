@@ -1579,6 +1579,62 @@ The cost is a **leak where there used to be a dangling pointer** — the array-i
 fix"), so this joins a known list rather than opening a new one. Pinned node-differentially in
 `test/drops-obj.test.ts` and as UI tests in `test/ownership/move-out-of-field.ts`.
 
+### Assigning to a LINEAR PARAMETER is `NT1608` — it used to free the caller's value
+
+The same borrow, written to rather than read from — and the same failure mode, one notch worse
+because it did not reproduce identically.
+
+```ts
+function f(out: string[]): void { out = ["z"]; }
+const acc: string[] = ["a", "b"];
+f(acc);
+console.log(acc.length);   // node 2;  we printed 3, then 6875746259392517000, at EXIT 0
+```
+
+`3` is not the length of anything in that program (`["z"]` is 1, `acc` is 2), and the next run
+printed a fresh garbage integer. The spread spelling — `for (const n of names) out = [...out, n]`
+— printed a different address-sized number on every run, always at exit 0. **Nondeterministic
+output at exit 0 is the worst failure this project recognises**: a differential test can pass by
+luck.
+
+**Cause, one token wide.** `AssignExpr` sets `dropOld` — "this scope frees the value being
+overwritten" — from `droppable()`, which proves only *not moved out* and *not captured by a
+closure*. It never asked whether this scope **owns** the binding. A linear parameter is in
+`linear` (the move checker tracks it) but is deliberately **not** in the scope-exit drop set,
+because it is a **borrow**: `paramBorrows`, `src/ownership.ts`. `dropOld` was the one place that
+read `linear` without also reading `borrowParams`, so `out = […]` freed the **caller's** array and
+every later read of `acc` dangled. An **object** parameter took the same path and died on
+**SIGTRAP** (heap corruption, exit 133) with nothing on stdout at all.
+
+**Why a refusal and not a fix.** Suppressing `dropOld` for a borrow parameter is memory-safe and
+matches node on every case above — but then nothing ever frees the value the *callee* allocated
+(measured: `__arrLive()` **2** where 1 is live for the straight-line case, **5** where 1 is live
+for the loop). Freeing it at scope exit instead needs a per-parameter drop flag for the paths that
+did not reassign, and getting that wrong is a **double free** — strictly worse than what was
+fixed. The pattern people reach for here is an accumulator out-param, and that **cannot work in
+node either**: JS parameters are by-value bindings, so the caller never observes the rebinding.
+`docs/self-hosting.md` had already decided the same question for a persistent `Map` — *return the
+value*. So the rebinding is refused with the reason, rather than made to silently do nothing.
+
+`NT1608` ≈ rustc **E0384** ("cannot assign twice to immutable variable"): a Rust parameter is an
+immutable binding unless declared `mut`, which is the same rule arrived at from the same model.
+
+**Only LINEAR parameters** — array, object, union, class instance. A `string` or `number`
+parameter is `Copy`, is not in `linear`, and is untouched, so `s = s.trim()` keeps working. A
+`for-of` element is a borrow too but is not in `linear`, so it never had the use-after-free; it
+does leak the assigned value, which is the pre-existing container-element leak class, not this one.
+
+**The hint that recommended it.** `NT1606` on `out.push(n)` used to answer "to accumulate in a
+loop, reassign: `acc = [...acc, x]`". Applied to the parameter the reader was actually holding,
+that is the second program above — the diagnostic handed out the use-after-free. The `.push` hint
+is now receiver-aware: on a parameter it says the receiver is a borrow, names `NT1608` rather than
+recommending it, and gives the true answer (accumulate into a **local** and **return** it). A hint
+is trusted exactly when the reader is unsure, so one that routes into a refusal is worse than none.
+
+Pinned in `test/drops.test.ts` (the refusal, plus the string parameter and the ordinary local that
+must stay accepted) and `test/immutable.test.ts` (the hint, including the negative that the
+rebinding advice is *absent* on a parameter receiver).
+
 ### `.push()` — refused by default, legal on a `@@mutable` ACCUMULATOR binding
 
 > **Superseded in part.** The section below argued — correctly, and it is kept because the
