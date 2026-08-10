@@ -3549,7 +3549,7 @@ class Parser {
       if (t.type === "ident" && t.value === "in" && BIN.get("<")!.prec >= minPrec) {
         this.next();
         const object = this.parseBinary(BIN.get("<")!.prec + 1);
-        left = { kind: "InExpr", key: left, object, loc: { line: t.line, col: t.col } };
+        left = { kind: "InExpr", key: left, object, loc: { line: t.line, col: t.col, file: this.file } };
         continue;
       }
       if (t.type !== "punct") break;
@@ -3821,7 +3821,11 @@ class Parser {
       // SH4: `import { readFileSync as rfs }` renames a HOST BUILTIN, which has no
       // declaration to alpha-rename — so the alias is resolved here, at the use site.
       const name = this.hostAliases.get(t.value) ?? t.value;
-      return { kind: "Identifier", name, loc: { line: t.line, col: t.col } };
+      // `file` is carried, exactly as the postfix forms below carry it. An Identifier is
+      // the loc `exprLoc` lands on most often (it descends to the first child that has
+      // one), so omitting it here was enough on its own to make a cross-module diagnostic
+      // unattributable — the span reached the renderer with a line number and no file.
+      return { kind: "Identifier", name, loc: { line: t.line, col: t.col, file: this.file } };
     }
     if (this.at("[")) return this.parseArrayLiteral();
     if (this.at("{")) return this.parseObjectLiteral();

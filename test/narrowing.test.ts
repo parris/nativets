@@ -573,7 +573,12 @@ console.log(f(d));
     // `d.spans`, not `value` — and the `.` of the offending `.length` read.
     expect(diag.message).toBe("'d.spans' is possibly undefined at 3:17");
     expect(diag.hint).toContain("?.");
-    expect(diag.spans).toEqual([{ line: 3, label: "this read is not proved non-nullish", primary: true }]);
+    // `col`/`file` are the span's location fields: a span carries the FILE its line number
+    // indexes, because `linkProgram` merges the import graph into one Program while each
+    // module keeps its own numbering. `file` is undefined here — `sourceToIR(source)` with
+    // no path parses anonymously — which is exactly the single-file case that must keep
+    // rendering against the one `source` below.
+    expect(diag.spans).toEqual([{ line: 3, col: 17, file: undefined, label: "this read is not proved non-nullish", primary: true }]);
     // With the source in hand it renders rustc-style, pointing at the actual line.
     expect(formatDiagnostic(diag, source)).toContain("return d.spans.length;");
   });

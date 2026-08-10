@@ -22,6 +22,27 @@ export interface DiagSpan {
   line: number;
   label: string;
   primary?: boolean;
+  /**
+   * The file this line number indexes.
+   *
+   * `linkProgram` merges the whole import graph into ONE Program, but every module is
+   * parsed on its own — so a `loc` that survived linking carries its ORIGINAL module's
+   * line number, which means nothing without the file beside it. Without this field the
+   * renderer had one `source` to draw against (the entry file) and drew every span against
+   * it, printing an imported module's line number over the entry file's text.
+   *
+   * Optional because a span assembled by hand (and every single-file program parsed with
+   * no path) has no file to name; those render exactly as they always did.
+   */
+  file?: string;
+  /** The column, carried only so the `-->` locator can be as precise as the message is. */
+  col?: number;
+}
+
+/** A module's source, keyed by the path a `DiagSpan.file` names. */
+export interface SourceFile {
+  file: string;
+  text: string;
 }
 
 export interface Diagnostic {
@@ -99,12 +120,42 @@ function leadingWhitespace(s: string): number {
 }
 
 /**
+ * The text a span's line number indexes, or `undefined` when we cannot know it.
+ *
+ * Two channels, and the difference between them is the whole point:
+ *
+ *   * `source` is the ANONYMOUS one — one file's text, with no claim about WHICH file.
+ *     A span that names no file is rendered against it, which is every single-file
+ *     program and every hand-assembled span. Unchanged behaviour.
+ *   * `sources` is the FILE-AWARE one. A caller that supplies it is declaring it knows
+ *     the whole graph, so a span naming a file that is not in it gets NO source line —
+ *     the locator alone. Silence there is correct: the alternative is drawing a caret
+ *     under some other file's text, which is what this function used to do.
+ *
+ * A file-naming span with no `sources` at all falls back to `source`, so every existing
+ * caller renders byte-identically. That fallback is the one path that can still show the
+ * wrong text — which is exactly why the `-->` locator is emitted whenever a file is
+ * known, so the file being rendered is never left implicit again.
+ */
+function sourceFor(file: string | undefined, source: string | undefined, sources: SourceFile[] | undefined): string | undefined {
+  if (file === undefined) return source;
+  if (sources === undefined) return source;
+  for (const f of sources) {
+    if (f.file === file) return f.text;
+  }
+  return undefined;
+}
+
+/**
  * Render a diagnostic. With the original `source`, a multi-span diagnostic prints
  * rustc-style — the message, then each labeled span with its source line and a caret
  * underline — turning "moved at line 4, used at line 7" into a scannable, pointed error.
  * Falls back to the compact single-line form when there are no spans (or no source).
+ *
+ * `sources` carries the text of EVERY module in the program, so a span produced inside an
+ * imported file is drawn against that file rather than against the entry. See `sourceFor`.
  */
-export function formatDiagnostic(diag: Diagnostic, source?: string): string {
+export function formatDiagnostic(diag: Diagnostic, source?: string, sources?: SourceFile[]): string {
   const head = `error[${diag.code}]: ${diag.message}`;
   // A span with no real line is worse than no span. Not every AST node carries a `loc`,
   // so a producer that writes `line: e.loc?.line ?? 0` emits line 0 — which rendered as a
@@ -122,21 +173,45 @@ export function formatDiagnostic(diag: Diagnostic, source?: string): string {
   // call on a nullable is NT1002 — and this file has to stay inside the subset it
   // compiles (docs/self-hosting.md). The optional-chained spelling silently moved this
   // module's SH6 blocker backwards; the shape below does not.
-  if (!diag.spans || diag.spans.length === 0 || !source) {
+  // `sources` alone is enough to draw a frame — a caller that knows the whole graph need
+  // not also nominate one file as the anonymous default.
+  if (!diag.spans || diag.spans.length === 0 || (!source && sources === undefined)) {
     return diag.hint ? `${head}\n  = help: ${diag.hint}` : head;
   }
   const located = diag.spans.filter((s) => s.line > 0);
   if (located.length === 0) {
     return diag.hint ? `${head}\n  = help: ${diag.hint}` : head;
   }
-  const srcLines = source.split("\n");
   // Primary span(s) first, then secondaries, but keep source order within each group.
   const spans = [...located].sort(
     (a, b) => Number(!!b.primary) - Number(!!a.primary) || a.line - b.line,
   );
   const gutter = Math.max(...spans.map((s) => String(s.line).length));
   let lines = [head];
+  // The file the previous span was drawn from, so a `-->` locator is emitted once per
+  // file rather than once per span — and so a diagnostic that genuinely spans two modules
+  // says where it crosses over.
+  //
+  // `""` is the sentinel, NOT `undefined`, and this file has to stay inside the subset it
+  // compiles (docs/self-hosting.md). A `let shownFile: string | undefined` made the guard
+  // `s.file !== shownFile` a `!==` between two NULLABLES, which is NT1009: a nullable is a
+  // tagged box here, so that comparison would test PRESENCE rather than the paths. It is
+  // refused, and it stopped `formatDiagnostic` type-checking — this module is the first to
+  // reach SH6 rung 3 and the ratchet's rule is that a module which reached IR may never
+  // stop. No real path is `""`, so the sentinel is exact rather than merely convenient.
+  let shownFile = "";
   for (const s of spans) {
+    const text0 = sourceFor(s.file, source, sources);
+    const f = s.file;
+    if (f !== undefined && f !== shownFile) {
+      const col = s.col === undefined ? "" : `:${s.col}`;
+      lines = [...lines, `  ${" ".repeat(gutter)}--> ${f}:${s.line}${col}`];
+      shownFile = f;
+    }
+    // No text for this span's file: the caller is file-aware and could not supply it. The
+    // locator above already said where; inventing a frame from another file is the defect.
+    if (text0 === undefined) continue;
+    const srcLines = text0.split("\n");
     // `?? ""` was a DEAD GUARD twice over, and the second half is the more interesting one.
     //   1. A span whose line is PAST the end of `source` made `srcLines[s.line - 1]` a read
     //      at index >= length, which nativets PANICS on (Stage 41) before the `??` runs.
@@ -408,7 +483,7 @@ type NyiSpec = { code: string; milestone: Milestone; hint: string };
 // stopped this module self-compiling. `diagnostics.ts` is the first module to reach SH6
 // rung 3, and the ratchet's unconditional rule is that a module which reached IR may
 // never stop. Keep the shape.
-export function nyi(spec: NyiSpec, what: string, hint?: string, at?: { line: number; col: number }): NTError {
+export function nyi(spec: NyiSpec, what: string, hint?: string, at?: { line: number; col: number; file?: string }): NTError {
   if (at === undefined) {
     return new NTError({ code: spec.code, message: `${what} is not supported yet`, milestone: spec.milestone, hint: hint ?? spec.hint });
   }
@@ -417,7 +492,7 @@ export function nyi(spec: NyiSpec, what: string, hint?: string, at?: { line: num
     message: `${what} is not supported yet at ${at.line}:${at.col}`,
     milestone: spec.milestone,
     hint: hint ?? spec.hint,
-    spans: [{ line: at.line, label: "here", primary: true }],
+    spans: [{ line: at.line, label: "here", primary: true, file: at.file, col: at.col }],
   });
 }
 
@@ -495,13 +570,13 @@ export function decoratorError(message: string, hint: string): NTError {
 // bare `label = "here"` made this function's own `spans` literal fail to type-check when
 // src/diagnostics.ts is compiled by nativets — SH6 blocker 3 of 6, docs/self-hosting.md.
 // The annotation is a no-op for TypeScript and can come out once that inference lands.
-export function typeError(message: string, at?: { line: number; col: number }, hint?: string, label: string = "here"): NTError {
+export function typeError(message: string, at?: { line: number; col: number; file?: string }, hint?: string, label: string = "here"): NTError {
   if (at === undefined) return new NTError({ code: "NT2001", message, hint });
   return new NTError({
     code: "NT2001",
     message: `${message} at ${at.line}:${at.col}`,
     hint,
-    spans: [{ line: at.line, label, primary: true }],
+    spans: [{ line: at.line, label, primary: true, file: at.file, col: at.col }],
   });
 }
 
@@ -531,14 +606,14 @@ export function boundsError(message: string, hint: string): NTError {
  * tsc rejects too, not TypeScript we have not implemented yet. `coverage` should never
  * count it as a missing feature.
  */
-export function unknownTypeName(name: string, at?: { line: number; col: number }): NTError {
+export function unknownTypeName(name: string, at?: { line: number; col: number; file?: string }): NTError {
   const hint = `'${name}' is not declared in this file, not imported by it, and not a builtin type — check the spelling, or add a \`type\`/\`interface\`/\`class\` declaration or an \`import type { ${name} } from …\` for it`;
   if (at === undefined) return new NTError({ code: "NT2003", message: `Cannot find name '${name}'`, hint });
   return new NTError({
     code: "NT2003",
     message: `Cannot find name '${name}' at ${at.line}:${at.col}`,
     hint,
-    spans: [{ line: at.line, label: "not defined", primary: true }],
+    spans: [{ line: at.line, label: "not defined", primary: true, file: at.file, col: at.col }],
   });
 }
 
@@ -579,7 +654,7 @@ export function mutationError(message: string, hint: string, at?: { line: number
     message: `${message} at ${at.line}:${at.col}`,
     milestone: "later",
     hint,
-    spans: [{ line: at.line, label, primary: true }],
+    spans: [{ line: at.line, label, primary: true, file: at.file, col: at.col }],
   });
 }
 
@@ -598,14 +673,14 @@ export function mutationError(message: string, hint: string, at?: { line: number
  * `let x: T | undefined;` is a DIFFERENT program — it admits `undefined`, is genuinely
  * initialized to it, and never reaches this check.
  */
-export function useBeforeAssign(message: string, at?: { line: number; col: number }, hint?: string): NTError {
+export function useBeforeAssign(message: string, at?: { line: number; col: number; file?: string }, hint?: string): NTError {
   if (at === undefined) return new NTError({ code: "NT1600", message, milestone: "later", hint });
   return new NTError({
     code: "NT1600",
     message: `${message} at ${at.line}:${at.col}`,
     milestone: "later",
     hint,
-    spans: [{ line: at.line, label: "read here, before any assignment reaches it", primary: true }],
+    spans: [{ line: at.line, label: "read here, before any assignment reaches it", primary: true, file: at.file, col: at.col }],
   });
 }
 

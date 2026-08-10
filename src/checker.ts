@@ -6024,7 +6024,14 @@ class Checker {
    * deny-list would let the next unhandled type do it again. See NYI.STRINGIFY for what is
    * refused and why each one is a refusal rather than a feature.
    */
-  private checkStringCoercion(t: Ty, what: string, at?: { line: number; col: number }): void {
+  /* `at` is spelled to match `ast.ts`'s `Loc` STRUCTURALLY — including the `file` this
+   * helper only forwards — for the reason `mutationError` (src/diagnostics.ts) records at
+   * length: every caller passes an `exprLoc(...)` result, i.e. a `Loc`, and in the
+   * self-host subset a pass-through parameter written narrower than what it is handed (or
+   * than what it hands on) is an NT2001 in one direction or the other. tsc accepts both,
+   * so only the compiler compiling ITSELF can see it. Keep this shape in step with the
+   * `nyi`/`typeError` parameters it forwards to. */
+  private checkStringCoercion(t: Ty, what: string, at?: { line: number; col: number; file?: string }): void {
     if (t === "string" || t === "number" || t === "boolean" || t === "undefined" || t === "null" || t === "void") return;
     // The box branches on its tag, so it coerces iff its base does.
     if (isNullableTy(t)) { this.checkStringCoercion(baseTy(t), what, at); return; }
