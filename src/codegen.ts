@@ -6205,6 +6205,165 @@ class FnGen {
   }
 }
 
+/** A character LLVM allows in an unquoted local name (`%foo.bar`, `endtry12`). */
+function isLabelChar(c: string): boolean {
+  return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") ||
+    c === "_" || c === "." || c === "$" || c === "-";
+}
+
+/**
+ * The `X` of every `label %X` on one instruction line.
+ *
+ * `label %X` is the ONLY way this codegen names a block: it emits `br label %X` and
+ * `br i1 %c, label %A, label %B` and nothing else — no `switch` (a TS `switch` lowers
+ * to chained `br i1`), no `phi`, no `blockaddress`, and none of the unwind forms
+ * (`invoke`, `indirectbr`, `callbr`, `catchswitch`, `cleanupret`), because the throw
+ * model is a lexical branch and there is no unwinder. Measured over every module the
+ * corpus emits (173 modules, 3.6 MB): 6,706 block references on 4,844 branch lines, all
+ * of them a `br`, and zero occurrences of any other form. So this is the whole reference
+ * grammar as emitted, not a subset of it.
+ *
+ * Two forms WOULD escape it if codegen ever grew them, because neither spells the
+ * `label` keyword: a `phi` incoming block (`[ %v, %lbl ]`) and `blockaddress(@f, %lbl)`.
+ * `verifyBlockLabels` refuses outright if it sees either, rather than waving through a
+ * construct it does not actually check.
+ *
+ * `%label`, `%label.addr` and `@Item.label` are VALUES, not block operands — a program
+ * with a variable named `label` emits all three — so a match must not be preceded by a
+ * name character, `%` or `@`.
+ */
+function labelRefs(line: string): string[] {
+  //@@mutable
+  const out: string[] = [];
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === ";") break; // a comment: nothing after it is an operand
+    // The `l` test first: it makes the common (non-matching) character free, where the
+    // `slice` alone allocated a 5-char string at every position of every line.
+    if (line[i] !== "l" || line.slice(i, i + 5) !== "label") { i++; continue; }
+    const before = i === 0 ? " " : line[i - 1]!;
+    if (isLabelChar(before) || before === "%" || before === "@") { i = i + 5; continue; }
+    let j = i + 5;
+    while (j < line.length && (line[j] === " " || line[j] === "\t")) j++;
+    if (j >= line.length || line[j] !== "%") { i = i + 5; continue; }
+    j++;
+    const start = j;
+    while (j < line.length && isLabelChar(line[j]!)) j++;
+    if (j > start) out.push(line.slice(start, j));
+    i = j;
+  }
+  return out;
+}
+
+/**
+ * The two constructs that reference a block WITHOUT the `label` keyword, and which
+ * `labelRefs` therefore cannot see: a `phi` incoming block (`[ %v, %lbl ]`) and
+ * `blockaddress(@f, %lbl)`. Codegen emits neither — zero of each across every module
+ * the corpus emits — and the point of naming them here is that if one ever appears,
+ * `verifyBlockLabels` says so loudly instead of quietly checking less than it claims.
+ *
+ * Matched in OPCODE position only, so a user function `@phi` or a local `%phi` (both
+ * of which a program with a variable named `phi` emits) is not one of these.
+ */
+function uncheckedBlockRef(line: string): string {
+  const s = line.trim();
+  if (s.slice(0, 4) === "phi ") return "phi";
+  if (s.indexOf("= phi ") >= 0) return "phi";
+  const b = s.indexOf("blockaddress(");
+  // Not `@blockaddress(...)` / `%blockaddress` — a call to a user function of that name.
+  if (b === 0 || (b > 0 && !isLabelChar(s[b - 1]!) && s[b - 1] !== "%" && s[b - 1] !== "@")) return "blockaddress";
+  return "";
+}
+
+/** `@name` out of a `define <ty> @name(...) ... {` header, for the error message. */
+function defineSymbol(header: string): string {
+  const at = header.indexOf("@");
+  if (at < 0) return header;
+  let j = at + 1;
+  while (j < header.length && header[j] !== "(") j++;
+  return header.slice(at, j);
+}
+
+/**
+ * Every `label %X` inside a `define` must name a block defined in that SAME `define`.
+ *
+ * This exists because `sourceToIR` is check -> analyzeOwnership -> codegen and returns
+ * TEXT: clang never runs, so `emit` exited 0 on a module clang would reject. A
+ * `try`/`finally` with no `catch` emitted `br label %catchN` with no such block, and the
+ * compiler reported success — and "emit exits 0" is the gate this project reads as
+ * "reaches IR". That particular source is refused now (NT1004); this stops the next one.
+ *
+ * A malformed module is a COMPILER bug, so it raises `InternalError` and never an
+ * `NT****` code: an NT code tells the reader how to rewrite their program, and there is
+ * nothing here for them to rewrite (see `InternalError` in src/diagnostics.ts).
+ *
+ * Deliberately NOT a general IR verifier — LLVM ships one, and duplicating it here would
+ * be a second, worse implementation. This is one structural invariant, checked exactly.
+ *
+ * Only `define` BODIES are scanned. A module-level string constant may contain any text
+ * at all (`;`, `%`, the word `label`), and a body contains no string constants — over
+ * the whole corpus, zero `label` occurrences outside a body and zero double-quotes
+ * inside one.
+ */
+export function verifyBlockLabels(ir: string): void {
+  const lines = ir.split("\n");
+  let inDefine = false;
+  let fn = "";
+  let defs = new Set<string>();
+  //@@mutable
+  let refs: string[] = [];
+  for (let n = 0; n < lines.length; n++) {
+    const line = lines[n]!;
+    if (!inDefine) {
+      if (line.startsWith("define ") && line.endsWith("{")) {
+        inDefine = true;
+        fn = defineSymbol(line);
+        defs = new Set<string>();
+        refs = [];
+      }
+      continue;
+    }
+    // `assemble` closes a body with a bare `}` at column 0, and emits every
+    // instruction indented — so an UNINDENTED `name:` is a block label.
+    if (line === "}") { checkRefs(fn, defs, refs); inDefine = false; continue; }
+    if (line.length > 1 && line.endsWith(":") && isLabelChar(line[0]!)) {
+      // `defs = defs.add(…)`, not `defs.add(…)`: our `Set` is persistent (NT1606).
+      defs = defs.add(line.slice(0, line.length - 1));
+      continue;
+    }
+    const blind = uncheckedBlockRef(line);
+    if (blind !== "") {
+      throw internalError(
+        `${fn} emits a \`${blind}\`, which names its blocks WITHOUT the \`label\` keyword — ` +
+        `so verifyBlockLabels does not check those references and would wave the module ` +
+        `through. Teach \`labelRefs\` the \`${blind}\` operand form before emitting one. ` +
+        `Line: ${line.trim()}`,
+      );
+    }
+    for (const r of labelRefs(line)) refs.push(r);
+  }
+  // An unterminated body would otherwise drop its references unchecked — the one way
+  // this check could go quiet without saying so.
+  if (inDefine) checkRefs(fn, defs, refs);
+}
+
+function checkRefs(fn: string, defs: Set<string>, refs: string[]): void {
+  for (const r of refs) {
+    if (defs.has(r)) continue;
+    //@@mutable
+    const names: string[] = [];
+    for (const d of defs) names.push(d);
+    const shown = names.length > 24 ? names.slice(0, 24).join(", ") + `, … (${names.length} total)` : names.join(", ");
+    throw internalError(
+      `${fn} branches to \`label %${r}\`, but no block \`${r}:\` is defined in it — the ` +
+      `emitted module is malformed and clang would reject it. A branch target was emitted ` +
+      `without the block it names. Blocks defined in ${fn}: ${shown}`,
+    );
+  }
+}
+
 export function codegen(checked: CheckedProgram): string {
-  return new ModuleGen(checked.functions, checked.globals).build(checked.program);
+  const ir = new ModuleGen(checked.functions, checked.globals).build(checked.program);
+  verifyBlockLabels(ir);
+  return ir;
 }
