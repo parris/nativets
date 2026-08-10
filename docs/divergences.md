@@ -4273,12 +4273,27 @@ So the trigger is **"some function writes the global"**, not "the narrowing is a
 level" — in B the narrowing is *inside* the reading function and is still dropped, because
 any call could have invalidated it. It is a refusal, not a miscompile.
 
-**And the hint is still circular for exactly this case.** On B it advises *"prove it
-non-nullish first — `if (g) { … }`"* at a read whose author wrote precisely that. The other
-routes (`g?.length`, `!`, a local copy) do work here, so the hint is not useless — but its
-first suggestion is the one the reader has already tried. Worth fixing when the narrowing
-is, and worth remembering that this hint has now been read as circular twice, in two
-different bugs.
+**The hint used to be circular for exactly this case — CLOSED.** On B it advised *"prove
+it non-nullish first — `if (g) { … }`"* at a read whose author wrote precisely that. The
+other routes (`g?.length`, `!`, a local copy) do work here, so the hint was not useless —
+but its first suggestion was the one the reader had already tried. It now says why no
+guard on that spelling can work and **names the writer it found**:
+
+```
+error[NT2001]: 'g' is possibly undefined
+  = help: 'g' is assigned by `clear`, so a guard on it records NOTHING — any call between
+    the guard and this read could rebind it … BIND IT FIRST and test the local:
+    `const v = g; if (v) { … v.length … }` — the local is read once, before any call can
+    change it. Or use '?.' … or `!`
+```
+
+Every spelling it recommends is compiled against node in `test/narrowing.test.ts`
+("a module-level binding a function assigns"), and a binding no function assigns keeps the
+original wording — that case is the mutation guard. This was the SECOND reading of this
+hint as circular; the first (a `@@mutable` receiver, where the dotted path is what
+`accessPath` declines) is closed in `test/mutable-narrowing.test.ts`. The **refusal**
+itself is unchanged and deliberate: see that file for the counterexample and for what
+relaxing it would cost.
 
 **Related boundary worth stating explicitly:** `verifyModule` passing means *the module
 parses*, explicitly **not** that it is correct. The segfault above is the proof, and the

@@ -1534,3 +1534,92 @@ console.log(apply(21));
 `, "NT2001", "possibly undefined");
   });
 });
+
+
+/*
+ * THE SECOND CIRCULAR HINT — a MODULE-LEVEL binding some function assigns.
+ *
+ * `closureMayAssign` drops every fact about a name that any nested function body assigns,
+ * because a call between the proof and the read can rebind it (`docs/divergences.md`
+ * records the case and the reasoning). The refusal is right. What was wrong was the hint:
+ *
+ *     let g: string | undefined = "abc";
+ *     function clear(): void { g = undefined; }
+ *     function f(): void { if (g) { console.log(g.length); } }
+ *
+ *     error[NT2001]: 'g' is possibly undefined
+ *       = help: … or prove it non-nullish first — `if (g) { … }`, an early `return`, or `!`
+ *
+ * The guard it asks for is on the same line. `docs/divergences.md` flagged this as "read
+ * as circular twice, in two different bugs" and left it open; `mutable-narrowing` closed
+ * the OTHER one (a `@@mutable` receiver) with truthful wording. This is the same fix on
+ * the same message, for the root-name half rather than the dotted half.
+ *
+ * The spellings it now recommends are COMPILED against node below. That matters
+ * especially here: the bound local and the guard are NOT the same program under mutation
+ * — `const v = g` reads `g` once, before any call can change it — so the advice has to be
+ * checked against the oracle, not reasoned about.
+ */
+describe("narrowing — a module-level binding a function assigns", () => {
+  const WRITTEN_ELSEWHERE = `
+let g: string | undefined = "abc";
+function clear(): void { g = undefined; }
+function f(): void { if (g) { console.log(g.length); } else { console.log("absent"); } }
+f(); clear(); f();
+`;
+
+  test("REFUSED — the guard records nothing, because a call could rebind it", () => {
+    expectRejected(WRITTEN_ELSEWHERE, "NT2001", "'g' is possibly undefined");
+  });
+
+  test("the hint no longer recommends the guard that is already written", () => {
+    let err: unknown;
+    try { sourceToIR(WRITTEN_ELSEWHERE); } catch (e) { err = e; }
+    const hint = (err as NTError).diag.hint ?? "";
+    expect(hint.length).toBeGreaterThan(0);
+    expect(hint).not.toContain("prove it non-nullish first");
+    // It says WHY, names the writer it found, and gives a line that builds.
+    expect(hint).toContain("clear");
+    expect(hint).toContain("const v = g;");
+  });
+
+  test("the hint's `bind it first` spelling compiles and matches node", async () => {
+    await expectNode(`
+let g: string | undefined = "abc";
+function clear(): void { g = undefined; }
+function f(): void {
+  const v = g;
+  if (v) { console.log(v.length); } else { console.log("absent"); }
+}
+f(); clear(); f();
+`);
+  });
+
+  test("the hint's `?.` spelling compiles and matches node", async () => {
+    await expectNode(`
+let g: string | undefined = "abc";
+function clear(): void { g = undefined; }
+function f(): void { console.log(g?.length ?? -1); }
+f(); clear(); f();
+`);
+  });
+
+  // The mutation guard. A module-level binding NOTHING assigns narrows normally, and
+  // there the original hint is the right one — widen the new wording to every nullable
+  // read and this fails.
+  test("a binding no function assigns narrows as usual (and keeps the original hint)", async () => {
+    await expectNode(`
+let g: string | undefined = "abc";
+function f(): void { if (g) { console.log(g.length); } else { console.log("absent"); } }
+f();
+`);
+    let err: unknown;
+    try { sourceToIR(`
+let g: string | undefined = "abc";
+function f(): void { console.log(g.length); }
+f();
+`); } catch (e) { err = e; }
+    const hint = (err as NTError).diag.hint ?? "";
+    expect(hint).toContain("prove it non-nullish first");
+  });
+});

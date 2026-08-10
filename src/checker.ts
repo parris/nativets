@@ -1563,6 +1563,36 @@ class Checker {
   noteClosureAssignments(body: Stmt[]): void {
     const direct = new Set<string>();
     collectAssignedStmts(body, direct, this.closureAssigned, false);
+    this.programBody = body;
+  }
+
+  /** Kept only so a DIAGNOSTIC can name the function that assigns a name — see
+   *  `writerOf`. Nothing on the checking path reads it. */
+  private programBody: Stmt[] = [];
+
+  /**
+   * A function in the program that assigns `name`, for the hint to name it.
+   *
+   * `closureAssigned` is a set of NAMES: it answers "is this narrowable" and nothing
+   * about who made it un-narrowable, which is exactly the part a reader needs. The
+   * refusal it produces is one `docs/divergences.md` records as having been "read as
+   * circular twice" — the hint asked for the guard the author had already written —
+   * and "some function somewhere assigns it" is only a marginal improvement on that.
+   * Naming `clear` turns it into an instruction.
+   *
+   * Runs on the ERROR path only, and answers `undefined` rather than guessing: a writer
+   * inside an arrow, or in a body this scan does not reach, falls back to the wording
+   * that names no function.
+   */
+  private writerOf(name: string): string | undefined {
+    for (const s of this.programBody) {
+      if (s.kind !== "FuncDecl") continue;
+      const direct = new Set<string>();
+      const inArrow = new Set<string>();
+      collectAssignedStmts(s.body, direct, inArrow, false);
+      if (direct.has(name) || inArrow.has(name)) return s.name;
+    }
+    return undefined;
   }
 
   /** The narrowed type of the path `b` + `path` here, or undefined if no fact covers it. */
@@ -3368,10 +3398,28 @@ class Checker {
             // test/mutable-narrowing.test.ts rather than asserted, because advice that
             // does not build is the failure this clause exists to remove.
             const unstable = e.object.kind === "MemberExpr" && this.accessPath(e.object, scope) === undefined;
+            // THE SAME LESSON, on the root-name half. A bare name that some function body
+            // assigns gets no fact either (`closureMayAssign` — a call between the proof
+            // and the read can rebind it), so `if (g) { … }` records nothing there as
+            // surely as it does through a `@@mutable` receiver. docs/divergences.md
+            // recorded this hint as "read as circular twice, in two different bugs" and
+            // left it open when the dotted half was fixed; this is the other one. The
+            // writer is NAMED, because "some function somewhere assigns it" is only a
+            // marginal improvement on the circular text it replaces.
+            const rebindable = e.object.kind === "Identifier" && e.object.name !== "this"
+              && this.closureMayAssign(e.object.name);
+            const writer = rebindable && what !== undefined ? this.writerOf(what) : undefined;
             throw typeError(
               `${what === undefined ? "this value" : `'${what}'`} is possibly ${nullishKind(ot)}`,
               e.loc,
-              unstable && what !== undefined
+              rebindable && what !== undefined
+                ? `'${what}' is assigned by ${writer === undefined ? "a function in this program" : `\`${writer}\``}, ` +
+                  `so a guard on it records NOTHING — any call between the guard and this read could rebind it, ` +
+                  `and \`if (${what}) { … }\` is refused here even when it is already written. BIND IT FIRST and ` +
+                  `test the local: \`const v = ${what}; if (v) { … v.${e.property} … }\` — the local is read once, ` +
+                  `before any call can change it. Or use '?.' (\`${what}?.${e.property}\` short-circuits the whole ` +
+                  `chain to undefined), or \`!\``
+                : unstable && what !== undefined
                 ? `narrowing needs a STABLE access path and '${what}' is not one — a '@@mutable' object, ` +
                   `'this', a '?.' link and a computed index can each hold something else by the time this ` +
                   `read runs, so \`if (${what}) { … }\` records nothing here even when it is already ` +
