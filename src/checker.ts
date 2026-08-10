@@ -976,6 +976,23 @@ class Checker {
    */
   private iterOk = new Set<Expr>();
   /**
+   * STATEMENT POSITION — is the expression about to be typed the whole of an `ExprStmt`,
+   * i.e. is its result thrown away? Only `.pop` asks (see `inferArrayMethod`), because
+   * `.pop` is the one accumulator mutator whose LEGALITY depends on the answer: removing
+   * the last element is a plain shrink, while TAKING the removed element moves a value
+   * out of the array and asks a question this compiler has no answer for yet.
+   *
+   * A BOOLEAN THAT `infer` CAPTURES AND CLEARS, not a `Set<Expr>` like `iterOk` above.
+   * `iterOk` is the obvious model and it was rejected on measurement: `markIter` is a
+   * self-hosting BLOCKER (NT2001 — `Set<Expr>.add` on a 40-member union), so a second
+   * set of the same shape would add a refused function to `src/` in the very commit that
+   * removes nine. `infer` reads this into a local and stores `false` back before it
+   * dispatches, so the flag reaches EXACTLY the outermost expression of the statement and
+   * nothing nested inside it — `f(xs.pop())` and `xs.pop() + 1` both see `false`, which
+   * is right, because both USE the popped value even though the statement discards it.
+   */
+  private discardStmt = false;
+  /**
    * `static` class methods, by their LOWERED name (`C.m`). A static has no receiver, so
    * `C.m(a)` is a direct call to the lowered function — and an INSTANCE method, which
    * lowers to the same shape of name, must NOT be reachable that way (in node a class
@@ -2770,6 +2787,10 @@ class Checker {
         for (const st of s.stmts) this.checkStmt(st, scope, ret);
         return;
       case "ExprStmt":
+        // The ONE position where a call's result is thrown away. `infer` clears the flag
+        // the moment it dispatches, so it is a fact about `s.expr` itself and never about
+        // anything nested inside it — see the field's note.
+        this.discardStmt = true;
         this.type(s.expr, scope);
         this.rejectDiscardedMutator(s.expr, scope);
         return;
@@ -2810,6 +2831,13 @@ class Checker {
   type(e: Expr, scope: Scope, hint?: Ty): Ty { const t = this.unfold(this.infer(e, scope, hint)); e.ty = t; return t; }
 
   private infer(e: Expr, scope: Scope, hint?: Ty): Ty {
+    // CAPTURE AND CLEAR (see `discardStmt`). Read into a local FIRST, store `false` back
+    // BEFORE the switch: every recursive `this.type(…)` below therefore sees `false`, so
+    // "the result is discarded" describes this node alone. Doing it here rather than at
+    // the one `case "CallExpr"` is what makes `xs.pop() + 1;` — a statement whose result
+    // is discarded but whose POP is not — read as a use, which it is.
+    const discard = this.discardStmt;
+    this.discardStmt = false;
     switch (e.kind) {
       case "NumberLiteral": return "number";
       case "BooleanLiteral": return "boolean";
@@ -3704,7 +3732,7 @@ class Checker {
         e.ty = "boolean";
         return "boolean";
       }
-      case "CallExpr": return this.inferCall(e, scope, hint);
+      case "CallExpr": return this.inferCall(e, scope, hint, discard);
     }
   }
 
@@ -3755,7 +3783,7 @@ class Checker {
     return undefined; // variadic builtin / method
   }
 
-  private inferCall(e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope, hint?: Ty): Ty {
+  private inferCall(e: Extract<Expr, { kind: "CallExpr" }>, scope: Scope, hint?: Ty, discard: boolean = false): Ty {
     // `Math.max(...xs)` / `Math.min(...xs)` — the ONE variadic builtin that accepts a
     // spread of a runtime-length array, because its fold has a well-defined IDENTITY
     // (-Infinity / +Infinity). So the length need not be known at compile time and an
@@ -4261,7 +4289,7 @@ class Checker {
         if (e.args.length !== 1 || !isBytesTy(this.type(e.args[0]!, scope))) throw typeError("TextDecoder.decode expects (Uint8Array)");
         return "string";
       }
-      if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee, e.args, scope);
+      if (isArrayTy(recv)) return this.inferArrayMethod(recv, e.callee, e.args, scope, discard);
       // stdlib Batch 1: Number#toFixed(digits) — the digit count must be a literal
       // 0..100 so the RangeError node throws for anything else is impossible here.
       if (recv === "number") {
@@ -4973,7 +5001,7 @@ class Checker {
     return (scope.lookup(recv.name)?.mutable ?? false) ? recv.name : null;
   }
 
-  private inferArrayMethod(recv: Ty, callee: MemberExpr, args: Expr[], scope: Scope): Ty {
+  private inferArrayMethod(recv: Ty, callee: MemberExpr, args: Expr[], scope: Scope, discard: boolean = false): Ty {
     const method = callee.property;
     const el = elemTy(recv);
     if (method === "map" || method === "filter" || method === "reduce" || method === "flatMap") return this.inferHof(el, method, args, scope);
@@ -5006,7 +5034,7 @@ class Checker {
       if (!freshArray(callee.object))
         throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.sort\` would sort the array in place`, "use `.toSorted()` (ES2023) — it returns a NEW sorted array and leaves the original alone", exprLoc(callee.object) ?? callee.loc);
       callee.property = "toSorted";
-      return this.inferArrayMethod(recv, callee, args, scope);
+      return this.inferArrayMethod(recv, callee, args, scope, discard);
     }
     if (method === "toSorted") {
       if (args.length > 1) throw typeError(".toSorted expects 0..1 args");
@@ -5085,6 +5113,62 @@ class Checker {
       return "number";
     }
 
+    // --- `.pop` — the DISCARDED half of the same opt-in ----------------------------
+    //
+    // `.push` and `.pop` are ONE idiom (`push` on the way in, `pop` in the matching
+    // `finally`), and legalizing half of it is the inconsistency that produced the false
+    // NT1606 hint the push lane had to correct. But the two are NOT the same question,
+    // and the difference decides the rule: `.push` APPENDS, so the array gains an owner
+    // of a value the caller had (`arrPush` in src/ownership.ts models it as a move IN),
+    // while `.pop` REMOVES AND RETURNS, so ownership would travel OUT.
+    //
+    // So the opt-in extends to `.pop` in STATEMENT POSITION ONLY — `xs.pop();`, the
+    // result discarded — and that is not a syntactic nicety, it is the whole of what
+    // makes the rule answerable. Two independent reasons, either sufficient:
+    //
+    //  1. OWNERSHIP. Discarded, nothing leaves the array: the effect is exactly "one
+    //     shorter", there is no second owner, and therefore no new free. `nt_obj_free` is
+    //     `free(o)` and never walks slots, so array elements are never freed today — a
+    //     rule that minted an owner for a popped element would be the tree's first
+    //     move-out-of-an-element and would land on that unswept path the day it is fixed.
+    //     THIS RULE STAYS CORRECT WHEN IT IS: a discarded pop drops the element, and the
+    //     array is where the drop belongs, so element freeing subsumes it unchanged.
+    //  2. node's RETURN VALUE. `pop(): T | undefined` (lib.es5.d.ts), and `[].pop()` is
+    //     `undefined`. Our `nt_arr_pop` answers `return 0` on an empty array and codegen's
+    //     `case "pop"` types the result as bare `el` — so `const n = xs.pop()` would read
+    //     `0` for a number and a NULL pointer for anything heap, where node says
+    //     `undefined`. A silent wrong answer, which is the worst outcome available. It is
+    //     UNREACHABLE while only the discarded form is legal: the value nobody takes
+    //     cannot be observed, and node's empty-array `.pop()` is a no-op on the array
+    //     itself, which is exactly what `nt_arr_pop`'s early return does.
+    //
+    // Ahead of `argTys` for the same reason `.push` is: so the refusal below can be
+    // receiver-aware. Iterator invalidation (`for (const x of this.xs) this.xs.pop()`) is
+    // NOT checked here — `MUTATING` in src/ownership.ts already carries `"pop"`, so the
+    // ownership pass refuses it with NT1603 on both the bare-name and the `this.<field>`
+    // path. Pinned in test/pop-accumulator.test.ts, because a guard nobody exercises is a
+    // guard that quietly stops holding.
+    if (method === "pop") {
+      if (args.length !== 0) throw typeError(".pop expects 0 args");
+      const acc = this.accumulatorName(callee.object, scope);
+      if (acc !== null && discard) return el;
+      const text = exprText(callee.object) ?? "";
+      // THE OLD HINT RECOMMENDED A PROGRAM THAT DIVERGES HARDER THAN THE ONE IT REFUSED:
+      // "use `arr[arr.length - 1]` for the last element". On an EMPTY array node's
+      // `.pop()` is `undefined` and node's `arr[-1]` is `undefined`, but ours PANICS
+      // (Stage 41) — so the reader who followed it traded a refusal for exit 255.
+      // test/no-index-last.test.ts has a standing lint for that shape and carries an
+      // explicit carve-out for this very string, which is how it survived. `.at(-1)` is
+      // the spelling that really answers `undefined`; it is restricted to number/string/
+      // boolean elements (`case "at"` below), so the heap-element case is named as itself
+      // rather than answered with advice that does not compile.
+      throw mutationError(`arrays are immutable: \`${text}.pop\` would mutate the array in place`,
+        acc !== null
+          ? `\`${text}.pop();\` AS ITS OWN STATEMENT is legal — this receiver is already a \`@@mutable\` accumulator. What is refused is TAKING the removed element, because node's \`.pop()\` is \`T | undefined\` and answers \`undefined\` on an empty array, which this compiler cannot yet produce here. Read the top FIRST and drop it second: \`const top = ${text}.at(-1); ${text}.pop();\` — \`.at(-1)\` is \`undefined\` on an empty array exactly as node's \`.pop()\` is (number/string/boolean elements only; for an object or array element there is no reading spelling yet, so keep the value where you pushed it from)`
+          : `to shrink it in place, put \`//@@mutable\` on the line above the binding (or above the \`class\`, for \`this.f.pop()\`) and write \`${text}.pop();\` as its own STATEMENT — the discarded form is the whole of the opt-in. Otherwise build a shorter array: \`${text} = ${text}.slice(0, -1)\`, which leaves the original alone. To read the last element without removing it use \`.at(-1)\` — NOT \`${text}[${text}.length - 1]\`, which panics on an empty array where node gives \`undefined\``,
+        exprLoc(callee.object) ?? callee.loc);
+    }
+
     const argTys = args.map((a) => this.type(a, scope));
     const need = (n: number) => { if (args.length !== n) throw typeError(`.${method} expects ${n} args`); };
     switch (method) {
@@ -5109,10 +5193,23 @@ class Checker {
       // (`.sort` is rejected above, next to `.toSorted` — the ordering primitives are
       // handled together so the hint can point at the implemented copying form.)
       case "splice": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.splice\` would mutate the array in place`, "use `.slice(0, i)` / `.slice(j)` plus spread — `[...a.slice(0, i), ...a.slice(j)]`", exprLoc(callee.object) ?? callee.loc);
-      case "shift": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.shift\` would mutate the array in place`, "use `arr.slice(1)` for the shorter array, or `arr[0]` for the first element", exprLoc(callee.object) ?? callee.loc);
+      // `.shift` gets NO share of the `@@mutable` opt-in `.pop` just took, and the hint
+      // says which of the two reasons applies. It is not the stack idiom wearing a
+      // different name: it removes from the FRONT, so every remaining element moves —
+      // O(n) per call, O(n²) to drain — and there is no `nt_arr_shift` in the runtime to
+      // lower it to (`nt_arr_pop` is a decrement). The one site in this compiler's own
+      // source, `checker.ts`'s `this.pending.shift()!`, TAKES the removed element anyway,
+      // which is the half of `.pop` that is refused too.
+      //
+      // `arr[0]` used to be offered here "for the first element" — the identical defect
+      // the `.pop` hint carried above: on an empty array node's `.shift()` and node's
+      // `arr[0]` are both `undefined`, while ours PANICS (Stage 41). `.at(0)` is the
+      // spelling that answers `undefined`.
+      case "shift": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.shift\` would mutate the array in place`, "use `arr.slice(1)` for the shorter array, and `.at(0)` — NOT `arr[0]`, which panics on an empty array where node gives `undefined` — for the first element. Unlike `.pop`, `.shift` gets no `@@mutable` opt-in: it removes from the FRONT, so every remaining element shifts down (O(n) per call), and a queue is better spelled as an index that walks forward over a fixed array", exprLoc(callee.object) ?? callee.loc);
       case "unshift": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.unshift\` would mutate the array in place`, "build a new array instead: `[x, ...arr]`", exprLoc(callee.object) ?? callee.loc);
       case "copyWithin": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.copyWithin\` would overwrite the array in place`, "build a new array from `.slice` + spread instead", exprLoc(callee.object) ?? callee.loc);
-      case "pop": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.pop\` would mutate the array in place`, "use `arr.slice(0, -1)` for the shorter array, or `arr[arr.length - 1]` for the last element", exprLoc(callee.object) ?? callee.loc);
+      // (`.pop` is handled above `argTys`, next to `.push` — the two are one idiom and the
+      // refusal has to see the receiver AND whether the result is taken.)
       case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
       // `.indexOf(x, fromIndex?)` — the second parameter is optional in lib.es5.d.ts, so
       // requiring exactly one rejected valid TypeScript with a TYPE error. See the

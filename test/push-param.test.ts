@@ -234,9 +234,15 @@ describe("the rejection table — what the marker does NOT legalize", () => {
       source: `function fill(\n  //@@mutable\n  out: number[],\n): void { out.push(1); }\n//@@mutable\nlet a: number[] = [];\nconst b = a;\nfill(a);\nconsole.log(b.length);\n`,
     },
     {
-      what: "the OTHER in-place mutators — the opt-in is `.push` only, here as everywhere",
+      // `out.pop()` USED TO BE THIS ROW and no longer belongs in it: a DISCARDED `.pop()`
+      // is part of the opt-in now (test/pop-accumulator.test.ts), on a marked parameter
+      // exactly as on a `@@mutable` local or field — the callee shrinks the caller's array
+      // and the caller sees it, which is the same contract the append already had.
+      // `.shift` takes its place because its refusal has a reason of its own: it removes
+      // from the FRONT, so every remaining element moves, and there is no `nt_arr_shift`.
+      what: "the OTHER in-place mutators — the opt-in is append/drop-last, here as everywhere",
       code: "NT1606",
-      source: `function f(\n  //@@mutable\n  out: number[],\n): void { out.pop(); }\nf([1, 2]);\nconsole.log(1);\n`,
+      source: `function f(\n  //@@mutable\n  out: number[],\n): void { out.shift(); }\nf([1, 2]);\nconsole.log(1);\n`,
     },
   ];
 
