@@ -251,12 +251,12 @@ const clone = (s: State): State => {
   return out;
 };
 function merge(a: State, b: State): State {
-  const out: State = new Map();
+  let out: State = new Map();
   for (const k of new Set([...a.keys(), ...b.keys()])) {
     const va = a.get(k), vb = b.get(k);
     const moved = !!va?.moved || !!vb?.moved;
     const must = !!va?.must && !!vb?.must;   // definitely moved only if moved on BOTH paths
-    out.set(k, { moved, must, at: va?.at ?? vb?.at });
+    out = out.set(k, { moved, must, at: va?.at ?? vb?.at });
   }
   return out;
 }
@@ -1240,8 +1240,8 @@ function closureDecls(list: Stmt[], out: Map<string, object>): void {
  * mistake would be a use-after-free rather than a leak.
  */
 function shadowedNames(node: unknown, seeded: string[]): Set<string> {
-  const count = new Map<string, number>();
-  for (const p of seeded) count.set(p, (count.get(p) ?? 0) + 1);
+  let count = new Map<string, number>();
+  for (const p of seeded) count = count.set(p, (count.get(p) ?? 0) + 1);
   const seen = new Set<object>();
   const walk = (n: unknown): void => {
     if (n === null || typeof n !== "object") return;
@@ -1256,8 +1256,8 @@ function shadowedNames(node: unknown, seeded: string[]): Set<string> {
     for (const k of Object.keys(obj)) walk(obj[k]);
   };
   walk(node);
-  const out = new Set<string>();
-  for (const [n, c] of count) if (c > 1) out.add(n);
+  let out = new Set<string>();
+  for (const [n, c] of count) if (c > 1) out = out.add(n);
   return out;
 }
 
@@ -1456,16 +1456,16 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
    * (parameter 0 is the receiver `this`).
    */
   const CTOR = ".constructor";
-  const consuming = new Map<string, Set<number>>();
+  let consuming = new Map<string, Set<number>>();
   for (const s of checked.program.body) {
     if (s.kind !== "FuncDecl" || !s.name.endsWith(CTOR)) continue;
     const sig = checked.functions.get(s.name);
     if (sig === undefined) continue;
-    const idx = new Set<number>();
+    let idx = new Set<number>();
     for (let i = 1; i < s.params.length; i++) {
-      if ((s.params[i]!.paramProp ?? false) && isLinearTy(sig.params[i] ?? "number")) idx.add(i - 1);
+      if ((s.params[i]!.paramProp ?? false) && isLinearTy(sig.params[i] ?? "number")) idx = idx.add(i - 1);
     }
-    if (idx.size > 0) consuming.set(s.name.slice(0, s.name.length - CTOR.length), idx);
+    if (idx.size > 0) consuming = consuming.set(s.name.slice(0, s.name.length - CTOR.length), idx);
   }
 
   const isMutableTy = (t: Ty): boolean => {
@@ -1526,13 +1526,13 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     // binding in `params`, and it is a borrow in every member body.
     const borrowRoots = new Set<string>(["this", ...params.filter((p) => isLinearTy(p.ty)).map((p) => p.name)]);
     collectAliases(body, isMutableTy, aliases, borrowRoots); // ALWAYS: the retains-receiver rule is not `@@mutable`-specific
-    const varTy = new Map<string, Ty>();
+    let varTy = new Map<string, Ty>();
     if (mutable.classes.size) {
-      for (const p of params) varTy.set(p.name, p.ty);
+      for (const p of params) varTy = varTy.set(p.name, p.ty);
       collectVarTys(body, varTy);
     }
-    const linear = new Set<string>();
-    for (const p of params) if (isLinearTy(p.ty)) linear.add(p.name);
+    let linear = new Set<string>();
+    for (const p of params) if (isLinearTy(p.ty)) linear = linear.add(p.name);
     collectLinear(body, linear);
     for (const a of aliases.keys()) linear.delete(a); // an alias owns nothing
     for (const u of untrack) linear.delete(u);

@@ -2102,7 +2102,7 @@ class FnGen {
         const nfields = objectFields(ty).length;
         const obj = this.fresh();
         this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(nfields)})`);
-        const written = new Set<string>();
+        let written = new Set<string>();
         // store by MERGED field index (spread + overrides mean property order != slot order)
         for (const p of e.properties) {
           if (p.spread) {
@@ -2116,7 +2116,7 @@ class FnGen {
               const dg = this.fresh();
               this.emit(`${dg} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, f.key)}`);
               this.emit(`store i64 ${val}, ptr ${dg}`);
-              written.add(f.key);
+              written = written.add(f.key);
             }
           } else {
             const ft = fieldType(ty, p.key) ?? (p.value.ty as Ty);
@@ -2124,7 +2124,7 @@ class FnGen {
             const g = this.fresh();
             this.emit(`${g} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, p.key)}`);
             this.emit(`store i64 ${slot}, ptr ${g}`);
-            written.add(p.key);
+            written = written.add(p.key);
           }
         }
         // An OMITTED optional field must still hold a valid `undefined` box so a later
@@ -4639,12 +4639,12 @@ class FnGen {
    *  left untouched, so they still resolve to the enclosing frame. */
   private freshenHofArrow(arrow: Extract<Expr, { kind: "ArrowFunction" }>): void {
     const suffix = `.h${this.hofSeq++}`;
-    const bound = new Set<string>();
-    for (const p of arrow.params) bound.add(p.name);
+    let bound = new Set<string>();
+    for (const p of arrow.params) bound = bound.add(p.name);
     if (!arrow.exprBody) this.collectBoundNames(arrow.stmts as Stmt[], bound);
     if (bound.size === 0) return;
-    const map = new Map<string, string>();
-    for (const n of bound) map.set(n, n + suffix);
+    let map = new Map<string, string>();
+    for (const n of bound) map = map.set(n, n + suffix);
     for (const p of arrow.params) { if (p.default) this.subExpr(p.default, map); p.name = map.get(p.name)!; }
     if (arrow.exprBody) this.subExpr(arrow.body as Expr, map);
     else this.subStmts(arrow.stmts as Stmt[], map);
@@ -4653,8 +4653,8 @@ class FnGen {
   /** The names a nested arrow/function binds — remove from the active rename map for its
    *  subtree so an inner re-binding (shadow) isn't rewritten to the outer's fresh name. */
   private childRenameMap(params: { name: string }[], stmts: Stmt[] | undefined, map: Map<string, string>): Map<string, string> {
-    const shadow = new Set<string>();
-    for (const p of params) shadow.add(p.name);
+    let shadow = new Set<string>();
+    for (const p of params) shadow = shadow.add(p.name);
     // An EXPRESSION body binds nothing beyond the parameters, so `stmts` is absent and
     // there is nothing to collect — which is what `exprBody` used to be passed in to say.
     if (stmts !== undefined) this.collectBoundNames(stmts, shadow);

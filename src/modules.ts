@@ -377,8 +377,8 @@ function topLevelNames(p: Program): string[] {
 
 /** Which of a module's top-level names are CLASSES (their Ty carries the name as a tag). */
 function classNames(p: Program): Set<string> {
-  const out = new Set<string>();
-  for (const s of p.body) if (s.kind === "FuncDecl" && s.name.endsWith(".constructor")) out.add(s.name.slice(0, -".constructor".length));
+  let out = new Set<string>();
+  for (const s of p.body) if (s.kind === "FuncDecl" && s.name.endsWith(".constructor")) out = out.add(s.name.slice(0, -".constructor".length));
   return out;
 }
 
@@ -606,18 +606,18 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
 
     // 1. Type environment: every imported name that names a TYPE in its module
     //    (an `export type`/`interface`, or an exported class's instance shape).
-    const typeEnv = new Map<string, Ty>();
+    let typeEnv = new Map<string, Ty>();
     /** …and, on the same walk, every imported name that is an `export async function`,
      *  under the LOCAL name this module calls it by (so `import { one as o }` guards
      *  `o()`). Without it an un-awaited imported call is silently erased. */
-    const asyncEnv = new Set<string>();
+    let asyncEnv = new Set<string>();
     for (const imp of deps.get(path) ?? []) { // import list from the discovery parse
       const dep = mods.get(resolveSpecifier(path, imp.source));
       if (!dep) continue;
       for (const spec of imp.specs) {
         const t = dep.finalTypes.get(spec.imported);
-        if (t !== undefined) typeEnv.set(spec.local, t);
-        if (dep.asyncExports.has(spec.imported)) asyncEnv.add(spec.local);
+        if (t !== undefined) typeEnv = typeEnv.set(spec.local, t);
+        if (dep.asyncExports.has(spec.imported)) asyncEnv = asyncEnv.add(spec.local);
       }
     }
 
@@ -630,8 +630,8 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     // 3. Rename map: imported locals → the exporting module's final names; own
     //    top-level bindings → a module-unique name (the entry keeps its own names,
     //    so the emitted IR still reads like the program you wrote).
-    const names = new Map<string, string>();
-    const tags = new Map<string, string>();
+    let names = new Map<string, string>();
+    let tags = new Map<string, string>();
     for (const imp of program.imports ?? []) {
       const depPath = resolveSpecifier(path, imp.source);
       const dep = mods.get(depPath)!;
@@ -642,26 +642,26 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
           throw moduleError("NT1703", `module '${imp.source}' has no exported member '${spec.imported}' (imported by ${show(path)}:${imp.line})`,
             `exported members: ${[...dep.finalExports.keys()].join(", ") || "(none)"}`);
         }
-        names.set(spec.local, target);
+        names = names.set(spec.local, target);
       }
     }
     if (!isEntry) {
       const prefix = `${prefixBase}${i}_`;
       const classes = classNames(program);
       for (const n of topLevelNames(program)) {
-        names.set(n, `${prefix}${n}`);
-        if (classes.has(n)) tags.set(n, `${prefix}${n}`);
+        names = names.set(n, `${prefix}${n}`);
+        if (classes.has(n)) tags = tags.set(n, `${prefix}${n}`);
       }
     }
-    if (!isEntry) for (const r of program.mutableRecords ?? []) tags.set(r, `${prefixBase}${i}_${r}`);
+    if (!isEntry) for (const r of program.mutableRecords ?? []) tags = tags.set(r, `${prefixBase}${i}_${r}`);
     for (const c of program.mutableClasses ?? []) mutableClasses.add(names.get(c) ?? c);
     for (const r of program.mutableRecords ?? []) mutableRecords.add(tags.get(r) ?? r);
     // Every declaration of this module's cycle(s) is renamed FIRST, so a shape's references
     // to its SIBLINGS are rewritten with the same map its own name is — a mutual cycle is
     // one unit and renaming half of it leaves the other half dangling. The entry keeps its
     // own names, so the map is empty there and `rewriteRefs` is the identity.
-    const refRenames = new Map<string, string>();
-    if (!isEntry) for (const e of program.recTypes ?? []) refRenames.set(e.name, `${prefixBase}${i}_${e.name}`);
+    let refRenames = new Map<string, string>();
+    if (!isEntry) for (const e of program.recTypes ?? []) refRenames = refRenames.set(e.name, `${prefixBase}${i}_${e.name}`);
     for (const e of program.recTypes ?? []) {
       recTypes.set(refRenames.get(e.name) ?? e.name, rewriteRefs(rewriteTags(e.ty, tags), refRenames) as Ty);
     }
@@ -669,10 +669,10 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     new Renamer(names, tags, refRenames).program(program);
 
     // 4. Publish this module's export table under the final names.
-    const finalExports = new Map<string, string>();
-    const finalTypes = new Map<string, Ty>();
-    const asyncExports = new Set<string>(program.exports?.asyncValues ?? []);
-    for (const [exported, local] of program.exports?.values ?? []) finalExports.set(exported, names.get(local) ?? local);
+    let finalExports = new Map<string, string>();
+    let finalTypes = new Map<string, Ty>();
+    let asyncExports = new Set<string>(program.exports?.asyncValues ?? []);
+    for (const [exported, local] of program.exports?.values ?? []) finalExports = finalExports.set(exported, names.get(local) ?? local);
     for (const [exported, ref] of program.exports?.reexports ?? []) {
       const dep = mods.get(resolveSpecifier(path, ref.source))!;
       const target = dep.finalExports.get(ref.imported);
@@ -680,10 +680,10 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
         throw moduleError("NT1703", `module '${ref.source}' has no exported member '${ref.imported}' (re-exported by ${show(path)}:${ref.line})`,
           `exported members: ${[...dep.finalExports.keys()].join(", ") || "(none)"}`);
       }
-      finalExports.set(exported, target);
+      finalExports = finalExports.set(exported, target);
       // A re-export forwards async-ness too: `export { one } from "./lib.ts"` is still
       // a promise-returning function to whoever imports it from HERE.
-      if (dep.asyncExports.has(ref.imported)) asyncExports.add(exported);
+      if (dep.asyncExports.has(ref.imported)) asyncExports = asyncExports.add(exported);
     }
     // The back-edges travel with the exported SHAPE too, and under the same map. The
     // importing module gets this type verbatim through its `typeEnv`, so an unrenamed `@N`
@@ -691,7 +691,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     // the "one module's nodes with the other's layout" hazard `recTypes` is renamed to
     // prevent, arriving by the other door.
     for (const [exported, ty] of program.exports?.types ?? []) {
-      finalTypes.set(exported, rewriteTy(ty, tags, refRenames));
+      finalTypes = finalTypes.set(exported, rewriteTy(ty, tags, refRenames));
     }
 
     mods.set(path, { path, source, program, finalExports, finalTypes, asyncExports });

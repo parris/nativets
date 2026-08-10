@@ -599,13 +599,13 @@ export interface FnBlocker { fn: string; code: string; message: string }
  * Omit the argument and this is the pre-existing function, byte for byte.
  */
 export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedProgram {
-  const functions = new Map<string, Sig>();
+  let functions = new Map<string, Sig>();
   // Value bindings this module imports. A linked program has none left (the linker
   // rewrites them to concrete names), so this is populated only for a single-module
   // check — where it turns "unknown callee" into "you did not link".
-  const importedFrom = new Map<string, string>();
+  let importedFrom = new Map<string, string>();
   for (const im of program.imports ?? [])
-    for (const s of im.specs ?? []) if (!s.typeOnly) importedFrom.set(s.local, im.source);
+    for (const s of im.specs ?? []) if (!s.typeOnly) importedFrom = importedFrom.set(s.local, im.source);
   const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []), importedFrom, recTypeTable(program));
   const builtins = () => {
     const s = new Scope();
@@ -646,7 +646,7 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
     const defaults = s.params.map((p) => p.default ?? null);
     const ret = s.returnAnnot ?? "number";
     s.returnTy = ret;
-    functions.set(s.name, { params, ret, required, defaults, rest });
+    functions = functions.set(s.name, { params, ret, required, defaults, rest });
     if (s.isStatic) c.statics.add(s.name); // `static m()` → reachable only as `C.m(…)`
   }
 
@@ -722,11 +722,11 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
   // on the final body also covers every generic specialization just spliced in.
   checkDefiniteAssignment(program.body);
 
-  const globals = new Map<string, Ty>();
+  let globals = new Map<string, Ty>();
   for (const name of moduleScope.hits) {
     if (BUILTIN_NUMBERS.includes(name)) continue; // NaN/Infinity are constants, not storage
     const b = moduleScope.own(name);
-    if (b) globals.set(name, b.ty);
+    if (b) globals = globals.set(name, b.ty);
   }
   return { program, functions, globals };
 }
@@ -1039,7 +1039,7 @@ class Checker {
    * and a silent wrong answer out of `console.log`.
    */
   private typeReaches(t: Ty, target: string): boolean {
-    const seen = new Set<string>();
+    let seen = new Set<string>();
     // NOT `//@@mutable`: the worklist is drained with `.pop`, and the opt-in legalizes
     // `.push` ONLY — the mark would be dead weight, not a fix.
     const front: Ty[] = [t];
@@ -1049,7 +1049,7 @@ class Checker {
       for (const n of folded) {
         if (n === target) return true;
         if (seen.has(n)) continue;
-        seen.add(n);
+        seen = seen.add(n);
         const shape = this.recTypes.get(n);
         if (shape === undefined) return true;                // cannot decide => refuse
         front.push(shape);
@@ -5850,7 +5850,7 @@ function daIsExit(e: Expr): boolean {
 function daMerge(paths: { flow: DAFlow; diverged: boolean }[], fallback: DAFlow): DAFlow {
   const live = paths.filter((p) => !p.diverged);
   if (live.length === 0) return new Set(fallback); // every path left; nothing merges here
-  const out = new Set(live[0]!.flow);
+  let out = new Set(live[0]!.flow);
   for (const p of live.slice(1)) for (const n of [...out]) if (!p.flow.has(n)) out.delete(n);
   return out;
 }
@@ -6236,11 +6236,11 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
  * conservative.
  */
 function ownBindings(params: { name: string }[], body: Stmt[]): Set<string> {
-  const out = new Set<string>();
-  for (const p of params) out.add(p.name);
+  let out = new Set<string>();
+  for (const p of params) out = out.add(p.name);
   for (const s of body) {
-    if (s.kind === "VarDecl") for (const d of s.decls) out.add(d.name);
-    else if (s.kind === "FuncDecl") out.add(s.name);
+    if (s.kind === "VarDecl") for (const d of s.decls) out = out.add(d.name);
+    else if (s.kind === "FuncDecl") out = out.add(s.name);
   }
   return out;
 }
@@ -6711,8 +6711,8 @@ export function planFormatString(first: string, argc: number): FmtPlan | null {
 
 /** Which specifier consumes each argument index (indices below `restStart`). */
 export function fmtSpecByArg(plan: FmtPlan): Map<number, FmtSpec> {
-  const m = new Map<number, FmtSpec>();
-  for (const p of plan.pieces) if (p.kind === "arg") m.set(p.arg, p.spec);
+  let m = new Map<number, FmtSpec>();
+  for (const p of plan.pieces) if (p.kind === "arg") m = m.set(p.arg, p.spec);
   return m;
 }
 

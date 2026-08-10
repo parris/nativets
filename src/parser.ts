@@ -650,7 +650,7 @@ class Parser {
    */
   private hoistTypeDecls(): void {
     let pending = [...this.typeDeclStarts.keys()];
-    const blocker = new Map<string, string>(); // name -> the unresolved type it stopped on
+    let blocker = new Map<string, string>(); // name -> the unresolved type it stopped on
     while (pending.length) {
       const deferred: string[] = [];
       for (const name of pending) {
@@ -670,7 +670,7 @@ class Parser {
         } catch (e) {
           if (e instanceof NTError && e.diag.code === NYI.FORWARD_TYPE.code) {
             deferred.push(name);
-            if (sub.blockedOn !== undefined) blocker.set(name, sub.blockedOn);
+            if (sub.blockedOn !== undefined) blocker = blocker.set(name, sub.blockedOn);
             continue;
           }
           continue; // a real refusal — leave it to the main parse, where it belongs
@@ -736,11 +736,11 @@ class Parser {
     if (!names.length) return;
     for (const n of names) this.cycleNames = this.cycleNames.add(n);
     const recBefore = new Map(this.recTypes); // restored wholesale if the round stalls
-    const resolved = new Map<string, Ty>();
+    let resolved = new Map<string, Ty>();
     let pending = names;
     while (pending.length) {
       const deferred: string[] = [];
-      const why = new Map<string, string>(); // residual member -> the error it stalled with
+      let why = new Map<string, string>(); // residual member -> the error it stalled with
       for (const name of pending) {
         const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
         sub.pos = this.typeDeclStarts.get(name)!;
@@ -752,12 +752,12 @@ class Parser {
           sub.parseStatement();
         } catch (e) {
           deferred.push(name); // may only need a member that has not settled yet
-          why.set(name, String((e as { message?: string }).message ?? e).split("\n")[0]!);
+          why = why.set(name, String((e as { message?: string }).message ?? e).split("\n")[0]!);
           continue;
         }
         const ty = sub.typeAliases.get(name);
         if (ty === undefined) { deferred.push(name); continue; }
-        resolved.set(name, ty);
+        resolved = resolved.set(name, ty);
       }
       if (deferred.length === 0) break;
       if (deferred.length === pending.length) {
@@ -1119,8 +1119,8 @@ class Parser {
     if (this.imports.length) program.imports = this.imports;
     if (this.textImports.length) program.textImports = this.textImports;
     if (this.exportValues.size || this.exportReexports.size || this.exportTypes.size) {
-      const types = new Map<string, Ty>();
-      for (const n of this.exportTypes) { const t = this.typeAliases.get(n); if (t) types.set(n, t); }
+      let types = new Map<string, Ty>();
+      for (const n of this.exportTypes) { const t = this.typeAliases.get(n); if (t) types = types.set(n, t); }
       program.exports = { values: this.exportValues, reexports: this.exportReexports, types, asyncValues: this.exportAsync } satisfies ExportTable;
     }
     return program;
@@ -2477,8 +2477,8 @@ class Parser {
     this.eat("(");
     //@@mutable
     const params: Param[] = [];
-    const promiseIdx = new Set<number>();
-    const promiseNames = new Set<string>();
+    let promiseIdx = new Set<number>();
+    let promiseNames = new Set<string>();
     if (!this.at(")")) {
       do {
         if (this.at(")")) break; // trailing comma in the param list
@@ -2533,7 +2533,7 @@ class Parser {
           // A `(…) => Promise<T>` parameter holds an async function, whoever passed it.
           // Calling it is exactly `one()` on an `async function one`, so it gets the same
           // floating-async guard — scoped to this body (see asyncParamScopes).
-          if (t.asyncFn) { promiseNames.add(pname); promiseIdx.add(params.length); }
+          if (t.asyncFn) { promiseNames = promiseNames.add(pname); promiseIdx = promiseIdx.add(params.length); }
         }
         let def: Expr | undefined;
         if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
@@ -3266,8 +3266,8 @@ class Parser {
   private parseArrow(): Expr {
     //@@mutable
     const params: Param[] = [];
-    const arrowPromiseIdx = new Set<number>();
-    const arrowPromiseNames = new Set<string>();
+    let arrowPromiseIdx = new Set<number>();
+    let arrowPromiseNames = new Set<string>();
     if (this.at("(")) {
       this.eat("(");
       if (!this.at(")")) {
@@ -3283,7 +3283,7 @@ class Parser {
             const t = this.parseTypeAsyncAware();
             annot = t.ty;
             // see parseParamList — same rule, arrow syntax
-            if (t.asyncFn) { arrowPromiseNames.add(name); arrowPromiseIdx.add(params.length); }
+            if (t.asyncFn) { arrowPromiseNames = arrowPromiseNames.add(name); arrowPromiseIdx = arrowPromiseIdx.add(params.length); }
           }
           let def: Expr | undefined;
           if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
