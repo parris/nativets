@@ -288,6 +288,16 @@ class Renamer {
       case "ArrowFunction": {
         const a = e as ArrowFunction;
         a.params.forEach((p) => this.param(p));
+        // `retAnnot` is the DECLARED return type of `(x): T => …`, and it was the field
+        // this arm missed — the third instance of the walker-misses-a-field class already
+        // recorded above (`NonNullExpr`/`InExpr`, `ForOfStmt.name2`). It is also the only
+        // one of these three Ty slots that holds anything HERE: the parser sets `retAnnot`
+        // (and expands the alias into it), while `paramTys` and `retTy` are written by the
+        // checker, which runs after the link. So every annotated arrow in every imported
+        // module carried its module's PRE-rename `@N`, and the refusal printed the two
+        // spellings as one type: `return type U<…inner:@_m0_Expr> does not match declared
+        // U<…inner:@Expr>`. See test/modules/arrow-retannot.
+        a.retAnnot = this.t(a.retAnnot);
         if (a.paramTys) a.paramTys = a.paramTys.map((t) => this.t(t)!);
         a.retTy = this.t(a.retTy);
         if (a.exprBody) this.expr(a.body as Expr); else (a.stmts as Stmt[]).forEach((s) => this.stmt(s));
