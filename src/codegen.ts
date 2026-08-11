@@ -391,15 +391,28 @@ function llvmTy(ty: Ty): string {
  */
 function userSym(name: string): string { return name === "main" ? "nt_user_main" : name; }
 
+/**
+ * The zero initializer for a module-level binding promoted to an LLVM global (SH1).
+ *
+ * DERIVED from `llvmTy`, deliberately, rather than re-listing the type predicates.
+ * The two lists had drifted: `llvmTy` grew `isUrlRefTy` into its `ptr` arms and this
+ * function did not, so a `URL` global fell to the `default` and emitted
+ * `@nt.g.u = internal global ptr 0` — an integer constant in a pointer slot, which
+ * clang REFUSES to parse ("integer constant must have integer type"). A `Date` global
+ * hit the same fall-through the other way and emitted `double 0`.
+ *
+ * Deriving makes the drift impossible: every `Ty` whose machine type is `ptr` gets
+ * `null` by construction, including the next reference type anyone adds. This is the
+ * same lesson as the AST walkers — a parallel enumeration is a defect waiting for the
+ * next member, so the fix is to stop enumerating rather than to correct the list.
+ */
 function defaultZero(ty: Ty): string {
-  if (isTypeRefTy(ty) || isUnionTy(ty) || isGeneralUnionTy(ty)) return "null";
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "null";
-  switch (ty) {
-    case "number": return "0x0000000000000000";
-    case "boolean": return "false";
-    case "string": return "null";
+  switch (llvmTy(ty)) {
+    case "ptr": return "null";
+    case "double": return "0x0000000000000000";
+    case "i1": return "false";
     case "void": return "";
-    default: return "0"; // undefined | null
+    default: return "0"; // i8 — the unit types (undefined | null)
   }
 }
 
@@ -478,6 +491,7 @@ const DECLARES = [
   "declare ptr @js_str_concat(ptr, ptr)",
   "declare double @js_str_len(ptr)",
   "declare i32 @js_str_eq(ptr, ptr)",
+  "declare i32 @js_same_value(double, double)",
   "declare i32 @js_str_cmp(ptr, ptr)",
   "declare ptr @js_num_to_str(double)",
   "declare ptr @js_bool_to_str(i32)",
@@ -544,6 +558,7 @@ const DECLARES = [
   "declare ptr @nt_arr_join_bool(ptr, ptr)",
   "declare i32 @nt_arr_includes_num(ptr, double)",
   "declare i32 @nt_arr_includes_str(ptr, ptr)",
+  "declare i32 @nt_arr_includes_bool(ptr, i32)",
   "declare double @nt_arr_indexof_num(ptr, double, double)",
   "declare double @nt_arr_indexof_str(ptr, ptr, double)",
   "declare ptr @nt_arr_copy(ptr)",
@@ -1410,6 +1425,30 @@ class FnGen {
   private terminate(line: string): void {
     const b = this.blocks[this.cur]!;
     if (!b.terminated) { b.lines.push("  " + line); b.terminated = true; }
+  }
+  /**
+   * `out = l <bare> r` for a COMPOUND assignment, where `bare` is the operator with its
+   * trailing `=` stripped: `"+"`, `"&"`, `"<<"`, `"**"`. ONE function rather than the
+   * choice written at each site, for the same reason `joinFn` is one function.
+   *
+   * The choice used to be two-way and inlined three times — `ARITH.has(bare)` or else
+   * `BITFN.get(bare)!` — which is fine for exactly the operators that existed then. `**`
+   * is in NEITHER map: it is not an LLVM binary instruction, it is `Number::exponentiate`,
+   * and it lowers to `js_pow` because C `pow` answers `1` for a unit base with an infinite
+   * exponent where ES 6.1.6.1.3 says `NaN`. So `**=` would have taken the `else` and
+   * emitted `call double @undefined(...)` at all three sites — which is why `**=` could
+   * not be wired into the parser without this. Adding a fourth operator now means
+   * teaching one place, not remembering three.
+   */
+  private compoundArith(out: string, bare: string, l: string, r: string): void {
+    if (bare === "**") { this.emit(`${out} = call double @js_pow(double ${l}, double ${r})`); return; }
+    if (ARITH.has(bare)) { this.emit(`${out} = ${ARITH.get(bare)!} double ${l}, ${r}`); return; }
+    const fn = BITFN.get(bare);
+    // Not a fallback: an operator the parser accepts and this does not know would
+    // otherwise interpolate `undefined` into a call and surface as a raw clang error with
+    // no NT code — exactly what `**=` did before it was taught here.
+    if (fn === undefined) throw internalError(`compound assignment '${bare}=' has no lowering — teach \`compoundArith\``);
+    this.emit(`${out} = call double @${fn}(double ${l}, double ${r})`);
   }
   /** Whether the current block already has a terminator.
    *
@@ -3716,10 +3755,8 @@ class FnGen {
           if (e.op === "=") { const v = this.genExpr(e.value); this.writeCapture(e.target, v); return { v: v.v, ty: cty }; }
           const cur = this.readCapture(e.target);
           const rv = this.genExpr(e.value);
-          const bare0 = e.op.slice(0, -1);
           const t0 = this.fresh();
-          if (ARITH.has(bare0)) this.emit(`${t0} = ${ARITH.get(bare0)!} double ${cur.v}, ${rv.v}`);
-          else this.emit(`${t0} = call double @${BITFN.get(bare0)!}(double ${cur.v}, double ${rv.v})`);
+          this.compoundArith(t0, e.op.slice(0, -1), cur.v, rv.v);
           this.writeCapture(e.target, { v: t0, ty: "number" });
           return { v: t0, ty: "number" };
         }
@@ -3769,10 +3806,8 @@ class FnGen {
         const old = this.fresh();
         this.emit(`${old} = load double, ptr ${this.addr(e.target)}`);
         const rv = this.genExpr(e.value);
-        const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
         const t = this.fresh();
-        if (ARITH.has(bare)) this.emit(`${t} = ${ARITH.get(bare)!} double ${old}, ${rv.v}`);
-        else this.emit(`${t} = call double @${BITFN.get(bare)!}(double ${old}, double ${rv.v})`);
+        this.compoundArith(t, e.op.slice(0, -1), old, rv.v); // "+", "&", "<<", "**", ...
         this.emit(`store double ${t}, ptr ${this.addr(e.target)}`);
         return { v: t, ty: "number" };
       }
@@ -3847,10 +3882,8 @@ class FnGen {
             ? `${cur} = call double @nt_bytes_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
             : `${cur} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
           const rv = this.genExpr(e.value);
-          const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
           out = this.fresh();
-          if (ARITH.has(bare)) this.emit(`${out} = ${ARITH.get(bare)!} double ${cur}, ${rv.v}`);
-          else this.emit(`${out} = call double @${BITFN.get(bare)!}(double ${cur}, double ${rv.v})`);
+          this.compoundArith(out, e.op.slice(0, -1), cur, rv.v); // "+", "&", "<<", "**", ...
         }
         this.emit(loc
           ? `call void @nt_bytes_index_set(ptr ${obj.v}, double ${idx.v}, double ${out}, ptr ${loc})`
@@ -4065,6 +4098,33 @@ class FnGen {
           this.emit(`store i64 ${this.toSlot(v)}, ptr ${gep}`);
         });
         return { v: obj, ty };
+      }
+      // `Object.is` is handled BEFORE the shared `genExpr(e.args[0])` below, which types
+      // its result as the object receiver every other `Object.*` static takes. SameValue
+      // (ES 7.2.10): NaN equals NaN, and `+0` does NOT equal `-0` — the opposite of
+      // `.includes`'s SameValueZero on that second pair, so the two never share a routine.
+      // The checker has already refused a non-primitive argument.
+      if (e.callee.property === "is") {
+        const a = this.genExpr(e.args[0]!);
+        const b = this.genExpr(e.args[1]!);
+        const t = this.fresh();
+        // Different TYPES are never SameValue, and nothing is coerced: `Object.is(0, false)`
+        // is `false` where `0 == false` is `true`. Both operands are still evaluated, above,
+        // for their side effects.
+        if (a.ty !== b.ty) return { v: "false", ty: "boolean" };
+        if (a.ty === "number") {
+          const r = this.fresh();
+          this.emit(`${r} = call i32 @js_same_value(double ${a.v}, double ${b.v})`);
+          this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        } else if (a.ty === "boolean") {
+          this.emit(`${t} = icmp eq i1 ${a.v}, ${b.v}`);
+        } else {
+          // string: by value, so an interned literal and a built string are SameValue.
+          const r = this.fresh();
+          this.emit(`${r} = call i32 @js_str_eq(ptr ${a.v}, ptr ${b.v})`);
+          this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        }
+        return { v: t, ty: "boolean" };
       }
       const o = this.genExpr(e.args[0]!);
       if (e.callee.property === "entries") {
@@ -5890,11 +5950,19 @@ class FnGen {
         this.emit(`${t} = call ptr @${joinFn(el)}(ptr ${recv.v}, ptr ${sep})`);
         return { v: t, ty: "string" };
       }
+      // THREE-way on the element type, like `joinFn` above it and for the same reason: a
+      // `boolean[]` slot is `zext i1`, so the old `number ? _num : _str` handed an `i1` to
+      // a `ptr` parameter and clang rejected the whole module with no NT code. The needle
+      // is widened to `i32` here so the runtime never sees a one-bit value.
       case "includes": {
         const x = this.genExpr(args[0]!).v;
         const r = this.fresh();
         if (numeric) this.emit(`${r} = call i32 @nt_arr_includes_num(ptr ${recv.v}, double ${x})`);
-        else this.emit(`${r} = call i32 @nt_arr_includes_str(ptr ${recv.v}, ptr ${x})`);
+        else if (el === "boolean") {
+          const w = this.fresh();
+          this.emit(`${w} = zext i1 ${x} to i32`);
+          this.emit(`${r} = call i32 @nt_arr_includes_bool(ptr ${recv.v}, i32 ${w})`);
+        } else this.emit(`${r} = call i32 @nt_arr_includes_str(ptr ${recv.v}, ptr ${x})`);
         const t = this.fresh();
         this.emit(`${t} = icmp ne i32 ${r}, 0`);
         return { v: t, ty: "boolean" };
@@ -6582,6 +6650,44 @@ class FnGen {
   }
 
   /**
+   * A JSON object KEY, quotes included — the compile-time twin of `js_json_quote`, which
+   * a string VALUE has always gone through at runtime.
+   *
+   * The key never did. It comes from the static type, so it is interned as a constant and
+   * was written out raw: node produced `{"c\\d":1}` for the key `c\d` and we produced
+   * `{"c\d":1}`, which is not JSON and does not survive its own `JSON.parse`. A tab in a
+   * key was worse — an actual 0x09 byte inside the string. Both at exit 0.
+   *
+   * node applies the SAME `QuoteJSONString` (ECMA-262 25.5.2.3) to a key as to a value, so
+   * this mirrors `js_json_quote` (runtime/runtime.c) rule for rule rather than inventing a
+   * key-specific one: short forms for \b \t \n \f \r, `\u00XX` below 0x20, and U+007F left
+   * literal because JSON does not treat it as a control character.
+   *
+   * The `"` case is unreachable today — `keyIsEncodable` (src/ast.ts) refuses a key
+   * carrying a quote, because `widenLiteralTys` would fuse it with a neighbour — and it is
+   * kept anyway: this is an ESCAPER, and it should be correct as one independently of what
+   * the admission rule upstream happens to allow this month.
+   */
+  private jsonKey(k: string): string {
+    const HEX = "0123456789abcdef";
+    let out = `"`;
+    for (let i = 0; i < k.length; i++) {
+      const c = k[i]!;
+      const n = k.charCodeAt(i);
+      if (c === `"`) out += `\\"`;
+      else if (c === "\\") out += "\\\\";
+      else if (n === 8) out += "\\b";
+      else if (n === 12) out += "\\f";
+      else if (n === 10) out += "\\n";
+      else if (n === 13) out += "\\r";
+      else if (n === 9) out += "\\t";
+      else if (n < 0x20) out += "\\u00" + HEX[(n >> 4) & 0xf] + HEX[n & 0xf];
+      else out += c;
+    }
+    return out + `"`;
+  }
+
+  /**
    * JSON.stringify — generated recursively from the static type.
    * `indent` is the (compile-time) indent unit ("" = compact); `depth` the current
    * nesting level, so a pretty-printed line is prefixed with indent.repeat(depth).
@@ -6703,7 +6809,7 @@ class FnGen {
       let own = false;
       fields.forEach((f, i) => {
         if (i > 0) { acc = this.jsonCat(acc, own, this.mod.intern(pretty ? `,\n${inner}` : ","), false); own = true; }
-        acc = this.jsonCat(acc, own, this.mod.intern(pretty ? `"${f.key}": ` : `"${f.key}":`), false); own = true;
+        acc = this.jsonCat(acc, own, this.mod.intern(pretty ? `${this.jsonKey(f.key)}: ` : `${this.jsonKey(f.key)}:`), false); own = true;
         const fv = this.genJsonStringify(this.loadField(val, f.key, f.ty), indent, depth + 1).v;
         acc = this.jsonCat(acc, own, fv, true); own = true;
       });
@@ -6728,7 +6834,7 @@ class FnGen {
       // table", and `nt_str_release` is a no-op on the second. `lead` is a select between
       // two interned constants, so it is never owned.
       let a = this.jsonCat(cur, true, lead, false);
-      a = this.jsonCat(a, true, this.mod.intern(pretty ? `"${key}": ` : `"${key}":`), false);
+      a = this.jsonCat(a, true, this.mod.intern(pretty ? `${this.jsonKey(key)}: ` : `${this.jsonKey(key)}:`), false);
       a = this.jsonCat(a, true, jsonV, true);
       this.emit(`store ptr ${a}, ptr ${accSlot}`);
       this.emit(`store i1 true, ptr ${emittedSlot}`);

@@ -733,4 +733,38 @@ console.log(work(${n}));
     // the whole residue; the URI calls add none of their own.
     expect({ leaks: uri.leaks }).toEqual({ leaks: control.leaks });
   }, 300_000);
+
+  /*
+   * THE SAME SCRATCH-BUFFER SHAPE, TWICE MORE. `nt_qs_to_string` (URLSearchParams'
+   * serializer) builds its answer in a `nativets_alloc(n * 3 + 2)` worst case, copies
+   * into a fresh `alloc_str`, and returned without freeing the scratch — one abandoned
+   * block per serialization, unregistered, so no counter this compiler exposes could
+   * see it. Measured with `leaks --atExit` before the fix: 20,000 calls left
+   * **20,000 blocks / 640,000 bytes**; after, zero.
+   *
+   * `nt_date_to_json` is the same defect in the OTHER allocator: its intermediate comes
+   * from `nt_date_to_iso`, which IS registered, so it takes the refcount pair rather
+   * than `free`. That one is visible to `__strLive`, and the two-scale check below is
+   * marginal — the same program with and without the call — because a loop-local string
+   * leaks on its own today (docs/ROADMAP.md records that separately), so a flat residue
+   * would be someone else's bug rather than proof about this one.
+   */
+  const qsLoop = (n: number) => `
+const u = new URL("https://x.test/p?a=b+c&d=e");
+function work(n: number): number {
+  let acc = 0;
+  for (let i = 0; i < n; i++) { acc = acc + u.searchParams.toString().length; }
+  return acc;
+}
+console.log(work(${n}));
+`;
+
+  test("URLSearchParams.toString frees its scratch buffer", () => {
+    const small = leakedBlocks(qsLoop(200));
+    const big = leakedBlocks(qsLoop(2000));
+    expect(small.stdout).toBe("1800\n");
+    expect(big.stdout).toBe("18000\n");
+    // 10x the work, the same residue. Before the fix this was 200 vs 2000.
+    expect({ leaks: big.leaks }).toEqual({ leaks: small.leaks });
+  }, 300_000);
 });
