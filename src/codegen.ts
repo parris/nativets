@@ -6187,6 +6187,44 @@ class FnGen {
   }
 
   /**
+   * A JSON object KEY, quotes included — the compile-time twin of `js_json_quote`, which
+   * a string VALUE has always gone through at runtime.
+   *
+   * The key never did. It comes from the static type, so it is interned as a constant and
+   * was written out raw: node produced `{"c\\d":1}` for the key `c\d` and we produced
+   * `{"c\d":1}`, which is not JSON and does not survive its own `JSON.parse`. A tab in a
+   * key was worse — an actual 0x09 byte inside the string. Both at exit 0.
+   *
+   * node applies the SAME `QuoteJSONString` (ECMA-262 25.5.2.3) to a key as to a value, so
+   * this mirrors `js_json_quote` (runtime/runtime.c) rule for rule rather than inventing a
+   * key-specific one: short forms for \b \t \n \f \r, `\u00XX` below 0x20, and U+007F left
+   * literal because JSON does not treat it as a control character.
+   *
+   * The `"` case is unreachable today — `keyIsEncodable` (src/ast.ts) refuses a key
+   * carrying a quote, because `widenLiteralTys` would fuse it with a neighbour — and it is
+   * kept anyway: this is an ESCAPER, and it should be correct as one independently of what
+   * the admission rule upstream happens to allow this month.
+   */
+  private jsonKey(k: string): string {
+    const HEX = "0123456789abcdef";
+    let out = `"`;
+    for (let i = 0; i < k.length; i++) {
+      const c = k[i]!;
+      const n = k.charCodeAt(i);
+      if (c === `"`) out += `\\"`;
+      else if (c === "\\") out += "\\\\";
+      else if (n === 8) out += "\\b";
+      else if (n === 12) out += "\\f";
+      else if (n === 10) out += "\\n";
+      else if (n === 13) out += "\\r";
+      else if (n === 9) out += "\\t";
+      else if (n < 0x20) out += "\\u00" + HEX[(n >> 4) & 0xf] + HEX[n & 0xf];
+      else out += c;
+    }
+    return out + `"`;
+  }
+
+  /**
    * JSON.stringify — generated recursively from the static type.
    * `indent` is the (compile-time) indent unit ("" = compact); `depth` the current
    * nesting level, so a pretty-printed line is prefixed with indent.repeat(depth).
@@ -6304,7 +6342,7 @@ class FnGen {
       let acc = this.mod.intern(pretty ? `{\n${inner}` : "{");
       fields.forEach((f, i) => {
         if (i > 0) acc = this.concat(acc, this.mod.intern(pretty ? `,\n${inner}` : ","));
-        acc = this.concat(acc, this.mod.intern(pretty ? `"${f.key}": ` : `"${f.key}":`));
+        acc = this.concat(acc, this.mod.intern(pretty ? `${this.jsonKey(f.key)}: ` : `${this.jsonKey(f.key)}:`));
         acc = this.concat(acc, this.genJsonStringify(this.loadField(val, f.key, f.ty), indent, depth + 1).v);
       });
       return { v: this.concat(acc, this.mod.intern(pretty ? `\n${close}}` : "}")), ty: "string" };
@@ -6323,7 +6361,7 @@ class FnGen {
       const lead = this.fresh();
       this.emit(`${lead} = select i1 ${had}, ptr ${sep}, ptr ${this.mod.intern("")}`);
       let a = this.concat(cur, lead);
-      a = this.concat(a, this.mod.intern(pretty ? `"${key}": ` : `"${key}":`));
+      a = this.concat(a, this.mod.intern(pretty ? `${this.jsonKey(key)}: ` : `${this.jsonKey(key)}:`));
       a = this.concat(a, jsonV);
       this.emit(`store ptr ${a}, ptr ${accSlot}`);
       this.emit(`store i1 true, ptr ${emittedSlot}`);

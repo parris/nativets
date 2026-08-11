@@ -12,7 +12,7 @@ import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral, unknow
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep, mapTypesDeepExpr,
   isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
-  tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
+  tagValueIsEncodable, keyIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, generalUnionArmTypeof, extractUnionMembers, unionWidenedMembers,
   resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
 } from "./ast.ts";
@@ -1223,7 +1223,19 @@ class Parser {
    */
   private expectKey(): string {
     const t = this.peek();
-    if (t.type === "ident" || t.type === "str") { this.next(); return t.value; }
+    if (t.type === "ident") { this.next(); return t.value; }
+    // Only a QUOTED key can carry text the type encoding cannot hold — an identifier is
+    // safe by construction, and a numeric key is now `String(Number(…))`, which is digits,
+    // `.`, `-`, `+`, `e`, `Infinity` or `NaN`. Refused here, at the one production that
+    // still knows the key's source position, rather than downstream where the corrupted
+    // type string no longer remembers which key wrecked it. NT1040.
+    if (t.type === "str") {
+      this.next();
+      if (!keyIsEncodable(t.value)) {
+        throw nyi(NYI.KEY_ENCODING, `the object key ${JSON.stringify(t.value)} at ${t.line}:${t.col} (its text would be read as type syntax)`, undefined, { line: t.line, col: t.col });
+      }
+      return t.value;
+    }
     if (t.type === "num") { this.next(); return String(Number(t.value)); }
     throw parseError(`Expected property key at ${t.line}:${t.col}`);
   }

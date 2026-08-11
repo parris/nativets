@@ -419,6 +419,59 @@ export function tagValueIsEncodable(v: string): boolean {
   return true;
 }
 
+/**
+ * Can `k` be an object KEY without corrupting the layout? An object's slot list IS its
+ * type string — `{k1:t1,k2:t2}`, split back by `objectFields` above — so a key carrying a
+ * character that split reacts to does not merely look odd, it MOVES THE SLOT BOUNDARIES.
+ * Measured on a scan of every printable ASCII character through `{ "a<C>b": 1, z: 2 }`,
+ * with node as the oracle, nine of them did, all at exit 0 with no diagnostic:
+ *
+ *   for (const k in { "a,b": 1, z: 2 })   node → "a,b","z"    was → "","b","z"
+ *   for (const k in { "a:b": 1, z: 2 })   node → "a:b","z"    was → "a","z"
+ *   for (const k in { "a<b": 1, z: 2 })   node → "a<b","z"    was → "a<b"   ← `z` GONE
+ *
+ * This is a ROUND TRIP and deliberately not a forbidden-character list, because the
+ * property that matters is not "contains a suspicious byte", it is "`objectFields` of the
+ * minted type gives back the fields that were minted" — which is exactly what every
+ * consumer relies on (`fields.length` is an allocation size and `fieldIndex` is a
+ * `getelementptr` offset). Testing the property directly cannot be too NARROW, the way a
+ * hand-written list can: a list wide enough to be safe has to ban `>`, `|`, `"`, `\` and a
+ * balanced `<…>` as well, and every one of those encodes faithfully and works today.
+ *
+ * The probe carries a SECOND, known-good field, and that is the whole subtlety: `a<b` on
+ * its own round-trips perfectly (there is no separator for its dangling angle to swallow)
+ * and only eats the comma once a neighbour exists. A single-field probe would have passed
+ * it. `x:boolean` is the neighbour; `k === "x"` is harmless, since then both fields are
+ * genuinely named `x` and the encoding is still faithful.
+ *
+ * The string is built by hand rather than through `objectType` so the probe is not
+ * reordered by `canonicalKeyOrder` — position is irrelevant here, only faithfulness is.
+ *
+ * `KEY_MARKERS` is the one part that CANNOT be a round trip, and the reason is worth
+ * stating: `#` and `"` are read against the whole type string by SUBSTRING, so whether a
+ * key carrying one is safe depends on what its NEIGHBOURS contain, which no single-key
+ * probe can see.
+ *   - `"` — `widenLiteralTys` pairs quotes across the entire string and replaces what lies
+ *     between them with `string`. One quoted key alone is harmless (there is no closing
+ *     quote, so the scan bails); TWO of them, or one beside a field with a string-LITERAL
+ *     type, are not. Measured: `{ 'a"b': 1, 'c"d': 2, z: 3 }` enumerated `astringd`, `z` —
+ *     two keys silently fused into one, at exit 0.
+ *   - `#` — `hasTypeParam` is `t.includes("#")`, so a key carrying one makes a fully
+ *     substituted type look like it still has an open parameter. Already refused today,
+ *     but as an `NT1013` naming the whole mangled type rather than the key.
+ * `@` is NOT here, and was checked rather than assumed: `hasTypeRef` is also a bare
+ * `includes`, but every consumer behind it walks by POSITION, so `{ "x@N": 1, z: 2 }`
+ * agrees with node even with a recursive `type N` in the table. Banning it would have
+ * refused a program that works.
+ */
+const KEY_MARKERS = "#\""; // whole-string markers in the Ty encoding — see above
+export function keyIsEncodable(k: string): boolean {
+  for (let i = 0; i < k.length; i++) if (KEY_MARKERS.includes(k[i]!)) return false;
+  const probe = objectFields(`{${k}:number,x:boolean}` as Ty);
+  if (probe.length !== 2) return false;
+  return probe[0]!.key === k && probe[0]!.ty === "number" && probe[1]!.key === "x" && probe[1]!.ty === "boolean";
+}
+
 export function isUnionTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("U<") && t.endsWith(">"); }
 export function unionMembers(t: Ty): Ty[] { return splitTopLevel(t.slice(2, -1), "|") as Ty[]; }
 export function makeUnionTy(members: Ty[]): Ty { return `U<${members.join("|")}>` as Ty; }
