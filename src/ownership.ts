@@ -1989,22 +1989,43 @@ function collectAliases(stmts: Stmt[], isMutableTy: (t: Ty) => boolean, out: Map
   }
 }
 
-/** Static type of every name bound in a scope — what the `@@mutable` rules read. */
-function collectVarTys(stmts: Stmt[], out: Map<string, Ty>): void {
+/**
+ * Static type of every name bound in a scope — what the `@@mutable` rules read.
+ *
+ * RETURNS the accumulator, exactly as `collectLinear` below does and for the same reason:
+ * `out` is a PARAMETER the caller reads back, so the in-place `out.set(…)` this used to be
+ * is a guaranteed NO-OP under nativets (a `Map` here is persistent — `.set` answers a new
+ * map and leaves the receiver alone), while under bun, where `src/` runs today, it mutates
+ * and works. Fix #2 from test/discarded-mutator.test.ts, whose spelling is compiled against
+ * node there.
+ *
+ * The accumulator is a LOCAL seeded from `out`, never `out` itself: rebinding the parameter
+ * is refused (`rejectParamRebind`, NT1606) precisely because a caller that ignored the
+ * return would silently lose every write. Every recursive step and the single caller
+ * (`runScope`) thread it.
+ *
+ * WHAT AN EMPTY ANSWER WOULD COST, so the no-op is not mistaken for cosmetic: `varTy` is
+ * what `isMutableInstance` consults, so an unthreaded map makes every binding look
+ * non-`@@mutable` and quietly disables the aliasing rules that keep a mutable instance
+ * single-owner.
+ */
+function collectVarTys(stmts: Stmt[], out: Map<string, Ty>): Map<string, Ty> {
+  let acc = out;
   for (const s of stmts) {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) if (d.ty !== undefined) out.set(d.name, d.ty); break;
-      case "IfStmt": collectVarTys(s.consequent, out); if (s.alternate) collectVarTys(s.alternate, out); break;
-      case "WhileStmt": case "DoWhileStmt": case "BlockStmt": collectVarTys(s.body, out); break;
-      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectVarTys([s.init as Stmt], out); collectVarTys(s.body, out); break;
-      case "ForOfStmt": if (s.elemTy !== undefined) out.set(s.name, s.elemTy); collectVarTys(s.body, out); break;
-      case "ForInStmt": collectVarTys(s.body, out); break;
-      case "SwitchStmt": for (const c of s.cases) collectVarTys(c.body, out); break;
-      case "TryStmt": collectVarTys(s.block, out); if (s.handler) collectVarTys(s.handler, out); if (s.finalizer) collectVarTys(s.finalizer, out); break;
-      case "MultiStmt": collectVarTys(s.stmts, out); break;
+      case "VarDecl": for (const d of s.decls) if (d.ty !== undefined) acc = acc.set(d.name, d.ty); break;
+      case "IfStmt": acc = collectVarTys(s.consequent, acc); if (s.alternate) acc = collectVarTys(s.alternate, acc); break;
+      case "WhileStmt": case "DoWhileStmt": case "BlockStmt": acc = collectVarTys(s.body, acc); break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") acc = collectVarTys([s.init as Stmt], acc); acc = collectVarTys(s.body, acc); break;
+      case "ForOfStmt": if (s.elemTy !== undefined) acc = acc.set(s.name, s.elemTy); acc = collectVarTys(s.body, acc); break;
+      case "ForInStmt": acc = collectVarTys(s.body, acc); break;
+      case "SwitchStmt": for (const c of s.cases) acc = collectVarTys(c.body, acc); break;
+      case "TryStmt": acc = collectVarTys(s.block, acc); if (s.handler) acc = collectVarTys(s.handler, acc); if (s.finalizer) acc = collectVarTys(s.finalizer, acc); break;
+      case "MultiStmt": acc = collectVarTys(s.stmts, acc); break;
       default: break;
     }
   }
+  return acc;
 }
 
 /*
@@ -2208,7 +2229,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     let varTy = new Map<string, Ty>();
     if (mutable.classes.size) {
       for (const p of params) varTy = varTy.set(p.name, p.ty);
-      collectVarTys(body, varTy);
+      varTy = collectVarTys(body, varTy);
     }
     let linear = new Set<string>();
     for (const p of params) if (isLinearTy(p.ty)) linear = linear.add(p.name);

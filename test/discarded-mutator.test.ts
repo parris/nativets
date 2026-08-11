@@ -366,8 +366,6 @@ describe("discarded persistent mutators in src/", () => {
     "ownership.ts collectAliases: out.set(…)",
     "ownership.ts collectAliases: out.set(…)",
     "ownership.ts collectAliases: out.set(…)",
-    "ownership.ts collectVarTys: out.set(…)",
-    "ownership.ts collectVarTys: out.set(…)",
     "ownership.ts scanMentions: out.add(…)",
     "ownership.ts scanMentions: seen.add(…)",
     "ownership.ts shadowedNames: count.set(…)",
