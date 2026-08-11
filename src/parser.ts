@@ -874,7 +874,14 @@ class Parser {
     // second parse UNFOLD one level (`?U@N` became `?U{v:number,next:?U@N}`), so the same
     // type had two spellings and `===` — which is the whole point of a string encoding —
     // stopped holding between an annotation and a literal.
-    if (id === this.declaringType) {
+    // The local copy and the `!== undefined` are not nullability logic — `id` is a
+    // `string`, so the bare `id === this.declaringType` already answered false when it was
+    // unset. They are there because comparing `T` with `T | undefined` is NT2001 in the
+    // subset this file must compile in, and the guard only narrows a LOCAL: a `this.<field>`
+    // does not narrow across `&&`, so guarding the field in place moved the refusal onto the
+    // right operand rather than clearing it. Same answer on every input.
+    const declaring = this.declaringType;
+    if (declaring !== undefined && id === declaring) {
       this.declaringTypeIsRecursive = true;
       return typeRefTy(id);
     }
