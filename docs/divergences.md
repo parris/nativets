@@ -27,6 +27,7 @@ a trap:
 | `a[-1]` | `0` | `undefined` |
 | `"abc"[7]` | `""` | `undefined` |
 | `u[9] = 1` on a 4-byte array | silently ignored | silently ignored |
+| `a[1.5]` on `[1,2,3]` | `2` (truncated!) | `undefined` |
 
 A wrong-but-plausible `0` is the worst outcome available: the program keeps running and computes
 a wrong answer from a value that was never there. Memory safety is supposed to mean *a guaranteed
@@ -42,6 +43,30 @@ Rules:
   32-element persistent-trie threshold). **Negative indices panic everywhere** (they are not
   Python-style wrap-around). See the next bullet for what node actually does at each of these —
   the answer is not uniform, and the `.with` case is a real divergence, not a shared stop.
+- **A NON-INTEGER index is out of bounds too** — `NaN`, `±Infinity` and any fraction. In JS
+  `a[1.5]` is a property lookup on the string `"1.5"`, which no array, string or typed array
+  has, so node reads `undefined`; it does **not** truncate to `a[1]`. The runtime used to
+  truncate the double and read the neighbour, which was a *silent wrong answer*, not a
+  divergence:
+
+  ```ts
+  const a: number[] = [1, 2, 3];
+  let i = 1.5;
+  console.log(a[i]);   // node: undefined   nativets (before): 2   nativets (now): panic
+  ```
+
+  Also `"abc"[1.5]` → `"b"`, `u[1.5]` → byte 1, and `u[1.5] = 7` **overwrote byte 1** where node
+  stores an ordinary `"1.5"` property and leaves the bytes alone. All exited 0 with no
+  diagnostic. The **compile-time** half had always agreed with node here — `checkStaticBounds`
+  requires `Number.isInteger`, so the literal `a[1.5]` has always been `NT2002` — so the two
+  halves of the same rule disagreed, and the runtime was the one that was wrong. Fixed:
+  `NT_IS_INDEX` in `runtime/runtime.c` (guarded copy in `nt_bytes.c`).
+
+  **`arr.with(i, v)` is deliberately excluded**: node's `.with` runs its index through
+  `ToIntegerOrInfinity`, so `[1,2,3].with(1.7, 9)` really *is* `[1,9,3]` — truncating there
+  matches node and is left alone. Bracket indexing has no such coercion. (`.with(NaN, 9)` is
+  `[9,2,3]` in node and still panics here — see the negative-index table's `.with` row for the
+  same class of gap.)
 - **What node does with a NEGATIVE index — and where our rule genuinely diverges.** Verified
   against node, every case:
 
@@ -74,18 +99,42 @@ Rules:
   `String#charAt(i)` is likewise untouched — node *defines* it as `""` out of range, so it is not
   a defect and does not panic.
 
-  **But `.at` is only the right advice for a NON-NEGATIVE read**, and both the `NT2002` hint and
-  the runtime `help:` line currently offer it unconditionally. Two ways that is wrong:
+  **`.at` is only the right advice for a read at or past the end**, and both the `NT2002` hint
+  and the runtime `help:` line used to offer it unconditionally, to every accessor and every
+  index. Following it did not avoid the panic — it silently returned a **different value**:
 
-  - **Negative index:** the hint on `a[-1]` reads "use `.at(-1)` if you want `undefined` instead
-    of a panic". `a.at(-1)` is **`3`**, not `undefined` — node's `a[-1]` is `undefined` and
-    `a.at(-1)` is the *last element*. Following the hint changes the program's answer instead of
-    preserving it. Same for `"abc".at(-1)` → `"c"` and `u.at(-1)` → the last byte.
-  - **Not a read:** on `u[i] = v` and on `arr.with(i, v)` the `help:` line still says `.at(…)`.
-    `.at` is a read — it cannot express either one, so the advice is not actionable at all.
+  | written | node | the advised replacement | node |
+  |---|---|---|---|
+  | `[1,2,3][5]` | `undefined` | `[1,2,3].at(5)` | `undefined` ✅ |
+  | `[1,2,3][-1]` | `undefined` | `[1,2,3].at(-1)` | **`3`** — the LAST element ❌ |
+  | `"abc"[-1]` | `undefined` | `"abc".at(-1)` | **`"c"`** ❌ |
+  | `[1,2,3][1.5]` | `undefined` | `[1,2,3].at(1.5)` | **`2`** — truncates ❌ |
+  | `[1,2,3][NaN]` | `undefined` | `[1,2,3].at(NaN)` | **`1`** — element 0 ❌ |
+  | `u[i] = v` | discards the write | — | `.at` is a **read**; it cannot express a write ❌ |
+  | `a.with(i, v)` | `RangeError` / relative | — | `.at` is a **read**; it cannot update ❌ |
 
-  Both are live defects in the diagnostics, not in this document; they are filed with repros
-  under "Reported, not fixed here" at the end of this section.
+  **Both hints are now keyed on the accessor and the index.** `nt_panic_bounds` already received
+  a `what` argument and now composes a different `help:` line per accessor (`nt_bytes.c`'s write
+  passes its own `what`, `"Uint8Array write index"`, rather than sharing the read's), and
+  `checkStaticBounds` does the same for `NT2002` through `atSuggestion`. What each says now:
+
+  - **read, at or past the end** — unchanged; ``use `.at(5)` to get `undefined` instead of
+    panicking`` is true there.
+  - **read, negative** — names that node reads `undefined` and that `.at` counts from the END
+    instead, so it is *not* the same value.
+  - **read, fractional / `NaN`** — names that `.at` truncates and that `.at(NaN)` reads
+    element 0.
+  - **read, infinite** — the one non-finite case `.at` gets right (`.at(±Infinity)` really is
+    `undefined`), said so, with a note that an infinite index means the arithmetic is wrong.
+  - **typed-array write** — node *discards* an out-of-range write, so no accessor replaces it:
+    test `i >= 0 && i < u.length` first. `.at` is named only to rule it out.
+  - **`.with`, negative** — points at `.with(a.length - 1, v)`, which is exactly node's
+    `.with(-1, v)`.
+  - **`.with`, out of range** — node throws `RangeError: Invalid index` too; to append, spread.
+
+  Every one of those lines is **executed against node** in `test/panic.test.ts` ("the advice
+  compiles and matches node"). A hint whose advice is never run is a hint nobody checked, and
+  this class is only caught by running it.
 - **Compile-time beats runtime.** When the length and the index are both statically known — a
   literal array/string, or a `const` bound to one, indexed by a numeric literal — the program is
   **rejected** with **`NT2002`** (`index 5 is out of bounds for an array of length 3`) rather than
@@ -126,24 +175,81 @@ So the negative-index rule is uniform in the code but **not** uniform in its jus
 accessors are covered by the Stage-41 phantom-value argument, and `.with` is covered by nothing
 except consistency with them. Whoever changes it should change the rule, not this document.
 
-#### Reported, not fixed here — two lying hints on this path
+#### FIXED — the two lying hints on this path
 
-Both are in files held by other lanes at the time of the audit, so they are filed rather than
-patched. Both are the "hint recommends code that does something else" class.
+Both were filed here by the documentation audit and are now repaired; kept as a record because
+the *class* recurs. Both were "the hint recommends code that does something else".
 
 1. **`src/checker.ts` (`NT2002` hint) — `.at(-1)` does not give `undefined`.** For a negative
-   literal index the hint reads ``use `.at(-1)` if you want `undefined` instead of a panic``.
-   Verified in node: `[1,2,3][-1]` is `undefined`, but `[1,2,3].at(-1)` is `3`. The hint's advice
-   silently changes the answer. Repro: `const a: number[] = [1,2,3]; console.log(a[-1]);`
-   Applies to strings (`"abc".at(-1)` → `"c"`) and `Uint8Array` alike. The suggestion is only
-   sound for a non-negative index; for a negative one the honest advice is `?? fallback` on
-   `.at(i)` **only if the wrap-around is wanted**, and otherwise a length check.
-2. **`runtime/runtime.c` (`nt_panic_bounds` help line) — `.at` is suggested for non-reads.** The
-   line is built once for every accessor, so a `Uint8Array` **write** (`u[-1] = 7`) and
-   `arr.with(-1, 9)` both advise ``use `.at(-1)` to get `undefined` instead of panicking``.
-   `.at` is a read and cannot express either operation. It also inherits defect 1 for every
-   negative index. The fix wants the suggestion to depend on the `what` argument the caller
-   already passes, rather than being unconditional.
+   literal index the hint read ``use `.at(-1)` if you want `undefined` instead of a panic``.
+   `[1,2,3][-1]` is `undefined` but `[1,2,3].at(-1)` is `3`, so the advice silently changed the
+   answer; likewise `"abc".at(-1)` → `"c"`. Now keyed on the index by `atSuggestion`, which also
+   covers the fractional case that the same audit did not reach.
+2. **`runtime/runtime.c` (`nt_panic_bounds` help line) — `.at` was suggested for non-reads.** One
+   line was composed for every accessor, so a `Uint8Array` **write** and `arr.with(i, v)` were
+   both told to use `.at`, a read that cannot express either. Now keyed on the `what` argument
+   the caller already passed.
+
+**And the defect that fell out of fixing them:** writing a truthful hint for a *fractional* index
+meant producing one, and the runtime never panicked on it at all — it truncated, so `a[1.5]` was
+`2` where node reads `undefined`. That was a silent wrong answer hiding behind a lying hint, and
+it is the argument for the standing rule: **compile the advice you write and run it against
+node.** Recorded in the non-integer bullet above.
+
+### A string past node's maximum length PANICS (node throws a catchable `RangeError`)
+
+`"abc".padStart(Infinity, "xy")`, `"x".repeat(2 ** 53)` and friends are a **`RangeError` at
+exit 1** in node. nativets stops too, but as a **panic**:
+
+```
+panic: invalid string length: the padded string would be Infinity bytes, past the 536870888-byte maximum
+  help: node throws `RangeError: Invalid string length` at exactly this boundary; build the
+        text in pieces, or write it out incrementally, instead of materialising one string this large
+```
+
+```
+panic: invalid count value: -1
+  help: `.repeat(n)` needs `n` to be finite and >= 0; node throws `RangeError: Invalid count value: -1`
+```
+
+on **stderr**, stdout flushed first and byte-comparable up to the stop, `abort()` → **exit 134**.
+**The exit code is the divergence** (node's is 1), and so is catchability: like every other panic
+this does not go through the pending-exception protocol, so `try`/`catch` cannot stop it.
+
+**The cap is node's own number.** V8's maximum string length on 64-bit is `2**29 - 24` =
+**536870888**, found by binary search against node v24: `"abc".padStart(536870888)` succeeds on
+both sides and `536870889` stops on both. We count **UTF-8 bytes** where node counts UTF-16 code
+units (§A.2), so the boundaries coincide for ASCII and ours is the stricter one above U+007F.
+
+**Covered:** `String#padStart`, `String#padEnd`, `String#repeat` (both its `RangeError`s — the
+count check of ES 22.1.3.18 step 3 runs *before* the length check, which is why `"".repeat(Infinity)`
+stops while `"".repeat(1e100)` is a plain `""`), and `+` / `String#concat`. `new Array(n)` never
+reaches this: it is refused at compile time (`NT1012`).
+
+**Why a panic and not a raise, when node throws something catchable.** The pending-exception
+protocol *could* carry a `RangeError`, and that would match node's exit code. It would also make
+every `.repeat` / `.padStart` / `.padEnd` call site a **fallible call**, which `emitExcCheck`
+*refuses to compile* inside a `try` with no `catch`, and inside a `try` whose `catch` binds an
+object type. Those are ordinary formatting calls: the trade would be a rare stop for a common
+**rejection of programs that compile and run correctly today**. One stop discipline — the same one
+as an out-of-range index and `nativets: out of memory` — is worth the exit code.
+
+**What this replaced.** All four builders took their length as `(long)d`, which C leaves
+**undefined** for a non-finite or out-of-range double, and then did the size arithmetic in `size_t`,
+which **wraps**. Measured, that was worse than a divergence:
+
+| | nativets (before) | node |
+|---|---|---|
+| `"abc".padStart(Infinity, "xy")` | SIGABRT, **empty stderr** on arm64; `"abc"` at **exit 0** on x86-64 | `RangeError`, exit 1 |
+| `"abcd".repeat(2 ** 62)` | **SIGBUS, empty stdout AND stderr** — 2^64 bytes truncated to 0, so it wrote 2^62 times into a **1-byte** buffer | `RangeError`, exit 1 |
+| `"".repeat(1e100)` | **hung forever** (a `LONG_MAX`-trip loop of zero-byte copies) | `""` |
+| `"x".repeat(-1)` | `""` at **exit 0** | `RangeError`, exit 1 |
+
+The `repeat` wrap was an out-of-bounds heap write in a memory-safe compiler, and it had smashed
+stdio's own buffer before it died — which is why even the line printed *before* the fault was lost.
+Every length argument now goes through ES 7.1.5 `ToIntegerOrInfinity` **as a double**, so ±Infinity
+survives the conversion, and the size arithmetic is done in double, which is exact below the cap and
+cannot wrap. Regression tests: `test/panic.test.ts`, "string length".
 
 ### Decorators — a class method that assigns a field (`docs/decorators.md`)
 
@@ -358,6 +464,58 @@ which are **refusals or already-documented consequences**, never approximations:
 - **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
   monotonic, whole milliseconds, plausible epoch range.
 
+### base64 (`btoa`/`atob`) — the BINARY-STRING contract, and it is NOT a divergence
+
+This one is here because it *was* a divergence, silently, and is not one any more.
+
+`btoa`/`atob` are defined on a **binary string**: one **code point** per byte. Ours were
+implemented as "pure byte ops over the string's bytes" — the one reading of them that is
+never right, because §A.2's UTF-8 byte orientation had reached the single function whose
+entire contract is *which bytes those are*:
+
+| | node | nativets, before |
+|---|---|---|
+| `btoa("é")` | `6Q==` | `w6k=` |
+| `btoa("你")` | **throws** `InvalidCharacterError` | `5L2g`, **exit 0** |
+| `atob("YQ===")` | **throws** | `"a"` |
+| `atob("!!!!")` | **throws** | `""` |
+| `atob("/w==")` stdout | `C3 BF` | the bare byte `FF` — stdout that is not valid UTF-8 |
+
+Two of those are the worst outcome the prime directive names, and the last is the
+byte-level one a text-decoding comparison would have shown as a match.
+
+**Now:** `btoa` decodes its UTF-8 input to code points and takes each one's single byte;
+above U+00FF there is no byte, so it raises — which is also where a **lone surrogate**
+(`\ud800`, WTF-8 in our representation) and a **malformed sequence** land, the latter
+because node's string would hold U+FFFD there, above U+00FF for the same reason. `atob`
+implements WHATWG *forgiving-base64 decode* (strip the five ASCII whitespace code points —
+**VT is not one**; strip up to two trailing `=` only from a length that is already `%4 == 0`;
+then reject a non-alphabet character, then a length leaving remainder 1) and re-encodes each
+decoded byte as the code point of that value. `atob(btoa(s)) === s` for every `s` `btoa`
+accepts.
+
+**The throw follows the `JSON.parse` precedent** rather than inventing one: the runtime
+raises on the pending-exception slot (`nt_exc_raise_msg`) and codegen emits the matching
+`emitExcCheck`, exactly as for `JSON.parse` and `decodeURIComponent`. So it is **catchable
+in a `try` in the same frame**, and uncaught it exits 1 with node's stdout. `emitExcCheck`'s
+existing refusals now reach these calls too, unchanged and for the unchanged reason —
+`btoa("x")` inside a `finally`-only `try` is `NT1004` ("a call that can raise inside a `try`
+that has a `finally` and no `catch`"), exactly as `JSON.parse` there already was. Both are
+pinned in `test/fuzz-diff.test.ts`.
+
+**What still differs, and why neither is a base64 question:**
+
+- **The message shape.** node's `e` is a `DOMException`; ours is the string
+  `"InvalidCharacterError: Invalid character"` (or `"…: The string to be decoded is not
+  correctly encoded."`). That is the pre-existing shape of *every* runtime-raised message —
+  `JSON.parse`, `fs`, `fetch` all do this — not something this pair decides.
+- **`.length` of a non-ASCII decode.** `atob("////").length` is `6` here and `3` in node:
+  three `0xFF` bytes are three code units in node and six UTF-8 bytes here. That is §A.2, the
+  documented index-space divergence. The decoded **value** is equal (`atob("////") ===
+  "ÿÿÿ"` is `true` on both sides); only the index space differs.
+- **A decoded NUL truncates** — `atob("AA==")` is `""`, not `"\0"`. That is the runtime-NUL
+  door, tabulated with the rest of them under `NT1705` above.
+
 ### Number → String is NOT a divergence (it used to be, silently)
 
 `Number::toString` (ECMAScript §6.1.6.1.20) sits under every printed number, and until now the
@@ -566,7 +724,7 @@ Everything else about Batch 3:
   catchably, through the pending-exception protocol. `console.log(date)` prints the ISO string
   (node's `util.inspect` of a Date) and `Invalid Date` for `NaN`; `JSON.stringify` emits the
   quoted ISO string, or `null` for an Invalid Date — all node-exact.
-- **A Date is an IMMUTABLE time value.** `setHours`/`setDate`/… are refused (**`NT1023`**),
+- **A Date is an IMMUTABLE time value.** `setHours`/`setDate`/… are refused (**`NT1024`**),
   pointing at reconstruction (`new Date(d.getTime() + ms)`). So is `Date#toString`/
   `toLocaleDateString` — those are locale + zone-*display-name* formatting, which needs tables
   we do not ship. `"" + date` is refused for the same reason.
@@ -575,7 +733,7 @@ Everything else about Batch 3:
   (input is assumed canonical; node re-normalizes). node throws a `TypeError` on a URL it cannot
   parse and so do we — catchably — but for a *different set* of inputs: a `file:///x` that node
   accepts throws here. `.href` and `URL#toString()` need the WHATWG serializer, so they are
-  refused (`NT1023`) rather than approximated; `console.log(url)` likewise (node inspects it as
+  refused (`NT1024`) rather than approximated; `console.log(url)` likewise (node inspects it as
   `URL { … }`).
 - **`URLSearchParams` is read-only**: `.get`/`.has`/`.getAll`/`.toString`. `.append`/`.set`/
   `.delete`/`.sort` mutate, so they are refused — consistent with immutable-by-default.
@@ -589,24 +747,41 @@ Everything else about Batch 3:
   back, non-writable) holds exactly. `Object.assign`/`defineProperty`/`setPrototypeOf` MUTATE
   their target and are refused with **`NT1606`** pointing at object spread.
 
-  **`Object.isFrozen` is constant-`true`, and that DOES diverge — it is a silent wrong answer.**
-  An earlier version of this bullet stated the constant-`true` as if it followed from node's
-  contract holding. It does not: node answers `isFrozen` about *this object's* state, not about
-  whether the language permits mutation, so a never-frozen object is `false` there.
+  **`Object.isFrozen` USED to be constant-`true`, which was a silent wrong answer. It is now
+  REFUSED (`NT1002`), together with `Object.isSealed` and `Object.isExtensible`.**
+
+  The constant was justified by "objects are immutable here anyway, so nothing can ever be
+  unfrozen". node does not ask that question: `isFrozen` reports whether *this object* was
+  frozen, not whether the language permits mutation, so a never-frozen object is `false` there.
 
   ```ts
   const o = { a: 1 };
-  console.log(Object.isFrozen(o));         // node: false      nativets: true
-  console.log(Object.isFrozen(Object.freeze(o)));  // node: true   nativets: true
+  console.log(Object.isFrozen(o));   // node: false   nativets (before): true   — exit 0 both sides
   ```
 
-  Exit 0 on both sides, no diagnostic — so this is the project's own worst category, a
-  wrong answer that keeps running, and it is recorded here rather than left implied. The
-  post-`freeze` answer agrees; only the pre-`freeze` one is wrong. Two honest repairs exist and
-  neither is taken yet: refuse `Object.isFrozen` outright (`NT1023`, consistent with how
-  `Date#setHours` and `URL#href` are handled — it cannot be answered without a per-object frozen
-  bit we do not carry), or add that bit. Reported alongside the diagnostics defects above.
-- **`String#normalize` and `#localeCompare` are refused** (`NT1023`), not approximated:
+  Refused rather than answered, and the choice was between the two:
+
+  - **A frozen bit is not available.** An object is a bare block of `i64` slots — codegen reads
+    field *i* at `getelementptr i64, ptr o, i64 i` — with no header to carry one. Adding it is a
+    change to the representation of every object in the language.
+  - **A compile-time approximation would be UNSOUND, not merely incomplete.** `Object.freeze`
+    returns the *same* object, so `const f = Object.freeze(o)` makes `Object.isFrozen(o)` true in
+    node as well. Deciding it from the syntactic form of the argument would need alias analysis,
+    and getting it wrong reproduces the very defect being removed — a closer-looking guess in
+    place of a wrong constant. **Reject, never miscompile.**
+
+  So `Object.isFrozen` joins `Date#setHours` and `URL#href`: refused because it cannot be
+  answered honestly. `isSealed`/`isExtensible` are the same question and already landed on the
+  same `NT1002`; they now share the specific hint, which names the aliasing reason and says the
+  useful thing — objects here are already deeply immutable and every mutation is a compile
+  error, so a freeze guard has nothing to guard.
+
+  **`Object.freeze` itself is untouched**: node's contract for it — the same object back — is met
+  exactly, and the frozen-ness it establishes was only ever observable through the three
+  predicates that now refuse. (One divergence remains on it: `Object.freeze(o)` **moves** `o`
+  under the ownership rules, so `Object.freeze(o) === o` is `NT1601` here where node says `true`.
+  A refusal, not a wrong answer.)
+- **`String#normalize` and `#localeCompare` are refused** (`NT1024`), not approximated:
   normalization needs the Unicode character database and collation needs ICU
   (`"a".localeCompare("B")` is `-1` in node but `+1` under any byte compare — §A on string
   relational order).
@@ -1047,8 +1222,10 @@ the Stage 41 runtime panic — where node yields `undefined`. So:
 
 Reading the guard as "make this read safe" is therefore wrong: it makes the *base* safe. Use
 `.at(i)` for node's out-of-range `undefined`, exactly as with a plain `a[i]` — **but only for a
-NON-NEGATIVE `i`**. `.at(-1)` is node's *last element*, not `undefined`, so it is not a
-substitute for `a?.[-1]`; see the headline section's `.at` bullet for the full trap.
+NON-NEGATIVE WHOLE `i`**. `.at(-1)` is node's *last element* and `.at(1.5)`/`.at(NaN)` truncate,
+none of them `undefined`, so they are not substitutes for `a?.[-1]` / `a?.[1.5]`; see the
+headline section's `.at` table for the full trap. The panic's own `help:` line now says which of
+these applies, per accessor and per index.
 
 **`?.` in a write position is refused (`NT0001`) — this is agreement with node, not a
 divergence.** ECMAScript's `IsValidSimpleAssignmentTarget` returns `false` for an
@@ -1476,6 +1653,15 @@ NUL computed at RUN time still truncates silently, and these all remain open:
 | `("a" + String.fromCharCode(0) + "b").length` | `3` | `2` |
 | `readFileSync(binaryFile, "utf8").length` (NUL inside) | full length | truncated at the NUL |
 | `JSON.parse` of JSON text holding a `\u0000`, then `.length` | `3` | `1` |
+| `atob("AA==")` — base64 that decodes to a zero byte | `"\0"` (length `1`) | `""` (length `0`) |
+
+The `atob` row is the newest; it was found while making that pair node-exact (see
+"base64 (`btoa`/`atob`) — the BINARY-STRING contract" below). It belongs to THIS door, not
+to base64: `atob` is *supposed* to produce a byte of any value, so the single input class it
+cannot represent is exactly the one a NUL-terminated string forbids. Raising there was
+considered and rejected — node **accepts** `atob("AA==")`, so a throw would be a divergence
+invented to paper over a representation limit, in a function whose neighbouring rows in this
+very table stay silent. It closes when they do.
 
 `String.fromCharCode(0)` in particular **must not** be refused: `src/lexer.ts` and
 `src/modules.ts` both call it deliberately (it is how the compiler spells a NUL now that a
@@ -2856,6 +3042,14 @@ scheduler thread.
 We store strings as NUL-terminated UTF-8 and measure/slice by byte. Identical to JS for
 ASCII (all fixtures); differs for non-ASCII (an emoji is 4 bytes here, 2 UTF-16 units in JS).
 
+**Scope: this is about the UNIT, not about character identity.** §A.2 covers how a string is
+*measured* (`.length`) and *cut* (`slice`, `substring`, `s[i]`, `indexOf`) — byte offsets
+instead of UTF-16 code-unit offsets. It does **not** license returning the wrong *character*.
+`toUpperCase`/`toLowerCase` were once read as covered here and were a no-op outside ASCII;
+they were not covered, and that was a defect, not a decision — `é` → `É` is two bytes to two
+bytes in either encoding, so no unit question arises. It is fixed; the *remaining* limit on
+case mapping is its own entry, **§A.4** below.
+
 > `typeof undefined` (a former divergence) is now **supported** and matches node.
 
 ### 3. Pipeline operator `|>` (Elixir semantics, not TC39 Hack-style)
@@ -2879,6 +3073,69 @@ twin-file strategy (`test/pipeline/*.ts` + hand-desugared `*.twin.ts`, gated by
 `test/pipeline.test.ts`) keeps a defined node oracle. If a Hack-style `|>` ever ships in
 standard JS/TS, our `|>` will diverge from conforming TS (same token, different lowering) — this
 entry is that pre-registered divergence.
+
+### 4. `toUpperCase` / `toLowerCase` map U+0000–U+017F; above that they are the identity
+
+`toUpperCase` and `toLowerCase` are **exact** for every code point up to **U+017F** — ASCII,
+Latin-1 Supplement, and Latin Extended-A. From **U+0180 up** — Latin Extended-B, IPA, Greek,
+Cyrillic, Armenian, Georgian, Latin Extended Additional, and the rest — a character is
+returned **unchanged**, where node maps it:
+
+```ts
+"é".toUpperCase()   // "É"    — covered, matches node
+"straße".toUpperCase()  // "STRASSE" — covered, matches node
+"αβγ".toUpperCase() // "αβγ"  — node gives "ΑΒΓ"        ← the divergence
+"да".toUpperCase()  // "да"   — node gives "ДА"         ← the divergence
+```
+
+**Why the line is here and not further out.** `runtime/` is **libc-only** so it cross-links
+to macOS, Linux, iOS, Android, Windows and wasm. That rules out two otherwise-obvious
+implementations:
+
+- **`toupper`/`towupper` are locale-dependent.** The answer would vary with the environment
+  the binary happens to run in, so the same program would print different bytes on two
+  machines. A divergence that is *stable and documented* is worth more than one that is
+  merely smaller but unpredictable, and an environment-dependent answer cannot be tested
+  against a fixed oracle at all.
+- **The full tables do not fit the constraint.** 2981 code points are cased. Beyond their
+  size, `Default Case Conversion` is not a pure per-character function: it has
+  **context-sensitive** rules (final sigma — `Σ` lowercases to `ς` word-finally and `σ`
+  elsewhere) and **locale-sensitive** ones (Turkish/Azeri dotted and dotless `i`, Lithuanian
+  retained dots). A `const char *` in, `const char *` out, with no locale argument, cannot
+  express either. Implementing the table but not the conditions would be a *wrong* whole,
+  which is worse than a *correct* part.
+
+**What the covered range buys.** Those 360 cased code points collapse to six arithmetic
+rules per direction plus eight exceptions, so the whole thing is exact in ~40 lines with no
+tables at all. It also includes the five **length-changing** unconditional mappings, which
+are the ones an implementation is most likely to get wrong:
+
+| mapping | | note |
+|---|---|---|
+| `ß` U+00DF → `SS` | upper | one character becomes two |
+| `ŉ` U+0149 → `ʼN` | upper | 2 bytes → 3 |
+| `İ` U+0130 → `i` + U+0307 | lower | 2 bytes → 3 — the worst growth ratio, 1.5x |
+| `ı` U+0131 → `I` | upper | 2 bytes → 1 |
+| `ſ` U+017F → `S` | upper | 2 bytes → 1 |
+| `µ` U+00B5 → `Μ` U+039C | upper | leaves the block entirely (into Greek) |
+
+Because of these, neither method can work **in place** or size its output from its input;
+both measure the result with the same mapper that fills it.
+
+**Uncovered input is never damaged, including ill-formed UTF-8.** No decoder is involved:
+the covered range is *self-identifying* in UTF-8 (one byte below 0x80, or two bytes with a
+lead in `0xC2..0xC5` and a real continuation byte after it), so any byte that does not begin
+a covered scalar is copied through singly and longer sequences reassemble untouched. That
+matters more than it sounds, because §A.2 makes ill-formed UTF-8 **reachable from ordinary
+source**: `.slice` cuts bytes, so `"é".slice(0, 1)` is a lone lead byte. `("é".slice(0, 1) +
+"A").toLowerCase()` keeps the stray lead byte as-is and lowers the `A` — it does not re-frame
+the pair into `Á` and eat the `A`, and it does not substitute U+FFFD.
+
+**Tested by** `test/case-mapping.test.ts`: every code point in U+0001–U+017F swept against
+node in both directions, every code point in U+0180–U+FFFF asserted byte-identical (the
+regression test for *this* entry — it fails the day the range widens without this section
+widening), the growth cases built under `-fsanitize=address`, and the half-character slice
+above pinned at the byte level.
 
 ### Template-literal TYPES parse and erase to `string` — the pattern is NOT enforced
 
@@ -3236,6 +3493,50 @@ reference is `NT1003`.
 scope (`const a = 1; const a = 2;` prints `2`), which node rejects as a `SyntaxError`. Those
 are the one case still sharing a frame slot, which is why the ownership pass keeps its
 `shadowedNames` disqualification — it holds that gap to a leak rather than a use-after-free.
+
+**A second shape is still wrong, and it is a `function` DECLARATION inside a block.**
+`alphaRenameShadows` binds every hoisted `FuncDecl` name with `pinned = true` in *every*
+scope, frame or not — "they genuinely hoist and never rename" — so a block-level
+declaration keys the same storage as an enclosing declaration of that name, and the call
+resolves to the *enclosing* one:
+
+```ts
+function fmt(n: number): string { return `outer:${n}`; }
+function run(): string {
+  { function fmt(n: number): string { return `inner:${n * 2}`; }
+    return fmt(21); }
+}
+console.log(run());          // node: inner:42.  nativets: outer:21.
+console.log(fmt(1));         // outer:1 on both.
+```
+
+Exit 0 on both sides, no diagnostic — a silent wrong answer, and the inner body is never
+emitted. It survives at any signature: the shadowing declaration's parameters and return
+type are simply ignored in favour of the outer function's.
+
+It needs an enclosing declaration of the same name to land on. With no outer `fmt` to
+absorb the reference — two **sibling** blocks each declaring `function tag()`, say — the
+call is `NT1003` instead, so the refusal, not the miscompile, is the common case. That is
+the identical structure as the `const g` gap above, and the same root: a name is resolved
+against what the frame already knows rather than against the block that declares it.
+
+Fixing it properly is not a rename. node's block-level function declarations follow
+Annex B — the declaration creates a **var-scoped** binding in the enclosing function,
+assigned where the block *evaluates* it — which is why node prints `4`, not `3`, for
+
+```ts
+function pick(): number { return 1; }
+function outer(): number {
+  let t = 0;
+  { function pick(): number { return 2; } t += pick(); }
+  t += pick();                 // still the INNER one: Annex B var-scoped it
+  return t;
+}
+console.log(outer());        // node: 4.  nativets: 2.
+```
+
+Until that is modelled, the honest interim is to **refuse** a `FuncDecl` in a nested block
+whose name is already bound in the frame, rather than pin it onto the outer one.
 
 ## B. Unimplemented features (we refuse to compile — never miscompile)
 
@@ -4127,6 +4428,32 @@ Only the one-argument string form exists. node's `(chunk, encoding?, callback?)`
 is node's own rule.
 
 | NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface — and the ambient `process.stdout` members outside `.write(s)` | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`), `process.stdout.write` |
+
+### `process.platform` — the TARGET's platform, and the one value node has no word for
+
+`process.platform` is a host builtin returning node's spelling for the platform the program
+is running on: `darwin`, `linux`, `win32`, `android`. On every platform node itself runs on
+this is **not** a divergence — `node file.ts` and our compiled binary print the same string,
+which is what `test/hostio/platform.ts` asserts differentially on whatever box runs it (so a
+Linux runner checks the branch a macOS laptop cannot).
+
+The interesting part is *when* it is resolved. For an AOT binary "the platform I am running
+on" **is** the platform I was built for, so the answer has to follow `--target`. It is
+therefore computed by the **C preprocessor** in `runtime/runtime.c` (`nt_platform`), not
+folded to a constant by codegen. That is forced by a rule this project keeps elsewhere: the
+emitted `.ll` deliberately carries **no target triple** so clang can retarget it, and
+`linkArgv` puts `-target` on the one clang command that compiles both the `.ll` and the
+runtime `.c`. Codegen runs once and cannot know the target; the preprocessor is told. Had we
+folded a constant, `nativets build --target linux` on a Mac would have produced a Linux ELF
+that reported `darwin` — a silent wrong answer, the worst outcome available.
+
+`__ANDROID__` is tested **before** `__linux__`, because Android defines both and node reports
+`android` there.
+
+**The actual divergence is `wasm` only.** No node build targets wasi, so there is no oracle to
+match, and a wasi binary reports **`wasi`** — a value node never produces. That is deliberate:
+guessing one of node's spellings (`linux`, say) would make a wrong answer *look* right. An
+unrecognized platform reports `unknown` for the same reason.
 
 ### Type declarations HOIST; recursive types are still not representable (NT1030)
 

@@ -228,6 +228,141 @@ function f(x: number | undefined): number {
   });
 });
 
+/*
+ * narrowing 2b — the same guard, in a body whose RETURN TYPE IS INFERRED.
+ *
+ * `checkBlock` has done early-exit narrowing since SH2. It is not the only walk over a
+ * statement list: `inferBlockReturn` runs FIRST over the same statements, to find the
+ * first top-level `return` and read the body's type off it, and it checked every
+ * statement on the way with a hand-rolled loop that had no narrowing at all. Its
+ * diagnostic wins because it is raised first, so the guard-clause idiom was refused in
+ * every body that reaches it — and `checkBlock`, which would have accepted the identical
+ * code, never ran.
+ *
+ * Which bodies reach it: every BLOCK-BODIED ARROW (`typeArrowReturn` calls it whether or
+ * not the arrow is annotated) and every UNANNOTATED `function`. An annotated `function`
+ * does not, which is why `narrowing 2` above never caught this — every case there is a
+ * `function` with a return type written on it.
+ *
+ * node is the oracle for all of them: the type layer is erased, so each of these programs
+ * simply runs.
+ */
+describe("narrowing 2b — an early-exit guard in an INFERRED-return body", () => {
+  test("an inlined `forEach` arrow: `if (el.name === null) return;` narrows the rest", async () => {
+    await expectNode(`
+const elems: { name: string | null }[] = [{ name: null }, { name: "b" }];
+elems.forEach((el, i) => {
+  if (el.name === null) return;
+  console.log(i, el.name.length);
+});
+`);
+  });
+
+  // The A/B pair this was found as: the two spellings of one loop, which differed only
+  // in `return`-in-an-arrow vs `continue`-in-a-`for`. The `for` half always compiled.
+  test("the `forEach`/`return` and `for`/`continue` spellings now agree", async () => {
+    const body = (loop: string) => `
+const elems: { name: string | null }[] = [{ name: null }, { name: "b" }];
+//@@mutable
+let out: { name: string }[] = [];
+${loop}
+console.log(out.length, out[0].name);
+`;
+    await expectNode(body(`elems.forEach((el, i) => {
+  if (el.name === null) return;
+  out.push({ name: el.name });
+});`));
+    await expectNode(body(`for (const el of elems) {
+  if (el.name === null) continue;
+  out.push({ name: el.name });
+}`));
+  });
+
+  // An UNANNOTATED `function` reaches the same pre-pass (`inferReturnType`), so this was
+  // never about arrows. Annotating this exact function made it compile.
+  test("an unannotated `function` — the read is INSIDE the inferred return", async () => {
+    await expectNode(`
+function go(el: { name: string | null }) {
+  if (el.name === null) return 0;
+  return el.name.length;
+}
+console.log(go({ name: null }), go({ name: "bcd" }));
+`);
+  });
+
+  // A `: void` arrow reaches it too — `typeArrowReturn` calls the pre-pass whether or not
+  // the arrow is annotated, and treats `void` as "no declared type".
+  test("a `: void`-annotated arrow narrows as well", async () => {
+    await expectNode(`
+const f = (el: { name: string | null }): void => {
+  if (el.name === null) return;
+  console.log(el.name.length);
+};
+f({ name: null });
+f({ name: "xyz" });
+`);
+  });
+
+  // WHY THE RETURN TAKES THE WIDER READING. The guard proves nothing about the `return`
+  // nested inside it, and the pre-pass's answer is the type BOTH are checked against.
+  // Narrowing the top-level read to `string` refuses the `return null` above it — this
+  // program compiles and matches node, and must keep doing so.
+  test("a `return` nested in the guard still fits: the body's type stays the wide one", async () => {
+    await expectNode(`
+const elems: { name: string | null }[] = [{ name: null }, { name: "b" }];
+const r = elems.map((el) => {
+  if (el.name === null) return null;
+  return el.name;
+});
+console.log(r.length, r[0], r[1]);
+`);
+  });
+
+  // MUTATION 1. The guard must actually DIVERGE. Drop the `return` and the statements
+  // below it are reachable on the nullish path, so nothing is proved — still refused.
+  test("REFUSED: the guard body does not exit, so the rest is NOT narrowed", () => {
+    expectRejected(`
+const elems: { name: string | null }[] = [{ name: null }, { name: "b" }];
+elems.forEach((el, i) => {
+  if (el.name === null) { console.log("skip", i); }
+  console.log(el.name.length);
+});
+`, "NT2001", "'el.name' is possibly null");
+  });
+
+  // MUTATION 2. The proof only survives while the object cannot be rewritten between the
+  // guard and the read. `accessPath` declines a `@@mutable` receiver for exactly this, and
+  // that decline is load-bearing — narrowing here would read a bare value out of a slot
+  // still holding a nullish box. The pre-pass must not have become a way around it.
+  test("REFUSED: a `@@mutable` field, guarded then invalidated by a call in between", () => {
+    expectRejected(`
+@@mutable
+type Cell = { def: string | null };
+function clear(c: Cell): void { c.def = null; }
+const cells: Cell[] = [{ def: "a" }];
+cells.forEach((c) => {
+  if (c.def === null) return;
+  clear(c);
+  console.log(c.def.length);
+});
+`, "NT2001", "'c.def' is possibly null");
+  });
+
+  // MUTATION 3. Same rule as `narrowing 2`'s "an assignment below the guard invalidates
+  // the narrowing", now that this walk records facts at all: the region filter has to be
+  // live here too, or a reassigned root would keep a proof about the previous value.
+  test("REFUSED: the root is reassigned below the guard", () => {
+    expectRejected(`
+const f = (x: number | undefined) => {
+  if (x === undefined) return 0;
+  x = undefined;
+  return x + 1;
+};
+console.log(f(1));
+`, "NT2001", "?Unumber");
+  });
+});
+
 describe("narrowing 3 — the fact persists to the right of `&&`", () => {
   // TypeScript: compiler/narrowingWithNonNullExpression.ts — `m! && m[0]`, where the
   // SECOND `m` is narrowed by the assertion in the first. Its own `''.match('')` needs
@@ -856,6 +991,70 @@ console.log(n === null, n !== null);`);
 const q: number | undefined = [2].at(0);
 if (p !== undefined && q !== undefined) console.log(p === q, p !== q);
 console.log((p ?? -1) === (q ?? -1));`);
+  });
+
+  /*
+   * The MIXED case — one box, one raw value — is the same refusal for the same reason,
+   * and it arrived with NO hint at all:
+   *
+   *     const a: string = "x";
+   *     const b: string | undefined = "x";
+   *     console.log(a === b);
+   *     error[NT2001]: Cannot compare string with ?Ustring        (no `= help:` line)
+   *
+   * The refusal is right — a raw `string` and a `[tag, value]` block have no bit pattern
+   * in common — but `T === T | undefined` is ordinary, correct JavaScript, so a reader
+   * who wrote it needs the rewrite, not just the two type names. The two-nullable case
+   * one block up has carried that advice all along; this is the same sentence for the
+   * other arity.
+   *
+   * The rewrite it hands back is EXACT for `===`, not merely compilable: node answers
+   * `false` whenever the nullable is absent, and so does `b !== undefined && a === b`,
+   * because an absent value can never equal a present one. Both spellings are compiled
+   * against node below.
+   */
+  test("the MIXED comparison (`T === T | undefined`) says how to rewrite it", () => {
+    let err: unknown;
+    try {
+      sourceToIR(`const a: string = "x";\nconst b: string | undefined = "x";\nconsole.log(a === b);`);
+    } catch (e) { err = e; }
+    const text = formatDiagnostic((err as NTError).diag);
+    expect(text).toContain("NT2001");
+    expect(text).toContain("Cannot compare string with ?Ustring");
+    expect(text).toContain("= help:");            // there WAS no help line at all
+    expect(text).toContain("b !== undefined && a === b");
+  });
+
+  test("the mixed hint's rewrite compiles and matches node — present AND absent", async () => {
+    await expectNode(`const a: string = "x";
+const b: string | undefined = ["x"].at(0);
+const c: string | undefined = ["x"].at(9);
+console.log(b !== undefined && a === b, c !== undefined && a === c);
+console.log(b === undefined || a !== b, c === undefined || a !== c);`);
+  });
+
+  // The `| null` base renders `null` throughout — the tag it prescribes has to be the
+  // one the box actually carries, or the line it hands back does not even compile.
+  test("the `| null` base gets the `null` spelling, and it too matches node", async () => {
+    let err: unknown;
+    try { sourceToIR(`const a: number = 1;\nconst b: number | null = 1;\nconsole.log(a !== b);`); } catch (e) { err = e; }
+    const text = formatDiagnostic((err as NTError).diag);
+    expect(text).toContain("b === null || a !== b");
+    expect(text).not.toContain("undefined");
+    await expectNode(`const a: number = 1;
+const b: number | null = [1].at(0) ?? null;
+const c: number | null = null;
+console.log(b === null || a !== b, c === null || a !== c);`);
+  });
+
+  // The mutation guard: a mismatch that is NOT nullable-vs-its-own-base gets no advice,
+  // because there is none to give. Widen the hint to every `l !== r` and this fails.
+  test("an unrelated type mismatch keeps the bare message", () => {
+    let err: unknown;
+    try { sourceToIR(`const a: string = "x";\nconst n: number = 1;\nconsole.log(a === n);`); } catch (e) { err = e; }
+    const text = formatDiagnostic((err as NTError).diag);
+    expect(text).toContain("Cannot compare string with number");
+    expect(text).not.toContain("= help:");
   });
 });
 
@@ -1621,5 +1820,74 @@ f();
 `); } catch (e) { err = e; }
     const hint = (err as NTError).diag.hint ?? "";
     expect(hint).toContain("prove it non-nullish first");
+  });
+});
+
+/*
+ * THE THIRD CIRCULAR HINT — `bind \`const v = n;\`` where `n` is a `const`.
+ *
+ * The union-field advice ends with a clause about the OTHER way a written tag test can
+ * fail to narrow: the root is reassigned between the test and the read, which drops the
+ * fact. That is real, and when it applies the wording is the right one. It was appended
+ * to EVERY stable receiver, though, including ones nothing can possibly reassign:
+ *
+ *     const n: Node = { kind: "num", value: 1 };
+ *     console.log(n.value);
+ *
+ *     … — and if that test is already written, 'n' is assigned between it and this read
+ *     …; bind `const v = n;` before the test and narrow `v`
+ *
+ * `n` is a `const`. It is not assigned anywhere, it cannot be, and `const v = n;` is a
+ * rename of a binding that already has the property the advice is asking for. The clause
+ * states a cause that is impossible and prescribes a no-op — the shape this file already
+ * closed twice, in `narrowing 5` and in the module-level-binding block above.
+ *
+ * A `const` root is the exact predicate: the fact-dropping rules that clause describes
+ * (`unstableNames`, `closureMayAssign`) both key on ASSIGNMENT, and neither can fire for
+ * a binding no assignment is legal on. So the clause is dropped there and kept everywhere
+ * else. What remains is compiled against node below — the reason the clause was worth
+ * removing is that the advice above it is already correct and complete.
+ */
+describe("narrowing — the union-field hint does not blame a `const` for being reassigned", () => {
+  const CONST_ROOT = `
+type Node = { kind: "num"; value: number } | { kind: "str"; text: string };
+const n: Node = { kind: "num", value: 1 };
+console.log(n.value);
+`;
+
+  test("REFUSED — an un-narrowed union field read is still an error", () => {
+    expectRejected(CONST_ROOT, "NT2001", "Property 'value' does not exist");
+  });
+
+  test("the hint does not claim the `const` is assigned, and does not prescribe `const v = n;`", () => {
+    let err: unknown;
+    try { sourceToIR(CONST_ROOT); } catch (e) { err = e; }
+    const text = formatDiagnostic((err as NTError).diag);
+    expect(text).toContain("narrow it first");
+    expect(text).not.toContain("is assigned between it and this read");
+    expect(text).not.toContain("const v = n;");
+  });
+
+  test("the advice it DOES give compiles and matches node", async () => {
+    await expectNode(`
+type Node = { kind: "num"; value: number } | { kind: "str"; text: string };
+const n: Node = { kind: "num", value: 1 };
+if (n.kind === "num") { console.log(n.value); } else { console.log(n.text); }
+`);
+  });
+
+  // The mutation guard. A `let` root really can be reassigned between the test and the
+  // read, so the clause is TRUE there and must survive — narrow this to "never say it"
+  // and this fails.
+  test("a `let` root still gets the reassignment clause", () => {
+    let err: unknown;
+    try { sourceToIR(`
+type Node = { kind: "num"; value: number } | { kind: "str"; text: string };
+let n: Node = { kind: "num", value: 1 };
+console.log(n.value);
+`); } catch (e) { err = e; }
+    const text = formatDiagnostic((err as NTError).diag);
+    expect(text).toContain("is assigned between it and this read");
+    expect(text).toContain("const v = n;");
   });
 });

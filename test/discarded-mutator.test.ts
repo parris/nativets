@@ -63,13 +63,45 @@ function recvText(e: unknown): string {
   return `<${String(n.kind)}>`;
 }
 
-/** A call whose result is discarded, on one of the persistent mutators. */
-function discardedMutator(expr: unknown): string | undefined {
+/** This expression IS a call on one of the persistent mutators. */
+function mutatorCall(expr: unknown): string | undefined {
   const e = expr as Record<string, unknown> | null;
   if (!e || typeof e !== "object" || e.kind !== "CallExpr") return undefined;
   const c = e.callee as Record<string, unknown> | undefined;
   if (!c || c.kind !== "MemberExpr" || !MUTATORS.has(String(c.property))) return undefined;
   return `${recvText(c.object)}.${String(c.property)}(…)`;
+}
+
+/**
+ * Every mutator call whose result is discarded, given that `expr`'s OWN value is
+ * discarded — a list, because one dropped expression can hold several.
+ *
+ * IT LOOKS THROUGH THE VALUE-DROPPING WRAPPERS, and that is not a refinement: the first
+ * cut matched only a bare `CallExpr`, and `src/parser.ts::parseExport` hid a live site
+ * from it for the life of the file by spelling the same discard as a TERNARY —
+ *
+ *     c.typeOnly ? this.exportTypes.add(c.name) : this.exportValues.set(c.alias, c.name);
+ *
+ * which is `.add`/`.set` in statement position wearing one layer of syntax. Measured on
+ * the exact shape: node prints `1 1`, nativets prints `0 0`, and BOTH exit 0. So the
+ * detector's own blind spot was the difference between a census that holds the class and
+ * one that reports zero while the class is present — this repo's oldest failure mode.
+ *
+ * The four wrappers are exactly the ones that PROPAGATE the drop. A ternary drops both
+ * arms; a comma drops every element; `&&`/`||`/`??` drop the right operand (the left is a
+ * test, and a mutator there is read for its truthiness, which is a different bug). Nothing
+ * else is unwrapped — an argument, a receiver or an operand of `+` is a value somebody
+ * READS, and `x = s.add(k)` is the correct fix, not an instance of the defect.
+ */
+function discardedMutators(expr: unknown): string[] {
+  const direct = mutatorCall(expr);
+  if (direct !== undefined) return [direct];
+  const e = expr as Record<string, unknown> | null;
+  if (!e || typeof e !== "object") return [];
+  if (e.kind === "ConditionalExpr") return [...discardedMutators(e.consequent), ...discardedMutators(e.alternate)];
+  if (e.kind === "SequenceExpr") return (e.exprs as unknown[]).flatMap(discardedMutators);
+  if (e.kind === "LogicalExpr") return discardedMutators(e.right);
+  return [];
 }
 
 export function census(): Site[] {
@@ -91,14 +123,12 @@ export function census(): Site[] {
       }
       // Statement position: the value is dropped on the floor.
       if (n.kind === "ExprStmt") {
-        const s = discardedMutator(n.expr);
-        if (s !== undefined) out.push({ file, fn, shape: s });
+        for (const s of discardedMutators(n.expr)) out.push({ file, fn, shape: s });
       }
       // An arrow with an EXPRESSION body is the same discard whenever the arrow is a void
       // callback — `xs.forEach((x) => seen.add(x))` is exactly the shape, one level in.
       if (n.kind === "ArrowFunction" && n.exprBody === true) {
-        const s = discardedMutator(n.body);
-        if (s !== undefined) out.push({ file, fn, shape: s });
+        for (const s of discardedMutators(n.body)) out.push({ file, fn, shape: s });
       }
       for (const k of Object.keys(n)) {
         if (k === "ty" || k === "loc" || k === "annot" || k === "returnAnnot") continue;
@@ -138,8 +168,7 @@ describe("discarded persistent mutators in src/", () => {
       const n = node as Record<string, unknown>;
       if (n.kind === "FuncDecl") { fn = String(n.name); walk(n.body); return; }
       if (n.kind === "ExprStmt") {
-        const s = discardedMutator(n.expr);
-        if (s !== undefined) evs.push({ file: "x.ts", fn, shape: s });
+        for (const s of discardedMutators(n.expr)) evs.push({ file: "x.ts", fn, shape: s });
       }
       for (const k of Object.keys(n)) walk(n[k]);
     };
@@ -147,6 +176,60 @@ describe("discarded persistent mutators in src/", () => {
     expect(evs.map((e) => e.shape)).toEqual([
       `out.add(…)`, `m.set(…)`, `out.delete(…)`, `m.clear(…)`,
     ]);
+  });
+
+  /*
+   * The blind spot that let a live site sit in `src/parser.ts` unseen. Each of these is
+   * `.add`/`.set` in STATEMENT position with one layer of syntax on top, and the value is
+   * dropped just as flatly as a bare call's. Compiled and measured on the ternary shape:
+   * node prints `1 1` where nativets prints `0 0`, both exit 0 — a silent wrong answer,
+   * not a refusal, which is why the detector has to reach it rather than the checker.
+   */
+  test("the detector looks through a ternary, a comma and a short-circuit", () => {
+    const evs: string[] = [];
+    const prog = parse(`
+      function go(a: Set<string>, b: Set<string>, m: Map<string, number>, t: boolean): number {
+        t ? a.add("x") : b.add("y");
+        (a.add("p"), m.set("q", 1));  // a BARE comma is NT0001 here; parenthesized parses
+        t && a.add("s");
+        return m.size;
+      }
+    `);
+    const walk = (node: unknown): void => {
+      if (node === null || typeof node !== "object") return;
+      if (Array.isArray(node)) { for (const x of node) walk(x); return; }
+      const n = node as Record<string, unknown>;
+      if (n.kind === "ExprStmt") for (const s of discardedMutators(n.expr)) evs.push(s);
+      for (const k of Object.keys(n)) walk(n[k]);
+    };
+    walk(prog.body);
+    expect(evs).toEqual([`a.add(…)`, `b.add(…)`, `a.add(…)`, `m.set(…)`, `a.add(…)`]);
+  });
+
+  /*
+   * The LEFT of `&&`/`||`/`??` is deliberately NOT unwrapped: its value is READ (as the
+   * test), so it is a different defect with a different fix, and reporting it here would
+   * send a reader to rebind a call whose result the program already depends on.
+   */
+  test("the detector does not fire on a mutator whose value is read", () => {
+    const evs: string[] = [];
+    const prog = parse(`
+      function go(a: Set<string>, m: Map<string, number>): number {
+        a.add("x") && m.set("k", 1);
+        const b = a.add("y");
+        return b.size + m.size;
+      }
+    `);
+    const walk = (node: unknown): void => {
+      if (node === null || typeof node !== "object") return;
+      if (Array.isArray(node)) { for (const x of node) walk(x); return; }
+      const n = node as Record<string, unknown>;
+      if (n.kind === "ExprStmt") for (const s of discardedMutators(n.expr)) evs.push(s);
+      for (const k of Object.keys(n)) walk(n[k]);
+    };
+    walk(prog.body);
+    // Only the RIGHT operand of the `&&`; the left is the test, and the `const` is a read.
+    expect(evs).toEqual([`m.set(…)`]);
   });
 
   test("the detector does NOT fire on any of the three correct fixes", () => {
@@ -178,8 +261,7 @@ describe("discarded persistent mutators in src/", () => {
       const n = node as Record<string, unknown>;
       if (n.kind === "FuncDecl") { fn = String(n.name); walk(n.body); return; }
       if (n.kind === "ExprStmt") {
-        const s = discardedMutator(n.expr);
-        if (s !== undefined) sites.push({ file: "x.ts", fn, shape: s });
+        for (const s of discardedMutators(n.expr)) sites.push({ file: "x.ts", fn, shape: s });
       }
       for (const k of Object.keys(n)) walk(n[k]);
     };
@@ -202,6 +284,13 @@ describe("discarded persistent mutators in src/", () => {
  *   coverage.ts coverage                  `found` — the ARROW that wrote it (`flag`) became the
  *                                         top-level `bumpBlocker(found, …) -> Map`, so the
  *                                         rebind happens in the owner's frame, not a capture
+   *   codegen.ts  ModuleGen.fnValue         `this.fnValues` — rebind on a `@@mutable` field (fix 1)
+   *   codegen.ts  FnGen.collectBoundNames   returns the extended set (fix 2); both callers thread
+   *                                         a local, and `freshenHofArrow` is exactly the caller
+   *                                         that READS THE PARAMETER BACK, so a rebind there
+   *                                         would have been the silent lost update
+   *   codegen.ts  FnGen.childRenameMap      `.delete` has no rebinding spelling (fix 3) — the
+   *                                         survivors are filtered into a fresh Map
    *
    * WHAT IS LEFT, and why it is not the same job. Almost every remaining entry writes to a
    * collection that is a PARAMETER of the function above it — `collectIdents(e, out)`,
@@ -244,13 +333,6 @@ describe("discarded persistent mutators in src/", () => {
     "checker.ts daStmt: flow.delete(…)",
     "checker.ts daStmt: tracked.set(…)",
     "checker.ts noteEscapingWrite: out.set(…)",
-    "codegen.ts FnGen.childRenameMap: child.delete(…)",
-    "codegen.ts FnGen.collectBoundNames: out.add(…)",
-    "codegen.ts FnGen.collectBoundNames: out.add(…)",
-    "codegen.ts FnGen.collectBoundNames: out.add(…)",
-    "codegen.ts FnGen.collectBoundNames: out.add(…)",
-    "codegen.ts FnGen.collectBoundNames: out.add(…)",
-    "codegen.ts ModuleGen.fnValue: this.fnValues.set(…)",
     "modules.ts linkProgram: hostImports.add(…)",
     "modules.ts linkProgram: mods.set(…)",
     "modules.ts linkProgram: mutableClasses.add(…)",
@@ -300,6 +382,13 @@ describe("discarded persistent mutators in src/", () => {
     // The three that lived in `Parser.resolveCycle` were MASKED behind `deferred.push`, so
     // the blocker metric scored their removal as free. This assertion is what holds them.
     expect(census().filter((s) => s.file === "parser.ts").map(show)).toEqual([]);
+  });
+
+  test("src/codegen.ts is clear of the whole class", () => {
+    // Same argument as parser.ts, and the arithmetic is starker: FIVE of these seven sites
+    // lived in ONE function (`collectBoundNames`), which the blocker metric counts once. It
+    // scored the whole family at a single unit, and would score their RETURN the same way.
+    expect(census().filter((s) => s.file === "codegen.ts").map(show)).toEqual([]);
   });
 
   test("the census is exactly the known, documented set", () => {

@@ -295,6 +295,27 @@ const RECURSIVE_TYPE_HINT =
 /** Truncate for a diagnostic: a type dump is unbounded and a hint has to stay readable. */
 function clip(s: string, n: number): string { return s.length <= n ? s : `${s.slice(0, n)}…`; }
 
+/**
+ * Is the field named `key` of the object type `t` string-literal typed — i.e. usable as a
+ * union discriminant?
+ *
+ * A LOOP, not `objectFields(t).find((f) => f.key === key)!.ty`. `.find` over an array of
+ * RECORDS is NT1001 in the subset this file has to stay inside (the element it answers
+ * would alias its owner), and this call sits three arrows deep inside `.some`/`.every`,
+ * where a `for` cannot go — so the loop has to live in a function of its own.
+ *
+ * A MEMBER WITH NO SUCH FIELD ANSWERS FALSE, which is what the `!` spelling meant rather
+ * than a widening: the only caller passes a `k` drawn from `common`, and `common` is the
+ * keys `keys.every((ks) => ks.includes(k))` kept — so every member has the field and the
+ * missing case is unreachable. It is spelled totally anyway, because "unreachable" is a
+ * claim about today's callers and `!` on a genuinely absent field is a TypeError under
+ * node inside the code that BUILDS a diagnostic.
+ */
+function hasStringLitField(t: Ty, key: string): boolean {
+  for (const f of objectFields(t)) if (f.key === key) return isStringLitTy(f.ty);
+  return false;
+}
+
 /** The shared refusal for `?.` in a write position — one message for all four spellings. */
 function optChainWriteError(what: string): never {
   throw parseError(
@@ -857,7 +878,23 @@ class Parser {
    * `number`. Empty for ordinary code, so nothing else changes.
    */
   private typeParamScopes: Set<string>[] = [];
+  /**
+   * Type parameters INHERITED from a parser that is lexically outside this one — the
+   * frames open around a `${…}` substitution, which `parseSubstitution` hands to the
+   * fragment's own parser.
+   *
+   * FLAT, where the stack it comes from is not, and that is not a simplification: this
+   * query is "does ANY open frame declare `id`", so a merged set answers it identically,
+   * and the alternative spelling costs a self-hosting blocker. A `Set<string>[]` cannot be
+   * built as a local in the subset `src/` must stay inside (NT1001, "arrays of Set"), and
+   * appending to the sub-parser's own stack from here is NT1606 (it is another object's
+   * array). A flat `Set<string>` is neither. The sub-parser still pushes and POPS its own
+   * frames on top of this for arrows written inside the substitution, so nesting inside
+   * the fragment behaves exactly as it does anywhere else.
+   */
+  private inheritedTypeParams = new Set<string>();
   private inTypeParamScope(id: string): boolean {
+    if (this.inheritedTypeParams.has(id)) return true;
     for (let i = this.typeParamScopes.length - 1; i >= 0; i--) if (this.typeParamScopes[i]!.has(id)) return true;
     return false;
   }
@@ -918,7 +955,7 @@ class Parser {
     }
     const declaredAt = this.declaredTypeLines.get(id);
     if (declaredAt !== undefined) {
-      const used = this.toks[this.pos - 1]?.line ?? declaredAt;
+      const used = this.prevLine(declaredAt);
       this.blockedOn = id;
       // Two different failures, and the advice differs: one is fixed by moving a line,
       // the other cannot be fixed by reordering at all. Saying "declare it earlier" for a
@@ -952,12 +989,11 @@ class Parser {
     // Nothing above claimed the name, so the answer is the erasure. For an inline
     // `import("m").T` that is never acceptable — see `parseImportType`.
     if (this.erasedImportOf !== undefined) {
-      const t0 = this.toks[this.pos - 1];
       throw nyi(
         NYI.AMBIENT_TYPE,
         `the inline import type 'import("${this.erasedImportOf}").${id}'`,
         `'${id}' is not in scope in this file, and an inline import type is resolved against this file's scope — the module path is dropped, so there is nothing left to look '${id}' up in. Import it by name instead (\`import type { ${id} } from "${this.erasedImportOf}"\`) and annotate with the bare \`${id}\``,
-        t0 === undefined ? undefined : { line: t0.line, col: t0.col },
+        this.prevLoc(),
       );
     }
     return "number" as Ty;
@@ -1025,12 +1061,11 @@ class Parser {
     // sets is that over-collection may only ever PRESERVE today's behavior for a name, so a
     // `T` that is also an import binding keeps the old escape rather than gaining a refusal.
     if (this.genericParamNames.has(id) && !this.externalNames.has(id) && !this.fragmentNames.has(id)) {
-      const t0 = this.toks[this.pos - 1];
       throw nyi(
         NYI.GENERIC,
         `the type parameter '${id}' of a generic type alias`,
         `'${id}' is a type PARAMETER, and nothing in this subset substitutes the type argument for it — so the declaration would silently become its \`number\` shape for every instantiation. Write the concrete type out, or declare one alias per instantiation (\`type ArrOfString = string[]\`)`,
-        t0 === undefined ? undefined : { line: t0.line, col: t0.col },
+        this.prevLoc(),
       );
     }
     // Imported (unseeded), or stripped by a fragment-parsing caller. STILL ERASES.
@@ -1080,15 +1115,14 @@ class Parser {
       // The documented residue — see `ERASURE_STILL_ALLOWED`. Never inside an assertion,
       // which is the position where an erased type is ADOPTED instead of checked.
       if (!this.erasureIsFatal && ERASURE_STILL_ALLOWED.has(id)) return;
-      const t0 = this.toks[this.pos - 1];
       throw nyi(
         NYI.AMBIENT_TYPE,
         `the type '${id}'`,
         ambientTypeHint(id),
-        t0 === undefined ? undefined : { line: t0.line, col: t0.col },
+        this.prevLoc(),
       );
     }
-    const t = this.toks[this.pos - 1];
+    const at = this.prevLoc();
     // Declared in this file as a CLASS, and not yet parsed — the class case of the same
     // ordering problem `declaredTypeLines` handles for `type`/`interface`, and it needs its
     // own arm because classes are NOT hoisted: `parseClass` registers the instance shape
@@ -1101,11 +1135,50 @@ class Parser {
       this.blockedOn = id;
       throw nyi(
         NYI.FORWARD_TYPE,
-        `use of class type '${id}' before its declaration${t === undefined ? "" : ` (used at line ${t.line})`}`,
+        `use of class type '${id}' before its declaration${at === undefined ? "" : ` (used at line ${at.line})`}`,
         "a class is not hoisted the way `type`/`interface` is — its instance shape only exists once the class body has been parsed, so a class named in an annotation must be declared ABOVE its first use. Move the `class` declaration up; see docs/divergences.md",
       );
     }
-    throw unknownTypeName(id, t === undefined ? undefined : { line: t.line, col: t.col });
+    throw unknownTypeName(id, at);
+  }
+
+  /**
+   * The position of the token just CONSUMED (`this.pos - 1`), or undefined before the
+   * first one — the location every type-resolution refusal below points at.
+   *
+   * BOUNDS-CHECKED RATHER THAN COMPARED. The four callers each used to write
+   *
+   *     const t0 = this.toks[this.pos - 1];
+   *     …  t0 === undefined ? undefined : { line: t0.line, col: t0.col }
+   *
+   * which is correct TypeScript under `noUncheckedIndexedAccess` and NT2001 here: an index
+   * expression has the ELEMENT type in this subset, so comparing one with `undefined` has
+   * no overlap to narrow. Asking the index instead answers exactly the same question, and
+   * `this.pos - 1` is the only reachable way out — `pos` starts at 0 and never passes the
+   * `eof` token, so the guard fires only at the very start of a parse.
+   *
+   * The fields are read through the index rather than through a bound `const t`: binding
+   * one MOVES the record out of the array (NT1605), which is a second refusal the same
+   * spelling used to carry.
+   */
+  private prevLoc(): { line: number; col: number; file?: string } | undefined {
+    const i = this.pos - 1;
+    if (i < 0 || i >= this.toks.length) return undefined;
+    // `file` is carried, not omitted. A fileless span is rendered against the ENTRY
+    // source (src/cli.ts::diagSources skips it), so every one of these type-resolution
+    // refusals used to underline the wrong file's line whenever it fired in an IMPORTED
+    // module — the same defect the `delete` refusal in `parseUnary` had. It is also what
+    // makes the record fit `nyi`'s `{line,col,file?}` parameter in this subset, which has
+    // no width subtyping: `{line,col}` is a DIFFERENT type here, not a narrower one.
+    return { line: this.toks[i]!.line, col: this.toks[i]!.col, file: this.file };
+  }
+
+  /** The LINE of the token just consumed, or `fallback` before the first one — the
+   *  `this.toks[this.pos - 1]?.line ?? fallback` spelling, without the optional chain on
+   *  an index (NT1002). Identical for a real token, including line 0. */
+  private prevLine(fallback: number): number {
+    const i = this.pos - 1;
+    return i < 0 || i >= this.toks.length ? fallback : this.toks[i]!.line;
   }
 
   private peek(o = 0): Token { return this.toks[this.pos + o]!; }
@@ -1141,8 +1214,9 @@ class Parser {
     this.checkFloatingAsyncCalls(body);
     this.checkAsyncEscapes();
     // Class members lower to top-level functions (`C.constructor`, `C.method`) so they
-    // register + hoist alongside ordinary functions for the checker/codegen.
-    body.push(...this.hoistedFns);
+    // register + hoist alongside ordinary functions for the checker/codegen. Appended one
+    // at a time — `push(...xs)` is a spread into a variadic call (NT1006) — same order.
+    for (const f of this.hoistedFns) body.push(f);
     // A static field is a module-level `const C.f` (see `parseClass`), so every `C.f` READ
     // becomes that identifier — here, once the whole file is parsed, because a function
     // body may legally read a static of a class declared further down.
@@ -1206,7 +1280,10 @@ class Parser {
     const entrypoint = last !== null && last.kind === "ExprStmt" ? last.expr : null;
     for (const c of this.identCalls) {
       if (!(c.scopedAsync || this.asyncFns.has(c.name))) continue;
-      if (this.awaitedCalls.has(c.node) || c.node === entrypoint) continue;
+      // `entrypoint !== null` is written out because comparing an `Expr` with an
+      // `Expr | null` is NT2001 here. It changes nothing: `c.node` is an object, so
+      // `c.node === null` was already false on the arm the guard removes.
+      if (this.awaitedCalls.has(c.node) || (entrypoint !== null && c.node === entrypoint)) continue;
       throw nyi(
         NYI.ASYNC,
         `calling async function '${c.name}' without 'await' at ${c.line}:${c.col} (its value is a Promise under node; nativets runs it to completion immediately)`,
@@ -1254,8 +1331,13 @@ class Parser {
     return asyncArrow || scopedAsync || (name !== null && this.asyncFns.has(name));
   }
 
+  /** The `(…) => Promise<T>` parameter names of the frames open OUTSIDE this parser — the
+   *  `asyncParamScopes` twin of `inheritedTypeParams`, flat for the same reason. */
+  private inheritedAsyncParams = new Set<string>();
+
   /** Is `n` a `(…) => Promise<T>` parameter of some enclosing body being parsed? */
   private inAsyncParamScope(n: string): boolean {
+    if (this.inheritedAsyncParams.has(n)) return true;
     for (const s of this.asyncParamScopes) if (s.has(n)) return true;
     return false;
   }
@@ -1286,7 +1368,11 @@ class Parser {
     while (this.at("|") || this.at("&")) { if (this.at("&")) sawIntersect = true; this.next(); arms.push(this.parseTypeAtom()); }
     if (arms.length === 1) return arms[0]!;
     // Literal arms of the same base collapse (`"a" | "b"` → string), exactly as before.
-    const uniq = [...new Set(arms.map(widenLiteralTys))];
+    // The arrow is written out rather than passed by NAME: `.map(widenLiteralTys)` is a
+    // first-class function value, which this subset refuses (NT1003). It is also the safer
+    // spelling in plain TypeScript — `.map` hands the callback (value, index, array), so a
+    // by-name callee silently gains two arguments it never declared.
+    const uniq = [...new Set(arms.map((a) => widenLiteralTys(a)))];
     if (uniq.length === 1) return uniq[0]!;
     if (!sawIntersect && uniq.length === 2) {
       const [a, b] = uniq as [Ty, Ty];
@@ -1314,9 +1400,9 @@ class Parser {
       // A GENERAL union: nothing inside the value distinguishes the arms, so it is
       // boxed [tag, value] and `typeof` is the discriminant. Only arms `typeof` can
       // actually tell apart are accepted — see `generalUnionArmsOk`.
-      if (uniq.every(isGeneralUnionArm) && new Set(uniq.map(generalUnionArmTypeof)).size === uniq.length) return makeGeneralUnionTy(uniq);
+      if (uniq.every((a) => isGeneralUnionArm(a)) && new Set(uniq.map((a) => generalUnionArmTypeof(a))).size === uniq.length) return makeGeneralUnionTy(uniq);
     }
-    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.map(widenLiteralTys).join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null', a DISCRIMINATED union of object types — a common literal-typed tag field at the same position in every member — and a general union of arms \`typeof\` can tell apart are supported)`);
+    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.map((a) => widenLiteralTys(a)).join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null', a DISCRIMINATED union of object types — a common literal-typed tag field at the same position in every member — and a general union of arms \`typeof\` can tell apart are supported)`);
   }
 
   /**
@@ -1351,9 +1437,12 @@ class Parser {
     // union's members already satisfy that among THEMSELVES, never across the splice. So
     // flattening widens what is ACCEPTED without weakening the invariant — the failure mode
     // is still the NT1009 refusal below, never a phantom tag.
+    //@@mutable
     const arms: Ty[] = [];
     for (const a of rawArms.map((a) => expandTypeRef(a, this.recTypes))) {
-      if (isUnionTy(a)) arms.push(...unionMembers(a)); else arms.push(a);
+      // Appended one at a time: `push(...xs)` is a SPREAD into a variadic call, which this
+      // subset refuses (NT1006). Same order, same result.
+      if (isUnionTy(a)) { for (const m of unionMembers(a)) arms.push(m); } else arms.push(a);
     }
     // THE TAG RULE. `classTag(a) === undefined` used to be required of every arm. That
     // clause dates to SH2 behavior 1, when the only carrier of a tag was a CLASS instance
@@ -1379,7 +1468,7 @@ class Parser {
     };
     if (!arms.every((a) => isObjectTy(a) && armTagOk(a))) return null;
     const members = [...new Set(arms)];
-    const shown = members.map(widenLiteralTys).join(" | ");
+    const shown = members.map((m) => widenLiteralTys(m)).join(" | ");
     if (members.length < 2) return null;
     const ty = makeUnionTy(members);
     const d = unionDiscriminant(ty);
@@ -1391,7 +1480,7 @@ class Parser {
     const why =
       common.length === 0
         ? "the members share no field at all, so nothing can tell them apart"
-        : common.some((k) => members.every((m) => isStringLitTy(objectFields(m).find((f) => f.key === k)!.ty)))
+        : common.some((k) => members.every((m) => hasStringLitField(m, k)))
           ? `the shared tag field must sit at the SAME position in every member and carry a DISTINCT string-literal type in each (shared fields: ${common.join(", ")})`
           : `the shared field(s) ${common.join(", ")} are not string-literal typed — a discriminant needs \`kind: "a"\`, not \`kind: string\``;
     throw nyi(NYI.OPTIONAL_CHAIN, `union of object types '${shown}' without a usable discriminant — ${why}`);
@@ -1538,18 +1627,18 @@ class Parser {
         `a lookup needs the base's fields at hand: declare '${display}' as a \`type\`/\`interface\` in THIS file, or write the field's type directly instead of looking it up`,
       );
     }
-    const f = objectFields(base).find((x) => x.key === key);
-    if (!f) {
-      const have = objectFields(base).map((x) => x.key);
-      throw nyi(
-        NYI.INDEXED_ACCESS,
-        `indexed access type '${display}["${key}"]' — '${display}' has no field '${key}'`,
-        have.length === 0
-          ? `'${display}' has no fields to look up`
-          : `'${display}' has: ${have.join(", ")}`,
-      );
-    }
-    return f.ty;
+    // First match wins and the type is returned BY VALUE, exactly as `.find(…)` then
+    // `.ty` did. Written as a loop because `.find` over an array of records is NT1001 in
+    // the subset this file has to stay inside — see `hasStringLitField`.
+    for (const x of objectFields(base)) if (x.key === key) return x.ty;
+    const have = objectFields(base).map((x) => x.key);
+    throw nyi(
+      NYI.INDEXED_ACCESS,
+      `indexed access type '${display}["${key}"]' — '${display}' has no field '${key}'`,
+      have.length === 0
+        ? `'${display}' has no fields to look up`
+        : `'${display}' has: ${have.join(", ")}`,
+    );
   }
   /**
    * Inline import type `import("./mod").Name` (optionally qualified) — resolved to the
@@ -1822,7 +1911,11 @@ class Parser {
       } while ((this.at(",") || this.at(";")) && (this.next(), true));
     }
     this.eat("}");
-    return `{${fields.join(",")}}` as Ty;
+    // Round-tripped through `objectFields`/`objectType` rather than joined straight, so an
+    // ANNOTATION gets the same canonical array-index-first key order a LITERAL gets. If only
+    // one side were canonical the two spellings of one shape would stop being identical
+    // strings, and tagged-union membership is a string-identity test.
+    return objectType(objectFields(`{${fields.join(",")}}` as Ty));
   }
 
   // Consume a generic type-parameter list `<T, U extends V, W = X>` (balanced angles)
@@ -2224,7 +2317,20 @@ class Parser {
         this.imports.push({ source, specs: [], line: kw.line });
       } else {
         // `export { type T }` re-publishes a local type alias; a plain spec is a value.
-        for (const c of clause) c.typeOnly ? this.exportTypes.add(c.name) : this.exportValues.set(c.alias, c.name);
+        //
+        // REBOUND, not called for effect. A nativets `Set`/`Map` is PERSISTENT: `.add`/
+        // `.set` answer a NEW collection and leave the receiver alone (docs/divergences.md
+        // §A), so the ternary this used to be — `c.typeOnly ? this.exportTypes.add(…) :
+        // this.exportValues.set(…)` in statement position — recorded NOTHING once this file
+        // compiles itself, and `export { a, b }` published an empty table. Measured on the
+        // exact shape with both arms the same type (so nothing refuses it): node prints
+        // `1 1`, nativets prints `0 0`, both exit 0. Every other write to these three fields
+        // was already spelled this way; only this one hid inside a ternary, which is
+        // precisely why `test/discarded-mutator.test.ts` could not see it and now can.
+        for (const c of clause) {
+          if (c.typeOnly) this.exportTypes = this.exportTypes.add(c.name);
+          else this.exportValues = this.exportValues.set(c.alias, c.name);
+        }
       }
       if (this.at(";")) this.eat(";");
       return { kind: "MultiStmt", stmts: [] };
@@ -2713,7 +2819,11 @@ class Parser {
     // `@@mutable` — TRUE in-place mutation: a field-assigning method mutates the receiver
     // and every handle observes it. Without it a field-assigning method is COPY-ON-WRITE
     // (it returns a new instance). See docs/decorators.md.
-    const isMutable = !!dec?.attrs.includes("mutable");
+    // The null test is written out: `dec?.attrs.includes(…)` calls a method on the
+    // `string[] | undefined` the optional chain produces, which is NT1002 in the subset
+    // this file has to stay inside. `!!(undefined)` is `false`, so the two agree on all
+    // three inputs (verified against node).
+    const isMutable = dec !== null && dec.attrs.includes("mutable");
     if (isMutable) this.mutableClasses = this.mutableClasses.add(name);
     if (this.at("<")) throw nyi(NYI.CLASS_FEATURE, `generic class '${name}' (type parameters)`);
     // Only `extends Error` is supported: nativets models Error as `{message:string}`, so the
@@ -2744,6 +2854,7 @@ class Parser {
     while (!this.at("}") && this.peek().type !== "eof") {
       if (this.at(";")) { this.eat(";"); continue; }
       // `@wrapper` on a MEMBER (docs/decorators.md). `@@` attributes are class-level only.
+      //@@mutable
       const memberWrappers: string[] = [];
       while (this.at("@") || this.at("@@")) {
         const sig = this.next();
@@ -3692,18 +3803,29 @@ class Parser {
           `arrays are immutable: \`delete xs[i]\` would punch a hole in place`,
           "node's array `delete` leaves a HOLE — `length` is unchanged and the slot reads `undefined` — which a dense array cannot represent. " +
           "Build a new array without the element: `xs.filter((_, i) => i !== 0)`, or `[...xs.slice(0, i), ...xs.slice(i + 1)]`",
-          kw,
+          { line: kw.line, col: kw.col, file: this.file },
         );
       }
       // NOTE (mutable records): `@@mutable` does NOT make `delete` legal. A record's
       // SHAPE is its type — fields are static slots resolved at compile time — so removing
       // a key would change the value's type mid-program, which is a different (and much
       // larger) feature than assigning a slot in place. Refused precisely instead.
+      //
+      // BOTH SPANS ARE BUILT EXPLICITLY, and the `file` on them is not cosmetic. Handing
+      // `mutationError` the raw `kw` TOKEN relied on `{type,value,line,col}` structurally
+      // fitting the `{line,col,file?}` parameter — which TypeScript allows for a variable
+      // (no excess-property check) and this compiler refuses (NT2001), and which silently
+      // left `file` undefined. `src/cli.ts::diagSources` skips a span with no file and
+      // `formatDiagnostic` then renders it against the ENTRY source, so a `delete` in an
+      // IMPORTED module underlined the entry file's line of the same number: measured, a
+      // `delete o.b` at lib.ts:4 printed `4 | const decoy2 = 2;` from main.ts, marked
+      // "mutated here", and never named lib.ts. Exactly the failure the `diagSources`
+      // comment in cli.ts records for the producers that were already fixed.
       throw mutationError(
         `objects are immutable: \`delete o.k\` would remove a key in place`,
         "a record's shape is its TYPE (fields are static slots), so a key cannot be removed at runtime even from a `@@mutable` record. " +
         "Declare the field optional (`k?: T`) and set it to `undefined`, or rebuild without the key",
-        kw,
+        { line: kw.line, col: kw.col, file: this.file },
       );
     }
     if (this.at("new")) {
@@ -3711,6 +3833,7 @@ class Parser {
       const callee = this.expectIdent();
       const typeArgs = this.at("<") ? this.parseTypeArgs() : undefined; // new Map<K,V>() / new Set<T>()
       this.eat("(");
+      //@@mutable
       const args: Expr[] = [];
       if (!this.at(")")) { args.push(this.parseAssign()); while (this.at(",")) { this.eat(","); if (this.at(")")) break; args.push(this.parseAssign()); } }
       this.eat(")");
@@ -4026,13 +4149,94 @@ class Parser {
           src += ch; i++;
         }
         i++;
-        exprs.push(parseExpressionFrom(src, subLine, subCol));
+        exprs.push(this.parseSubstitution(src, subLine, subCol));
         continue;
       }
       cur += raw[i]; i++;
     }
     quasis.push(cur);
     return { kind: "TemplateLiteral", quasis, exprs };
+  }
+
+  /**
+   * Parse ONE `${…}` substitution, in a sub-parser that can see this file's TYPES.
+   *
+   * A substitution is lexed from its own sliced text, so it needs a parser of its own —
+   * and the free `parseExpressionFrom` built that parser from nothing but the tokens. The
+   * fragment therefore had an EMPTY type environment, and every type name written inside
+   * one was refused as undeclared:
+   *
+   *     interface P { v: number }
+   *     console.log(`${xs.map((a: P): number => a.v).length}`);
+   *     // node: 2, exit 0.  nativets, before this: NT2003 Cannot find name 'P'
+   *
+   * The identical annotation OUTSIDE a template compiled, which is what made it a lie
+   * rather than a limitation — and the hint said "'P' is not declared in this file" with
+   * the declaration two lines above it. A parse-time refusal on valid TypeScript that
+   * node runs; a REFUSAL, so never a wrong answer, but a false one.
+   *
+   * SEEDED WITH COPIES, and not harvested. The tables are copied rather than shared for
+   * the reason `hoistTypeDecls` records at length: a nativets `Map`/`Set` is PERSISTENT,
+   * so sharing a receiver and relying on the sub-parser's writes to be visible here is a
+   * bun-ism that compiles and silently does nothing. Nothing is harvested back because a
+   * substitution is an EXPRESSION — `parseExpression` cannot reach `parseTypeAlias`,
+   * `parseInterface` or `parseClass`, so a fragment has no declaration to contribute.
+   *
+   * `file` goes across too: a diagnostic raised inside a substitution of an imported
+   * module was otherwise fileless, and a fileless span is rendered against the ENTRY
+   * source (see `prevLoc`).
+   *
+   * THE FLOATING-ASYNC GUARD IS SEEDED **AND HARVESTED**, which the type tables are not,
+   * and the asymmetry is the whole point. That guard accumulates during the parse
+   * (`identCalls`, `asyncEscapes`, `returnEscapes`, `awaitedCalls`) and is checked ONCE at
+   * the end of `parseProgram` — so state left on the sub-parser is state nothing ever
+   * checks. With the fragment parsed in isolation, `` `${one()}` `` on an `async function`
+   * printed `1` where node prints `[object Promise]`, both exit 0: a SILENT WRONG ANSWER,
+   * and the identical call one character outside the backticks is NT1020. That is a worse
+   * failure than the false refusal above and it was found the same way.
+   *
+   * The seed/harvest split follows what each field means. `asyncParamScopes` is seeded
+   * because `scopedAsync` can only be decided AT the escape, from the parameter scopes open
+   * around it; `asyncFns` is seeded for the same-frame reads, but a name declared LATER in
+   * the file still resolves, because what comes back is the raw `identCalls` entry and
+   * `checkFloatingAsyncCalls` resolves the name against the finished set. `awaitedCalls`
+   * has to come back or `` `${await one()}` `` would be refused as floating.
+   */
+  private parseSubstitution(src: string, line: number, col: number): Expr {
+    const sub = new Parser(rebaseTokens(tokenize(src), line, col), { file: this.file });
+    for (const [k, v] of this.typeAliases) sub.typeAliases = sub.typeAliases.set(k, v);
+    for (const [k, v] of this.recTypes) sub.recTypes = sub.recTypes.set(k, v);
+    for (const [k, v] of this.declaredTypeLines) sub.declaredTypeLines = sub.declaredTypeLines.set(k, v);
+    for (const [k, v] of this.cyclicTypes) sub.cyclicTypes = sub.cyclicTypes.set(k, v);
+    for (const n of this.declaredClassNames) sub.declaredClassNames = sub.declaredClassNames.add(n);
+    for (const n of this.cycleNames) sub.cycleNames = sub.cycleNames.add(n);
+    for (const n of this.mutableRecords) sub.mutableRecords = sub.mutableRecords.add(n);
+    // The three "do not refuse this name" sets, merged rather than assigned: the
+    // constructor's own lexical scan has already filled them from the FRAGMENT's tokens,
+    // and over-collection may only ever preserve today's behavior for a name.
+    for (const n of this.externalNames) sub.externalNames = sub.externalNames.add(n);
+    for (const n of this.fragmentNames) sub.fragmentNames = sub.fragmentNames.add(n);
+    for (const n of this.genericParamNames) sub.genericParamNames = sub.genericParamNames.add(n);
+    // A generic FUNCTION's type parameters are a STACK of frames, and the substitution is
+    // lexically inside every one currently open — `function f<T>(x: T) { return
+    // `${g((y: T) => y)}`; }` names `T`. Flattened into `inheritedTypeParams`, which is
+    // what that field exists for; the query is "any open frame", so merging is exact.
+    for (const s of this.typeParamScopes) for (const n of s) sub.inheritedTypeParams = sub.inheritedTypeParams.add(n);
+    for (const n of this.inheritedTypeParams) sub.inheritedTypeParams = sub.inheritedTypeParams.add(n);
+    // ---- the floating-async guard: seeded, then harvested on every path.
+    for (const n of this.asyncFns) sub.asyncFns = sub.asyncFns.add(n);
+    for (const n of this.returnsAsyncFn) sub.returnsAsyncFn = sub.returnsAsyncFn.add(n);
+    for (const [k, v] of this.promiseParamsByFn) sub.promiseParamsByFn = sub.promiseParamsByFn.set(k, v);
+    for (const s of this.asyncParamScopes) for (const n of s) sub.inheritedAsyncParams = sub.inheritedAsyncParams.add(n);
+    for (const n of this.inheritedAsyncParams) sub.inheritedAsyncParams = sub.inheritedAsyncParams.add(n);
+    const out = sub.parseExpression();
+    for (const c of sub.identCalls) this.identCalls.push(c);
+    for (const e of sub.asyncEscapes) this.asyncEscapes.push(e);
+    for (const r of sub.returnEscapes) this.returnEscapes.push(r);
+    for (const n of sub.awaitedCalls) this.awaitedCalls = this.awaitedCalls.add(n);
+    for (const n of sub.asyncFnExprs) this.asyncFnExprs = this.asyncFnExprs.add(n);
+    for (const n of sub.hostImports) this.hostImports = this.hostImports.add(n);
+    return out;
   }
 }
 
