@@ -34,6 +34,20 @@ void nt_num_to_buf(double v, char *out, unsigned long out_len) {
 
 #include "../../runtime/nt_actor.c"
 
+/* mbox_discard reclaims a dead actor's undelivered messages through the same two frees the
+ * receiving frame would have used. No compiler messages are sent here, so plain free / a
+ * no-op stands in for the object allocator and the string refcount.
+ *
+ * DEFINED AFTER THE INCLUDE, and that is not cosmetic. nt_actor.c must be the first thing
+ * in the translation unit to see a SYSTEM header, because it defines `_XOPEN_SOURCE` /
+ * `_DARWIN_C_SOURCE` (macOS hides ucontext without them) and a feature-test macro set
+ * after `<sys/cdefs.h>` has been processed does nothing. Pulling `<stdlib.h>` in ABOVE the
+ * include for `free` was enough to change the ucontext layout the file compiles against:
+ * an instant SIGSEGV/SIGABRT, 6/6 runs at 4 scheduler threads, with the runtime source
+ * itself unchanged. nt_actor.c includes <stdlib.h> itself, so free() is in scope here. */
+void nt_obj_free(void *o) { free(o); }
+void nt_str_release(void *p) { (void)p; }
+
 #include <stdio.h>
 #include <stdatomic.h>
 #include <string.h>
