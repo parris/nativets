@@ -2543,3 +2543,43 @@ export function mentionsThis(e: Expr): boolean {
   thisExpr(e, out);
   return out.hit;
 }
+
+/* ---- pass 5: which fields does a constructor body store into? -------------- */
+
+/** The accumulator for `fieldsStoredViaThis`, in the shape `BoundNames`/`ThisHit` set. */
+//@@mutable
+interface StoredFields { names: Set<string> }
+
+function storedExpr(e: Expr, out: StoredFields): Expr {
+  // TRUTHINESS, not `=== true`: `viaThis` is `?Uboolean`, and comparing a nullable
+  // boolean against a plain one is outside the subset src/ must stay inside (NT2001,
+  // "Cannot compare ?Uboolean with boolean") — the spelling `parseClass`'s own
+  // `if (!p.paramProp) continue` already uses.
+  // `out.names = out.names.add(…)`, not `out.names.add(…)`: `Set` is PERSISTENT here, so
+  // the bare call returns a new set and leaves the receiver untouched (NT1606) — the same
+  // reason `BoundNames` above is written this way.
+  if (e.kind === "FieldAssign" && e.viaThis) out.names = out.names.add(e.field);
+  return walkExprChildren(e, (x: Expr): Expr => storedExpr(x, out), (s: Stmt): Stmt => storedStmt(s, out), KEEP_TY);
+}
+function storedStmt(s: Stmt, out: StoredFields): Stmt {
+  return walkStmtChildren(s, (x: Expr): Expr => storedExpr(x, out), (y: Stmt): Stmt => storedStmt(y, out), KEEP_TY);
+}
+/**
+ * Every field a constructor body stores into via `this.f = …`, ANYWHERE inside it — a pure
+ * visitor in the shape `mentionsThis` established.
+ *
+ * DELIBERATELY AN OVER-APPROXIMATION of "definitely assigned", and the caller depends on
+ * that direction. It answers a purely SYNTACTIC question ("is there such a store at all"),
+ * so a store under an `if` counts even though the else path leaves the slot unwritten. The
+ * over-approximation is the SAFE direction for the one caller (`parseClass`'s
+ * uninitialized-field refusal): erring towards "covered" can only ever accept a program,
+ * never refuse a valid one, so this cannot turn a working class into a false NT1015. The
+ * conditional-store hole it leaves is real and stated at that call site — closing it needs
+ * the flow analysis `checkDefiniteAssignment` runs for locals, which is a checker pass and
+ * not a syntactic question the parser can answer.
+ */
+export function fieldsStoredViaThis(body: Stmt[]): Set<string> {
+  const out: StoredFields = { names: new Set<string>() };
+  for (const s of body) storedStmt(s, out);
+  return out.names;
+}

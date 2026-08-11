@@ -549,4 +549,88 @@ class C {
 console.log(new C(5).x);
 `);
   });
+
+  /*
+   * 27. THE OTHER HALF OF THE SAME ROOT CAUSE. The uninitialized-field refusal was
+   * gated on `!hadExplicitCtor`, so the moment a class had ANY constructor the guard
+   * stopped running — and the constructor was never checked for actually assigning
+   * every field. A NON-nullable field left unassigned then read the slot's zero:
+   *
+   *     node   -> 7 undefined      (exit 0)
+   *     before -> 7 0              (exit 0)   <- silent wrong answer, no diagnostic
+   *
+   * Both exit 0, so nothing anywhere in the tree noticed. `tsc --strict` rejects this
+   * program (TS2564, "Property 'z' has no initializer and is not definitely assigned
+   * in the constructor"), which is why no fixture carried the shape — but rejecting it
+   * is the compiler's own job, not tsc's, and printing `0` for `undefined` is exactly
+   * the outcome the prime directive puts last.
+   *
+   * There is no value of type `number` to hand back, so this is a REFUSAL, on the same
+   * reasoning test 3 above gives for `let s: string; console.log(s);`.
+   */
+  test("a non-nullable field the constructor never assigns is refused", () => {
+    const e = expectRefused(`
+class C {
+  y: number;
+  z: number;
+  constructor(y: number) { this.y = y; }
+}
+console.log(new C(7).z);
+`, "NT1015");
+    expect(e.diag.message).toContain("'z'");
+    expect(e.diag.message).toContain("never assigned by its constructor");
+    // NOT the generic "this class feature is deferred" hint — nothing is deferred here.
+    expect(e.diag.hint).toContain("has no such value");
+  });
+
+  /*
+   * 29. THE HINT'S OWN ADVICE, COMPILED. The refusal above names three ways out; a hint
+   * that names a fix which does not work is worse than no hint at all. Each one is run
+   * against node here, so the hint cannot rot into a lie without this failing.
+   */
+  test("every fix the refusal's hint suggests actually compiles and matches node", async () => {
+    // (a) assign it in the constructor
+    await expectNode(`
+class C {
+  y: number;
+  z: number;
+  constructor(y: number) { this.y = y; this.z = 99; }
+}
+console.log(new C(7).y, new C(7).z);
+`);
+    // (b) give it an initializer
+    await expectNode(`
+class C {
+  y: number;
+  z: number = 99;
+  constructor(y: number) { this.y = y; }
+}
+console.log(new C(7).y, new C(7).z);
+`);
+    // (c) widen the type to include `undefined`
+    await expectNode(`
+class C {
+  y: number;
+  z: number | undefined;
+  constructor(y: number) { this.y = y; }
+}
+console.log(new C(7).y, new C(7).z);
+`);
+  });
+
+  // 28. …and the guard must still pass a constructor that assigns every field,
+  //     including from a nested/conditional position.
+  test("a constructor that assigns every field still compiles", async () => {
+    await expectNode(`
+class C {
+  y: number;
+  z: number;
+  constructor(y: number, c: boolean) {
+    this.y = y;
+    if (c) { this.z = 1; } else { this.z = 2; }
+  }
+}
+console.log(new C(7, true).z, new C(7, false).z);
+`);
+  });
 });

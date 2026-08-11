@@ -15,7 +15,7 @@ import {
   isNullableTy, nullishKind,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, generalUnionArmTypeof, extractUnionMembers, unionWidenedMembers,
-  resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
+  resolveStaticFieldReads, collectBindingNames, fieldsStoredViaThis, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -3072,12 +3072,43 @@ class Parser {
       ctorBody = [{ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: "message", value: this.ident("message"), viaThis: true, inCtor: true } }];
     }
 
-    // Reject-don't-miscompile: fields are only initialized by the constructor. Without an
-    // explicit ctor, only initialized (and, for Error subclasses, `message`) fields are set;
-    // any other field would be uninitialized garbage — refuse rather than emit it.
-    if (!hadExplicitCtor) {
-      const covered = new Set([...fieldInits.map(fi => fi.field), ...(extendsError ? ["message"] : [])]);
-      for (const f of fields) if (!covered.has(f.key)) throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
+    // Reject-don't-miscompile: fields are only initialized by the constructor, so a field
+    // nothing stores into is uninitialized garbage — refuse rather than emit it.
+    //
+    // This used to be gated on `!hadExplicitCtor`, which meant the guard stopped running
+    // the moment a class had ANY constructor, and that constructor was never checked for
+    // assigning every field. `class C { y: number; z: number; constructor(y: number) {
+    // this.y = y } }` then read `z` as the slot's zero and printed `0` where node prints
+    // `undefined` — both at exit 0, so nothing observed it. (`tsc --strict` rejects that
+    // program with TS2564, which is why no fixture carried the shape; refusing it is this
+    // compiler's own job.) There is no value of type `number` to serve, so it is refused
+    // for the same reason `let s: string; console.log(s);` is (NT1600).
+    //
+    // `ctorBody` already carries the prelude — parameter properties and field
+    // initializers were folded into it above — so ONE scan covers every way a field can
+    // be initialized, and the two cases no longer drift apart.
+    const covered = fieldsStoredViaThis(ctorBody);
+    // `extends Error`: `message` is slot 0 and `super(msg)` sets it, which is not a
+    // `this.f = …` store and so cannot appear in the scan above.
+    const stored = extendsError ? covered.add("message") : covered;
+    for (const f of fields) {
+      if (stored.has(f.key)) continue;
+      if (!hadExplicitCtor) {
+        throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
+      }
+      // A TRUTHFUL hint, not the generic "this class feature is deferred" one: nothing is
+      // deferred here, the program simply has no answer at this type. Each of the three
+      // ways out is compiled against node in test/definite-assignment.test.ts (case 29),
+      // because a hint that names a fix which does not work is worse than no hint.
+      throw nyi(
+        NYI.CLASS_FEATURE,
+        `class '${name}' field '${f.key}' is never assigned by its constructor`,
+        `node reads an unassigned field as \`undefined\`, but '${f.key}' is declared `
+          + `'${f.ty}', which has no such value — the slot would be served as its zero `
+          + `(\`0\`/\`(null)\`) instead. Assign it in the constructor (\`this.${f.key} = …\`), `
+          + `give it an initializer (\`${f.key}: ${f.ty} = …\`), or widen the type to `
+          + `\`${f.ty} | undefined\`, which really does read as \`undefined\``,
+      );
     }
 
     // A FIELD naming its own class is a self-referential instance shape, which a flat
