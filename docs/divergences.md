@@ -3568,6 +3568,50 @@ That really *is* a tag comparison, which is why it was always right. The fixes t
 hands back are `if (a !== undefined && b !== undefined)` (narrowing makes both operands the
 base type) or `(a ?? d) === (b ?? d)`; both match node. `test/narrowing.test.ts`.
 
+### `instanceof` on a NULLABLE or UNION operand is refused (`NT1022`) — it was a silent wrong answer
+
+```ts
+class Dog { name: string; constructor(n: string) { this.name = n; } }
+const d: Dog | undefined = new Dog("rex");
+console.log(d instanceof Dog);            // node: true       nativets, before: FALSE, exit 0
+
+const a: number[] | string = [1, 2];
+console.log(a instanceof Array);          // node: true       nativets, before: FALSE, exit 0
+```
+
+`instanceof` here is a **constant fold**, not a runtime test: the checker decides it from the
+operand's static type and codegen emits `true`/`false` (the left operand is still evaluated
+for its effects). That is exact — and it is the same answer node computes — only while the
+static type names ONE thing, which is the premise `InstanceOfExpr` was written against: *"a
+value's static type IS its exact class in this subset."*
+
+A nullable or a union breaks the premise, and the five arms of the fold were being applied to
+the WHOLE type spelling anyway. Each one then answers `false` for a **structural** reason
+rather than a semantic one, so the wrong answer was unanimous and silent:
+
+| arm | why it said `false` on `?UDog{…}` / `G<number[]|string>` |
+|---|---|
+| a user class | `classTag` reads the tag as `?UDog`, not an identifier → `undefined` |
+| `Array` | `isArrayTy` excludes nullables by construction (`!isNullableTy(t)`) |
+| `Map` / `Set` | anchored on a `Map<` / `Set<` **prefix** that `?U` / `?N` displaces |
+| `Uint8Array` | an exact `t === "Uint8Array"` match, which `?UUint8Array` is not |
+
+The fold is now decided **per arm**, which is the smallest rule that is both correct and
+non-lossy:
+
+- **arms agree → still folded, still compiled.** `x instanceof Array` on a union of record
+  types is a real `false`; so is `s instanceof Map` on `string | undefined`. Neither was
+  wrong, and neither is refused. These are the mutation guards in
+  `test/selfhost-parse.test.ts` — widen the refusal to "compound operand" and they fail.
+- **arms disagree → `NT1022`.** The answer depends on which arm the value holds at run time,
+  and `e.result` is one compile-time boolean with nowhere to put a runtime test. A nullable's
+  nullish arm votes `false` (in node, `undefined instanceof C` is false for every `C`), which
+  is exactly why `d instanceof Dog` above is *undecidable* rather than simply `true`.
+
+The hint names the test that does decide it, and the rewrite it names compiles and matches
+node: `x !== undefined` for a nullable (the narrowing the branch body wanted anyway), a
+discriminant comparison for a union. `test/selfhost-parse.test.ts`.
+
 ### Narrowing does not reach `this.<field>` (`NT2001`) — a refusal, with a reason
 
 ```ts
