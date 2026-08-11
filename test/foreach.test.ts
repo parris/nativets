@@ -347,6 +347,41 @@ console.log(run());
     expect(oracle.stdout).toBe("100\n200\nx!\ny!\n0\n");
   });
 
+  /* THE SAME COLLISION ONE AST NODE DEEPER, and it was live — a silent wrong answer, not a
+   * refusal. `for (const [k, v] of map)` binds TWO names, `name` and `name2`, and the
+   * freshening walk handled only `name`: `collectBoundNames` never added `name2` to the
+   * bound set and `subStmt`'s `ForOfStmt` case never renamed it. So the value half kept its
+   * source spelling in every inlining. The first callback fixed `v`'s slot as a double, the
+   * second reused that slot for a string ptr, and the program printed
+   *
+   *   10:a2.139169827e-314b2.139169828e-314   where node prints   10:axby
+   *
+   * at exit 0 — the one outcome this compiler refuses to have. The KEY half was already
+   * safe, which is what kept it hidden: any test that only reads `k` passes either way.
+   * Both types differ here on purpose, so a shared slot cannot come out looking plausible. */
+  test("the VALUE half of a Map-entry for-of is freshened too, not just the key", async () => {
+    const src = `
+const nums: Map<string, number> = new Map<string, number>().set("a", 1).set("b", 2);
+const strs: Map<string, string> = new Map<string, string>().set("a", "x").set("b", "y");
+const one: number[] = [10, 20].map((n) => {
+  let acc = 0;
+  for (const [k, v] of nums) { acc = acc + v + k.length; }
+  return n + acc;
+});
+const two: string[] = [10, 20].map((n) => {
+  let acc = "";
+  for (const [k, v] of strs) { acc = acc + k + v; }
+  return \`\${n}:\${acc}\`;
+});
+console.log(one.join(","));
+console.log(two.join(","));
+`;
+    const { ours, oracle } = await expectMatchesNode(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+    expect(oracle.stdout).toBe("15,25\n10:axby,20:axby\n");
+  });
+
   test("nested .forEach iterates the cross product in node's order", async () => {
     const src = `
 const rows: number[] = [1, 2];

@@ -5,10 +5,10 @@
  * Borrowed from microsoft/TypeScript
  *   tests/cases/conformance/types/union/discriminatedUnionTypes1.ts  (`area1`)
  * — the `if / else if / else if / else` chain over `Square | Rectangle | Circle`,
- * verbatim in shape, printed so node can be the oracle. One substitution: `Math.PI`
- * is an unrelated gap (nativets has `Math.floor` etc. but no `Math` CONSTANTS —
- * `Math.PI` is `NT2001: 'Math' is not defined`), so the borrowed case spells out its
- * exact double instead. Nothing about the union changes.
+ * verbatim in shape, printed so node can be the oracle — including `Math.PI`, which
+ * this case previously had to spell as its exact double because nativets had
+ * `Math.floor` but no `Math` CONSTANTS. That gap is closed (see the Math-constant
+ * cases in `test/stdlib-batch1.test.ts`), so the borrowed case is now unsubstituted.
  */
 
 interface Square {
@@ -29,13 +29,11 @@ interface Circle {
 
 type Shape = Square | Rectangle | Circle;
 
-const PI = 3.141592653589793; // === Math.PI
-
 function area1(s: Shape): number {
   if (s.kind === "square") {
     return s.size * s.size;
   } else if (s.kind === "circle") {
-    return PI * s.radius * s.radius;
+    return Math.PI * s.radius * s.radius;
   } else if (s.kind === "rectangle") {
     return s.width * s.height;
   } else {

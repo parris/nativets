@@ -3957,9 +3957,22 @@ class Parser {
       do {
         if (this.at("}")) break;
         if (this.at("...")) { this.eat("..."); properties.push({ key: "", value: this.parseAssign(), spread: true }); continue; }
+        const kt = this.peek();
         const key = this.expectKey();
-        if (this.at(":")) { this.eat(":"); properties.push({ key, value: this.parseAssign() }); }
-        else properties.push({ key, value: { kind: "Identifier", name: key } }); // shorthand
+        if (this.at(":")) {
+          // NT1038. `__proto__` in exactly this production — `PropertyName :
+          // AssignmentExpression` — is the PROTOTYPE SETTER, not a property (ECMAScript
+          // B.3.1), and we have no prototype chain to set. Refused HERE rather than in the
+          // checker because this is the only point that still knows the production: the
+          // shorthand below desugars to `{ key, value: Identifier(key) }`, which is
+          // indistinguishable downstream from the `{ __proto__: __proto__ }` that IS the
+          // setter. Both `PropertyName` spellings are covered — `expectKey` returns the same
+          // string for the identifier `__proto__` and the string `"__proto__"`, and node
+          // treats them alike.
+          this.eat(":");
+          if (key === "__proto__") throw nyi(NYI.PROTO_KEY, "`__proto__` as an object-literal key", undefined, { line: kt.line, col: kt.col });
+          properties.push({ key, value: this.parseAssign() });
+        } else properties.push({ key, value: { kind: "Identifier", name: key } }); // shorthand
       } while (this.at(",") && (this.eat(","), true));
     }
     this.eat("}");
