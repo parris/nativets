@@ -6845,9 +6845,18 @@ class Checker {
    * throw here means "no", which is an answer, not an error. Nothing is skipped as a
    * result — `checkBlock` types this expression again, narrowed, and every diagnostic it
    * raises is reported normally.
+   *
+   * An `NTError` ONLY. A bare `catch` here would also eat an `InternalError` — the one
+   * class that means the defect is OURS — and turn a loud compiler bug into a silently
+   * wider return type. Anything that is not a diagnostic is re-thrown.
    */
   private widestReturnTy(arg: Expr, inner: Scope): Ty | undefined {
-    try { return this.type(arg, inner); } catch { return undefined; }
+    try {
+      return this.type(arg, inner);
+    } catch (e) {
+      if (e instanceof NTError) return undefined;
+      throw e;
+    }
   }
 
   /** Return type of an unannotated function, inferred from its first top-level return. */
