@@ -764,6 +764,7 @@ class Parser {
     let resolved = new Map<string, Ty>();
     let pending = names;
     while (pending.length) {
+      //@@mutable
       const deferred: string[] = [];
       let why = new Map<string, string>(); // residual member -> the error it stalled with
       for (const name of pending) {
@@ -873,7 +874,14 @@ class Parser {
     // second parse UNFOLD one level (`?U@N` became `?U{v:number,next:?U@N}`), so the same
     // type had two spellings and `===` — which is the whole point of a string encoding —
     // stopped holding between an annotation and a literal.
-    if (id === this.declaringType) {
+    // The local copy and the `!== undefined` are not nullability logic — `id` is a
+    // `string`, so the bare `id === this.declaringType` already answered false when it was
+    // unset. They are there because comparing `T` with `T | undefined` is NT2001 in the
+    // subset this file must compile in, and the guard only narrows a LOCAL: a `this.<field>`
+    // does not narrow across `&&`, so guarding the field in place moved the refusal onto the
+    // right operand rather than clearing it. Same answer on every input.
+    const declaring = this.declaringType;
+    if (declaring !== undefined && id === declaring) {
       this.declaringTypeIsRecursive = true;
       return typeRefTy(id);
     }
@@ -1794,7 +1802,10 @@ class Parser {
     this.erasureIsFatal = false;
     try { return this.parseObjectTypeFields(fields); } finally { this.erasureIsFatal = fatal; }
   }
-  private parseObjectTypeFields(fields: string[]): Ty {
+  private parseObjectTypeFields(
+    //@@mutable
+    fields: string[],
+  ): Ty {
     if (!this.at("}")) {
       do {
         if (this.at("}")) break; // tolerate a trailing `,`/`;` separator (interface bodies)
@@ -2465,14 +2476,24 @@ class Parser {
     this.eat("]"); this.eat("=");
     const init = this.parseAssign();
     const tmp = this.freshTmp();
+    //@@mutable
     const decls: Declarator[] = [{ name: tmp, init }];
-    elems.forEach((el, i) => {
-      if (el.name === null) return; // elision hole — no binding
+    // A for-of with an explicit positional index rather than `.forEach((el, i) =>`: an
+    // early `return` inside an INLINED ARROW does not narrow the rest of that body (the
+    // same guard as `continue` in a loop body does), so `el.name` stayed `string | null`
+    // here and the push was NT2001 in the subset this file must compile in. Behavior is
+    // identical — an elision hole still consumes an index, which is why `i` advances
+    // before the guard rather than after it.
+    let idx = 0;
+    for (const el of elems) {
+      const i = idx;
+      idx++;
+      if (el.name === null) continue; // elision hole — no binding
       const init: Expr = el.rest
         ? { kind: "CallExpr", callee: { kind: "MemberExpr", object: this.ident(tmp), property: "slice" }, args: [{ kind: "NumberLiteral", value: i }] }
         : { kind: "IndexExpr", object: this.ident(tmp), index: { kind: "NumberLiteral", value: i } };
       decls.push({ name: el.name, init });
-    });
+    }
     return { kind: "VarDecl", declKind, decls };
   }
 
@@ -2966,6 +2987,7 @@ class Parser {
     if (selfRecursive) this.recTypes = this.recTypes.set(name, objTy);
     this.typeAliases = this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
+    //@@mutable
     let emitted: FuncDecl[] = [];
     /** `const __dec_C_m = w(…)` statements — the ONE-TIME decorator applications. */
     let decorators: Stmt[] = [];
@@ -3037,7 +3059,14 @@ class Parser {
    * signature with the receiver as the first parameter. Stacked decorators apply
    * BOTTOM-UP, exactly like Python: `@a @b m` ≡ `a(b(m))`.
    */
-  private applyWrappers(fn: FuncDecl, wrappers: string[], emitted: FuncDecl[], decorators: Stmt[]): void {
+  private applyWrappers(
+    fn: FuncDecl,
+    wrappers: string[],
+    //@@mutable
+    emitted: FuncDecl[],
+    //@@mutable
+    decorators: Stmt[],
+  ): void {
     const label = fn.name.replace(".", "::");
     if (fn.returnAnnot === undefined) {
       throw decoratorError(
@@ -3245,11 +3274,18 @@ class Parser {
       const rhs = this.parseAssign();
       this.eat(";");
       const tmp = this.freshTmp();
+      //@@mutable
       const stmts: Stmt[] = [{ kind: "VarDecl", declKind: "const", decls: [{ name: tmp, init: rhs }] }];
-      pattern.elements.forEach((el, i) => {
+      // for-of, not `.forEach((el, i) =>` — see the note in `parseArrayDestructure`: an
+      // early exit inside an inlined arrow does not narrow the body after it, so the
+      // `kind !== "Identifier"` throw left `el` un-narrowed and `el.name` was NT2001.
+      let idx = 0;
+      for (const el of pattern.elements) {
+        const i = idx;
+        idx++;
         if (el.kind !== "Identifier") throw parseError("array assignment pattern must be identifiers");
         stmts.push({ kind: "ExprStmt", expr: { kind: "AssignExpr", op: "=", target: el.name, value: { kind: "IndexExpr", object: this.ident(tmp), index: { kind: "NumberLiteral", value: i } } } });
-      });
+      }
       return { kind: "MultiStmt", stmts };
     }
     this.eat(";");
@@ -3933,6 +3969,7 @@ class Parser {
   private buildTemplate(raw: string, tok: Token): Expr {
     //@@mutable
     const quasis: string[] = [];
+    //@@mutable
     const exprs: Expr[] = [];
     const nul = String.fromCharCode(0);
     let cur = "";
