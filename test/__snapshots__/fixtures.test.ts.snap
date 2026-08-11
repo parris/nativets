@@ -11249,6 +11249,7 @@ L0:
   %t83 = ptrtoint ptr @.str.78 to i64
   call double @nt_arr_push(ptr %t81, i64 %t83)
   %t84 = call i1 @irCallsAny(ptr @.str.77, ptr %t81)
+  call void @nt_arr_free(ptr %t81)
   %t85 = zext i1 %t84 to i32
   call void @js_print_bool(i32 %t85)
   call void @js_print_newline()
@@ -11257,6 +11258,7 @@ L0:
   %t88 = ptrtoint ptr @.str.78 to i64
   call double @nt_arr_push(ptr %t86, i64 %t88)
   %t89 = call i1 @irCallsAny(ptr @.str.79, ptr %t86)
+  call void @nt_arr_free(ptr %t86)
   %t90 = zext i1 %t89 to i32
   call void @js_print_bool(i32 %t90)
   call void @js_print_newline()
@@ -11265,6 +11267,7 @@ L0:
   %t93 = ptrtoint ptr @.str.78 to i64
   call double @nt_arr_push(ptr %t91, i64 %t93)
   %t94 = call i1 @irCallsAny(ptr @.str.80, ptr %t91)
+  call void @nt_arr_free(ptr %t91)
   %t95 = zext i1 %t94 to i32
   call void @js_print_bool(i32 %t95)
   call void @js_print_newline()
@@ -11279,6 +11282,7 @@ L0:
   %t102 = ptrtoint ptr @.str.84 to i64
   call double @nt_arr_push(ptr %t96, i64 %t102)
   %t103 = call i1 @irCallsAny(ptr @.str.81, ptr %t96)
+  call void @nt_arr_free(ptr %t96)
   %t104 = zext i1 %t103 to i32
   call void @js_print_bool(i32 %t104)
   call void @js_print_newline()
