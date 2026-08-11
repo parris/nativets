@@ -715,14 +715,18 @@ export interface FnBlocker { fn: string; code: string; message: string }
  * Omit the argument and this is the pre-existing function, byte for byte.
  */
 export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedProgram {
-  let functions = new Map<string, Sig>();
   // Value bindings this module imports. A linked program has none left (the linker
   // rewrites them to concrete names), so this is populated only for a single-module
   // check — where it turns "unknown callee" into "you did not link".
+  //
+  // FILLED FIRST, HANDED OVER SECOND, and never touched again — the ordering is the whole
+  // correctness argument, and it is the opposite of what the signature table used to do
+  // (see the note on `c.functions` below). A binding is safe to share exactly when no
+  // rebind follows the sharing.
   let importedFrom = new Map<string, string>();
   for (const im of program.imports ?? [])
     for (const s of im.specs ?? []) if (!s.typeOnly) importedFrom = importedFrom.set(s.local, im.source);
-  const c = new Checker(functions, mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []), importedFrom, recTypeTable(program));
+  const c = new Checker(new Map<string, Sig>(), mutableTags(program), new Set(program.mutableRecords ?? []), new Set(program.hostImports ?? []), importedFrom, recTypeTable(program));
   const builtins = () => {
     const s = new Scope();
     for (const n of BUILTIN_NUMBERS) s.declare(n, "number", true);
@@ -749,7 +753,7 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
 
   for (const s of program.body) {
     if (s.kind !== "FuncDecl" || s.typeParams?.length) continue;
-    if (functions.has(s.name)) throw typeError(`Duplicate function '${s.name}'`);
+    if (c.functions.has(s.name)) throw typeError(`Duplicate function '${s.name}'`);
     let rest = false;
     s.params.forEach((p, i) => { if (p.rest) { if (i !== s.params.length - 1) throw typeError("rest parameter must be last"); rest = true; } });
     const params = s.params.map((p) => p.annot ?? (p.default ? c.type(p.default, builtins()) : "number"));
@@ -761,7 +765,16 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
     const required = s.params.slice(0, fixed).filter((p) => !p.default).length;
     const defaults = s.params.map((p) => p.default ?? null);
     const ret = s.returnAnnot ?? "number";
-    functions = functions.set(s.name, { params, ret, required, defaults, rest });
+    // THE SIGNATURE TABLE HAS EXACTLY ONE OWNER — the Checker — and this writes THROUGH it
+    // rather than into a local. It used to be `functions = functions.set(…)` on a local the
+    // line above had already handed to `new Checker(functions, …)`, which works only
+    // because bun's `Map.set` MUTATES and returns the receiver, so the two names stayed one
+    // object. Under the semantics this compiler implements, `.set` answers a NEW map: the
+    // local would fork away and `Checker.functions` would stay EMPTY for the whole check,
+    // so no call in any program would resolve. Identical under bun (same object, same
+    // writes, same order); correct under nativets. `Checker` is `//@@mutable`, so the field
+    // assignment stands — the same shape as `c.statics` below.
+    c.functions = c.functions.set(s.name, { params, ret, required, defaults, rest });
     // `static m()` → reachable only as `C.m(…)`. REBOUND, not `.add`-and-discard: a
     // nativets `Set` is persistent, so the discarded spelling adds nothing there while
     // bun's mutating `Set.add` makes it work here — the divergence is invisible until
@@ -796,7 +809,7 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
       // checker.ts, codegen.ts and ownership.ts alike, together with the `s.returnTy = …`
       // it sat next to. The resolved return type now has exactly ONE home (this table);
       // `FuncDecl.returnTy` was a second copy of it that four in-place writes kept in sync.
-      functions = functions.set(s.name, { ...functions.get(s.name)!, ret: inferred });
+      c.functions = c.functions.set(s.name, { ...c.functions.get(s.name)!, ret: inferred });
     }
   }
 
@@ -851,7 +864,12 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
     const b = moduleScope.own(name);
     if (b) globals = globals.set(name, b.ty);
   }
-  return { program, functions, globals };
+  // `c.functions`, not a local copy: the monomorphizer adds its specializations through
+  // `this.functions` while the bodies above are checked (`instantiate`), and reading the
+  // table off its OWNER is what makes those visible here for any reason other than bun's
+  // aliasing. Codegen resolves every call through this table, so a missing specialization
+  // is a call emitted against a signature that is not there.
+  return { program, functions: c.functions, globals };
 }
 
 /** Expansion budget — a monomorphizable program needs a handful; only polymorphic
@@ -1134,7 +1152,14 @@ class Checker {
   }
 
   constructor(
-    private functions: Map<string, Sig>,
+    /** The signature table, and the Checker is its ONE owner — `check` fills it through
+     *  `c.functions = c.functions.set(…)` and reads it back off this field on the way out.
+     *  PUBLIC (and not `readonly`) for the same reason `statics` is: a nativets `Map` is
+     *  PERSISTENT, so the only way to add to it from outside is to rebind the field, and
+     *  `Checker` is `//@@mutable` so that assignment is legal and node-exact. Keeping a
+     *  second handle in `check` instead is the bug this shape exists to prevent — it stays
+     *  in sync only under bun's mutating `Map.set`. */
+    public functions: Map<string, Sig>,
     /** Tags whose values mutate IN PLACE — `@@mutable` classes and `@@mutable` records.
      *  Empty for every program that does not use the attribute, which is what keeps
      *  `o.f = v` rejected exactly as it was before (Stage 29). */
