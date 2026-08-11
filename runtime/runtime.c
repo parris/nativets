@@ -703,14 +703,120 @@ double js_shl(double a, double b)  { return (double)(to_int32(a)  << (to_uint32(
 double js_shr(double a, double b)  { return (double)(to_int32(a)  >> (to_uint32(b) & 31u)); }
 double js_ushr(double a, double b) { return (double)(to_uint32(a) >> (to_uint32(b) & 31u)); }
 
-/* Number(string) / unary + on string, matching JS ToNumber */
+/* StrWhiteSpace is the SAME set the trims use (ECMAScript WhiteSpace + LineTerminator),
+ * so `Number(x)` and `x.trim()` cannot disagree about what a blank string is. Defined
+ * further down next to js_str_trim; forward-declared here rather than moved, so the one
+ * canonical table stays where its comment explains it. */
+static const char *nt_ws_skip_fwd(const char *s, const char *end);
+static const char *nt_ws_skip_back(const char *start, const char *end);
+
+/* ---- StrDecimalLiteral — ECMA-262 7.1.4.1, the grammar `Number(string)` and
+ * `parseFloat` are both defined on. ------------------------------------------------
+ *
+ *     StrDecimalLiteral ::: [+-]opt StrUnsignedDecimalLiteral
+ *     StrUnsignedDecimalLiteral ::: Infinity
+ *                                 | DecimalDigits . DecimalDigits_opt ExponentPart_opt
+ *                                 | . DecimalDigits ExponentPart_opt
+ *                                 | DecimalDigits ExponentPart_opt
+ *
+ * `strtod` is NOT this grammar, and every place it is wider was a silent wrong answer:
+ * it accepts `inf` / `infinity` / `INFINITY` in ANY case where JS spells it exactly
+ * `Infinity` (so `Number("infinity")` handed back a finite-looking Infinity and the
+ * program kept running), and it accepts C99 hex floats, so `Number("0x1p3")` was 8
+ * where node says NaN. There is no hex form in StrDecimalLiteral at all, which is why
+ * `parseFloat("0x1f")` is 0 — it stops at the `x`.
+ *
+ * So the SHAPE is matched here and strtod is asked only for the VALUE, which is the
+ * part it is good at: correctly rounded, unlike any hand-rolled digit loop. The two
+ * ends then agree on where the literal stops in every case but one — a `0x`/`0X`
+ * prefix, which this grammar reads as the single digit `0` — and that one is answered
+ * without calling strtod at all.
+ *
+ * Returns the end of the match, or NULL when there is no StrDecimalLiteral at `s`. */
+static const char *nt_scan_decimal(const char *s, const char *limit, double *out) {
+  const char *p = s;
+  int neg = 0;
+  if (p < limit && (*p == '+' || *p == '-')) { neg = (*p == '-'); p++; }
+  if (limit - p >= 8 && memcmp(p, "Infinity", 8) == 0) {   /* exact case, no `inf` */
+    *out = neg ? -INFINITY : INFINITY;
+    return p + 8;
+  }
+  const char *ints = p;
+  while (p < limit && *p >= '0' && *p <= '9') p++;
+  int has_int = p > ints, has_frac = 0;
+  if (p < limit && *p == '.') {
+    const char *frac = ++p;
+    while (p < limit && *p >= '0' && *p <= '9') p++;
+    has_frac = p > frac;
+  }
+  if (!has_int && !has_frac) return NULL;   /* "", ".", "+", "e5" — no mantissa */
+  if (p < limit && (*p == 'e' || *p == 'E')) {
+    const char *q = p + 1;
+    if (q < limit && (*q == '+' || *q == '-')) q++;
+    const char *dig = q;
+    while (q < limit && *q >= '0' && *q <= '9') q++;
+    if (q > dig) p = q;                     /* a digitless `e` is simply not part of it */
+  }
+  /* The only place strtod would run PAST us: the match is exactly `0` and a hex float
+   * starts here. In this grammar that is the digit zero and the `x` is where it ends. */
+  if (p == ints + 1 && *ints == '0' && p < limit && (*p == 'x' || *p == 'X')) {
+    *out = neg ? -0.0 : 0.0;
+    return p;
+  }
+  *out = strtod(s, NULL);
+  return p;
+}
+
+/* NonDecimalIntegerLiteral — the `0b` / `0o` / `0x` prefixes. ES2015 added the first
+ * two to StringNumericLiteral; this runtime knew only `0x`, so `Number("0b101")` was
+ * NaN. A SIGN is not part of this production, which the old code also got wrong in the
+ * loud-to-silent direction: `Number("-0x10")` answered -16 where node says NaN.
+ *
+ * The digits fold into a 64-bit significand with a sticky low bit, scaled once by
+ * ldexp. Every radix here is a power of two, so that is a single rounding and a
+ * 300-digit hex string is as correctly rounded as a short one; `v = v * radix + d` in
+ * double would round at every step. Returns the end of the match, or NULL. */
+static const char *nt_scan_nondecimal(const char *s, const char *limit, double *out) {
+  int bits;
+  if (limit - s < 3 || s[0] != '0') return NULL;
+  switch (s[1]) {
+    case 'b': case 'B': bits = 1; break;
+    case 'o': case 'O': bits = 3; break;
+    case 'x': case 'X': bits = 4; break;
+    default: return NULL;
+  }
+  const char *p = s + 2, *first = p;
+  uint64_t mant = 0;
+  int shift = 0;                            /* bit places dropped below `mant` */
+  for (; p < limit; p++) {
+    unsigned c = (unsigned char)*p, v;
+    if (c >= '0' && c <= '9') v = c - '0';
+    else if (bits == 4 && c >= 'a' && c <= 'f') v = c - 'a' + 10;
+    else if (bits == 4 && c >= 'A' && c <= 'F') v = c - 'A' + 10;
+    else break;
+    if (v >= (1u << bits)) break;           /* `8` in an octal literal, `2` in a binary one */
+    /* `mant` full: the digit is entirely below the significand, so it can only set the
+     * sticky bit. `shift` STOPS at 65536 — anything at all is already Infinity by then,
+     * and letting a long enough literal overflow a signed int would be UB. */
+    if (mant >> (64 - bits)) { if (shift < 65536) shift += bits; if (v) mant |= 1; }
+    else mant = (mant << bits) | v;
+  }
+  if (p == first) return NULL;              /* `0x` with no digits after it */
+  *out = ldexp((double)mant, shift);
+  return p;
+}
+
+/* Number(string) / unary + on string — ToNumber applied to StringNumericLiteral:
+ * StrWhiteSpace on both sides, empty (or blank) is 0, and ANY trailing garbage is NaN. */
 double js_str_to_num(const char *s) {
-  while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-  if (*s == '\0') return 0.0;
-  char *end;
-  double v = strtod(s, &end);
-  while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
-  return *end == '\0' ? v : NAN;
+  const char *end = s + nt_strlen(s);
+  const char *p = nt_ws_skip_fwd(s, end);
+  end = nt_ws_skip_back(p, end);
+  if (p == end) return 0.0;                 /* StrWhiteSpace only */
+  double v;
+  const char *q = nt_scan_nondecimal(p, end, &v);
+  if (q == NULL) q = nt_scan_decimal(p, end, &v);
+  return q == end ? v : NAN;
 }
 
 /* Math.round — ECMA-262 21.3.2.28, which is NOT `floor(x + 0.5)`.
@@ -758,6 +864,27 @@ double js_math_min(double a, double b) {
   return a;
 }
 
+/* `**` and Math.pow — ECMA-262 Number::exponentiate, NOT C `pow`.
+ *
+ * The two agree on every input but one FAMILY, and C is deliberately wrong there:
+ * C99 F.10.4.4 specifies pow(+1, y) = 1 for ANY y "even a NaN", and pow(±1, ±inf) = 1,
+ * because C wanted pow to be continuous in the exponent when the base is exactly 1.
+ * ECMA-262 declines both: step 1 returns NaN whenever the exponent is NaN (the base is
+ * never consulted), and step 8 returns NaN when the base is finite with magnitude 1 and
+ * the exponent is ±Infinity. So `1 ** NaN`, `(±1) ** ±Infinity` are all NaN in JS and
+ * all 1 in C — five of the eight (base, exponent) edge pairs, every one of them a
+ * silent wrong answer at exit 0.
+ *
+ * One guard covers the whole family: a unit-magnitude base with a non-finite exponent.
+ * `!isfinite(b)` is true for both NaN and ±Infinity, which is exactly the two clauses.
+ * Everything else — ±0, ±Infinity bases, the odd-integral sign rules, and the
+ * negative-base/fractional-exponent NaN — C already matches the spec on, so it stays
+ * with libm rather than being re-derived here. */
+double js_pow(double a, double b) {
+  if (fabs(a) == 1.0 && !isfinite(b)) return NAN;
+  return pow(a, b);
+}
+
 /* parseInt / parseFloat (prefix parsing, JS-style) */
 double js_parse_int(const char *s, double radixd) {
   while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
@@ -771,11 +898,14 @@ double js_parse_int(const char *s, double radixd) {
   if (end == s) return NAN;
   return (double)(sign * v);
 }
+/* parseFloat is the LONGEST-PREFIX read of the same StrDecimalLiteral: trailing garbage
+ * is ignored rather than fatal, and the `0b`/`0o`/`0x` prefixes are NOT in this grammar
+ * (that is Number's extra production alone), so `parseFloat("0x1f")` is 0, not 31. */
 double js_parse_float(const char *s) {
-  while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-  char *end;
-  double v = strtod(s, &end);
-  return end == s ? NAN : v;
+  const char *end = s + nt_strlen(s);
+  const char *p = nt_ws_skip_fwd(s, end);
+  double v;
+  return nt_scan_decimal(p, end, &v) ? v : NAN;
 }
 
 /* ---- string methods (byte-oriented; ASCII-correct) ---- */
@@ -1226,7 +1356,25 @@ const char *nt_arr_join_str(NtArray *a, const char *sep) {
   }
   const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
 }
+/* `.includes` is SameValueZero (ES 23.1.3.16 -> 7.2.11), NOT the strict equality the two
+ * `indexOf` routines below use. SameValueZero differs from `===` at exactly ONE pair of
+ * values: NaN equals NaN. C `==` is IEEE-754 equality, which is false whenever either
+ * operand is NaN, so the plain scan answered `[NaN].includes(NaN)` with `false` where node
+ * says `true` — at exit 0, so a silent wrong answer.
+ *
+ * The needle is tested for NaN ONCE, outside the loop, and picks the predicate: a NaN
+ * needle matches a NaN element and nothing else, and a non-NaN needle keeps `==` exactly
+ * (so a NaN ELEMENT never answers a non-NaN needle — NaN must not become a wildcard).
+ *
+ * It is SameValueZero and not SameValue: `+0` and `-0` are the SAME value here, which
+ * `==` already gets right and which SameValue would get wrong. Do not "tighten" this into
+ * a bit compare — `[-0].includes(0)` is `true` in node. `indexOf`/`lastIndexOf` stay on
+ * `==` deliberately; `[NaN].indexOf(NaN)` is -1. See test/array-includes.test.ts. */
 int32_t nt_arr_includes_num(NtArray *a, double x) {
+  if (isnan(x)) {
+    for (int64_t i = 0; i < a->len; i++) if (isnan(slot_to_num(arr_at(a, i)))) return 1;
+    return 0;
+  }
   for (int64_t i = 0; i < a->len; i++) if (slot_to_num(arr_at(a, i)) == x) return 1;
   return 0;
 }

@@ -66,6 +66,19 @@ not by having a small first-blocker count. That is the pattern to aim for.
 **Self-hosting is NOT reached.** Stage-1 still dies in `check`; no 3-stage fixed point
 exists. Do not claim one without a measured byte-identical `nativets-2`/`nativets-3`.
 
+> **The `checker` column drifts within the day — read it with a timestamp.** A doc-audit
+> re-run of `bun run test/blocker-metric.ts` later on 2026-08-10 read **153 failing of 749
+> functions (20.4%)**, against this table's `checker` 185 of 702. Same instrument class
+> (checker refusals, first blocker per function, bodies only), so the two are not
+> independent measurements of different things — the tree simply moved underneath them
+> while a wide lane fleet was landing: the numerator fell as checker refusals were fixed
+> and the denominator rose as functions were added and split. Neither figure is wrong;
+> **a bare frontier number is only meaningful with the commit it was taken at**, which is
+> why the stubbed table above is the one to quote for shape and this line for scale. The
+> `by module` split at that reading: `checker` 60/199, `codegen` 37/178, `parser` 25/113,
+> `ownership` 21/47, `modules` 7/21, `driver` 2/29, `coverage` 1/4, and **0** for `ast`,
+> `lexer`, `diagnostics`, `coverage-preprocess`, `cli`.
+
 ### `src/` RELIES ON BUN'S MUTATION SEMANTICS — a blocker class no instrument measures
 
 Found 2026-08-10. Distinct from every blocker in the table below: these sites **parse,
