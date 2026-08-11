@@ -228,6 +228,37 @@ function f(x: number | undefined): number {
   });
 });
 
+/*
+ * narrowing 2b — the same guard, in a body whose RETURN TYPE IS INFERRED.
+ *
+ * `checkBlock` has done early-exit narrowing since SH2. It is not the only walk over a
+ * statement list: `inferBlockReturn` runs FIRST over the same statements, to find the
+ * first top-level `return` and read the body's type off it, and it checked every
+ * statement on the way with a hand-rolled loop that had no narrowing at all. Its
+ * diagnostic wins because it is raised first, so the guard-clause idiom was refused in
+ * every body that reaches it — and `checkBlock`, which would have accepted the identical
+ * code, never ran.
+ *
+ * Which bodies reach it: every BLOCK-BODIED ARROW (`typeArrowReturn` calls it whether or
+ * not the arrow is annotated) and every UNANNOTATED `function`. An annotated `function`
+ * does not, which is why `narrowing 2` above never caught this — every case there is a
+ * `function` with a return type written on it.
+ *
+ * node is the oracle for all of them: the type layer is erased, so each of these programs
+ * simply runs.
+ */
+describe("narrowing 2b — an early-exit guard in an INFERRED-return body", () => {
+  test("an inlined `forEach` arrow: `if (el.name === null) return;` narrows the rest", async () => {
+    await expectNode(`
+const elems: { name: string | null }[] = [{ name: null }, { name: "b" }];
+elems.forEach((el, i) => {
+  if (el.name === null) return;
+  console.log(i, el.name.length);
+});
+`);
+  });
+});
+
 describe("narrowing 3 — the fact persists to the right of `&&`", () => {
   // TypeScript: compiler/narrowingWithNonNullExpression.ts — `m! && m[0]`, where the
   // SECOND `m` is narrowed by the assertion in the first. Its own `''.match('')` needs

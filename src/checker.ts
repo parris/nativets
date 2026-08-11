@@ -6660,14 +6660,115 @@ class Checker {
     return this.assignable(declared, inferred) && this.reshapable(arg, declared, inferred);
   }
 
-  /** First top-level return's type in a body (for closure/function return inference). */
+  /**
+   * First top-level return's type in a body (for closure/function return inference).
+   *
+   * TWO JOBS IN ONE LOOP, and they take OPPOSITE answers on the guard-clause idiom —
+   * which is why the narrowing here is deliberately asymmetric rather than a copy of
+   * `checkBlock`.
+   *
+   * The STATEMENT WALK is a full `checkStmt`, so every diagnostic in the body can be
+   * raised from here — and this pass runs BEFORE `checkBlock` does, so whatever it
+   * raises is what the user sees. It therefore has to model control flow exactly as
+   * `checkBlock` does, or it refuses code `checkBlock` would accept and the accepting
+   * pass never runs. It did not, and the guard clause was the casualty:
+   *
+   *     elems.forEach((el) => {
+   *       if (el.name === null) return;    // early-exit guard
+   *       out.push({ name: el.name });     // NT2001 — from HERE, not from checkBlock
+   *     });
+   *
+   * The `for`/`continue` spelling of the same loop compiled, because a `for` body is
+   * only ever walked by `checkBlock`. Nothing was miscompiled; the shape was simply
+   * unreachable in every body whose return type is inferred — every BLOCK-BODIED ARROW
+   * (annotated or not: `typeArrowReturn` calls this unconditionally) and every
+   * UNANNOTATED `function`. So the same three lines were accepted in a `function f():
+   * void` and refused in `const f = (): void =>`.
+   *
+   * THE RETURN ITSELF takes the WIDER of the two readings, and the asymmetry is the whole
+   * design. The type this function answers is not just this return's — `typeArrowReturn`
+   * hands it straight to `checkBlock` as the type EVERY return in the body is validated
+   * against, and a guard above the first top-level return proves nothing about the
+   * returns nested INSIDE that guard:
+   *
+   *     elems.map((el) => {
+   *       if (el.name === null) return null;   // nested — still `null`
+   *       return el.name;                      // first TOP-LEVEL return, narrows to string
+   *     });
+   *
+   * Answering `string` there makes `string` the body's type and refuses the `return null`
+   * above it — a program that compiles today and matches node. So the un-narrowed reading
+   * is preferred WHEN IT EXISTS, and it is the one every return fits.
+   *
+   * But it often does not exist, because the guard is what made the read legal at all:
+   *
+   *     function f(el: { name: string | null }) {
+   *       if (el.name === null) return 0;
+   *       return el.name.length;               // `?Nstring` has no `.length`
+   *     }
+   *
+   * Un-narrowed, that expression has no type — it is the NT2001 this whole method used to
+   * raise. So: type it narrowed (which is what `checkBlock` will do anyway), type it again
+   * un-narrowed, and answer the un-narrowed reading only if it produced a type.
+   *
+   * WHY THIS CANNOT REGRESS ANYTHING. The un-narrowed reading is exactly what this method
+   * computed before early-exit facts existed here, so any body whose first return HAD a
+   * type still gets that same type, unchanged. The narrowed reading is consulted only
+   * where the old code threw — and a thrown diagnostic accepted no program. The change is
+   * one-directional by construction: refusals become acceptances, no inferred type moves.
+   *
+   * Typing the expression twice is safe and is not a third evaluation of anything: both
+   * `checkFunction` and `typeArrowReturn` run a full `checkBlock` over the same body
+   * afterwards, so the `.ty` stamps codegen reads always come from THAT pass, never from
+   * either reading here. The second reading is skipped entirely when no exiting guard
+   * preceded the return (`pushed === 0`), which is every body that behaved correctly
+   * before — so the common path is the original one line.
+   */
   private inferBlockReturn(body: Stmt[], scope: Scope): Ty {
     const inner = scope.child();
-    for (const s of body) {
-      if (s.kind === "ReturnStmt") return s.argument ? this.type(s.argument, inner) : "number";
-      this.checkStmt(s, inner, "void"); // declare vars; don't validate returns
+    let pushed = 0;
+    try {
+      for (let i = 0; i < body.length; i++) {
+        const s = body[i]!;
+        if (s.kind === "ReturnStmt") {
+          if (s.argument === null) return "number";
+          const narrowed = this.type(s.argument, inner);
+          if (pushed === 0) return narrowed; // no guard above it — the two readings agree
+          for (let k = 0; k < pushed; k++) this.narrowStack.pop();
+          pushed = 0;
+          return this.widestReturnTy(s.argument, inner) ?? narrowed;
+        }
+        this.checkStmt(s, inner, "void"); // declare vars; don't validate returns
+        // The identical bookkeeping `checkBlock` does, over the identical region: the
+        // facts an exiting guard establishes cover exactly the statements below it.
+        const rest = body.slice(i + 1);
+        const facts = this.exitGuardFacts(s, inner, rest);
+        this.eliminateAfterEarlyExit(s, inner, rest, facts);
+        if (facts.length) { this.narrowStack.push(facts); pushed++; }
+      }
+    } finally {
+      // `finally`, unlike `checkBlock`'s trailing loop: this walk leaves by `return` on
+      // the common path, and `coverage` keeps going after a thrown diagnostic — either
+      // would otherwise strand a frame on the stack for the next body to read.
+      for (let k = 0; k < pushed; k++) this.narrowStack.pop();
     }
     return "number";
+  }
+
+  /**
+   * The type this return expression has with the enclosing guard facts already dropped,
+   * or `undefined` when it has none — see `inferBlockReturn` for why both readings are
+   * taken and which one wins.
+   *
+   * The `catch` swallows a diagnostic on purpose, and it is not a suppression: the SAME
+   * expression has just been typed successfully with the facts in force, so the program is
+   * known good, and the only question left is whether a wider type also describes it. A
+   * throw here means "no", which is an answer, not an error. Nothing is skipped as a
+   * result — `checkBlock` types this expression again, narrowed, and every diagnostic it
+   * raises is reported normally.
+   */
+  private widestReturnTy(arg: Expr, inner: Scope): Ty | undefined {
+    try { return this.type(arg, inner); } catch { return undefined; }
   }
 
   /** Return type of an unannotated function, inferred from its first top-level return. */
