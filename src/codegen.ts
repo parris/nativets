@@ -2265,7 +2265,7 @@ class FnGen {
         this.emit(`${iB} = load double, ptr ${idx}`);
         if (isStr) {
           // ONE STEP OF THE STRING ITERATOR — a CODE POINT, not a byte. `js_str_char_at`
-          // over `0 .. js_str_len` framed this by byte, so `for (const c of " Axx")`
+          // over `0 .. js_str_len` framed this by byte, so `for (const c of "\u2001Axx")`
           // ran 6 times where node (and our own `Array.from`, which had already been given
           // code-point framing) says 4. In node both spellings ARE the same iterator, so
           // they cannot disagree; here they did, and only one of the two matched node.

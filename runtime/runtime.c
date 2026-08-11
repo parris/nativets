@@ -1563,7 +1563,7 @@ static int nt_utf8_len(const unsigned char *p, const unsigned char *end, unsigne
  *
  * WHY THIS EXISTS AT ALL, given `js_str_char_at`. `for…of` used to BE `js_str_char_at`
  * over `0 .. js_str_len`, i.e. one element per byte, while `Array.from` framed the same
- * string by code point. For `" Axx"` — well formed, ordinary source — that was 6
+ * string by code point. For `"\u2001Axx"` — well formed, ordinary source — that was 6
  * against node's 4, with `Array.from` already answering 4. In node the two spellings are
  * the SAME iterator and can never disagree; here they did. `for…of` is now the code-point
  * side, which is node-exact for every well-formed string. `split("")` deliberately stays
