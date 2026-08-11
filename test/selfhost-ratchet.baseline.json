@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "37be969"
+    "rev": "0a2be64"
   },
   "modules": {
     "ast.ts": {
@@ -41,7 +41,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] '{kind:string,name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustring,body:@_nts0_m2_Stmt[],endDrops:?Ustring[],typeParams:?Ustring[],copyThis:?Uboolean,setter:?Uboolean,isStatic:?Uboolean,…"
+        "message": "[NT2001] '_nts0_m2_mapTypesDeep' arg 0 expects U<{kind:\"VarDecl\",declKind:string,decls:@_nts0_m2_Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustr…"
       }
     },
     "codegen.ts": {
@@ -81,7 +81,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] '{kind:string,name:string,params:@_nts0_m0_Param[],returnAnnot:?Ustring,body:@_nts0_m0_Stmt[],endDrops:?Ustring[],typeParams:?Ustring[],copyThis:?Uboolean,setter:?Uboolean,isStatic:?Uboolean,…"
+        "message": "[NT2001] '_nts0_m0_mapTypesDeep' arg 0 expects U<{kind:\"VarDecl\",declKind:string,decls:@_nts0_m0_Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@_nts0_m0_Param[],returnAnnot:?Ustr…"
       }
     },
     "diagnostics.ts": {
@@ -108,7 +108,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] '{kind:string,name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustring,body:@_nts0_m2_Stmt[],endDrops:?Ustring[],typeParams:?Ustring[],copyThis:?Uboolean,setter:?Uboolean,isStatic:?Uboolean,…"
+        "message": "[NT2001] '_nts0_m2_mapTypesDeep' arg 0 expects U<{kind:\"VarDecl\",declKind:string,decls:@_nts0_m2_Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustr…"
       }
     },
     "lexer.ts": {
@@ -134,7 +134,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] '{kind:string,name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustring,body:@_nts0_m2_Stmt[],endDrops:?Ustring[],typeParams:?Ustring[],copyThis:?Uboolean,setter:?Uboolean,isStatic:?Uboolean,…"
+        "message": "[NT2001] '_nts0_m2_mapTypesDeep' arg 0 expects U<{kind:\"VarDecl\",declKind:string,decls:@_nts0_m2_Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustr…"
       }
     },
     "ownership.ts": {
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "af852a40c6f2f2d3",
+      "sha256": "f89f6830f6ded8a8",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -161,7 +161,7 @@
       "linked": {
         "stage": "check",
         "code": "NT2001",
-        "message": "[NT2001] '{kind:string,name:string,params:@_nt_m2_Param[],returnAnnot:?Ustring,body:@_nt_m2_Stmt[],endDrops:?Ustring[],typeParams:?Ustring[],copyThis:?Uboolean,setter:?Uboolean,isStatic:?Uboolean,untr…"
+        "message": "[NT2001] '_nt_m2_mapTypesDeep' arg 0 expects U<{kind:\"VarDecl\",declKind:string,decls:@_nt_m2_Declarator[],mutable:?Uboolean}|{kind:\"FuncDecl\",name:string,params:@_nt_m2_Param[],returnAnnot:?Ustring,bo…"
       }
     }
   }

@@ -3378,33 +3378,49 @@ class Parser {
     /** `const __dec_C_m = w(…)` statements — the ONE-TIME decorator applications. */
     let decorators: Stmt[] = [];
     // Constructor → `C.constructor(this, …ctorParams): void` (caller allocates `this`).
-    const ctor = {
+    // ANNOTATED, not `as FuncDecl`. An `as` assertion demands the literal already have the
+    // target's exact slot layout, so a literal omitting the optional fields is NT2001; an
+    // ANNOTATION is a context the literal gets reshaped INTO (`retypeLiteral`), which is
+    // what fills the omitted slots. Same program, and the spelling the checker supports.
+    //@@mutable
+    const ctor: FuncDecl = {
       kind: "FuncDecl", name: `${name}.constructor`,
       params: [thisParam, ...(ctorParams ?? [])], returnAnnot: "void", body: ctorBody,
-    } as FuncDecl;
+    };
     // A CLASS `@wrapper` wraps the CONSTRUCTOR: the thing being decorated is
     // `(instance, …ctorArgs) => instance` — nativets allocates the instance, the
     // initializer fills it in and hands it back, and the wrapper may do anything
     // around that. (Our classes are not first-class values, so the constructor is
     // the closest expressible reading of Python's `C = wrap(C)`.)
-    if (dec?.wrappers.length) {
+    // Bound and tested explicitly: `dec?.wrappers.length` is an OPTIONAL CHAIN, which
+    // tests the field without NARROWING `dec` for the body — `dec.wrappers` inside is then
+    // 'possibly null'. The same shape as `sub.blockedOn` and `this.collectTypes`.
+    const decd = dec;
+    if (decd !== null && decd.wrappers.length > 0) {
       ctor.returnAnnot = selfMarker;
       ctor.body = [...ctor.body, { kind: "ReturnStmt", argument: this.ident("this") }];
       ctor.untrackThis = true; // `return this` hands the caller's own allocation back
-      this.applyWrappers(ctor, dec.wrappers, emitted, decorators);
+      this.applyWrappers(ctor, decd.wrappers, emitted, decorators);
     } else {
       emitted.push(ctor);
     }
     // Each method → `C.method(this, …params)`.
     for (const m of methods) {
-      const fn = {
+      // The optional field is SET, not conditionally spread. `...(c ? { f: v } : {})` is a
+      // ternary whose arms are two different shapes (`{typeParams:string[]}` vs `{}`), so
+      // it is NT2001 — and `undefined` means exactly what the absent key meant, because
+      // every reader is `s.typeParams?.length`. Annotated rather than `as FuncDecl` for
+      // the reason the constructor above is: an annotation RESHAPES the literal into the
+      // declared layout, an assertion demands it already match.
+      //@@mutable
+      const fn: FuncDecl = {
         kind: "FuncDecl", name: `${name}.${m.name}`,
         params: [thisParam, ...m.params], returnAnnot: m.returnAnnot, body: m.body,
         // A GENERIC method is the same FuncDecl carrying `typeParams`, so the checker's
         // existing template registration (`declareGeneric`) picks it up with no special
         // case: `this` is simply its first parameter, and it is never generic.
-        ...(m.typeParams ? { typeParams: m.typeParams } : {}),
-      } as FuncDecl;
+        typeParams: m.typeParams,
+      };
       if (m.setter) { fn.setter = true; this.lowerSetter(fn, name, isMutable, selfMarker); }
       if (m.wrappers.length) this.applyWrappers(fn, m.wrappers, emitted, decorators);
       else emitted.push(fn);
@@ -3414,10 +3430,13 @@ class Parser {
     // `isStatic` flag tells the checker, so `C.m(a)` resolves to this function and
     // `inst.m(a)` does not.
     for (const m of statics) {
-      emitted.push({
+      // Annotated through a local, for the same reason the two literals above are: an
+      // assertion demands the exact layout, an annotation reshapes into it.
+      const sfn: FuncDecl = {
         kind: "FuncDecl", name: `${name}.${m.name}`,
         params: m.params, returnAnnot: m.returnAnnot, body: m.body, isStatic: true,
-      } as FuncDecl);
+      };
+      emitted.push(sfn);
     }
     // Substitute the self MARKER for the real instance type, everywhere it reached.
     const unself = (t: Ty): Ty => (t.includes(selfMarker) ? (t.split(selfMarker).join(objTy) as Ty) : t);
