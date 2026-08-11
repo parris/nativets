@@ -5089,8 +5089,14 @@ class Checker {
     this.raisedTys = this.raisedTys.set(name, []); // recursion guard AND the default answer
     //@@mutable
     let args: Expr[] = [];
+    // A `.prop` query matches by SUFFIX — every method of that name in the program — and
+    // the agreement check below then makes it unanimity: two same-named methods raising
+    // different shapes answer `[]`, which is exactly "cannot say" and leaves the binding
+    // at today's default. A plain name still matches exactly.
+    const byProp = name.startsWith(".");
     for (const s of this.programBody) {
-      if (s.kind !== "FuncDecl" || s.name !== name) continue;
+      if (s.kind !== "FuncDecl") continue;
+      if (byProp ? !s.name.endsWith(name) : s.name !== name) continue;
       args = [...args, ...uncoveredThrows(s.body, false)];
     }
     if (args.length === 0) return [];
@@ -5117,6 +5123,22 @@ class Checker {
    *  filled in before any body is checked. Empty for everything else. */
   private raisedNewTy(e: Expr): Ty[] {
     if (e.kind === "StringLiteral" || e.kind === "TemplateLiteral") return ["string"];
+    // `throw helper(…)` — the FACTORY spelling, and the one this compiler's own source
+    // uses everywhere (`throw nyi(…)`, `throw typeError(…)`, `throw mutationError(…)`).
+    // Only `new X(…)` and string literals were typed here, so every `src/` throw was
+    // invisible to the inference and the catch binding fell to the `"string"` default —
+    // which is why three of its own functions read `Property 'diag' does not exist on
+    // string`. The callee's DECLARED return type is the payload's type by construction;
+    // no scope is needed for it, which is the invariant this function is documented on.
+    //
+    // Narrowed to an object-shaped return: a helper returning a number or a string is
+    // either already covered above or not a payload this can rebuild, and answering
+    // "cannot say" there leaves today's default rather than inventing a binding type.
+    if (e.kind === "CallExpr" && e.callee.kind === "Identifier") {
+      const sig = this.functions.get(e.callee.name);
+      if (sig !== undefined && (isObjectTy(sig.ret) || isTypeRefTy(sig.ret))) return [sig.ret];
+      return [];
+    }
     if (e.kind !== "NewExpr") return [];
     const ctor = this.functions.get(`${e.callee}.constructor`);
     if (ctor !== undefined) return [ctor.params[0]!];
@@ -8594,8 +8616,25 @@ function calleesInBody(stmts: Stmt[]): string[] {
 function calleesInExpr(e: Expr): string[] {
   switch (e.kind) {
     case "CallExpr": {
+      // A METHOD call contributes `.<prop>` — a query answered by SUFFIX in
+      // `raisedTypeOf`, since the linker flattens methods to top-level `FuncDecl`s named
+      // `<mangled>.<prop>`. The leading dot cannot collide with a real callee: linked
+      // names contain dots but never start with one.
+      //
+      // The old comment on `calleesOf` explained why methods were left out — they resolve
+      // by PROPERTY name, so pulling in every same-named method could let two unrelated
+      // ones disagree and turn `inferThrowType` into a refusal. That reasoning holds and
+      // is why the resolution is by UNANIMITY: disagreement DECLINES (empty list, today's
+      // default binding) rather than refusing, so the over-approximation can cost the
+      // inference and never a program. What it bought: `r.go()` where `go` throws an
+      // Error left the binding at `"string"`, and node-legal TypeScript was refused with
+      // `Property 'code' does not exist on string`.
       //@@mutable
-      let out: string[] = e.callee.kind === "Identifier" ? [e.callee.name] : calleesInExpr(e.callee);
+      let out: string[] = e.callee.kind === "Identifier"
+        ? [e.callee.name]
+        : e.callee.kind === "MemberExpr"
+          ? [`.${e.callee.property}`, ...calleesInExpr(e.callee.object)]
+          : calleesInExpr(e.callee);
       for (const a of e.args) out = [...out, ...calleesInExpr(a)];
       return out;
     }

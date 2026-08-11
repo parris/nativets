@@ -92,6 +92,66 @@ describe("the catch binding is typed from the throw, exactly or not at all", () 
     ].join("\n"));
   });
 
+  /*
+   * A METHOD call's raise, which `calleesOf` deliberately did not collect.
+   *
+   * The exclusion was reasoned — a method resolves by PROPERTY name, and pulling in every
+   * same-named method in the program would let two unrelated ones disagree and turn
+   * `inferThrowType` into a refusal on a block whose real callee raises one type. But the
+   * cost was paid on ordinary TypeScript: node prints `code E9` for the program below and
+   * we refused it, `Property 'code' does not exist on string`, because the binding fell to
+   * the `"string"` default.
+   *
+   * Resolved by UNANIMITY rather than by picking: every `FuncDecl` whose linked name ends
+   * in `.<prop>` contributes, and disagreement DECLINES (falls back to today's default)
+   * instead of refusing. So the over-approximation the comment warned about can only ever
+   * cost the inference, never a program.
+   */
+  test("a raise from a METHOD call types the catch binding", async () => {
+    await differential([
+      `class MyErr extends Error {`,
+      `  code: string;`,
+      `  constructor(code: string) { super(code); this.code = code; }`,
+      `}`,
+      `class Runner {`,
+      `  go(): void { throw new MyErr("E9"); }`,
+      `}`,
+      `const r = new Runner();`,
+      `try {`,
+      `  r.go();`,
+      `} catch (e) {`,
+      `  if (e instanceof MyErr) { console.log("code", e.code); } else { console.log("other"); }`,
+      `}`,
+      ``,
+    ].join("\n"));
+  });
+
+  test("two same-named methods that DISAGREE decline — the refusal is unchanged", async () => {
+    // The guard on the unanimity rule. `go` raises two different shapes across two
+    // classes, so the inference must answer "cannot say" and leave the binding at today's
+    // default — never PICK an arm, which would store a raise into a slot of the wrong
+    // shape (the silent-wrong-answer class `ThrowStmt` and `emitExcCheck` refuse from the
+    // other side).
+    //
+    // Asserted as a REFUSAL because that is the truth: this program is NT1004 both before
+    // and after the change, and for a reason unrelated to the inference (a cross-frame
+    // raise needs every call site inside a `try`). What matters is that it is the SAME
+    // refusal — declining costs nothing that was working.
+    const { emitIR } = await import("./harness.ts");
+    const src = [
+      `class A { go(): void { throw new Error("a"); } }`,
+      `class B { go(): void { throw "b"; } }`,
+      `const a = new A();`,
+      `const b = new B();`,
+      `try { a.go(); } catch (e1) { console.log("A", e1); }`,
+      `try { b.go(); } catch (e2) { console.log("B", e2); }`,
+      ``,
+    ].join("\n");
+    let code = "";
+    try { emitIR(src); } catch (e) { code = (e as { diag?: { code: string } }).diag?.code ?? "throw"; }
+    expect(code).toBe("NT1004");
+  });
+
   test("two throws of DIFFERENT types in one try are refused, not stored raw", async () => {
     const { emitIR } = await import("./harness.ts");
     expect(() =>

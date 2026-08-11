@@ -146,10 +146,6 @@ describe("no internal error reaches the user", () => {
   // `"string"` and `scanEscaping` rule 3 rejected the raise. `inferThrowType` asks the
   // block's callees too, and the object crosses the frame by MOVE (test/exc-move.test.ts).
   const THROWS: [string, string][] = [
-    // A METHOD call: `calleesOf` resolves only IDENTIFIER callees, because a method
-    // resolves by PROPERTY name and every same-named method in the program would have to
-    // agree. So the binding is still untyped here, and the raise still cannot cross.
-    ["method throws, try at the call site", `class C { m(): number { throw new Error("b"); } }\ntry { console.log(new C().m()); } catch (e) { console.log("caught"); }\n`],
     // A LIFTED arrow's throw runs in a frame the escape scan is not describing (rule 4).
     ["throw from an arrow", `const f = (): number => { throw new Error("b"); };\ntry { console.log(f()); } catch (e) { console.log("c"); }\n`],
   ];
@@ -165,6 +161,12 @@ describe("no internal error reaches the user", () => {
   const NOW_COMPILES: [string, string][] = [
     ["function throws, try at the CALL SITE", `function f(): number { throw new Error("boom"); }\ntry { console.log(f()); } catch (e) { console.log("caught"); }\n`],
     ["rethrow from a callee's catch block", `function f(): number { try { throw new Error("a"); } catch (e) { throw new Error("b"); } }\ntry { console.log(f()); } catch (e) { console.log("c"); }\n`],
+    // THE THIRD TO MOVE. `calleesOf` used to resolve only IDENTIFIER callees — a method
+    // resolves by PROPERTY name, and every same-named method in the program would have to
+    // agree — so the binding stayed untyped and the raise could not cross. It resolves
+    // methods by UNANIMITY now (`.<prop>` matched by suffix against the linked names), so
+    // this is node's "caught" / exit 0, verified.
+    ["method throws, try at the call site", `class C { m(): number { throw new Error("b"); } }\ntry { console.log(new C().m()); } catch (e) { console.log("caught"); }\n`],
   ];
   for (const [name, src] of NOW_COMPILES) {
     test(`no longer NT1004 — the object crosses the frame: ${name}`, () => {
