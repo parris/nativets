@@ -4260,7 +4260,20 @@ class Checker {
               `\`${e.op}\` between two Dates (node compares object IDENTITY, and a Date here IS its time value — so there is no identity left to compare)`,
               "compare the TIME VALUES instead: `a.getTime() === b.getTime()` (or `+a === +b`). Note that is a VALUE comparison and node's `===` is not: two distinct Dates at the same instant are `true` by time value and `false` by `===`, and an Invalid Date is `false` against itself by time value (`NaN !== NaN`) and `true` by `===`",
               exprLoc(e));
-          if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`, exprLoc(e), mixedNullableHint(e, l, r));
+          // A NULLABLE against its own BASE type. `v === "yes"` where `v: string | undefined`
+          // is ordinary TypeScript and has a right answer — a value that is absent never
+          // equals a present one, which is exactly what node computes — but it was refused
+          // (`Cannot compare ?Ustring with string`) because the two spellings are not equal
+          // strings. The pair of NULLABLES above stays refused: there the tags really do
+          // decide, and comparing two boxes would answer PRESENCE rather than value.
+          //
+          // Codegen unboxes and ANDs with presence, branch-free (`genEq`'s nullable arm).
+          if (isNullableTy(l) !== isNullableTy(r) && baseTy(l) === baseTy(r)) return "boolean";
+          // No hint: the ONE mismatch that had actionable advice — a nullable against its own
+          // base — is compiled now (the arm above), so `mixedNullableHint` fired on nothing
+          // and was removed with this call. What reaches here is an unrelated pair
+          // (`string` vs `number`), where there is no rewrite to suggest.
+          if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`, exprLoc(e));
           return "boolean";
         }
         if (BITWISE.has(e.op)) {
@@ -9431,49 +9444,6 @@ function refuseUnboxedUnion(ty: Ty, what: string): void {
   );
 }
 
-/**
- * The advice for `T === T | undefined` — one raw value, one tagged box.
- *
- * `Cannot compare string with ?Ustring` arrived with no `= help:` line at all, and this
- * is a shape people write on purpose: comparing a value against an optional one is
- * ordinary, correct JavaScript. The refusal itself is the same one the TWO-nullable case
- * carries (a `[tag, value]` block and a raw value share no bit pattern, and the FCMP
- * chain's fall-through would `strcmp` across the tag), and that case has always named the
- * rewrite. This is the same sentence for the other arity.
- *
- * THE REWRITE IS EXACT, not merely compilable, which is why it can be stated flatly. An
- * absent value never equals a present one, so under node `a === b` is `false` on exactly
- * the paths where `b` is absent — which is what `b !== undefined && a === b` evaluates
- * to. The `!==` spelling is its De Morgan dual and is exact for the same reason. Both are
- * compiled against node in test/narrowing.test.ts, present arm and absent arm.
- *
- * The `??` alternative is offered with its condition attached rather than bare: it is
- * only equivalent for a default the other side can never itself be, and `(b ?? "")`
- * against an `a` that may be `""` is a wrong answer, not a rewrite.
- *
- * `undefined` WHERE THERE IS NOTHING TRUE TO SAY. Comparing a `string` with a `number` is
- * a plain type error with no rewrite behind it, and this returns nothing for it rather
- * than inventing one — the predicate is "the other side is exactly this nullable's own
- * base type", so `?Ustring` against `number` gets no advice either.
- */
-function mixedNullableHint(e: BinaryExpr, l: Ty, r: Ty): string | undefined {
-  const leftNullable = isNullableTy(l) && !isNullableTy(r) && baseTy(l) === r;
-  const rightNullable = isNullableTy(r) && !isNullableTy(l) && baseTy(r) === l;
-  if (!leftNullable && !rightNullable) return undefined;
-  const box = leftNullable ? l : r;
-  const kind = nullishKind(box);
-  // The comparison keeps the operands in the order the author wrote them, so the
-  // suggestion can be pasted over the line it is about.
-  const boxText = (leftNullable ? exprText(e.left) : exprText(e.right)) ?? "b";
-  const leftText = exprText(e.left) ?? "a";
-  const cmp = `${leftText} ${e.op} ${exprText(e.right) ?? "b"}`;
-  const negated = e.op === "!==" || e.op === "!=";
-  const rewrite = negated ? `${boxText} === ${kind} || ${cmp}` : `${boxText} !== ${kind} && ${cmp}`;
-  return `a \`${box}\` is a tagged box and a \`${baseTy(box)}\` is the raw value, so there is no bit ` +
-    `pattern they share. Narrow the nullable side first — \`${rewrite}\` — which is EXACTLY node's ` +
-    `answer here, because a value that is \`${kind}\` can never equal a present one. (A default works ` +
-    `too, \`${leftText} ${e.op} (${boxText} ?? d)\`, but only for a \`d\` the other side can never be.)`;
-}
 
 /**
  * Refuse the two `JSON.stringify` shapes an `undefined` arm cannot express here.

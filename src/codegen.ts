@@ -3802,6 +3802,59 @@ class FnGen {
           }
           const l = this.genExpr(e.left);
           const r = this.genExpr(e.right);
+          // A NULLABLE against its own BASE type — `v === "yes"` where `v: string |
+          // undefined`. Node's answer is "absent never equals present", so this is
+          // `present && (unboxed == other)`.
+          //
+          // BRANCH-FREE, with `select` and never `phi`: `verifyBlockLabels` refuses `phi`
+          // outright, so the comparison is evaluated unconditionally and masked by
+          // presence. That is why the pointer arm SELECTS the other operand when the box is
+          // absent rather than unboxing slot 1 — an absent box carries 0 there, and
+          // `js_str_eq` would be handed a null pointer on a path that executes every time.
+          // The `and` below discards the result of that compare, but the CALL still happens.
+          {
+            const lNull = isNullableTy(lt), rNull = isNullableTy(e.right.ty ?? "number");
+            if (lNull !== rNull) {
+              const box = lNull ? l : r;
+              const other = lNull ? r : l;
+              const base = baseTy(lNull ? lt : (e.right.ty ?? "number"));
+              const absent = this.isNullish(box.v);
+              const raw = this.nullVal(box.v);
+              const cmp = this.fresh();
+              if (base === "number") {
+                const d = this.fresh();
+                this.emit(`${d} = bitcast i64 ${raw} to double`);
+                this.emit(`${cmp} = fcmp oeq double ${d}, ${other.v}`);
+              } else if (base === "boolean") {
+                const b = this.fresh();
+                this.emit(`${b} = trunc i64 ${raw} to i1`);
+                this.emit(`${cmp} = icmp eq i1 ${b}, ${other.v}`);
+              } else if (base === "string") {
+                const p0 = this.fresh();
+                this.emit(`${p0} = inttoptr i64 ${raw} to ptr`);
+                const safe = this.fresh();
+                this.emit(`${safe} = select i1 ${absent}, ptr ${other.v}, ptr ${p0}`);
+                const eq = this.fresh();
+                this.emit(`${eq} = call i32 @js_str_eq(ptr ${safe}, ptr ${other.v})`);
+                this.emit(`${cmp} = icmp ne i32 ${eq}, 0`);
+              } else if (llvmTy(base) === "ptr") {
+                // Arrays/objects/Map/Set compare by REFERENCE, as `===` does elsewhere here.
+                const p0 = this.fresh();
+                this.emit(`${p0} = inttoptr i64 ${raw} to ptr`);
+                this.emit(`${cmp} = icmp eq ptr ${p0}, ${other.v}`);
+              } else {
+                throw internalError(`\`${op}\` between \`${lt}\` and \`${e.right.ty ?? "?"}\`: no unboxing arm for base type \`${base}\` (representation \`${llvmTy(base)}\`)`);
+              }
+              const present = this.fresh();
+              this.emit(`${present} = xor i1 ${absent}, true`);
+              const both = this.fresh();
+              this.emit(`${both} = and i1 ${present}, ${cmp}`);
+              if (op === "===" || op === "==") return { v: both, ty: "boolean" };
+              const ne2 = this.fresh();
+              this.emit(`${ne2} = xor i1 ${both}, true`);
+              return { v: ne2, ty: "boolean" };
+            }
+          }
           // Unit types, BEFORE a register is allocated: every value of `undefined` is THE
           // undefined and every value of `null` is THE null, so equality is a CONSTANT —
           // node's `null === null` is `true`. (The checker already refused the mixed pair,

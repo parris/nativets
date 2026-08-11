@@ -142,6 +142,73 @@ if (x !== undefined) {
   });
 });
 
+/*
+ * COMPARING A NULLABLE TO A PLAIN VALUE — `v === "yes"` where `v: string | undefined`.
+ *
+ * This was refused (`Cannot compare ?Ustring with string`) with an accurate hint telling
+ * the reader to narrow first. The hint's rewrite works, but the refusal cost ordinary
+ * TypeScript: a value that is `undefined` simply never equals a present one, which is
+ * exactly what node computes, so there is a right answer to give.
+ *
+ * Lowered BRANCH-FREE (`select`, never `phi` — `verifyBlockLabels` refuses `phi`
+ * outright): presence and the unboxed comparison are ANDed. The absent case still feeds a
+ * VALID pointer into `js_str_eq` rather than the box's zero slot, because the compare is
+ * evaluated unconditionally in straight-line code.
+ */
+describe("narrowing 6 — a nullable compared against a plain value", () => {
+  test("string | undefined vs a string literal, both present and absent", async () => {
+    await expectNode(`function pick(b: boolean): string | undefined { return b ? "yes" : undefined; }
+const v = pick(true);
+console.log(v === "yes", v === "no", v !== "yes");
+const w = pick(false);
+console.log(w === "yes", w !== "yes");
+`);
+  });
+
+  test("number | undefined vs a number, including the -0/NaN pairs", async () => {
+    await expectNode(`function pick(b: boolean): number | undefined { return b ? 0 : undefined; }
+const v = pick(true);
+console.log(v === 0, v === -0, v === 1);
+const w = pick(false);
+console.log(w === 0, w !== 0);
+const n = pick(true);
+console.log(n === NaN);
+`);
+  });
+
+  test("null-flavoured too, and the operand order does not matter", async () => {
+    await expectNode(`function pick(b: boolean): string | null { return b ? "a" : null; }
+const v = pick(true);
+console.log(v === "a", "a" === v, v === "b", "b" === v);
+const w = pick(false);
+console.log(w === "a", "a" === w);
+`);
+  });
+
+  test("boolean | undefined vs a boolean", async () => {
+    await expectNode(`function pick(b: boolean): boolean | undefined { return b ? false : undefined; }
+const v = pick(true);
+console.log(v === false, v === true);
+const w = pick(false);
+console.log(w === false, w === true);
+`);
+  });
+
+  /* The refusal that STAYS: two nullables compare PRESENCE, not values (see the arm above
+   * this one in the checker), so it is still narrowed-first-or-nothing. */
+  test("two nullables are still refused", () => {
+    expectRejected(
+      `function pick(b: boolean): string | undefined { return b ? "y" : undefined; }
+const a = pick(true);
+const b2 = pick(false);
+console.log(a === b2);
+`,
+      "NT1009",
+      "compare PRESENCE and not the values",
+    );
+  });
+});
+
 describe("narrowing 2 — a guard whose branch EXITS narrows the rest of the block", () => {
   // TypeScript: conformance/controlFlow/controlFlowIfStatement.ts (function `a`) — the
   // branch that `return`s leaves only the narrowed path for the statements below.
@@ -1013,16 +1080,17 @@ console.log((p ?? -1) === (q ?? -1));`);
    * because an absent value can never equal a present one. Both spellings are compiled
    * against node below.
    */
-  test("the MIXED comparison (`T === T | undefined`) says how to rewrite it", () => {
-    let err: unknown;
-    try {
-      sourceToIR(`const a: string = "x";\nconst b: string | undefined = "x";\nconsole.log(a === b);`);
-    } catch (e) { err = e; }
-    const text = formatDiagnostic((err as NTError).diag);
-    expect(text).toContain("NT2001");
-    expect(text).toContain("Cannot compare string with ?Ustring");
-    expect(text).toContain("= help:");            // there WAS no help line at all
-    expect(text).toContain("b !== undefined && a === b");
+  /* NOW COMPILED, NOT REFUSED — and the comment above is why it could be. It already
+   * established that the rewrite is EXACT rather than merely compilable ("an absent value
+   * can never equal a present one"), which is the whole semantics; the compiler performs
+   * it now instead of printing it. The hint assertions below became a test of advice
+   * nobody needs, so they are replaced by the differential the advice was justified by. */
+  test("the MIXED comparison (`T === T | undefined`) compiles and matches node", async () => {
+    await expectNode(`const a: string = "x";
+const b: string | undefined = ["x"].at(0);
+const c: string | undefined = ["x"].at(9);
+console.log(a === b, a === c, a !== b, a !== c);
+console.log(b === a, c === a);`);
   });
 
   test("the mixed hint's rewrite compiles and matches node — present AND absent", async () => {
@@ -1033,17 +1101,13 @@ console.log(b !== undefined && a === b, c !== undefined && a === c);
 console.log(b === undefined || a !== b, c === undefined || a !== c);`);
   });
 
-  // The `| null` base renders `null` throughout — the tag it prescribes has to be the
-  // one the box actually carries, or the line it hands back does not even compile.
-  test("the `| null` base gets the `null` spelling, and it too matches node", async () => {
-    let err: unknown;
-    try { sourceToIR(`const a: number = 1;\nconst b: number | null = 1;\nconsole.log(a !== b);`); } catch (e) { err = e; }
-    const text = formatDiagnostic((err as NTError).diag);
-    expect(text).toContain("b === null || a !== b");
-    expect(text).not.toContain("undefined");
+  // The `| null` flavour, which used to need its own `null` spelling in the hint: the box
+  // carries tag 1 rather than 0, and the presence test (`tag < 2`) covers both alike.
+  test("the `| null` base compiles too, and matches node", async () => {
     await expectNode(`const a: number = 1;
 const b: number | null = [1].at(0) ?? null;
 const c: number | null = null;
+console.log(a === b, a === c, a !== b, a !== c);
 console.log(b === null || a !== b, c === null || a !== c);`);
   });
 
