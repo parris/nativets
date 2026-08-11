@@ -700,7 +700,6 @@ const GLOBAL_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("mousePressed", { min: 0, max: 0, argTys: [], ret: "boolean" }) // left button pressed this frame
   .set("pointInRect", { min: 6, max: 6, argTys: ["number", "number", "number", "number", "number", "number"], ret: "boolean" }) // px,py,x,y,w,h
   .set("setTargetFPS", { min: 1, max: 1, argTys: ["number"], ret: "void" });
-/** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 /**
  * The builtin objects this compiler KNOWS — recognized only through their members
  * (`Math.floor`, `JSON.stringify`, `Object.keys`, `console.log`, …), never as a value.
@@ -715,6 +714,7 @@ const GLOBAL_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
  */
 const BUILTIN_NAMESPACES = new Set(["Math", "JSON", "console", "Number", "String", "Object", "Array", "Date"]);
 
+/** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 const ACTOR_BUILTINS = new Set([
   "spawn", "send", "receive", "self", "__drain",
   // v2 registry / links / monitors / trap + fault injection; v3 supervision
