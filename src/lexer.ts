@@ -163,6 +163,16 @@ function escapeChar(e: string): string {
     // this file un-self-hostable — src/*.ts has to stay inside the subset nativets
     // compiles (docs/self-hosting.md). `src/modules.ts` spells its NUL the same way.
     case "0": return String.fromCharCode(0);
+    // \b, \f and \v are spelled by CODE POINT for the same reason as the NUL above, and
+    // for a second one that is specific to them: they were MISSING from this table until
+    // 2026-08-11, so they decoded to the letters `b`/`f`/`v`. Writing the literal escape
+    // here would be read correctly by the bun-hosted stage-1 and INCORRECTLY by a
+    // nativets-compiled stage-2 built from a tree that still had the bug — the two stages
+    // would disagree, which is exactly the bootstrap fixed point this project is aiming at.
+    // A fix for a lexer defect must never be written using the construct it fixes.
+    case "b": return String.fromCharCode(8);
+    case "f": return String.fromCharCode(12);
+    case "v": return String.fromCharCode(11);
     default: return e; // an unknown escape is the character itself — `\q` is `q`
   }
 }
