@@ -66,6 +66,45 @@ describe("for-in over an object with an OPTIONAL field is refused", () => {
   });
 });
 
+describe("the refusal names the FIRST optional field, and only an optional one", () => {
+  /**
+   * WHICH field the message names is observable, and it is decided by a scan that used to
+   * be `objectFields(ot).find(…)`. That `.find` is refused when the compiler compiles
+   * itself (NT1001 — the found record would alias the array that owns it), so it is now a
+   * loop that copies out the KEY and stops at the first hit. These pin the two properties
+   * that rewrite had to preserve: FIRST wins, and a required field is never picked.
+   *
+   * The empty-key case (`{ "": T }`, where the scan's "nothing found" sentinel could
+   * collide with a real key) is not testable from source today — this parser answers
+   * `NT0001 Expected identifier` for a quoted key in a type position — which is why the
+   * scan carries a separate `found` flag rather than treating `""` as absent.
+   */
+  test("two optional fields: the first one is named", () => {
+    const r = rejectionOf(`type O = { a?: number; z?: number; b: number };\nconst o: O = { b: 2 };\nfor (const k in o) console.log(k);\n`);
+    expect(r?.code).toBe("NT1010");
+    expect(r?.message).toContain("'a'");
+    expect(r?.message).not.toContain("'z'");
+  });
+
+  test("a required field BEFORE the optional one is not named", () => {
+    const r = rejectionOf(`type O = { b: number; a?: number };\nconst o: O = { b: 2 };\nfor (const k in o) console.log(k);\n`);
+    expect(r?.code).toBe("NT1010");
+    expect(r?.message).toContain("'a'");
+    expect(r?.message).not.toContain("'b'");
+  });
+
+  test("`T | null` is NOT optional — its key is always present, so enumeration is allowed", async () => {
+    // node prints both keys: a `null` value still HAS its key. Only `| undefined` (which
+    // is how `a?:` is encoded) makes presence a runtime question.
+    const src = `type O = { a: number | null; b: number };\nconst o: O = { a: null, b: 2 };\nfor (const k in o) console.log(k);\n`;
+    expect(rejectionOf(src)).toBeNull();
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
 describe("the sibling enumerating forms are refused too", () => {
   /** All four `Object.*` enumerators read the same compile-time key list, so all four lie. */
   test.each(["values", "entries", "getOwnPropertyNames"])("Object.%s", (p) => {

@@ -515,7 +515,13 @@ class Scope {
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
     if (b) { this.hits = this.hits.add(name); return b; }
-    return this.parent?.lookup(name);
+    // `this.parent?.lookup(…)` is NT1002 — a method call on a NULLABLE receiver, which is
+    // this body's first blocker when the compiler compiles itself. Bind, narrow, call. The
+    // root scope's `parent` is `null`, and `undefined` is what `?.` would have produced
+    // there, so the two spellings agree on every input.
+    const up = this.parent;
+    if (up === null) return undefined;
+    return up.lookup(name);
   }
 }
 
@@ -1113,8 +1119,15 @@ function keyPresence(key: Expr, ot: Ty): boolean {
     );
   }
   const k = key.value;
-  const f = objectFields(ot).find((x) => x.key === k);
-  if (f !== undefined && isNullableTy(f.ty) && nullishKind(f.ty) === "undefined") {
+  // `.find` over an array of RECORDS is refused (NT1001: the result would alias its
+  // owner), and it was this body's first blocker when the compiler compiles itself. The
+  // loop copies out only the scalar this needs — the field's TYPE — so nothing is aliased.
+  // The `found` flag makes it the FIRST hit that wins, as `.find` does; a field key
+  // cannot repeat, so the two agree on every object anyway.
+  let fty: Ty | undefined;
+  let found = false;
+  for (const x of objectFields(ot)) if (!found && x.key === k) { fty = x.ty; found = true; }
+  if (fty !== undefined && isNullableTy(fty) && nullishKind(fty) === "undefined") {
     throw nyi(
       NYI.OBJECT,
       `${where} on the optional field '${k}'`,
@@ -1124,19 +1137,32 @@ function keyPresence(key: Expr, ot: Ty): boolean {
       `Note that \`${k}: T | undefined\` is encoded exactly like \`${k}?: T\` here, so it is refused too even though its key is always present in node`,
     );
   }
-  return f !== undefined || OBJECT_PROTO_KEYS.includes(k);
+  return found || OBJECT_PROTO_KEYS.includes(k);
 }
 
 function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
-  const opt = objectFields(ot).find((f) => isNullableTy(f.ty) && nullishKind(f.ty) === "undefined");
-  if (opt === undefined) return;
+  // `.find` over an array of RECORDS is refused (NT1001: the result would alias its
+  // owner), and it was this body's first blocker when the compiler compiles itself. Copy
+  // out the one scalar the message needs — the KEY — instead of holding the field. The
+  // first optional field wins, as `.find` did.
+  //
+  // A separate `found` flag, NOT `key === ""` as the sentinel. `{ "": T }` is a legal
+  // object type in TypeScript; this parser does not accept a quoted key in a type
+  // position yet (`NT0001 Expected identifier`, verified), so today the sentinel would
+  // be unreachable rather than wrong. It is spelled this way because the day that
+  // parser gap closes, the sentinel becomes a SKIPPED refusal — a `for…in` we cannot
+  // answer, compiled — and nothing about this line would look wrong at that point.
+  let key = "";
+  let found = false;
+  for (const f of objectFields(ot)) if (!found && isNullableTy(f.ty) && nullishKind(f.ty) === "undefined") { key = f.key; found = true; }
+  if (!found) return;
   throw nyi(
     forIn ? NYI.FOR_IN : NYI.OBJECT,
-    `${what} of an object with the optional field '${opt.key}'`,
+    `${what} of an object with the optional field '${key}'`,
     "a key set is decided at compile time here (from the TYPE), but node decides it per value at runtime — `{}` and " +
-    `\`{${opt.key}: …}\` share this type and have different key sets, so there is no answer to give. ` +
-    `Read the field instead (\`o.${opt.key} !== undefined\`), or make it REQUIRED and assign \`undefined\` when it is missing. ` +
-    `Note that \`${opt.key}: T | undefined\` is encoded exactly like \`${opt.key}?: T\` here, so it is refused too even though its key is always present in node`,
+    `\`{${key}: …}\` share this type and have different key sets, so there is no answer to give. ` +
+    `Read the field instead (\`o.${key} !== undefined\`), or make it REQUIRED and assign \`undefined\` when it is missing. ` +
+    `Note that \`${key}: T | undefined\` is encoded exactly like \`${key}?: T\` here, so it is refused too even though its key is always present in node`,
   );
 }
 
@@ -2940,15 +2966,33 @@ class Checker {
     const d = unionDiscriminant(u);
     if (!d) return undefined;
     const tags = unionTagValues(u).map((v) => `"${v}"`).join(" | ");
-    const p = e.properties.find((p) => !p.spread && p.key === d.key);
-    if (!p || p.value.kind !== "StringLiteral") {
+    // `.find` over the property records is refused (NT1001: the found property holds an
+    // `Expr`, so the result would alias the literal it came from), and it was this body's
+    // first blocker when the compiler compiles itself. Copy out the one scalar that is
+    // wanted — the tag STRING — and let the property itself stay owned by `e.properties`.
+    //
+    // `done` marks the FIRST property whose key is the discriminant, exactly as `.find`
+    // picked it, so a repeated key still selects the same one; `tag` stays `undefined`
+    // when that property's value is not a string literal, which is the second half of the
+    // original `!p || p.value.kind !== "StringLiteral"` test.
+    let tag: string | undefined;
+    let done = false;
+    for (const p of e.properties) {
+      // `?? false`, not `p.spread === true`: comparing an OPTIONAL boolean against
+      // `boolean` is NT2001 in the self-host subset (a nullable is a tagged box), which is
+      // the same rewrite `rejectDiscardedMutator` records for its own `?Uboolean` read.
+      if (done || (p.spread ?? false) || p.key !== d.key) continue;
+      done = true;
+      if (p.value.kind === "StringLiteral") tag = p.value.value;
+    }
+    if (tag === undefined) {
       throw typeError(
         `an object literal for ${showUnion(u)} must set '${d.key}' to one of the literals ${tags}` +
           ` — that tag is what selects the member (and, at runtime, IS the value's type)`,
       );
     }
-    const m = unionMemberFor(u, p.value.value);
-    if (!m) throw typeError(`'${d.key}: "${p.value.value}"' matches no member of ${showUnion(u)} (expected ${tags})`);
+    const m = unionMemberFor(u, tag);
+    if (!m) throw typeError(`'${d.key}: "${tag}"' matches no member of ${showUnion(u)} (expected ${tags})`);
     return m;
   }
 
@@ -8250,7 +8294,14 @@ function collectIdentsStmt(s: Stmt, out: Set<string>): void {
     case "VarDecl": for (const d of s.decls) if (d.init) collectIdents(d.init, out); return;
     case "ReturnStmt": if (s.argument) collectIdents(s.argument, out); return;
     case "ExprStmt": collectIdents(s.expr, out); return;
-    case "IfStmt": collectIdents(s.test, out); s.consequent.forEach((x) => collectIdentsStmt(x, out)); s.alternate?.forEach((x) => collectIdentsStmt(x, out)); return;
+    // `s.alternate?.forEach(…)` is NT1002 — a method call on a NULLABLE receiver, this
+    // body's first blocker when the compiler compiles itself. `if (…)` then `for…of` is
+    // the same walk: an absent `alternate` visited nothing either way.
+    case "IfStmt":
+      collectIdents(s.test, out);
+      for (const x of s.consequent) collectIdentsStmt(x, out);
+      if (s.alternate) for (const x of s.alternate) collectIdentsStmt(x, out);
+      return;
     case "WhileStmt": case "DoWhileStmt": collectIdents(s.test, out); s.body.forEach((x) => collectIdentsStmt(x, out)); return;
     case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectIdentsStmt(s.init as Stmt, out); else if (s.init) collectIdents(s.init as Expr, out); if (s.test) collectIdents(s.test, out); if (s.update) collectIdents(s.update, out); s.body.forEach((x) => collectIdentsStmt(x, out)); return;
     case "ForOfStmt": collectIdents(s.iterable, out); s.body.forEach((x) => collectIdentsStmt(x, out)); return;
