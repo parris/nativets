@@ -2177,12 +2177,15 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     // source spelling: `alphaRenameShadows` (src/checker.ts) pins those two scopes and
     // renames every deeper `const shared` to `shared.N`, so a nested shadow can no longer
     // collide with a global's name and needs no subtraction here.
+    // (Every `.add` here REBINDS: a nativets `Set` is persistent, so a discarded
+    // `shadows.add(…)` is a guaranteed no-op under this compiler's own semantics even
+    // though it works under bun — the class `test/discarded-mutator.test.ts` censuses.)
     let globalBorrows = new Set<string>();
     if (globals.size) {
-      const shadows = new Set<string>(params.map((p) => p.name));
+      let shadows = new Set<string>(params.map((p) => p.name));
       for (const s of body) {
-        if (s.kind === "VarDecl") for (const d of s.decls) shadows.add(d.name);
-        else if (s.kind === "FuncDecl") shadows.add(s.name);
+        if (s.kind === "VarDecl") for (const d of s.decls) shadows = shadows.add(d.name);
+        else if (s.kind === "FuncDecl") shadows = shadows.add(s.name);
       }
       for (const g of globals) if (!shadows.has(g)) globalBorrows = globalBorrows.add(g);
     }
@@ -2242,8 +2245,8 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   //
   // The MODULE scope is deliberately not given this set: it OWNS these bindings and is the
   // one frame that legitimately drops them.
-  const moduleGlobals = new Set<string>();
-  for (const [n, t] of checked.globals) if (isLinearTy(t)) moduleGlobals.add(n);
+  let moduleGlobals = new Set<string>();
+  for (const [n, t] of checked.globals) if (isLinearTy(t)) moduleGlobals = moduleGlobals.add(n);
 
   checked.program.endDrops = runScope(checked.program.body, []);
   for (const s of checked.program.body) {
