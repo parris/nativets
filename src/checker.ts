@@ -1910,22 +1910,33 @@ class Checker {
         this.typeofFacts(e, scope, positive === eq, out);
         // The value is non-nullish on the TRUE branch of `!==` and the FALSE branch of `===`.
         if (positive !== ne) return;
-        for (const [v, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
-          // Both operand orders narrow — TypeScript's
-          // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
-          // `exprTy`, not `(lit as { ty?: Ty }).ty` — `ty` lives at five different slots
-          // across the 30 members and the window named slot 0, `kind`, for every one of
-          // them. Compiled, this compared a kind string against "undefined"/"null", never
-          // matched, and so silently dropped EVERY nullish narrowing in the compiler.
-          //
-          // A tag test for `UndefinedLiteral`/`NullLiteral` would not do: the operand does
-          // not have to be the literal. `const u = undefined; if (x !== u)` narrows today
-          // because the read is of the recorded TYPE, not of the syntax, and TypeScript's
-          // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` is about the operand ORDER, not
-          // about it being literal. Reading the real `ty` keeps both.
-          const lt = exprTy(lit);
-          if (lt === "undefined" || lt === "null") this.addFact(v, scope, lt, out);
-        }
+        // Both operand orders narrow — TypeScript's
+        // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
+        //
+        // UNROLLED, not `for (const [v, lit] of [[e.left, e.right], [e.right, e.left]])`:
+        // a `[a, b]` for-of binding is only lowered for Map entries (NT1007), so the loop
+        // spelling refused this body when the compiler compiles itself — and it built two
+        // throwaway arrays holding the operands to say something two lines already say.
+        //
+        // `exprTy`, not `(lit as { ty?: Ty }).ty` — `ty` lives at five different slots
+        // across the 30 members and the window named slot 0, `kind`, for every one of
+        // them. Compiled, this compared a kind string against "undefined"/"null", never
+        // matched, and so silently dropped EVERY nullish narrowing in the compiler.
+        //
+        // A tag test for `UndefinedLiteral`/`NullLiteral` would not do: the operand does
+        // not have to be the literal. `const u = undefined; if (x !== u)` narrows today
+        // because the read is of the recorded TYPE, not of the syntax, and TypeScript's
+        // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` is about the operand ORDER, not
+        // about it being literal. Reading the real `ty` keeps both.
+        //
+        // The `!== undefined` guard is not redundant here even though `=== "undefined"`
+        // implies it under node: `exprTy` returns `Ty | undefined`, a TAGGED BOX, and
+        // comparing a box against the raw string it may contain is NT2001 — the refusal
+        // this compiler's own `mixedNullableHint` prescribes exactly this rewrite for.
+        const rt = exprTy(e.right);
+        if (rt !== undefined && (rt === "undefined" || rt === "null")) this.addFact(e.left, scope, rt, out);
+        const lt = exprTy(e.left);
+        if (lt !== undefined && (lt === "undefined" || lt === "null")) this.addFact(e.right, scope, lt, out);
         return;
       }
       case "LogicalExpr":
@@ -2050,15 +2061,31 @@ class Checker {
     //@@mutable
     out: NarrowFact[],
   ): void {
-    for (const [t, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
-      if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") continue;
-      const p = this.accessPath(t.operand, scope);
-      if (p === undefined || !isGeneralUnionTy(p.ty)) continue;
-      const keep = generalUnionMembers(p.ty).filter((m) => (generalUnionArmTypeof(m) === lit.value) === matched);
-      if (keep.length !== 1) continue;
-      if (out.some((f) => f.binding === p.binding && f.path === p.path)) continue;
-      out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
-    }
+    // Both operand orders, as two CALLS rather than a `[t, lit]` for-of over two throwaway
+    // pair arrays: that binding form is lowered only for Map entries (NT1007), so the loop
+    // spelling refused this body when the compiler compiles itself.
+    this.typeofFact(e.left, e.right, scope, matched, out);
+    this.typeofFact(e.right, e.left, scope, matched, out);
+  }
+
+  /** One operand ORDER of `typeofFacts` — `typeof t === lit`. Appends at most one fact. */
+  private typeofFact(
+    t: Expr,
+    lit: Expr,
+    scope: Scope,
+    matched: boolean,
+    // Marked for the reason `guardFacts` records: the obligation travels with the
+    // parameter, and that is what makes this leaf's `.push` land in `factsFor`'s array.
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
+    if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") return;
+    const p = this.accessPath(t.operand, scope);
+    if (p === undefined || !isGeneralUnionTy(p.ty)) return;
+    const keep = generalUnionMembers(p.ty).filter((m) => (generalUnionArmTypeof(m) === lit.value) === matched);
+    if (keep.length !== 1) return;
+    if (out.some((f) => f.binding === p.binding && f.path === p.path)) return;
+    out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
   }
 
   /** The narrowed type for the path `e` reads here, if a fact covers it. */
@@ -2689,10 +2716,13 @@ class Checker {
     if (test.kind !== "BinaryExpr") return undefined;
     if (test.op !== "===" && test.op !== "!==" && test.op !== "==" && test.op !== "!=") return undefined;
     const negated = test.op === "!==" || test.op === "!=";
-    for (const [a, b] of [[test.left, test.right], [test.right, test.left]] as [Expr, Expr][]) {
-      const d = this.discriminantRead(a, scope);
-      if (d && b.kind === "StringLiteral") return { ...d, tag: b.value, negated };
-    }
+    // Both operand orders, UNROLLED: a `[a, b]` for-of binding is lowered only for Map
+    // entries (NT1007), so the loop spelling refused this body when the compiler compiles
+    // itself — and the two arrays it built existed only to say "either order".
+    const dl = this.discriminantRead(test.left, scope);
+    if (dl !== undefined && test.right.kind === "StringLiteral") return { ...dl, tag: test.right.value, negated };
+    const dr = this.discriminantRead(test.right, scope);
+    if (dr !== undefined && test.left.kind === "StringLiteral") return { ...dr, tag: test.left.value, negated };
     return undefined;
   }
 
