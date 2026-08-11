@@ -511,7 +511,15 @@ function moduleOrder(
     edges.push(typeOnly);
     // A discovery parse, just for the import list: the REAL parse happens post-order
     // below, seeded with the dependencies' type exports (unknowable until then).
-    const imports = parse(src).imports ?? [];
+    //
+    // IT STILL GETS THE PATH. This parse is the FIRST to touch every non-entry module, so
+    // it is the one that raises any parse-time refusal the module holds — and without
+    // `file` every span it produced was fileless. `src/cli.ts::diagSources` skips a
+    // fileless span and `formatDiagnostic` renders it against the ENTRY source, so a
+    // refusal at lib.ts:4 printed the entry file's line 4 (`const decoy2 = 2;`) with a
+    // caret under it and never named lib.ts. `file` is not read by the import scan, so
+    // this changes nothing but where the caret points.
+    const imports = parse(src, { file: path }).imports ?? [];
     deps.set(path, imports);
     // An `import type { … }` clause (or one whose every specifier is `type`-prefixed)
     // binds no value. It is still an edge — see the refusal above — but it is a

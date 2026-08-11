@@ -939,7 +939,7 @@ class Parser {
     }
     const declaredAt = this.declaredTypeLines.get(id);
     if (declaredAt !== undefined) {
-      const used = this.toks[this.pos - 1]?.line ?? declaredAt;
+      const used = this.prevLine(declaredAt);
       this.blockedOn = id;
       // Two different failures, and the advice differs: one is fixed by moving a line,
       // the other cannot be fixed by reordering at all. Saying "declare it earlier" for a
@@ -973,12 +973,11 @@ class Parser {
     // Nothing above claimed the name, so the answer is the erasure. For an inline
     // `import("m").T` that is never acceptable — see `parseImportType`.
     if (this.erasedImportOf !== undefined) {
-      const t0 = this.toks[this.pos - 1];
       throw nyi(
         NYI.AMBIENT_TYPE,
         `the inline import type 'import("${this.erasedImportOf}").${id}'`,
         `'${id}' is not in scope in this file, and an inline import type is resolved against this file's scope — the module path is dropped, so there is nothing left to look '${id}' up in. Import it by name instead (\`import type { ${id} } from "${this.erasedImportOf}"\`) and annotate with the bare \`${id}\``,
-        t0 === undefined ? undefined : { line: t0.line, col: t0.col },
+        this.prevLoc(),
       );
     }
     return "number" as Ty;
@@ -1046,12 +1045,11 @@ class Parser {
     // sets is that over-collection may only ever PRESERVE today's behavior for a name, so a
     // `T` that is also an import binding keeps the old escape rather than gaining a refusal.
     if (this.genericParamNames.has(id) && !this.externalNames.has(id) && !this.fragmentNames.has(id)) {
-      const t0 = this.toks[this.pos - 1];
       throw nyi(
         NYI.GENERIC,
         `the type parameter '${id}' of a generic type alias`,
         `'${id}' is a type PARAMETER, and nothing in this subset substitutes the type argument for it — so the declaration would silently become its \`number\` shape for every instantiation. Write the concrete type out, or declare one alias per instantiation (\`type ArrOfString = string[]\`)`,
-        t0 === undefined ? undefined : { line: t0.line, col: t0.col },
+        this.prevLoc(),
       );
     }
     // Imported (unseeded), or stripped by a fragment-parsing caller. STILL ERASES.
@@ -1101,15 +1099,14 @@ class Parser {
       // The documented residue — see `ERASURE_STILL_ALLOWED`. Never inside an assertion,
       // which is the position where an erased type is ADOPTED instead of checked.
       if (!this.erasureIsFatal && ERASURE_STILL_ALLOWED.has(id)) return;
-      const t0 = this.toks[this.pos - 1];
       throw nyi(
         NYI.AMBIENT_TYPE,
         `the type '${id}'`,
         ambientTypeHint(id),
-        t0 === undefined ? undefined : { line: t0.line, col: t0.col },
+        this.prevLoc(),
       );
     }
-    const t = this.toks[this.pos - 1];
+    const at = this.prevLoc();
     // Declared in this file as a CLASS, and not yet parsed — the class case of the same
     // ordering problem `declaredTypeLines` handles for `type`/`interface`, and it needs its
     // own arm because classes are NOT hoisted: `parseClass` registers the instance shape
@@ -1122,11 +1119,50 @@ class Parser {
       this.blockedOn = id;
       throw nyi(
         NYI.FORWARD_TYPE,
-        `use of class type '${id}' before its declaration${t === undefined ? "" : ` (used at line ${t.line})`}`,
+        `use of class type '${id}' before its declaration${at === undefined ? "" : ` (used at line ${at.line})`}`,
         "a class is not hoisted the way `type`/`interface` is — its instance shape only exists once the class body has been parsed, so a class named in an annotation must be declared ABOVE its first use. Move the `class` declaration up; see docs/divergences.md",
       );
     }
-    throw unknownTypeName(id, t === undefined ? undefined : { line: t.line, col: t.col });
+    throw unknownTypeName(id, at);
+  }
+
+  /**
+   * The position of the token just CONSUMED (`this.pos - 1`), or undefined before the
+   * first one — the location every type-resolution refusal below points at.
+   *
+   * BOUNDS-CHECKED RATHER THAN COMPARED. The four callers each used to write
+   *
+   *     const t0 = this.toks[this.pos - 1];
+   *     …  t0 === undefined ? undefined : { line: t0.line, col: t0.col }
+   *
+   * which is correct TypeScript under `noUncheckedIndexedAccess` and NT2001 here: an index
+   * expression has the ELEMENT type in this subset, so comparing one with `undefined` has
+   * no overlap to narrow. Asking the index instead answers exactly the same question, and
+   * `this.pos - 1` is the only reachable way out — `pos` starts at 0 and never passes the
+   * `eof` token, so the guard fires only at the very start of a parse.
+   *
+   * The fields are read through the index rather than through a bound `const t`: binding
+   * one MOVES the record out of the array (NT1605), which is a second refusal the same
+   * spelling used to carry.
+   */
+  private prevLoc(): { line: number; col: number; file?: string } | undefined {
+    const i = this.pos - 1;
+    if (i < 0 || i >= this.toks.length) return undefined;
+    // `file` is carried, not omitted. A fileless span is rendered against the ENTRY
+    // source (src/cli.ts::diagSources skips it), so every one of these type-resolution
+    // refusals used to underline the wrong file's line whenever it fired in an IMPORTED
+    // module — the same defect the `delete` refusal in `parseUnary` had. It is also what
+    // makes the record fit `nyi`'s `{line,col,file?}` parameter in this subset, which has
+    // no width subtyping: `{line,col}` is a DIFFERENT type here, not a narrower one.
+    return { line: this.toks[i]!.line, col: this.toks[i]!.col, file: this.file };
+  }
+
+  /** The LINE of the token just consumed, or `fallback` before the first one — the
+   *  `this.toks[this.pos - 1]?.line ?? fallback` spelling, without the optional chain on
+   *  an index (NT1002). Identical for a real token, including line 0. */
+  private prevLine(fallback: number): number {
+    const i = this.pos - 1;
+    return i < 0 || i >= this.toks.length ? fallback : this.toks[i]!.line;
   }
 
   private peek(o = 0): Token { return this.toks[this.pos + o]!; }
@@ -3734,18 +3770,29 @@ class Parser {
           `arrays are immutable: \`delete xs[i]\` would punch a hole in place`,
           "node's array `delete` leaves a HOLE — `length` is unchanged and the slot reads `undefined` — which a dense array cannot represent. " +
           "Build a new array without the element: `xs.filter((_, i) => i !== 0)`, or `[...xs.slice(0, i), ...xs.slice(i + 1)]`",
-          kw,
+          { line: kw.line, col: kw.col, file: this.file },
         );
       }
       // NOTE (mutable records): `@@mutable` does NOT make `delete` legal. A record's
       // SHAPE is its type — fields are static slots resolved at compile time — so removing
       // a key would change the value's type mid-program, which is a different (and much
       // larger) feature than assigning a slot in place. Refused precisely instead.
+      //
+      // BOTH SPANS ARE BUILT EXPLICITLY, and the `file` on them is not cosmetic. Handing
+      // `mutationError` the raw `kw` TOKEN relied on `{type,value,line,col}` structurally
+      // fitting the `{line,col,file?}` parameter — which TypeScript allows for a variable
+      // (no excess-property check) and this compiler refuses (NT2001), and which silently
+      // left `file` undefined. `src/cli.ts::diagSources` skips a span with no file and
+      // `formatDiagnostic` then renders it against the ENTRY source, so a `delete` in an
+      // IMPORTED module underlined the entry file's line of the same number: measured, a
+      // `delete o.b` at lib.ts:4 printed `4 | const decoy2 = 2;` from main.ts, marked
+      // "mutated here", and never named lib.ts. Exactly the failure the `diagSources`
+      // comment in cli.ts records for the producers that were already fixed.
       throw mutationError(
         `objects are immutable: \`delete o.k\` would remove a key in place`,
         "a record's shape is its TYPE (fields are static slots), so a key cannot be removed at runtime even from a `@@mutable` record. " +
         "Declare the field optional (`k?: T`) and set it to `undefined`, or rebuild without the key",
-        kw,
+        { line: kw.line, col: kw.col, file: this.file },
       );
     }
     if (this.at("new")) {
@@ -3753,6 +3800,7 @@ class Parser {
       const callee = this.expectIdent();
       const typeArgs = this.at("<") ? this.parseTypeArgs() : undefined; // new Map<K,V>() / new Set<T>()
       this.eat("(");
+      //@@mutable
       const args: Expr[] = [];
       if (!this.at(")")) { args.push(this.parseAssign()); while (this.at(",")) { this.eat(","); if (this.at(")")) break; args.push(this.parseAssign()); } }
       this.eat(")");
