@@ -710,14 +710,109 @@ double js_ushr(double a, double b) { return (double)(to_uint32(a) >> (to_uint32(
 static const char *nt_ws_skip_fwd(const char *s, const char *end);
 static const char *nt_ws_skip_back(const char *start, const char *end);
 
-/* Number(string) / unary + on string, matching JS ToNumber */
+/* ---- StrDecimalLiteral — ECMA-262 7.1.4.1, the grammar `Number(string)` and
+ * `parseFloat` are both defined on. ------------------------------------------------
+ *
+ *     StrDecimalLiteral ::: [+-]opt StrUnsignedDecimalLiteral
+ *     StrUnsignedDecimalLiteral ::: Infinity
+ *                                 | DecimalDigits . DecimalDigits_opt ExponentPart_opt
+ *                                 | . DecimalDigits ExponentPart_opt
+ *                                 | DecimalDigits ExponentPart_opt
+ *
+ * `strtod` is NOT this grammar, and every place it is wider was a silent wrong answer:
+ * it accepts `inf` / `infinity` / `INFINITY` in ANY case where JS spells it exactly
+ * `Infinity` (so `Number("infinity")` handed back a finite-looking Infinity and the
+ * program kept running), and it accepts C99 hex floats, so `Number("0x1p3")` was 8
+ * where node says NaN. There is no hex form in StrDecimalLiteral at all, which is why
+ * `parseFloat("0x1f")` is 0 — it stops at the `x`.
+ *
+ * So the SHAPE is matched here and strtod is asked only for the VALUE, which is the
+ * part it is good at: correctly rounded, unlike any hand-rolled digit loop. The two
+ * ends then agree on where the literal stops in every case but one — a `0x`/`0X`
+ * prefix, which this grammar reads as the single digit `0` — and that one is answered
+ * without calling strtod at all.
+ *
+ * Returns the end of the match, or NULL when there is no StrDecimalLiteral at `s`. */
+static const char *nt_scan_decimal(const char *s, const char *limit, double *out) {
+  const char *p = s;
+  int neg = 0;
+  if (p < limit && (*p == '+' || *p == '-')) { neg = (*p == '-'); p++; }
+  if (limit - p >= 8 && memcmp(p, "Infinity", 8) == 0) {   /* exact case, no `inf` */
+    *out = neg ? -INFINITY : INFINITY;
+    return p + 8;
+  }
+  const char *ints = p;
+  while (p < limit && *p >= '0' && *p <= '9') p++;
+  int has_int = p > ints, has_frac = 0;
+  if (p < limit && *p == '.') {
+    const char *frac = ++p;
+    while (p < limit && *p >= '0' && *p <= '9') p++;
+    has_frac = p > frac;
+  }
+  if (!has_int && !has_frac) return NULL;   /* "", ".", "+", "e5" — no mantissa */
+  if (p < limit && (*p == 'e' || *p == 'E')) {
+    const char *q = p + 1;
+    if (q < limit && (*q == '+' || *q == '-')) q++;
+    const char *dig = q;
+    while (q < limit && *q >= '0' && *q <= '9') q++;
+    if (q > dig) p = q;                     /* a digitless `e` is simply not part of it */
+  }
+  /* The only place strtod would run PAST us: the match is exactly `0` and a hex float
+   * starts here. In this grammar that is the digit zero and the `x` is where it ends. */
+  if (p == ints + 1 && *ints == '0' && p < limit && (*p == 'x' || *p == 'X')) {
+    *out = neg ? -0.0 : 0.0;
+    return p;
+  }
+  *out = strtod(s, NULL);
+  return p;
+}
+
+/* NonDecimalIntegerLiteral — the `0b` / `0o` / `0x` prefixes. ES2015 added the first
+ * two to StringNumericLiteral; this runtime knew only `0x`, so `Number("0b101")` was
+ * NaN. A SIGN is not part of this production, which the old code also got wrong in the
+ * loud-to-silent direction: `Number("-0x10")` answered -16 where node says NaN.
+ *
+ * The digits fold into a 64-bit significand with a sticky low bit, scaled once by
+ * ldexp. Every radix here is a power of two, so that is a single rounding and a
+ * 300-digit hex string is as correctly rounded as a short one; `v = v * radix + d` in
+ * double would round at every step. Returns the end of the match, or NULL. */
+static const char *nt_scan_nondecimal(const char *s, const char *limit, double *out) {
+  int bits;
+  if (limit - s < 3 || s[0] != '0') return NULL;
+  switch (s[1]) {
+    case 'b': case 'B': bits = 1; break;
+    case 'o': case 'O': bits = 3; break;
+    case 'x': case 'X': bits = 4; break;
+    default: return NULL;
+  }
+  const char *p = s + 2, *first = p;
+  uint64_t mant = 0;
+  int shift = 0;                            /* bit places dropped below `mant` */
+  for (; p < limit; p++) {
+    unsigned c = (unsigned char)*p, v;
+    if (c >= '0' && c <= '9') v = c - '0';
+    else if (bits == 4 && c >= 'a' && c <= 'f') v = c - 'a' + 10;
+    else if (bits == 4 && c >= 'A' && c <= 'F') v = c - 'A' + 10;
+    else break;
+    if (v >= (1u << bits)) break;           /* `8` in an octal literal, `2` in a binary one */
+    if (mant >> (64 - bits)) { shift += bits; if (v) mant |= 1; }  /* full: sticky only */
+    else mant = (mant << bits) | v;
+  }
+  if (p == first) return NULL;              /* `0x` with no digits after it */
+  *out = ldexp((double)mant, shift);
+  return p;
+}
+
+/* Number(string) / unary + on string — ToNumber applied to StringNumericLiteral:
+ * StrWhiteSpace on both sides, empty (or blank) is 0, and ANY trailing garbage is NaN. */
 double js_str_to_num(const char *s) {
   const char *end = s + nt_strlen(s);
   const char *p = nt_ws_skip_fwd(s, end);
   end = nt_ws_skip_back(p, end);
-  if (p == end) return 0.0;
-  char *q;
-  double v = strtod(p, &q);
+  if (p == end) return 0.0;                 /* StrWhiteSpace only */
+  double v;
+  const char *q = nt_scan_nondecimal(p, end, &v);
+  if (q == NULL) q = nt_scan_decimal(p, end, &v);
   return q == end ? v : NAN;
 }
 
@@ -779,11 +874,14 @@ double js_parse_int(const char *s, double radixd) {
   if (end == s) return NAN;
   return (double)(sign * v);
 }
+/* parseFloat is the LONGEST-PREFIX read of the same StrDecimalLiteral: trailing garbage
+ * is ignored rather than fatal, and the `0b`/`0o`/`0x` prefixes are NOT in this grammar
+ * (that is Number's extra production alone), so `parseFloat("0x1f")` is 0, not 31. */
 double js_parse_float(const char *s) {
-  while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-  char *end;
-  double v = strtod(s, &end);
-  return end == s ? NAN : v;
+  const char *end = s + nt_strlen(s);
+  const char *p = nt_ws_skip_fwd(s, end);
+  double v;
+  return nt_scan_decimal(p, end, &v) ? v : NAN;
 }
 
 /* ---- string methods (byte-oriented; ASCII-correct) ---- */
