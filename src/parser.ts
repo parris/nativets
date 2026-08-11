@@ -764,6 +764,7 @@ class Parser {
     let resolved = new Map<string, Ty>();
     let pending = names;
     while (pending.length) {
+      //@@mutable
       const deferred: string[] = [];
       let why = new Map<string, string>(); // residual member -> the error it stalled with
       for (const name of pending) {
@@ -1794,7 +1795,10 @@ class Parser {
     this.erasureIsFatal = false;
     try { return this.parseObjectTypeFields(fields); } finally { this.erasureIsFatal = fatal; }
   }
-  private parseObjectTypeFields(fields: string[]): Ty {
+  private parseObjectTypeFields(
+    //@@mutable
+    fields: string[],
+  ): Ty {
     if (!this.at("}")) {
       do {
         if (this.at("}")) break; // tolerate a trailing `,`/`;` separator (interface bodies)
@@ -2465,6 +2469,7 @@ class Parser {
     this.eat("]"); this.eat("=");
     const init = this.parseAssign();
     const tmp = this.freshTmp();
+    //@@mutable
     const decls: Declarator[] = [{ name: tmp, init }];
     elems.forEach((el, i) => {
       if (el.name === null) return; // elision hole — no binding
@@ -2966,6 +2971,7 @@ class Parser {
     if (selfRecursive) this.recTypes = this.recTypes.set(name, objTy);
     this.typeAliases = this.typeAliases.set(name, objTy); // uses of `name` as a type resolve to the instance shape
     const thisParam: Param = { name: "this", annot: objTy };
+    //@@mutable
     let emitted: FuncDecl[] = [];
     /** `const __dec_C_m = w(…)` statements — the ONE-TIME decorator applications. */
     let decorators: Stmt[] = [];
@@ -3037,7 +3043,14 @@ class Parser {
    * signature with the receiver as the first parameter. Stacked decorators apply
    * BOTTOM-UP, exactly like Python: `@a @b m` ≡ `a(b(m))`.
    */
-  private applyWrappers(fn: FuncDecl, wrappers: string[], emitted: FuncDecl[], decorators: Stmt[]): void {
+  private applyWrappers(
+    fn: FuncDecl,
+    wrappers: string[],
+    //@@mutable
+    emitted: FuncDecl[],
+    //@@mutable
+    decorators: Stmt[],
+  ): void {
     const label = fn.name.replace(".", "::");
     if (fn.returnAnnot === undefined) {
       throw decoratorError(
@@ -3245,6 +3258,7 @@ class Parser {
       const rhs = this.parseAssign();
       this.eat(";");
       const tmp = this.freshTmp();
+      //@@mutable
       const stmts: Stmt[] = [{ kind: "VarDecl", declKind: "const", decls: [{ name: tmp, init: rhs }] }];
       pattern.elements.forEach((el, i) => {
         if (el.kind !== "Identifier") throw parseError("array assignment pattern must be identifiers");
@@ -3933,6 +3947,7 @@ class Parser {
   private buildTemplate(raw: string, tok: Token): Expr {
     //@@mutable
     const quasis: string[] = [];
+    //@@mutable
     const exprs: Expr[] = [];
     const nul = String.fromCharCode(0);
     let cur = "";
