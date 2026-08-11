@@ -290,7 +290,7 @@ function scanEscaping(program: Program, usesActors: boolean): Set<string> {
 
   // ---- judge. `dead[i]` is "seed function i is NOT provably escaping".
   //@@mutable
-  const dead: boolean[] = names.map(() => false);
+  const dead: boolean[] = names.map((_n) => false);
   for (let i = 0; i < names.length; i++) {
     const name = names[i]!;
     // A method is a top-level `Class.m` whose call sites name only `m`, so it answers to
@@ -793,6 +793,56 @@ interface Val { v: string; ty: Ty; }
 interface StrTemp { v: string; fresh: boolean; }
 
 /**
+ * One live `try`'s finalizer, and the abrupt exits parked on it.
+ *
+ * A finalizer is entered by BRANCH from every path that leaves the `try`, and a slot
+ * says which path that was: 0 = fell out the bottom, 1 = a `return` is pending, and one
+ * fresh id per `break`/`continue` that crosses this finalizer on its way somewhere else.
+ * The dispatch at the end of the finalizer reads the slot back and resumes the pending
+ * completion — that is the whole mechanism, and `break`/`continue` simply had no ids in
+ * it, so they branched around the finalizer instead of through it.
+ *
+ * `scopeDepth` is `blockScopes.length` at the `try` itself, i.e. NOT counting the try
+ * block's own scope. Everything at or above it is inside the `try` and is dropped BEFORE
+ * the finalizer runs; everything below is outside and is dropped after, on the way to
+ * the next finalizer out or to the jump's real target.
+ */
+interface FinallyFrame {
+  /** Identity, so a pending exit can name the frame it is parked on WITHOUT the frame
+   *  holding the list. The list lives on the emitter (`jumpExits`) for a reason the
+   *  self-host subset dictates: `frame.exits.push(…)` mutates an array reached through a
+   *  parameter, which the checker refuses (NT1606) — `this.jumpExits.push(…)` mutates a
+   *  field of the `@@mutable` emitter, which it allows. `src/` stays inside the subset it
+   *  compiles, so the side table is the shape, not the aggregate. */
+  id: number;
+  finallyLbl: string;
+  modeSlot: string;
+  retSlot: string | null;
+  scopeDepth: number;
+}
+
+/**
+ * A `break`/`continue` that is mid-flight through `chain[idx]`'s finalizer.
+ *
+ * It has to be a RECORD rather than a callback because the resume code is emitted long
+ * after the jump: the finalizer's dispatch is written when the `TryStmt` finishes, by
+ * which time `blockScopes` has popped every scope the jump still owes drops for. So the
+ * scope drop sets are SNAPSHOT at the jump (`scopes`, absolute indices), and the chain of
+ * finalizers still to run is captured with it.
+ */
+interface PendingExit {
+  /** The `FinallyFrame.id` this exit is parked on — `chain[idx]`'s, always. */
+  frameId: number;
+  mode: number;
+  scopes: string[][];
+  chain: FinallyFrame[];
+  /** Index into `chain` of the finalizer this exit is currently parked on. */
+  idx: number;
+  targetLbl: string;
+  targetDepth: number;
+}
+
+/**
  * Does lowering THIS expression to a `string` allocate a fresh heap string that nothing
  * else can already own?
  *
@@ -1148,8 +1198,13 @@ class FnGen {
    * from the enclosing loop — so a `continue` inside a switch inside a loop leaves the
    * case's scope AND the loop body's, while a `break` at the same spot leaves only the
    * case's. One depth would fix one of them and leave the other leaking.
+   *
+   * `brkFin`/`contFin` are the same idea one stack over: the `finallyStack` DEPTH the
+   * target sits at. A jump crosses every finalizer above that mark and has to RUN each
+   * one on the way out (node does), and it inherits the switch's split for exactly the
+   * reason the scope depths do — `break` stops at the switch, `continue` does not.
    */
-  private loops: { brk: string; cont: string; brkDepth: number; contDepth: number }[] = [];
+  private loops: { brk: string; cont: string; brkDepth: number; contDepth: number; brkFin: number; contFin: number }[] = [];
   /**
    * The stack of live block scopes' drop sets — `blockScopes[i]` is the `BlockDrops`
    * names of the i-th enclosing statement list (empty when that list has no marker).
@@ -1195,7 +1250,28 @@ class FnGen {
     return n > 0 ? this.tryHandlers[n - 1]! : null;
   }
   /** Active finally blocks (a `return` inside runs finally first, mode=1). */
-  private finallyStack: { finallyLbl: string; modeSlot: string; retSlot: string | null }[] = [];
+  private finallyStack: FinallyFrame[] = [];
+  /**
+   * Next free finalizer dispatch mode. 0 and 1 are reserved (fall-through, `return`), so
+   * jump ids start at 2 and one jump burns one id PER finalizer it crosses — the resume
+   * block after finalizer N stores a fresh id into finalizer N-1's slot before branching
+   * on. Per function: `reset` puts it back, and the slots are per-`try` allocas anyway.
+   */
+  private jumpMode = 2;
+  /**
+   * The innermost live finalizer, or null when nothing encloses. Spelled as a length
+   * test for the reason `innermostHandler` is: an EMPTY stack is the ordinary case, and
+   * `xs[xs.length - 1]` forms index -1 there, which node answers `undefined` and nativets
+   * PANICS on (test/no-index-last.test.ts). One helper so the call sites cannot drift.
+   */
+  private innermostFinally(): FinallyFrame | null {
+    const n = this.finallyStack.length;
+    return n > 0 ? this.finallyStack[n - 1]! : null;
+  }
+  /** Abrupt exits parked on a live finalizer, keyed by `FinallyFrame.id`. */
+  private jumpExits: PendingExit[] = [];
+  /** Next `FinallyFrame.id`. */
+  private finId = 0;
   /**
    * True while emitting `main`. `retTy` is "number" there (top-level expressions are typed
    * like any others), but the FUNCTION returns `i32` — so any `ret` emitted from a generic
@@ -1320,6 +1396,9 @@ class FnGen {
     this.captures = new Map();
     this.tryHandlers = [];
     this.finallyStack = [];
+    this.jumpMode = 2;
+    this.jumpExits = [];
+    this.finId = 0;
     this.hofReturnStack = [];
     this.strLocals = new Set();
     this.frameLocals = new Set();
@@ -1393,6 +1472,76 @@ class FnGen {
    */
   private emitJumpDrops(depth: number): void {
     for (let i = this.blockScopes.length - 1; i >= depth; i--) this.emitDrops(this.blockScopes[i] ?? []);
+  }
+
+  /** Drops for the snapshot scopes `[low, high)`, innermost first — the segment of a
+   *  jump's unwind that lies between two finalizers, replayed from the snapshot because
+   *  `blockScopes` has long since popped it by the time the resume block is emitted. */
+  private emitSnapshotDrops(scopes: string[][], high: number, low: number): void {
+    for (let i = high - 1; i >= low; i--) this.emitDrops(scopes[i] ?? []);
+  }
+
+  /**
+   * Lower a `break`/`continue`: unwind to `targetDepth` and branch to `targetLbl`, RUNNING
+   * every finalizer between here and `targetFin` on the way, innermost first.
+   *
+   * With nothing crossed this is the plain branch it always was. With one or more `try`s
+   * crossed the jump cannot branch to its target at all — it has to reach the innermost
+   * finalizer, let it run, and be resumed by its dispatch, which may in turn hand it to
+   * the next finalizer out. So the jump stores an id and parks a `PendingExit`; the
+   * `TryStmt` case pays it off when it writes the dispatch.
+   *
+   * The drops INTERLEAVE with the finalizers rather than all happening first, which is
+   * the property that makes this compose with the block-scope unwinding beside it: a
+   * local declared inside the `try` is still live while that `try`'s finalizer runs, and
+   * a local declared outside it is not freed until the finalizer is done.
+   */
+  private emitJump(targetDepth: number, targetFin: number, targetLbl: string): void {
+    const nCross = this.finallyStack.length - targetFin;
+    if (nCross <= 0) {
+      this.emitJumpDrops(targetDepth);
+      this.terminate(`br label %${targetLbl}`);
+      return;
+    }
+    // Snapshot, because the resume blocks are emitted after these scopes have popped.
+    const scopes = this.blockScopes.map((names) => names);
+    const chain = this.finallyStack.slice(targetFin); // outermost .. innermost
+    const inner = chain[nCross - 1]!;
+    this.emitSnapshotDrops(scopes, scopes.length, inner.scopeDepth);
+    this.enterFinally(scopes, chain, nCross - 1, targetLbl, targetDepth);
+  }
+
+  /** Store a fresh dispatch id into `chain[idx]`'s mode slot, park the exit on it under
+   *  that id, and branch into the finalizer. The id is minted here so the jump site and
+   *  every resume block after it share one spelling of "hand this exit to that one". */
+  private enterFinally(scopes: string[][], chain: FinallyFrame[], idx: number, targetLbl: string, targetDepth: number): void {
+    const f = chain[idx]!;
+    const mode = this.jumpMode++;
+    this.emit(`store double ${llvmDouble(mode)}, ptr ${f.modeSlot}`);
+    this.jumpExits.push({ frameId: f.id, mode, scopes, chain, idx, targetLbl, targetDepth });
+    this.terminate(`br label %${f.finallyLbl}`);
+  }
+
+  /** The exits parked on `f`, in the order they were parked — the order the dispatch
+   *  tests them in, which keeps the emitted IR deterministic. */
+  private exitsOn(f: FinallyFrame): PendingExit[] {
+    return this.jumpExits.filter((ex) => ex.frameId === f.id);
+  }
+
+  /** The resume block for one pending exit, emitted after its finalizer's body: finish
+   *  the segment of unwinding this finalizer was blocking, then either hand the exit to
+   *  the next finalizer out or land on the jump's real target. */
+  private emitResume(ex: PendingExit): void {
+    const here = ex.chain[ex.idx]!.scopeDepth;
+    const next = ex.idx - 1;
+    if (next >= 0) {
+      const outer = ex.chain[next]!;
+      this.emitSnapshotDrops(ex.scopes, here, outer.scopeDepth);
+      this.enterFinally(ex.scopes, ex.chain, next, ex.targetLbl, ex.targetDepth);
+      return;
+    }
+    this.emitSnapshotDrops(ex.scopes, here, ex.targetDepth);
+    this.terminate(`br label %${ex.targetLbl}`);
   }
 
   /** Emit deterministic drops (RAII frees) for owned linear locals. */
@@ -1547,9 +1696,15 @@ class FnGen {
     return null;
   }
 
-  /** Emit the frees `argTempFree` selected, once the call has returned. */
-  private emitArgTempFrees(frees: [string, string][]): void {
-    for (const [free, v] of frees) this.emit(`call void @${free}(ptr ${v})`);
+  /** Emit the frees `argTempFree` selected, once the call has returned.
+   *
+   *  A RECORD per entry, not a `[string, string]` tuple. The tuple read back as
+   *  `string[][]`, so the destructuring `for (const [free, v] of frees)` was NT1007
+   *  ("only Map entries are supported") — a self-host blocker — and the two fields were
+   *  positional at four push sites, where nothing marked which string was the free
+   *  function and which was the pointer. */
+  private emitArgTempFrees(frees: { free: string; v: string }[]): void {
+    for (const f of frees) this.emit(`call void @${f.free}(ptr ${f.v})`);
   }
 
   /** The CLASS-INSTANCE half of the rule above — `new P(7).get()`, which leaked 200
@@ -1799,7 +1954,10 @@ class FnGen {
     out.push(`  br label %${this.blocks[firstBlock]!.label}`);
     for (const b of this.blocks) {
       out.push(`${b.label}:`);
-      out.push(...b.lines);
+      // A loop, not `out.push(...b.lines)`. The spread is NT1006 (a self-host blocker),
+      // and spreading into a variadic call passes one ARGUMENT per line — a block with
+      // enough lines overflows the call stack in the bun-hosted stage-0 too.
+      for (const line of b.lines) out.push(line);
     }
     out.push("}");
     return out.join("\n");
@@ -1846,9 +2004,10 @@ class FnGen {
           this.terminate(`br label %${h.done}`);
           return;
         }
-        if (this.finallyStack.length > 0) {
+        const fin = this.innermostFinally();
+        if (fin !== null) {
           // return inside a try/catch with a finally: stash value, run finally (mode=1)
-          const f = this.finallyStack[this.finallyStack.length - 1]!;
+          const f = fin;
           // Coerced to the DECLARED return type, exactly as the ordinary return path
           // below is. Without this the stash STORED the raw value under the declared
           // type's LLVM type: `function g(): string | boolean { try { return "hi" } finally {…} }`
@@ -1918,7 +2077,7 @@ class FnGen {
         // Both depths are the CURRENT one: the body's own scope is pushed by the
         // `genStmts` below, so a jump inside the body unwinds it and every block nested
         // in it. A real loop is the one place `break` and `continue` agree (see `loops`).
-        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
@@ -1944,7 +2103,7 @@ class FnGen {
           this.terminate(`br label %${bodyLbl}`);
         }
         this.to(this.block(bodyLbl));
-        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -1963,7 +2122,7 @@ class FnGen {
         // Both depths are the CURRENT one: the body's own scope is pushed by the
         // `genStmts` below, so a jump inside the body unwinds it and every block nested
         // in it. A real loop is the one place `break` and `continue` agree (see `loops`).
-        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
@@ -2022,7 +2181,7 @@ class FnGen {
             this.emit(`store ${llvmTy(vt)} ${this.fromSlot(vs, vt)}, ptr ${this.addr(s.name2!)}`);
           }
         }
-        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -2053,7 +2212,11 @@ class FnGen {
       case "SwitchStmt": {
         const disc = this.genExpr(s.discriminant);
         const endLbl = this.label("endsw");
-        const bodyLbls = s.cases.map(() => this.label("case"));
+        // `_c` is spelled rather than omitted: a callback's parameters bind POSITIONALLY,
+        // so a 0-parameter `.map` callback is an arity mismatch the checker refuses — one
+        // of codegen.ts's self-host blockers. One label per case, none of them derived
+        // from the case itself.
+        const bodyLbls = s.cases.map((_c) => this.label("case"));
         const defaultIdx = s.cases.findIndex((c) => c.test === null);
         // A `switch` is a `break` target but NOT a `continue` target: a `continue` inside
         // one belongs to the enclosing loop, so its label AND its unwind depth are both
@@ -2063,7 +2226,8 @@ class FnGen {
         const outer = this.loops.length ? this.loops[this.loops.length - 1]! : null;
         const outerCont = outer ? outer.cont : endLbl;
         const brkDepth = this.blockScopes.length;
-        this.loops.push({ brk: endLbl, cont: outerCont, brkDepth, contDepth: outer ? outer.contDepth : brkDepth });
+        const brkFin = this.finallyStack.length;
+        this.loops.push({ brk: endLbl, cont: outerCont, brkDepth, contDepth: outer ? outer.contDepth : brkDepth, brkFin, contFin: outer ? outer.contFin : brkFin });
         // dispatch chain
         for (let i = 0; i < s.cases.length; i++) {
           const c = s.cases[i]!;
@@ -2110,7 +2274,7 @@ class FnGen {
         const slot = this.fresh();
         this.emit(`${slot} = call i64 @nt_arr_get(ptr ${arr}, double ${iB})`);
         this.emit(`store ptr ${this.fromSlot(slot, "string")}, ptr ${this.addr(s.name)}`);
-        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -2208,7 +2372,8 @@ class FnGen {
           this.emit(`store ptr null, ptr ${this.addr(s.param)}`);
         }
         this.tryHandlers.push({ catchLbl, excVar: s.param, eType, catchless: !s.handler });
-        if (hasFinally) this.finallyStack.push({ finallyLbl, modeSlot, retSlot: retSlot || null });
+        const frame: FinallyFrame = { id: this.finId++, finallyLbl, modeSlot, retSlot: retSlot || null, scopeDepth: this.blockScopes.length };
+        if (hasFinally) this.finallyStack.push(frame);
         this.genStmts(s.block);
         this.tryHandlers.pop();
         if (!this.isTerminated()) gotoFinally();
@@ -2221,15 +2386,56 @@ class FnGen {
           this.finallyStack.pop();
           this.to(this.block(finallyLbl));
           this.genStmts(s.finalizer!);
+          // A finalizer that ends TERMINATED — one that itself does a `return`, `break` or
+          // `continue` on every path — has no dispatch at all, and that is exactly right:
+          // ECMAScript's `UpdateEmpty` says the finalizer's own abrupt completion REPLACES
+          // the pending one. Verified against node, not assumed:
+          //   for (…) { try { return 7; } finally { break; } } return 9;   -> node prints 9.
+          // The pending exits parked on this frame are then simply never resumed, and the
+          // stores that named them are dead. A finalizer that jumps only on SOME path still
+          // reaches the dispatch on the others, which is the same rule falling out for free.
           if (!this.isTerminated()) {
             const m = this.fresh(); this.emit(`${m} = load double, ptr ${modeSlot}`);
+            // Jump modes first: each is one id, and a miss falls through to the next test.
+            // The load dominates every block in this chain, so the `%m` uses are legal.
+            for (const ex of this.exitsOn(frame)) {
+              const hit = this.fresh(); this.emit(`${hit} = fcmp oeq double ${m}, ${llvmDouble(ex.mode)}`);
+              const jumpLbl = this.label("finjump");
+              const nextLbl = this.label("findisp");
+              this.terminate(`br i1 ${hit}, label %${jumpLbl}, label %${nextLbl}`);
+              this.to(this.block(jumpLbl));
+              this.emitResume(ex);
+              this.to(this.block(nextLbl));
+            }
             const isRet = this.fresh(); this.emit(`${isRet} = fcmp oeq double ${m}, ${llvmDouble(1)}`);
             const retLbl = this.label("finret");
             this.terminate(`br i1 ${isRet}, label %${retLbl}, label %${endLbl}`);
             this.to(this.block(retLbl));
+            // FORWARD RATHER THAN `ret` when another finalizer still encloses this one.
+            // This block sits INSIDE the outer `try` — it is emitted while generating it —
+            // so returning from here jumped clean over the outer finalizer, which node
+            // runs. That was a live silent wrong answer with `return` and TWO finalizers,
+            // exactly the defect `break` had, and it survived because `return` was
+            // verified against a single `finally` only. So: copy the stashed value into
+            // the outer frame's slot, re-arm mode 1 there, and hand the return on. The
+            // outer dispatch repeats the test, which is what makes it a CHAIN — three
+            // deep works for the same reason two does.
+            //
+            // `finallyStack` has already popped THIS frame (just above), so the innermost
+            // entry left is precisely the next finalizer out.
+            const outerFin = this.innermostFinally();
+            if (outerFin !== null) {
+              if (retSlot && outerFin.retSlot) {
+                const fv = this.fresh();
+                this.emit(`${fv} = load ${llvmTy(this.retTy)}, ptr ${retSlot}`);
+                this.emit(`store ${llvmTy(this.retTy)} ${fv}, ptr ${outerFin.retSlot}`);
+              }
+              this.emit(`store double ${llvmDouble(1)}, ptr ${outerFin.modeSlot}`);
+              this.terminate(`br label %${outerFin.finallyLbl}`);
+            }
             // In `main` this block is unreachable (no top-level `return`), but it must still
             // type-check against `define i32 @main` — see `inMain`.
-            if (this.inMain) this.terminate("ret i32 0");
+            else if (this.inMain) this.terminate("ret i32 0");
             else if (this.retTy === "void" || !retSlot) this.terminate("ret void");
             else { const rv = this.fresh(); this.emit(`${rv} = load ${llvmTy(this.retTy)}, ptr ${retSlot}`); this.terminate(`ret ${llvmTy(this.retTy)} ${rv}`); }
           }
@@ -2257,14 +2463,12 @@ class FnGen {
         return;
       case "BreakStmt": {
         const t = this.loops[this.loops.length - 1]!;
-        this.emitJumpDrops(t.brkDepth);
-        this.terminate(`br label %${t.brk}`);
+        this.emitJump(t.brkDepth, t.brkFin, t.brk);
         return;
       }
       case "ContinueStmt": {
         const t = this.loops[this.loops.length - 1]!;
-        this.emitJumpDrops(t.contDepth);
-        this.terminate(`br label %${t.cont}`);
+        this.emitJump(t.contDepth, t.contFin, t.cont);
         return;
       }
       case "FuncDecl":
@@ -4409,7 +4613,11 @@ class FnGen {
    *  selective-receive scan calls the user predicate with a value peeked out of the
    *  mailbox, which has no Expr form. */
   private callClosureWith(clo: string, fnTy: Ty, argVs: Val[]): Val {
-    return this.callClosure(clo, fnTy, () => argVs);
+    // `_ps` is named but unused — the values are already generated, so there is nothing
+    // left to coerce. Spelling the parameter rather than passing `() => argVs` keeps this
+    // inside the subset `src/` must compile: a 0-parameter arrow where a 1-parameter one
+    // is expected is an arity mismatch the checker refuses (it was a self-host blocker).
+    return this.callClosure(clo, fnTy, (_ps) => argVs);
   }
 
   /** Shared closure-call emission. Arguments are produced by `mk` at exactly the
@@ -5666,11 +5874,57 @@ class FnGen {
 
   /** HOF loop skeleton. `setup(len)` runs in the pre-loop block (create output
    *  arrays etc. exactly once); then the cond/body blocks are set up and entered. */
-  private hofLoop(recv: Val, tag: string, setup: (len: string) => void): { idx: string; cond: string; upd: string; end: string; elem: (el: Ty, pName: string, iName: string) => string } {
-    const src = recv.v;
+  /**
+   * The receiver's length, emitted BEFORE the loop scaffolding — the value a caller that
+   * pre-sizes an output array (`.map`/`.filter`) needs, and the loop bound for everyone.
+   *
+   * It is a separate call rather than a `setup` CALLBACK that `hofLoop` invoked between
+   * the two emissions. The callback shape forced every pre-sizing caller to write its
+   * output register into a `let` in the ENCLOSING function and assign it from inside the
+   * arrow, which is a write to a captured binding — NT1031, and outside the subset `src/`
+   * must stay inside (three of `codegen.ts`'s self-host blockers were exactly this, plus
+   * two more from `() => {}` passed where `(len: string) => void` was expected). Ordering
+   * is unchanged: callers emit their pre-loop setup between `hofLen` and `hofLoop`, which
+   * is where `setup(len)` used to run, so the IR is byte-identical.
+   */
+  private hofLen(recv: Val): string {
     const len = this.fresh();
-    this.emit(`${len} = call double @nt_arr_len(ptr ${src})`);
-    setup(len); // pre-loop, runs once
+    this.emit(`${len} = call double @nt_arr_len(ptr ${recv.v})`);
+    return len;
+  }
+
+  /**
+   * Bind one iteration's element into the callback's parameter slot (and its INDEX slot,
+   * when the callback declared one), returning the element value.
+   *
+   * A METHOD taking `recv`/`idx` rather than a closure member on `hofLoop`'s result. As a
+   * member it was a function-typed FIELD, so every `L.elem(…)` was a method call on an
+   * object literal — NT1002, and outside the subset `src/` must stay inside; it was the
+   * blocker masked directly beneath the `setup` callback in all five HOF generators.
+   * `hofLoop` never called it, only handed it back, so lifting it out moves no emission.
+   */
+  private hofElem(recv: Val, idx: string, el: Ty, pName: string, iName: string): string {
+    const iB = this.fresh();
+    this.emit(`${iB} = load double, ptr ${idx}`);
+    const slot = this.fresh();
+    this.emit(`${slot} = call i64 @nt_arr_get(ptr ${recv.v}, double ${iB})`);
+    const v = this.fromSlot(slot, el);
+    this.emit(`store ${llvmTy(el)} ${v}, ptr ${this.addr(pName)}`);
+    // The INDEX parameter, when the callback declared one: the loop counter this line
+    // just loaded, copied into the callback's own slot. Re-read per iteration inside the
+    // body block rather than hoisted, so a body that ASSIGNS to `i` perturbs only its own
+    // copy and the loop keeps stepping — node's callback parameter is a fresh binding too.
+    //
+    // `""` for "no index parameter", not an optional parameter: `iName?: string` in this
+    // annotation is outside the subset `src/` must stay inside (the parser does not take
+    // `?` on a function-TYPE parameter, and the recovery reported it as `Cannot find name
+    // 'el'` — the whole tree stopped linking). Same sentinel `hofReturnStack`'s `slot`
+    // already uses two screens down.
+    if (iName !== "") this.emit(`store double ${iB}, ptr ${this.addr(iName)}`);
+    return v;
+  }
+
+  private hofLoop(recv: Val, tag: string, len: string): { idx: string; cond: string; upd: string; end: string } {
     const idx = this.slot("number");
     this.emit(`store double 0x0000000000000000, ptr ${idx}`);
     const cond = this.label(tag), body = this.label(`${tag}b`), upd = this.label(`${tag}u`), end = this.label(`${tag}e`);
@@ -5682,27 +5936,7 @@ class FnGen {
     this.emit(`${cmp} = fcmp olt double ${iC}, ${len}`);
     this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
     this.to(this.block(body));
-    const elem = (el: Ty, pName: string, iName: string): string => {
-      const iB = this.fresh();
-      this.emit(`${iB} = load double, ptr ${idx}`);
-      const slot = this.fresh();
-      this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src}, double ${iB})`);
-      const v = this.fromSlot(slot, el);
-      this.emit(`store ${llvmTy(el)} ${v}, ptr ${this.addr(pName)}`);
-      // The INDEX parameter, when the callback declared one: the loop counter this line
-      // just loaded, copied into the callback's own slot. Re-read per iteration inside the
-      // body block rather than hoisted, so a body that ASSIGNS to `i` perturbs only its own
-      // copy and the loop keeps stepping — node's callback parameter is a fresh binding too.
-      //
-      // `""` for "no index parameter", not an optional parameter: `iName?: string` in this
-      // annotation is outside the subset `src/` must stay inside (the parser does not take
-      // `?` on a function-TYPE parameter, and the recovery reported it as `Cannot find name
-      // 'el'` — the whole tree stopped linking). Same sentinel `hofReturnStack`'s `slot`
-      // already uses two screens down.
-      if (iName !== "") this.emit(`store double ${iB}, ptr ${this.addr(iName)}`);
-      return v;
-    };
-    return { idx, cond, upd, end, elem };
+    return { idx, cond, upd, end };
   }
 
   /**
@@ -5973,8 +6207,8 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    const L = this.hofLoop(recv, "each", () => {}); // no output array to build
-    L.elem(el, p, ip);
+    const L = this.hofLoop(recv, "each", this.hofLen(recv)); // no output array to build
+    this.hofElem(recv, L.idx, el, p, ip);
     if (arrow.exprBody) {
       this.genExpr(arrow.body as Expr); // evaluated for effect, exactly as an ExprStmt is
     } else {
@@ -5998,9 +6232,11 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    let out = "";
-    const L = this.hofLoop(recv, "map", (len) => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); });
-    L.elem(el, p, ip);
+    const len = this.hofLen(recv);
+    const out = this.fresh();
+    this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); // pre-sized: one element per input
+    const L = this.hofLoop(recv, "map", len);
+    this.hofElem(recv, L.idx, el, p, ip);
     const rv = this.genHofBody(arrow, R);
     this.emit(`call double @nt_arr_push(ptr ${out}, i64 ${this.toSlot(rv)})`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -6018,9 +6254,11 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    let out = "";
-    const L = this.hofLoop(recv, "fmap", () => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double 1.0)`); });
-    L.elem(el, p, ip);
+    const len = this.hofLen(recv);
+    const out = this.fresh();
+    this.emit(`${out} = call ptr @nt_arr_new(double 1.0)`); // flattened length is not known here
+    const L = this.hofLoop(recv, "fmap", len);
+    this.hofElem(recv, L.idx, el, p, ip);
     const rv = this.genHofBody(arrow, R);
     this.emit(`call void @nt_arr_extend(ptr ${out}, ptr ${rv.v})`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -6035,9 +6273,11 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    let out = "";
-    const L = this.hofLoop(recv, "flt", (len) => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); });
-    const pv = L.elem(el, p, ip);
+    const len = this.hofLen(recv);
+    const out = this.fresh();
+    this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); // pre-sized: at most one per input
+    const L = this.hofLoop(recv, "flt", len);
+    const pv = this.hofElem(recv, L.idx, el, p, ip);
     const keep = this.genHofBody(arrow, "boolean"); // boolean
     const pushLbl = this.label("fltp");
     const skipLbl = this.label("flts");
@@ -6160,8 +6400,8 @@ class FnGen {
     const ip = this.hofIndexParam(arrow, 2); // `(acc, elem, index)` — index is param TWO here
     this.emit(`store ${llvmTy(A)} ${init.v}, ptr ${this.addr(accName)}`); // pre-loop init
     this.prepHofLocals(arrow);
-    const L = this.hofLoop(recv, "red", () => {});
-    L.elem(el, xName, ip);
+    const L = this.hofLoop(recv, "red", this.hofLen(recv));
+    this.hofElem(recv, L.idx, el, xName, ip);
     const rv = this.genHofBody(arrow, A);
     this.emit(`store ${llvmTy(A)} ${rv.v}, ptr ${this.addr(accName)}`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -7137,7 +7377,7 @@ class FnGen {
       //@@mutable
       const argVals: string[] = [];
       //@@mutable
-      const frees: [string, string][] = []; // see `argTempFree`
+      const frees: { free: string; v: string }[] = []; // see `argTempFree`
       // The FIXED parameters coerce just like a non-rest call's do (see below) — this
       // path emitted them raw, so a nullable/general-union fixed parameter of a rest
       // function received an unboxed value.
@@ -7145,7 +7385,7 @@ class FnGen {
         const raw = this.argVal(i, args, preArg0, sig);
         const co = this.coerce(raw, sig.params[i]!);
         const free = this.argTempFree(i, args, preArg0, sig, raw, co);
-        if (free !== null) frees.push([free, raw.v]);
+        if (free !== null) frees.push({ free, v: raw.v });
         argVals.push(`${llvmTy(sig.params[i]!)} ${co.v}`);
       }
       const arr = this.fresh(); // pack trailing args into the rest array
@@ -7158,7 +7398,7 @@ class FnGen {
       // is NT1604), so the caller frees the header once the call returns. Shallow: the
       // ELEMENTS are the caller's own values, still owned and dropped by its own scope,
       // and freeing them here would be the double free this rule exists to avoid.
-      frees.push(["nt_arr_free", arr]);
+      frees.push({ free: "nt_arr_free", v: arr });
       const argstr = argVals.join(", ");
       if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); this.emitArgTempFrees(frees); if (raises) this.emitExcCheck(objPayload); return { v: "", ty: "void" }; }
       const t = this.fresh();
@@ -7170,7 +7410,7 @@ class FnGen {
     //@@mutable
     const argVals: string[] = [];
     //@@mutable
-    const frees: [string, string][] = []; // unbound literal temporaries, freed after the call
+    const frees: { free: string; v: string }[] = []; // unbound literal temporaries, freed after the call
     for (let i = 0; i < sig.params.length; i++) {
       // Coerced to the param type — boxing an `undefined` default into a nullable
       // optional param (`f(x?: T)`), and boxing an ARM into a general-union param
@@ -7179,7 +7419,7 @@ class FnGen {
       const raw = this.argVal(i, args, preArg0, sig);
       const co = this.coerce(raw, sig.params[i]!);
       const free = this.argTempFree(i, args, preArg0, sig, raw, co);
-      if (free !== null) frees.push([free, raw.v]);
+      if (free !== null) frees.push({ free, v: raw.v });
       argVals.push(co.v);
     }
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");

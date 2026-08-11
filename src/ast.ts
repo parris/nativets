@@ -5,7 +5,40 @@
  * fills in; codegen reads it to choose LLVM types/instructions.
  */
 
-export type ScalarTy = "number" | "boolean" | "string" | "void" | "undefined" | "null" | "Dyn";
+/**
+ * Nominal type names with no structural marker. NOT "types that are a machine scalar" —
+ * `Dyn` is a tagged heap box and `unknown` has no representation at all. What the arms
+ * share is that each is recognized by plain string equality, which is why they live in one
+ * union: `parseTypeAtom`'s `SCALARS` (src/parser.ts) is the smaller, genuinely-scalar set
+ * and deliberately holds neither of those two.
+ *
+ * `"unknown"` IS TypeScript's `unknown`, as an OPAQUE PLACEHOLDER — a type-level name with
+ * no machine representation and, in practice, no inhabitants. It is spelled as the bare
+ * word so every diagnostic that interpolates a `Ty` prints the type the programmer
+ * actually wrote. That is the whole point of it: `unknown` used to erase to `number` (see
+ * `ERASURE_STILL_ALLOWED`, src/parser.ts), so a reflective walk written `f(node: unknown)`
+ * was refused with `Cannot compare number with null` — a diagnostic naming a type its
+ * source never contains, which sends the reader to fix the wrong thing.
+ *
+ * NOTHING ELSE CLAIMS IT, and that is what makes it safe. Every structural `Ty` predicate
+ * anchors on a sigil (`{`, `U<`, `@`, `?U`/`?N`, `#`, a `[]` suffix), and the nominal ones
+ * test exact names; `"unknown"` is in no `SCALARS`, `BuiltinTy` or container set. So it
+ * falls off the end of every classifier, including `reprClass` (src/checker.ts), whose
+ * documented answer for "no opinion" is `undefined` and whose caller refuses on it.
+ * Assignability here is string equality, so ONLY another `unknown` is assignable to an
+ * `unknown` slot — which means no value ever carries the type and codegen is never reached
+ * with it.
+ *
+ * DO NOT give it a representation to "finish" it. A `Ty` that can hold a value needs a
+ * runtime tag to narrow from, and the only tagged box this compiler has is `Dyn` — not a
+ * candidate: `Dyn` refuses `d === null` and `Object.keys(d)`, ICEs on `typeof d` in value
+ * position, is not spellable in source, and could only receive an AST node by DEEP-COPYING
+ * it into a box tree, which would silently break the reference-identity sets
+ * (`Set<object>`, the `seen` cycle guards) the ownership walks depend on. That is the
+ * miscompile direction, so the placeholder stays uninhabited on purpose.
+ */
+export type ScalarTy =
+  | "number" | "boolean" | "string" | "void" | "undefined" | "null" | "Dyn" | "unknown";
 /**
  * The NOMINAL builtin types: reserved type names with no structural marker
  * (`{`/`[]`/`(`/`<`/`?`), so no structural predicate matches them and each is
@@ -2542,4 +2575,44 @@ export function mentionsThis(e: Expr): boolean {
   const out: ThisHit = { hit: false };
   thisExpr(e, out);
   return out.hit;
+}
+
+/* ---- pass 5: which fields does a constructor body store into? -------------- */
+
+/** The accumulator for `fieldsStoredViaThis`, in the shape `BoundNames`/`ThisHit` set. */
+//@@mutable
+interface StoredFields { names: Set<string> }
+
+function storedExpr(e: Expr, out: StoredFields): Expr {
+  // TRUTHINESS, not `=== true`: `viaThis` is `?Uboolean`, and comparing a nullable
+  // boolean against a plain one is outside the subset src/ must stay inside (NT2001,
+  // "Cannot compare ?Uboolean with boolean") — the spelling `parseClass`'s own
+  // `if (!p.paramProp) continue` already uses.
+  // `out.names = out.names.add(…)`, not `out.names.add(…)`: `Set` is PERSISTENT here, so
+  // the bare call returns a new set and leaves the receiver untouched (NT1606) — the same
+  // reason `BoundNames` above is written this way.
+  if (e.kind === "FieldAssign" && e.viaThis) out.names = out.names.add(e.field);
+  return walkExprChildren(e, (x: Expr): Expr => storedExpr(x, out), (s: Stmt): Stmt => storedStmt(s, out), KEEP_TY);
+}
+function storedStmt(s: Stmt, out: StoredFields): Stmt {
+  return walkStmtChildren(s, (x: Expr): Expr => storedExpr(x, out), (y: Stmt): Stmt => storedStmt(y, out), KEEP_TY);
+}
+/**
+ * Every field a constructor body stores into via `this.f = …`, ANYWHERE inside it — a pure
+ * visitor in the shape `mentionsThis` established.
+ *
+ * DELIBERATELY AN OVER-APPROXIMATION of "definitely assigned", and the caller depends on
+ * that direction. It answers a purely SYNTACTIC question ("is there such a store at all"),
+ * so a store under an `if` counts even though the else path leaves the slot unwritten. The
+ * over-approximation is the SAFE direction for the one caller (`parseClass`'s
+ * uninitialized-field refusal): erring towards "covered" can only ever accept a program,
+ * never refuse a valid one, so this cannot turn a working class into a false NT1015. The
+ * conditional-store hole it leaves is real and stated at that call site — closing it needs
+ * the flow analysis `checkDefiniteAssignment` runs for locals, which is a checker pass and
+ * not a syntactic question the parser can answer.
+ */
+export function fieldsStoredViaThis(body: Stmt[]): Set<string> {
+  const out: StoredFields = { names: new Set<string>() };
+  for (const s of body) storedStmt(s, out);
+  return out.names;
 }
