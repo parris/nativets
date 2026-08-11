@@ -585,10 +585,27 @@ Everything else about Batch 3:
   bounded residual leak, never a dangling pointer (`__strLive()` will not return to 0 in a
   program that builds URLs).
 - **`Object.freeze(o)` is the identity, and that is honest**: objects are already immutable
-  (Stage 29), so freezing changes nothing and node's contract (same object back, non-writable)
-  holds exactly; `Object.isFrozen` is therefore constant-`true`. `Object.assign`/
-  `defineProperty`/`setPrototypeOf` MUTATE their target and are refused with **`NT1606`**
-  pointing at object spread.
+  (Stage 29), so freezing changes nothing and node's contract for `freeze` itself (same object
+  back, non-writable) holds exactly. `Object.assign`/`defineProperty`/`setPrototypeOf` MUTATE
+  their target and are refused with **`NT1606`** pointing at object spread.
+
+  **`Object.isFrozen` is constant-`true`, and that DOES diverge — it is a silent wrong answer.**
+  An earlier version of this bullet stated the constant-`true` as if it followed from node's
+  contract holding. It does not: node answers `isFrozen` about *this object's* state, not about
+  whether the language permits mutation, so a never-frozen object is `false` there.
+
+  ```ts
+  const o = { a: 1 };
+  console.log(Object.isFrozen(o));         // node: false      nativets: true
+  console.log(Object.isFrozen(Object.freeze(o)));  // node: true   nativets: true
+  ```
+
+  Exit 0 on both sides, no diagnostic — so this is the project's own worst category, a
+  wrong answer that keeps running, and it is recorded here rather than left implied. The
+  post-`freeze` answer agrees; only the pre-`freeze` one is wrong. Two honest repairs exist and
+  neither is taken yet: refuse `Object.isFrozen` outright (`NT1023`, consistent with how
+  `Date#setHours` and `URL#href` are handled — it cannot be answered without a per-object frozen
+  bit we do not carry), or add that bit. Reported alongside the diagnostics defects above.
 - **`String#normalize` and `#localeCompare` are refused** (`NT1023`), not approximated:
   normalization needs the Unicode character database and collation needs ICU
   (`"a".localeCompare("B")` is `-1` in node but `+1` under any byte compare — §A on string
