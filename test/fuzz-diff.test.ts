@@ -36,7 +36,7 @@ describe("fuzz findings — arithmetic", () => {
    * Number::exponentiate says the result is NaN when the exponent is NaN, and NaN when
    * the base's magnitude is 1 and the exponent is ±Infinity. Five of eight wrong, exit 0.
    */
-  it.failing("`**` follows ECMAScript, not C pow, for NaN / ±Infinity exponents", async () => {
+  it("`**` follows ECMAScript, not C pow, for NaN / ±Infinity exponents", async () => {
     await expectSameBytes([
       "console.log(1 ** NaN);",          // node NaN, ours 1
       "console.log(1 ** Infinity);",     // node NaN, ours 1
