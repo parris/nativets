@@ -190,6 +190,28 @@ ownership pass so they stay move-aware:
 | nested block exit (`if` arm, loop body, `switch` case, `try` block) | `Stmt[].blockDrops` | a loop-body local is freed **each iteration** |
 | **reassignment** `x = …` | `AssignExpr.dropOld` | the superseded value is freed after the RHS is evaluated |
 | unbound **temporary** | emitted by codegen | a fresh array consumed as a method receiver (`xs.map(f).filter(g)`, `s.split(",").length`) is freed there |
+| **discarded statement result** | `FnGen.discardFree`, emitted by codegen | `Object.keys(o);` / `a.concat(b);` / `JSON.stringify(o);` — see below |
+
+**A discarded result is a temporary with no name at all.** `Object.keys(o);` in statement
+position allocates an array that no binding owns, so no drop set can refer to it and the
+receiver rule above never sees it (that rule frees the *receiver* of a chain, never its
+result). Codegen marks such a value at the point it is **built** (`discardFree`, carrying the
+reclaiming call) and the `ExprStmt` frees it on SSA identity.
+
+Marked at construction rather than recognised by shape, deliberately. The shape test exists —
+`freshArray` in `ast.ts` already answers "yes" for `.concat` and `.keys` — and is wrong here
+because it matches on the **method name**: its two current callers are safe only because both
+have already established that the receiver is a builtin array, and at a discard there is no
+such context. A user class with a `keys()`/`concat()` method returning a field would match it,
+and freeing that field is a use-after-free rather than a leak. Only lowerings whose freshness
+is a fact of the lowering set the mark (`Object.keys`/`values`/`entries`/`getOwnPropertyNames`,
+`Array#concat`, `JSON.stringify`); everything else stays unclaimed and keeps leaking, because a
+wrong claim is a premature free.
+
+`JSON.stringify` also releases the accumulators of its own fold (`jsonCat`): the serializer is
+a left fold of `js_str_concat`, which always allocates and copies both inputs, so every
+accumulator but the last is dead once the next concatenation has run. `{a, b}` allocated eight
+strings and returned one.
 
 **Conditional moves get a drop flag.** The move lattice tracks MAY-move (join = OR — what the
 use-after-move check reads) *and* MUST-move (join = AND). A value moved on only some paths is
