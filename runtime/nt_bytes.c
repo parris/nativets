@@ -81,15 +81,27 @@ void nt_bytes_set(NtBytes *b, double id, double v) {
  * runtime.c, which is always linked; nt_bytes.c is linked only when a program uses bytes.) */
 extern void nt_panic_bounds(const char *what, double len, double idx, const char *loc);
 
+/* Guarded copy of runtime.c's index predicate — a separate translation unit with no
+ * shared runtime header. runtime.c holds the definition of record and the reasoning:
+ * NaN, ±Inf and any FRACTION are not indices (node reads `undefined` for `u[1.5]`, it
+ * does not truncate to `u[1]`), so they are out of bounds rather than truncated. */
+#ifndef NT_IS_INDEX
+#define NT_IS_INDEX(d) (floor(d) == (d) && !isinf(d))
+#endif
+
 double nt_bytes_index(NtBytes *b, double id, const char *loc) {
   int64_t i = (int64_t)id;
-  if (!(id == id) || i < 0 || i >= b->len) nt_panic_bounds("Uint8Array index", (double)b->len, id, loc);
+  if (!NT_IS_INDEX(id) || i < 0 || i >= b->len) nt_panic_bounds("Uint8Array index", (double)b->len, id, loc);
   return (double)b->data[i];
 }
 
+/* NOTE the `what`: "Uint8Array WRITE index", not the read's "Uint8Array index". It is the
+ * key `nt_panic_bounds` composes the help line from, and the write is the one caller for
+ * which `.at()` — a READ — cannot express the operation at all. It used to share the
+ * read's string and was therefore told to "use `.at(i)`". */
 void nt_bytes_index_set(NtBytes *b, double id, double v, const char *loc) {
   int64_t i = (int64_t)id;
-  if (!(id == id) || i < 0 || i >= b->len) nt_panic_bounds("Uint8Array index", (double)b->len, id, loc);
+  if (!NT_IS_INDEX(id) || i < 0 || i >= b->len) nt_panic_bounds("Uint8Array write index", (double)b->len, id, loc);
   b->data[i] = to_uint8(v);
 }
 

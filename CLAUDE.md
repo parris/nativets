@@ -64,6 +64,12 @@ bun run compile               # -> ./nativets, self-contained binary
 - **Snapshots are not a correctness gate.** A changed IR snapshot is a prompt to
   re-verify behavior, never a failure on its own. Regenerate deliberately with
   `bun test --update-snapshots` *after* behavior is re-verified.
+  **NEVER combine `--update-snapshots` with a `-t` filter.** bun treats every
+  filtered-out snapshot as obsolete and DELETES it, while reporting success.
+  Measured: `-t "key-order" --update-snapshots` printed `393 filtered out,
+  snapshots: +1 added` and took the file from **132 exports / 49,886 lines to 1
+  export / 1,119 lines**. Regenerate the whole file and assert the export count
+  either side: `grep -c '^exports\[' test/__snapshots__/fixtures.test.ts.snap`.
 - **A green local run is not a green CI run.** Two failures have shipped that were
   invisible on macOS: LeakSanitizer only exists on Linux, and a race only lost under a
   loaded runner. Treat red CI as authoritative over a green laptop.

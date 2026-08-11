@@ -525,8 +525,10 @@ instructions, and it was 76% of that file. `git log` is the other view of the sa
   `test/harness.ts`; `test/stdlib-url/*.ts` were migrated to `new URL(…)` and now run against
   plain `runWithNode`. **`URLSearchParams`** (`url.searchParams` or standalone): `.get`
   (`string | null`, node's exact shape), `.has`, `.getAll`, `.toString`. **`Object.freeze`** is
-  the identity and honestly so — objects are already immutable (Stage 29) — with `isFrozen`
-  constant-`true` and `getOwnPropertyNames` == `keys`; **`Object.assign`/`defineProperty`/
+  the identity and honestly so — objects are already immutable (Stage 29) — with
+  `getOwnPropertyNames` == `keys`; `isFrozen` was constant-`true` here and is now REFUSED
+  (`NT1002`, with `isSealed`/`isExtensible`) because node answers it about the OBJECT, not the
+  language, so a never-frozen object is `false` there; **`Object.assign`/`defineProperty`/
   `setPrototypeOf` mutate → `NT1606`** pointing at spread. **`encodeURIComponent`/`decodeURIComponent`/
   `encodeURI`/`decodeURI`** byte-exact per ECMAScript §19.2 (malformed `%` → a catchable
   `URIError`). **Refused, never approximated — the new `NT1024`:** `String#normalize` (needs the

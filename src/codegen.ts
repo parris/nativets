@@ -1412,6 +1412,56 @@ class FnGen {
     this.emit(`call void @nt_arr_free(ptr ${recv.v})`);
   }
 
+  /**
+   * The ARGUMENT-POSITION half of the same rule — `f({a: 1})`, which leaked one object
+   * per call, without bound, in the most idiomatic shape TypeScript has. A literal
+   * written directly in an argument position has NO NAME, so no drop set can refer to
+   * it: `ownedInScope`/`ownedTopLevel` walk `this.scopes`, which hold declared locals.
+   * The caller therefore has to free it right here, the way it already frees an unbound
+   * method receiver just above.
+   *
+   * The license to free is that A PARAMETER CANNOT ESCAPE ITS CALLEE. Every route out
+   * is already NT1604 ("cannot move out of `o`: it is borrowed") — `return o`, `g = o`,
+   * `return new Box(o)`, `return [o]` are each refused today, so when the call returns
+   * nothing in the program can still be pointing at the temporary. That refusal is what
+   * this rule rests on; if a parameter ever becomes movable, this must be revisited.
+   *
+   * Four conditions, all syntactic or identity-checked, and all load-bearing:
+   *  - the argument is written as a LITERAL at the call site. A named local is the
+   *    caller's own owned binding (the drop pass frees it, and freeing here would be a
+   *    double free); a plain call may hand back a value its callee still owns.
+   *  - the parameter's type is the literal's own aggregate type, so the pointer passed
+   *    is the pointer allocated — this is what excludes `Dyn`, a general union and a
+   *    nullable, whose boxes RETAIN the literal inside a second allocation.
+   *  - `coerce` was the IDENTITY (`co.v === raw.v`). The type test above should imply
+   *    it, but this checks the actual fact rather than a prediction of it: any present
+   *    or future coercion that allocates a wrapper around the pointer fails this and the
+   *    temporary is simply left to leak, as it did before.
+   *  - argument 0 of a pre-lowered call is the RECEIVER, which the caller owns.
+   *
+   * The free is SHALLOW, like every other one here: an object-typed field's target and
+   * a string slot survive it. That is the separate, known shallowness of `nt_obj_free`,
+   * not a defect of this rule — it leaks, it never dangles.
+   *
+   * A callee that RAISES branches to its `catch` before reaching the free, so the
+   * temporary leaks on the exceptional path. Conservative in the safe direction, and the
+   * reason the free is emitted before `emitExcCheck` rather than after: the pending
+   * payload can never BE this temporary (moving a parameter onto it is NT1604 too).
+   */
+  private argTempFree(i: number, args: Expr[], preArg0: string, sig: Sig, raw: Val, co: Val): string | null {
+    if (i >= args.length || (i === 0 && preArg0 !== "") || co.v !== raw.v) return null;
+    const pt = sig.params[i]!;
+    const k = args[i]!.kind;
+    if (k === "ObjectLiteral" && isObjectTy(pt)) return "nt_obj_free";
+    if (k === "ArrayLiteral" && isArrayTy(pt)) return "nt_arr_free";
+    return null;
+  }
+
+  /** Emit the frees `argTempFree` selected, once the call has returned. */
+  private emitArgTempFrees(frees: [string, string][]): void {
+    for (const [free, v] of frees) this.emit(`call void @${free}(ptr ${v})`);
+  }
+
   /** The CLASS-INSTANCE half of the rule above — `new P(7).get()`, which leaked 200
    *  objects in the loop the array shape leaked none in. Stage 41 wired the array branch
    *  only, and a class call never reaches it: it lowers to `C.m(inst, …)` through
@@ -3542,10 +3592,14 @@ class FnGen {
         return { v: arr, ty: "string[][]" };
       }
       // stdlib Batch 3: `Object.freeze(o)` is the identity (objects are ALREADY
-      // immutable, Stage 29) and `isFrozen` is therefore the constant `true`.
-      // `getOwnPropertyNames` == `keys` for a plain record.
+      // immutable, Stage 29). `getOwnPropertyNames` == `keys` for a plain record.
+      //
+      // There is deliberately NO `isFrozen` case: it used to return the constant `true`,
+      // which is a silent wrong answer for a never-frozen object (node: `false`). The
+      // checker now refuses `isFrozen`/`isSealed`/`isExtensible` (NT1002), so nothing
+      // reaches here — and the constant is gone rather than left as unreachable code,
+      // because that is the shape a future edit would resurrect.
       if (e.callee.property === "freeze") return o;
-      if (e.callee.property === "isFrozen") return { v: "true", ty: "boolean" };
       if (e.callee.property === "keys" || e.callee.property === "getOwnPropertyNames")
         return this.buildStringArray(objectFields(o.ty).map((f) => f.key));
       // values: read each field slot into a fresh homogeneous array (checker enforced).
@@ -6849,38 +6903,62 @@ class FnGen {
       const fixed = sig.params.length - 1;
       //@@mutable
       const argVals: string[] = [];
+      //@@mutable
+      const frees: [string, string][] = []; // see `argTempFree`
       // The FIXED parameters coerce just like a non-rest call's do (see below) — this
       // path emitted them raw, so a nullable/general-union fixed parameter of a rest
       // function received an unboxed value.
-      for (let i = 0; i < fixed; i++) argVals.push(`${llvmTy(sig.params[i]!)} ${this.coerce(this.argVal(i, args, preArg0, sig), sig.params[i]!).v}`);
+      for (let i = 0; i < fixed; i++) {
+        const raw = this.argVal(i, args, preArg0, sig);
+        const co = this.coerce(raw, sig.params[i]!);
+        const free = this.argTempFree(i, args, preArg0, sig, raw, co);
+        if (free !== null) frees.push([free, raw.v]);
+        argVals.push(`${llvmTy(sig.params[i]!)} ${co.v}`);
+      }
       const arr = this.fresh(); // pack trailing args into the rest array
       this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(args.length - fixed, 1))})`);
       for (let i = fixed; i < args.length; i++) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.genExpr(args[i]!))})`);
       argVals.push(`ptr ${arr}`);
+      // The REST ARRAY is built right here, at this call site, and nothing else can ever
+      // name it — the purest unbound temporary in the language. It is a borrow to the
+      // callee like every other parameter (`function f(...xs: T[]): T[] { return xs; }`
+      // is NT1604), so the caller frees the header once the call returns. Shallow: the
+      // ELEMENTS are the caller's own values, still owned and dropped by its own scope,
+      // and freeing them here would be the double free this rule exists to avoid.
+      frees.push(["nt_arr_free", arr]);
       const argstr = argVals.join(", ");
-      if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); if (raises) this.emitExcCheck(objPayload); return { v: "", ty: "void" }; }
+      if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); this.emitArgTempFrees(frees); if (raises) this.emitExcCheck(objPayload); return { v: "", ty: "void" }; }
       const t = this.fresh();
       this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
+      this.emitArgTempFrees(frees);
       if (raises) this.emitExcCheck(objPayload);
       return { v: t, ty: sig.ret };
     }
     //@@mutable
     const argVals: string[] = [];
+    //@@mutable
+    const frees: [string, string][] = []; // unbound literal temporaries, freed after the call
     for (let i = 0; i < sig.params.length; i++) {
       // Coerced to the param type — boxing an `undefined` default into a nullable
       // optional param (`f(x?: T)`), and boxing an ARM into a general-union param
       // (`f(v: number | string)`, called as `f(41)`). A no-op when the types already
       // match, so ordinary params are unaffected.
-      argVals.push(this.coerce(this.argVal(i, args, preArg0, sig), sig.params[i]!).v);
+      const raw = this.argVal(i, args, preArg0, sig);
+      const co = this.coerce(raw, sig.params[i]!);
+      const free = this.argTempFree(i, args, preArg0, sig, raw, co);
+      if (free !== null) frees.push([free, raw.v]);
+      argVals.push(co.v);
     }
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");
     if (sig.ret === "void") {
       this.emit(`call void @${userSym(name)}(${argstr})`);
+      this.emitArgTempFrees(frees);
       if (raises) this.emitExcCheck(objPayload);
       return { v: "", ty: "void" };
     }
     const t = this.fresh();
     this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
+    this.emitArgTempFrees(frees);
     if (raises) this.emitExcCheck(objPayload);
     return { v: t, ty: sig.ret };
   }
