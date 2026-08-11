@@ -3223,6 +3223,45 @@ that ends at zero because its frame exited proves nothing) and an ASan run with
 `sanitize_address` asserted present on the `define`s — on macOS LeakSanitizer does not exist,
 so use-after-free and double-free are the two faults a sanitizer can actually see here.
 
+##### OPEN BUG: an IN-FRAME `throw` of a local declared OUTSIDE the `try` double-frees
+
+The move above is the CROSS-FRAME path. The in-frame path — a `throw` lowered as a branch to
+the enclosing `catch` — does not move, and where the thrown value is a linear local declared
+outside the `try`, two owners free one block:
+
+```ts
+class E { message: string; code: number; constructor(m: string, c: number) { this.message = m; this.code = c; } }
+function run(n: number): number {
+  const err = new E("x", n);
+  try { if (n % 2 === 0) throw err; return n; } catch (e) { return e.code; }
+}
+```
+
+node prints `190` for a loop of 20; nativets **exits 133 with no output and no diagnostic**.
+The handler emits `nt_obj_free` twice on the same pointer — once for the catch binding (an
+owner since the `TryStmt` case in `src/ownership.ts`) and once for `err` (still an owner).
+Present at `47b28d2`, i.e. it predates the move work and is unchanged by it.
+
+**The one-word fix does not work, and the reason is a SECOND open bug.** Making the `throw`
+consuming (`this.expr(s.argument, state, true)`) does fix it — the existing conditional-drop
+machinery (`condDrops`/`moveSites`/`nullOnMove`) nulls the slot at the move site, so the
+second free is a no-op — but it also refuses `if (c) throw err; use(err);` as `NT1601`, on a
+program node runs: the ownership pass merges an `if` branch back into the state
+unconditionally, so a value moved on a TERMINATING path is seen as maybe-moved afterwards.
+That is not specific to `throw` — `return` is consuming today and has exactly the same false
+positive at `47b28d2`:
+
+```ts
+function pick(n: number): E {
+  const a = new E(n);
+  if (n % 2 === 0) return a;
+  return new E(a.code + 1);   // node: fine. nativets: NT1601 "use of moved value: `a`"
+}
+```
+
+So both want the same change — a branch that `return`s or `throw`s must not merge its moved
+state back — and neither should be fixed without the other.
+
 The **stderr text divergence above applies to a propagated throw that nobody catches too**:
 it reaches `main`, and `main` prints one line and exits 1 where node prints a stack trace.
 
