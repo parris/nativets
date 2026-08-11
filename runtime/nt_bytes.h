@@ -13,7 +13,7 @@
 
 typedef struct { int64_t len; uint8_t *data; } NtBytes;
 
-NtBytes    *nt_bytes_new(double n);          /* zero-filled length n (n<0 -> 0)      */
+NtBytes    *nt_bytes_new(double n);          /* zero-filled; ToIndex, panics if invalid */
 NtBytes    *nt_bytes_from_arr(void *arr);    /* from an NtArray of numbers (ToUint8) */
 double      nt_bytes_get(NtBytes *b, double i);           /* read 0..255 (double)     */
 void        nt_bytes_set(NtBytes *b, double i, double v); /* write, JS ToUint8 wrap   */

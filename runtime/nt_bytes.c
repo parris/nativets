@@ -14,6 +14,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>  /* snprintf, for nt_bytes_json */
+#include <stdlib.h> /* abort, for the invalid-length panic */
 
 /* From runtime.c: the shared bump/GC allocator + the RC string side-table register
  * (a decoded string must join the RC table so scope-exit release balances it). */
@@ -41,9 +42,40 @@ static uint8_t to_uint8(double v) {
   return (uint8_t)m;
 }
 
+/* ES 23.2.5.1 -> ToIndex: NaN maps to 0, a fraction truncates, and anything negative or
+ * past 2^53-1 is a RangeError. node: `RangeError: Invalid typed array length: -1`.
+ *
+ * The LENGTH is decided in DOUBLE space for the same reason `to_uint8` above does its
+ * arithmetic there, and this is the case that proves the rule. `(int64_t)nd` on a
+ * non-finite or out-of-range double is UNDEFINED in C, and the two hosts disagree in the
+ * worst possible way (the split `nt_to_integer_or_infinity` in runtime.c was written for):
+ * arm64 SATURATES to INT64_MAX, so `new Uint8Array(1e30)` tried to allocate that and died
+ * "out of memory"; x86-64 yields INT64_MIN, which the old `if (n < 0) n = 0` guard then
+ * turned into a SILENT length-0 array at exit 0. Same source, same program, answer decided
+ * by the host — and the silent side is the architecture CI runs on.
+ *
+ * A negative length was wrong on both hosts anyway: we answered 0 where node throws. The
+ * header documented that as "n<0 -> 0", which read as a decision rather than the bug it
+ * was. */
+#define NT_MAX_BYTES_LEN 9007199254740991.0 /* 2^53-1, ToIndex's ceiling */
+
+static void nt_panic_bytes_len(double want) {
+  char w[64];
+  /* %.17g so a huge or fractional argument is reported as WRITTEN rather than rounded
+     into looking valid; `inf` prints as `inf`, which is the answer node names too. */
+  snprintf(w, sizeof(w), "%.17g", want);
+  fflush(stdout);
+  fprintf(stderr, "panic: invalid typed array length: %s\n", w);
+  fprintf(stderr, "  help: a Uint8Array length must be a non-negative integer no larger "
+                  "than 2^53-1; node throws `RangeError: Invalid typed array length` here\n");
+  fflush(stderr);
+  abort();
+}
+
 NtBytes *nt_bytes_new(double nd) {
-  int64_t n = (int64_t)nd;
-  if (n < 0) n = 0;
+  double d = (nd != nd) ? 0.0 : trunc(nd);   /* NaN -> 0, per ToIndex */
+  if (d < 0.0 || d > NT_MAX_BYTES_LEN) nt_panic_bytes_len(nd);
+  int64_t n = (int64_t)d;                    /* in range by the guard above */
   NtBytes *b = (NtBytes *)nativets_alloc(sizeof(NtBytes));
   b->len = n;
   b->data = (uint8_t *)nativets_alloc((size_t)(n > 0 ? n : 1));

@@ -5952,5 +5952,38 @@ literal is involved, and the advice is unactionable. Worse, `Object.is` is the n
 `-0` probe, so a wrong hint at exactly that spelling pushed callers onto the clumsier
 `1 / x === -Infinity`.
 
+### An invalid `Uint8Array` length PANICS (node throws `RangeError`)
+
+```ts
+new Uint8Array(-1)        // node: RangeError: Invalid typed array length: -1
+new Uint8Array(1e30)      // node: RangeError
+new Uint8Array(Infinity)  // node: RangeError
+```
+
+All three abort with `panic: invalid typed array length: …` on stderr, the same choice this
+runtime already makes for `.repeat(n)` and for an over-long string — node throws a catchable
+`RangeError`, we stop. `NaN` is `0`, a fraction truncates and `0` is legal, exactly as node
+(ES 23.2.5.1 → ToIndex).
+
+**Why it is written down: two of those three used to be decided by the HOST.** `nt_bytes_new`
+did `int64_t n = (int64_t)nd` on the raw argument, and `(int64_t)` of a non-finite or
+out-of-range double is undefined in C. arm64 **saturates** to `INT64_MAX`, so `1e30` tried to
+allocate that and died "out of memory"; x86-64 yields `INT64_MIN`, which the guard below it
+(`if (n < 0) n = 0`) turned into a **silent length-0 array at exit 0**. Same source, same
+program, answer decided by the architecture — and the silent side is the one CI runs on.
+
+The negative case was wrong on both: we answered `0` where node throws, and `nt_bytes.h`
+recorded it as `n<0 -> 0`, which reads as a decision rather than the bug it was.
+
+This is the third instance of that exact cast: `nt_to_integer_or_infinity` (runtime.c) exists
+because `"abc".padStart(Infinity, "xy")` aborted on one target and silently answered `"abc"`
+on the other, and `js_str_repeat`'s `size_t` wrap was an out-of-bounds heap WRITE. The rule
+this file now follows: **a length or count derived from a JS number is decided in DOUBLE space
+and range-checked BEFORE any integer cast** — `to_uint8`, one function above the fix, already
+did its arithmetic that way and says why.
+
+Pinned in `test/bytes.test.ts` with the controls (`NaN`, `2.7`, `0`) asserted against node
+alongside the three refusals.
+
 When a feature ships: delete its row here, move its corpus case out of `KNOWN_UNSUPPORTED`
 in the relevant `test/*conformance*`/`test/gap.test.ts` allow-list, and drop the `NYI` entry.

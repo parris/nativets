@@ -269,7 +269,11 @@ console.log(a[0], a[2], "abc"[1]);
 
     test("an EMPTY container has no `.at` that returns anything", () => {
       const d = compileError(`const a: number[] = [];\nconsole.log(a[0]);\n`);
-      expect(d?.hint).toContain("it is empty");
+      // The empty case gets its OWN sentence rather than the general range plus a
+      // parenthetical: the general branch renders "valid indices are 0..-1", which is not
+      // a range and reads as a second, invented error.
+      expect(d?.hint).toContain("no valid indices at all");
+      expect(d?.hint).not.toContain("0..-1");
       expect(d?.hint).toContain("`.at(0)`");
     });
   });
