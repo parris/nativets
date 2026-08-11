@@ -265,6 +265,91 @@ console.log(f(undefined));
 });
 
 /* ------------------------------------------------------------------ *
+ * 3b. The direction the three guards above all miss: a SCALAR asserted to a
+ *     REFERENCE type, or back.
+ *
+ * The union/box guards are keyed on the OPERAND being a `U<…>`, a `G<…>` or a nullable,
+ * and the wider-object guard on both sides being object types. A plain `number` asserted
+ * to a `string` matches none of them, so `AsExpr` fell through to the unchecked identity
+ * retype it was before any of this existed: `e.ty` is returned and codegen emits the
+ * operand's `double` straight into a slot the asserted type says is a `ptr`. That is
+ * failure mode 3 of this file's header, verbatim and still live —
+ *
+ *     const n = 12345; console.log((n as string).length);
+ *     // node: `undefined`, exit 0
+ *     // ours: clang failed — "'%t0' defined with type 'double' but expected 'ptr'"
+ *
+ * — and the test above ("no `as` form leaks a raw clang type error") did not catch it
+ * because all three of its cases are union/nullable shapes.
+ *
+ * It is reachable from source `tsc` accepts, which is what makes it more than a lint on a
+ * mistake `tsc` would already flag: `unknown` is one of the three names still allowed to
+ * erase in an ANNOTATION (`ERASURE_STILL_ALLOWED`, src/parser.ts), so a parameter written
+ * `e: unknown` IS a `number` here, and `e as string` inside the body is an assertion
+ * TypeScript permits from `unknown` to anything. test/type-erasure.test.ts's header claims
+ * the residue "is refused in an ASSERTION regardless, which is the only position where the
+ * erasure was ever a wrong answer rather than a confusing refusal" — the assertion there
+ * names no ambient type at all, so nothing refuses it.
+ *
+ * No runtime check can rescue this one either: there is no tag, and a double and a pointer
+ * are not the same width of the same thing. So it is refused, like the wider-object case.
+ * ------------------------------------------------------------------ */
+describe("`as` across the scalar/reference boundary is refused", () => {
+  test("a number asserted to a string is NT2001, not a clang error", () => {
+    let err: unknown;
+    try {
+      emitIR(`
+const n = 12345;
+console.log((n as string).length);
+`);
+    } catch (e) { err = e; }
+    expect(String(err)).toContain("NT2001");
+    expect(String(err)).toContain("string");
+  });
+
+  test("…and the erased-`unknown` parameter that reaches it from tsc-clean source", () => {
+    let err: unknown;
+    try {
+      emitIR(`
+function asStr(e: unknown): string { return e as string; }
+console.log(asStr(42));
+`);
+    } catch (e) { err = e; }
+    expect(String(err)).toContain("NT2001");
+  });
+
+  test("the reference direction is refused too", () => {
+    let err: unknown;
+    try {
+      emitIR(`
+const s = "hello";
+console.log((s as number) + 1);
+`);
+    } catch (e) { err = e; }
+    expect(String(err)).toContain("NT2001");
+  });
+
+  test("no scalar/reference `as` leaks a raw clang type error", async () => {
+    // `compileAndRun` THROWS on a build failure rather than returning it, so the check has
+    // to cover the thrown text as well — the raw clang error arrives that way, not on the
+    // program's stderr.
+    for (const src of [
+      `const n = 12345;\nconsole.log((n as string).length);`,
+      `function asStr(e: unknown): string { return e as string; }\nconsole.log(asStr(42));`,
+      `function m(e: unknown): string { return (e as Error).message; }\nconsole.log(m(42));`,
+    ]) {
+      let seen = "";
+      try {
+        const ours = await compileAndRun(src);
+        seen = ours.stderr;
+      } catch (e) { seen = String(e); }
+      expect(seen).not.toContain("but expected");
+      expect(seen).not.toContain("clang failed");
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ *
  * 4. The one shape NO runtime check can rescue — asserting to a WIDER object.
  * ------------------------------------------------------------------ */
 describe("`as` to a wider plain object is refused, not read out of bounds", () => {

@@ -148,6 +148,21 @@ const AMBIENT_TYPES = new Set([
  * which is why `xs as any[]` silently re-typed a `string[]` as a `number[]`. That case is
  * refused for every name including these two.
  *
+ * THE HOLE THAT ARGUMENT LEFT, since it is the one someone will re-open. "The annotation is
+ * checked" covers the value flowing INTO the slot; it says nothing about what the BODY then
+ * does with a binding it believes is a `number`. A parameter written `e: unknown` IS a
+ * `number` from that point on, and `e as string` inside the body names no ambient type, so
+ * nothing here refuses it — the erasure was ADOPTED by an assertion after all, one indirection
+ * later. It reached clang as "'%t0' defined with type 'double' but expected 'ptr'":
+ *
+ *     function asStr(e: unknown): string { return e as string; }
+ *     console.log(asStr(42));            // node: "42", exit 0
+ *
+ * `Checker.type`'s `AsExpr` case now refuses an assertion that crosses the scalar/reference
+ * boundary (`reprClass`, src/checker.ts), which closes it wherever it is reached from — the
+ * erasure is only one of the ways to get there, and `(n as string)` on an honest `number`
+ * emitted the same invalid IR with no ambient name in sight.
+ *
  * This set should shrink to empty. Removing an entry needs the feature, not just the
  * deletion: a bottom type for `never`, and for `unknown`/`object` either an opaque
  * unusable `Ty` or reflective walks the subset can express.

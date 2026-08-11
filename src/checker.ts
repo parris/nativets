@@ -36,6 +36,40 @@ export interface Sig { params: Ty[]; ret: Ty; required: number; defaults: (Expr 
 function isMapValueTy(v: Ty): boolean {
   return v === "number" || v === "string" || v === "boolean" || isArrayTy(v) || isObjectTy(v);
 }
+
+/**
+ * How a `Ty` is REPRESENTED in the emitted IR: `number` is a `double`, `boolean` is an
+ * `i1`, and every heap-allocated thing in this subset is a `ptr`. Used by `as` to refuse
+ * an assertion that crosses the boundary — see the `AsExpr` case.
+ *
+ * `undefined` means THIS TABLE HAS NO OPINION, and that is the safe answer rather than a
+ * gap: its only caller refuses on a mismatch, so a spelling classified wrongly would be a
+ * FALSE refusal on correct code. Every arm therefore has to be a representation this
+ * compiler actually commits to, and anything else falls off the end.
+ *
+ * Nullables, unions and the generic/recursive markers are unclassified DELIBERATELY, not
+ * by omission. A `?U…` and a `G<…>` are BOXES whose `as` behaviour `nt_as_unbox` and
+ * `nt_as_tag` already own (test/as-cast.test.ts sections 2 and 3), and answering "ptr"
+ * for them here would refuse exactly the narrowing casts those runtime checks exist to
+ * allow — `x as number` on a `number | undefined` is the shape src/ uses most.
+ */
+function reprClass(t0: Ty): string | undefined {
+  if (isNullableTy(t0) || isUnionTy(t0) || isGeneralUnionTy(t0)) return undefined;
+  if (hasTypeParam(t0) || hasTypeRef(t0)) return undefined;
+  // A literal type is the scalar it widens to, so `x as "a"` is classified with `string`
+  // rather than falling off the end and losing the check.
+  const t = widenLiteralTys(t0);
+  if (t === "number") return "number";
+  if (t === "boolean") return "boolean";
+  if (t === "string" || isObjectTy(t) || isArrayTy(t) || isMapTy(t) || isSetTy(t) || isFuncTy(t)) return "reference";
+  if (isBytesRefTy(t) || isFetchRefTy(t) || isUrlRefTy(t)) return "reference";
+  return undefined;
+}
+
+/** `reprClass`'s answer as the machine word it stands for, for the diagnostic. */
+function reprWord(r: string): string {
+  return r === "number" ? "a double" : r === "boolean" ? "a bit" : "a pointer";
+}
 export interface CheckedProgram {
   program: Program;
   functions: Map<string, Sig>;
@@ -4256,6 +4290,38 @@ class Checker {
        */
       case "AsExpr": {
         const from = this.type(e.expr, scope);
+        // (a) SCALAR <-> REFERENCE, which none of the guards below can see. They key on the
+        // OPERAND being a union/box, or on BOTH sides being object types, so a plain
+        // `number` asserted to a `string` matched none of them and fell through to the
+        // unchecked identity retype `AsExpr` was before any of this existed. `as`
+        // reinterprets the operand's bytes, and a `double` and a `ptr` are not two readings
+        // of the same bytes — there is nothing to reinterpret. It reached clang as
+        // "'%t0' defined with type 'double' but expected 'ptr'": a raw LLVM error naming a
+        // temporary the user never wrote, which is failure mode 3 of this file's `as`
+        // story still live in the one direction its test did not cover.
+        //
+        // NOT merely a lint on something `tsc` would already flag. `unknown` is one of the
+        // three names still allowed to erase in an ANNOTATION (`ERASURE_STILL_ALLOWED`,
+        // src/parser.ts), so `function f(e: unknown)` gives `e` the type `number` here —
+        // and `e as string` inside the body is an assertion TypeScript permits from
+        // `unknown` to anything. So the invalid IR is reachable from source `tsc` accepts,
+        // and the residue's own note that it "is refused in an ASSERTION regardless" does
+        // not cover it: the assertion names no ambient type at all.
+        const rFrom = reprClass(from);
+        const rTo = reprClass(e.ty);
+        if (rFrom !== undefined && rTo !== undefined && rFrom !== rTo) {
+          throw typeError(
+            `'${e.ty}' is not a valid assertion for '${from}': they have different machine `
+              + `representations (${reprWord(rFrom)} vs ${reprWord(rTo)})`,
+            exprLoc(e),
+            "`as` does not convert a value — it reinterprets the operand's memory at the "
+              + "asserted type's layout, and there is nothing to reinterpret here: a "
+              + "`number` is an IEEE-754 double, a `boolean` is one bit, and a string, "
+              + "object, array, Map or Set is a pointer. Convert instead (`String(x)`, "
+              + "`Number(s)`, `x !== 0`), or give the value a union type it really has "
+              + "(`number | string`), which `as` can narrow because the union is tagged",
+          );
+        }
         // (b) union -> a NON-MEMBER object. A member target is exempt: codegen tag-checks
         // it, and its layout is the union's by construction.
         if (isUnionTy(from) && isObjectTy(e.ty)) {
