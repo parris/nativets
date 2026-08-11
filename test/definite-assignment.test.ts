@@ -662,4 +662,144 @@ console.log(new C(7, false).z);
     expect(e.diag.message).toContain("not assigned on every path");
     expect(e.diag.hint).toContain("has no such value");
   });
+
+  /*
+   * 31. EVERY WAY A PATH CAN SKIP THE STORE. Each of these printed the slot's zero at
+   * exit 0 where node prints `undefined`, and each was invisible to the syntactic scan
+   * for the same reason: the store is THERE, it is just not on every path. The list is
+   * the control-flow model's own case list — the `if` with no `else`, the arm that does
+   * not assign, the loop that may run zero times, the early `return`, the `try` whose
+   * `catch` starts from the try's ENTRY state, and the `switch` with no `default` — so
+   * a case the analysis stops handling correctly reds exactly one of these.
+   *
+   * `string` is in the list because it is where the wrong answer got worse: a heap
+   * pointer, so the unwritten slot printed `(null)` rather than a plausible `0`.
+   */
+  const partial: { name: string; ctor: string; args: string }[] = [
+    { name: "an `if` with no `else`", ctor: `constructor(c: boolean) { if (c) this.z = 1; }`, args: "false" },
+    { name: "an `if`/`else` where only one arm assigns", ctor: `constructor(c: boolean) { if (c) { this.z = 1; } else { this.z2(); } } z2(): void {}`, args: "false" },
+    { name: "a `for` body that may run zero times", ctor: `constructor(n: number) { for (let i = 0; i < n; i++) { this.z = i; } }`, args: "0" },
+    { name: "a `while` body that may run zero times", ctor: `constructor(c: boolean) { while (c) { this.z = 1; break; } }`, args: "false" },
+    { name: "an early `return` before the store", ctor: `constructor(c: boolean) { if (c) { return; } this.z = 1; }`, args: "true" },
+    { name: "a `return` in the arm that does not store", ctor: `constructor(c: boolean) { if (c) { this.z = 1; } else { return; } }`, args: "false" },
+    { name: "a store in the `try` but not the `catch`", ctor: `constructor(c: boolean) { try { if (c) throw new Error("e"); this.z = 1; } catch (e) { this.z2(); } } z2(): void {}`, args: "true" },
+    { name: "a `switch` with no `default`", ctor: `constructor(k: string) { switch (k) { case "a": this.z = 1; break; case "b": this.z = 2; break; } }`, args: `"c"` },
+  ];
+  for (const c of partial) {
+    test(`a field left unwritten by ${c.name} is refused`, () => {
+      const e = expectRefused(`class C { z: number; ${c.ctor} }\nconsole.log(new C(${c.args}).z);\n`, "NT1015");
+      expect(e.diag.message).toContain("not assigned on every path");
+    });
+  }
+
+  // 32. …and the same shape at a POINTER-typed field, which is where the unwritten slot
+  //     printed `(null)` instead of a merely-plausible `0`.
+  test("a `string` field left unwritten by one path is refused", () => {
+    const e = expectRefused(`
+class C { s: string; constructor(c: boolean) { if (c) this.s = "hi"; } }
+console.log(new C(false).s);
+`, "NT1015");
+    expect(e.diag.message).toContain("'s'");
+    expect(e.diag.message).toContain("not assigned on every path");
+  });
+
+  /*
+   * 33. THE OTHER SIDE OF EVERY ONE OF THOSE — the shapes that DO assign on every path,
+   * which the refusal must not touch. Without these the analysis could pass test 31 by
+   * refusing every constructor that mentions a field under any control flow at all.
+   *
+   * `throw` is the one that is not symmetric with `return`: a constructor that always
+   * throws hands nobody an instance, so there is nothing to prove and it compiles. A
+   * `do…while` body always runs once. A `finally` always runs. A `switch` with a
+   * `default` whose every arm assigns covers the discriminant.
+   */
+  test("a constructor that assigns on every path compiles and matches node", async () => {
+    // an early `throw` — divergence, unlike `return`: no instance escapes that path
+    await expectNode(`
+class C { z: number; constructor(c: boolean) { if (c) { throw new Error("no"); } this.z = 1; } }
+console.log(new C(false).z);
+`);
+    // a `switch` with a `default`, every arm assigning
+    await expectNode(`
+class C { z: number; constructor(k: string) { switch (k) { case "a": this.z = 1; break; default: this.z = 9; } } }
+console.log(new C("a").z, new C("c").z);
+`);
+    // a `do…while`, whose body always runs once
+    await expectNode(`
+class C { z: number; constructor() { do { this.z = 3; } while (false); } }
+console.log(new C().z);
+`);
+    // a `finally`, which always runs
+    await expectNode(`
+class C { z: number; constructor() { try { console.log("t"); } finally { this.z = 8; } } }
+console.log(new C().z);
+`);
+    // both `try` and `catch` assigning
+    await expectNode(`
+class C { z: number; constructor(c: boolean) { try { if (c) throw new Error("e"); this.z = 1; } catch (e) { this.z = 2; } } }
+console.log(new C(false).z, new C(true).z);
+`);
+    // a conditional EXPRESSION, which is one store, not two paths
+    await expectNode(`
+class C { z: number; constructor(c: boolean) { this.z = c ? 1 : 2; } }
+console.log(new C(true).z, new C(false).z);
+`);
+  });
+
+  /*
+   * 34. A PARAMETER PROPERTY always assigns — the parser desugars `constructor(public z:
+   * number)` into an unconditional `this.z = z` at the top of the body, so it must reach
+   * the analysis as a store like any other. node cannot be the oracle here: parameter
+   * properties are not erasable syntax, so `node file.ts` refuses to run the program at
+   * all. Compiling it and reading the value back is the whole assertion.
+   */
+  test("a parameter property is assigned on every path", async () => {
+    const r = await compileAndRun(`
+class C { constructor(public z: number) {} }
+console.log(new C(3).z);
+`);
+    expect(r.stdout).toBe("3\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  /*
+   * 35. A field whose type ADMITS `undefined` is not at risk on any path: it has a legal
+   * starting value, so the partial store that is refused above is fine here — and reads
+   * as `undefined`, exactly as node says. Both spellings, because they were once NOT the
+   * same program: reading the `?` token instead of the field's type made `z?: number`
+   * work while the identical type spelled as a union SIGSEGVed.
+   */
+  test("a nullable field assigned on only some paths reads as undefined", async () => {
+    await expectNode(`
+class C { z: number | undefined; constructor(c: boolean) { if (c) this.z = 1; } }
+console.log(new C(false).z, new C(true).z);
+`);
+    await expectNode(`
+class C { z?: number; constructor(c: boolean) { if (c) this.z = 1; } }
+console.log(new C(false).z, new C(true).z);
+`);
+  });
+
+  /*
+   * 36. THE HINT'S OWN ADVICE, COMPILED — the same guarantee test 29 gives the syntactic
+   * refusal, for the path-sensitive one. It names three ways out; all three are run
+   * against node here, so the hint cannot rot into a lie without this failing.
+   */
+  test("every fix the path-sensitive refusal's hint suggests compiles and matches node", async () => {
+    // (a) assign it on every path
+    await expectNode(`
+class C { z: number; constructor(c: boolean) { if (c) { this.z = 1; } else { this.z = 0; } } }
+console.log(new C(true).z, new C(false).z);
+`);
+    // (b) give it an initializer
+    await expectNode(`
+class C { z: number = 0; constructor(c: boolean) { if (c) this.z = 1; } }
+console.log(new C(true).z, new C(false).z);
+`);
+    // (c) widen the type to include `undefined`
+    await expectNode(`
+class C { z: number | undefined; constructor(c: boolean) { if (c) this.z = 1; } }
+console.log(new C(true).z, new C(false).z);
+`);
+  });
 });
