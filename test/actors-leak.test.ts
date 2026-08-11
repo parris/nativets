@@ -31,7 +31,7 @@
  * programs: single-threaded `__drain` means a receiver cannot die before its sends, which
  * hides both halves of the send-vs-die handoff entirely.
  */
-import { test, expect, describe } from "bun:test";
+import { test, it, expect, describe } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -393,5 +393,48 @@ describe("actor message lifetime under AddressSanitizer", () => {
     expect(r.stderr).not.toContain("AddressSanitizer");
     expect(r.status).toBe(0);
     expectFlat(r.stdout, ["delivered", "undelivered", "refused"]);
+  });
+
+  /*
+   * A PRE-EXISTING USE-AFTER-FREE, PINNED HERE BECAUSE THIS IS WHERE IT WAS FOUND — it is
+   * NOT this lane's, and NOT a regression. Verified by reproducing it byte-identically on a
+   * clean tree with both files reverted: same `heap-use-after-free ... in nt_msg_render_0`,
+   * same `emit_crash_record -> actor_die -> nt_kill` frames.
+   *
+   * The crash record's causal tag (`note_last` -> `a->last_val`) is a BORROWED pointer to
+   * the last message the actor CONSUMED, and consuming a message is exactly what transfers
+   * it to the receiving frame — which then drops it at the end of its scope. So an actor
+   * killed from OUTSIDE after it finished an iteration has a `last_val` pointing at freed
+   * memory, and `print_triggering_message` renders it. It is a READ of freed memory, so
+   * without instrumentation it prints plausible garbage at exit 0: the silent-wrong-answer
+   * class, in a diagnostic whose whole job is to be trusted.
+   *
+   * What this lane DID change is the reach. The receiving frame always dropped its message
+   * when the receive sat in a plain `function`; now that a lifted arrow drops too, every
+   * actor written the natural way (`spawn` takes a closure) reaches it. Fixing it means
+   * deciding who owns the causal tag, and every cheap answer entangles the object model's
+   * shallow `nt_obj_free` (a shallow COPY of the tag is only sound because the shallow free
+   * leaves the string slots alive) — which this lane was told not to take on silently.
+   */
+  it.failing("the crash record renders a message the receiving frame already freed", () => {
+    const src = [
+      `const uafW = (n: number): void => {`,
+      `  for (let i = 0; i < n; i++) {`,
+      `    const m: { a: number; b: string } = receive();`,
+      `    console.log("got " + m.a + " " + m.b);`,
+      `  }`,
+      `};`,
+      `const w = spawn(uafW, 4);`,
+      `send(w, { a: 1, b: "one" });`,
+      `__drain();`,
+      // The worker consumed message 1 and is now blocked awaiting the next, so its causal
+      // tag points at a record its own frame has already dropped. Killing it renders that.
+      `__kill(w);`,
+      `__drain();`,
+      `console.log("after kill");`,
+    ].join("\n");
+    const r = runUnderAsan(src, "uaf", "1");
+    expect(r.stderr).not.toContain("heap-use-after-free");
+    expect(r.status).toBe(0);
   });
 });
