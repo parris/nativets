@@ -475,3 +475,78 @@ console.log(label());
     expect(e.diag.message).toContain("'out' is used before being assigned");
   });
 });
+
+/*
+ * THE CLASS-FIELD ANALOGUE of everything above, which had no coverage at all.
+ *
+ * A field slot is a real slot in the instance's heap block, so "absent" has to be
+ * WRITTEN — the same reason `let s: string | undefined;` is genuinely initialized to
+ * `undefined` (test 12). `parseClass` did write it, but only for the `x?: T` SPELLING:
+ * the fill was gated on the `?` token rather than on the field's TYPE. Written as the
+ * equivalent explicit union `x: T | undefined`, the slot stayed zero.
+ *
+ * The two spellings denote the SAME type — `parseClass` runs both through
+ * `makeNullable("undefined", ty)` and gets the same `Ty` back — so nothing downstream
+ * could tell them apart, and a read of the unwritten slot dereferenced NULL.
+ *
+ * Severity: `x: number | undefined` with no initializer is VALID strict TypeScript.
+ * `tsc --strict` accepts it (`undefined` is in the declared type, so
+ * strictPropertyInitialization is satisfied), node prints `undefined`, and the compiled
+ * binary died with SIGSEGV — exit 139 against node's 0. A memory-safety failure on a
+ * program the type checker signs off on is the worst outcome this compiler has.
+ */
+describe("definite assignment — class fields", () => {
+  // 23. THE DEFECT. `x` is never assigned by the constructor and its type admits
+  //     `undefined`, so it reads as `undefined` — exactly as the `x?: T` spelling below.
+  test("a `T | undefined` field the constructor never assigns reads as undefined", async () => {
+    await expectNode(`
+class C {
+  x: number | undefined;
+  y: number;
+  constructor(y: number) { this.y = y; }
+}
+const c = new C(7);
+console.log(c.x === undefined, c.x, c.y);
+`);
+  });
+
+  // 24. THE REGRESSION GUARD: the `?` spelling already worked and must keep working.
+  //     It is the same type and must give the same answer.
+  test("the `x?: T` spelling of the same field agrees", async () => {
+    await expectNode(`
+class C {
+  x?: number;
+  y: number;
+  constructor(y: number) { this.y = y; }
+}
+const c = new C(7);
+console.log(c.x === undefined, c.x, c.y);
+`);
+  });
+
+  // 25. A POINTER-SHAPED field is where the unwritten slot actually segfaulted rather
+  //     than merely reading a zero — `string` is a heap pointer, so the read
+  //     dereferenced NULL instead of printing `0`.
+  test("a `string | undefined` field the constructor never assigns reads as undefined", async () => {
+    await expectNode(`
+class C {
+  s: string | undefined;
+  n: number;
+  constructor(n: number) { this.n = n; }
+}
+const c = new C(3);
+console.log(c.s === undefined, c.n);
+`);
+  });
+
+  // 26. …and the fill must not overwrite a field the constructor DOES assign.
+  test("a nullable field the constructor does assign keeps the assigned value", async () => {
+    await expectNode(`
+class C {
+  x: number | undefined;
+  constructor(x: number) { this.x = x; }
+}
+console.log(new C(5).x);
+`);
+  });
+});

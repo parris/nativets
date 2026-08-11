@@ -12,6 +12,7 @@ import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral, unknow
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep, mapTypesDeepExpr,
   isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
+  isNullableTy, nullishKind,
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, generalUnionArmTypeof, extractUnionMembers, unionWidenedMembers,
   resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
@@ -3018,7 +3019,18 @@ class Parser {
       // block and every field is a real slot, so "absent" has to be WRITTEN as the
       // `undefined` arm of the nullable box. Without this the slot stays zero and a read
       // dereferences NULL. A constructor that assigns the field simply overwrites this.
-      if (init === undefined && optional) init = this.undef();
+      //
+      // The condition is the field's TYPE, not the `?` token that may have produced it.
+      // Gating on `optional` covered `x?: T` and missed the equivalent explicit union
+      // `x: T | undefined` — the SAME `Ty` (line 3004 runs the `?` spelling through the
+      // very same `makeNullable("undefined", …)`), so nothing downstream could tell the
+      // two apart, and the second one left the slot zero. `x: number | undefined` with no
+      // initializer is valid strict TypeScript (`tsc --strict` accepts it: `undefined` is
+      // in the declared type, so strictPropertyInitialization is satisfied) and node
+      // prints `undefined`; the binary died with SIGSEGV. Only the `undefined` arm is
+      // filled — `?N` (`T | null`) does not admit `undefined`, and a field typed that way
+      // and left unassigned is rejected by tsc for the same reason it has no value here.
+      if (init === undefined && isNullableTy(ty) && nullishKind(ty) === "undefined") init = this.undef();
       if (init !== undefined) fieldInits.push({ field: member, value: init });
       } finally {
         // `finally` also runs on the `continue`s above, so the scope is popped on every
