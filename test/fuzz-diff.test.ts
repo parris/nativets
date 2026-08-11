@@ -220,6 +220,29 @@ describe("fuzz findings — object literals", () => {
       "",
     ].join("\n"));
   });
+
+  /*
+   * Key ORDER. OrdinaryOwnPropertyKeys puts every ARRAY-INDEX key first, in ascending
+   * NUMERIC order, and only then the rest in insertion order. Ours is insertion order
+   * throughout, so `{ b: 1, a: 2, "10": 3, "2": 4 }` stringifies with its keys in the wrong
+   * order — same keys, same values, different bytes, exit 0.
+   *
+   * The rule is narrow and the sweep pins both halves of it: `"0"`, `"1"`, `"2"`, `"10"` are
+   * array indices and move to the front; `"01"`, `"1.5"` and `"-1"` are NOT canonical index
+   * strings and must stay where they were written. Any fix that sorts "anything numeric-ish"
+   * would break the second half.
+   */
+  it.failing("array-index keys enumerate first, in ascending numeric order", async () => {
+    await expectSameBytes([
+      'const o = { b: 1, a: 2, "10": 3, "2": 4 };',
+      "console.log(JSON.stringify(Object.keys(o)));",   // node ["2","10","b","a"]
+      "console.log(JSON.stringify(o));",                // node {"2":4,"10":3,"b":1,"a":2}
+      "console.log(JSON.stringify(Object.values(o)));", // node [4,3,1,2]
+      'const q = { z: 1, "01": 2, "1.5": 3, "-1": 4, "0": 5 };',
+      "console.log(JSON.stringify(Object.keys(q)));",   // node ["0","z","01","1.5","-1"]
+      "",
+    ].join("\n"));
+  });
 });
 
 describe("fuzz findings — base64", () => {
