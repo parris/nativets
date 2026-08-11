@@ -159,8 +159,23 @@ describe("the trims compose and chain", () => {
  *   - it AGREES WITH THE NEIGHBOURS. `.charCodeAt(i)` and `.at(i)` are defined as the raw
  *     byte by §A.2, so `codePointAt` returning U+FFFD where `charCodeAt` returns 226 would
  *     make two accessors disagree about the same position.
- * It is also already the answer `toUpperCase`/`toLowerCase` give (§A.4) — one policy, so
- * the eight consumers of the decoder cannot drift apart.
+ * It is also already the answer `toUpperCase`/`toLowerCase` give (§A.4) — one policy, so the
+ * consumers cannot drift apart.
+ *
+ * THE CENSUS behind that word "every", because fixing one of these silently is the failure
+ * mode. The string ops split three ways:
+ *   RE-FRAMING, i.e. decoders that group bytes — all were wrong, all are fixed and covered
+ *     below: `trim`/`trimStart`/`trimEnd`, `codePointAt`, `Array.from(str)`.
+ *   ALREADY SAFE by the same self-identifying argument, fixed earlier under §A.4:
+ *     `toUpperCase`/`toLowerCase`.
+ *   BYTE-ORIENTED, so they cannot re-frame anything by construction: `charCodeAt`, `.at`,
+ *     `s[i]`, `slice`/`substring`, `split`, `indexOf`/`includes`, and `for…of` over a
+ *     string. These are §A.2 proper and are unchanged here.
+ * Refused, so they cannot miscompile anything: `normalize` and `localeCompare` (both
+ * NYI.WEBAPI — they need ICU) and `[...str]` (NT2001). Ordering (`<`, `>`) is `js_str_cmp`,
+ * a plain `strcmp` over the bytes, which has no decode step to get wrong.
+ *
+ * The one deliberate NON-member of the ill-formed set is a SURROGATE — see the WTF-8 test.
  *
  * NODE IS NOT THE ORACLE for the ill-formed cases: a JS `String` is UTF-16 and cannot hold
  * these bytes at all, so there is no comparison to make and the assertion is on OUR bytes.

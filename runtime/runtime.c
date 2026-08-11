@@ -1488,7 +1488,14 @@ static int nt_utf8_len(const unsigned char *p, const unsigned char *end, unsigne
   else if ((c & 0xF0) == 0xE0) { need = 2; v = c & 0x0Fu; min = 0x800; }
   else if ((c & 0xF8) == 0xF0) { need = 3; v = c & 0x07u; min = 0x10000; }
   else return 0;                                /* a continuation byte, or 0xF8..0xFF */
-  if (end - p <= (long)need) return 0;          /* truncated — the bytes are not there */
+  /* Truncated. This one guard is an EQUIVALENT MUTANT today — deleting it keeps every
+   * test green, and that is a proof about the CALLERS, not a gap in them: both windows
+   * that reach here end on a byte that can never be a continuation (`s + strlen(s)` is the
+   * NUL, and `nt_ws_skip_back`'s window always ends at a character boundary), so the loop
+   * below would stop on its own and in bounds. It stays because it is what makes this
+   * function correct for an ARBITRARY window, which is the property the next caller will
+   * assume and the one neither invariant above is written down to defend. */
+  if (end - p <= (long)need) return 0;
   for (int k = 1; k <= need; k++) {
     if ((p[k] & 0xC0) != 0x80) return 0;        /* NOT a continuation — load-bearing */
     v = (v << 6) | (unsigned)(p[k] & 0x3F);

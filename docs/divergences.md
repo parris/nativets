@@ -3168,6 +3168,44 @@ they were not covered, and that was a defect, not a decision — `é` → `É` i
 bytes in either encoding, so no unit question arises. It is fixed; the *remaining* limit on
 case mapping is its own entry, **§A.4** below.
 
+**Scope, second half: §A.2 MAKES ill-formed UTF-8 reachable, so it does not get to treat it
+as impossible.** Cutting by byte means `" ".slice(0, 2)` is a truncated lead pair
+`E2 80` and `" ".slice(1, 2)` is a lone continuation byte `A0` — both from ordinary
+source, no host input required. `readFileSync(p, "utf8")` hands over file bytes verbatim and
+reaches the rest of the space (overlong forms, `0xF8..0xFF`). So **every scanner in the
+runtime must be correct on input that is not valid UTF-8**, and "we only handle well-formed
+strings" is not a position this document supports.
+
+The rule, and it is the same in every consumer: **an ill-formed sequence is ONE RAW BYTE, and
+the scan advances one byte.** Not U+FFFD, and never re-framed. Two properties follow, and
+both are tested:
+
+- **Lossless.** `Array.from(s).join("") === s` and `s.split("").join("") === s` for *every*
+  byte string. Substituting U+FFFD would rewrite the program's own bytes to "correct" them.
+- **Consistent across accessors.** `.charCodeAt(i)` and `.at(i)` are the raw byte by the
+  paragraph above, so `.codePointAt(i)` answers the raw byte too rather than inventing a code
+  point the string does not contain.
+
+**A raw byte is not a code point**, and that distinction is where this went wrong twice.
+Whitespace, case and framing tables are indexed by *code point*; feeding a raw byte to one
+re-interprets it. `trim`'s table contains U+00A0 NBSP, which encodes as `C2 A0`, so the byte
+`A0` tested true as whitespace and `trimStart` deleted it while `trimEnd` kept it. A
+whitespace/case test therefore runs **only on a code point that was actually decoded**.
+
+**Surrogates are deliberately accepted** — this is WTF-8, not strict UTF-8. The lexer and
+`String.fromCharCode` emit `ED A0 80` for `\ud800`, and node's `codePointAt` says 55296;
+rejecting the sequence would answer 237 and *lose* agreement with node. "Ill-formed" here
+means truncated, a missing continuation byte, an overlong form, a continuation or `0xF8..0xFF`
+byte in lead position, or a value above U+10FFFF — deliberately not "encodes a surrogate".
+
+Historically this section's blind spot was a decoder that sized a sequence from its **lead
+byte alone**: `" ".slice(0, 2) + "Axx"` is `E2 80 41 78 78`, which recombined to U+2001 EM
+QUAD, so `.trim()` consumed three bytes and **deleted the `A`** — `"xx"` against node's
+`"Axx"`, at exit 0, with well-formed output on both sides. Tested by `test/trim.test.ts`
+("ill-formed UTF-8 is never re-framed"), which pins `trim`/`trimStart`/`trimEnd`,
+`codePointAt` and `Array.from` against each other and against node on the well-formed twin of
+every case.
+
 > `typeof undefined` (a former divergence) is now **supported** and matches node.
 
 ### 3. Pipeline operator `|>` (Elixir semantics, not TC39 Hack-style)
