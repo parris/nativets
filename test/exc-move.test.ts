@@ -95,4 +95,112 @@ describe("the catch binding takes its type from what the block's callees raise",
       ``,
     ].join("\n"));
   });
+
+  // The stage-1 shape verbatim: a CLASS instance, three fields, one of them a nested
+  // record with an ARRAY in it — the `NTError{message,name,diag:{code,spans}}` that made
+  // flattening worth exactly zero. The catch binding's type comes from `lex`, which the
+  // block never mentions except by calling it.
+  test("a class instance with a nested record and an array inside it", async () => {
+    await differential([
+      `class NTError {`,
+      `  message: string;`,
+      `  name: string;`,
+      `  diag: { code: string, spans: number[] };`,
+      `  constructor(m: string, c: string, n: number) {`,
+      `    this.message = m; this.name = "NTError"; this.diag = { code: c, spans: [n, n - 1] };`,
+      `  }`,
+      `}`,
+      `function lex(n: number): number {`,
+      `  if (n < 0) throw new NTError("bad input", "NT9001", n);`,
+      `  return n * 2;`,
+      `}`,
+      `function run(n: number): number {`,
+      `  try { return lex(n); } catch (e) { console.log(e.name, e.message, e.diag.code, e.diag.spans.length); return -1; }`,
+      `}`,
+      `console.log(run(4));`,
+      `console.log(run(-3));`,
+      ``,
+    ].join("\n"));
+  });
+});
+
+/*
+ * THE OWNERSHIP PROOF. Leaks and double frees are SILENT on macOS (LeakSanitizer is
+ * Linux-only), and a fixture that ends at 0 because its frame exited proves nothing about
+ * a leak proportional to work. Every probe here runs a LOOP, and each is asserted at TWO
+ * scales — the numbers must be IDENTICAL, not merely small.
+ */
+describe("exactly one owner, exactly one free", () => {
+  const raiseLoop = (n: number, handler: string): string => [
+    `class E { message: string; code: number; constructor(m: string, c: number) { this.message = m; this.code = c; } }`,
+    `function lex(n: number): number {`,
+    `  if (n % 2 === 0) throw new E("boom", n);`,
+    `  return n;`,
+    `}`,
+    `function run(n: number): number {`,
+    `  try { return lex(n); } ${handler}`,
+    `}`,
+    `let acc = 0;`,
+    `for (let i = 0; i < ${n}; i++) acc = acc + run(i);`,
+    `console.log(acc);`,
+    `console.log(__objLive(), __strLive());`,
+    ``,
+  ].join("\n");
+
+  // The BINDING takes the object (`nt_exc_take_object` NULLs the slot) and the handler's
+  // own drop set frees it. 200 raises and 2000 raises must both settle at zero.
+  test("the catch binding is the owner: no growth at 10x the scale", async () => {
+    const small = await compileAndRun(raiseLoop(200, `catch (e) { return e.code; }`));
+    const large = await compileAndRun(raiseLoop(2000, `catch (e) { return e.code; }`));
+    expect(small.stdout.split("\n")[1]).toBe("0 0");
+    expect(large.stdout.split("\n")[1]).toBe("0 0");
+    expect(small.exitCode).toBe(0);
+    expect(large.exitCode).toBe(0);
+  });
+
+  // `catch { }` with NO binding takes nothing, so the object would be dropped on the floor
+  // — this is the one path where `nt_exc_clear` has to free it, and the only way to tell
+  // is that the count does not grow with the loop.
+  test("catch with no binding: nt_exc_clear frees what nobody took", async () => {
+    const small = await compileAndRun(raiseLoop(200, `catch { return -1; }`));
+    const large = await compileAndRun(raiseLoop(2000, `catch { return -1; }`));
+    expect(small.stdout.split("\n")[1]).toBe("0 0");
+    expect(large.stdout.split("\n")[1]).toBe("0 0");
+    expect(small.exitCode).toBe(0);
+    expect(large.exitCode).toBe(0);
+  });
+
+  // The raising frame must NOT free what it just handed over. `throw err` on a NAMED local
+  // is the shape where it would: `ownedInScope` lists it, and `ThrowStmt.drops` subtracts
+  // it. Were the subtraction missing, the handler would read a freed block — invisible in
+  // stdout on macOS, which is why this one runs under ASAN as well, below.
+  test("a thrown NAMED local is moved out of the raising frame's drop set", async () => {
+    const src = (n: number): string => [
+      `class E { message: string; code: number; constructor(m: string, c: number) { this.message = m; this.code = c; } }`,
+      `function lex(n: number): number {`,
+      `  const err = new E("named", n);`,
+      `  if (n % 2 === 0) throw err;`,
+      `  return n;`,
+      `}`,
+      `function run(n: number): number {`,
+      // The sentinel `throw` is what types the binding: `throw err` on an IDENTIFIER is a
+      // shape `raisedNewTy` cannot type without the callee's own scope, so rule 2 says
+      // "cannot say" and the block has to name the type itself. The MOVE under test is
+      // `lex`'s, either way.
+      `  try { if (n === -7) throw new E("never", 0); return lex(n); }`,
+      `  catch (e) { return e.code + e.message.length; }`,
+      `}`,
+      `let acc = 0;`,
+      `for (let i = 0; i < ${n}; i++) acc = acc + run(i);`,
+      `console.log(acc);`,
+      `console.log(__objLive(), __strLive());`,
+      ``,
+    ].join("\n");
+    const small = await compileAndRun(src(100));
+    const large = await compileAndRun(src(1000));
+    expect(small.stdout.split("\n")[1]).toBe("0 0");
+    expect(large.stdout.split("\n")[1]).toBe("0 0");
+    expect(small.exitCode).toBe(0);
+    expect(large.exitCode).toBe(0);
+  });
 });
