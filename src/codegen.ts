@@ -15,10 +15,10 @@ import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, spawnMode, SPAWN_INH
 // `blockDrops` is gone: the drop set is a synthesized trailing BlockDrops STATEMENT now,
 // not an expando read back off the array, so codegen reads it in the normal statement loop.
 // `Program` stays — it is still used below, and the lane's branch predated its arrival.
-import { freshArray, RETAINS_RECEIVER, arrayElements } from "./ast.ts";
+import { freshArray, RETAINS_RECEIVER, arrayElements, stringLiteralValue } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
-import { NUMBER_CONSTS } from "./checker.ts";
+import { NUMBER_CONSTS, MATH_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, staticTypeofName } from "./ast.ts";
 import { isTypeRefTy, unfoldTypeRef, recTypeTable } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
@@ -474,7 +474,7 @@ const DECLARES = [
   "declare void @js_eprint_sep()",
   "declare void @js_eprint_newline()",
   "declare void @nt_fmt_guard(ptr, double)",
-  "declare double @pow(double, double)",
+  "declare double @js_pow(double, double)",
   "declare ptr @js_str_concat(ptr, ptr)",
   "declare double @js_str_len(ptr)",
   "declare i32 @js_str_eq(ptr, ptr)",
@@ -997,14 +997,20 @@ class ModuleGen {
     if (existing) return existing;
     const idx = this.fnValues.size;
     const blk = `@nt_fnval_blk_${idx}`;
-    this.fnValues.set(name, blk);
+    // Threaded, not discarded: a nativets `Map` is PERSISTENT, so `.set` returns a new map
+    // and leaves the receiver alone (NT1606). Under bun `.set` mutates and returns the same
+    // map, so the assignment is a no-op there — one spelling, both semantics.
+    this.fnValues = this.fnValues.set(name, blk);
     const shim = `nt_fnval_${idx}`;
     const ps = funcParams(fnTy);
     const ret = funcRet(fnTy);
     // ONE list: an LLVM parameter and the argument forwarding it are spelled identically
     // (`double %a0`), so the declaration and the call share it. Built with an index loop
     // rather than `.map((p, i) => …)` — `.map` binds `(elem)` only in the subset `src/`
-    // must stay inside, and the point-free spelling put this function outside it.
+    // must stay inside, and the point-free spelling put this function outside it. The list
+    // is built by `.push` into a local nothing else can see, so it takes the `@@mutable`
+    // opt-in rather than a fold.
+    //@@mutable
     const slots: string[] = [];
     for (let i = 0; i < ps.length; i++) slots.push(`${llvmTy(ps[i]!)} %a${i}`);
     const list = slots.join(", ");
@@ -2746,6 +2752,12 @@ class FnGen {
           const c = NUMBER_CONSTS.get(e.property);
           if (c !== undefined) return { v: llvmDouble(c), ty: "number" };
         }
+        // The `Math.*` data properties — folded the same way, and admitted by the same
+        // guard in the checker (both consult the one table, so neither can drift).
+        if (e.object.kind === "Identifier" && e.object.name === "Math" && !this.isBound("Math")) {
+          const c = MATH_CONSTS.get(e.property);
+          if (c !== undefined) return { v: llvmDouble(c), ty: "number" };
+        }
         // Host I/O: process.argv (string[]) and process.env.NAME (string). Recognized
         // only when `process` is not a user binding (matches the checker's guard).
         if (!this.varTypes.has("process") && !this.captures.has("process")) {
@@ -3046,7 +3058,9 @@ class FnGen {
         const l = this.genExpr(e.left);
         const r = this.genExpr(e.right);
         const t = this.fresh();
-        if (op === "**") this.emit(`${t} = call double @pow(double ${l.v}, double ${r.v})`);
+        // `**` is Number::exponentiate, which C `pow` gets wrong for a unit base with a
+        // non-finite exponent — `js_pow` is the spec-shaped wrapper. Math.pow shares it.
+        if (op === "**") this.emit(`${t} = call double @js_pow(double ${l.v}, double ${r.v})`);
         else this.emit(`${t} = ${ARITH.get(op)!} double ${l.v}, ${r.v}`);
         return { v: t, ty: "number" };
       }
@@ -3474,17 +3488,26 @@ class FnGen {
         // an empty object here would be a silent wrong answer.
         const pairs = arrayElements(e.args[0]!);
         if (pairs === undefined) throw internalError("Object.fromEntries reached codegen with a non-literal argument");
+        const ty = e.ty ?? "number";
         const obj = this.fresh();
         this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(pairs.length)})`);
-        pairs.forEach((pair, i) => {
+        pairs.forEach((pair) => {
           const inner = arrayElements(pair);
           if (inner === undefined) throw internalError("Object.fromEntries reached codegen with a non-literal entry");
+          // Stored by FIELD INDEX, not by the entry's position in the literal — the same
+          // rule `ObjectLiteral` above already follows. Entry order and slot order are two
+          // different things now that a minted object type puts ARRAY-INDEX keys first:
+          // `[["b",…],["2",…]]` has `2` at slot 0, so indexing by position paired every
+          // value with the wrong key. It was silent (the keys and the value SET both still
+          // looked right) and exit 0, which is the worst outcome available.
+          const key = stringLiteralValue(inner[0]!);
+          if (key === undefined) throw internalError("Object.fromEntries reached codegen with a non-literal entry key");
           const v = this.genExpr(inner[1]!);
           const gep = this.fresh();
-          this.emit(`${gep} = getelementptr i64, ptr ${obj}, i64 ${i}`);
+          this.emit(`${gep} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, key)}`);
           this.emit(`store i64 ${this.toSlot(v)}, ptr ${gep}`);
         });
-        return { v: obj, ty: e.ty ?? "number" };
+        return { v: obj, ty };
       }
       const o = this.genExpr(e.args[0]!);
       if (e.callee.property === "entries") {
@@ -4798,16 +4821,21 @@ class FnGen {
     // the node also means the index expression travels UNEVALUATED: it is lowered only
     // inside the continuation block past the guard, which is what makes
     // `a?.[sideEffect()]` skip the side effect when `a` is nullish, as node does.
-    // NOT `//@@mutable`: the chain is built with `.unshift`, and the opt-in legalizes
-    // `.push` ONLY — the mark would be dead weight, not a fix.
+    // Collected OUTERMOST-FIRST with `.push` and walked backwards, rather than `.unshift`ed
+    // into chain order: `//@@mutable` legalizes `.push` only, so the reversed loop is what
+    // puts this function inside the subset `src/` must stay in. The two spellings visit the
+    // links in the same order — head-first — which is load-bearing, because each guard must
+    // short-circuit before the links past it are lowered.
+    //@@mutable
     const links: Extract<Expr, { kind: "MemberExpr" | "IndexExpr" }>[] = [];
     let node: Expr = e;
-    while (node.kind === "MemberExpr" || node.kind === "IndexExpr") { links.unshift(node); node = node.object; }
+    while (node.kind === "MemberExpr" || node.kind === "IndexExpr") { links.push(node); node = node.object; }
     const resultSlot = this.slot(e.ty!); // holds the resulting nullable box (ptr)
     const nullJoin = this.label("ocnull");
     const endLbl = this.label("ocend");
     let cur = this.genExpr(node); // chain head
-    for (const link of links) {
+    for (let li = links.length - 1; li >= 0; li--) {
+      const link = links[li]!;
       if (isNullableTy(cur.ty)) {
         const isN = this.isNullish(cur.v);
         const contLbl = this.label("occ");
@@ -4845,8 +4873,10 @@ class FnGen {
     if (method === "max" || method === "min") return this.genMathMinMax(method, args);
     const vals = args.map((a) => this.genExpr(a).v);
     if (method === "pow") {
+      // Math.pow and `**` are the SAME operation in the spec (both Number::exponentiate),
+      // so they share one lowering; C `pow` would answer 1 where node answers NaN.
       const t = this.fresh();
-      this.emit(`${t} = call double @pow(double ${vals[0]}, double ${vals[1]})`);
+      this.emit(`${t} = call double @js_pow(double ${vals[0]}, double ${vals[1]})`);
       return { v: t, ty: "number" };
     }
     const fn = MATH_FN1.get(method);
@@ -5427,29 +5457,41 @@ class FnGen {
 
   /** Collect the names an arrow's block body BINDS in the flat frame (params handled by
    *  the caller) — VarDecls, for-loop/for-of/for-in vars, catch params — WITHOUT descending
-   *  into nested arrows (those are their own binders). Mirrors collectLocals's shape. */
-  private collectBoundNames(body: Stmt[], out: Set<string>): void {
+   *  into nested arrows (those are their own binders). Mirrors collectLocals's shape.
+   *
+   *  RETURNS the accumulated set rather than filling an out-parameter, and every caller
+   *  must take the return. A nativets `Set` is PERSISTENT: `.add` yields a new set and
+   *  leaves the receiver unchanged (NT1606), so an out-parameter would come back empty.
+   *  Under bun `.add` mutates and returns the same set, so threading is a no-op there —
+   *  one spelling, both semantics. */
+  private collectBoundNames(body: Stmt[], out: Set<string>): Set<string> {
+    let acc = out;
     for (const s of body) {
       switch (s.kind) {
-        case "VarDecl": for (const d of s.decls) out.add(d.name); break;
-        case "IfStmt": this.collectBoundNames(s.consequent, out); if (s.alternate) this.collectBoundNames(s.alternate, out); break;
-        case "WhileStmt": case "DoWhileStmt": this.collectBoundNames(s.body, out); break;
+        case "VarDecl": for (const d of s.decls) acc = acc.add(d.name); break;
+        case "IfStmt": acc = this.collectBoundNames(s.consequent, acc); if (s.alternate) acc = this.collectBoundNames(s.alternate, acc); break;
+        case "WhileStmt": case "DoWhileStmt": acc = this.collectBoundNames(s.body, acc); break;
         case "ForStmt":
-          if (s.init && (s.init as VarDecl).kind === "VarDecl") for (const d of (s.init as VarDecl).decls) out.add(d.name);
-          this.collectBoundNames(s.body, out); break;
-        case "ForOfStmt": out.add(s.name); this.collectBoundNames(s.body, out); break;
-        case "ForInStmt": out.add(s.name); this.collectBoundNames(s.body, out); break;
-        case "SwitchStmt": for (const c of s.cases) this.collectBoundNames(c.body, out); break;
-        case "BlockStmt": this.collectBoundNames(s.body, out); break;
-        case "MultiStmt": this.collectBoundNames(s.stmts, out); break;
+          if (s.init && (s.init as VarDecl).kind === "VarDecl") for (const d of (s.init as VarDecl).decls) acc = acc.add(d.name);
+          acc = this.collectBoundNames(s.body, acc); break;
+        // `name2` is the VALUE half of `for (const [k, v] of map)` and binds exactly as
+        // `name` does. Missing it here was a silent wrong answer: two inlined callbacks in
+        // one frame both kept the source name `v`, the first fixed its slot's LLVM type,
+        // and the second read a string ptr back as a double.
+        case "ForOfStmt": acc = acc.add(s.name); if (s.name2) acc = acc.add(s.name2); acc = this.collectBoundNames(s.body, acc); break;
+        case "ForInStmt": acc = acc.add(s.name); acc = this.collectBoundNames(s.body, acc); break;
+        case "SwitchStmt": for (const c of s.cases) acc = this.collectBoundNames(c.body, acc); break;
+        case "BlockStmt": acc = this.collectBoundNames(s.body, acc); break;
+        case "MultiStmt": acc = this.collectBoundNames(s.stmts, acc); break;
         case "TryStmt":
-          if (s.param) out.add(s.param);
-          this.collectBoundNames(s.block, out);
-          if (s.handler) this.collectBoundNames(s.handler, out);
-          if (s.finalizer) this.collectBoundNames(s.finalizer, out); break;
+          if (s.param) acc = acc.add(s.param);
+          acc = this.collectBoundNames(s.block, acc);
+          if (s.handler) acc = this.collectBoundNames(s.handler, acc);
+          if (s.finalizer) acc = this.collectBoundNames(s.finalizer, acc); break;
         default: break;
       }
     }
+    return acc;
   }
 
   /** Alpha-rename an inlined HOF callback's OWN bound names (params + block-body locals) to
@@ -5468,7 +5510,7 @@ class FnGen {
     const suffix = `.h${this.hofSeq++}`;
     let bound = new Set<string>();
     for (const p of arrow.params) bound = bound.add(p.name);
-    if (!arrow.exprBody) this.collectBoundNames(arrow.stmts as Stmt[], bound);
+    if (!arrow.exprBody) bound = this.collectBoundNames(arrow.stmts as Stmt[], bound);
     if (bound.size === 0) return;
     let map = new Map<string, string>();
     for (const n of bound) map = map.set(n, n + suffix);
@@ -5484,9 +5526,14 @@ class FnGen {
     for (const p of params) shadow = shadow.add(p.name);
     // An EXPRESSION body binds nothing beyond the parameters, so `stmts` is absent and
     // there is nothing to collect — which is what `exprBody` used to be passed in to say.
-    if (stmts !== undefined) this.collectBoundNames(stmts, shadow);
-    const child = new Map(map);
-    for (const n of shadow) child.delete(n);
+    if (stmts !== undefined) shadow = this.collectBoundNames(stmts, shadow);
+    // Copy the keys that SURVIVE rather than copy-then-`.delete`. `.delete` cannot be
+    // threaded the way `.set`/`.add` are: under bun it returns a BOOLEAN, so
+    // `child = child.delete(n)` would type-check under nativets' persistent Map and put
+    // `true` in `child` when this same file runs under bun. Filtering is the one spelling
+    // that means the same thing in both.
+    let child = new Map<string, string>();
+    for (const [k, v] of map) if (!shadow.has(k)) child = child.set(k, v);
     return child;
   }
 
@@ -5506,7 +5553,13 @@ class FnGen {
         if (s.test) this.subExpr(s.test, map);
         if (s.update) this.subExpr(s.update, map);
         this.subStmts(s.body, map); break;
-      case "ForOfStmt": this.subExpr(s.iterable, map); if (map.has(s.name)) s.name = map.get(s.name)!; this.subStmts(s.body, map); break;
+      case "ForOfStmt":
+        this.subExpr(s.iterable, map);
+        if (map.has(s.name)) s.name = map.get(s.name)!;
+        // The value half of `for (const [k, v] of map)` — renamed with the key half, or the
+        // two inlinings collide on `v` (see collectBoundNames).
+        if (s.name2 && map.has(s.name2)) s.name2 = map.get(s.name2)!;
+        this.subStmts(s.body, map); break;
       case "ForInStmt": this.subExpr(s.object, map); if (map.has(s.name)) s.name = map.get(s.name)!; this.subStmts(s.body, map); break;
       case "SwitchStmt": this.subExpr(s.discriminant, map); for (const c of s.cases) { if (c.test) this.subExpr(c.test, map); this.subStmts(c.body, map); } break;
       case "ThrowStmt": this.subExpr(s.argument, map); break;
@@ -6343,8 +6396,17 @@ class FnGen {
       case "Number": return { v: this.coerceToNumber(this.genExpr(args[0]!)), ty: "number" };
       case "String": return { v: this.coerceToString(this.genExpr(args[0]!)), ty: "string" };
       // --- stdlib (web standards) Batch 1: base64 globals ---
-      case "btoa": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_btoa(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
-      case "atob": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_atob(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      // BOTH ARE FALLIBLE, exactly like `decodeURIComponent` two cases below: node throws
+      // `InvalidCharacterError` for a `btoa` code point above U+00FF and for an `atob`
+      // input that is not forgiving-base64. So each needs the pending-exception check —
+      // without it the runtime's raise would set the flag and nothing would read it, which
+      // is how a throw turns back into the exit-0 wrong answer this pair is being fixed for.
+      case "btoa": case "atob": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_${name}(ptr ${this.genExpr(args[0]!).v})`);
+        this.emitExcCheck();
+        return { v: t, ty: "string" };
+      }
       // --- stdlib: URL parsing (WHATWG URL functional subset) — string in, string out ---
       // --- stdlib Batch 3: URI encoding. decode* is fallible (node's URIError). ---
       case "encodeURIComponent": case "encodeURI": {
