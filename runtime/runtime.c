@@ -450,6 +450,67 @@ void nt_panic_bounds(const char *what, double len, double idx, const char *loc) 
   abort();
 }
 
+/* ============================================================
+ * PANIC — a string the host cannot represent (see docs/divergences.md).
+ *
+ * node's (V8's) maximum string length on 64-bit is 2^29-24; `"x".repeat(536870889)` is
+ * the first `RangeError: Invalid string length` (measured against node v24). We count
+ * UTF-8 BYTES where node counts UTF-16 code units — the pre-existing string-index
+ * divergence (A.2) — so the two boundaries coincide for ASCII and ours is the stricter
+ * one for anything wider.
+ *
+ * WHY A PANIC AND NOT A RAISE. node throws a CATCHABLE RangeError here, and the pending-
+ * exception protocol below could carry one. It deliberately does not: making these
+ * builders fallible would route every `.repeat` / `.padStart` / `.padEnd` call site
+ * through `emitExcCheck`, which REFUSES to compile a fallible call inside a `try` with no
+ * `catch`, and inside a `try` whose `catch` binds an object type. Those are ordinary
+ * formatting calls, so that trades a rare stop for a common REJECTION of programs that
+ * compile and run correctly today. This is the same policy the compiler already applies
+ * to every other unrecoverable size failure — `nativets: out of memory` and
+ * `nt_panic_bounds` — so there is one stop discipline, not two. stdout is flushed first,
+ * so everything printed before the fault stays byte-comparable with node; the exit code
+ * is 134 (SIGABRT) where node's is 1, documented in docs/divergences.md.
+ * ============================================================ */
+#define NT_MAX_STR_LEN 536870888.0
+
+static void nt_panic_str_len(const char *what, double want) {
+  char w[64];
+  js_number_to_string(want, w, sizeof(w));
+  fflush(stdout);
+  fprintf(stderr, "panic: invalid string length: %s would be %s bytes, past the %.0f-byte maximum\n",
+          what, w, NT_MAX_STR_LEN);
+  fprintf(stderr, "  help: node throws `RangeError: Invalid string length` at exactly this "
+                  "boundary; build the text in pieces, or write it out incrementally, instead "
+                  "of materialising one string this large\n");
+  fflush(stderr);
+  abort();
+}
+
+/* `.repeat(count)` rejects its COUNT before it ever looks at the length — ES 22.1.3.18
+ * step 3 — which is why `"".repeat(Infinity)` throws while `"".repeat(1e100)` is "". */
+static void nt_panic_repeat_count(double count) {
+  char c[64];
+  js_number_to_string(count, c, sizeof(c));
+  fflush(stdout);
+  fprintf(stderr, "panic: invalid count value: %s\n", c);
+  fprintf(stderr, "  help: `.repeat(n)` needs `n` to be finite and >= 0; node throws "
+                  "`RangeError: Invalid count value: %s` here\n", c);
+  fflush(stderr);
+  abort();
+}
+
+/* ES 7.1.5 ToIntegerOrInfinity, kept as a DOUBLE so ±Infinity SURVIVES the conversion.
+ * `(long)d` for a non-finite or out-of-range `d` is undefined in C, and the two hosts
+ * disagree in the worst possible way: arm64 saturates to LONG_MAX while x86-64 yields
+ * LONG_MIN. That one line made `"abc".padStart(Infinity, "xy")` abort on one target and
+ * silently answer `"abc"` on the other — a WRONG ANSWER at exit 0, from the same source,
+ * decided by the host. Every length argument below goes through here first. */
+static double nt_to_integer_or_infinity(double d) {
+  if (isnan(d)) return 0.0;
+  if (isinf(d)) return d;
+  return trunc(d);
+}
+
 /* `expr!` — TypeScript's non-null assertion, on an A2 tagged pair [tag, value]
  * (tag 0 = undefined, 1 = null, >=2 = present). Unwraps to the value slot.
  *
@@ -645,6 +706,11 @@ refuse:
 
 const char *js_str_concat(const char *a, const char *b) {
   size_t la = nt_strlen(a), lb = nt_strlen(b);
+  /* `+` shares the cap but NOT the overflow: both operands are strings already in memory,
+   * so `la + lb` cannot wrap. It can still step past what node can represent, and node
+   * raises `Invalid string length` there — so a concatenation that outgrows the maximum
+   * must stop rather than answer a string node would refuse to build. One compare. */
+  if ((double)la + (double)lb > NT_MAX_STR_LEN) nt_panic_str_len("the concatenation", (double)la + (double)lb);
   char *out = (char *)nativets_alloc(la + lb + 1);
   memcpy(out, a, la);
   memcpy(out + la, b, lb);
@@ -885,18 +951,173 @@ double js_pow(double a, double b) {
   return pow(a, b);
 }
 
-/* parseInt / parseFloat (prefix parsing, JS-style) */
+/* ---- parseInt (ECMA-262 §19.2.5) ------------------------------------------------
+ *
+ * This used to be `strtol` with a hand-rolled prologue, which was wrong three ways, all
+ * of them silent:
+ *
+ *   1. `strtol` reads its OWN sign, after we had already read one. `parseInt("--1")`
+ *      came back 1 and `parseInt("+-1")` came back -1 — the second, inner sign WON, so
+ *      the answer was not merely wrong, it was inverted. Both are NaN in node.
+ *   2. `(double)(sign * v)` cannot produce -0, so `parseInt("-0")` was 0. Invisible
+ *      through `String()` (both "0"), visible through `console.log`.
+ *   3. `long` SATURATES at INT64_MAX, so every input above 2^63 returned the one
+ *      constant 9223372036854775807. The value has to be built as a double.
+ *
+ * The grammar below is V8's `StringToIntHelper::DetectRadixInternal`, and the three
+ * accumulators are V8's three. Matching V8's ARITHMETIC — not just its grammar — is
+ * deliberate: for a radix that is not 2, 4, 8, 10, 16 or 32 the spec explicitly permits
+ * "an implementation-dependent approximation to the mathematical integer value", and
+ * node takes it. `parseInt("9007199254740993", 36)` is 1.9896986116031812e+24 in node
+ * where the correctly-rounded answer is 1.989698611603181e+24, so a bignum here would
+ * be *more* accurate and would fail the prime directive. Verified against node over 436
+ * random (digits, radix) pairs spanning every non-special radix: 436/436.
+ *
+ * `nt_pi_generic` writes its accumulation as ONE expression on purpose. clang contracts
+ * `result * multiplier + part` to a fused multiply-add wherever the target has one, and
+ * V8 is built by the same compiler under the same default (`-ffp-contract=on`) — so the
+ * fused form on arm64 and the unfused form on baseline x86-64 are BOTH what the local
+ * node does. Forcing either one (an explicit `fma()`, or `-ffp-contract=off`) would make
+ * us disagree with node on the other half of our targets. Do not "fix" it.
+ */
+
+/* parseInt's leading trim is `nt_ws_skip_fwd` — the SAME WhiteSpace + LineTerminator set
+ * the trims and `Number(x)` use, not the four ASCII spaces this used to skip. It is
+ * forward-declared once, above, with the rest of the string-to-number grammar. */
+
+/* V8 `isDigit`, folded into a value: the digit's value in `radix`, or -1. */
+static int nt_pi_digit(int c, int radix) {
+  if (c >= '0' && c <= '9' && c < '0' + radix) return c - '0';
+  if (radix > 10 && c >= 'a' && c < 'a' + radix - 10) return c - 'a' + 10;
+  if (radix > 10 && c >= 'A' && c < 'A' + radix - 10) return c - 'A' + 10;
+  return -1;
+}
+
+/* Radix 2/4/8/16/32 — V8 `InternalStringToIntDouble`. Exact: accumulate into the low 53
+ * bits, then round the dropped bits to nearest-even with a sticky tail. Returns the
+ * MAGNITUDE; the caller applies the sign, as V8's `GetResult` does. */
+static double nt_pi_pow2(const char *cur, const char *end, int radix, int log2r) {
+  int64_t number = 0;
+  int exponent = 0;
+  for (;;) {
+    int digit = nt_pi_digit((unsigned char)*cur, radix);
+    if (digit < 0) break; /* trailing junk is allowed and ignored */
+    number = number * radix + digit;
+    int overflow = (int)(number >> 53);
+    if (overflow != 0) {
+      int overflow_bits = 1;
+      while (overflow > 1) { overflow_bits++; overflow >>= 1; }
+      int dropped = (int)number & ((1 << overflow_bits) - 1);
+      number >>= overflow_bits;
+      exponent = overflow_bits;
+      int zero_tail = 1;
+      for (;;) {
+        ++cur;
+        if (cur == end || nt_pi_digit((unsigned char)*cur, radix) < 0) break;
+        if (*cur != '0') zero_tail = 0;
+        /* Clamped: past ~1100 the result is already Infinity, and an unclamped `int`
+         * would overflow (UB) on a multi-gigadigit string. */
+        if (exponent < 100000) exponent += log2r;
+      }
+      int middle = 1 << (overflow_bits - 1);
+      if (dropped > middle) number++;
+      else if (dropped == middle && ((number & 1) != 0 || !zero_tail)) number++;
+      if ((number & ((int64_t)1 << 53)) != 0) { exponent++; number >>= 1; }
+      break;
+    }
+    ++cur;
+    if (cur == end) break;
+  }
+  return exponent == 0 ? (double)number : ldexp((double)number, exponent);
+}
+
+/* Radix 10 — V8 `HandleBaseTenCase`: hand the digit run to libc's correctly-rounded
+ * strtod. Digits past the 310th are dropped exactly as V8 drops them, and that is not
+ * an approximation: any value with more than 309 digits is already past DBL_MAX, so the
+ * truncated prefix and the true value both round to Infinity. */
+static double nt_pi_base10(const char *cur, const char *end) {
+  char buf[312];
+  size_t n = 0;
+  while (cur != end && *cur >= '0' && *cur <= '9') {
+    if (n <= 309) buf[n++] = *cur;
+    ++cur;
+  }
+  buf[n] = '\0';
+  return strtod(buf, NULL);
+}
+
+/* Every other radix — V8 `NumberParseIntHelper::HandleGenericCase`. Digits go into a
+ * uint32 `part` for as long as the multiplier stays under kMaxUInt32/36, then one
+ * multiply-add folds the chunk into the double. See the note above about contraction. */
+static double nt_pi_generic(const char *cur, const char *end, int radix) {
+  double result = 0.0;
+  int done = 0;
+  do {
+    uint32_t part = 0, multiplier = 1;
+    for (;;) {
+      if (cur == end) { done = 1; break; }
+      int d = nt_pi_digit((unsigned char)*cur, radix);
+      if (d < 0) { done = 1; break; } /* trailing junk is allowed and ignored */
+      uint32_t m = multiplier * (uint32_t)radix;
+      if (m > 0xFFFFFFFFu / 36u) break; /* chunk full; this digit starts the next one */
+      part = part * (uint32_t)radix + (uint32_t)d;
+      multiplier = m;
+      ++cur;
+    }
+    result = result * multiplier + part;
+  } while (!done);
+  return result;
+}
+
 double js_parse_int(const char *s, double radixd) {
-  while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-  int radix = (int)radixd;
-  int sign = 1;
-  if (*s == '+') s++; else if (*s == '-') { sign = -1; s++; }
-  if ((radix == 0 || radix == 16) && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { s += 2; radix = 16; }
-  if (radix == 0) radix = 10;
-  char *end;
-  long v = strtol(s, &end, radix);
-  if (end == s) return NAN;
-  return (double)(sign * v);
+  const char *end = s + nt_strlen(s);
+  const char *cur = nt_ws_skip_fwd(s, end);
+  if (cur == end) return NAN; /* empty, or whitespace only */
+
+  /* Exactly ONE optional sign. Anything after it that is not a digit is junk. */
+  int negative = 0;
+  if (*cur == '+' || *cur == '-') {
+    negative = (*cur == '-');
+    if (++cur == end) return NAN; /* a bare "+" / "-" */
+  }
+
+  /* ToInt32 first, so `parseInt("11", 2 ** 32 + 16)` is a radix-16 parse, not junk. */
+  int radix = (int)to_int32(radixd);
+  if (radix != 0 && (radix < 2 || radix > 36)) return NAN;
+
+  int leading_zero = 0;
+  if (radix == 0 || radix == 16) {
+    if (radix == 0) radix = 10; /* the default, unless a `0x` prefix says otherwise */
+    if (*cur == '0') {
+      if (++cur == end) return negative ? -0.0 : 0.0;
+      if (*cur == 'x' || *cur == 'X') {
+        radix = 16;
+        if (++cur == end) return NAN; /* "0x" with nothing after it */
+      } else {
+        leading_zero = 1;
+      }
+    }
+  }
+  while (*cur == '0') {
+    leading_zero = 1;
+    if (++cur == end) return negative ? -0.0 : 0.0; /* all zeros: SIGNED zero */
+  }
+  if (nt_pi_digit((unsigned char)*cur, radix) < 0) {
+    /* Leading zeros then junk is zero ("-0.9" is -0); junk with no leading zero is NaN. */
+    return leading_zero ? (negative ? -0.0 : 0.0) : NAN;
+  }
+
+  double v;
+  switch (radix) {
+    case 10: v = nt_pi_base10(cur, end); break;
+    case 2:  v = nt_pi_pow2(cur, end, 2, 1); break;
+    case 4:  v = nt_pi_pow2(cur, end, 4, 2); break;
+    case 8:  v = nt_pi_pow2(cur, end, 8, 3); break;
+    case 16: v = nt_pi_pow2(cur, end, 16, 4); break;
+    case 32: v = nt_pi_pow2(cur, end, 32, 5); break;
+    default: v = nt_pi_generic(cur, end, radix); break;
+  }
+  return negative ? -v : v;
 }
 /* parseFloat is the LONGEST-PREFIX read of the same StrDecimalLiteral: trailing garbage
  * is ignored rather than fatal, and the `0b`/`0o`/`0x` prefixes are NOT in this grammar
@@ -1151,15 +1372,36 @@ static const char *nt_trim_impl(const char *s, int front, int back) {
 const char *js_str_trim(const char *s)       { return nt_trim_impl(s, 1, 1); }
 const char *js_str_trim_end(const char *s)   { return nt_trim_impl(s, 0, 1); }
 const char *js_str_trim_start(const char *s) { return nt_trim_impl(s, 1, 0); }
+/* String#repeat(count) — ES 22.1.3.18. The COUNT is validated first (step 3: a negative
+ * or +Infinity count is a RangeError whatever the receiver is), then the RESULT LENGTH.
+ *
+ * The size arithmetic is done in DOUBLE, not size_t, on purpose. `n * (size_t)count`
+ * wrapped: `"abcd".repeat(2**62)` is 2^64 bytes, which truncates to 0, so this allocated
+ * ONE byte and then memcpy'd 2^62 times into it — an out-of-bounds heap write in a
+ * memory-safe compiler, observed as SIGBUS with empty stdout AND empty stderr (the
+ * overflow had already smashed stdio's own buffer). A double holds every product up to
+ * the 2^29 cap exactly, so the comparison below is exact and cannot itself wrap. */
 const char *js_str_repeat(const char *s, double countd) {
-  long count = (long)countd; if (count < 0) count = 0;
-  size_t n = nt_strlen(s); char *o = alloc_str(n * (size_t)count);
-  for (long i = 0; i < count; i++) memcpy(o + i * n, s, n);
-  o[n * count] = 0; return o;
+  double count = nt_to_integer_or_infinity(countd);
+  if (count < 0.0 || isinf(count)) nt_panic_repeat_count(count);
+  size_t n = nt_strlen(s);
+  double total = (double)n * count;   /* exact for every value that survives the cap */
+  if (total > NT_MAX_STR_LEN) nt_panic_str_len("the repeated string", total);
+  size_t need = (size_t)total;        /* <= 2^29, so the narrowing is lossless */
+  char *o = alloc_str(need);
+  for (size_t i = 0; i < need; i += n) memcpy(o + i, s, n);
+  o[need] = 0; return o;
 }
+/* String#padStart(target, pad) — ES 22.1.3.17. Order matters and is node's: a target at
+ * or below the current length returns the receiver, THEN an empty filler returns the
+ * receiver (so `"abc".padStart(Infinity, "")` is `"abc"`, not a RangeError), and only
+ * then is the result length checked. */
 const char *js_str_pad_start(const char *s, double targetd, const char *pad) {
-  long target = (long)targetd; long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
-  if (n >= target || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, n); o[n] = 0; return o; }
+  double t = nt_to_integer_or_infinity(targetd);
+  long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
+  if (t <= (double)n || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, n); o[n] = 0; return o; }
+  if (t > NT_MAX_STR_LEN) nt_panic_str_len("the padded string", t);
+  long target = (long)t; /* <= 2^29 after the cap, so this conversion is defined */
   long padlen = target - n; char *o = alloc_str((size_t)target);
   for (long i = 0; i < padlen; i++) o[i] = pad[i % pn];
   memcpy(o + padlen, s, (size_t)n); o[target] = 0; return o;
@@ -3457,8 +3699,11 @@ const char *js_str_at(const char *s, double id) {
  * repetition, and a no-op when the string is already long enough or the pad is
  * empty (node's semantics exactly). */
 const char *js_str_pad_end(const char *s, double targetd, const char *pad) {
-  long target = (long)targetd; long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
-  if (n >= target || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, (size_t)n); o[n] = 0; return o; }
+  double t = nt_to_integer_or_infinity(targetd);
+  long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
+  if (t <= (double)n || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, (size_t)n); o[n] = 0; return o; }
+  if (t > NT_MAX_STR_LEN) nt_panic_str_len("the padded string", t);
+  long target = (long)t; /* <= 2^29 after the cap, so this conversion is defined */
   char *o = alloc_str((size_t)target);
   memcpy(o, s, (size_t)n);
   for (long i = n; i < target; i++) o[i] = pad[(size_t)(i - n) % pn];

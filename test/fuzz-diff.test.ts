@@ -80,7 +80,7 @@ describe("fuzz findings — string → number conversions", () => {
    * the result NaN. Ours returns a number — and for `"+-1"` the sign it returns is the
    * one from the SECOND character, so the answer is not merely wrong, it is inverted.
    */
-  it.failing("parseInt rejects a second sign character", async () => {
+  it("parseInt rejects a second sign character", async () => {
     await expectSameBytes([
       'console.log(parseInt("--1"));', // node NaN, ours 1
       'console.log(parseInt("-+1"));', // node NaN, ours -1
@@ -155,7 +155,7 @@ describe("fuzz findings — string → number conversions", () => {
    * `parseInt("-0")` is -0, not 0. Invisible through `String()` (both "0") but visible
    * through console.log, which is util.inspect's formatNumber and prints `-0`.
    */
-  it.failing("parseInt preserves the sign of a negative zero", async () => {
+  it("parseInt preserves the sign of a negative zero", async () => {
     await expectSameBytes([
       'console.log(parseInt("-0"));',      // node -0, ours 0
       'console.log(parseInt("-0", 16));',  // node -0, ours 0
@@ -169,7 +169,7 @@ describe("fuzz findings — string → number conversions", () => {
    * accumulates mathematically and rounds to the nearest double at the end, so any input
    * whose value exceeds 2^63 comes back as the same wrong constant here.
    */
-  it.failing("parseInt with a radix does not saturate at INT64_MAX", async () => {
+  it("parseInt with a radix does not saturate at INT64_MAX", async () => {
     await expectSameBytes([
       'console.log(parseInt("9007199254740993", 16));', // node 10378291982571407000, ours 9223372036854776000
       'console.log(parseInt("9007199254740993", 36));', // node 1.9896986116031812e+24, ours the same constant
@@ -484,19 +484,37 @@ describe("fuzz findings — refusals and stops (ranked last)", () => {
   });
 
   /*
-   * `"abc".padStart(Infinity, "xy")` is a RangeError in node (exit 1, a message on stderr).
-   * Here the process dies on a SIGNAL with an EMPTY stderr — no `nativets: out of memory`,
-   * no panic line, nothing. Both sides stop, so it is not a wrong answer, but a silent
-   * signal death is not the documented controlled stop either.
+   * FIXED (fx-padstop). `"abc".padStart(Infinity, "xy")` is a RangeError in node (exit 1,
+   * a message on stderr). Here the process died on a SIGNAL with an EMPTY stderr — no
+   * `nativets: out of memory`, no panic line, nothing: `(long)Infinity` is UB in C, arm64
+   * saturated it to LONG_MAX and asked malloc for 9 exabytes. (On x86-64 the same
+   * conversion yields LONG_MIN, which makes `n >= target` true and silently answers
+   * `"abc"` at exit 0 — the same source, a wrong answer instead of a stop, decided by the
+   * host.) It now stops the documented way, with a `panic:` line naming the length.
+   *
+   * The pinned assertion is REWRITTEN, not merely un-`.failing`ed: as recorded it demanded
+   * `stderrLen: 0`, which describes neither the bug nor a diagnostic. What a fix has to
+   * deliver is asserted instead — stdout byte-identical to node's up to the stop, a real
+   * message on stderr, and a deliberate exit code. The neighbours this shares a path with
+   * (`padEnd`, `.repeat`, and `.repeat`'s far worse size_t WRAP) are covered case by case
+   * in test/panic.test.ts, "string length".
    */
-  it.failing("an over-long padStart stops with a diagnostic, not a bare signal", async () => {
+  it("an over-long padStart stops with a diagnostic, not a bare signal", async () => {
     const src = 'console.log("start");\nconsole.log("abc".padStart(Infinity, "xy"));\n';
     const oracle = nodeRun(src);
     const ours = await ourRun(src);
     if (isRefusal(ours)) throw new Error(`refused: ${ours.refused}`);
     expect(oracle.exitCode).toBe(1);
-    expect(oracle.stderr.toString("utf8")).toContain("RangeError");
-    // Ours: killed by a signal, stderr empty.
-    expect({ signal: ours.signal, stderrLen: ours.stderr.length }).toEqual({ signal: null, stderrLen: 0 });
+    expect(oracle.stderr.toString("utf8")).toContain("RangeError: Invalid string length");
+    // Both sides stop at the same point, so everything printed before it must agree byte
+    // for byte — the part of the contract a differential run actually compares.
+    expect(Buffer.compare(ours.stdout, oracle.stdout)).toBe(0);
+    expect(ours.stdout.toString("latin1")).toBe("start\n");
+    // Ours: a controlled panic (SIGABRT, shell 134) with the reason on stderr, not silence.
+    expect(ours.stderr.toString("utf8")).toContain("panic: invalid string length");
+    expect(ours.signal).toBe("SIGABRT");
+    // The exit code is where we diverge from node's 1 — deliberately, and documented in
+    // docs/divergences.md: this is a panic, like an out-of-range index, not a throw.
+    expect(ours.exitCode).toBe(-1); // spawnSync reports `status: null` for a signalled child
   });
 });

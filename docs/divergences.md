@@ -145,6 +145,61 @@ patched. Both are the "hint recommends code that does something else" class.
    negative index. The fix wants the suggestion to depend on the `what` argument the caller
    already passes, rather than being unconditional.
 
+### A string past node's maximum length PANICS (node throws a catchable `RangeError`)
+
+`"abc".padStart(Infinity, "xy")`, `"x".repeat(2 ** 53)` and friends are a **`RangeError` at
+exit 1** in node. nativets stops too, but as a **panic**:
+
+```
+panic: invalid string length: the padded string would be Infinity bytes, past the 536870888-byte maximum
+  help: node throws `RangeError: Invalid string length` at exactly this boundary; build the
+        text in pieces, or write it out incrementally, instead of materialising one string this large
+```
+
+```
+panic: invalid count value: -1
+  help: `.repeat(n)` needs `n` to be finite and >= 0; node throws `RangeError: Invalid count value: -1`
+```
+
+on **stderr**, stdout flushed first and byte-comparable up to the stop, `abort()` → **exit 134**.
+**The exit code is the divergence** (node's is 1), and so is catchability: like every other panic
+this does not go through the pending-exception protocol, so `try`/`catch` cannot stop it.
+
+**The cap is node's own number.** V8's maximum string length on 64-bit is `2**29 - 24` =
+**536870888**, found by binary search against node v24: `"abc".padStart(536870888)` succeeds on
+both sides and `536870889` stops on both. We count **UTF-8 bytes** where node counts UTF-16 code
+units (§A.2), so the boundaries coincide for ASCII and ours is the stricter one above U+007F.
+
+**Covered:** `String#padStart`, `String#padEnd`, `String#repeat` (both its `RangeError`s — the
+count check of ES 22.1.3.18 step 3 runs *before* the length check, which is why `"".repeat(Infinity)`
+stops while `"".repeat(1e100)` is a plain `""`), and `+` / `String#concat`. `new Array(n)` never
+reaches this: it is refused at compile time (`NT1012`).
+
+**Why a panic and not a raise, when node throws something catchable.** The pending-exception
+protocol *could* carry a `RangeError`, and that would match node's exit code. It would also make
+every `.repeat` / `.padStart` / `.padEnd` call site a **fallible call**, which `emitExcCheck`
+*refuses to compile* inside a `try` with no `catch`, and inside a `try` whose `catch` binds an
+object type. Those are ordinary formatting calls: the trade would be a rare stop for a common
+**rejection of programs that compile and run correctly today**. One stop discipline — the same one
+as an out-of-range index and `nativets: out of memory` — is worth the exit code.
+
+**What this replaced.** All four builders took their length as `(long)d`, which C leaves
+**undefined** for a non-finite or out-of-range double, and then did the size arithmetic in `size_t`,
+which **wraps**. Measured, that was worse than a divergence:
+
+| | nativets (before) | node |
+|---|---|---|
+| `"abc".padStart(Infinity, "xy")` | SIGABRT, **empty stderr** on arm64; `"abc"` at **exit 0** on x86-64 | `RangeError`, exit 1 |
+| `"abcd".repeat(2 ** 62)` | **SIGBUS, empty stdout AND stderr** — 2^64 bytes truncated to 0, so it wrote 2^62 times into a **1-byte** buffer | `RangeError`, exit 1 |
+| `"".repeat(1e100)` | **hung forever** (a `LONG_MAX`-trip loop of zero-byte copies) | `""` |
+| `"x".repeat(-1)` | `""` at **exit 0** | `RangeError`, exit 1 |
+
+The `repeat` wrap was an out-of-bounds heap write in a memory-safe compiler, and it had smashed
+stdio's own buffer before it died — which is why even the line printed *before* the fault was lost.
+Every length argument now goes through ES 7.1.5 `ToIntegerOrInfinity` **as a double**, so ±Infinity
+survives the conversion, and the size arithmetic is done in double, which is exact below the cap and
+cannot wrap. Regression tests: `test/panic.test.ts`, "string length".
+
 ### Decorators — a class method that assigns a field (`docs/decorators.md`)
 
 Full design in `docs/decorators.md`; these are the three places node cannot be the oracle.
@@ -3368,6 +3423,50 @@ reference is `NT1003`.
 scope (`const a = 1; const a = 2;` prints `2`), which node rejects as a `SyntaxError`. Those
 are the one case still sharing a frame slot, which is why the ownership pass keeps its
 `shadowedNames` disqualification — it holds that gap to a leak rather than a use-after-free.
+
+**A second shape is still wrong, and it is a `function` DECLARATION inside a block.**
+`alphaRenameShadows` binds every hoisted `FuncDecl` name with `pinned = true` in *every*
+scope, frame or not — "they genuinely hoist and never rename" — so a block-level
+declaration keys the same storage as an enclosing declaration of that name, and the call
+resolves to the *enclosing* one:
+
+```ts
+function fmt(n: number): string { return `outer:${n}`; }
+function run(): string {
+  { function fmt(n: number): string { return `inner:${n * 2}`; }
+    return fmt(21); }
+}
+console.log(run());          // node: inner:42.  nativets: outer:21.
+console.log(fmt(1));         // outer:1 on both.
+```
+
+Exit 0 on both sides, no diagnostic — a silent wrong answer, and the inner body is never
+emitted. It survives at any signature: the shadowing declaration's parameters and return
+type are simply ignored in favour of the outer function's.
+
+It needs an enclosing declaration of the same name to land on. With no outer `fmt` to
+absorb the reference — two **sibling** blocks each declaring `function tag()`, say — the
+call is `NT1003` instead, so the refusal, not the miscompile, is the common case. That is
+the identical structure as the `const g` gap above, and the same root: a name is resolved
+against what the frame already knows rather than against the block that declares it.
+
+Fixing it properly is not a rename. node's block-level function declarations follow
+Annex B — the declaration creates a **var-scoped** binding in the enclosing function,
+assigned where the block *evaluates* it — which is why node prints `4`, not `3`, for
+
+```ts
+function pick(): number { return 1; }
+function outer(): number {
+  let t = 0;
+  { function pick(): number { return 2; } t += pick(); }
+  t += pick();                 // still the INNER one: Annex B var-scoped it
+  return t;
+}
+console.log(outer());        // node: 4.  nativets: 2.
+```
+
+Until that is modelled, the honest interim is to **refuse** a `FuncDecl` in a nested block
+whose name is already bound in the frame, rather than pin it onto the outer one.
 
 ## B. Unimplemented features (we refuse to compile — never miscompile)
 
