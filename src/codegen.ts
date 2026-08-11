@@ -4387,7 +4387,11 @@ class FnGen {
    *  selective-receive scan calls the user predicate with a value peeked out of the
    *  mailbox, which has no Expr form. */
   private callClosureWith(clo: string, fnTy: Ty, argVs: Val[]): Val {
-    return this.callClosure(clo, fnTy, () => argVs);
+    // `_ps` is named but unused — the values are already generated, so there is nothing
+    // left to coerce. Spelling the parameter rather than passing `() => argVs` keeps this
+    // inside the subset `src/` must compile: a 0-parameter arrow where a 1-parameter one
+    // is expected is an arity mismatch the checker refuses (it was a self-host blocker).
+    return this.callClosure(clo, fnTy, (_ps) => argVs);
   }
 
   /** Shared closure-call emission. Arguments are produced by `mk` at exactly the
