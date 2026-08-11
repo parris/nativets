@@ -813,6 +813,23 @@ interface StrTemp { v: string; fresh: boolean; }
  * `genExprInner` is only that a blocker EARLIER in that body masks it, which is the
  * first-blocker masking `test/blocker-metric.ts` warns hides refusals a lane ADDS.
  */
+/**
+ * The `BlockDrops` set a statement list carries, or `[]` if it has none.
+ *
+ * The marker is always the LAST statement (`setBlockDrops` in ast.ts replaces in place
+ * precisely so it stays last through the ownership pass's five fixpoint walks), so this
+ * is a single look at the tail rather than a scan. Spelled with the length hoisted, the
+ * way `setBlockDrops` itself is: `list[list.length - 1]` reads index `-1` on an empty
+ * list, which node answers `undefined` and this compiler PANICS on by design (Stage 41,
+ * test/no-index-last.test.ts).
+ */
+function dropsOf(list: Stmt[]): string[] {
+  const n = list.length;
+  if (n === 0) return [];
+  const last = list[n - 1]!;
+  return last.kind === "BlockDrops" ? last.names : [];
+}
+
 function allocatesString(e: Expr): boolean {
   if (e.kind === "TemplateLiteral") return true;
   if (e.kind !== "BinaryExpr") return false;
@@ -1123,7 +1140,28 @@ class FnGen {
   private lbl = 0;
   private varTypes = new Map<string, Ty>();
   private retTy: Ty = "number";
-  private loops: { brk: string; cont: string }[] = [];
+  /**
+   * Active `break`/`continue` targets, each with the BLOCK-SCOPE DEPTH it sits at.
+   *
+   * The two depths are not the same number and that is the whole point of storing both.
+   * A `switch` pushes an entry so that `break` can find it, but its `cont` is INHERITED
+   * from the enclosing loop — so a `continue` inside a switch inside a loop leaves the
+   * case's scope AND the loop body's, while a `break` at the same spot leaves only the
+   * case's. One depth would fix one of them and leave the other leaking.
+   */
+  private loops: { brk: string; cont: string; brkDepth: number; contDepth: number }[] = [];
+  /**
+   * The stack of live block scopes' drop sets — `blockScopes[i]` is the `BlockDrops`
+   * names of the i-th enclosing statement list (empty when that list has no marker).
+   *
+   * This mirrors, in codegen, the `this.scopes` stack the ownership pass keeps while it
+   * walks. It exists because the marker is a TRAILING statement: `genStmts` stops at the
+   * first terminated block, so a jump reached the loop label without ever reaching the
+   * markers of the blocks it was leaving. `return` never had the problem — it carries
+   * its own `ReturnStmt.drops` stamped by `ownedInScope` — and it deliberately still
+   * does; this stack is read only by `break`/`continue`.
+   */
+  private blockScopes: string[][] = [];
   /** In a lifted arrow: captured var name -> its slot in the closure env (%__clo). */
   private captures = new Map<string, { index: number; ty: Ty }>();
   /** Is `name` a user-bound local/param/capture (so a `Foo.bar` isn't a builtin namespace)? */
@@ -1278,6 +1316,7 @@ class FnGen {
     this.entryAllocas = []; this.blocks = []; this.cur = 0; this.tmp = 0; this.lbl = 0;
     this.varTypes = new Map();
     this.loops = [];
+    this.blockScopes = [];
     this.captures = new Map();
     this.tryHandlers = [];
     this.finallyStack = [];
@@ -1320,10 +1359,39 @@ class FnGen {
   /** Generate a statement sequence, stopping once the block is terminated
    *  (so code after return/break/continue isn't emitted as unreachable IR). */
   private genStmts(list: Stmt[]): void {
+    // Every statement list is a scope entry, whether or not it has a marker: the depth
+    // arithmetic a jump does is RELATIVE (from here down to its target's depth), so a
+    // list with no drops contributing an empty entry costs nothing and keeps the two
+    // stacks in step without `genStmts` having to know which lists the ownership pass
+    // chose to call `scoped()` on. `dropsOf` reads the marker, which is always LAST.
+    this.blockScopes.push(dropsOf(list));
     for (const s of list) {
       if (this.isTerminated()) break;
       this.genStmt(s);
     }
+    this.blockScopes.pop();
+  }
+
+  /**
+   * Unwind block scopes for a `break`/`continue`: free the linear locals of every scope
+   * between here and `depth`, innermost first — the order `ownedInScope` builds a
+   * `return`'s list in, and the reverse of construction.
+   *
+   * This does NOT need a fresh move analysis, and that is the load-bearing claim. The
+   * names come from the block's own `BlockDrops`, which `droppable` already filtered:
+   * a name moved on EVERY path is absent from the list, and a name moved on SOME path is
+   * in `condDrops`, so `nullOnMove` stores null into its slot at the move site and
+   * `nt_arr_free(NULL)`/`nt_obj_free(NULL)` are no-ops. The pointer IS the drop flag.
+   * The jump therefore frees exactly what the fall-through out of the same block would
+   * have freed, which is the property that makes it a leak fix rather than a new
+   * double-free surface.
+   *
+   * The one case it under-frees is a name moved unconditionally AFTER the jump: it is
+   * `must`-moved at the end of the block, so it is in no list, yet the jump's path never
+   * reached the move. That leaks exactly as it did before this existed.
+   */
+  private emitJumpDrops(depth: number): void {
+    for (let i = this.blockScopes.length - 1; i >= depth; i--) this.emitDrops(this.blockScopes[i] ?? []);
   }
 
   /** Emit deterministic drops (RAII frees) for owned linear locals. */
@@ -1825,7 +1893,10 @@ class FnGen {
         const cond = this.genCond(s.test);
         this.terminate(`br i1 ${cond}, label %${bodyLbl}, label %${endLbl}`);
         this.to(this.block(bodyLbl));
-        this.loops.push({ brk: endLbl, cont: condLbl });
+        // Both depths are the CURRENT one: the body's own scope is pushed by the
+        // `genStmts` below, so a jump inside the body unwinds it and every block nested
+        // in it. A real loop is the one place `break` and `continue` agree (see `loops`).
+        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
@@ -1851,7 +1922,7 @@ class FnGen {
           this.terminate(`br label %${bodyLbl}`);
         }
         this.to(this.block(bodyLbl));
-        this.loops.push({ brk: endLbl, cont: updLbl });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -1867,7 +1938,10 @@ class FnGen {
         const endLbl = this.label("enddo");
         this.terminate(`br label %${bodyLbl}`);
         this.to(this.block(bodyLbl));
-        this.loops.push({ brk: endLbl, cont: condLbl });
+        // Both depths are the CURRENT one: the body's own scope is pushed by the
+        // `genStmts` below, so a jump inside the body unwinds it and every block nested
+        // in it. A real loop is the one place `break` and `continue` agree (see `loops`).
+        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
@@ -1926,7 +2000,7 @@ class FnGen {
             this.emit(`store ${llvmTy(vt)} ${this.fromSlot(vs, vt)}, ptr ${this.addr(s.name2!)}`);
           }
         }
-        this.loops.push({ brk: endLbl, cont: updLbl });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -1959,8 +2033,15 @@ class FnGen {
         const endLbl = this.label("endsw");
         const bodyLbls = s.cases.map(() => this.label("case"));
         const defaultIdx = s.cases.findIndex((c) => c.test === null);
-        const outerCont = this.loops.length ? this.loops[this.loops.length - 1]!.cont : endLbl;
-        this.loops.push({ brk: endLbl, cont: outerCont });
+        // A `switch` is a `break` target but NOT a `continue` target: a `continue` inside
+        // one belongs to the enclosing loop, so its label AND its unwind depth are both
+        // inherited. That is the whole reason the entry carries two depths. Inheriting
+        // the label without the depth would unwind only as far as the switch and leave
+        // the loop body's own locals leaking — half a fix, silently.
+        const outer = this.loops.length ? this.loops[this.loops.length - 1]! : null;
+        const outerCont = outer ? outer.cont : endLbl;
+        const brkDepth = this.blockScopes.length;
+        this.loops.push({ brk: endLbl, cont: outerCont, brkDepth, contDepth: outer ? outer.contDepth : brkDepth });
         // dispatch chain
         for (let i = 0; i < s.cases.length; i++) {
           const c = s.cases[i]!;
@@ -2007,7 +2088,7 @@ class FnGen {
         const slot = this.fresh();
         this.emit(`${slot} = call i64 @nt_arr_get(ptr ${arr}, double ${iB})`);
         this.emit(`store ptr ${this.fromSlot(slot, "string")}, ptr ${this.addr(s.name)}`);
-        this.loops.push({ brk: endLbl, cont: updLbl });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -2142,17 +2223,28 @@ class FnGen {
         return;
       // Block-scoped RAII: free the linear locals this NESTED block declared (a
       // function/module body has none — those use endDrops). The marker is last in the
-      // list, so a block that terminated early (return/break/continue) never reaches it
-      // — a leak, never a double free.
+      // list, so a block that terminated early never reaches it — which is why a jump
+      // out of the block has to emit the same frees itself, on its way past.
+      //
+      // The two paths cannot both run: `terminate` marks the basic block terminated and
+      // `genStmts` stops at the first terminated block, so once a `break` has unwound,
+      // the markers of every list it unwound are unreachable in that block. A jump frees
+      // once, a fall-through frees once, and never both.
       case "BlockDrops":
         this.emitDrops(s.names);
         return;
-      case "BreakStmt":
-        this.terminate(`br label %${this.loops[this.loops.length - 1]!.brk}`);
+      case "BreakStmt": {
+        const t = this.loops[this.loops.length - 1]!;
+        this.emitJumpDrops(t.brkDepth);
+        this.terminate(`br label %${t.brk}`);
         return;
-      case "ContinueStmt":
-        this.terminate(`br label %${this.loops[this.loops.length - 1]!.cont}`);
+      }
+      case "ContinueStmt": {
+        const t = this.loops[this.loops.length - 1]!;
+        this.emitJumpDrops(t.contDepth);
+        this.terminate(`br label %${t.cont}`);
         return;
+      }
       case "FuncDecl":
         return;
     }
