@@ -16838,7 +16838,7 @@ L0:
   %t2 = call ptr @risky(double %t1)
   call void @js_print_str(ptr %t2)
   call void @js_print_newline()
-  %t3 = call ptr @nt_str_retain(ptr @.str.4)
+  %rc3 = call ptr @nt_str_retain(ptr @.str.4)
   store ptr @.str.4, ptr %e.addr
   br label %catch1
 catch1:

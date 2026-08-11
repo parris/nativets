@@ -176,4 +176,131 @@ console.log(__strLive());`;
     expect(r.stdout).toBe("28000\n0\n");
     expect(r.exitCode).toBe(0);
   });
+
+  /*
+   * A THROWN PRODUCER STRING WAS DOUBLE-OWNED.
+   *
+   * Every other binding site in codegen asks `isStrProducer` before retaining — a fresh
+   * template/concat/call result arrives already registered at rc=1, so binding it CONSUMES
+   * that reference instead of adding one (`retainStrBind`, and the `ReturnStmt` transfer
+   * rule beside it). Both `throw` lowerings retained unconditionally: the in-frame one
+   * before storing into the catch binding, and the cross-frame one inside
+   * `nt_exc_raise_msg`. The producer's own rc=1 was then never released by anybody —
+   * `emitStrDrops` only walks NAMED locals, and a thrown temporary is not one.
+   *
+   * One heap string leaked per throw, on the shape the self-hosting frontier is made of
+   * (`throw \`LexError: …\``). The control is the test above and the two here: the same
+   * template bound to a local reclaims correctly, so this is the throw path, not the
+   * producer.
+   */
+  /*
+   * The in-frame shape is measured INSIDE A FUNCTION, deliberately. Written with the
+   * `try` directly in the loop body it reports the same residue before and after the fix,
+   * and the counter is not lying — `__strLive` is allocations minus frees, so it cannot
+   * see the difference between one leaked string and one leaked string that also had a
+   * spurious extra reference. A SEPARATE, pre-existing gap dominates there: a string local
+   * declared in a loop body has a function-scoped slot that is released once, at function
+   * exit, so the previous iteration's value is dropped on the floor. The last case in this
+   * describe is that control — no throw anywhere, same residue — and it is NOT fixed here.
+   * Putting the `try` in a function makes the frame (and its releases) exit every
+   * iteration, which isolates the throw path: base 500, fixed 0, at n=500.
+   */
+  test("a thrown producer string is consumed, not double-owned — in-frame catch", async () => {
+    const body = (n: number): string => `
+function work(i: number): number {
+  try {
+    if (i > -1) throw \`LexError: bad input \${i}\`;
+    return 0;
+  } catch (e) {
+    return e.length;
+  }
+}
+let acc = 0;
+for (let i = 0; i < ${n}; i++) { acc = acc + work(i); }
+console.log(__strLive());`;
+    const small = await compileAndRun(body(200));
+    const large = await compileAndRun(body(1000));
+    expect(small.exitCode).toBe(0);
+    expect(large.exitCode).toBe(0);
+    expect(small.stdout).toBe("0\n");
+    expect(large.stdout).toBe("0\n"); // …and it does not GROW with the work
+  });
+
+  test("a thrown producer string is consumed, not double-owned — across a frame", async () => {
+    const body = (n: number): string => `
+function lex(s: string, i: number): number {
+  if (s === "bad") throw \`LexError: bad input \${i}\`;
+  return s.length;
+}
+function run(s: string, i: number): number {
+  try { return lex(s, i); } catch (e) { return e.length; }
+}
+let acc = 0;
+for (let i = 0; i < ${n}; i++) { acc = acc + run("bad", i); }
+console.log(__strLive());`;
+    const small = await compileAndRun(body(200));
+    const large = await compileAndRun(body(1000));
+    expect(small.exitCode).toBe(0);
+    expect(large.exitCode).toBe(0);
+    expect(small.stdout).toBe("0\n");
+    expect(large.stdout).toBe("0\n");
+  });
+
+  // THE PREMATURE-FREE DIRECTION, which is the risk the fix above runs. A thrown NAMED
+  // local is a borrow of a string the frame still owns and still releases at scope exit,
+  // and a thrown literal is untracked — neither may lose a reference here. If the consume
+  // were applied to them, the handler would read freed memory.
+  test("a thrown local and a thrown literal are not consumed", async () => {
+    const src = `
+function work(i: number): number {
+  const m: string = \`held \${i}\`;
+  try {
+    if (i > -1) throw m;
+    return 0;
+  } catch (e) {
+    return e.length + m.length;
+  }
+}
+let acc = 0;
+for (let i = 0; i < 1000; i++) { acc = acc + work(i); }
+console.log(acc);
+try { throw "a literal"; } catch (e) { console.log(e); }
+console.log(__strLive());`;
+    const r = await compileAndRun(src);
+    expect(r.exitCode).toBe(0);
+    // 2 * Σ len(`held ${i}`) for i<1000 = 2 * (5000 + 10 + 180 + 2700) = 15780.
+    expect(r.stdout).toBe("15780\na literal\n0\n");
+  });
+
+  /*
+   * THE ADJACENT GAP THAT IS *NOT* FIXED, pinned with its control so the boundary is
+   * evidence rather than a claim, and so the next lane inherits a measurement instead of
+   * a suspicion.
+   *
+   * A string local DECLARED IN A LOOP BODY gets a function-scoped slot, released once at
+   * the function's exit. Each iteration overwrites it without releasing what was there, so
+   * every value but the last is dropped on the floor: one heap string per iteration. There
+   * is no `throw`, no `try` and no `catch` in this program — it is the plain shape.
+   *
+   * This is why the in-frame throw case above is measured inside a function: with the
+   * `try` written directly in a loop body, THIS is what dominates the counter, and a test
+   * that asserted 0 there would have been asserting something else's bug.
+   */
+  test("KNOWN GAP: a string local declared in a loop body leaks one per iteration", async () => {
+    const body = (n: number): string => `
+let acc = 0;
+for (let i = 0; i < ${n}; i++) {
+  const m: string = \`LexError: bad input \${i}\`;
+  acc = acc + m.length;
+}
+console.log(__strLive());`;
+    const small = await compileAndRun(body(200));
+    const large = await compileAndRun(body(1000));
+    expect(small.exitCode).toBe(0);
+    expect(large.exitCode).toBe(0);
+    // Recorded as it IS, not as it should be. When this is fixed these become "0\n" —
+    // that is the intended direction, and a change here is a result, not a regression.
+    expect(small.stdout).toBe("200\n");
+    expect(large.stdout).toBe("1000\n");
+  });
 });

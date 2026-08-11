@@ -1972,7 +1972,14 @@ class FnGen {
         // The binding is an OWNER now (see `collectLocals`), so the store takes a
         // reference — `try { throw s; } catch (e) {}` with a heap `s` otherwise has two
         // slots releasing one string.
-        if (h.excVar && h.eType === "string") this.emit(`${this.fresh()} = call ptr @nt_str_retain(ptr ${v.v})`);
+        // …and the retain ASKS `isStrProducer`, exactly as `retainStrBind` and the
+        // `ReturnStmt` transfer rule beside it do. A fresh template/concat/call result
+        // arrives already registered at rc=1, so binding it CONSUMES that reference; the
+        // unconditional retain this replaces made the binding a SECOND owner of a
+        // temporary nobody else releases (`emitStrDrops` walks named locals only), and one
+        // heap string leaked per throw. A thrown NAMED local or literal still retains: the
+        // local's own release is still coming at scope exit, and a literal is untracked.
+        if (h.excVar && h.eType === "string") this.retainStrBind(s.argument, v.v);
         if (h.excVar) this.emit(`store ${llvmTy(h.eType)} ${v.v}, ptr ${this.addr(h.excVar)}`);
         this.terminate(`br label %${h.catchLbl}`);
         return;
@@ -3932,6 +3939,17 @@ class FnGen {
     if (msg === "") return false;
     this.mod.usesUncaughtThrow = true;
     this.emit(`call void @nt_exc_raise_msg(ptr ${msg})`);
+    // THE RAISE CONSUMES A PRODUCER. `nt_exc_raise_msg` retains unconditionally, which is
+    // right for a thrown NAMED local (this frame's `emitStrDrops` release is still coming)
+    // and for a borrow, but a fresh template/concat/call result already carries rc=1 and
+    // no named local holds it — `emitStrDrops` walks locals only — so nobody ever released
+    // that reference and one heap string leaked per cross-frame throw. Releasing here
+    // hands the raise the producer's own count instead of adding a second: the pending
+    // slot is left holding exactly one, which `nt_exc_clear` drops. Same `isStrProducer`
+    // question the in-frame path above and `retainStrBind` ask, so the two agree.
+    if (v.ty === "string" && this.isStrProducer(s.argument)) {
+      this.emit(`call void @nt_str_release(ptr ${msg})`);
+    }
     // `nt_obj_free` is SHALLOW, so freeing a thrown `new Error(m)` here does not touch
     // the message the raise just retained.
     this.emitDrops(s.drops ?? []);
