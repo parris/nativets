@@ -631,13 +631,20 @@ class Analyzer {
   /** Linear locals of every ACTIVE scope that are still owned — what a `return` from
    *  inside a nested block must free (innermost first). */
   private ownedInScope(state: State): string[] {
-    const out: string[] = [];
-    for (let i = this.scopes.length - 1; i >= 0; i--) out.push(...this.scopes[i]!.filter((n) => this.droppable(n, state)));
-    out.push(...this.ownedTopLevel(state));
+    // APPEND BY REBUILD, not `push(...)`. Arrays are immutable in nativets (NT1606) and
+    // a spread ARGUMENT is NT1006; `[...a, ...b]` is the supported spelling and is what
+    // `scoped` below already uses. Both the ORDER of the result (innermost scope first —
+    // codegen frees in this sequence) and the order the `droppable` calls happen in are
+    // unchanged, and the second matters as much as the first: `droppable` records into
+    // `condDrops` as a side effect, so re-ordering the appends would re-order the
+    // null-on-move decisions.
+    let out: string[] = [];
+    for (let i = this.scopes.length - 1; i >= 0; i--) out = [...out, ...this.scopes[i]!.filter((n) => this.droppable(n, state))];
+    out = [...out, ...this.ownedTopLevel(state)];
     // A `return` jumps past every block's drop marker, so it frees the enclosing
     // closure envs too. Never both: reaching the marker means not having returned.
-    for (let i = this.closureScopes.length - 1; i >= 0; i--) out.push(...this.closureScopes[i]!);
-    out.push(...this.topClosures);
+    for (let i = this.closureScopes.length - 1; i >= 0; i--) out = [...out, ...this.closureScopes[i]!];
+    out = [...out, ...this.topClosures];
     return out;
   }
 
