@@ -524,6 +524,7 @@ const DECLARES = [
   "declare ptr @nt_arr_new(double)",
   "declare double @nt_arr_push(ptr, i64)",
   "declare i64 @nt_arr_get(ptr, double)",
+  "declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)",
   // Bounds-PANIC accessors — used only where the programmer wrote the index (the
   // extra `ptr` is the interned "file:line:col" the panic reports).
   "declare i64 @nt_arr_index(ptr, double, ptr)",
@@ -5670,13 +5671,13 @@ class FnGen {
         return { v: t, ty: recv.ty };
       }
       case "flat": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_arr_flat1(ptr ${recv.v})`); return { v: t, ty: el }; }
-      case "flatMap": return this.genFlatMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
+      case "flatMap": return this.genFlatMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, this.locArg(loc) ?? "null");
       case "some": case "every": case "find": case "findIndex": case "findLast": case "findLastIndex":
         return this.genSearchHof(method, recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
-      case "forEach": return this.genForEach(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
-      case "map": return this.genMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
-      case "filter": return this.genFilter(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>);
-      case "reduce": return this.genReduce(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, args[1]!);
+      case "forEach": return this.genForEach(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, this.locArg(loc) ?? "null");
+      case "map": return this.genMap(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, this.locArg(loc) ?? "null");
+      case "filter": return this.genFilter(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, this.locArg(loc) ?? "null");
+      case "reduce": return this.genReduce(recv, args[0] as Extract<Expr, { kind: "ArrowFunction" }>, args[1]!, this.locArg(loc) ?? "null");
       default: throw internalError(`no lowering for array method .${method}, which the checker admitted`);
     }
   }
@@ -5712,11 +5713,31 @@ class FnGen {
    * blocker masked directly beneath the `setup` callback in all five HOF generators.
    * `hofLoop` never called it, only handed it back, so lifting it out moves no emission.
    */
-  private hofElem(recv: Val, idx: string, el: Ty, pName: string, iName: string): string {
+  private hofElem(recv: Val, idx: string, el: Ty, pName: string, iName: string, what: string, locp: string): string {
     const iB = this.fresh();
     this.emit(`${iB} = load double, ptr ${idx}`);
     const slot = this.fresh();
-    this.emit(`${slot} = call i64 @nt_arr_get(ptr ${recv.v}, double ${iB})`);
+    // THE BOUNDS-PANICKING ACCESSOR, not `nt_arr_get`. The loop bound is `hofLen`'s
+    // SNAPSHOT of the length, taken before the first callback ran — which matches node,
+    // whose `.map`/`.filter`/… read `length` once too. What it is NOT is a guaranteed
+    // in-bounds range: a callback that SHRINKS the receiver leaves every index from the
+    // new length up to the snapshot pointing past the end, and `nt_arr_get` answered 0
+    // there. That printed `[1,2,0,0]` where node prints `[1,2,null,null]`, exit 0 both
+    // ways — and it was the one place a compiler-generated read could go out of bounds
+    // without the Stage 41 panic, while the identical `a[i]` written in the source did
+    // panic. The comment on `nt_arr_get` used to justify its return-0 contract by naming
+    // these loops as in-bounds; that is what was false.
+    //
+    // Re-reading the length per iteration is NOT the alternative: node snapshots too, so
+    // a callback that PUSHES must still visit only the original count, and re-reading
+    // would walk the growth. node's actual answer — skip the absent index, and let
+    // `.map`'s result carry holes — needs an absent-ness a dense `int64` array cannot
+    // represent, and would give `.map` the type `T | undefined`.
+    //
+    // Measured cost: ZERO IR instructions (a one-for-one call substitution across all 24
+    // perf-corpus programs), and no wall-clock delta once the panic's buffers live in
+    // their own frame. See nt_arr_hof_at in runtime/runtime.c.
+    this.emit(`${slot} = call i64 @nt_arr_hof_at(ptr ${recv.v}, double ${iB}, ptr ${this.mod.intern(what)}, ptr ${locp})`);
     const v = this.fromSlot(slot, el);
     this.emit(`store ${llvmTy(el)} ${v}, ptr ${this.addr(pName)}`);
     // The INDEX parameter, when the callback declared one: the loop counter this line
@@ -6009,7 +6030,7 @@ class FnGen {
    * The one difference from map is the body: nothing is pushed anywhere, and a `return`
    * means "next element" rather than "here is this element's result".
    */
-  private genForEach(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+  private genForEach(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>, locp: string): Val {
     this.freshenHofArrow(arrow); // unique per-inlining slots — no cross-callback name collision
     const el = elemTy(recv.ty);
     const p = arrow.params[0]!.name;
@@ -6017,7 +6038,7 @@ class FnGen {
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
     const L = this.hofLoop(recv, "each", this.hofLen(recv)); // no output array to build
-    this.hofElem(recv, L.idx, el, p, ip);
+    this.hofElem(recv, L.idx, el, p, ip, ".forEach", locp);
     if (arrow.exprBody) {
       this.genExpr(arrow.body as Expr); // evaluated for effect, exactly as an ExprStmt is
     } else {
@@ -6033,7 +6054,7 @@ class FnGen {
     return { v: "", ty: "void" }; // node: `.forEach` returns undefined
   }
 
-  private genMap(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+  private genMap(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>, locp: string): Val {
     this.freshenHofArrow(arrow); // unique per-inlining slots — no cross-callback name collision
     const el = elemTy(recv.ty);
     const R = this.hofRetTy(arrow);
@@ -6045,7 +6066,7 @@ class FnGen {
     const out = this.fresh();
     this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); // pre-sized: one element per input
     const L = this.hofLoop(recv, "map", len);
-    this.hofElem(recv, L.idx, el, p, ip);
+    this.hofElem(recv, L.idx, el, p, ip, ".map", locp);
     const rv = this.genHofBody(arrow, R);
     this.emit(`call double @nt_arr_push(ptr ${out}, i64 ${this.toSlot(rv)})`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -6055,7 +6076,7 @@ class FnGen {
 
   /** flatMap — map's loop, but each callback result (an array) is CONCATENATED
    *  into the output instead of pushed, i.e. exactly one level of flattening. */
-  private genFlatMap(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+  private genFlatMap(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>, locp: string): Val {
     this.freshenHofArrow(arrow);
     const el = elemTy(recv.ty);
     const R = this.hofRetTy(arrow); // an array type (checker-enforced)
@@ -6067,7 +6088,7 @@ class FnGen {
     const out = this.fresh();
     this.emit(`${out} = call ptr @nt_arr_new(double 1.0)`); // flattened length is not known here
     const L = this.hofLoop(recv, "fmap", len);
-    this.hofElem(recv, L.idx, el, p, ip);
+    this.hofElem(recv, L.idx, el, p, ip, ".flatMap", locp);
     const rv = this.genHofBody(arrow, R);
     this.emit(`call void @nt_arr_extend(ptr ${out}, ptr ${rv.v})`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -6075,7 +6096,7 @@ class FnGen {
     return { v: out, ty: R };
   }
 
-  private genFilter(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>): Val {
+  private genFilter(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>, locp: string): Val {
     this.freshenHofArrow(arrow); // unique per-inlining slots — no cross-callback name collision
     const el = elemTy(recv.ty);
     const p = arrow.params[0]!.name;
@@ -6086,7 +6107,7 @@ class FnGen {
     const out = this.fresh();
     this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); // pre-sized: at most one per input
     const L = this.hofLoop(recv, "flt", len);
-    const pv = this.hofElem(recv, L.idx, el, p, ip);
+    const pv = this.hofElem(recv, L.idx, el, p, ip, ".filter", locp);
     const keep = this.genHofBody(arrow, "boolean"); // boolean
     const pushLbl = this.label("fltp");
     const skipLbl = this.label("flts");
@@ -6197,7 +6218,7 @@ class FnGen {
     return { v: this.nullBox(this.nullTagIf(miss), es), ty: makeNullable("undefined", el) };
   }
 
-  private genReduce(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>, initExpr: Expr): Val {
+  private genReduce(recv: Val, arrow: Extract<Expr, { kind: "ArrowFunction" }>, initExpr: Expr, locp: string): Val {
     this.freshenHofArrow(arrow); // unique per-inlining slots — no cross-callback name collision
     const el = elemTy(recv.ty);
     const accName = arrow.params[0]!.name;
@@ -6210,7 +6231,7 @@ class FnGen {
     this.emit(`store ${llvmTy(A)} ${init.v}, ptr ${this.addr(accName)}`); // pre-loop init
     this.prepHofLocals(arrow);
     const L = this.hofLoop(recv, "red", this.hofLen(recv));
-    this.hofElem(recv, L.idx, el, xName, ip);
+    this.hofElem(recv, L.idx, el, xName, ip, ".reduce", locp);
     const rv = this.genHofBody(arrow, A);
     this.emit(`store ${llvmTy(A)} ${rv.v}, ptr ${this.addr(accName)}`);
     this.hofStep(L.idx, L.upd, L.cond);

@@ -1787,10 +1787,64 @@ int64_t nt_arr_get(NtArray *a, double idxd) {
   return arr_at(a, i);
 }
 
+/* The COLD half of nt_arr_hof_at, deliberately its own function.
+ *
+ * It holds the two 64-byte number buffers, and folding it into the accessor cost a
+ * MEASURED 4.4% on a HOF-saturated benchmark (80M element reads: 0.53s -> 0.55s) —
+ * because the buffers are reserved in the PROLOGUE, so every in-bounds read paid for a
+ * frame it never used. Splitting them out puts the accessor's frame back to a leaf's.
+ * (The 4.4% was NOT the diagnostic arguments: a probe that dropped `what`/`loc` and took
+ * the same two arguments as `nt_arr_get` measured identically to the four-argument form,
+ * so the message is free and the frame was the whole cost.) */
+static void nt_panic_hof_resize(const char *what, double len, double idx, const char *loc) {
+  char l[64], x[64];
+  js_number_to_string(len, l, sizeof(l));
+  js_number_to_string(idx, x, sizeof(x));
+  fflush(stdout);
+  fprintf(stderr, "panic: `%s` callback resized the array it is walking: the length is now %s but the walk is at index %s\n", what, l, x);
+  if (loc && *loc) fprintf(stderr, "  at %s\n", loc);
+  fprintf(stderr,
+          "  help: `%s` reads the length ONCE, before the first callback runs — node does too, so a callback "
+          "that GROWS the array is fine and still visits only the original elements. Shrinking is the problem: "
+          "node skips the elements that are gone, and a dense array cannot represent \"gone\". Do the removal "
+          "AFTER the walk (collect what to drop inside the callback, then `.pop()` in a following loop), or "
+          "walk an index yourself with `while`\n", what);
+  fflush(stderr);
+  abort();
+}
+
+/* An element read from an INLINED HOF LOOP (`.map`/`.filter`/`.forEach`/`.flatMap`/
+ * `.reduce`). Out of range PANICS, and it needs its own entry point rather than
+ * `nt_arr_get` because the loop's bound is the length SNAPSHOTTED before the first
+ * callback ran: once a callback shrinks the receiver, the remaining indices are past the
+ * end, and the return-0 policy turned that into a silent wrong answer
+ * (`[1,2,3,4].map(cb)` with a cb that pops twice printed `[1,2,0,0]` where node prints
+ * `[1,2,null,null]`, both exit 0).
+ *
+ * The bound is NOT the bug and re-reading the length would not fix it: node snapshots
+ * `length` too, so GROWTH must keep visiting only the original count — measured, node
+ * visits [0,1,2] of a 3-element array whose callback pushes twice. What node does that we
+ * cannot is SKIP an absent index — `.map` pre-sizes its result to the snapshot and leaves
+ * HOLES — and a dense `int64` array has no absent-ness to represent.
+ *
+ * The comparison itself is free: `nt_arr_get` already evaluated this exact test on every
+ * iteration, so only the taken branch's body changes. `NT_IS_INDEX` is deliberately NOT
+ * tested (unlike `nt_arr_index`): the index here is the loop's own counter, never a
+ * fraction and never an infinity, so the `floor`/`isinf` pair would be pure overhead.
+ *
+ * `what` names the method so the message can state the CAUSE, rather than report a bare
+ * bounds failure for an index the programmer never wrote. */
+int64_t nt_arr_hof_at(NtArray *a, double idxd, const char *what, const char *loc) {
+  int64_t i = (int64_t)idxd;
+  if (i < 0 || i >= a->len) nt_panic_hof_resize(what, (double)a->len, idxd, loc);
+  return arr_at(a, i);
+}
+
 /* `arr[i]` as WRITTEN IN THE SOURCE — out of range PANICS (see nt_panic_bounds).
  * nt_arr_get above keeps the return-0 policy because it is the internal accessor
- * every other runtime routine (and every compiler-generated in-bounds loop) reads
- * through; only indices the programmer wrote reach this one. */
+ * every other runtime routine reads through; only indices the programmer wrote reach
+ * this one. (The HOF loops used to be cited here as "compiler-generated in-bounds
+ * loops" — see nt_arr_hof_at above for why that claim was false.) */
 int64_t nt_arr_index(NtArray *a, double idxd, const char *loc) {
   int64_t i = (int64_t)idxd;
   if (!NT_IS_INDEX(idxd) || i < 0 || i >= a->len)
