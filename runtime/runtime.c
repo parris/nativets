@@ -2152,6 +2152,27 @@ NtArray *nt_str_split(const char *s, const char *sep) {
   return a;
 }
 
+/* `xs[i] = v` on a `@@mutable` binding — the in-place ELEMENT STORE.
+ *
+ * `nt_arr_with` is the persistent writer and returns a NEW array; this is its in-place
+ * twin, and it is safe by exactly the argument `nt_arr_reverse` below already ships on:
+ * `arr_thaw` turns a shared persistent trie into a PRIVATE flat block first, so the write
+ * never goes through a node another owner can see. Below the trie threshold the array is
+ * already a private flat block and the thaw is a no-op.
+ *
+ * The bounds check is `nt_arr_with`'s, verbatim: an out-of-range element write PANICS
+ * (Stage 41) rather than growing the array or silently doing nothing, which is what node
+ * does for a plain array — see docs/divergences.md. `.with` and `xs[i] =` therefore agree
+ * about what is in range.
+ */
+void nt_arr_set_inplace(NtArray *a, double idxd, int64_t slot, const char *loc) {
+  int64_t i = (int64_t)idxd;
+  if (!(idxd == idxd) || i < 0 || i >= a->len)
+    nt_panic_bounds("element assignment index", (double)a->len, idxd, loc);
+  arr_thaw(a);   /* never write through a shared trie node — see nt_arr_reverse */
+  a->data[i] = slot;
+}
+
 void *nt_arr_reverse(NtArray *a) {
   arr_thaw(a);   /* node's .reverse mutates in place; never write through shared nodes */
   for (int64_t i = 0, j = a->len - 1; i < j; i++, j--) {

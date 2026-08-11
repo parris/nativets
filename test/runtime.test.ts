@@ -37,6 +37,7 @@ const C_TESTS = [
   { name: "hamt_test.c — the persistent hash map behind Map/Set", src: "test/runtime/hamt_test.c", link: [] as string[], ok: "0 failures" },
   { name: "pvec_test.c — the persistent vector trie behind arrays", src: "test/runtime/pvec_test.c", link: ["runtime/nt_pvec.c"], ok: "0 failures" },
   { name: "collinplace_test.c — the in-place Map/Set update behind a `@@mutable` binding", src: "test/runtime/collinplace_test.c", link: ["runtime/nt_hamt.c", "runtime/runtime.c"], ok: "0 failures" },
+  { name: "arrset_test.c — the in-place element store behind `xs[i] = v`", src: "test/runtime/arrset_test.c", link: ["runtime/nt_pvec.c"], ok: "0 failures" },
 ];
 
 describe("C runtime unit tests (built + run, so they cannot silently rot)", () => {

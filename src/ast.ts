@@ -1297,6 +1297,11 @@ export interface IndexAssign {
   value: Expr;
   ty?: Ty;
   loc?: Loc; // the written `[` — an out-of-range element WRITE panics from here
+  /** `xs[i] = v` on a `@@mutable` binding — codegen emits the in-place element store
+   *  (`nt_arr_set_inplace`) instead of refusing. One-way: the checker is the only writer
+   *  (it is the pass that knows the binding carries the attribute), codegen the only
+   *  reader — same arrangement as `nullOnMove`, `awaited` and `inPlaceColl`. */
+  inPlaceElem?: boolean;
 }
 
 /**

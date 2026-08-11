@@ -4626,7 +4626,26 @@ class Checker {
         }
         if (isObjectTy(ot))
           throw mutationError(`objects are immutable: \`${exprText(e.object) ?? "o"}[k] = v\` would mutate the object in place`, "use `{ ...o, k: v }` — returns a NEW object; the original is unchanged", exprLoc(e.object) ?? e.loc);
-        throw mutationError(`arrays are immutable: \`${exprText(e.object) ?? "arr"}[i] = v\` would mutate the array in place`, "use `arr.with(i, v)` — returns a NEW array; the original is unchanged", exprLoc(e.object) ?? e.loc);
+        // A `@@mutable` BINDING may store in place — the same opt-in that legalizes `.push`,
+        // and the runtime does it the way `.reverse` already does: `arr_thaw` turns a shared
+        // persistent trie into a PRIVATE flat block first, so the write never goes through a
+        // node another owner can see (`nt_arr_set_inplace`, test/runtime/arrset_test.c).
+        // Deliberately an IDENTIFIER receiver only: an element or a field is the
+        // `@@mutable`-on-fields question, which is a different feature.
+        if (e.object.kind === "Identifier") {
+          const ab = scope.lookup(e.object.name);
+          if (ab !== undefined && (ab.mutable ?? false)) {
+            const vt2 = this.type(e.value, scope, elemTy(ot));
+            if (!this.assignable(elemTy(ot), vt2)) {
+              throw typeError(`Cannot assign ${vt2} to ${elemTy(ot)} element of '${e.object.name}'`, exprLoc(e.object) ?? e.loc);
+            }
+            if (this.type(e.index, scope) !== "number") throw typeError("array index must be a number", exprLoc(e.object) ?? e.loc);
+            e.inPlaceElem = true;
+            e.ty = elemTy(ot);
+            return e.ty;
+          }
+        }
+        throw mutationError(`arrays are immutable: \`${exprText(e.object) ?? "arr"}[i] = v\` would mutate the array in place`, "use `arr.with(i, v)` — returns a NEW array; the original is unchanged, or declare the binding `//@@mutable` to store in place", exprLoc(e.object) ?? e.loc);
       }
       case "FieldAssign": {
         // `o.field = expr` — store one slot. Three ways to get here:

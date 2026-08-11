@@ -571,6 +571,7 @@ const DECLARES = [
   "declare ptr @nt_arr_to_sorted_by(ptr, ptr, ptr)",
   "declare ptr @nt_arr_to_reversed(ptr)",
   "declare ptr @nt_arr_with(ptr, double, i64, ptr)",
+  "declare void @nt_arr_set_inplace(ptr, double, i64, ptr)",
   "declare void @nt_arr_free(ptr)",
   "declare double @nt_arr_live()",
   // structural-sharing witnesses (B2 step 2): live / cumulative persistent-vector nodes
@@ -4150,6 +4151,16 @@ class FnGen {
         const idx = this.genExpr(e.index);
         // An out-of-range typed-array write used to be a SILENT no-op; it panics now.
         const loc = this.locArg(e.loc);
+        // A `@@mutable` ARRAY element store — stamped by the checker, which is the pass
+        // that knows the binding carries the attribute. The runtime thaws a shared trie to
+        // a private flat block first, exactly as `.reverse` does, so the write never goes
+        // through a node another owner can see (`nt_arr_set_inplace`).
+        if (e.inPlaceElem ?? false) {
+          const el = elemTy(obj.ty);
+          const v = this.toSlot(this.coerce(this.genExpr(e.value), el));
+          this.emit(`call void @nt_arr_set_inplace(ptr ${obj.v}, double ${idx.v}, i64 ${v}, ptr ${loc ?? "null"})`);
+          return { v: "", ty: "void" };
+        }
         let out: string;
         if (e.op === "=") {
           out = this.genExpr(e.value).v;
