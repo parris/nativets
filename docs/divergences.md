@@ -1029,7 +1029,9 @@ the Stage 41 runtime panic — where node yields `undefined`. So:
 | `a?.[99]`, `a` present, len 2 | `undefined` | **panics** (Stage 41) |
 
 Reading the guard as "make this read safe" is therefore wrong: it makes the *base* safe. Use
-`.at(i)` for node's out-of-range `undefined`, exactly as with a plain `a[i]`.
+`.at(i)` for node's out-of-range `undefined`, exactly as with a plain `a[i]` — **but only for a
+NON-NEGATIVE `i`**. `.at(-1)` is node's *last element*, not `undefined`, so it is not a
+substitute for `a?.[-1]`; see the headline section's `.at` bullet for the full trap.
 
 **`?.` in a write position is refused (`NT0001`) — this is agreement with node, not a
 divergence.** ECMAScript's `IsValidSimpleAssignmentTarget` returns `false` for an
