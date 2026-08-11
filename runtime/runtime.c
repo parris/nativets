@@ -1875,6 +1875,18 @@ int32_t nt_arr_includes_num(NtArray *a, double x) {
   for (int64_t i = 0; i < a->len; i++) if (slot_to_num(arr_at(a, i)) == x) return 1;
   return 0;
 }
+/* A boolean array needs its own scan for the same reason `nt_arr_join_bool` does: the
+ * slot holds `zext i1` — the integers 0 and 1 — so it is neither a `double` nor a `ptr`.
+ * With only a two-way split (`number` vs everything-else) a `boolean[]` took the `_str`
+ * arm and codegen emitted an `i1` into a `ptr` parameter, which is not valid IR: clang
+ * rejected the module with a bare "constant expression type mismatch" and no NT code.
+ * SameValueZero on booleans is plain equality — there is no NaN and no signed zero here —
+ * so the needle arrives already normalized to 0/1 and this is a slot compare.
+ * See test/array-includes.test.ts. */
+int32_t nt_arr_includes_bool(NtArray *a, int32_t x) {
+  for (int64_t i = 0; i < a->len; i++) if ((arr_at(a, i) != 0) == (x != 0)) return 1;
+  return 0;
+}
 int32_t nt_arr_includes_str(NtArray *a, const char *x) {
   for (int64_t i = 0; i < a->len; i++) if (strcmp((const char *)(intptr_t) arr_at(a, i), x) == 0) return 1;
   return 0;

@@ -150,6 +150,56 @@ describe("Array#includes is SameValueZero", () => {
    * `readFileSync`, never a shell `grep` (project memory: the shimmed grep on some setups
    * silently drops matching lines, which would make this vacuous).
    */
+  /*
+   * BOOLEAN ELEMENTS — the third slot shape, which had no arm.
+   *
+   * `.includes` split two ways (`el === "number" ? _num : _str`), exactly the split
+   * `.join` already learned was wrong: a `boolean[]` slot holds `zext i1`, so it is
+   * neither a `double` nor a `ptr`. It took the `_str` arm and emitted
+   * `call i32 @nt_arr_includes_str(ptr %t3, ptr true)` — an `i1` in a `ptr` parameter,
+   * which is not valid IR at all. That reached the user as a raw clang
+   * "constant expression type mismatch" with no NT code and no hint. A two-way choice
+   * written twice is how the third case gets missed twice; see `joinFn` in codegen.ts.
+   */
+  test("boolean elements are found by value, not by pointer", async () => {
+    expect(await matchesNode([
+      "const a = [true, false];",
+      "console.log(a.includes(true), a.includes(false));",
+      "const t = [true, true];",
+      "console.log(t.includes(true), t.includes(false));",
+      "const f = [false, false];",
+      "console.log(f.includes(true), f.includes(false));",
+      "const e: boolean[] = [];",
+      "console.log(e.includes(true), e.includes(false));",
+      "",
+    ].join("\n"))).toBe("true true\ntrue false\nfalse true\nfalse false\n");
+  });
+
+  // A computed needle and a computed element must agree with the literals — the runtime
+  // compares slots, so anything that is not exactly 0/1 in the slot would show up here.
+  test("boolean needles and elements from expressions", async () => {
+    expect(await matchesNode([
+      "const n = 1;",
+      "const a = [n > 0, n < 0];",
+      "console.log(a.includes(n === 1), a.includes(n !== 1));",
+      "console.log([!true].includes(false), [!false].includes(false));",
+      "",
+    ].join("\n"))).toBe("true true\ntrue false\n");
+  });
+
+  // Past the persistent-vector threshold the tail is not contiguous with the trie, so a
+  // boolean scan must go through `arr_at` like its siblings.
+  test("boolean scan past the 32-element threshold", async () => {
+    expect(await matchesNode([
+      "let a: boolean[] = [];",
+      "for (let i = 0; i < 50; i++) a = [...a, false];",
+      "console.log(a.length, a.includes(true), a.includes(false));",
+      "a = [...a, true];",
+      "console.log(a.length, a.includes(true));",
+      "",
+    ].join("\n"))).toBe("50 false true\n51 true\n");
+  });
+
   test("the SameValueZero branch is in includes only, not in indexOf", () => {
     const c = readFileSync(new URL("../runtime/runtime.c", import.meta.url), "utf8");
     const bodyOf = (name: string): string => {

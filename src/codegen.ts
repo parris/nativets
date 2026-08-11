@@ -543,6 +543,7 @@ const DECLARES = [
   "declare ptr @nt_arr_join_bool(ptr, ptr)",
   "declare i32 @nt_arr_includes_num(ptr, double)",
   "declare i32 @nt_arr_includes_str(ptr, ptr)",
+  "declare i32 @nt_arr_includes_bool(ptr, i32)",
   "declare double @nt_arr_indexof_num(ptr, double, double)",
   "declare double @nt_arr_indexof_str(ptr, ptr, double)",
   "declare ptr @nt_arr_copy(ptr)",
@@ -5579,11 +5580,19 @@ class FnGen {
         this.emit(`${t} = call ptr @${joinFn(el)}(ptr ${recv.v}, ptr ${sep})`);
         return { v: t, ty: "string" };
       }
+      // THREE-way on the element type, like `joinFn` above it and for the same reason: a
+      // `boolean[]` slot is `zext i1`, so the old `number ? _num : _str` handed an `i1` to
+      // a `ptr` parameter and clang rejected the whole module with no NT code. The needle
+      // is widened to `i32` here so the runtime never sees a one-bit value.
       case "includes": {
         const x = this.genExpr(args[0]!).v;
         const r = this.fresh();
         if (numeric) this.emit(`${r} = call i32 @nt_arr_includes_num(ptr ${recv.v}, double ${x})`);
-        else this.emit(`${r} = call i32 @nt_arr_includes_str(ptr ${recv.v}, ptr ${x})`);
+        else if (el === "boolean") {
+          const w = this.fresh();
+          this.emit(`${w} = zext i1 ${x} to i32`);
+          this.emit(`${r} = call i32 @nt_arr_includes_bool(ptr ${recv.v}, i32 ${w})`);
+        } else this.emit(`${r} = call i32 @nt_arr_includes_str(ptr ${recv.v}, ptr ${x})`);
         const t = this.fresh();
         this.emit(`${t} = icmp ne i32 ${r}, 0`);
         return { v: t, ty: "boolean" };
