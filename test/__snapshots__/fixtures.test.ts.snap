@@ -61,6 +61,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -464,6 +465,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -798,6 +800,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -1192,6 +1195,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -1619,6 +1623,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -1941,6 +1946,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -2270,6 +2276,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -2658,6 +2665,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -3034,6 +3042,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -3412,6 +3421,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -3836,6 +3846,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -4207,6 +4218,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -4770,6 +4782,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -5140,6 +5153,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -5521,6 +5535,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -5894,6 +5909,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -6343,6 +6359,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -6752,6 +6769,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -7063,6 +7081,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -7386,6 +7405,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -7719,6 +7739,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -8020,6 +8041,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -8221,15 +8243,17 @@ declare ptr @nt_dyn_str_or_null(ptr)
 @.str.1 = private unnamed_addr constant [2 x i8] c"(\\00"
 @.str.2 = private unnamed_addr constant [3 x i8] c", \\00"
 @.str.3 = private unnamed_addr constant [2 x i8] c")\\00"
-@.str.4 = private unnamed_addr constant [6 x i8] c"hello\\00"
-@.str.5 = private unnamed_addr constant [2 x i8] c"!\\00"
-@.str.6 = private unnamed_addr constant [7 x i8] c"pinned\\00"
-@.str.7 = private unnamed_addr constant [3 x i8] c"ab\\00"
-@.str.8 = private unnamed_addr constant [4 x i8] c"cde\\00"
-@.str.9 = private unnamed_addr constant [2 x i8] c"x\\00"
-@.str.10 = private unnamed_addr constant [2 x i8] c"y\\00"
-@.str.11 = private unnamed_addr constant [2 x i8] c",\\00"
-@.str.12 = private unnamed_addr constant [2 x i8] c"-\\00"
+@.str.4 = private unnamed_addr constant [14 x i8] c"<input>:14:16\\00"
+@.str.5 = private unnamed_addr constant [5 x i8] c".map\\00"
+@.str.6 = private unnamed_addr constant [6 x i8] c"hello\\00"
+@.str.7 = private unnamed_addr constant [2 x i8] c"!\\00"
+@.str.8 = private unnamed_addr constant [7 x i8] c"pinned\\00"
+@.str.9 = private unnamed_addr constant [3 x i8] c"ab\\00"
+@.str.10 = private unnamed_addr constant [4 x i8] c"cde\\00"
+@.str.11 = private unnamed_addr constant [2 x i8] c"x\\00"
+@.str.12 = private unnamed_addr constant [2 x i8] c"y\\00"
+@.str.13 = private unnamed_addr constant [2 x i8] c",\\00"
+@.str.14 = private unnamed_addr constant [2 x i8] c"-\\00"
 
 define double @arrow_0(ptr %__clo, double %n) {
 entry:
@@ -8374,7 +8398,7 @@ map2:
   br i1 %t4, label %mapb3, label %mape5
 mapb3:
   %t5 = load double, ptr %s1
-  %t6 = call i64 @nt_arr_get(ptr %t0, double %t5)
+  %t6 = call i64 @nt_arr_hof_at(ptr %t0, double %t5, ptr @.str.5, ptr @.str.4)
   %t7 = bitcast i64 %t6 to double
   store double %t7, ptr %x.h0.addr
   %t8 = load ptr, ptr %f.addr
@@ -8416,7 +8440,7 @@ map2:
   br i1 %t4, label %mapb3, label %mape5
 mapb3:
   %t5 = load double, ptr %s1
-  %t6 = call i64 @nt_arr_get(ptr %t0, double %t5)
+  %t6 = call i64 @nt_arr_hof_at(ptr %t0, double %t5, ptr @.str.5, ptr @.str.4)
   %t7 = inttoptr i64 %t6 to ptr
   store ptr %t7, ptr %x.h0.addr
   %t8 = load ptr, ptr %f.addr
@@ -8448,15 +8472,15 @@ L0:
   %t1 = fadd double %t0, 0x3FF0000000000000
   call void @js_print_num(double %t1)
   call void @js_print_newline()
-  %t2 = call ptr @id$string(ptr @.str.4)
-  %t3 = call ptr @js_str_concat(ptr %t2, ptr @.str.5)
+  %t2 = call ptr @id$string(ptr @.str.6)
+  %t3 = call ptr @js_str_concat(ptr %t2, ptr @.str.7)
   call void @js_print_str(ptr %t3)
   call void @js_print_newline()
   %t4 = call i1 @id$boolean(i1 true)
   %t5 = zext i1 %t4 to i32
   call void @js_print_bool(i32 %t5)
   call void @js_print_newline()
-  %t6 = call ptr @id$string(ptr @.str.6)
+  %t6 = call ptr @id$string(ptr @.str.8)
   call void @js_print_str(ptr %t6)
   call void @js_print_newline()
   %t7 = call ptr @nt_arr_new(double 0x4008000000000000)
@@ -8468,11 +8492,11 @@ L0:
   call double @nt_arr_push(ptr %t7, i64 %t10)
   store ptr %t7, ptr %ns.addr
   %t11 = call ptr @nt_arr_new(double 0x4000000000000000)
-  %rc12 = call ptr @nt_str_retain(ptr @.str.7)
-  %t13 = ptrtoint ptr @.str.7 to i64
+  %rc12 = call ptr @nt_str_retain(ptr @.str.9)
+  %t13 = ptrtoint ptr @.str.9 to i64
   call double @nt_arr_push(ptr %t11, i64 %t13)
-  %rc14 = call ptr @nt_str_retain(ptr @.str.8)
-  %t15 = ptrtoint ptr @.str.8 to i64
+  %rc14 = call ptr @nt_str_retain(ptr @.str.10)
+  %t15 = ptrtoint ptr @.str.10 to i64
   call double @nt_arr_push(ptr %t11, i64 %t15)
   store ptr %t11, ptr %ws.addr
   %t16 = load ptr, ptr %ns.addr
@@ -8483,10 +8507,10 @@ L0:
   %t19 = call ptr @first$string(ptr %t18)
   call void @js_print_str(ptr %t19)
   call void @js_print_newline()
-  %t20 = call ptr @pair$number$string(double 0x3FF0000000000000, ptr @.str.9)
+  %t20 = call ptr @pair$number$string(double 0x3FF0000000000000, ptr @.str.11)
   call void @js_print_str(ptr %t20)
   call void @js_print_newline()
-  %t21 = call ptr @pair$string$number(ptr @.str.10, double 0x4000000000000000)
+  %t21 = call ptr @pair$string$number(ptr @.str.12, double 0x4000000000000000)
   call void @js_print_str(ptr %t21)
   call void @js_print_newline()
   %t22 = load ptr, ptr %ns.addr
@@ -8495,7 +8519,7 @@ L0:
   %t25 = getelementptr i64, ptr %t23, i64 0
   store i64 %t24, ptr %t25
   %t26 = call ptr @mapAll$number$number(ptr %t22, ptr %t23)
-  %t27 = call ptr @nt_arr_join_num(ptr %t26, ptr @.str.11)
+  %t27 = call ptr @nt_arr_join_num(ptr %t26, ptr @.str.13)
   call void @js_print_str(ptr %t27)
   call void @js_print_newline()
   %t28 = load ptr, ptr %ws.addr
@@ -8504,7 +8528,7 @@ L0:
   %t31 = getelementptr i64, ptr %t29, i64 0
   store i64 %t30, ptr %t31
   %t32 = call ptr @mapAll$string$number(ptr %t28, ptr %t29)
-  %t33 = call ptr @nt_arr_join_num(ptr %t32, ptr @.str.12)
+  %t33 = call ptr @nt_arr_join_num(ptr %t32, ptr @.str.14)
   call void @js_print_str(ptr %t33)
   call void @js_print_newline()
   %t34 = load ptr, ptr %ns.addr
@@ -8577,6 +8601,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -8964,6 +8989,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -9342,6 +9368,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -11505,6 +11532,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -11775,6 +11803,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -12049,6 +12078,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -12320,6 +12350,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -12591,6 +12622,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -12863,6 +12895,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -13136,6 +13169,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -13412,6 +13446,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -13697,6 +13732,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -13968,6 +14004,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -14386,6 +14423,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -14729,6 +14767,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -15042,6 +15081,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -15445,6 +15485,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -15838,6 +15879,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -16248,6 +16290,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -16776,6 +16819,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -17128,6 +17172,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -17527,6 +17572,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -17876,6 +17922,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -18160,6 +18207,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -18460,6 +18508,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -18746,6 +18795,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -19053,6 +19103,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -19343,6 +19394,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -19633,6 +19685,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -20126,6 +20179,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -20437,6 +20491,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -20751,6 +20806,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -21115,6 +21171,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -21406,6 +21463,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -21880,6 +21938,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -22161,6 +22220,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -22527,6 +22587,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -22907,6 +22968,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -23217,6 +23279,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -23502,6 +23565,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -23811,6 +23875,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -24121,6 +24186,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -24479,6 +24545,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -24808,6 +24875,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -25187,6 +25255,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -25476,6 +25545,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -25815,6 +25885,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -26148,6 +26219,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -26444,6 +26516,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -26804,6 +26877,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -27209,6 +27283,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -27652,6 +27727,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -27993,6 +28069,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -28339,6 +28416,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -28826,6 +28904,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -29152,6 +29231,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -29473,6 +29553,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -29792,6 +29873,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -30116,6 +30198,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -30460,6 +30543,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -30891,6 +30975,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -31251,6 +31336,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -31564,6 +31650,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -31869,6 +31956,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -32220,6 +32308,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -33487,6 +33576,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -33819,6 +33909,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -34016,12 +34107,17 @@ declare ptr @nt_dyn_inspect(ptr, double)
 declare ptr @nt_dyn_display(ptr, double)
 declare ptr @nt_dyn_str_or_null(ptr)
 
-@.str.0 = private unnamed_addr constant [13 x i8] c"<input>:3:20\\00"
-@.str.1 = private unnamed_addr constant [13 x i8] c"<input>:3:34\\00"
-@.str.2 = private unnamed_addr constant [13 x i8] c"<input>:3:48\\00"
-@.str.3 = private unnamed_addr constant [14 x i8] c"<input>:10:17\\00"
-@.str.4 = private unnamed_addr constant [14 x i8] c"<input>:10:26\\00"
-@.str.5 = private unnamed_addr constant [14 x i8] c"<input>:10:35\\00"
+@.str.0 = private unnamed_addr constant [13 x i8] c"<input>:2:24\\00"
+@.str.1 = private unnamed_addr constant [5 x i8] c".map\\00"
+@.str.2 = private unnamed_addr constant [13 x i8] c"<input>:3:20\\00"
+@.str.3 = private unnamed_addr constant [13 x i8] c"<input>:3:34\\00"
+@.str.4 = private unnamed_addr constant [13 x i8] c"<input>:3:48\\00"
+@.str.5 = private unnamed_addr constant [13 x i8] c"<input>:5:23\\00"
+@.str.6 = private unnamed_addr constant [8 x i8] c".filter\\00"
+@.str.7 = private unnamed_addr constant [13 x i8] c"<input>:9:21\\00"
+@.str.8 = private unnamed_addr constant [14 x i8] c"<input>:10:17\\00"
+@.str.9 = private unnamed_addr constant [14 x i8] c"<input>:10:26\\00"
+@.str.10 = private unnamed_addr constant [14 x i8] c"<input>:10:35\\00"
 
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
@@ -34080,7 +34176,7 @@ map2:
   br i1 %t23, label %mapb3, label %mape5
 mapb3:
   %t24 = load double, ptr %s1
-  %t25 = call i64 @nt_arr_get(ptr %t19, double %t24)
+  %t25 = call i64 @nt_arr_hof_at(ptr %t19, double %t24, ptr @.str.1, ptr @.str.0)
   %t26 = inttoptr i64 %t25 to ptr
   store ptr %t26, ptr %p.h0.addr
   %t27 = call ptr @nt_obj_new(double 0x4000000000000000)
@@ -34110,19 +34206,19 @@ mapu4:
 mape5:
   store ptr %t21, ptr %shifted.addr
   %t44 = load ptr, ptr %shifted.addr
-  %t45 = call i64 @nt_arr_index(ptr %t44, double 0x0000000000000000, ptr @.str.0)
+  %t45 = call i64 @nt_arr_index(ptr %t44, double 0x0000000000000000, ptr @.str.2)
   %t46 = inttoptr i64 %t45 to ptr
   %t47 = getelementptr i64, ptr %t46, i64 0
   %t48 = load i64, ptr %t47
   %t49 = bitcast i64 %t48 to double
   %t50 = load ptr, ptr %shifted.addr
-  %t51 = call i64 @nt_arr_index(ptr %t50, double 0x3FF0000000000000, ptr @.str.1)
+  %t51 = call i64 @nt_arr_index(ptr %t50, double 0x3FF0000000000000, ptr @.str.3)
   %t52 = inttoptr i64 %t51 to ptr
   %t53 = getelementptr i64, ptr %t52, i64 0
   %t54 = load i64, ptr %t53
   %t55 = bitcast i64 %t54 to double
   %t56 = load ptr, ptr %shifted.addr
-  %t57 = call i64 @nt_arr_index(ptr %t56, double 0x4000000000000000, ptr @.str.2)
+  %t57 = call i64 @nt_arr_index(ptr %t56, double 0x4000000000000000, ptr @.str.4)
   %t58 = inttoptr i64 %t57 to ptr
   %t59 = getelementptr i64, ptr %t58, i64 0
   %t60 = load i64, ptr %t59
@@ -34144,7 +34240,7 @@ flt7:
   br i1 %t66, label %fltb8, label %flte10
 fltb8:
   %t67 = load double, ptr %s6
-  %t68 = call i64 @nt_arr_get(ptr %t62, double %t67)
+  %t68 = call i64 @nt_arr_hof_at(ptr %t62, double %t67, ptr @.str.6, ptr @.str.5)
   %t69 = inttoptr i64 %t68 to ptr
   store ptr %t69, ptr %p.h1.addr
   %t70 = load ptr, ptr %p.h1.addr
@@ -34213,7 +34309,7 @@ map19:
   br i1 %t101, label %mapb20, label %mape22
 mapb20:
   %t102 = load double, ptr %s18
-  %t103 = call i64 @nt_arr_get(ptr %t97, double %t102)
+  %t103 = call i64 @nt_arr_hof_at(ptr %t97, double %t102, ptr @.str.1, ptr @.str.7)
   %t104 = inttoptr i64 %t103 to ptr
   store ptr %t104, ptr %p.h2.addr
   %t105 = load ptr, ptr %p.h2.addr
@@ -34236,13 +34332,13 @@ mapu21:
 mape22:
   store ptr %t99, ptr %sums.addr
   %t117 = load ptr, ptr %sums.addr
-  %t118 = call i64 @nt_arr_index(ptr %t117, double 0x0000000000000000, ptr @.str.3)
+  %t118 = call i64 @nt_arr_index(ptr %t117, double 0x0000000000000000, ptr @.str.8)
   %t119 = bitcast i64 %t118 to double
   %t120 = load ptr, ptr %sums.addr
-  %t121 = call i64 @nt_arr_index(ptr %t120, double 0x3FF0000000000000, ptr @.str.4)
+  %t121 = call i64 @nt_arr_index(ptr %t120, double 0x3FF0000000000000, ptr @.str.9)
   %t122 = bitcast i64 %t121 to double
   %t123 = load ptr, ptr %sums.addr
-  %t124 = call i64 @nt_arr_index(ptr %t123, double 0x4000000000000000, ptr @.str.5)
+  %t124 = call i64 @nt_arr_index(ptr %t123, double 0x4000000000000000, ptr @.str.10)
   %t125 = bitcast i64 %t124 to double
   call void @js_print_num(double %t119)
   call void @js_print_sep()
@@ -34324,6 +34420,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -34758,6 +34855,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -35826,6 +35924,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -36023,7 +36122,9 @@ declare ptr @nt_dyn_inspect(ptr, double)
 declare ptr @nt_dyn_display(ptr, double)
 declare ptr @nt_dyn_str_or_null(ptr)
 
-@.str.0 = private unnamed_addr constant [14 x i8] c"<input>:11:18\\00"
+@.str.0 = private unnamed_addr constant [13 x i8] c"<input>:8:27\\00"
+@.str.1 = private unnamed_addr constant [8 x i8] c".reduce\\00"
+@.str.2 = private unnamed_addr constant [14 x i8] c"<input>:11:18\\00"
 
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
@@ -36109,7 +36210,7 @@ red7:
   br i1 %t37, label %redb8, label %rede10
 redb8:
   %t38 = load double, ptr %s6
-  %t39 = call i64 @nt_arr_get(ptr %t34, double %t38)
+  %t39 = call i64 @nt_arr_hof_at(ptr %t34, double %t38, ptr @.str.1, ptr @.str.0)
   %t40 = inttoptr i64 %t39 to ptr
   store ptr %t40, ptr %it.h0.addr
   %t41 = load double, ptr %acc.h0.addr
@@ -36135,7 +36236,7 @@ rede10:
   %t52 = load ptr, ptr %items.addr
   %t53 = call double @nt_arr_len(ptr %t52)
   %t54 = fsub double %t53, 0x3FF0000000000000
-  %t55 = call i64 @nt_arr_index(ptr %t51, double %t54, ptr @.str.0)
+  %t55 = call i64 @nt_arr_index(ptr %t51, double %t54, ptr @.str.2)
   %t56 = inttoptr i64 %t55 to ptr
   %t57 = getelementptr i64, ptr %t56, i64 0
   %t58 = load i64, ptr %t57
@@ -36216,6 +36317,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -36572,6 +36674,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -36924,6 +37027,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -37201,6 +37305,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -37474,6 +37579,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -37769,6 +37875,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -38158,6 +38265,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -38355,15 +38463,23 @@ declare ptr @nt_dyn_inspect(ptr, double)
 declare ptr @nt_dyn_display(ptr, double)
 declare ptr @nt_dyn_str_or_null(ptr)
 
-@.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
-@.str.1 = private unnamed_addr constant [2 x i8] c"e\\00"
-@.str.2 = private unnamed_addr constant [2 x i8] c"o\\00"
-@.str.3 = private unnamed_addr constant [2 x i8] c" \\00"
-@.str.4 = private unnamed_addr constant [2 x i8] c"a\\00"
-@.str.5 = private unnamed_addr constant [3 x i8] c"bb\\00"
-@.str.6 = private unnamed_addr constant [4 x i8] c"ccc\\00"
-@.str.7 = private unnamed_addr constant [1 x i8] c"\\00"
-@.str.8 = private unnamed_addr constant [2 x i8] c"-\\00"
+@.str.0 = private unnamed_addr constant [13 x i8] c"<input>:6:24\\00"
+@.str.1 = private unnamed_addr constant [5 x i8] c".map\\00"
+@.str.2 = private unnamed_addr constant [2 x i8] c",\\00"
+@.str.3 = private unnamed_addr constant [14 x i8] c"<input>:13:25\\00"
+@.str.4 = private unnamed_addr constant [8 x i8] c".filter\\00"
+@.str.5 = private unnamed_addr constant [14 x i8] c"<input>:20:26\\00"
+@.str.6 = private unnamed_addr constant [8 x i8] c".reduce\\00"
+@.str.7 = private unnamed_addr constant [14 x i8] c"<input>:28:24\\00"
+@.str.8 = private unnamed_addr constant [2 x i8] c"e\\00"
+@.str.9 = private unnamed_addr constant [2 x i8] c"o\\00"
+@.str.10 = private unnamed_addr constant [2 x i8] c" \\00"
+@.str.11 = private unnamed_addr constant [2 x i8] c"a\\00"
+@.str.12 = private unnamed_addr constant [3 x i8] c"bb\\00"
+@.str.13 = private unnamed_addr constant [4 x i8] c"ccc\\00"
+@.str.14 = private unnamed_addr constant [14 x i8] c"<input>:37:27\\00"
+@.str.15 = private unnamed_addr constant [1 x i8] c"\\00"
+@.str.16 = private unnamed_addr constant [2 x i8] c"-\\00"
 
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
@@ -38425,7 +38541,7 @@ map2:
   br i1 %t10, label %mapb3, label %mape5
 mapb3:
   %t11 = load double, ptr %s1
-  %t12 = call i64 @nt_arr_get(ptr %t6, double %t11)
+  %t12 = call i64 @nt_arr_hof_at(ptr %t6, double %t11, ptr @.str.1, ptr @.str.0)
   %t13 = bitcast i64 %t12 to double
   store double %t13, ptr %n.h0.addr
   %t14 = load double, ptr %n.h0.addr
@@ -38448,7 +38564,7 @@ mapu4:
 mape5:
   store ptr %t8, ptr %mapped.addr
   %t22 = load ptr, ptr %mapped.addr
-  %t23 = call ptr @nt_arr_join_num(ptr %t22, ptr @.str.0)
+  %t23 = call ptr @nt_arr_join_num(ptr %t22, ptr @.str.2)
   call void @js_print_str(ptr %t23)
   call void @js_print_newline()
   %t24 = load ptr, ptr %nums.addr
@@ -38462,7 +38578,7 @@ flt9:
   br i1 %t28, label %fltb10, label %flte12
 fltb10:
   %t29 = load double, ptr %s8
-  %t30 = call i64 @nt_arr_get(ptr %t24, double %t29)
+  %t30 = call i64 @nt_arr_hof_at(ptr %t24, double %t29, ptr @.str.4, ptr @.str.3)
   %t31 = bitcast i64 %t30 to double
   store double %t31, ptr %n.h1.addr
   %t32 = load double, ptr %n.h1.addr
@@ -38494,7 +38610,7 @@ fltu11:
 flte12:
   store ptr %t26, ptr %kept.addr
   %t41 = load ptr, ptr %kept.addr
-  %t42 = call ptr @nt_arr_join_num(ptr %t41, ptr @.str.0)
+  %t42 = call ptr @nt_arr_join_num(ptr %t41, ptr @.str.2)
   call void @js_print_str(ptr %t42)
   call void @js_print_newline()
   %t43 = load ptr, ptr %nums.addr
@@ -38508,7 +38624,7 @@ red20:
   br i1 %t46, label %redb21, label %rede23
 redb21:
   %t47 = load double, ptr %s19
-  %t48 = call i64 @nt_arr_get(ptr %t43, double %t47)
+  %t48 = call i64 @nt_arr_hof_at(ptr %t43, double %t47, ptr @.str.6, ptr @.str.5)
   %t49 = bitcast i64 %t48 to double
   store double %t49, ptr %n.h2.addr
   %t50 = load double, ptr %sum.h2.addr
@@ -38545,7 +38661,7 @@ map27:
   br i1 %t63, label %mapb28, label %mape30
 mapb28:
   %t64 = load double, ptr %s26
-  %t65 = call i64 @nt_arr_get(ptr %t59, double %t64)
+  %t65 = call i64 @nt_arr_hof_at(ptr %t59, double %t64, ptr @.str.1, ptr @.str.7)
   %t66 = bitcast i64 %t65 to double
   store double %t66, ptr %n.h3.addr
   %t67 = load double, ptr %n.h3.addr
@@ -38561,14 +38677,14 @@ mapb28:
 tern34:
   %t74 = load double, ptr %scaled.h3.addr
   %t75 = call ptr @js_num_to_str(double %t74)
-  %t76 = call ptr @js_str_concat(ptr %t75, ptr @.str.1)
+  %t76 = call ptr @js_str_concat(ptr %t75, ptr @.str.8)
   call void @nt_str_release(ptr %t75)
   store ptr %t76, ptr %s33
   br label %ternend36
 ternelse35:
   %t77 = load double, ptr %scaled.h3.addr
   %t78 = call ptr @js_num_to_str(double %t77)
-  %t79 = call ptr @js_str_concat(ptr %t78, ptr @.str.2)
+  %t79 = call ptr @js_str_concat(ptr %t78, ptr @.str.9)
   call void @nt_str_release(ptr %t78)
   store ptr %t79, ptr %s33
   br label %ternend36
@@ -38590,22 +38706,22 @@ mapu29:
 mape30:
   store ptr %t61, ptr %labels.addr
   %t86 = load ptr, ptr %labels.addr
-  %t87 = call ptr @nt_arr_join_str(ptr %t86, ptr @.str.3)
+  %t87 = call ptr @nt_arr_join_str(ptr %t86, ptr @.str.10)
   call void @js_print_str(ptr %t87)
   call void @js_print_newline()
   %t88 = call ptr @nt_arr_new(double 0x4008000000000000)
-  %rc89 = call ptr @nt_str_retain(ptr @.str.4)
-  %t90 = ptrtoint ptr @.str.4 to i64
+  %rc89 = call ptr @nt_str_retain(ptr @.str.11)
+  %t90 = ptrtoint ptr @.str.11 to i64
   call double @nt_arr_push(ptr %t88, i64 %t90)
-  %rc91 = call ptr @nt_str_retain(ptr @.str.5)
-  %t92 = ptrtoint ptr @.str.5 to i64
+  %rc91 = call ptr @nt_str_retain(ptr @.str.12)
+  %t92 = ptrtoint ptr @.str.12 to i64
   call double @nt_arr_push(ptr %t88, i64 %t92)
-  %rc93 = call ptr @nt_str_retain(ptr @.str.6)
-  %t94 = ptrtoint ptr @.str.6 to i64
+  %rc93 = call ptr @nt_str_retain(ptr @.str.13)
+  %t94 = ptrtoint ptr @.str.13 to i64
   call double @nt_arr_push(ptr %t88, i64 %t94)
   store ptr %t88, ptr %words.addr
   %t95 = load ptr, ptr %words.addr
-  store ptr @.str.7, ptr %acc.h4.addr
+  store ptr @.str.15, ptr %acc.h4.addr
   store ptr null, ptr %piece.h4.addr
   %t96 = call double @nt_arr_len(ptr %t95)
   store double 0x0000000000000000, ptr %s37
@@ -38616,13 +38732,13 @@ red38:
   br i1 %t98, label %redb39, label %rede41
 redb39:
   %t99 = load double, ptr %s37
-  %t100 = call i64 @nt_arr_get(ptr %t95, double %t99)
+  %t100 = call i64 @nt_arr_hof_at(ptr %t95, double %t99, ptr @.str.6, ptr @.str.14)
   %t101 = inttoptr i64 %t100 to ptr
   store ptr %t101, ptr %w.h4.addr
   %t102 = load ptr, ptr %acc.h4.addr
   %t103 = load ptr, ptr %w.h4.addr
   %t104 = call ptr @js_str_concat(ptr %t102, ptr %t103)
-  %t105 = call ptr @js_str_concat(ptr %t104, ptr @.str.8)
+  %t105 = call ptr @js_str_concat(ptr %t104, ptr @.str.16)
   call void @nt_str_release(ptr %t104)
   store ptr %t105, ptr %piece.h4.addr
   %t106 = load ptr, ptr %piece.h4.addr
@@ -38723,6 +38839,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -38923,9 +39040,16 @@ declare ptr @nt_dyn_str_or_null(ptr)
 @.str.0 = private unnamed_addr constant [2 x i8] c"a\\00"
 @.str.1 = private unnamed_addr constant [3 x i8] c"bb\\00"
 @.str.2 = private unnamed_addr constant [4 x i8] c"ccc\\00"
-@.str.3 = private unnamed_addr constant [1 x i8] c"\\00"
-@.str.4 = private unnamed_addr constant [2 x i8] c"!\\00"
-@.str.5 = private unnamed_addr constant [2 x i8] c",\\00"
+@.str.3 = private unnamed_addr constant [13 x i8] c"<input>:8:27\\00"
+@.str.4 = private unnamed_addr constant [8 x i8] c".reduce\\00"
+@.str.5 = private unnamed_addr constant [13 x i8] c"<input>:9:28\\00"
+@.str.6 = private unnamed_addr constant [1 x i8] c"\\00"
+@.str.7 = private unnamed_addr constant [14 x i8] c"<input>:14:21\\00"
+@.str.8 = private unnamed_addr constant [5 x i8] c".map\\00"
+@.str.9 = private unnamed_addr constant [14 x i8] c"<input>:15:23\\00"
+@.str.10 = private unnamed_addr constant [2 x i8] c"!\\00"
+@.str.11 = private unnamed_addr constant [2 x i8] c",\\00"
+@.str.12 = private unnamed_addr constant [14 x i8] c"<input>:20:24\\00"
 
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
@@ -38988,7 +39112,7 @@ red2:
   br i1 %t15, label %redb3, label %rede5
 redb3:
   %t16 = load double, ptr %s1
-  %t17 = call i64 @nt_arr_get(ptr %t12, double %t16)
+  %t17 = call i64 @nt_arr_hof_at(ptr %t12, double %t16, ptr @.str.4, ptr @.str.3)
   %t18 = bitcast i64 %t17 to double
   store double %t18, ptr %n.h0.addr
   %t19 = load double, ptr %acc.h0.addr
@@ -39005,7 +39129,7 @@ rede5:
   %t24 = load double, ptr %acc.h0.addr
   store double %t24, ptr %numSum.addr
   %t25 = load ptr, ptr %words.addr
-  store ptr @.str.3, ptr %acc.h1.addr
+  store ptr @.str.6, ptr %acc.h1.addr
   %t26 = call double @nt_arr_len(ptr %t25)
   store double 0x0000000000000000, ptr %s6
   br label %red7
@@ -39015,7 +39139,7 @@ red7:
   br i1 %t28, label %redb8, label %rede10
 redb8:
   %t29 = load double, ptr %s6
-  %t30 = call i64 @nt_arr_get(ptr %t25, double %t29)
+  %t30 = call i64 @nt_arr_hof_at(ptr %t25, double %t29, ptr @.str.4, ptr @.str.5)
   %t31 = inttoptr i64 %t30 to ptr
   store ptr %t31, ptr %w.h1.addr
   %t32 = load ptr, ptr %acc.h1.addr
@@ -39048,7 +39172,7 @@ map12:
   br i1 %t44, label %mapb13, label %mape15
 mapb13:
   %t45 = load double, ptr %s11
-  %t46 = call i64 @nt_arr_get(ptr %t40, double %t45)
+  %t46 = call i64 @nt_arr_hof_at(ptr %t40, double %t45, ptr @.str.8, ptr @.str.7)
   %t47 = bitcast i64 %t46 to double
   store double %t47, ptr %n.h2.addr
   %t48 = load double, ptr %n.h2.addr
@@ -39081,11 +39205,11 @@ map19:
   br i1 %t59, label %mapb20, label %mape22
 mapb20:
   %t60 = load double, ptr %s18
-  %t61 = call i64 @nt_arr_get(ptr %t55, double %t60)
+  %t61 = call i64 @nt_arr_hof_at(ptr %t55, double %t60, ptr @.str.8, ptr @.str.9)
   %t62 = inttoptr i64 %t61 to ptr
   store ptr %t62, ptr %w.h3.addr
   %t63 = load ptr, ptr %w.h3.addr
-  %t64 = call ptr @js_str_concat(ptr %t63, ptr @.str.4)
+  %t64 = call ptr @js_str_concat(ptr %t63, ptr @.str.10)
   store ptr %t64, ptr %r.h3.addr
   %t65 = load ptr, ptr %r.h3.addr
   store ptr %t65, ptr %s23
@@ -39104,11 +39228,11 @@ mapu21:
 mape22:
   store ptr %t57, ptr %bang.addr
   %t71 = load ptr, ptr %inc.addr
-  %t72 = call ptr @nt_arr_join_num(ptr %t71, ptr @.str.5)
+  %t72 = call ptr @nt_arr_join_num(ptr %t71, ptr @.str.11)
   call void @js_print_str(ptr %t72)
   call void @js_print_newline()
   %t73 = load ptr, ptr %bang.addr
-  %t74 = call ptr @nt_arr_join_str(ptr %t73, ptr @.str.5)
+  %t74 = call ptr @nt_arr_join_str(ptr %t73, ptr @.str.11)
   call void @js_print_str(ptr %t74)
   call void @js_print_newline()
   %t75 = load ptr, ptr %nums.addr
@@ -39122,7 +39246,7 @@ map26:
   br i1 %t79, label %mapb27, label %mape29
 mapb27:
   %t80 = load double, ptr %s25
-  %t81 = call i64 @nt_arr_get(ptr %t75, double %t80)
+  %t81 = call i64 @nt_arr_hof_at(ptr %t75, double %t80, ptr @.str.8, ptr @.str.12)
   %t82 = bitcast i64 %t81 to double
   store double %t82, ptr %numSum2.h4.addr
   %t83 = load double, ptr %numSum2.h4.addr
@@ -39139,7 +39263,7 @@ mapu28:
 mape29:
   store ptr %t77, ptr %scaled.addr
   %t89 = load ptr, ptr %scaled.addr
-  %t90 = call ptr @nt_arr_join_num(ptr %t89, ptr @.str.5)
+  %t90 = call ptr @nt_arr_join_num(ptr %t89, ptr @.str.11)
   call void @js_print_str(ptr %t90)
   call void @js_print_newline()
   %t91 = load ptr, ptr %nums.addr
@@ -39222,6 +39346,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -39610,6 +39735,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -40082,6 +40208,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -40409,6 +40536,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -40819,6 +40947,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -41144,6 +41273,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -41748,6 +41878,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -42179,6 +42310,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -42666,6 +42798,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -42948,6 +43081,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -43240,6 +43374,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -43523,6 +43658,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -43802,6 +43938,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -44100,6 +44237,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -44399,6 +44537,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -44687,6 +44826,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -45063,6 +45203,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -45463,6 +45604,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -45660,7 +45802,16 @@ declare ptr @nt_dyn_inspect(ptr, double)
 declare ptr @nt_dyn_display(ptr, double)
 declare ptr @nt_dyn_str_or_null(ptr)
 
-@.str.0 = private unnamed_addr constant [2 x i8] c",\\00"
+@.str.0 = private unnamed_addr constant [13 x i8] c"<input>:2:21\\00"
+@.str.1 = private unnamed_addr constant [5 x i8] c".map\\00"
+@.str.2 = private unnamed_addr constant [2 x i8] c",\\00"
+@.str.3 = private unnamed_addr constant [13 x i8] c"<input>:3:24\\00"
+@.str.4 = private unnamed_addr constant [8 x i8] c".filter\\00"
+@.str.5 = private unnamed_addr constant [13 x i8] c"<input>:4:24\\00"
+@.str.6 = private unnamed_addr constant [8 x i8] c".reduce\\00"
+@.str.7 = private unnamed_addr constant [13 x i8] c"<input>:6:21\\00"
+@.str.8 = private unnamed_addr constant [13 x i8] c"<input>:7:29\\00"
+@.str.9 = private unnamed_addr constant [13 x i8] c"<input>:7:50\\00"
 
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
@@ -45706,7 +45857,7 @@ map2:
   br i1 %t10, label %mapb3, label %mape5
 mapb3:
   %t11 = load double, ptr %s1
-  %t12 = call i64 @nt_arr_get(ptr %t6, double %t11)
+  %t12 = call i64 @nt_arr_hof_at(ptr %t6, double %t11, ptr @.str.1, ptr @.str.0)
   %t13 = bitcast i64 %t12 to double
   store double %t13, ptr %x.h0.addr
   %t14 = load double, ptr %x.h0.addr
@@ -45720,7 +45871,7 @@ mapu4:
   store double %t18, ptr %s1
   br label %map2
 mape5:
-  %t19 = call ptr @nt_arr_join_num(ptr %t8, ptr @.str.0)
+  %t19 = call ptr @nt_arr_join_num(ptr %t8, ptr @.str.2)
   call void @nt_arr_free(ptr %t8)
   call void @js_print_str(ptr %t19)
   call void @js_print_newline()
@@ -45735,7 +45886,7 @@ flt7:
   br i1 %t24, label %fltb8, label %flte10
 fltb8:
   %t25 = load double, ptr %s6
-  %t26 = call i64 @nt_arr_get(ptr %t20, double %t25)
+  %t26 = call i64 @nt_arr_hof_at(ptr %t20, double %t25, ptr @.str.4, ptr @.str.3)
   %t27 = bitcast i64 %t26 to double
   store double %t27, ptr %x.h1.addr
   %t28 = load double, ptr %x.h1.addr
@@ -45754,7 +45905,7 @@ fltu9:
   store double %t33, ptr %s6
   br label %flt7
 flte10:
-  %t34 = call ptr @nt_arr_join_num(ptr %t22, ptr @.str.0)
+  %t34 = call ptr @nt_arr_join_num(ptr %t22, ptr @.str.2)
   call void @nt_arr_free(ptr %t22)
   call void @js_print_str(ptr %t34)
   call void @js_print_newline()
@@ -45769,7 +45920,7 @@ red14:
   br i1 %t38, label %redb15, label %rede17
 redb15:
   %t39 = load double, ptr %s13
-  %t40 = call i64 @nt_arr_get(ptr %t35, double %t39)
+  %t40 = call i64 @nt_arr_hof_at(ptr %t35, double %t39, ptr @.str.6, ptr @.str.5)
   %t41 = bitcast i64 %t40 to double
   store double %t41, ptr %x.h2.addr
   %t42 = load double, ptr %acc.h2.addr
@@ -45798,7 +45949,7 @@ map19:
   br i1 %t52, label %mapb20, label %mape22
 mapb20:
   %t53 = load double, ptr %s18
-  %t54 = call i64 @nt_arr_get(ptr %t48, double %t53)
+  %t54 = call i64 @nt_arr_hof_at(ptr %t48, double %t53, ptr @.str.1, ptr @.str.7)
   %t55 = bitcast i64 %t54 to double
   store double %t55, ptr %x.h3.addr
   %t56 = load double, ptr %x.h3.addr
@@ -45813,7 +45964,7 @@ mapu21:
   store double %t61, ptr %s18
   br label %map19
 mape22:
-  %t62 = call ptr @nt_arr_join_num(ptr %t50, ptr @.str.0)
+  %t62 = call ptr @nt_arr_join_num(ptr %t50, ptr @.str.2)
   call void @nt_arr_free(ptr %t50)
   call void @js_print_str(ptr %t62)
   call void @js_print_newline()
@@ -45836,7 +45987,7 @@ map24:
   br i1 %t71, label %mapb25, label %mape27
 mapb25:
   %t72 = load double, ptr %s23
-  %t73 = call i64 @nt_arr_get(ptr %t63, double %t72)
+  %t73 = call i64 @nt_arr_hof_at(ptr %t63, double %t72, ptr @.str.1, ptr @.str.8)
   %t74 = bitcast i64 %t73 to double
   store double %t74, ptr %x.h4.addr
   %t75 = load double, ptr %x.h4.addr
@@ -45862,7 +46013,7 @@ red29:
   br i1 %t83, label %redb30, label %rede32
 redb30:
   %t84 = load double, ptr %s28
-  %t85 = call i64 @nt_arr_get(ptr %t69, double %t84)
+  %t85 = call i64 @nt_arr_hof_at(ptr %t69, double %t84, ptr @.str.6, ptr @.str.9)
   %t86 = bitcast i64 %t85 to double
   store double %t86, ptr %b.h5.addr
   %t87 = load double, ptr %a.h5.addr
@@ -45948,6 +46099,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -46348,6 +46500,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -46718,6 +46871,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -47253,6 +47407,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -47705,6 +47860,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -48071,6 +48227,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -48435,6 +48592,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -48843,6 +49001,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -49223,6 +49382,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -49526,6 +49686,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -49888,6 +50049,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -50308,6 +50470,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -50632,6 +50795,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -50967,6 +51131,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -51343,6 +51508,7 @@ declare double @nt_str_live()
 declare ptr @nt_arr_new(double)
 declare double @nt_arr_push(ptr, i64)
 declare i64 @nt_arr_get(ptr, double)
+declare i64 @nt_arr_hof_at(ptr, double, ptr, ptr)
 declare i64 @nt_arr_index(ptr, double, ptr)
 declare i64 @nt_nonnull(ptr, ptr)
 declare i64 @nt_union_arm(ptr, double, ptr, ptr)
@@ -51549,6 +51715,8 @@ declare ptr @nt_dyn_str_or_null(ptr)
 @.str.6 = private unnamed_addr constant [6 x i8] c"alice\\00"
 @.str.7 = private unnamed_addr constant [4 x i8] c"bob\\00"
 @.str.8 = private unnamed_addr constant [6 x i8] c"carol\\00"
+@.str.9 = private unnamed_addr constant [14 x i8] c"<input>:16:43\\00"
+@.str.10 = private unnamed_addr constant [8 x i8] c".reduce\\00"
 
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
@@ -51681,7 +51849,7 @@ red2:
   br i1 %t77, label %redb3, label %rede5
 redb3:
   %t78 = load double, ptr %s1
-  %t79 = call i64 @nt_arr_get(ptr %t62, double %t78)
+  %t79 = call i64 @nt_arr_hof_at(ptr %t62, double %t78, ptr @.str.10, ptr @.str.9)
   %t80 = bitcast i64 %t79 to double
   store double %t80, ptr %b.h0.addr
   %t81 = load double, ptr %a.h0.addr

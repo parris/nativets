@@ -146,9 +146,144 @@ Rules:
   panic at run time, even though both operands are just as statically known. Not a correctness
   hole (the program stops either way), but `.with` is listed as a covered accessor above and does
   not get the compile-time treatment the other four do.
-- **Only written indices panic.** Compiler-generated in-bounds reads (`for-of`, the array HOFs,
-  `JSON.stringify`, destructuring, spread-call expansion) keep the internal non-panicking
-  accessor, so nothing pays twice and in-bounds programs are behaviourally unchanged.
+- **Only written indices panic**, plus the array HOFs (below). Compiler-generated reads that are
+  genuinely in-bounds (`JSON.stringify`, destructuring, spread-call expansion) keep the internal
+  non-panicking accessor, so nothing pays twice and in-bounds programs are behaviourally
+  unchanged. **`for-of` is in this list for a different reason** than it looks: its loop bound is
+  a snapshot too, but the shape that would outrun it — mutating the array you are walking — is
+  refused at compile time by `NT1603` (iterator invalidation), so the read really is in bounds by
+  the time it runs.
+
+#### …and the ARRAY HOFs panic too, because their loop bound is a SNAPSHOT
+
+This bullet used to name "the array HOFs" among the compiler-generated *in-bounds* reads, and
+that claim was **false**. `.map`/`.filter`/`.forEach`/`.flatMap`/`.reduce` lower to an inlined
+loop whose bound is the receiver's length read **once**, before the first callback runs. A
+callback that **shrinks** the receiver leaves every index from the new length up to the snapshot
+pointing past the end — and `nt_arr_get`'s return-0 contract turned that into the exact
+phantom-value wrong answer this whole section exists to abolish:
+
+```ts
+//@@mutable
+const a = [1, 2, 3, 4];
+const out = a.map((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x; });
+console.log(JSON.stringify(out), a.length);
+// node:                [1,2,null,null] 2   exit 0
+// nativets (before):   [1,2,0,0] 2         exit 0     <- silent wrong answer
+// nativets (now):      panic,              exit 134
+```
+
+It was also a **hole in the guarantee at the top of this section**: a source-written `a[5]` on a
+3-element array panicked, while the *identical* read reached from inside the HOF loop returned
+`0`. Same array, same index, two different policies, decided by which accessor the lowering
+happened to call.
+
+```
+panic: `.map` callback resized the array it is walking: the length is now 2 but the walk is at index 2
+  at examples/thing.ts:3:18
+  help: `.map` reads the length ONCE, before the first callback runs — node does too, so a
+        callback that GROWS the array is fine and still visits only the original elements.
+        Shrinking is the problem: node skips the elements that are gone, and a dense array cannot
+        represent "gone". Do the removal AFTER the walk (collect what to drop inside the callback,
+        then `.pop()` in a following loop), or walk an index yourself with `while`
+```
+
+**Why a panic and not node's answer.** Measured against node, all five HOFs *skip* an index that
+is no longer present — the callback is never invoked for it. `.filter`/`.forEach`/`.flatMap`/
+`.reduce` therefore just visit fewer elements, but `.map` pre-sizes its result to the **snapshot**
+and leaves **holes**: `out.length` is 4, `2 in out` is `false`, `out[2]` is `undefined`, and
+`JSON.stringify` renders the holes as `null`. Reproducing that needs an *absent* element in a
+dense `int64` array, i.e. a nullable box on every element — and it would give `.map` the return
+type `T | undefined`, pushed through every downstream consumer of every `.map` in the language.
+That is precisely the trade rejected for `a[-1]` at the top of this section, so it is rejected
+here for the same reason.
+
+**Why NOT "re-read the length each iteration",** which is the cheap-looking fix and is *wrong*.
+node snapshots `length` too, so a callback that **grows** the receiver must still visit only the
+original count — measured, `[1,2,3].map(cb)` with a `cb` that pushes twice visits indices 0,1,2
+and returns a 3-element array while `a.length` becomes 5. Re-reading would walk into the growth
+and break every growing program, which agrees with node today. It would also give `.map` a
+result of the *shrunken* length (2) where node gives the snapshot length (4). The snapshot bound
+was never the bug; the return-0 policy on reads past it was.
+
+**A compile-time refusal remains available and is NOT ruled out** — it is simply not this lane's
+file (`src/ownership.ts`), and the runtime check is what closes the hole today. Stated honestly,
+because the first draft of this section under-sold it:
+
+- The pieces already exist. The `for-of` twin is refused by **`NT1603`**, and it is refused
+  **one call deep too** — handing the borrowed array to a parameter carrying its own
+  `@@mutable` is caught at the *call site* by `checkMutableArgs`
+  (`cannot pass \`a\` to the \`@@mutable\` parameter of \`drop\` while it is borrowed`). Marking a
+  HOF receiver borrowed for the callback's duration would plausibly reach the same set.
+- The set to key on is **closed**: `.pop` and `.push` are the only length-changing operations in
+  the language, since `.shift`, `.unshift` and `.splice` are refused outright. A callback that
+  only *reads* the receiver stays legal, because the rule keys on the mutating call.
+- What it would still miss is the imprecision `src/ownership.ts` documents about itself: both
+  rules key on an argument that is a **bare identifier** and a callee that is a **bare name**, so
+  an argument reached by a field or element path (`f(node.body)`) is admitted.
+
+The two are complements, not alternatives, and they answer different questions. A refusal fires
+on every program *shaped* like the hazard; the runtime check stops only the programs that
+actually *hit* it. Since the guarantee at the top of this section is about what happens at run
+time, the runtime check is the one that has to exist; a refusal on top of it would be a nicer
+diagnostic, delivered earlier, for the shapes it can see.
+
+**It costs nothing.** `nt_arr_get` already evaluated `i >= a->len` on every iteration, so only
+the taken branch's body changed: **+0 IR instructions** across all 24 perf-corpus programs and a
+HOF-saturated synthetic. Measured wall-clock on 80M element reads, the panicking accessor is
+**faster** than the old one (0.46s vs 0.53s) — an `abort()` branch is `noreturn`, so the fallthrough
+is the function's only exit and codegen is better than `return 0`'s two-way merge. The one thing
+that did cost was folding the panic's two 64-byte number buffers into the accessor: reserved in
+the prologue, they charged every in-bounds read for a frame it never used (+4.4%). They live in a
+separate cold function. (Not the diagnostic arguments — a probe taking the same two arguments as
+`nt_arr_get` measured identically to the four-argument form.)
+
+**The SEARCH HOFs are in this too, and node splits them in two.** `.some`/`.every`/`.find`/
+`.findIndex`/`.findLast`/`.findLastIndex` do not share the loop above — `genSearchHof` builds its
+own, because the `Last` pair counts *down* — so they took their own snapshot and had their own
+return-0 read. It bites harder there, because the phantom reaches a **predicate** rather than an
+output array, and a predicate that tests for `0` matches an element that does not exist:
+
+```ts
+//@@mutable
+const a = [1, 2, 3, 4];
+a.some((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; });
+// node: false      nativets (before): true      both exit 0   <- a FLIPPED BOOLEAN
+```
+
+Measuring node to write those tests turned up a distinction worth recording, because the two
+halves are not interchangeable and it is the ES spec that separates them:
+
+| method | absent index | visited, from a 4-element snapshot |
+|---|---|---|
+| `.some`, `.every` | guarded by `HasProperty` — **skipped** | `[0,1]` |
+| `.map`, `.filter`, `.forEach`, `.flatMap`, `.reduce` | guarded by `HasProperty` — **skipped** | `[0,1]` |
+| `.find`, `.findIndex` | plain `Get` — callback gets **`undefined`** | `[0,1,2,3]` |
+| `.findLast`, `.findLastIndex` | plain `Get` — callback gets **`undefined`** | `[3,2,1,0]` |
+
+Neither half is reproducible — one needs "skip", the other needs `undefined` — so all of them
+panic. (The trigger index differs only because the `Last` pair walks backwards: the shrink has to
+land on the first element that direction visits.)
+
+**One case in that family is NOT a panic, because node can be matched exactly.** `.find` and
+`.findLast` return an *element*, and it used to be produced by a **second** `src[hit]` read after
+the loop. The matching callback can shrink the array after being handed its element, so `hit`
+then points past the new end and that re-read answered 0:
+
+```ts
+a.find((x, i) => { const m = i === 3; if (m) { a.pop(); a.pop(); } return m; });
+// node: 4      nativets (before): 0      both exit 0
+```
+
+node returns `kValue`, which it read *before* the shrink — so unlike the loop read, the right
+answer is in hand and refusing would be gratuitous. The match path now keeps the slot it already
+loaded. Exit 0, node's answer, one store on the match path, and only `.find`/`.findLast` emit it
+so the other four keep byte-identical IR. Where node's answer is reachable we take it; the panic
+is only for where it is not.
+
+Covered by `test/hof-resize.test.ts`, which asserts node's real answer for every member of the
+family before asserting our panic, keeps the growth cases and a read-only callback as green
+controls, and compiles the hint's advice against node.
 
 #### STILL OPEN — `.with(-1, v)` panics on a program node runs correctly
 

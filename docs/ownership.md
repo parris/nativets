@@ -136,9 +136,19 @@ pending-exception protocol, so `try`/`catch` cannot swallow it — and when both
 the index are compile-time constants the program is rejected outright (**NT2002**) instead.
 See `docs/divergences.md` and `test/panic.test.ts`.
 
-Only indices the **programmer wrote** panic; compiler-generated in-bounds loops (`for-of`, the
-HOFs, `JSON.stringify`) keep reading through the internal `nt_arr_get`, so nothing pays for a
-second check.
+Indices the **programmer wrote** panic, and so do **the array HOFs** — `.map`/`.filter`/
+`.forEach`/`.flatMap`/`.reduce` and `.some`/`.every`/`.find`/`.findIndex`/`.findLast`/
+`.findLastIndex` all read through `nt_arr_hof_at`, which panics rather than returning 0.
+Genuinely in-bounds compiler-generated reads (`JSON.stringify`, destructuring, spread-call
+expansion) keep reading through the internal `nt_arr_get`, so nothing pays for a second check.
+
+The HOFs used to be in that second list, and it was **wrong**: a HOF's loop bound is the
+receiver's length read once, so a callback that shrinks the receiver walks off the end and used
+to read 0 there — a silent wrong answer, and a hole in the panic guarantee above. `for-of` is
+genuinely safe for a *different* reason than a snapshot bound: **NT1603** (iterator invalidation,
+below) refuses the program that would outrun it. The HOF form of that same hazard has no such
+refusal, because the shrink can happen one call deep, inside a callee, where nothing syntactic
+is left to key on. See `docs/divergences.md` and `test/hof-resize.test.ts`.
 
 ## Tests (rustc `compiletest`-style)
 
