@@ -1758,3 +1758,72 @@ f();
     expect(hint).toContain("prove it non-nullish first");
   });
 });
+
+/*
+ * THE THIRD CIRCULAR HINT — `bind \`const v = n;\`` where `n` is a `const`.
+ *
+ * The union-field advice ends with a clause about the OTHER way a written tag test can
+ * fail to narrow: the root is reassigned between the test and the read, which drops the
+ * fact. That is real, and when it applies the wording is the right one. It was appended
+ * to EVERY stable receiver, though, including ones nothing can possibly reassign:
+ *
+ *     const n: Node = { kind: "num", value: 1 };
+ *     console.log(n.value);
+ *
+ *     … — and if that test is already written, 'n' is assigned between it and this read
+ *     …; bind `const v = n;` before the test and narrow `v`
+ *
+ * `n` is a `const`. It is not assigned anywhere, it cannot be, and `const v = n;` is a
+ * rename of a binding that already has the property the advice is asking for. The clause
+ * states a cause that is impossible and prescribes a no-op — the shape this file already
+ * closed twice, in `narrowing 5` and in the module-level-binding block above.
+ *
+ * A `const` root is the exact predicate: the fact-dropping rules that clause describes
+ * (`unstableNames`, `closureMayAssign`) both key on ASSIGNMENT, and neither can fire for
+ * a binding no assignment is legal on. So the clause is dropped there and kept everywhere
+ * else. What remains is compiled against node below — the reason the clause was worth
+ * removing is that the advice above it is already correct and complete.
+ */
+describe("narrowing — the union-field hint does not blame a `const` for being reassigned", () => {
+  const CONST_ROOT = `
+type Node = { kind: "num"; value: number } | { kind: "str"; text: string };
+const n: Node = { kind: "num", value: 1 };
+console.log(n.value);
+`;
+
+  test("REFUSED — an un-narrowed union field read is still an error", () => {
+    expectRejected(CONST_ROOT, "NT2001", "Property 'value' does not exist");
+  });
+
+  test("the hint does not claim the `const` is assigned, and does not prescribe `const v = n;`", () => {
+    let err: unknown;
+    try { sourceToIR(CONST_ROOT); } catch (e) { err = e; }
+    const text = formatDiagnostic((err as NTError).diag);
+    expect(text).toContain("narrow it first");
+    expect(text).not.toContain("is assigned between it and this read");
+    expect(text).not.toContain("const v = n;");
+  });
+
+  test("the advice it DOES give compiles and matches node", async () => {
+    await expectNode(`
+type Node = { kind: "num"; value: number } | { kind: "str"; text: string };
+const n: Node = { kind: "num", value: 1 };
+if (n.kind === "num") { console.log(n.value); } else { console.log(n.text); }
+`);
+  });
+
+  // The mutation guard. A `let` root really can be reassigned between the test and the
+  // read, so the clause is TRUE there and must survive — narrow this to "never say it"
+  // and this fails.
+  test("a `let` root still gets the reassignment clause", () => {
+    let err: unknown;
+    try { sourceToIR(`
+type Node = { kind: "num"; value: number } | { kind: "str"; text: string };
+let n: Node = { kind: "num", value: 1 };
+console.log(n.value);
+`); } catch (e) { err = e; }
+    const text = formatDiagnostic((err as NTError).diag);
+    expect(text).toContain("is assigned between it and this read");
+    expect(text).toContain("const v = n;");
+  });
+});

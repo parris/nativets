@@ -432,6 +432,9 @@ interface RecvHint {
   already: boolean;
   /** A dotted path rather than a bare name; its root name, for the "rebound" clause. */
   root?: string;
+  /** Can that root actually be reassigned? A `const` cannot, so the "rebound" clause
+   *  states an impossible cause and prescribes a rename — see `narrowAdvice`. */
+  rootRebindable?: boolean;
 }
 
 // `//@@mutable`, which it could NOT be until the cycle rule landed. `parent: Scope | null`
@@ -2836,9 +2839,12 @@ class Checker {
       // name" is now reachable here as well — and without the root the advice would read
       // `narrow it first (\`if (n.kind === "num")\`)` at a read whose author wrote exactly
       // that test one line up, which is the untruthful-hint shape this repo keeps finding.
-      return { text, stable: true, already: b !== undefined && b.narrowedFrom !== undefined, root: obj.name };
+      return { text, stable: true, already: b !== undefined && b.narrowedFrom !== undefined, root: obj.name, rootRebindable: b === undefined || !b.constant };
     }
-    return { text, stable: true, already: this.narrowedTy(p.binding, p.path) !== undefined, root: p.name };
+    // The ROOT's binding, not the path's own — the "rebound" clause is about `x = …` on
+    // the root, which is the only assignment a path over immutable objects can suffer
+    // (`accessPath` has already declined every `@@mutable` link above this point).
+    return { text, stable: true, already: this.narrowedTy(p.binding, p.path) !== undefined, root: p.name, rootRebindable: !p.binding.constant };
   }
 
   /**
@@ -2953,7 +2959,16 @@ class Checker {
     // A dotted path DOES narrow, so "no test written" is no longer the only way to get
     // here with one: the fact is also dropped when the root is rebound between the proof
     // and this read. Naming both is what keeps the advice true in either case.
-    const rebound = recv !== undefined && recv.root !== undefined
+    //
+    // ...but only where a rebind is POSSIBLE. Both rules that drop a fact here
+    // (`unstableNames` and `closureMayAssign`) key on ASSIGNMENT, and neither can fire on
+    // a `const`, so on a `const` root this clause named an impossible cause and then
+    // prescribed `const v = n;` — a rename of a binding that already has the property the
+    // advice asks for. On `const v = <expr>` it degenerated all the way to
+    // `bind \`const v = v;\``. Third instance of the circular-hint shape in this file; the
+    // other two are `narrowing 5` and the module-level-binding block in
+    // test/narrowing.test.ts.
+    const rebound = recv !== undefined && recv.root !== undefined && (recv.rootRebindable ?? true)
       ? ` — and if that test is already written, '${recv.root}' is assigned between it and this read ` +
         `(anywhere in the region, or inside any arrow), which drops the narrowing; bind ` +
         `\`const v = ${x};\` before the test and narrow \`v\``
