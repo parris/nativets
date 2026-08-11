@@ -997,7 +997,10 @@ class ModuleGen {
     if (existing) return existing;
     const idx = this.fnValues.size;
     const blk = `@nt_fnval_blk_${idx}`;
-    this.fnValues.set(name, blk);
+    // Threaded, not discarded: a nativets `Map` is PERSISTENT, so `.set` returns a new map
+    // and leaves the receiver alone (NT1606). Under bun `.set` mutates and returns the same
+    // map, so the assignment is a no-op there — one spelling, both semantics.
+    this.fnValues = this.fnValues.set(name, blk);
     const shim = `nt_fnval_${idx}`;
     const ps = funcParams(fnTy);
     const ret = funcRet(fnTy);
@@ -4798,16 +4801,21 @@ class FnGen {
     // the node also means the index expression travels UNEVALUATED: it is lowered only
     // inside the continuation block past the guard, which is what makes
     // `a?.[sideEffect()]` skip the side effect when `a` is nullish, as node does.
-    // NOT `//@@mutable`: the chain is built with `.unshift`, and the opt-in legalizes
-    // `.push` ONLY — the mark would be dead weight, not a fix.
+    // Collected OUTERMOST-FIRST with `.push` and walked backwards, rather than `.unshift`ed
+    // into chain order: `//@@mutable` legalizes `.push` only, so the reversed loop is what
+    // puts this function inside the subset `src/` must stay in. The two spellings visit the
+    // links in the same order — head-first — which is load-bearing, because each guard must
+    // short-circuit before the links past it are lowered.
+    //@@mutable
     const links: Extract<Expr, { kind: "MemberExpr" | "IndexExpr" }>[] = [];
     let node: Expr = e;
-    while (node.kind === "MemberExpr" || node.kind === "IndexExpr") { links.unshift(node); node = node.object; }
+    while (node.kind === "MemberExpr" || node.kind === "IndexExpr") { links.push(node); node = node.object; }
     const resultSlot = this.slot(e.ty!); // holds the resulting nullable box (ptr)
     const nullJoin = this.label("ocnull");
     const endLbl = this.label("ocend");
     let cur = this.genExpr(node); // chain head
-    for (const link of links) {
+    for (let li = links.length - 1; li >= 0; li--) {
+      const link = links[li]!;
       if (isNullableTy(cur.ty)) {
         const isN = this.isNullish(cur.v);
         const contLbl = this.label("occ");
@@ -5427,29 +5435,41 @@ class FnGen {
 
   /** Collect the names an arrow's block body BINDS in the flat frame (params handled by
    *  the caller) — VarDecls, for-loop/for-of/for-in vars, catch params — WITHOUT descending
-   *  into nested arrows (those are their own binders). Mirrors collectLocals's shape. */
-  private collectBoundNames(body: Stmt[], out: Set<string>): void {
+   *  into nested arrows (those are their own binders). Mirrors collectLocals's shape.
+   *
+   *  RETURNS the accumulated set rather than filling an out-parameter, and every caller
+   *  must take the return. A nativets `Set` is PERSISTENT: `.add` yields a new set and
+   *  leaves the receiver unchanged (NT1606), so an out-parameter would come back empty.
+   *  Under bun `.add` mutates and returns the same set, so threading is a no-op there —
+   *  one spelling, both semantics. */
+  private collectBoundNames(body: Stmt[], out: Set<string>): Set<string> {
+    let acc = out;
     for (const s of body) {
       switch (s.kind) {
-        case "VarDecl": for (const d of s.decls) out.add(d.name); break;
-        case "IfStmt": this.collectBoundNames(s.consequent, out); if (s.alternate) this.collectBoundNames(s.alternate, out); break;
-        case "WhileStmt": case "DoWhileStmt": this.collectBoundNames(s.body, out); break;
+        case "VarDecl": for (const d of s.decls) acc = acc.add(d.name); break;
+        case "IfStmt": acc = this.collectBoundNames(s.consequent, acc); if (s.alternate) acc = this.collectBoundNames(s.alternate, acc); break;
+        case "WhileStmt": case "DoWhileStmt": acc = this.collectBoundNames(s.body, acc); break;
         case "ForStmt":
-          if (s.init && (s.init as VarDecl).kind === "VarDecl") for (const d of (s.init as VarDecl).decls) out.add(d.name);
-          this.collectBoundNames(s.body, out); break;
-        case "ForOfStmt": out.add(s.name); this.collectBoundNames(s.body, out); break;
-        case "ForInStmt": out.add(s.name); this.collectBoundNames(s.body, out); break;
-        case "SwitchStmt": for (const c of s.cases) this.collectBoundNames(c.body, out); break;
-        case "BlockStmt": this.collectBoundNames(s.body, out); break;
-        case "MultiStmt": this.collectBoundNames(s.stmts, out); break;
+          if (s.init && (s.init as VarDecl).kind === "VarDecl") for (const d of (s.init as VarDecl).decls) acc = acc.add(d.name);
+          acc = this.collectBoundNames(s.body, acc); break;
+        // `name2` is the VALUE half of `for (const [k, v] of map)` and binds exactly as
+        // `name` does. Missing it here was a silent wrong answer: two inlined callbacks in
+        // one frame both kept the source name `v`, the first fixed its slot's LLVM type,
+        // and the second read a string ptr back as a double.
+        case "ForOfStmt": acc = acc.add(s.name); if (s.name2) acc = acc.add(s.name2); acc = this.collectBoundNames(s.body, acc); break;
+        case "ForInStmt": acc = acc.add(s.name); acc = this.collectBoundNames(s.body, acc); break;
+        case "SwitchStmt": for (const c of s.cases) acc = this.collectBoundNames(c.body, acc); break;
+        case "BlockStmt": acc = this.collectBoundNames(s.body, acc); break;
+        case "MultiStmt": acc = this.collectBoundNames(s.stmts, acc); break;
         case "TryStmt":
-          if (s.param) out.add(s.param);
-          this.collectBoundNames(s.block, out);
-          if (s.handler) this.collectBoundNames(s.handler, out);
-          if (s.finalizer) this.collectBoundNames(s.finalizer, out); break;
+          if (s.param) acc = acc.add(s.param);
+          acc = this.collectBoundNames(s.block, acc);
+          if (s.handler) acc = this.collectBoundNames(s.handler, acc);
+          if (s.finalizer) acc = this.collectBoundNames(s.finalizer, acc); break;
         default: break;
       }
     }
+    return acc;
   }
 
   /** Alpha-rename an inlined HOF callback's OWN bound names (params + block-body locals) to
@@ -5468,7 +5488,7 @@ class FnGen {
     const suffix = `.h${this.hofSeq++}`;
     let bound = new Set<string>();
     for (const p of arrow.params) bound = bound.add(p.name);
-    if (!arrow.exprBody) this.collectBoundNames(arrow.stmts as Stmt[], bound);
+    if (!arrow.exprBody) bound = this.collectBoundNames(arrow.stmts as Stmt[], bound);
     if (bound.size === 0) return;
     let map = new Map<string, string>();
     for (const n of bound) map = map.set(n, n + suffix);
@@ -5484,9 +5504,14 @@ class FnGen {
     for (const p of params) shadow = shadow.add(p.name);
     // An EXPRESSION body binds nothing beyond the parameters, so `stmts` is absent and
     // there is nothing to collect — which is what `exprBody` used to be passed in to say.
-    if (stmts !== undefined) this.collectBoundNames(stmts, shadow);
-    const child = new Map(map);
-    for (const n of shadow) child.delete(n);
+    if (stmts !== undefined) shadow = this.collectBoundNames(stmts, shadow);
+    // Copy the keys that SURVIVE rather than copy-then-`.delete`. `.delete` cannot be
+    // threaded the way `.set`/`.add` are: under bun it returns a BOOLEAN, so
+    // `child = child.delete(n)` would type-check under nativets' persistent Map and put
+    // `true` in `child` when this same file runs under bun. Filtering is the one spelling
+    // that means the same thing in both.
+    let child = new Map<string, string>();
+    for (const [k, v] of map) if (!shadow.has(k)) child = child.set(k, v);
     return child;
   }
 
@@ -5506,7 +5531,13 @@ class FnGen {
         if (s.test) this.subExpr(s.test, map);
         if (s.update) this.subExpr(s.update, map);
         this.subStmts(s.body, map); break;
-      case "ForOfStmt": this.subExpr(s.iterable, map); if (map.has(s.name)) s.name = map.get(s.name)!; this.subStmts(s.body, map); break;
+      case "ForOfStmt":
+        this.subExpr(s.iterable, map);
+        if (map.has(s.name)) s.name = map.get(s.name)!;
+        // The value half of `for (const [k, v] of map)` — renamed with the key half, or the
+        // two inlinings collide on `v` (see collectBoundNames).
+        if (s.name2 && map.has(s.name2)) s.name2 = map.get(s.name2)!;
+        this.subStmts(s.body, map); break;
       case "ForInStmt": this.subExpr(s.object, map); if (map.has(s.name)) s.name = map.get(s.name)!; this.subStmts(s.body, map); break;
       case "SwitchStmt": this.subExpr(s.discriminant, map); for (const c of s.cases) { if (c.test) this.subExpr(c.test, map); this.subStmts(c.body, map); } break;
       case "ThrowStmt": this.subExpr(s.argument, map); break;
