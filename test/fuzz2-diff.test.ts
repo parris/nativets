@@ -361,11 +361,97 @@ describe("fuzz2 findings — leaks", () => {
   });
 
   /*
-   * `JSON.stringify` leaks EIGHT strings per call on a two-field object — the intermediate
+   * `JSON.stringify` leaked EIGHT strings per call on a two-field object — the intermediate
    * pieces of the serializer, not only the final concatenation.
+   *
+   * FIXED (lk-runtime), in two halves that are worth keeping apart.
+   *
+   * SEVEN of the eight were the FOLD's own accumulators. The serializer is a left fold of
+   * `js_str_concat`, which always allocates and copies both inputs, so every accumulator
+   * but the last is dead the instant the next concatenation has run — and none was ever
+   * released. `jsonCat` (src/codegen.ts) is `concat` plus that release, and it is told
+   * per operand which side this frame owns rather than releasing both: an interned
+   * separator is not in the RC table, so releasing one is a no-op that would only add a
+   * dead call to every JSON site's IR. A `genJsonStringify` result is always releasable,
+   * because every arm of it either allocates or returns an untracked pointer, and none
+   * returns its own argument.
+   *
+   * The EIGHTH is the result, which this statement discards — claimed through the same
+   * `discardFree` mark `Object.keys` and `concat` use. That one is a real claim about a
+   * PRODUCER, so it is made only where the producer is generated here and its rc is known
+   * (`JSON.stringify`), never inferred from a method's name.
    */
-  it.failing("JSON.stringify leaks its intermediate strings", async () => {
+  it("JSON.stringify leaks its intermediate strings", async () => {
     await expectResidueDoesNotScale(`const o = { a: i, b: i }; JSON.stringify(o);`);
+  });
+
+  /*
+   * The ARRAY fold, whose accumulator count is a RUNTIME fact rather than a compile-time
+   * one: one concatenation per element, in a loop, with the accumulator living in a slot
+   * across basic blocks instead of in an SSA name.
+   */
+  it("the JSON array fold releases its accumulators too", async () => {
+    await expectResidueDoesNotScale(`const xs = [i, i, i]; JSON.stringify(xs);`);
+  });
+
+  /*
+   * ...and the pretty-printed spelling, which branches at every step (a leading newline
+   * before the first element, `\n<indent>]` at the close) and so has its own accumulators.
+   */
+  it("JSON.stringify(v, null, 2) releases its accumulators", async () => {
+    await expectResidueDoesNotScale(`const xs = [i, i]; JSON.stringify(xs, null, 2); const o = { a: i, b: i }; JSON.stringify(o, null, 2);`);
+  });
+
+  /*
+   * The THIRD fold — an object with an OPTIONAL field, where the separator and the key are
+   * runtime decisions — cannot be measured by the flat-residue rule above, because the
+   * shape it needs carries a leak of its own: `const p: {a: number; b?: string} = {a: i, b: "x"}`
+   * leaks one OBJECT per iteration with no JSON.stringify anywhere near it (an optional
+   * field's nullable box is never dropped). That is a pre-existing defect of the object
+   * model, not of the serializer, and conflating the two would either hide this fix or
+   * claim someone else's.
+   *
+   * So this one is measured MARGINALLY: the same program twice, once with the
+   * `JSON.stringify` call and once without, and the assertion is that the serializer adds
+   * nothing to either counter at either scale. That is the attribution the flat-residue
+   * form gets for free when the surrounding shape happens to be clean.
+   */
+  it("the optional-field fold adds NOTHING to the residue (measured against its own control)", async () => {
+    const round = (call: string) => `
+type Opt = { a: number; b?: string };
+function nt2round(n: number): void {
+  for (let i = 0; i < n; i++) { const p: Opt = { a: i, b: "x" }; const q: Opt = { a: i }; ${call} }
+}
+const o0 = __objLive(); const s0 = __strLive();
+nt2round(50);
+const o1 = __objLive(); const s1 = __strLive();
+nt2round(500);
+const o2 = __objLive(); const s2 = __strLive();
+console.log((o1 - o0) + " " + (o2 - o1) + " " + (s1 - s0) + " " + (s2 - s1));
+`;
+    const withJson = await ourRun(round(`JSON.stringify(p); JSON.stringify(q);`));
+    const control = await ourRun(round(``));
+    if (isRefusal(withJson)) throw new Error(`nativets refused:\n${withJson.refused}`);
+    if (isRefusal(control)) throw new Error(`nativets refused:\n${control.refused}`);
+    expect(withJson.exitCode).toBe(0);
+    expect(control.exitCode).toBe(0);
+    // Identical residue with and without the serializer — and the control is NOT zero,
+    // which is the point: the leak that remains is the optional field's, not the fold's.
+    expect(withJson.stdout.toString("utf8")).toBe(control.stdout.toString("utf8"));
+    // Two optional-field objects per iteration -> 100/1000 objects, and ZERO strings on
+    // both sides: every accumulator the fold allocated is accounted for.
+    expect(control.stdout.toString("utf8").trim()).toBe("100 1000 0 0");
+  });
+
+  /*
+   * The control, and the reason the claim above is narrow: an ORDINARY string
+   * concatenation discarded in statement position still leaks its result. `+` has no
+   * producer to mark — `allocatesString` is a shape test over the expression, and the
+   * `discardFree` mark is deliberately set only where codegen generated the allocation
+   * itself. Pinned `failing` so widening it later is a deliberate act.
+   */
+  it.failing("a DISCARDED string concatenation is still unclaimed (the control)", async () => {
+    await expectResidueDoesNotScale(`const o = { a: i }; use(o.a); "x" + i + "y";`, `function use(n: number): number { return n; }`);
   });
 
   /*

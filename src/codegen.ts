@@ -1224,8 +1224,11 @@ class FnGen {
    *  function body reads). Empty in every other frame. */
   private globalVars = new Set<string>();
   /**
-   * The SSA name of the array a lowering just allocated and handed back UNOWNED — the
-   * one signal `ExprStmt` needs to free a discarded result rather than leak it.
+   * The SSA name of a value a lowering just allocated and handed back UNOWNED, and the
+   * runtime call that reclaims it — the one signal `ExprStmt` needs in order to free a
+   * DISCARDED result rather than leak it. A statement in expression position throws its
+   * value away, so nothing names it: no binding exists, no drop set can refer to it, and
+   * `freeReceiverTemp` only ever reaches the RECEIVER of a chain, never its result.
    *
    * Marked at the point of construction, NOT recognised by shape at the discard. The
    * shape test is available (`freshArray` in ast.ts, which already answers "yes" for
@@ -1238,15 +1241,16 @@ class FnGen {
    *
    * Set by exactly the lowerings whose freshness is a fact of the lowering itself:
    * `Object.keys`/`values`/`entries`/`getOwnPropertyNames` (built here out of
-   * `nt_arr_new`) and `Array#concat` (`nt_arr_concat` returns a new header). Anything
-   * that does not set it is simply left to leak, as before — a wrong `true` here is a
-   * premature free, so the default has to be "unclaimed".
+   * `nt_arr_new`), `Array#concat` (`nt_arr_concat` returns a new header), and
+   * `JSON.stringify` (a fold of `js_str_concat`, whose result this frame owns at rc=1).
+   * Anything that does not set it is simply left to leak, as before — a wrong claim here
+   * is a premature free, so the default has to be "unclaimed".
    *
    * Read by ONE consumer, immediately after the `genExpr` that set it, and compared by
-   * SSA identity: a nested lowering that set it for some inner array cannot be mistaken
-   * for the statement's own value, because the value returned would not be that name.
+   * SSA identity: a nested lowering that set it for some inner value cannot be mistaken
+   * for the statement's own result, because the value returned would not be that name.
    */
-  private freshArrayTemp: string | null = null;
+  private discardFree: { v: string; call: string } | null = null;
 
   constructor(private mod: ModuleGen) {}
 
@@ -1853,18 +1857,15 @@ class FnGen {
         return;
       }
       case "ExprStmt": {
-        // A statement in expression position DISCARDS its value, so a fresh array built
-        // for it has no owner at all: no binding exists, so no drop set names it, and
-        // `freeReceiverTemp` only ever reaches the RECEIVER of a chain, never its result.
-        // `Object.keys(o);` and `a.concat(b);` therefore leaked one array header per
-        // evaluation, without bound. See `freshArrayTemp` for why the value is marked at
-        // the point it is BUILT rather than recognised by shape here.
-        this.freshArrayTemp = null;
+        // `Object.keys(o);`, `a.concat(b);` and `JSON.stringify(o);` each allocated a
+        // value the statement then threw away, leaking it once per evaluation without
+        // bound. See `discardFree` for why freshness is marked at the point the value is
+        // BUILT rather than recognised by shape here.
+        this.discardFree = null;
         const v = this.genExpr(s.expr);
-        if (this.freshArrayTemp !== null && this.freshArrayTemp === v.v) {
-          this.emit(`call void @nt_arr_free(ptr ${v.v})`);
-        }
-        this.freshArrayTemp = null;
+        const claim = this.discardFree;
+        if (claim !== null && claim.v === v.v) this.emit(`call void @${claim.call}(ptr ${v.v})`);
+        this.discardFree = null;
         return;
       }
       case "ReturnStmt": {
@@ -2763,6 +2764,35 @@ class FnGen {
   private concat(a: string, b: string): string {
     const t = this.fresh();
     this.emit(`${t} = call ptr @js_str_concat(ptr ${a}, ptr ${b})`);
+    return t;
+  }
+
+  /**
+   * `concat`, releasing the operands the JSON serializer itself allocated.
+   *
+   * The serializer is a left fold of `js_str_concat`, so every accumulator but the last
+   * is dead the instant the next concatenation has copied it — and none of them was ever
+   * released: `JSON.stringify({a, b})` allocated EIGHT strings and returned one, so seven
+   * escaped per call, without bound. `js_str_concat` copies both inputs (it always
+   * allocates; there is no "return the operand when the other side is empty" fast path),
+   * so a release emitted after it is the last reference and the buffer is reclaimed.
+   *
+   * `own` says the operand is one this serializer produced. An interned `@.str` constant
+   * is passed `false` — not because releasing one would be wrong (`nt_str_release` is a
+   * documented no-op on a pointer the RC side table never saw) but so the emitted IR does
+   * not grow a dead call per separator.
+   *
+   * A `genJsonStringify` result is always safe to pass `true`: every arm of it either
+   * ALLOCATES (`nt_json_num`, `js_json_quote`, `nt_date_to_json`, a nested object/array's
+   * own final concat) or hands back a pointer that is not in the table at all (an
+   * interned `null`/`{}`, `js_bool_to_str`'s static `"true"`/`"false"`, `nt_json_num`'s
+   * static `"null"` for a non-finite). No arm returns the CALLER's value, which is the
+   * one thing that would make this a premature free.
+   */
+  private jsonCat(a: string, aOwn: boolean, b: string, bOwn: boolean): string {
+    const t = this.concat(a, b);
+    if (aOwn) this.emit(`call void @nt_str_release(ptr ${a})`);
+    if (bOwn) this.emit(`call void @nt_str_release(ptr ${b})`);
     return t;
   }
 
@@ -3765,7 +3795,14 @@ class FnGen {
       }
       // `e.args.length > 2` guards the read: `JSON.stringify(v)` is the common call and
       // `e.args[2]` would be an index == length read, which nativets PANICS on.
-      return this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args.length > 2 ? e.args[2] : undefined), 0);
+      const json = this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args.length > 2 ? e.args[2] : undefined), 0);
+      // The serializer's result is this frame's at rc=1 (a `js_str_concat` fold), so a
+      // DISCARDED `JSON.stringify(o);` can be reclaimed rather than leaked. The degenerate
+      // shapes — `{}` for a Map/Set/fieldless object, `null` — hand back an interned
+      // constant instead, which `nt_str_release` ignores. Never `val` itself: no arm of
+      // `genJsonStringify` returns its argument.
+      this.discardFree = { v: json.v, call: "nt_str_release" };
+      return json;
     }
 
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
@@ -3819,7 +3856,7 @@ class FnGen {
           this.emit(`call double @nt_arr_push(ptr ${pair}, i64 ${slot})`);
           this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot({ v: pair, ty: "string[]" })})`);
         });
-        this.freshArrayTemp = arr; // built here out of nt_arr_new; nothing else names it
+        this.discardFree = { v: arr, call: "nt_arr_free" }; // built here out of nt_arr_new; nothing else names it
         return { v: arr, ty: "string[][]" };
       }
       // stdlib Batch 3: `Object.freeze(o)` is the identity (objects are ALREADY
@@ -3833,7 +3870,7 @@ class FnGen {
       if (e.callee.property === "freeze") return o; // the IDENTITY — never mark this fresh
       if (e.callee.property === "keys" || e.callee.property === "getOwnPropertyNames") {
         const keys = this.buildStringArray(objectFields(o.ty).map((f) => f.key));
-        this.freshArrayTemp = keys.v; // a fresh nt_arr_new of interned key literals
+        this.discardFree = { v: keys.v, call: "nt_arr_free" }; // a fresh nt_arr_new of interned key literals
         return keys;
       }
       // values: read each field slot into a fresh homogeneous array (checker enforced).
@@ -3848,7 +3885,7 @@ class FnGen {
         const val: Val = { v: this.fromSlot(slot, f.ty), ty: f.ty };
         this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(val)})`);
       });
-      this.freshArrayTemp = arr; // Object.values: a fresh nt_arr_new of field slots
+      this.discardFree = { v: arr, call: "nt_arr_free" }; // Object.values: a fresh nt_arr_new of field slots
       return { v: arr, ty: makeArrayTy(fields[0]!.ty) };
     }
 
@@ -5671,7 +5708,7 @@ class FnGen {
         }
         // Fresh by construction: `nt_arr_concat` returns a NEW header (and `concat` with
         // no arguments is `recv` itself, which this frame does not own).
-        if (acc !== recv.v) this.freshArrayTemp = acc;
+        if (acc !== recv.v) this.discardFree = { v: acc, call: "nt_arr_free" };
         return { v: acc, ty: recv.ty };
       }
       case "at": {
@@ -6354,12 +6391,17 @@ class FnGen {
     // constants) so it does not churn every record's IR snapshot.
     if (!fields.some((f) => optional(f.ty))) {
       let acc = this.mod.intern(pretty ? `{\n${inner}` : "{");
+      // `own` tracks whether `acc` is still the interned opening constant (borrowed) or
+      // has become a concatenation this frame allocated. It flips on the first concat and
+      // never flips back; see `jsonCat`.
+      let own = false;
       fields.forEach((f, i) => {
-        if (i > 0) acc = this.concat(acc, this.mod.intern(pretty ? `,\n${inner}` : ","));
-        acc = this.concat(acc, this.mod.intern(pretty ? `"${f.key}": ` : `"${f.key}":`));
-        acc = this.concat(acc, this.genJsonStringify(this.loadField(val, f.key, f.ty), indent, depth + 1).v);
+        if (i > 0) { acc = this.jsonCat(acc, own, this.mod.intern(pretty ? `,\n${inner}` : ","), false); own = true; }
+        acc = this.jsonCat(acc, own, this.mod.intern(pretty ? `"${f.key}": ` : `"${f.key}":`), false); own = true;
+        const fv = this.genJsonStringify(this.loadField(val, f.key, f.ty), indent, depth + 1).v;
+        acc = this.jsonCat(acc, own, fv, true); own = true;
       });
-      return { v: this.concat(acc, this.mod.intern(pretty ? `\n${close}}` : "}")), ty: "string" };
+      return { v: this.jsonCat(acc, own, this.mod.intern(pretty ? `\n${close}}` : "}"), false), ty: "string" };
     }
 
     const sep = this.mod.intern(pretty ? `,\n${inner}` : ",");
@@ -6374,9 +6416,14 @@ class FnGen {
       const had = this.fresh(); this.emit(`${had} = load i1, ptr ${emittedSlot}`);
       const lead = this.fresh();
       this.emit(`${lead} = select i1 ${had}, ptr ${sep}, ptr ${this.mod.intern("")}`);
-      let a = this.concat(cur, lead);
-      a = this.concat(a, this.mod.intern(pretty ? `"${key}": ` : `"${key}":`));
-      a = this.concat(a, jsonV);
+      // `cur` is the interned `""` on the first write and a concatenation this frame
+      // allocated on every later one — a RUNTIME distinction, since a field can vanish.
+      // Released unconditionally: the two cases are exactly "owned" and "not in the RC
+      // table", and `nt_str_release` is a no-op on the second. `lead` is a select between
+      // two interned constants, so it is never owned.
+      let a = this.jsonCat(cur, true, lead, false);
+      a = this.jsonCat(a, true, this.mod.intern(pretty ? `"${key}": ` : `"${key}":`), false);
+      a = this.jsonCat(a, true, jsonV, true);
       this.emit(`store ptr ${a}, ptr ${accSlot}`);
       this.emit(`store i1 true, ptr ${emittedSlot}`);
     };
@@ -6409,7 +6456,9 @@ class FnGen {
     this.emit(`${openV} = select i1 ${any}, ptr ${open}, ptr ${bareOpen}`);
     const closeV = this.fresh();
     this.emit(`${closeV} = select i1 ${any}, ptr ${fullClose}, ptr ${bareClose}`);
-    return { v: this.concat(this.concat(openV, body), closeV), ty: "string" };
+    // `openV`/`closeV` select between interned constants; `body` is the accumulator, owned
+    // whenever any field survived and the interned `""` when none did.
+    return { v: this.jsonCat(this.jsonCat(openV, false, body, true), true, closeV, false), ty: "string" };
   }
 
   /** Load object field `key` (typed `ty`) out of the record `val`. */
@@ -6447,22 +6496,25 @@ class FnGen {
     this.terminate(`br i1 ${first}, label %${firstL}, label %${comma}`);
     // First element: pretty prints a leading newline + indent before it.
     this.to(this.block(firstL));
+    // Every accumulator load below is released once the next concatenation has copied it:
+    // owned on all but the first iteration, and the interned `[` on that one, which
+    // `nt_str_release` ignores. Without this the loop leaked one string per ELEMENT.
     if (pretty) {
       const af0 = this.fresh(); this.emit(`${af0} = load ptr, ptr ${accSlot}`);
-      this.emit(`store ptr ${this.concat(af0, this.mod.intern(`\n${inner}`))}, ptr ${accSlot}`);
+      this.emit(`store ptr ${this.jsonCat(af0, true, this.mod.intern(`\n${inner}`), false)}, ptr ${accSlot}`);
     }
     this.terminate(`br label %${after}`);
     // Subsequent elements: separator (compact `,` or pretty `,\n<indent>`).
     this.to(this.block(comma));
     const a1 = this.fresh(); this.emit(`${a1} = load ptr, ptr ${accSlot}`);
-    this.emit(`store ptr ${this.concat(a1, this.mod.intern(pretty ? `,\n${inner}` : ","))}, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.jsonCat(a1, true, this.mod.intern(pretty ? `,\n${inner}` : ","), false)}, ptr ${accSlot}`);
     this.terminate(`br label %${after}`);
     this.to(this.block(after));
     const iB2 = this.fresh(); this.emit(`${iB2} = load double, ptr ${idx}`);
     const slot = this.fresh(); this.emit(`${slot} = call i64 @nt_arr_get(ptr ${val.v}, double ${iB2})`);
     const es = this.genJsonStringify({ v: this.fromSlot(slot, el), ty: el }, indent, depth + 1);
     const a3 = this.fresh(); this.emit(`${a3} = load ptr, ptr ${accSlot}`);
-    this.emit(`store ptr ${this.concat(a3, es.v)}, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.jsonCat(a3, true, es.v, true)}, ptr ${accSlot}`);
     this.terminate(`br label %${upd}`);
     this.to(this.block(upd));
     const iU = this.fresh(); this.emit(`${iU} = load double, ptr ${idx}`);
@@ -6472,7 +6524,7 @@ class FnGen {
     this.to(this.block(end));
     if (!pretty) {
       const af = this.fresh(); this.emit(`${af} = load ptr, ptr ${accSlot}`);
-      return { v: this.concat(af, this.mod.intern("]")), ty: "string" };
+      return { v: this.jsonCat(af, true, this.mod.intern("]"), false), ty: "string" };
     }
     // Pretty close: an empty array stays inline `[]`; a non-empty one gets `\n<close>]`.
     const emptyL = this.label("jsE"), neL = this.label("jsN"), joinL = this.label("jsJ");
@@ -6480,11 +6532,11 @@ class FnGen {
     this.terminate(`br i1 ${isEmpty}, label %${emptyL}, label %${neL}`);
     this.to(this.block(emptyL));
     const ae = this.fresh(); this.emit(`${ae} = load ptr, ptr ${accSlot}`);
-    this.emit(`store ptr ${this.concat(ae, this.mod.intern("]"))}, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.jsonCat(ae, true, this.mod.intern("]"), false)}, ptr ${accSlot}`);
     this.terminate(`br label %${joinL}`);
     this.to(this.block(neL));
     const an = this.fresh(); this.emit(`${an} = load ptr, ptr ${accSlot}`);
-    this.emit(`store ptr ${this.concat(an, this.mod.intern(`\n${close}]`))}, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.jsonCat(an, true, this.mod.intern(`\n${close}]`), false)}, ptr ${accSlot}`);
     this.terminate(`br label %${joinL}`);
     this.to(this.block(joinL));
     const afj = this.fresh(); this.emit(`${afj} = load ptr, ptr ${accSlot}`);
