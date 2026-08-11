@@ -222,6 +222,33 @@ describe("fuzz findings — object literals", () => {
   });
 });
 
+describe("fuzz findings — base64", () => {
+  /*
+   * `btoa` is defined on a BINARY string: one code unit per byte, and a code point above
+   * U+00FF is an InvalidCharacterError. Ours base64-encodes the UTF-8 bytes instead, so
+   * `btoa("é")` differs (`w6k=` vs `6Q==`) and `btoa("你")` — which node REFUSES — returns a
+   * plausible-looking answer at exit 0. This is §A.2's byte orientation reaching a function
+   * whose whole contract is about which bytes those are, and §A.2 does not cover it.
+   */
+  it.failing("btoa is Latin-1, and rejects a code point above U+00FF", async () => {
+    await expectSameBytes('console.log(btoa("\\u00e9"));\n'); // node 6Q==, ours w6k=
+  });
+
+  /*
+   * `atob` validates: a bad length, stray padding or a non-alphabet character is an
+   * InvalidCharacterError. Ours accepts all three and returns a decoded string — the
+   * silent-wrong-answer direction on untrusted input.
+   */
+  it.failing("atob rejects malformed input instead of decoding it", async () => {
+    const src = 'console.log(atob("YQ==="));\nconsole.log("after");\n';
+    const oracle = nodeRun(src);
+    const ours = await ourRun(src);
+    if (isRefusal(ours)) throw new Error(`refused: ${ours.refused}`);
+    expect(oracle.exitCode).toBe(1); // node throws
+    expect(ours.exitCode).toBe(oracle.exitCode); // ours exits 0 having printed "a"
+  });
+});
+
 describe("fuzz findings — non-ASCII case mapping", () => {
   /*
    * §A.2 documents that string LENGTH and SLICING are UTF-8 byte oriented. It does not cover
