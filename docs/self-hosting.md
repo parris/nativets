@@ -66,6 +66,42 @@ not by having a small first-blocker count. That is the pattern to aim for.
 **Self-hosting is NOT reached.** Stage-1 still dies in `check`; no 3-stage fixed point
 exists. Do not claim one without a measured byte-identical `nativets-2`/`nativets-3`.
 
+### The frontier is gated on CROSS-FRAME UNWINDING, not on a list of checker gaps
+
+Measured 2026-08-10, by asking what a *perfect* fix to the current first blocker would be
+worth before building it. This is the single most important entry in this document.
+
+`src/parser.ts::tokenize` is refused with `NT2001 Property 'message' does not exist on
+string` — the `catch` binding is typed `string`. Chasing that as a narrowing bug is wrong,
+and so is chasing it as a representation bug:
+
+- **Throws already carry objects.** A same-frame `throw new LexError("…")` caught by
+  `catch (e) { … e.message }` compiles and matches node byte-for-byte at exit 0.
+- **The `string` is arbitrary.** `checker.ts`'s `inferThrowType(s.block) ?? "string"` scans
+  for the first `throw` *syntactically inside the try block, in the same frame*.
+  `tokenize`'s try block is just `tokens = lex(source)` — no throw at all — so it defaults.
+- **`instanceof` cannot narrow, structurally.** It is a **constant fold**: the checker
+  decides it from the static type and codegen emits `true`/`false`. There is no runtime
+  type tag to narrow on.
+
+The blocking fact is in `codegen.ts`: **a `throw` is lowered as a `br` to the enclosing
+`try`'s catch block in the same function frame.** A callee's throw can never reach a
+caller's catch. `lex()` throws and `tokenize()` catches, so the program is refused at
+**codegen** as `NT1004` *at the throw site in `lexer.ts`* — which the checker-only
+`blocker-metric` cannot see at all.
+
+**So a fix to the catch binding yields a checker-green function that codegen still
+refuses.** Measured on a scratch tree with the catch default replaced by a permissive
+record: **161 → 160. One function.** The other two sites merely move to `NT1606`, and the
+next whole-program blocker for all five modules becomes `NT1014 Set of U<Expr>`
+(`parser.ts:464`, `new Set<Expr>()`).
+
+**How to apply:** NT1004 cross-frame propagation is not one item among many on the tail —
+it is the gate. It is 73% of the post-checker tail *and* it is what makes the checker
+frontier's next several terms worth ~1 function each. Its real cost is not the branch: it
+is **freeing the live owned set at every propagating call site**. Any plan that schedules
+checker blockers ahead of it is optimising a number that codegen will refuse anyway.
+
 Two structural findings that change how this table should be read:
 
 - **The tail refills from correctness fixes.** NT1004 is 73% of it, and while cross-frame
