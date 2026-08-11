@@ -202,6 +202,13 @@ describe("discarded persistent mutators in src/", () => {
  *   coverage.ts coverage                  `found` — the ARROW that wrote it (`flag`) became the
  *                                         top-level `bumpBlocker(found, …) -> Map`, so the
  *                                         rebind happens in the owner's frame, not a capture
+   *   codegen.ts  ModuleGen.fnValue         `this.fnValues` — rebind on a `@@mutable` field (fix 1)
+   *   codegen.ts  FnGen.collectBoundNames   returns the extended set (fix 2); both callers thread
+   *                                         a local, and `freshenHofArrow` is exactly the caller
+   *                                         that READS THE PARAMETER BACK, so a rebind there
+   *                                         would have been the silent lost update
+   *   codegen.ts  FnGen.childRenameMap      `.delete` has no rebinding spelling (fix 3) — the
+   *                                         survivors are filtered into a fresh Map
    *
    * WHAT IS LEFT, and why it is not the same job. Almost every remaining entry writes to a
    * collection that is a PARAMETER of the function above it — `collectIdents(e, out)`,
@@ -244,13 +251,6 @@ describe("discarded persistent mutators in src/", () => {
     "checker.ts daStmt: flow.delete(…)",
     "checker.ts daStmt: tracked.set(…)",
     "checker.ts noteEscapingWrite: out.set(…)",
-    "codegen.ts FnGen.childRenameMap: child.delete(…)",
-    "codegen.ts FnGen.collectBoundNames: out.add(…)",
-    "codegen.ts FnGen.collectBoundNames: out.add(…)",
-    "codegen.ts FnGen.collectBoundNames: out.add(…)",
-    "codegen.ts FnGen.collectBoundNames: out.add(…)",
-    "codegen.ts FnGen.collectBoundNames: out.add(…)",
-    "codegen.ts ModuleGen.fnValue: this.fnValues.set(…)",
     "modules.ts linkProgram: hostImports.add(…)",
     "modules.ts linkProgram: mods.set(…)",
     "modules.ts linkProgram: mutableClasses.add(…)",
@@ -300,6 +300,13 @@ describe("discarded persistent mutators in src/", () => {
     // The three that lived in `Parser.resolveCycle` were MASKED behind `deferred.push`, so
     // the blocker metric scored their removal as free. This assertion is what holds them.
     expect(census().filter((s) => s.file === "parser.ts").map(show)).toEqual([]);
+  });
+
+  test("src/codegen.ts is clear of the whole class", () => {
+    // Same argument as parser.ts, and the arithmetic is starker: FIVE of these seven sites
+    // lived in ONE function (`collectBoundNames`), which the blocker metric counts once. It
+    // scored the whole family at a single unit, and would score their RETURN the same way.
+    expect(census().filter((s) => s.file === "codegen.ts").map(show)).toEqual([]);
   });
 
   test("the census is exactly the known, documented set", () => {
