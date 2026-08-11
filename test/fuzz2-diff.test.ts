@@ -337,8 +337,15 @@ describe("fuzz2 findings — leaks", () => {
    *
    * A number-only message is the clean control (no heap, flat residue), so this is the
    * message COPY and not the mailbox.
+   *
+   * FIXED (lk-actor). The copy's ownership story was already right — the mailbox owns it
+   * until `receive` dequeues it, and the receiving local becomes its one owner. What was
+   * missing was the DROP: `emitDrops` was a blanket no-op inside a lifted arrow, and an
+   * actor body is necessarily an arrow because `spawn` takes a closure. The same worker
+   * written as a `function` was always clean, which is what pins it there rather than on
+   * the message ABI. See `test/actors-leak.test.ts` for the per-path residue matrix.
    */
-  it.failing("an actor message copy is never freed after the receiver consumes it", async () => {
+  it("an actor message copy is never freed after the receiver consumes it", async () => {
     const source = `
 const nt2worker = (n: number): void => {
   for (let i = 0; i < n; i++) { const m: { a: number; b: number } = receive(); }

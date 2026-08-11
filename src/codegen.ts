@@ -290,7 +290,7 @@ function scanEscaping(program: Program, usesActors: boolean): Set<string> {
 
   // ---- judge. `dead[i]` is "seed function i is NOT provably escaping".
   //@@mutable
-  const dead: boolean[] = names.map(() => false);
+  const dead: boolean[] = names.map((_n) => false);
   for (let i = 0; i < names.length; i++) {
     const name = names[i]!;
     // A method is a top-level `Class.m` whose call sites name only `m`, so it answers to
@@ -1322,6 +1322,7 @@ class FnGen {
     this.finallyStack = [];
     this.hofReturnStack = [];
     this.strLocals = new Set();
+    this.frameLocals = new Set();
     this.globalVars = new Set();
     this.inMain = false;
     this.selfArrow = null;
@@ -1399,9 +1400,28 @@ class FnGen {
    *  arrow bodies inside their enclosing function, so a `return` inside a block-bodied
    *  arrow carries the ENCLOSING scope's drop list — locals that do not exist (and are
    *  not owned) in the lifted function. Dropping them there emitted a load of an
-   *  undefined `%x.addr` (clang: "use of undefined value"). Suppress drops in a lifted
-   *  arrow: conservative (the enclosing owner still frees at its own scope exit). */
+   *  undefined `%x.addr` (clang: "use of undefined value").
+   *
+   *  That used to suppress drops in a lifted arrow ENTIRELY, which is not conservative —
+   *  it is a leak. An arrow body is a frame of its own, and the enclosing owner it was
+   *  said to defer to does not own the arrow's locals at all: `declaredLinear` never
+   *  descends into an arrow, so an arrow-body local appears in NO other scope's drop
+   *  set and nothing ever freed it. Every value a closure allocated leaked, once per
+   *  call — and because `spawn` takes a CLOSURE, that is every actor message a receiver
+   *  ever consumes (`test/fuzz2-diff.test.ts`, one object per message DELIVERED at every
+   *  scale; the same body written as a `function` was already clean).
+   *
+   *  The precise question was never "is this a lifted arrow" but "does this name have
+   *  storage in THIS frame": `frameLocals` answers it, so an enclosing-scope name in a
+   *  `return`'s drop list is skipped (no slot here, nothing owned) and the arrow's own
+   *  locals are freed exactly where the ownership pass says. */
   private liftedArrow = false;
+
+  /** Names DECLARED in this frame (`addLocal`), so each has an `%n.addr` alloca here.
+   *  Parameters are deliberately excluded — they are borrows the caller drops, and an
+   *  arrow parameter that SHADOWS an enclosing linear local would otherwise be freed by
+   *  that local's name appearing in a `return`'s enclosing-scope drop list. */
+  private frameLocals = new Set<string>();
 
   /** In a lifted arrow that may call ITSELF (`const walk = (s: Stmt): void => { … walk(…) … }`):
    *  the name it is bound to, and its function type. The self-call needs NO new machinery —
@@ -1431,8 +1451,10 @@ class FnGen {
   private consumeTaken = false;
 
   private emitDrops(names: string[]): void {
-    if (this.liftedArrow) return;
     for (const n of names) {
+      // In a lifted arrow the list may name locals of the ENCLOSING scope (see
+      // `liftedArrow`); those have no slot here and this frame owns nothing of theirs.
+      if (this.liftedArrow && !this.frameLocals.has(n)) continue;
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       // Move-aware RAII: objects free via nt_obj_free, arrays via nt_arr_free.
@@ -1525,9 +1547,15 @@ class FnGen {
     return null;
   }
 
-  /** Emit the frees `argTempFree` selected, once the call has returned. */
-  private emitArgTempFrees(frees: [string, string][]): void {
-    for (const [free, v] of frees) this.emit(`call void @${free}(ptr ${v})`);
+  /** Emit the frees `argTempFree` selected, once the call has returned.
+   *
+   *  A RECORD per entry, not a `[string, string]` tuple. The tuple read back as
+   *  `string[][]`, so the destructuring `for (const [free, v] of frees)` was NT1007
+   *  ("only Map entries are supported") — a self-host blocker — and the two fields were
+   *  positional at four push sites, where nothing marked which string was the free
+   *  function and which was the pointer. */
+  private emitArgTempFrees(frees: { free: string; v: string }[]): void {
+    for (const f of frees) this.emit(`call void @${f.free}(ptr ${f.v})`);
   }
 
   /** The CLASS-INSTANCE half of the rule above — `new P(7).get()`, which leaked 200
@@ -1580,7 +1608,7 @@ class FnGen {
     if (this.varTypes.has(name)) return;
     this.varTypes = this.varTypes.set(name, ty);
     // A promoted module-level binding lives in its LLVM global, not a frame slot.
-    if (!this.globalVars.has(name)) this.alloca(name, ty);
+    if (!this.globalVars.has(name)) { this.alloca(name, ty); this.frameLocals = this.frameLocals.add(name); }
   }
 
   private collectLocals(body: Stmt[]): void {
@@ -1777,7 +1805,10 @@ class FnGen {
     out.push(`  br label %${this.blocks[firstBlock]!.label}`);
     for (const b of this.blocks) {
       out.push(`${b.label}:`);
-      out.push(...b.lines);
+      // A loop, not `out.push(...b.lines)`. The spread is NT1006 (a self-host blocker),
+      // and spreading into a variadic call passes one ARGUMENT per line — a block with
+      // enough lines overflows the call stack in the bun-hosted stage-0 too.
+      for (const line of b.lines) out.push(line);
     }
     out.push("}");
     return out.join("\n");
@@ -2031,7 +2062,11 @@ class FnGen {
       case "SwitchStmt": {
         const disc = this.genExpr(s.discriminant);
         const endLbl = this.label("endsw");
-        const bodyLbls = s.cases.map(() => this.label("case"));
+        // `_c` is spelled rather than omitted: a callback's parameters bind POSITIONALLY,
+        // so a 0-parameter `.map` callback is an arity mismatch the checker refuses — one
+        // of codegen.ts's self-host blockers. One label per case, none of them derived
+        // from the case itself.
+        const bodyLbls = s.cases.map((_c) => this.label("case"));
         const defaultIdx = s.cases.findIndex((c) => c.test === null);
         // A `switch` is a `break` target but NOT a `continue` target: a `continue` inside
         // one belongs to the enclosing loop, so its label AND its unwind depth are both
@@ -4387,7 +4422,11 @@ class FnGen {
    *  selective-receive scan calls the user predicate with a value peeked out of the
    *  mailbox, which has no Expr form. */
   private callClosureWith(clo: string, fnTy: Ty, argVs: Val[]): Val {
-    return this.callClosure(clo, fnTy, () => argVs);
+    // `_ps` is named but unused — the values are already generated, so there is nothing
+    // left to coerce. Spelling the parameter rather than passing `() => argVs` keeps this
+    // inside the subset `src/` must compile: a 0-parameter arrow where a 1-parameter one
+    // is expected is an arity mismatch the checker refuses (it was a self-host blocker).
+    return this.callClosure(clo, fnTy, (_ps) => argVs);
   }
 
   /** Shared closure-call emission. Arguments are produced by `mk` at exactly the
@@ -5644,11 +5683,57 @@ class FnGen {
 
   /** HOF loop skeleton. `setup(len)` runs in the pre-loop block (create output
    *  arrays etc. exactly once); then the cond/body blocks are set up and entered. */
-  private hofLoop(recv: Val, tag: string, setup: (len: string) => void): { idx: string; cond: string; upd: string; end: string; elem: (el: Ty, pName: string, iName: string) => string } {
-    const src = recv.v;
+  /**
+   * The receiver's length, emitted BEFORE the loop scaffolding — the value a caller that
+   * pre-sizes an output array (`.map`/`.filter`) needs, and the loop bound for everyone.
+   *
+   * It is a separate call rather than a `setup` CALLBACK that `hofLoop` invoked between
+   * the two emissions. The callback shape forced every pre-sizing caller to write its
+   * output register into a `let` in the ENCLOSING function and assign it from inside the
+   * arrow, which is a write to a captured binding — NT1031, and outside the subset `src/`
+   * must stay inside (three of `codegen.ts`'s self-host blockers were exactly this, plus
+   * two more from `() => {}` passed where `(len: string) => void` was expected). Ordering
+   * is unchanged: callers emit their pre-loop setup between `hofLen` and `hofLoop`, which
+   * is where `setup(len)` used to run, so the IR is byte-identical.
+   */
+  private hofLen(recv: Val): string {
     const len = this.fresh();
-    this.emit(`${len} = call double @nt_arr_len(ptr ${src})`);
-    setup(len); // pre-loop, runs once
+    this.emit(`${len} = call double @nt_arr_len(ptr ${recv.v})`);
+    return len;
+  }
+
+  /**
+   * Bind one iteration's element into the callback's parameter slot (and its INDEX slot,
+   * when the callback declared one), returning the element value.
+   *
+   * A METHOD taking `recv`/`idx` rather than a closure member on `hofLoop`'s result. As a
+   * member it was a function-typed FIELD, so every `L.elem(…)` was a method call on an
+   * object literal — NT1002, and outside the subset `src/` must stay inside; it was the
+   * blocker masked directly beneath the `setup` callback in all five HOF generators.
+   * `hofLoop` never called it, only handed it back, so lifting it out moves no emission.
+   */
+  private hofElem(recv: Val, idx: string, el: Ty, pName: string, iName: string): string {
+    const iB = this.fresh();
+    this.emit(`${iB} = load double, ptr ${idx}`);
+    const slot = this.fresh();
+    this.emit(`${slot} = call i64 @nt_arr_get(ptr ${recv.v}, double ${iB})`);
+    const v = this.fromSlot(slot, el);
+    this.emit(`store ${llvmTy(el)} ${v}, ptr ${this.addr(pName)}`);
+    // The INDEX parameter, when the callback declared one: the loop counter this line
+    // just loaded, copied into the callback's own slot. Re-read per iteration inside the
+    // body block rather than hoisted, so a body that ASSIGNS to `i` perturbs only its own
+    // copy and the loop keeps stepping — node's callback parameter is a fresh binding too.
+    //
+    // `""` for "no index parameter", not an optional parameter: `iName?: string` in this
+    // annotation is outside the subset `src/` must stay inside (the parser does not take
+    // `?` on a function-TYPE parameter, and the recovery reported it as `Cannot find name
+    // 'el'` — the whole tree stopped linking). Same sentinel `hofReturnStack`'s `slot`
+    // already uses two screens down.
+    if (iName !== "") this.emit(`store double ${iB}, ptr ${this.addr(iName)}`);
+    return v;
+  }
+
+  private hofLoop(recv: Val, tag: string, len: string): { idx: string; cond: string; upd: string; end: string } {
     const idx = this.slot("number");
     this.emit(`store double 0x0000000000000000, ptr ${idx}`);
     const cond = this.label(tag), body = this.label(`${tag}b`), upd = this.label(`${tag}u`), end = this.label(`${tag}e`);
@@ -5660,27 +5745,7 @@ class FnGen {
     this.emit(`${cmp} = fcmp olt double ${iC}, ${len}`);
     this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
     this.to(this.block(body));
-    const elem = (el: Ty, pName: string, iName: string): string => {
-      const iB = this.fresh();
-      this.emit(`${iB} = load double, ptr ${idx}`);
-      const slot = this.fresh();
-      this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src}, double ${iB})`);
-      const v = this.fromSlot(slot, el);
-      this.emit(`store ${llvmTy(el)} ${v}, ptr ${this.addr(pName)}`);
-      // The INDEX parameter, when the callback declared one: the loop counter this line
-      // just loaded, copied into the callback's own slot. Re-read per iteration inside the
-      // body block rather than hoisted, so a body that ASSIGNS to `i` perturbs only its own
-      // copy and the loop keeps stepping — node's callback parameter is a fresh binding too.
-      //
-      // `""` for "no index parameter", not an optional parameter: `iName?: string` in this
-      // annotation is outside the subset `src/` must stay inside (the parser does not take
-      // `?` on a function-TYPE parameter, and the recovery reported it as `Cannot find name
-      // 'el'` — the whole tree stopped linking). Same sentinel `hofReturnStack`'s `slot`
-      // already uses two screens down.
-      if (iName !== "") this.emit(`store double ${iB}, ptr ${this.addr(iName)}`);
-      return v;
-    };
-    return { idx, cond, upd, end, elem };
+    return { idx, cond, upd, end };
   }
 
   /**
@@ -5951,8 +6016,8 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    const L = this.hofLoop(recv, "each", () => {}); // no output array to build
-    L.elem(el, p, ip);
+    const L = this.hofLoop(recv, "each", this.hofLen(recv)); // no output array to build
+    this.hofElem(recv, L.idx, el, p, ip);
     if (arrow.exprBody) {
       this.genExpr(arrow.body as Expr); // evaluated for effect, exactly as an ExprStmt is
     } else {
@@ -5976,9 +6041,11 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    let out = "";
-    const L = this.hofLoop(recv, "map", (len) => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); });
-    L.elem(el, p, ip);
+    const len = this.hofLen(recv);
+    const out = this.fresh();
+    this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); // pre-sized: one element per input
+    const L = this.hofLoop(recv, "map", len);
+    this.hofElem(recv, L.idx, el, p, ip);
     const rv = this.genHofBody(arrow, R);
     this.emit(`call double @nt_arr_push(ptr ${out}, i64 ${this.toSlot(rv)})`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -5996,9 +6063,11 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    let out = "";
-    const L = this.hofLoop(recv, "fmap", () => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double 1.0)`); });
-    L.elem(el, p, ip);
+    const len = this.hofLen(recv);
+    const out = this.fresh();
+    this.emit(`${out} = call ptr @nt_arr_new(double 1.0)`); // flattened length is not known here
+    const L = this.hofLoop(recv, "fmap", len);
+    this.hofElem(recv, L.idx, el, p, ip);
     const rv = this.genHofBody(arrow, R);
     this.emit(`call void @nt_arr_extend(ptr ${out}, ptr ${rv.v})`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -6013,9 +6082,11 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    let out = "";
-    const L = this.hofLoop(recv, "flt", (len) => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); });
-    const pv = L.elem(el, p, ip);
+    const len = this.hofLen(recv);
+    const out = this.fresh();
+    this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); // pre-sized: at most one per input
+    const L = this.hofLoop(recv, "flt", len);
+    const pv = this.hofElem(recv, L.idx, el, p, ip);
     const keep = this.genHofBody(arrow, "boolean"); // boolean
     const pushLbl = this.label("fltp");
     const skipLbl = this.label("flts");
@@ -6138,8 +6209,8 @@ class FnGen {
     const ip = this.hofIndexParam(arrow, 2); // `(acc, elem, index)` — index is param TWO here
     this.emit(`store ${llvmTy(A)} ${init.v}, ptr ${this.addr(accName)}`); // pre-loop init
     this.prepHofLocals(arrow);
-    const L = this.hofLoop(recv, "red", () => {});
-    L.elem(el, xName, ip);
+    const L = this.hofLoop(recv, "red", this.hofLen(recv));
+    this.hofElem(recv, L.idx, el, xName, ip);
     const rv = this.genHofBody(arrow, A);
     this.emit(`store ${llvmTy(A)} ${rv.v}, ptr ${this.addr(accName)}`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -7115,7 +7186,7 @@ class FnGen {
       //@@mutable
       const argVals: string[] = [];
       //@@mutable
-      const frees: [string, string][] = []; // see `argTempFree`
+      const frees: { free: string; v: string }[] = []; // see `argTempFree`
       // The FIXED parameters coerce just like a non-rest call's do (see below) — this
       // path emitted them raw, so a nullable/general-union fixed parameter of a rest
       // function received an unboxed value.
@@ -7123,7 +7194,7 @@ class FnGen {
         const raw = this.argVal(i, args, preArg0, sig);
         const co = this.coerce(raw, sig.params[i]!);
         const free = this.argTempFree(i, args, preArg0, sig, raw, co);
-        if (free !== null) frees.push([free, raw.v]);
+        if (free !== null) frees.push({ free, v: raw.v });
         argVals.push(`${llvmTy(sig.params[i]!)} ${co.v}`);
       }
       const arr = this.fresh(); // pack trailing args into the rest array
@@ -7136,7 +7207,7 @@ class FnGen {
       // is NT1604), so the caller frees the header once the call returns. Shallow: the
       // ELEMENTS are the caller's own values, still owned and dropped by its own scope,
       // and freeing them here would be the double free this rule exists to avoid.
-      frees.push(["nt_arr_free", arr]);
+      frees.push({ free: "nt_arr_free", v: arr });
       const argstr = argVals.join(", ");
       if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); this.emitArgTempFrees(frees); if (raises) this.emitExcCheck(objPayload); return { v: "", ty: "void" }; }
       const t = this.fresh();
@@ -7148,7 +7219,7 @@ class FnGen {
     //@@mutable
     const argVals: string[] = [];
     //@@mutable
-    const frees: [string, string][] = []; // unbound literal temporaries, freed after the call
+    const frees: { free: string; v: string }[] = []; // unbound literal temporaries, freed after the call
     for (let i = 0; i < sig.params.length; i++) {
       // Coerced to the param type — boxing an `undefined` default into a nullable
       // optional param (`f(x?: T)`), and boxing an ARM into a general-union param
@@ -7157,7 +7228,7 @@ class FnGen {
       const raw = this.argVal(i, args, preArg0, sig);
       const co = this.coerce(raw, sig.params[i]!);
       const free = this.argTempFree(i, args, preArg0, sig, raw, co);
-      if (free !== null) frees.push([free, raw.v]);
+      if (free !== null) frees.push({ free, v: raw.v });
       argVals.push(co.v);
     }
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");

@@ -531,6 +531,43 @@ class Analyzer {
   private borrowBindings = new Set<string>();
 
   /**
+   * A MODULE-LEVEL LINEAR BINDING IS A BORROW INSIDE A FUNCTION BODY.
+   *
+   * The module scope owns `const shared = {a:1}` and drops it when the program ends — the
+   * binding is still live and still readable afterwards, which is exactly why "move the
+   * global out" is not an option: node prints `shared.a` fine after the call. So a function
+   * body may only BORROW it, and every consuming position is E0507, precisely as it is for
+   * a by-borrow parameter (they are the same fact: the owner is another frame).
+   *
+   * Measured on the two-line program this closes:
+   *
+   *     const shared = { a: 1 };
+   *     function getShared(): { a: number } { return shared; }
+   *     const x = getShared();
+   *     console.log(shared.a, x.a);           // node: "1 1", exit 0
+   *
+   * `shared` and `x` both became owners, so `main` emitted two consecutive
+   * `nt_obj_free`s on ONE pointer. The compiled binary died in the allocator with exit
+   * 133 and — the worst part — an EMPTY stdout and an EMPTY stderr, because the abort
+   * discards the buffered stream. A stdout-only differential test sees two empty strings
+   * and passes. ASan reports `attempting double-free`.
+   *
+   * Held apart from `borrowBindings` only so the refusal can say WHICH kind of borrow it
+   * is: the parameter hint ("declare it as a parameter property") is wrong advice here,
+   * and a lying hint is the failure mode this file has been bitten by most.
+   */
+  private globalBorrows = new Set<string>();
+
+  /** Register module-level linear bindings as borrows of this (function) frame. Called
+   *  after construction because only `runScope` knows which names this frame SHADOWS. */
+  addGlobalBorrows(names: Set<string>): void {
+    for (const n of names) {
+      this.globalBorrows = this.globalBorrows.add(n);
+      this.borrowBindings = this.borrowBindings.add(n);
+    }
+  }
+
+  /**
    * `this` IS A BORROW IN THIS FRAME, EVEN THOUGH IT IS NOT MOVE-TRACKED.
    *
    * A `@@mutable` method's receiver belongs to the caller (`untrackedThis` below), so it is
@@ -1173,6 +1210,24 @@ class Analyzer {
           });
           return;
         }
+        if (consume && this.globalBorrows.has(e.name)) {
+          // The borrow the rewrite should reach for depends on what the binding IS, and a
+          // hint that suggests `for (const v of …)` over an OBJECT is advice that does not
+          // compile. Every rewrite below is exercised against node in
+          // test/global-return.test.ts — this file's refusals have shipped lying hints
+          // before, and an unverified one is worth less than no hint.
+          const arrayLike = e.ty !== undefined && isArrayTy(e.ty);
+          const borrowExample = arrayLike
+            ? `\`for (const v of ${e.name})\` and \`return ${e.name}.length\``
+            : `\`return ${e.name}.field\``;
+          this.report({
+            code: OWN_CODES.MOVE_OUT_OF_BORROW,
+            message: `cannot move out of \`${e.name}\`: it is a module-level binding, and the module still owns it`,
+            line: e.loc?.line ?? 0,
+            hint: `a module-level \`const\`/\`let\` lives until the program ends and is freed there, so handing it out of a function makes the receiver a SECOND owner and the same pointer is freed twice — a double free that prints nothing at all, because the allocator's abort discards buffered stdout. Read THROUGH it instead: ${borrowExample} are borrows and stay legal. Otherwise build and return a new value, or — if the value really belongs to the caller — declare it inside the function and return it from there`,
+          });
+          return;
+        }
         if (consume && this.borrowBindings.has(e.name)) {
           const owner = this.aliasOf.get(e.name);
           // Built as a statement rather than a nested ternary: the arms are `string`,
@@ -1624,8 +1679,23 @@ class Analyzer {
         const inlined = this.inlinedCallbacks.has(e);
         this.arrowDepth++;
         if (!inlined) this.envArrowDepth++;
-        if (e.exprBody) this.expr(e.body as Expr, state, false);
-        else this.arrowScope(e.stmts as Stmt[], state);
+        // AN EXPRESSION BODY IS A RETURN, and the two spellings of one arrow disagreed
+        // about that. `=> { return shared; }` consumes through `ReturnStmt` (via
+        // `arrowScope` → `scoped`) and is refused; `=> shared` walked its body as a pure
+        // borrow, so nothing in the pass ever saw the value leave the frame. Measured:
+        // `const get = (): {a:number} => shared;` compiled clean and double-freed, while
+        // the braced twin of the same three characters was already an error.
+        //
+        // Narrowed to a body that IS A BARE IDENTIFIER, which is exactly — and only — the
+        // shape the braced spelling consumes: `ReturnStmt` on anything larger (`=> x.f`,
+        // `=> [x]`, `=> x * 2`) reaches its parts through the same borrowing walk either
+        // way. So this is not a new rule, it is the SAME rule reaching the spelling that
+        // was skipping it. A name that is neither linear nor borrowed falls out of the
+        // `Identifier` case immediately, so `xs.map((x) => x)` is byte-identical.
+        if (e.exprBody) {
+          const b = e.body as Expr;
+          this.expr(b, state, b.kind === "Identifier");
+        } else this.arrowScope(e.stmts as Stmt[], state);
         if (!inlined) this.envArrowDepth--;
         this.arrowDepth--;
         return;
@@ -2236,7 +2306,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
   };
   collectMutableArgs(checked.program.body);
 
-  const runScope = (body: Stmt[], params: { name: string; ty: Ty }[], untrack: Set<string> = new Set(), mutableNames: Set<string> = new Set(), borrowThis: boolean = false): string[] => {
+  const runScope = (body: Stmt[], params: { name: string; ty: Ty }[], untrack: Set<string> = new Set(), mutableNames: Set<string> = new Set(), borrowThis: boolean = false, globals: Set<string> = new Set()): string[] => {
     // Receivers whose FIELDS this scope may only borrow: a linear parameter (the caller
     // owns and drops it) and a method's `this`. `this` is unconditional — it names no
     // binding in `params`, and it is a borrow in every member body.
@@ -2259,6 +2329,23 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     for (const s of body) if (s.kind === "VarDecl") for (const d of s.decls) if (isLinearTy(d.ty ?? "number") && !aliases.has(d.name)) topLevel.push(d.name);
     // Linear params are BORROWED (the caller owns + drops them) — moving one out is E0507.
     const paramBorrows = params.filter((p) => isLinearTy(p.ty) && !untrack.has(p.name)).map((p) => p.name);
+    // The module-level linear bindings this frame can actually SEE, i.e. minus the ones it
+    // shadows. Only a frame's parameters and its own top-level declarations keep their
+    // source spelling: `alphaRenameShadows` (src/checker.ts) pins those two scopes and
+    // renames every deeper `const shared` to `shared.N`, so a nested shadow can no longer
+    // collide with a global's name and needs no subtraction here.
+    // (Every `.add` here REBINDS: a nativets `Set` is persistent, so a discarded
+    // `shadows.add(…)` is a guaranteed no-op under this compiler's own semantics even
+    // though it works under bun — the class `test/discarded-mutator.test.ts` censuses.)
+    let globalBorrows = new Set<string>();
+    if (globals.size) {
+      let shadows = new Set<string>(params.map((p) => p.name));
+      for (const s of body) {
+        if (s.kind === "VarDecl") for (const d of s.decls) shadows = shadows.add(d.name);
+        else if (s.kind === "FuncDecl") shadows = shadows.add(s.name);
+      }
+      for (const g of globals) if (!shadows.has(g)) globalBorrows = globalBorrows.add(g);
+    }
     const entry = (): State => new Map(params.filter((p) => isLinearTy(p.ty) && !untrack.has(p.name)).map((p) => [p.name, { moved: false, must: false }]));
     // Pass 1 (discard): which names does a closure body mention? Those pointers may be
     // copied into a closure env that outlives the binding, so they are never freed on
@@ -2275,6 +2362,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     scan.mutableArgProps = mutableArgProps;
     scan.mutableParams = mutableNames;
     scan.borrowThis = borrowThis;
+    scan.addGlobalBorrows(globalBorrows);
     scan.seq(body, entry());
     const a = new Analyzer(linear, topLevel, paramBorrows, scan.arrowNames, mutable, varTy, aliases, consuming);
     a.envCaptured = scan.envArrowNames; // the subset whose capture really is an env
@@ -2284,6 +2372,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     a.mutableArgProps = mutableArgProps;
     a.mutableParams = mutableNames;
     a.borrowThis = borrowThis;
+    a.addGlobalBorrows(globalBorrows);
     const st = entry();
     a.seq(body, st);
     const end = [...a.ownedTopLevel(st), ...topClosures]; // computed BEFORE marking: it can add to condDrops
@@ -2306,6 +2395,16 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     return end;
   };
 
+  // The module-level bindings a function body reads, restricted to the LINEAR ones. Read
+  // off `checked.globals` — the very table codegen promotes to `@nt.g.<name>` storage —
+  // rather than re-derived here, so the pass that decides what gets freed and the pass
+  // that emits the free agree about which names are globals by construction.
+  //
+  // The MODULE scope is deliberately not given this set: it OWNS these bindings and is the
+  // one frame that legitimately drops them.
+  let moduleGlobals = new Set<string>();
+  for (const [n, t] of checked.globals) if (isLinearTy(t)) moduleGlobals = moduleGlobals.add(n);
+
   checked.program.endDrops = runScope(checked.program.body, []);
   for (const s of checked.program.body) {
     if (s.kind === "FuncDecl") {
@@ -2316,6 +2415,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
         untrackedThis(s) ? new Set(["this"]) : new Set(),
         new Set(s.params.filter((p) => p.mutable).map((p) => p.name)),
         borrowedThis(s),
+        moduleGlobals,
       );
     }
   }
