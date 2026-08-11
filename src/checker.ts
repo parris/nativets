@@ -5313,6 +5313,30 @@ class Checker {
         this.checkArgs(e.args, sig, scope, `'.${e.callee.property}'`);
         return sig.ret;
       }
+      // A NULLABLE receiver, named as itself before the last-resort arm below claims it.
+      //
+      // Both `x?.m()` and `x.m()` land here when `x` is `T | null` / `T | undefined`, and
+      // the generic bucket's catalog hint ("object literals need the heap value model")
+      // is about a milestone that shipped: objects, classes, and `?.` on a FIELD all work.
+      // The one thing that does not is calling a method THROUGH the nullable, and what the
+      // reader has to do about it — narrow, assert, or supply the absent case — is nothing
+      // the inherited hint suggests. Every rewrite named here is compiled and run against
+      // node in test/nullable-assign.test.ts, per "advice a diagnostic gives has to
+      // compile" (docs/self-hosting.md).
+      //
+      // The declared type is quoted rather than the 3 KB structural dump the bare `recv`
+      // produces on the compiler's own `Scope`, which buries the sentence that matters.
+      if (isNullableTy(recv)) {
+        const absent = nullishKind(recv) === "null" ? "null" : "undefined";
+        throw nyi(
+          NYI.OBJECT,
+          `a method call on the nullable receiver \`${exprText(e.callee.object)}\``,
+          `\`${exprText(e.callee.object)}\` may be \`${absent}\`, and a method call through it is not lowered yet — ` +
+          `\`?.\` on a FIELD is, so this is about the CALL. Narrow it first: bind it to a local and test it ` +
+          `(\`const v = ${exprText(e.callee.object)}; if (v !== ${absent}) v.${e.callee.property}();\`), or supply the absent case ` +
+          `(\`v === ${absent} ? … : v.${e.callee.property}()\`). Where it cannot be ${absent}, \`${exprText(e.callee.object)}!.${e.callee.property}()\` asserts that`,
+        );
+      }
       throw nyi(NYI.OBJECT, `method call on ${recv}`);
     }
 
