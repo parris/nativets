@@ -246,6 +246,20 @@ describe("ill-formed UTF-8 is never re-framed (the shared UTF-8 decoder)", () =>
           `console.log(s.codePointAt(0), s.length);\n`,
       );
       expect(ours.stdout.toString("latin1")).toBe("192 3\n");
+
+      // 0xF8 is a lead byte ONLY in the obsolete 5-byte UTF-8 that Unicode withdrew; it
+      // is not a lead at all today. Sizing the sequence with `c >= 0xF0` instead of the
+      // exact `(c & 0xF8) == 0xF0` reads `F8 90 80 80` as a FOUR-byte sequence and lands
+      // on U+10000 — in range, so the overlong guard does not catch it. Each byte must
+      // stand alone: five elements, and the first code point is 248.
+      const g = join(dir, "f8.bin");
+      writeFileSync(g, Buffer.from([0xf8, 0x90, 0x80, 0x80, 0x41]));
+      const five = await bytesOf(
+        `import { readFileSync } from "node:fs";\n` +
+          `const s = readFileSync(${JSON.stringify(g)}, "utf8");\n` +
+          `console.log(s.codePointAt(0), Array.from(s).length);\n`,
+      );
+      expect(five.stdout.toString("latin1")).toBe("248 5\n");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -253,6 +267,44 @@ describe("ill-formed UTF-8 is never re-framed (the shared UTF-8 decoder)", () =>
 
   test("the well-formed twin still trims, byte-for-byte with node", async () => {
     await sameBytesAsNode(WELL + `console.log(s.trim());\nconsole.log(s.trimStart());\n`);
+  });
+
+  /*
+   * A RAW BYTE IS NOT A CODE POINT — the trap the first fix walked into.
+   *
+   * Having the decoder hand back the raw byte of an ill-formed sequence is right for
+   * `codePointAt` and `Array.from`, and WRONG the moment that byte is handed to
+   * `nt_ws_cp`, which is a table of CODE POINTS and contains U+00A0 NBSP. NBSP encodes as
+   * `C2 A0`, so the byte 0xA0 tested true as whitespace — and `" ".slice(1, 2)` is
+   * ordinary source for exactly that byte, because §A.2 cuts bytes.
+   *
+   * The give-away was that the two ends disagreed: `trimStart` ATE the stray byte while
+   * `trimEnd` kept it (the backward scan happens to reject it via its span check). One
+   * `trim`, two answers for one byte, so one of them had to be wrong. An ill-formed byte
+   * is never whitespace — the whitespace test now runs only on a decoded code point.
+   */
+  test("a lone 0xA0 is not NBSP — both ends of the trim agree", async () => {
+    const ours = await bytesOf(
+      // `A0` alone: the CONTINUATION byte of U+00A0, with its `C2` lead cut away.
+      `const tail = "\\u00a0".slice(1, 2);\n` +
+        `console.log((tail + "x").trimStart().length, ("x" + tail).trimEnd().length);\n` +
+        `console.log((tail + "x" + tail).trim().length);\n`,
+    );
+    expect(ours.exitCode).toBe(0);
+    // Nothing is stripped at either end, so every length is the input's own.
+    // Before the fix: `1 2` and `2` — trimStart and trim ate the leading byte.
+    expect(ours.stdout.toString("latin1")).toBe("2 2\n3\n");
+  });
+
+  test("a real NBSP still trims, byte-for-byte with node", async () => {
+    // The twin that keeps the fix honest: rejecting the stray 0xA0 must not cost us
+    // U+00A0 itself, which node does strip. Asserted on the trimmed CONTENT, not on
+    // `.length` — a length here would be comparing UTF-8 bytes to UTF-16 units and would
+    // be testing §A.2 rather than the trim.
+    await sameBytesAsNode(
+      `const s = "\\u00a0x\\u00a0";\n` +
+        `console.log(s.trim() === "x", s.trimStart() === "x\\u00a0", s.trimEnd() === "\\u00a0x");\n`,
+    );
   });
 
   // ---- codePointAt: the SIBLING copy of the same decoder. --------------------------

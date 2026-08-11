@@ -1496,19 +1496,24 @@ static int nt_utf8_len(const unsigned char *p, const unsigned char *end, unsigne
   if (v < min || v > 0x10FFFF) return 0;        /* overlong, or beyond Unicode */
   *cp = v; return need + 1;
 }
-/* Decode the sequence at `p` (which must not be the end), storing its byte length in
- * `*len`. An ill-formed sequence is ONE byte with that byte's own value. */
-static unsigned nt_utf8_cp(const unsigned char *p, const unsigned char *end, long *len) {
-  unsigned cp; int n = nt_utf8_len(p, end, &cp);
-  if (n == 0) { *len = 1; return p[0]; }
-  *len = n; return cp;
-}
+/* AN ILL-FORMED BYTE IS NEVER WHITESPACE, and the two scanners below say so by testing
+ * `nt_ws_cp` ONLY on a code point `nt_utf8_len` actually decoded.
+ *
+ * The tempting shape — fall back to the raw byte and ask `nt_ws_cp` about that — is wrong
+ * for the same reason the lead-byte-only decoder was: a RAW BYTE IS NOT A CODE POINT.
+ * `nt_ws_cp` holds U+00A0 NBSP, so the byte 0xA0 tests TRUE, and `" ".slice(1, 2)` is
+ * exactly how ordinary source produces a lone 0xA0 (§A.2 cuts bytes; NBSP encodes `C2 A0`).
+ * That made `(tail + "x").trimStart()` eat the byte while `("x" + tail).trimEnd()` kept it
+ * — the two ends of one `trim` disagreeing about one byte, which is proof on its own that
+ * one of them was wrong. Found by MUTATION: swapping the fall-back value to U+FFFD changed
+ * nothing any test could see, which is what pointed at the fall-back being consulted at all. */
+
 /* Scan FORWARD past whitespace from `s`. */
 static const char *nt_ws_skip_fwd(const char *s, const char *end) {
   const unsigned char *p = (const unsigned char *)s, *e = (const unsigned char *)end;
   while (p < e) {
-    long len; unsigned cp = nt_utf8_cp(p, e, &len);
-    if (!nt_ws_cp(cp)) break;
+    unsigned cp; int len = nt_utf8_len(p, e, &cp);
+    if (len == 0 || !nt_ws_cp(cp)) break;
     p += len;
   }
   return (const char *)p;
@@ -1521,10 +1526,10 @@ static const char *nt_ws_skip_back(const char *start, const char *end) {
   while (p > s) {
     const unsigned char *q = p - 1;
     while (q > s && (*q & 0xC0) == 0x80) q--;
-    long len; unsigned cp = nt_utf8_cp(q, p, &len);
-    /* Only treat it as one character if it spans exactly back to `p`; a stray
-     * continuation byte is not whitespace and stops the scan. */
-    if (q + len != p || !nt_ws_cp(cp)) break;
+    unsigned cp; int len = nt_utf8_len(q, p, &cp);
+    /* Only treat it as one character if it decoded AND spans exactly back to `p`; a
+     * stray continuation byte is not whitespace and stops the scan. */
+    if (len == 0 || q + len != p || !nt_ws_cp(cp)) break;
     p = q;
   }
   return (const char *)p;
