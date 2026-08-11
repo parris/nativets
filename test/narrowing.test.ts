@@ -257,6 +257,110 @@ elems.forEach((el, i) => {
 });
 `);
   });
+
+  // The A/B pair this was found as: the two spellings of one loop, which differed only
+  // in `return`-in-an-arrow vs `continue`-in-a-`for`. The `for` half always compiled.
+  test("the `forEach`/`return` and `for`/`continue` spellings now agree", async () => {
+    const body = (loop: string) => `
+const elems: { name: string | null }[] = [{ name: null }, { name: "b" }];
+//@@mutable
+let out: { name: string }[] = [];
+${loop}
+console.log(out.length, out[0].name);
+`;
+    await expectNode(body(`elems.forEach((el, i) => {
+  if (el.name === null) return;
+  out.push({ name: el.name });
+});`));
+    await expectNode(body(`for (const el of elems) {
+  if (el.name === null) continue;
+  out.push({ name: el.name });
+}`));
+  });
+
+  // An UNANNOTATED `function` reaches the same pre-pass (`inferReturnType`), so this was
+  // never about arrows. Annotating this exact function made it compile.
+  test("an unannotated `function` — the read is INSIDE the inferred return", async () => {
+    await expectNode(`
+function go(el: { name: string | null }) {
+  if (el.name === null) return 0;
+  return el.name.length;
+}
+console.log(go({ name: null }), go({ name: "bcd" }));
+`);
+  });
+
+  // A `: void` arrow reaches it too — `typeArrowReturn` calls the pre-pass whether or not
+  // the arrow is annotated, and treats `void` as "no declared type".
+  test("a `: void`-annotated arrow narrows as well", async () => {
+    await expectNode(`
+const f = (el: { name: string | null }): void => {
+  if (el.name === null) return;
+  console.log(el.name.length);
+};
+f({ name: null });
+f({ name: "xyz" });
+`);
+  });
+
+  // WHY THE RETURN TAKES THE WIDER READING. The guard proves nothing about the `return`
+  // nested inside it, and the pre-pass's answer is the type BOTH are checked against.
+  // Narrowing the top-level read to `string` refuses the `return null` above it — this
+  // program compiles and matches node, and must keep doing so.
+  test("a `return` nested in the guard still fits: the body's type stays the wide one", async () => {
+    await expectNode(`
+const elems: { name: string | null }[] = [{ name: null }, { name: "b" }];
+const r = elems.map((el) => {
+  if (el.name === null) return null;
+  return el.name;
+});
+console.log(r.length, r[0], r[1]);
+`);
+  });
+
+  // MUTATION 1. The guard must actually DIVERGE. Drop the `return` and the statements
+  // below it are reachable on the nullish path, so nothing is proved — still refused.
+  test("REFUSED: the guard body does not exit, so the rest is NOT narrowed", () => {
+    expectRejected(`
+const elems: { name: string | null }[] = [{ name: null }, { name: "b" }];
+elems.forEach((el, i) => {
+  if (el.name === null) { console.log("skip", i); }
+  console.log(el.name.length);
+});
+`, "NT2001", "'el.name' is possibly null");
+  });
+
+  // MUTATION 2. The proof only survives while the object cannot be rewritten between the
+  // guard and the read. `accessPath` declines a `@@mutable` receiver for exactly this, and
+  // that decline is load-bearing — narrowing here would read a bare value out of a slot
+  // still holding a nullish box. The pre-pass must not have become a way around it.
+  test("REFUSED: a `@@mutable` field, guarded then invalidated by a call in between", () => {
+    expectRejected(`
+@@mutable
+type Cell = { def: string | null };
+function clear(c: Cell): void { c.def = null; }
+const cells: Cell[] = [{ def: "a" }];
+cells.forEach((c) => {
+  if (c.def === null) return;
+  clear(c);
+  console.log(c.def.length);
+});
+`, "NT2001", "'c.def' is possibly null");
+  });
+
+  // MUTATION 3. Same rule as `narrowing 2`'s "an assignment below the guard invalidates
+  // the narrowing", now that this walk records facts at all: the region filter has to be
+  // live here too, or a reassigned root would keep a proof about the previous value.
+  test("REFUSED: the root is reassigned below the guard", () => {
+    expectRejected(`
+const f = (x: number | undefined) => {
+  if (x === undefined) return 0;
+  x = undefined;
+  return x + 1;
+};
+console.log(f(1));
+`, "NT2001", "?Unumber");
+  });
 });
 
 describe("narrowing 3 — the fact persists to the right of `&&`", () => {
