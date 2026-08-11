@@ -28,7 +28,7 @@ hand-off explicit and to satisfy the checker.
 | **NT1601** | E0382 | use of moved value | ✅ implemented |
 | **NT1602** | E0505 | cannot move while borrowed (for-of borrow live) | ✅ implemented |
 | **NT1603** | E0502 | cannot mutate while borrowed (iterator invalidation) | ✅ implemented |
-| **NT1604** | E0507 | move out of borrowed content (a for-of element, a by-borrow param, a `@@mutable` alias or method result) — but see **consuming parameters** below | ✅ implemented |
+| **NT1604** | E0507 | move out of borrowed content (a for-of element, a by-borrow param, a **module-level binding**, a `@@mutable` alias or method result) — but see **consuming parameters** below | ✅ implemented |
 | **NT1605** | E0508 | move out of a linear array element (`arr[i]`) | ✅ implemented |
 | **NT1607** | E0596 | cannot mutate through a borrow — a `@@mutable` setter needs an OWNED receiver | ✅ implemented |
 
@@ -73,6 +73,42 @@ Everything else stays a borrow, deliberately. A hand-written `this.f = p` in a c
 is still **NT1604** — only the parameter-property spelling is guaranteed to store — and its hint
 names the form to write instead. Plain functions have no consuming parameter, so
 `function wrap(d: T): Box { return new Box(d); }` is refused rather than miscompiled.
+
+**A module-level binding is a borrow inside a function body.** The module scope owns
+`const shared = { a: 1 }` and drops it when the program ends, so a function body may only read
+*through* it. Handing it out makes the caller a second owner of the same pointer:
+
+```ts
+const shared = { a: 1 };
+function getShared(): { a: number } { return shared; }   // NT1604
+const x = getShared();
+console.log(shared.a, x.a);                              // node: "1 1", exit 0
+```
+
+That program used to compile clean and emit two consecutive `nt_obj_free`s on one pointer in
+`main`. It died in the allocator with exit 133/134 and — the reason it survived so long — an
+**empty stdout and an empty stderr**, because the abort discards the buffered stream, so a
+differential test comparing stdout alone saw two empty strings and passed. ASan reports
+`attempting double-free`.
+
+The rule is the by-borrow parameter rule with a different owner, and it is enforced by the same
+`borrowBindings` machinery, over the set `checked.globals` — the very table codegen promotes to
+`@nt.g.<name>` storage, so "what gets freed" and "what is a global" cannot drift apart. Every
+consuming position is covered: `return g`, `const t = g` (which makes the *function* drop it,
+a double free with no `return` involved), `return { w: g }`, `return [g]`, an arrow's expression
+body (`=> g` — a return that used to be walked as a pure borrow, so it disagreed with its own
+braced spelling), and the same shapes reached across a module boundary.
+
+**Moving the global was not an option**, and this is the case that rules out the whole family of
+"just transfer ownership" answers: the binding is still live and still readable afterwards —
+node prints `shared.a` fine — so a move would produce a *wrong answer* rather than a refusal.
+A return-position **borrow** would be the expressive fix, but it is a language feature (every
+call site and every onward use would have to be proven not to outlive the module), not a bug
+fix; until then this is a refusal, per *reject, never miscompile*.
+
+Reads stay legal and are what the hint points at: `return g.field`, `for (const v of g)`,
+`g.length`, a field *of* the global (`return g.inner` — a distinct allocation), a freshly built
+value, and **strings**, which are refcounted rather than linear and were never affected.
 
 **Borrows (phase 2, done for for-of).** A `for-of (const x of arr)` holds a borrow of `arr`
 for the whole loop body. Inside the body: reads (`.length`, `arr[i]`, `.includes`) are shared
