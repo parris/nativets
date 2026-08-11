@@ -2406,8 +2406,13 @@ class Checker {
     const last = fn.body[fn.body.length - 1]!;
     if (last.kind !== "SwitchStmt") return;
     const d = last.discriminant;
-    if (d.kind !== "MemberExpr" || d.object.ty === undefined || !isUnionTy(d.object.ty)) return;
-    const u = d.object.ty;
+    if (d.kind !== "MemberExpr") return;
+    // `exprTy`, not `d.object.ty` — the receiver is an un-narrowed `Expr` and `ty` sits at
+    // five different slots across its members, so there is no constant offset to load it
+    // from (see `rejectVacuousCollectionTest`). Split out of the `||` chain for the same
+    // reason the binding exists at all: one read, one narrowing.
+    const u = exprTy(d.object);
+    if (u === undefined || !isUnionTy(u)) return;
     if (unionDiscriminant(u)!.key !== d.property) return;
     if (last.cases.some((c) => c.test === null)) return; // a `default` covers everything left
     // Only a switch every arm of which LEAVES the function is one the author wrote to be
@@ -5800,7 +5805,9 @@ class Checker {
   private rejectDiscardedMutator(e: Expr, scope: Scope): void {
     if (e.kind !== "CallExpr" || e.callee.kind !== "MemberExpr") return;
     const m = e.callee.property;
-    const recv = e.callee.object.ty;
+    // `exprTy`, not `.ty` — see `rejectVacuousCollectionTest` below: the receiver is an
+    // un-narrowed `Expr` and `ty` has no single slot across the union.
+    const recv = exprTy(e.callee.object);
     const isMap = recv !== undefined && isMapTy(recv) && (m === "set" || m === "delete");
     const isSet = recv !== undefined && isSetTy(recv) && (m === "add" || m === "delete");
     if (!isMap && !isSet) return;
@@ -5816,12 +5823,15 @@ class Checker {
     // is what almost every real call passes — would render as `…` and make the suggested
     // line uncopyable. Spell the literals out here rather than widening `exprText`, which
     // is shared with other diagnostics.
-    const argText = (a: Expr): string =>
+    // INLINE, not a named `const argText = (a) => …` passed by name: a callback that is
+    // not an inline arrow is NT1003 in this compiler's own subset (function values need
+    // captured environments), so hoisting it for readability is the difference between a
+    // body that self-compiles and one that does not.
+    const args = e.args.map((a) =>
       a.kind === "StringLiteral" ? JSON.stringify(a.value)
       : a.kind === "NumberLiteral" ? String(a.value)
       : a.kind === "BooleanLiteral" ? String(a.value)
-      : exprText(a) ?? "…";
-    const args = e.args.map(argText).join(", ");
+      : exprText(a) ?? "…").join(", ");
     // The one-chain suggestion is only sane for the ADDING methods — you cannot build a
     // collection out of `.delete` calls, so offering `new Map().delete(…).delete(…)` there
     // would be advice that does not typecheck as a fix for anything.
@@ -5874,7 +5884,9 @@ class Checker {
     // NOT write" the one line that fixes it, and then recommending they declare the class
     // `@@mutable`, which it already was. The type is read from the node's CACHE (the
     // receiver was typed to get here); no re-typing, so this cannot throw from a hint.
-    const ownerTy = recvExpr.kind === "MemberExpr" ? recvExpr.object.ty : undefined;
+    // `exprTy`, not `.ty` — `recvExpr.object` is an un-narrowed `Expr` and `ty` has no
+    // single slot across the union (see `rejectVacuousCollectionTest`).
+    const ownerTy = recvExpr.kind === "MemberExpr" ? exprTy(recvExpr.object) : undefined;
     const recvIsMutableField = ownerTy !== undefined && this.isMutableTy(ownerTy);
     const rebindable = recvExpr.kind === "Identifier" || recvIsOwnField || recvIsMutableField;
     const fix = recvIsParam && name !== undefined
@@ -6070,7 +6082,12 @@ class Checker {
    */
   private rejectVacuousCollectionTest(test: Expr | undefined, where: string, consequence: string): void {
     if (test === undefined) return;
-    const t = test.ty;
+    // `exprTy`, not `test.ty`: `test` is an un-narrowed `Expr`, and `ty` sits at FIVE
+    // different slots across the union's 30 members, so there is no constant offset to
+    // load it from and `unionCommonField` refuses the read (self-compiled this is an
+    // NT2001 on this very line). The helper switches on the tag and reads each narrowed
+    // member's own field. Same value under node, in the subset when compiled.
+    const t = exprTy(test);
     if (t === undefined || (!isMapTy(t) && !isSetTy(t))) return; // nullable `?N…`/`?U…` is a REAL check
     const kind = isMapTy(t) ? "Map" : "Set";
     const lower = kind.toLowerCase();

@@ -1,0 +1,12 @@
+NumLit: number
+StrLit: untyped
+Hole: never
+(none)
+NumLit StrLit Hole
+StrLit: untyped
+absent
+no owner ty
+NUMBER <none> NEVER
+7, "hi", _
+3
+NumLit: number
