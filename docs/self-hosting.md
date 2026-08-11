@@ -5293,3 +5293,61 @@ Green on Linux under ASan (`scripts/docker-test.sh`), 61/0 in `mutable-records`;
 unions+classes, 95/0 drops/ownership, 393/0 fixtures with snapshots unchanged; `tsc -p
 tsconfig.src.json` clean; all three canary modules still reach IR standalone (164628 /
 119501 / 149960 bytes, redirected to files — a pipe truncates at 65536).
+
+
+## What the frontier is made of, measured 2026-08-11 (94 blockers / 801 functions)
+
+The remaining blockers are **three architectural features**, not a backlog of mechanical
+fixes. Anyone planning "clear N blockers" should price against this first.
+
+### 1. The `unknown` generic AST walkers — 22 of 95 (23%), and NOT a checker gap
+
+`daUse`, `daReads`, `daStmt`, `scanEscaping`, `scanMentions`, `hasHostCall`,
+`shadowedNames`, `scanHasTry`, `mentions`, `frameThrows` and friends walk the AST
+generically: `typeof n === "object"`, `n === null`, `Array.isArray(n)`,
+`for (const k in n)`, `n[k]`.
+
+**The runtime cannot support that walk today, and the reason is in the emitted IR.**
+`const o = { alpha: 1, beta: "two" }` compiles to `nt_obj_new(2)` — a BARE two-slot block.
+The strings `alpha`/`beta` appear only as `private unnamed_addr constant` at the
+`console.log` CALL SITE, baked from the compile-time layout. An object at runtime carries
+no field names and no type tag, so `for (const k in n)` has nothing to enumerate.
+Supporting it needs field-name metadata on object blocks — i.e. RTTI — which is a
+representation change, not a checker rule. (`Dyn` DOES carry it: `nt_dyn_inspect` exists.
+So the boundary question is whether an AST node can be boxed into a Dyn, not whether
+dynamic values are possible at all.)
+
+**And the obvious alternative is worse than the blocker.** Rewriting these as typed walks
+loses the property that makes them sound: they are deliberately OVER-APPROXIMATE and
+exhaustive by construction. `scanHasTry` says so itself — *"a miss would be a wrong answer
+while a false hit is only a refusal."* A hand-written switch over `Stmt`/`Expr` is
+exhaustive only while someone maintains it, so this trades a safe refusal for a
+silent-wrong-answer class. A lane already proved the related version of this: delegating
+codegen's walks to `ast.ts`'s walkers re-introduced the `name2` bug plus nine siblings,
+because those walkers have no hook for binding-name strings.
+
+### 2. In-place element store — the "arrays are immutable" bucket
+
+`checker.ts`'s `IndexAssign` arm throws unconditionally for arrays and **never consults the
+`@@mutable` opt-in** that `.push` honours through `accumulatorName`. That looks like a
+two-line oversight and is not: **there is no in-place element store in the runtime at
+all.** `nt_arr_with` is the only writer and it is persistent; `nt_pvec.c:185` marks the
+in-place path *"unreachable: nt_arr_with panics first"*. Arrays become persistent tries
+past 32 elements, so a real `nt_arr_set` needs refcount-aware mutation (safe only at
+refcount 1) or it silently rewrites storage another holder can see.
+
+Wiring the checker without that is precisely the widen-the-predicate-not-the-layout
+miscompile recorded in [[nativets-testing-lessons]].
+
+### 3. `@@mutable` on fields — the 20x "objects are immutable" bucket
+
+Already measured **net negative** (179 -> 182): the tag is NOMINAL, so tagged records stop
+accepting structural literals, and `accessPath` declines a `@@mutable` receiver so
+optional-field narrowing stops. Unchanged.
+
+### What that leaves
+
+Roughly a dozen genuinely independent blockers (a `DataView`, a few narrowing gaps, a
+string-method gap). `process.cwd()` was one of them and is now closed. Clearing the rest
+would still leave the three features above, which is the honest reason the 3-stage
+byte-identical bootstrap is not near.
