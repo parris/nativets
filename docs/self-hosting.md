@@ -5345,6 +5345,41 @@ Already measured **net negative** (179 -> 182): the tag is NOMINAL, so tagged re
 accepting structural literals, and `accessPath` declines a `@@mutable` receiver so
 optional-field narrowing stops. Unchanged.
 
+### The discarded-mutator census, CLASSIFIED (2026-08-11) — 7 fixed, 9 blocked on two features
+
+`s.add(x)` / `m.set(k, v)` with the result discarded is a **no-op** here (a nativets
+`Set`/`Map` is persistent) and indistinguishable from the working spelling under bun. That
+is the "src/ relies on bun's mutation semantics" gate, and it was recorded as a count. It is
+not a count — it is two missing features and a small pile of ordinary bugs.
+
+**Fixed (7), all LOCALS, so a rebind was the whole fix** — `linkProgram`'s
+`mutableClasses`, `mutableRecords`, `recTypes`, `hostImports`, `mods`, `staticFields`, and
+`moduleOrder`'s `done`. Their neighbours `names`/`tags` in the same loop were already
+written correctly; these were three lines away from code that got it right.
+
+**Blocked (9), and every one needs one of exactly TWO things:**
+
+| site | receiver | needs |
+|---|---|---|
+| `moduleOrder` `sources`, `deps` | `Map` **parameter** | a Map/Set accumulator opt-in |
+| `collectIdents` `out` | `Set` parameter | " |
+| `addCaptured` `closure` | `Set` parameter | " |
+| `noteEscapingWrite` `out` | `Map` parameter | " |
+| `Analyzer.stmt` `state` | `Map` parameter (`State`) | " |
+| `collectAssigned` `(inArrow ? closure : direct)` | **conditional receiver** | " (no binding exists to mark) |
+| `alphaRenameShadows` `cur` | an ARRAY ELEMENT (`scopes[len-1]`) | in-place element store |
+| `analyzeOwnership` `mutable.setters` | a FIELD path | `@@mutable` on fields |
+
+**The parameter opt-in is ARRAY-ONLY, measured not assumed.** `//@@mutable` on a `Map`
+parameter is `NT1023`: *"'@@mutable' on parameter 'sources', which is not an array (it is
+'Map<string,string>')"*. And rebinding a parameter is **not** the fix — a parameter is a
+borrow, so `out = out.add(x)` is invisible to the caller (`NT1608`).
+
+So six of the nine fall to ONE feature: extend the per-parameter `//@@mutable` opt-in from
+arrays to `Map`/`Set`. That is the highest-leverage item on this list, and it is a language
+feature rather than a rewrite of `src/`. The remaining three need the in-place element store
+(itself item 2 of the three architectural features above) or `@@mutable` fields (item 3).
+
 ### Measured and REJECTED: transitive raise inference (2026-08-11)
 
 `raisedTypeOf` collects a function's own uncovered throws and does not follow calls. Making
