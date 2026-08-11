@@ -128,6 +128,24 @@ describe("a type name is in scope inside a `${…}` substitution", () => {
       'console.log(`${tag(8)} ${tag("s")}`);\n',
     );
   });
+
+  /*
+   * THE OTHER DIRECTION, and the one that keeps the fix from being a hole. Seeding the
+   * sub-parser widens what is ACCEPTED, so a name that is genuinely declared nowhere must
+   * still be refused — otherwise it would fall through `resolveNamed`'s last resort and
+   * erase to `number`, which is the destructive silent answer that refusal exists to
+   * prevent. Here the hint is also TRUE, which is the whole complaint about the old
+   * behaviour: it said the same sentence when the declaration was two lines above.
+   */
+  test("a name declared NOWHERE is still NT2003 inside a substitution", () => {
+    const r = rejectionOf(
+      'const xs: number[] = [1, 2];\n' +
+      'console.log(`${xs.map((a: Nope): number => a).length}`);\n',
+    );
+    expect(r?.code).toBe("NT2003");
+    expect(r?.message).toContain("Cannot find name 'Nope'");
+    expect(r?.hint).toContain("not declared in this file");
+  });
 });
 
 describe("the floating-async guard reaches inside a `${…}` substitution", () => {
