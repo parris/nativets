@@ -8858,7 +8858,14 @@ function isEmptyArrayLit(e: Expr): boolean {
 }
 
 /** Collect every identifier name referenced in an expression (for capture analysis). */
-function collectIdents(e: Expr, out: Set<string>): void {
+function collectIdents(
+  e: Expr,
+  // ACCUMULATOR PARAMETER — `out.add(…)` discards its result, which is a no-op here and
+  // works under bun. See `moduleOrder` in src/modules.ts for why this needs the attribute
+  // rather than a rebind.
+  //@@mutable
+  out: Set<string>,
+): void {
   switch (e.kind) {
     case "Identifier": out.add(e.name); return;
     case "TemplateLiteral": e.exprs.forEach((x) => collectIdents(x, out)); return;
@@ -9042,7 +9049,12 @@ function blockBindings(body: Stmt[], own: Set<string>): Set<string> {
  * on its own enough to unnarrow `a` in `src/ast.ts`'s `unifyTypeParams`, and that one
  * collision was the first blocker for eight of the twelve compiler modules.
  */
-function addCaptured(inner: Set<string>, own: Set<string>, closure: Set<string>): void {
+function addCaptured(
+  inner: Set<string>,
+  own: Set<string>,
+  //@@mutable
+  closure: Set<string>,
+): void {
   for (const n of inner) if (!own.has(n)) closure.add(n);
 }
 
@@ -9213,7 +9225,13 @@ function collectEscapingWrites(arrow: ArrowFunction, out: Map<string, string>): 
 }
 
 /** Record the FIRST write to a name the arrow does not bind (later ones say the same). */
-function noteEscapingWrite(name: string, op: string, bound: Set<string>, out: Map<string, string>): void {
+function noteEscapingWrite(
+  name: string,
+  op: string,
+  bound: Set<string>,
+  //@@mutable
+  out: Map<string, string>,
+): void {
   if (!bound.has(name) && !out.has(name)) out.set(name, op);
 }
 

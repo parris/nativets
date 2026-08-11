@@ -113,6 +113,38 @@ export function census(): Site[] {
     const prog = parse(readFileSync(path, "utf8"), { file: path });
     let fn = "(top level)";
 
+    /* Names declared `@@mutable` — a `let`/`const` accumulator or a marked PARAMETER.
+     * A discarded mutator on one of these is not a defect: the attribute is the opt-in
+     * that makes the update happen IN PLACE, which the runtime now does for Map/Set as
+     * well as arrays (`nt_map_put_slot_inplace`, test/runtime/collinplace_test.c).
+     *
+     * PER-FUNCTION, and that is not a detail. A per-FILE set was measured first and it
+     * silenced twelve sites for six markers: `collectIdents`, `daReads`, `closureDecls`
+     * and `scanMentions` all name a parameter `out`, so marking one hid the other three.
+     * A lint that goes quiet about code nobody fixed is worse than no lint. */
+    const markedIn = (node: unknown): Set<string> => {
+      const names = new Set<string>();
+      const scan = (x: unknown, top: boolean): void => {
+        if (x === null || typeof x !== "object") return;
+        if (Array.isArray(x)) { for (const y of x) scan(y, top); return; }
+        const o = x as Record<string, unknown>;
+        // Do NOT descend into a nested function: its parameters are its own.
+        if (!top && (o.kind === "FuncDecl" || o.kind === "ArrowFunction")) return;
+        if (o.kind === "VarDecl" && o.mutable === true) {
+          for (const d of (o.decls ?? []) as { name: string }[]) names.add(d.name);
+        }
+        if (top && (o.kind === "FuncDecl" || o.kind === "ArrowFunction")) {
+          for (const prm of (o.params ?? []) as { name: string; mutable?: boolean }[]) {
+            if (prm.mutable === true) names.add(prm.name);
+          }
+        }
+        for (const k of Object.keys(o)) scan(o[k], false);
+      };
+      scan(node, true);
+      return names;
+    };
+    let marked = markedIn(prog.body);
+
     const walk = (node: unknown): void => {
       if (node === null || typeof node !== "object") return;
       if (Array.isArray(node)) { for (const x of node) walk(x); return; }
@@ -120,16 +152,22 @@ export function census(): Site[] {
 
       if (n.kind === "FuncDecl") {
         const prev = fn; fn = String(n.name);
-        walk(n.body); fn = prev; return;
+        const prevMarked = marked; marked = markedIn(n);
+        walk(n.body);
+        marked = prevMarked; fn = prev; return;
       }
       // Statement position: the value is dropped on the floor.
       if (n.kind === "ExprStmt") {
-        for (const s of discardedMutators(n.expr)) out.push({ file, fn, shape: s });
+        for (const s of discardedMutators(n.expr)) {
+          if (!marked.has(s.slice(0, s.indexOf(".")))) out.push({ file, fn, shape: s });
+        }
       }
       // An arrow with an EXPRESSION body is the same discard whenever the arrow is a void
       // callback — `xs.forEach((x) => seen.add(x))` is exactly the shape, one level in.
       if (n.kind === "ArrowFunction" && n.exprBody === true) {
-        for (const s of discardedMutators(n.body)) out.push({ file, fn, shape: s });
+        for (const s of discardedMutators(n.body)) {
+          if (!marked.has(s.slice(0, s.indexOf(".")))) out.push({ file, fn, shape: s });
+        }
       }
       for (const k of Object.keys(n)) {
         if (k === "ty" || k === "loc" || k === "annot" || k === "returnAnnot") continue;
@@ -308,7 +346,6 @@ describe("discarded persistent mutators in src/", () => {
    *                               so the write-back is an array mutation, not a collection one
    */
   const KNOWN: string[] = [
-    "checker.ts addCaptured: closure.add(…)",
     "checker.ts alphaRenameShadows: cur.set(…)",
     "checker.ts alphaRenameShadows: cur.set(…)",
     "checker.ts alphaRenameShadows: used.add(…)",
@@ -316,9 +353,6 @@ describe("discarded persistent mutators in src/", () => {
     "checker.ts checkDefiniteAssignment: seen.add(…)",
     "checker.ts collectAssigned: <ConditionalExpr>.add(…)",
     "checker.ts collectAssigned: <ConditionalExpr>.add(…)",
-    "checker.ts collectIdents: out.add(…)",
-    "checker.ts collectIdents: out.add(…)",
-    "checker.ts collectIdents: out.add(…)",
     "checker.ts daReads: out.set(…)",
     "checker.ts daReads: out.set(…)",
     "checker.ts daStmt: flow.add(…)",
@@ -334,17 +368,10 @@ describe("discarded persistent mutators in src/", () => {
     "checker.ts daStmt: flow.clear(…)",
     "checker.ts daStmt: flow.delete(…)",
     "checker.ts daStmt: tracked.set(…)",
-    "checker.ts noteEscapingWrite: out.set(…)",
-    // THE TWO THAT CANNOT BE FIXED IN THE SUBSET, and the reason is worth carrying: both are
-  // ACCUMULATOR PARAMETERS of a `Map`. Rebinding is not the fix (a parameter is a borrow;
-  // `sources = sources.set(…)` is invisible to the caller — NT1608), and the per-parameter
-  // `//@@mutable` opt-in is ARRAY-ONLY — marking one is NT1023, "'@@mutable' on parameter
-  // 'sources', which is not an array (it is 'Map<string,string>')". So there is NO spelling
-  // that works today, and a self-hosted compiler would discover every module and record
-  // NONE of them. Closing these needs either a Map/Set parameter opt-in or `moduleOrder`
-  // restructured to RETURN its accumulators.
-  "modules.ts moduleOrder: deps.set(…)",
-    "modules.ts moduleOrder: sources.set(…)",
+    // (The two `moduleOrder` Map parameters that used to head this list are GONE: the
+  // per-parameter `//@@mutable` opt-in accepts a Map/Set now, so the shape that had no
+  // legal spelling at all — rebinding is NT1608, and the opt-in was array-only — is
+  // simply written. The census skips a marked receiver, per FUNCTION.)
     "ownership.ts Analyzer.expr: sites.add(…)",
     "ownership.ts Analyzer.expr: state.set(…)",
     "ownership.ts Analyzer.expr: state.set(…)",

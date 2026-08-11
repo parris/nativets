@@ -5427,10 +5427,21 @@ insertion ORDER survives. It is sound because the internals are structurally sha
 nothing is freed or overwritten, only one wrapper's view changes — which makes this a
 lost-update question, and `@@mutable` is precisely the opt-in that answers it.
 
-**What remains** is the compiler half: lift the array-only guard at `src/checker.ts:7547`
-for `Map`/`Set`, stop refusing a discarded `.set`/`.add` when the receiver is a `@@mutable`
-binding, and emit the `_inplace` variant from codegen. That closes 8 of the 88 blockers,
-including the two `moduleOrder` parameters for which no spelling exists today.
+**DONE (`e9004e6`).** Both guards are lifted, the checker STAMPS the call it exempts
+(`CallExpr.inPlaceColl`) so codegen never guesses, and a marked binding whose result is
+USED is refused rather than silently persistent. Applied to the seven sites it was built
+for — `moduleOrder`'s `sources`/`deps`, `collectIdents`'s `out`, `addCaptured`'s `closure`,
+`noteEscapingWrite`'s `out` — every one of which was a latent silent wrong answer under
+self-hosting. **Depth 88 -> 86.**
+
+Two silent wrong answers were created and caught during the build, both measured rather
+than reasoned about: lifting the checker guard alone printed `0 undefined undefined` for
+node's `2 1 2`, and a marked binding whose result is used printed `0 1` for node's `1 1`.
+
+The census (`test/discarded-mutator.test.ts`) now skips a `@@mutable` receiver **per
+FUNCTION**. A per-FILE set was measured first and silenced twelve sites for seven markers,
+because `collectIdents`, `daReads`, `closureDecls` and `scanMentions` all name a parameter
+`out` — a lint that goes quiet about code nobody fixed is worse than no lint.
 
 *The superseded analysis, kept because the reasoning is instructive:* the array opt-in
 works because an array HAS an in-place path (`nt_arr_push`), and `nt_map_put`

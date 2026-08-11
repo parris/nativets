@@ -424,7 +424,14 @@ function show(path: string): string {
 function moduleOrder(
   entry: string,
   read: ReadModule,
+  // ACCUMULATOR PARAMETERS. `sources.set(…)` with the result discarded is a no-op under
+  // this compiler's persistent collections and works under bun — the exact shape that
+  // would make a self-hosted build discover every module and record NONE of them. There
+  // was no spelling for it until `@@mutable` accepted a Map: rebinding is NT1608 (a
+  // parameter is a borrow, so the caller never sees it) and the opt-in was array-only.
+  //@@mutable
   sources: Map<string, string>,
+  //@@mutable
   deps: Map<string, ImportDecl[]> = new Map(),
 ): string[] {
   const order: string[] = [];
