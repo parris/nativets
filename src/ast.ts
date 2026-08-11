@@ -918,6 +918,37 @@ export function unfoldTypeRef(t: Ty, table: Map<string, Ty>): Ty {
  * with a user-written type name.
  * ============================================================ */
 
+/**
+ * TypeScript's `unknown`, as an OPAQUE PLACEHOLDER — a type-level name with no machine
+ * representation and, in practice, no inhabitants.
+ *
+ * It is spelled as the bare word so every diagnostic that interpolates a `Ty` prints the
+ * type the programmer actually wrote. That is the entire point of it: `unknown` used to
+ * erase to `number` (see `ERASURE_STILL_ALLOWED`, src/parser.ts), so a reflective walk
+ * written `f(node: unknown)` reported `Cannot compare number with null` — a diagnostic
+ * naming a type its source never contains, which sends the reader to fix the wrong thing.
+ *
+ * NOTHING CLAIMS IT, and that is what makes it safe. Every sibling `Ty` predicate anchors
+ * on a sigil (`{`, `U<`, `@`, `?U`/`?N`, `#`, a `[]` suffix) or on an exact scalar name,
+ * and `"unknown"` is in none of those sets — it is not in `ScalarTy`, not in `SCALARS`,
+ * not a `BuiltinTy`. So it falls off the end of every classifier, including `reprClass`,
+ * whose documented contract for "no opinion" is `undefined` and whose caller refuses on
+ * it. Assignability is string equality here, so only another `unknown` is assignable to
+ * an `unknown` slot — which means no value ever carries this type and codegen is never
+ * reached with it.
+ *
+ * DO NOT give this a representation to "finish" it. A `Ty` that can hold a value needs a
+ * runtime tag to narrow from, and the only tagged box in this compiler is `Dyn` — which
+ * is not a candidate: `Dyn` refuses `d === null` and `Object.keys(d)`, ICEs on `typeof d`
+ * in value position, is not spellable in source, and could only receive an AST node by
+ * DEEP-COPYING it into a box tree — which would silently break the reference-identity
+ * sets (`Set<object>`, the `seen` cycle guards) the ownership walks depend on. That is
+ * the miscompile direction, so the placeholder stays uninhabited on purpose.
+ */
+export const UNKNOWN_TY = "unknown" as Ty;
+/** Is `t` the opaque `unknown` placeholder? */
+export function isUnknownTy(t: Ty): boolean { return t === UNKNOWN_TY; }
+
 /** The marker type for type parameter `name` (`T` → `#T`). */
 export function typeParamTy(name: string): Ty { return `#${name}` as Ty; }
 /** Is `t` EXACTLY a bare type parameter (`^#[A-Za-z_$][\w$]*$` — `#T`, not `#T[]`)? */

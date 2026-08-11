@@ -15,6 +15,7 @@ import {
   tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, generalUnionArmTypeof, extractUnionMembers, unionWidenedMembers,
   resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
+  UNKNOWN_TY,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -120,10 +121,19 @@ const AMBIENT_TYPES = new Set([
   "ReadableStream", "WritableStream", "TransformStream", "Console", "Buffer", "NodeJS", "globalThis",
 ]);
 /**
- * The three ambient names still allowed to erase, and the ONLY three — a documented
- * residue, not a judgement that they are safe. All three are refused inside an
+ * The three ambient names allowed past `refuseUnknownName`, and the ONLY three — a
+ * documented residue, not a judgement that they are safe. All three are refused inside an
  * `as`/`satisfies` assertion regardless (`parseAssertedType`), which is where the erasure
  * stops being a confusing refusal and becomes a wrong answer.
+ *
+ * TWO OF THE THREE STILL ERASE TO `number`. `unknown` no longer does: it resolves to the
+ * opaque `UNKNOWN_TY` placeholder instead (see the arm at the end of `resolveNamed`, and
+ * `UNKNOWN_TY` in src/ast.ts for why an uninhabited type-level name is the whole
+ * mechanism rather than a half-finished one). It stays in this set because the set gates
+ * the parse-time REFUSAL, and refusing here is fatal to the whole file — measured: with
+ * `unknown` removed from this set a linked `src/cli.ts` stops PARSING, taking every
+ * per-function self-hosting number with it. The entry that follows describes what the
+ * placeholder replaced.
  *
  * WHY THEY ARE HERE. src/ uses all three, and none has an honest rewrite today:
  *
@@ -138,7 +148,11 @@ const AMBIENT_TYPES = new Set([
  *   - `unknown` (18 sites: src/checker.ts, src/ownership.ts, src/codegen.ts) is the
  *     parameter of a REFLECTIVE walk (`scanUsesActors(node: unknown)`), where it is the
  *     correct TypeScript type and a concrete one would be a lie. Those functions are
- *     already refused for their own reasons (`for…in`, `Object.values`, index signatures).
+ *     already refused for their own reasons (`for…in`, `Object.values`, index signatures)
+ *     — and that claim is now MEASURED rather than asserted: erasing to the opaque
+ *     placeholder instead of to `number` moves a linked `src/cli.ts` from 125 refused
+ *     functions to 125. Not one clears. What the 19 affected diagnostics stop doing is
+ *     naming `number`, a type none of those sources contains.
  *   - `object` (2 sites, src/ownership.ts) is an IDENTITY set over heterogeneous AST nodes
  *     (`Set<object>`, `Map<string, object>`), where it is likewise the correct type.
  *
@@ -163,9 +177,15 @@ const AMBIENT_TYPES = new Set([
  * erasure is only one of the ways to get there, and `(n as string)` on an honest `number`
  * emitted the same invalid IR with no ambient name in sight.
  *
+ * That hole is now closed for `unknown` a second, earlier way: nothing is assignable to
+ * the placeholder, so `asStr(42)` is refused at the CALL and the body's cast is never
+ * reached. `never` and `object` still erase, so it stays open for them.
+ *
  * This set should shrink to empty. Removing an entry needs the feature, not just the
- * deletion: a bottom type for `never`, and for `unknown`/`object` either an opaque
- * unusable `Ty` or reflective walks the subset can express.
+ * deletion: a bottom type for `never`, and for `object` either an opaque unusable `Ty` —
+ * the route `unknown` took — or reflective walks the subset can express. `unknown` is
+ * half-way: it has the opaque `Ty`, and it stays listed here only because the parse-time
+ * refusal is file-fatal. Rewriting src/'s 18 sites is what would let it leave entirely.
  */
 const ERASURE_STILL_ALLOWED = new Set(["unknown", "never", "object"]);
 /**
@@ -996,6 +1016,45 @@ class Parser {
         this.prevLoc(),
       );
     }
+    // `unknown` erases to an OPAQUE PLACEHOLDER rather than to `number` — the "opaque
+    // unusable `Ty`" `ERASURE_STILL_ALLOWED` names as the precondition for removing it
+    // from that set. It is a TYPE-LEVEL name with no representation and no inhabitants:
+    // nothing is assignable TO it (so no value ever carries it), and no operation on it
+    // is supported (so it never reaches codegen). That is not a limitation to fix later
+    // — it is the whole mechanism. A placeholder that could hold a value would need a
+    // runtime tag this compiler does not have.
+    //
+    // WHY A PLACEHOLDER AND NOT A REFUSAL. Refusing `unknown` outright is the honest
+    // shape, and it is what `ambientTypeHint` already writes advice for, but the refusal
+    // fires in the PARSER, and a parse refusal is fatal to the whole FILE rather than
+    // scoped to one function body. Measured: deleting "unknown" from
+    // `ERASURE_STILL_ALLOWED` takes a linked `src/cli.ts` from "125 of 767 functions
+    // refused" to "does not parse" — every per-function self-hosting number in
+    // docs/self-hosting.md goes dark, because src/ names `unknown` 18 times.
+    //
+    // WHAT IT BUYS, measured per function rather than assumed. It clears NOTHING: the
+    // count is 125 either way. Every one of the 19 functions that erasure blocks is a
+    // REFLECTIVE walk (`Object.values(node)`, `Object.keys(obj)` + `obj[k]`,
+    // `Set<object>` identity) or a caller of one, and each of those is independently
+    // outside the subset. What changes is that all 19 diagnostics stop naming a type the
+    // source never contained: `Cannot compare number with null` becomes `Cannot compare
+    // unknown with null`, and `arg 0 expects number, got Stmt[]` becomes `arg 0 expects
+    // unknown, got Stmt[]`. A diagnostic that names a type the program does not contain
+    // sends the reader to fix the wrong thing, which is a defect in its own right.
+    //
+    // IT ALSO CLOSES THE HOLE `ERASURE_STILL_ALLOWED` DOCUMENTS. `function asStr(e:
+    // unknown): string { return e as string; }` reached clang as "'%t0' defined with
+    // type 'double' but expected 'ptr'" because `e` really WAS a `number` and the
+    // assertion adopted the erasure one indirection later. With no value assignable to
+    // the placeholder, `asStr(42)` is refused at the CALL and the cast is unreachable.
+    //
+    // THE COST, stated because it is a real one. Erasure makes a program work whenever
+    // every value reaching the slot happens to be a number: `function handle(e:
+    // unknown){…}; handle(42)` prints today and is refused here. That only ever held in
+    // the degenerate case where `unknown` was not needed — `handle("x")` was already
+    // refused, and with a lying message — but it is capability given up, not merely
+    // honesty gained.
+    if (id === "unknown") return UNKNOWN_TY;
     return "number" as Ty;
   }
 
