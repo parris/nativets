@@ -162,7 +162,53 @@ hazard twice before it was right:
   what a frame frees, and **an empty one is a well-formed value** — so losing it is a leak or
   double free that looks like a clean compile.
 
-**The acceptance criterion, and the reason delegation is the fix:** the `modules.ts` Renamer
+### RESOLVED 2026-08-11: delegation is NOT viable for `subExpr`/`subStmt` — do not attempt it
+
+**A lane took this and proved the premise wrong, empirically.** `ast.ts`'s walkers have three
+hooks — `fe` (Expr), `fs` (Stmt), `ft` (Ty). **There is no hook for binding-name strings, and
+the walkers structurally never touch them.** Measured with a scratch harness:
+
+    ForOfStmt  after walkStmtChildren: name=k name2=v   <- unchanged
+    TryStmt    after walkStmtChildren: param=err        <- unchanged
+    VarDecl    after walkStmtChildren: decls[0].name=x  <- unchanged
+    AssignExpr after walkExprChildren: target=x         <- unchanged
+
+`subExpr`/`subStmt` exist **solely** to rewrite those fields. Delegating them would silently
+drop all ten rename positions — `Identifier.name`, `AssignExpr.target`, `UpdateExpr.target`,
+`Declarator.name`, `ForOfStmt.name`, **`ForOfStmt.name2`**, `ForInStmt.name`, `TryStmt.param`,
+`BlockDrops.names`, `Param.name`. **That is the `name2` silent-wrong-answer bug plus nine
+siblings**, i.e. delegating would re-introduce the exact defect the work exists to prevent.
+
+This also explains why `modules.ts` *could* delegate: its Renamer rewrites **types** (via
+`ft`) and **whole identifier nodes** (via `fe`), neither of which is a bare string binding
+field. **The precedent is real but does not transfer.**
+
+Per-walk verdict: `subExpr` no; `subStmt` no; `collectBoundNames` no (delegating its
+recursion would descend into nested arrow bodies and over-collect names from another scope);
+`liftArrow` is not a walk; `freshenHofArrow` is moot, it only orchestrates the other three.
+
+**If the class is to be closed, the shape is:** add an optional fifth parameter
+`fn: (n: string) => string = KEEP_NAME` to `walkExprChildren`/`walkStmtChildren` and apply it
+at the ten binding positions — deliberately **not** at `MemberExpr.property` or
+`ObjectProperty.key`. Defaulted, so it is additive and no existing caller changes.
+
+**The sixth walker-miss was found and fixed on the way**: `collectBoundNames` had no
+`FuncDecl` arm while `subStmt` did, so a nested `function f()` inside an inlined HOF callback
+was never freshened — and in `childRenameMap` an inner `function f` would not mask an outer
+one, so the inner body's references were rewritten to the outer's fresh name. Latent rather
+than live: the declaration compiles, but any *reference* is NT1003.
+
+Two corrections to the stamp table above: **`liftedName` is written AND read only in
+`codegen.ts`** — it is `liftArrow`'s idempotence memo stamped on the node, a form of identity
+state no `Set<Expr>`/`Map<Expr,…>` census can see. The full cross-pass set codegen reads back
+is wider than six: `nullOnMove`, `dropOld`, `endDrops`, `narrowed`, `selfName`, `catchTy`,
+`elemTy`, `copyThis`, `paramTys`, `retTy`, `captures`, `ty`.
+
+**The spread criterion below still holds and was independently confirmed** — every arm of both
+`ast.ts` walkers is `{ ...node, kind: "K", … }`, so stamps survive rebuilds without anyone
+enumerating them. It is necessary but, as the hook finding shows, not sufficient.
+
+**The acceptance criterion, and the reason delegation LOOKED like the fix:** the `modules.ts` Renamer
 is safe from all six **by construction, not by care** — every rebuild is
 `{ ...node, kind: "K", field: v }` and the `ast.ts` walkers are spread-based too (17 and 57
 spread rebuilds respectively), so **unknown fields survive without anyone enumerating them**.

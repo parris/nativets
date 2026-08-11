@@ -182,7 +182,14 @@ A minimal actor runtime in C, driven from codegen. Build order (from research):
   callback's `return` (the same codegen gap `test/hof-drops.test.ts` already pins for arrays).
   Re-adding function types to `isLinearTy` is NOT the way to widen this: measured, the naive
   version frees the escaping-counter idiom's env and exits 255.
-- **Still open:** values escaping through a `break`/`continue`/`throw` out of a block, temporaries
+- **Closed:** `break`/`continue` out of a block. Both jumped straight to the loop label, past the
+  trailing `BlockDrops` marker, so every linear local of every block they left leaked — and since
+  `break` is the mandatory terminator of a `switch` case, that was the ordinary shape, not an edge
+  case. `codegen.ts` now keeps a `blockScopes` stack mirroring the ownership pass's, and a jump
+  unwinds every scope between itself and its target (`test/break-drops.test.ts`, measured at two
+  scales: switch-break 100→1000 and continue 100→1000 became 0/0). Loop entries carry SEPARATE
+  break and continue depths, because a `switch` inherits the enclosing loop's `continue` target.
+- **Still open:** values escaping through a `throw` out of a block, temporaries
   in non-chain positions (call arguments), chain temporaries whose method hands the receiver
   back, array/object ELEMENTS (an array does not recursively
   free what its slots point at), module-level bindings a function may have aliased, and the

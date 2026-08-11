@@ -813,6 +813,23 @@ interface StrTemp { v: string; fresh: boolean; }
  * `genExprInner` is only that a blocker EARLIER in that body masks it, which is the
  * first-blocker masking `test/blocker-metric.ts` warns hides refusals a lane ADDS.
  */
+/**
+ * The `BlockDrops` set a statement list carries, or `[]` if it has none.
+ *
+ * The marker is always the LAST statement (`setBlockDrops` in ast.ts replaces in place
+ * precisely so it stays last through the ownership pass's five fixpoint walks), so this
+ * is a single look at the tail rather than a scan. Spelled with the length hoisted, the
+ * way `setBlockDrops` itself is: `list[list.length - 1]` reads index `-1` on an empty
+ * list, which node answers `undefined` and this compiler PANICS on by design (Stage 41,
+ * test/no-index-last.test.ts).
+ */
+function dropsOf(list: Stmt[]): string[] {
+  const n = list.length;
+  if (n === 0) return [];
+  const last = list[n - 1]!;
+  return last.kind === "BlockDrops" ? last.names : [];
+}
+
 function allocatesString(e: Expr): boolean {
   if (e.kind === "TemplateLiteral") return true;
   if (e.kind !== "BinaryExpr") return false;
@@ -1123,7 +1140,28 @@ class FnGen {
   private lbl = 0;
   private varTypes = new Map<string, Ty>();
   private retTy: Ty = "number";
-  private loops: { brk: string; cont: string }[] = [];
+  /**
+   * Active `break`/`continue` targets, each with the BLOCK-SCOPE DEPTH it sits at.
+   *
+   * The two depths are not the same number and that is the whole point of storing both.
+   * A `switch` pushes an entry so that `break` can find it, but its `cont` is INHERITED
+   * from the enclosing loop — so a `continue` inside a switch inside a loop leaves the
+   * case's scope AND the loop body's, while a `break` at the same spot leaves only the
+   * case's. One depth would fix one of them and leave the other leaking.
+   */
+  private loops: { brk: string; cont: string; brkDepth: number; contDepth: number }[] = [];
+  /**
+   * The stack of live block scopes' drop sets — `blockScopes[i]` is the `BlockDrops`
+   * names of the i-th enclosing statement list (empty when that list has no marker).
+   *
+   * This mirrors, in codegen, the `this.scopes` stack the ownership pass keeps while it
+   * walks. It exists because the marker is a TRAILING statement: `genStmts` stops at the
+   * first terminated block, so a jump reached the loop label without ever reaching the
+   * markers of the blocks it was leaving. `return` never had the problem — it carries
+   * its own `ReturnStmt.drops` stamped by `ownedInScope` — and it deliberately still
+   * does; this stack is read only by `break`/`continue`.
+   */
+  private blockScopes: string[][] = [];
   /** In a lifted arrow: captured var name -> its slot in the closure env (%__clo). */
   private captures = new Map<string, { index: number; ty: Ty }>();
   /** Is `name` a user-bound local/param/capture (so a `Foo.bar` isn't a builtin namespace)? */
@@ -1278,6 +1316,7 @@ class FnGen {
     this.entryAllocas = []; this.blocks = []; this.cur = 0; this.tmp = 0; this.lbl = 0;
     this.varTypes = new Map();
     this.loops = [];
+    this.blockScopes = [];
     this.captures = new Map();
     this.tryHandlers = [];
     this.finallyStack = [];
@@ -1321,10 +1360,39 @@ class FnGen {
   /** Generate a statement sequence, stopping once the block is terminated
    *  (so code after return/break/continue isn't emitted as unreachable IR). */
   private genStmts(list: Stmt[]): void {
+    // Every statement list is a scope entry, whether or not it has a marker: the depth
+    // arithmetic a jump does is RELATIVE (from here down to its target's depth), so a
+    // list with no drops contributing an empty entry costs nothing and keeps the two
+    // stacks in step without `genStmts` having to know which lists the ownership pass
+    // chose to call `scoped()` on. `dropsOf` reads the marker, which is always LAST.
+    this.blockScopes.push(dropsOf(list));
     for (const s of list) {
       if (this.isTerminated()) break;
       this.genStmt(s);
     }
+    this.blockScopes.pop();
+  }
+
+  /**
+   * Unwind block scopes for a `break`/`continue`: free the linear locals of every scope
+   * between here and `depth`, innermost first — the order `ownedInScope` builds a
+   * `return`'s list in, and the reverse of construction.
+   *
+   * This does NOT need a fresh move analysis, and that is the load-bearing claim. The
+   * names come from the block's own `BlockDrops`, which `droppable` already filtered:
+   * a name moved on EVERY path is absent from the list, and a name moved on SOME path is
+   * in `condDrops`, so `nullOnMove` stores null into its slot at the move site and
+   * `nt_arr_free(NULL)`/`nt_obj_free(NULL)` are no-ops. The pointer IS the drop flag.
+   * The jump therefore frees exactly what the fall-through out of the same block would
+   * have freed, which is the property that makes it a leak fix rather than a new
+   * double-free surface.
+   *
+   * The one case it under-frees is a name moved unconditionally AFTER the jump: it is
+   * `must`-moved at the end of the block, so it is in no list, yet the jump's path never
+   * reached the move. That leaks exactly as it did before this existed.
+   */
+  private emitJumpDrops(depth: number): void {
+    for (let i = this.blockScopes.length - 1; i >= depth; i--) this.emitDrops(this.blockScopes[i] ?? []);
   }
 
   /** Emit deterministic drops (RAII frees) for owned linear locals. */
@@ -1847,7 +1915,10 @@ class FnGen {
         const cond = this.genCond(s.test);
         this.terminate(`br i1 ${cond}, label %${bodyLbl}, label %${endLbl}`);
         this.to(this.block(bodyLbl));
-        this.loops.push({ brk: endLbl, cont: condLbl });
+        // Both depths are the CURRENT one: the body's own scope is pushed by the
+        // `genStmts` below, so a jump inside the body unwinds it and every block nested
+        // in it. A real loop is the one place `break` and `continue` agree (see `loops`).
+        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
@@ -1873,7 +1944,7 @@ class FnGen {
           this.terminate(`br label %${bodyLbl}`);
         }
         this.to(this.block(bodyLbl));
-        this.loops.push({ brk: endLbl, cont: updLbl });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -1889,7 +1960,10 @@ class FnGen {
         const endLbl = this.label("enddo");
         this.terminate(`br label %${bodyLbl}`);
         this.to(this.block(bodyLbl));
-        this.loops.push({ brk: endLbl, cont: condLbl });
+        // Both depths are the CURRENT one: the body's own scope is pushed by the
+        // `genStmts` below, so a jump inside the body unwinds it and every block nested
+        // in it. A real loop is the one place `break` and `continue` agree (see `loops`).
+        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
@@ -1948,7 +2022,7 @@ class FnGen {
             this.emit(`store ${llvmTy(vt)} ${this.fromSlot(vs, vt)}, ptr ${this.addr(s.name2!)}`);
           }
         }
-        this.loops.push({ brk: endLbl, cont: updLbl });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -1981,8 +2055,15 @@ class FnGen {
         const endLbl = this.label("endsw");
         const bodyLbls = s.cases.map(() => this.label("case"));
         const defaultIdx = s.cases.findIndex((c) => c.test === null);
-        const outerCont = this.loops.length ? this.loops[this.loops.length - 1]!.cont : endLbl;
-        this.loops.push({ brk: endLbl, cont: outerCont });
+        // A `switch` is a `break` target but NOT a `continue` target: a `continue` inside
+        // one belongs to the enclosing loop, so its label AND its unwind depth are both
+        // inherited. That is the whole reason the entry carries two depths. Inheriting
+        // the label without the depth would unwind only as far as the switch and leave
+        // the loop body's own locals leaking — half a fix, silently.
+        const outer = this.loops.length ? this.loops[this.loops.length - 1]! : null;
+        const outerCont = outer ? outer.cont : endLbl;
+        const brkDepth = this.blockScopes.length;
+        this.loops.push({ brk: endLbl, cont: outerCont, brkDepth, contDepth: outer ? outer.contDepth : brkDepth });
         // dispatch chain
         for (let i = 0; i < s.cases.length; i++) {
           const c = s.cases[i]!;
@@ -2029,7 +2110,7 @@ class FnGen {
         const slot = this.fresh();
         this.emit(`${slot} = call i64 @nt_arr_get(ptr ${arr}, double ${iB})`);
         this.emit(`store ptr ${this.fromSlot(slot, "string")}, ptr ${this.addr(s.name)}`);
-        this.loops.push({ brk: endLbl, cont: updLbl });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -2164,17 +2245,28 @@ class FnGen {
         return;
       // Block-scoped RAII: free the linear locals this NESTED block declared (a
       // function/module body has none — those use endDrops). The marker is last in the
-      // list, so a block that terminated early (return/break/continue) never reaches it
-      // — a leak, never a double free.
+      // list, so a block that terminated early never reaches it — which is why a jump
+      // out of the block has to emit the same frees itself, on its way past.
+      //
+      // The two paths cannot both run: `terminate` marks the basic block terminated and
+      // `genStmts` stops at the first terminated block, so once a `break` has unwound,
+      // the markers of every list it unwound are unreachable in that block. A jump frees
+      // once, a fall-through frees once, and never both.
       case "BlockDrops":
         this.emitDrops(s.names);
         return;
-      case "BreakStmt":
-        this.terminate(`br label %${this.loops[this.loops.length - 1]!.brk}`);
+      case "BreakStmt": {
+        const t = this.loops[this.loops.length - 1]!;
+        this.emitJumpDrops(t.brkDepth);
+        this.terminate(`br label %${t.brk}`);
         return;
-      case "ContinueStmt":
-        this.terminate(`br label %${this.loops[this.loops.length - 1]!.cont}`);
+      }
+      case "ContinueStmt": {
+        const t = this.loops[this.loops.length - 1]!;
+        this.emitJumpDrops(t.contDepth);
+        this.terminate(`br label %${t.cont}`);
         return;
+      }
       case "FuncDecl":
         return;
     }
@@ -2318,9 +2410,25 @@ class FnGen {
     return t;
   }
 
-  /** Coerce any value to a `double` (JS ToNumber for the supported types). */
+  /**
+   * Coerce a value to a `double` — JS ToNumber, for the types `checkNumberCoercion`
+   * (src/checker.ts) admits.
+   *
+   * `NaN` is the LAST case, not the default one. This used to end in a bare
+   * `return llvmDouble(NaN)`, and the checker returned `number` for every `+` operand
+   * without looking at one, so the fall-through was reached by ordinary code and answered
+   * a number node does not print, at exit 0: `+new Date(1000)` was NaN (node 1000), `+[]`
+   * was NaN (node 0), `+[1]` was NaN (node 1) and a `number | null` holding null was NaN
+   * (node 0). Anything not on the list below is refused in the checker now, and reaching
+   * this line with it is a compiler bug rather than the user's problem.
+   */
   private coerceToNumber(val: Val): string {
     if (val.ty === "number") return val.v;
+    // A Date IS its time value (a `double`), and ToNumber of a Date is exactly that value:
+    // `ToPrimitive(d, number)` runs `valueOf` FIRST. The string hint would run `toString`
+    // and give the weekday form instead, which is why `"" + date` stays refused (NT1024)
+    // while this is the identity. `%d` in console.log already had this rule.
+    if (isDateTy(val.ty)) return val.v;
     if (val.ty === "string") {
       const t = this.fresh();
       this.emit(`${t} = call double @js_str_to_num(ptr ${val.v})`);
@@ -2332,7 +2440,51 @@ class FnGen {
       return t;
     }
     if (val.ty === "null") return llvmDouble(0);
-    return llvmDouble(NaN); // undefined
+    if (val.ty === "undefined" || val.ty === "void") return llvmDouble(NaN);
+    // A nullable BOX branches on its TAG, and the two nullish answers DIFFER — `null` is 0
+    // and `undefined` is NaN — so this cannot be folded into a single constant. The raw
+    // box reaching the fall-through is what made `const n: number | null = null; +n` NaN.
+    if (isNullableTy(val.ty)) return this.coerceToNumberNullable(val.v, baseTy(val.ty), nullishKind(val.ty));
+    // An ARRAY has no `valueOf`, so ToNumber is StringToNumber of its `toString` — which
+    // IS `join(",")`. `[]` gives `""` → 0 and `[1]` gives `"1"` → 1, both of which node
+    // prints and the fall-through did not. Only the element types `joinFn` renders exactly
+    // reach here; the checker refuses the rest, so this is not a fallback.
+    if (isArrayTy(val.ty)) {
+      // The join allocates, and `js_str_to_num` only READS it — so this frame is the last
+      // owner and the buffer is dead on the next instruction. Released here for the same
+      // reason `releaseTemp` releases a concat operand: without it `+arr` in a loop would
+      // leak one string per iteration, which is the residue shape test/fuzz2-diff.test.ts
+      // measures.
+      const s = this.coerceToString(val);
+      const t = this.fresh();
+      this.emit(`${t} = call double @js_str_to_num(ptr ${s})`);
+      this.emit(`call void @nt_str_release(ptr ${s})`);
+      return t;
+    }
+    throw internalError(`coerceToNumber of ${val.ty} (the checker should have refused it — see NYI.TONUMBER)`);
+  }
+
+  /** node's ToNumber of a nullable box: 0 when `null`, NaN when `undefined`, else the
+   *  value's own coercion. Branched rather than computed unconditionally because the
+   *  absent case's value slot is 0, and unpacking that as a string would hand
+   *  `js_str_to_num` a null pointer. */
+  private coerceToNumberNullable(ptr: string, base: Ty, which: "undefined" | "null"): string {
+    const slot = this.slot("number");
+    const present = this.fresh();
+    this.emit(`${present} = icmp eq i64 ${this.nullTag(ptr)}, 2`);
+    const pLbl = this.label("cnp"), aLbl = this.label("cna"), end = this.label("cne");
+    this.terminate(`br i1 ${present}, label %${pLbl}, label %${aLbl}`);
+    this.to(this.block(pLbl));
+    const inner = this.coerceToNumber({ v: this.fromSlot(this.nullVal(ptr), base), ty: base });
+    this.emit(`store double ${inner}, ptr ${slot}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(aLbl));
+    this.emit(`store double ${llvmDouble(which === "null" ? 0 : NaN)}, ptr ${slot}`);
+    this.terminate(`br label %${end}`);
+    this.to(this.block(end));
+    const t = this.fresh();
+    this.emit(`${t} = load double, ptr ${slot}`);
+    return t;
   }
 
   /** Pack a value into a 64-bit array slot. */
@@ -3099,6 +3251,16 @@ class FnGen {
           }
           const l = this.genExpr(e.left);
           const r = this.genExpr(e.right);
+          // Unit types, BEFORE a register is allocated: every value of `undefined` is THE
+          // undefined and every value of `null` is THE null, so equality is a CONSTANT —
+          // node's `null === null` is `true`. (The checker already refused the mixed pair,
+          // so reaching here means both sides are the same unit type.) These used to fall
+          // all the way into the `js_str_eq` arm below and hand it an `i8`, which made
+          // `const a = null; const b = null; a === b` a clang error naming an SSA register
+          // rather than the `true` node prints. Both operands are still evaluated above,
+          // for their side effects.
+          if (lt === "undefined" || lt === "null" || lt === "void")
+            return { v: op === "===" || op === "==" ? "true" : "false", ty: "boolean" };
           const t = this.fresh();
           if (lt === "number") {
             this.emit(`${t} = fcmp ${FCMP.get(op)!} double ${l.v}, ${r.v}`);
@@ -3115,6 +3277,14 @@ class FnGen {
             this.emit(`${c} = call i32 @js_str_cmp(ptr ${l.v}, ptr ${r.v})`);
             this.emit(`${t} = icmp ${op === "<" ? "slt" : op === "<=" ? "sle" : op === ">" ? "sgt" : "sge"} i32 ${c}, 0`);
           } else {
+            // The BYTE-WISE arm, and it is only correct for a `ptr`. This was the plain
+            // `else` — the DEFAULT — so every type whose representation is not a pointer
+            // reached it and handed a `double`/`i1`/`i8` to a `ptr` parameter: `date ===
+            // date` emitted `js_str_eq(ptr <double>)` and came back to the user as a raw
+            // clang error with no NT code and no hint. The guard makes any remaining
+            // member of that class a loud compiler bug report instead, naming the type.
+            if (llvmTy(lt) !== "ptr")
+              throw internalError(`\`${op}\` on ${lt}, whose representation is \`${llvmTy(lt)}\` and not a pointer — the checker should have refused it, or this chain needs an arm for it`);
             const eq = this.fresh();
             this.emit(`${eq} = call i32 @js_str_eq(ptr ${l.v}, ptr ${r.v})`);
             this.emit(`${t} = icmp ${op === "===" || op === "==" ? "ne" : "eq"} i32 ${eq}, 0`);
@@ -3775,11 +3945,41 @@ class FnGen {
       if (isDateTy(recv.ty)) {
         const p = e.callee.property;
         if (p === "getTime" || p === "valueOf") return { v: recv.v, ty: "number" };
-        if (p === "toISOString" || p === "toJSON") {
+        if (p === "toISOString") {
           const t = this.fresh();
           this.emit(`${t} = call ptr @nt_date_to_iso(double ${recv.v})`);
           this.emitExcCheck();
           return { v: t, ty: "string" };
+        }
+        // `toJSON` used to share the line above, which is what made an Invalid Date's
+        // `.toJSON()` THROW. 21.4.4.37 tests the time value at step 3 and returns `null`
+        // for a non-finite one, so step 4's `toISOString` invocation is never reached and
+        // the method cannot throw — hence `string | null`, and hence the BRANCH: the ISO
+        // call is fallible, so it may only be evaluated on the finite side.
+        if (p === "toJSON") {
+          const slot = this.slot("string");
+          const nan = this.fresh();
+          this.emit(`${nan} = fcmp uno double ${recv.v}, ${recv.v}`);
+          const nLbl = this.label("tjn"), vLbl = this.label("tjv"), end = this.label("tje");
+          this.terminate(`br i1 ${nan}, label %${nLbl}, label %${vLbl}`);
+          this.to(this.block(vLbl));
+          const iso = this.fresh();
+          this.emit(`${iso} = call ptr @nt_date_to_iso(double ${recv.v})`);
+          this.emit(`store ptr ${iso}, ptr ${slot}`);
+          this.terminate(`br label %${end}`);
+          this.to(this.block(nLbl));
+          this.emit(`store ptr null, ptr ${slot}`);
+          this.terminate(`br label %${end}`);
+          this.to(this.block(end));
+          const got = this.fresh();
+          this.emit(`${got} = load ptr, ptr ${slot}`);
+          const isNull = this.fresh();
+          this.emit(`${isNull} = icmp eq ptr ${got}, null`);
+          const tag = this.fresh();
+          this.emit(`${tag} = select i1 ${isNull}, i64 1, i64 2`); // 1 = null, 2 = present
+          const val = this.fresh();
+          this.emit(`${val} = ptrtoint ptr ${got} to i64`);
+          return { v: this.nullBox(tag, val), ty: makeNullable("null", "string") };
         }
         const g = DATE_GETTERS.get(p)!;
         const t = this.fresh();
@@ -5572,6 +5772,17 @@ class FnGen {
         case "SwitchStmt": for (const c of s.cases) acc = this.collectBoundNames(c.body, acc); break;
         case "BlockStmt": acc = this.collectBoundNames(s.body, acc); break;
         case "MultiStmt": acc = this.collectBoundNames(s.stmts, acc); break;
+        // A nested `function f()` binds `f` in the arrow's scope exactly as a `let` does.
+        // Unreachable as a miscompile today only because any REFERENCE to a nested function
+        // is NT1003 ("function values / unknown callee") — the declaration itself compiles
+        // fine, so the binding is already in the tree. Missing it here is the same shape as
+        // the `name2` bug: two inlined callbacks in one frame would both keep the source
+        // name `f`. It also feeds `childRenameMap`, where the omission is a SHADOWING miss —
+        // an inner `function f` would not mask an outer `f`, so the inner body's references
+        // would be rewritten to the outer's fresh name. Collected here for the same reason
+        // `BlockDrops` is renamed in `subStmt`: it costs nothing and stops this being a live
+        // miscompile the day nested functions become callable.
+        case "FuncDecl": acc = acc.add(s.name); break;
         case "TryStmt":
           if (s.param) acc = acc.add(s.param);
           acc = this.collectBoundNames(s.block, acc);

@@ -579,3 +579,65 @@ console.log(a, b ?? 0);
 `);
   });
 });
+
+/*
+ * A METHOD CALL on a nullable receiver — NT1002, and the HINT it carries.
+ *
+ * The feature is genuinely deferred: `a.next?.m()` needs the null test plus a join, and
+ * `a.next.m()` is a tsc error to begin with. Both spellings land on the same throw, which
+ * is the LAST-RESORT arm of the method-call chain — `nyi(NYI.OBJECT, …)`. That bucket's
+ * catalog hint reads "object literals need the heap value model", which is about a
+ * milestone that shipped and has nothing to do with a nullable receiver. Objects, classes
+ * and `?.` on a FIELD all work; the one thing that does not is calling a method through
+ * the nullable, and the reader's actual next move is to narrow it.
+ *
+ * A hint that names a rewrite is only honest if the rewrite COMPILES (docs/self-hosting.md:
+ * "advice a diagnostic gives has to compile"), so each of the three this names is compiled
+ * AND run against node below.
+ */
+describe("a method call on a nullable receiver names a rewrite that compiles", () => {
+  const NULLABLE_RECEIVER = `
+class Node3 {
+  label: string;
+  next: Node3 | null;
+  constructor(label: string, next: Node3 | null = null) { this.label = label; this.next = next; }
+  name(): string { return this.label; }
+}
+const a = new Node3("a", new Node3("b"));
+`;
+
+  test("`?.m()` is refused as a NULLABLE receiver, not as an object-literal gap", () => {
+    const text = rejection(`${NULLABLE_RECEIVER}console.log(a.next?.name());`);
+    expect(text).toContain("NT1002");
+    // It must say what is actually wrong.
+    expect(text).toContain("nullable");
+    // And it must NOT repeat the bucket's inherited claim: object literals work.
+    expect(text).not.toContain("object literals need the heap value model");
+  });
+
+  test("the non-optional `.m()` on a nullable receiver gets the same honest hint", () => {
+    const text = rejection(`${NULLABLE_RECEIVER}console.log(a.next.name());`);
+    expect(text).toContain("NT1002");
+    expect(text).toContain("nullable");
+    expect(text).not.toContain("object literals need the heap value model");
+  });
+
+  // ---- the three rewrites the hint names, each compiled and matched against node.
+  test("rewrite 1 — bind to a local and narrow it", async () => {
+    await expectNode(`${NULLABLE_RECEIVER}
+const n = a.next;
+if (n !== null) console.log(n.name());
+`);
+  });
+
+  test("rewrite 2 — the non-null assertion", async () => {
+    await expectNode(`${NULLABLE_RECEIVER}console.log(a.next!.name());`);
+  });
+
+  test("rewrite 3 — a conditional that supplies the absent case", async () => {
+    await expectNode(`${NULLABLE_RECEIVER}
+const n = a.next;
+console.log(n === null ? "none" : n.name());
+`);
+  });
+});

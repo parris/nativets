@@ -1059,6 +1059,89 @@ console.log(b === null || a !== b, c === null || a !== c);`);
 });
 
 /*
+ * THE REST OF THE SAME FALL-THROUGH.
+ *
+ * The equality chain in `genExpr`'s `BinaryExpr` (src/codegen.ts) dispatched on `number`,
+ * `boolean` and array/object POINTER IDENTITY, and then ended in a bare `else` that called
+ * `js_str_eq(ptr, ptr)`. That `else` was the default arm, not the string arm, so any type
+ * whose representation is NOT a pointer reached it and handed a `double` or an `i8` to a
+ * `ptr` parameter. clang rejected the module, so neither of these was ever a MISCOMPILE —
+ * but both reached the user as a raw clang error naming an SSA register, with no `NT****`
+ * code and no hint, which is the one thing the diagnostics contract promises never happens:
+ *
+ *     const a = new Date(1000); const b = new Date(2000); a === b;
+ *     error: '%t2' defined with type 'double' but expected 'ptr'
+ *
+ *     const a = null; const b = null; a === b;      // node: true
+ *     error: '%t0' defined with type 'i8' but expected 'ptr'
+ *
+ * They get OPPOSITE answers, because the two questions are different.
+ *
+ * `null === null` is answerable: `null` and `undefined` are unit types, so every value of
+ * one is the same value, and node's answer is a constant `true` (`false` for `!==`). It is
+ * now computed as that constant.
+ *
+ * `date === date` is NOT answerable. node compares Date IDENTITY — two distinct Dates are
+ * `false` however equal their instants, and an Invalid Date IS `===` itself even though
+ * `NaN !== NaN` — and nativets represents a Date AS its time value, so there is no identity
+ * left to compare. Both plausible codegens are wrong for a program somebody writes, so it
+ * is REFUSED with a code that names the workaround instead. The hint's spelling is
+ * compiled against node below rather than asserted, because a hint that hands back a
+ * DIFFERENT answer is worse than no hint.
+ */
+describe("`===` on the types the js_str_eq fall-through was reaching", () => {
+  test("`null === null` is node's `true`, not a clang error", async () => {
+    await expectNode(`const a = null;
+const b = null;
+console.log(a === b, a !== b);
+const u = undefined;
+const v = undefined;
+console.log(u === v, u !== v);`);
+  });
+
+  test("`date === date` is refused with a CODE — never a bare clang error", () => {
+    expectRejected(
+      `const a = new Date(1000);\nconst b = new Date(2000);\nconsole.log(a === b);`,
+      "NT1024", "identity");
+  });
+
+  test("`!==` between Dates is the same refusal", () => {
+    expectRejected(
+      `const a = new Date(1000);\nconst b = new Date(2000);\nconsole.log(a !== b);`,
+      "NT1024", "identity");
+  });
+
+  /*
+   * The hint says to compare `.getTime()`, and warns that it is a VALUE comparison rather
+   * than node's identity one. Both halves of that warning are compiled here: two distinct
+   * Dates at the same instant are `true` by time value where node's `===` is `false`, and
+   * an Invalid Date is `false` against itself where node's `===` is `true`. If the hint
+   * ever stops saying so, this is the test that notices.
+   */
+  test("the hint's `.getTime()` spelling compiles, and its caveat is node-true", async () => {
+    // Half one: BOTH spellings the hint hands back really compile here, and agree with
+    // node. `+a === +b` only became available in this same change (the numeric coercion of
+    // a Date), so a hint offering it before then would have been a second dead end.
+    await expectNode(`const a = new Date(1000);
+const b = new Date(1000);
+const inv = new Date(NaN);
+console.log(a.getTime() === b.getTime());
+console.log(+a === +b);
+console.log(inv.getTime() === inv.getTime());
+console.log(+inv === +inv);`);
+    // Half two: node's IDENTITY answers for the same two pairs — `false` where the time
+    // values are equal, `true` where they are both NaN. Exactly the inversion the hint
+    // warns about, so the warning is measured rather than asserted. (node only: the
+    // construct is refused here, which is what this whole block is about.)
+    expect(runWithNode(`const a = new Date(1000);
+const b = new Date(1000);
+const inv = new Date(NaN);
+console.log(a === b);
+console.log(inv === inv);`).stdout).toBe("false\ntrue\n");
+  });
+});
+
+/*
  * A NAME'S NARROWING IS NOT POISONED BY AN UNRELATED FUNCTION'S OWN LOCAL.
  *
  * `Checker.closureAssigned` is the program-wide set of names assigned inside some
