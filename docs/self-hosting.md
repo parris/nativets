@@ -215,6 +215,44 @@ when the frame has no handler. The mechanism, the refcount discipline for the pe
 message, and the drop-set proof are all in place; what is left is the annotation and the
 scale.
 
+#### …except it is NOT the annotation and the scale. It is the PAYLOAD WIDTH, and the fixpoint is priced at zero behind it
+
+The paragraph above is wrong about what blocks the transitive step, and every number in
+the table above it is a CALL-GRAPH number that cannot see why. Propagation rides the
+runtime's pending-exception slot, and that slot is one `const char *` (`g_exc_msg` in
+`runtime/runtime.c`). A `throw` can only cross a frame if its payload FITS: a `string`, or
+the one-field `{message:string}` that `emitExcCheck` already reconstructs — this is
+`codegen.ts::raisableTy`, and it is a hard constraint of the mechanism, not a refusal
+anybody chose to keep.
+
+`src/` throws CLASS INSTANCES. Measured on the linked, *checked* stage-1 tree:
+
+| uncovered `throw` payload | sites | carriable? |
+|---|---|---|
+| `NTError{message,name,diag:{code,message,…}}` | 145 | **no** — 3 fields, one of them nested |
+| `InternalError{message,name}` | 16 | **no** — 2 fields |
+| `LexError{message:string}` | 9 | yes |
+| `BuildError{message:string}` | 7 | yes |
+| (in a body the checker refused, so never typed) | 319 | unknown |
+
+**So of the 129 SEED functions, SEVEN have a payload the flag can hold** — and the
+transitive fixpoint has a ceiling of those 7 however good it is. `bun run
+test/escape-metric.ts` now reports this as its `SEED w/ CARRIABLE load` row, cross-checked
+against an independent prototype (both answer 7) and against codegen itself, which accepts
+a reduced string-throwing seed and refuses a two-field one at exactly the predicted site.
+
+The one-frame scan confirms it from the other end: run the real `scanEscaping` on the
+linked stage-1 program and the escaping set is **0** — not 16, not 7. (Careful: it must be
+run on a CHECKED program. `linkProgram` alone leaves every `argument.ty` undefined, which
+makes every payload look uncarriable and every such measurement a tautology.)
+
+**The prerequisite is therefore a RUNTIME change, not more call-graph analysis**: widen the
+pending slot to carry an owned object handle (a second `void *` plus a shape tag, with a
+defined owner across `raise` → `clear`, and `nt_obj_free` being SHALLOW so a nested `diag`
+needs a real answer rather than an assumption). Until that exists, `CallExpr.unwindDrops`
+and the third `emitExcCheck` arm are correct work that moves stage-1 by zero — the same
+verdict the one-frame lane reached, for a different reason and one layer down.
+
 **One correctness fix fell out of it.** A string-typed `catch (e)` binding was never in
 `strLocals`, so it was never released — invisible only because every message that could
 reach it was untracked (a literal, or one of the runtime's `nativets_alloc`ed-but-
