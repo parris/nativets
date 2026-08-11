@@ -1176,25 +1176,35 @@ class Analyzer {
         }
         if (consume && this.borrowBindings.has(e.name)) {
           const owner = this.aliasOf.get(e.name);
+          // Built as a statement rather than a nested ternary: the arms are `string`,
+          // `string` and `undefined`, so the inner conditional is `string | undefined`
+          // and the outer one is NT2001 "Ternary branches differ: string vs ?Ustring".
+          // Same three arms, same order, same text.
+          let hint: string | undefined = undefined;
+          if (owner !== undefined && owner !== "") {
+            hint = `\`${e.name}\` names the value \`${owner}\` owns, so handing it out would leave \`${owner}\` to free a pointer the receiver still holds — hand out \`${owner}\` itself instead`;
+          } else if (this.borrowParams.has(e.name)) {
+            // The one CONSUMING position the language has, and the way out of this
+            // refusal for the shape it actually blocks: storing a parameter into an
+            // object. `constructor(readonly d: T)` makes the parameter a move rather
+            // than a borrow, and the `new` site gives the value up.
+            hint = `a parameter is a BORROW — the caller still owns the value and drops it when its scope ends, so a second owner here would free it twice. To take OWNERSHIP of an argument, declare it as a constructor PARAMETER PROPERTY (\`constructor(readonly ${e.name}: T)\`), which stores it into the object and moves it at every \`new\` site; otherwise build and return a new value instead of handing this one out`;
+          }
           this.report({
             code: OWN_CODES.MOVE_OUT_OF_BORROW,
             message: `cannot move out of \`${e.name}\`: it is borrowed (the owner is elsewhere)`,
             line: e.loc?.line ?? 0,
-            hint: owner !== undefined && owner !== ""
-              ? `\`${e.name}\` names the value \`${owner}\` owns, so handing it out would leave \`${owner}\` to free a pointer the receiver still holds — hand out \`${owner}\` itself instead`
-              : this.borrowParams.has(e.name)
-                // The one CONSUMING position the language has, and the way out of this
-                // refusal for the shape it actually blocks: storing a parameter into an
-                // object. `constructor(readonly d: T)` makes the parameter a move rather
-                // than a borrow, and the `new` site gives the value up.
-                ? `a parameter is a BORROW — the caller still owns the value and drops it when its scope ends, so a second owner here would free it twice. To take OWNERSHIP of an argument, declare it as a constructor PARAMETER PROPERTY (\`constructor(readonly ${e.name}: T)\`), which stores it into the object and moves it at every \`new\` site; otherwise build and return a new value instead of handing this one out`
-                : undefined,
+            hint: hint,
           });
           return;
         }
         if (!this.linear.has(e.name)) return;
+        // `st !== undefined && st.moved` rather than `st?.moved`: the optional chain does
+        // not carry its narrowing into the body, so `st.at` below is "possibly undefined"
+        // (NT2001). `Map.get` never yields `null`, so the two tests admit exactly the
+        // same states.
         const st = state.get(e.name);
-        if (st?.moved) {
+        if (st !== undefined && st.moved) {
           this.report({ code: OWN_CODES.USE_AFTER_MOVE, message: `use of moved value: \`${e.name}\``, line: e.loc?.line ?? 0, movedAt: st.at });
           return;
         }
