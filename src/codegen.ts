@@ -478,6 +478,7 @@ const DECLARES = [
   "declare ptr @js_str_concat(ptr, ptr)",
   "declare double @js_str_len(ptr)",
   "declare i32 @js_str_eq(ptr, ptr)",
+  "declare i32 @js_same_value(double, double)",
   "declare i32 @js_str_cmp(ptr, ptr)",
   "declare ptr @js_num_to_str(double)",
   "declare ptr @js_bool_to_str(i32)",
@@ -3764,6 +3765,33 @@ class FnGen {
           this.emit(`store i64 ${this.toSlot(v)}, ptr ${gep}`);
         });
         return { v: obj, ty };
+      }
+      // `Object.is` is handled BEFORE the shared `genExpr(e.args[0])` below, which types
+      // its result as the object receiver every other `Object.*` static takes. SameValue
+      // (ES 7.2.10): NaN equals NaN, and `+0` does NOT equal `-0` — the opposite of
+      // `.includes`'s SameValueZero on that second pair, so the two never share a routine.
+      // The checker has already refused a non-primitive argument.
+      if (e.callee.property === "is") {
+        const a = this.genExpr(e.args[0]!);
+        const b = this.genExpr(e.args[1]!);
+        const t = this.fresh();
+        // Different TYPES are never SameValue, and nothing is coerced: `Object.is(0, false)`
+        // is `false` where `0 == false` is `true`. Both operands are still evaluated, above,
+        // for their side effects.
+        if (a.ty !== b.ty) return { v: "false", ty: "boolean" };
+        if (a.ty === "number") {
+          const r = this.fresh();
+          this.emit(`${r} = call i32 @js_same_value(double ${a.v}, double ${b.v})`);
+          this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        } else if (a.ty === "boolean") {
+          this.emit(`${t} = icmp eq i1 ${a.v}, ${b.v}`);
+        } else {
+          // string: by value, so an interned literal and a built string are SameValue.
+          const r = this.fresh();
+          this.emit(`${r} = call i32 @js_str_eq(ptr ${a.v}, ptr ${b.v})`);
+          this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        }
+        return { v: t, ty: "boolean" };
       }
       const o = this.genExpr(e.args[0]!);
       if (e.callee.property === "entries") {

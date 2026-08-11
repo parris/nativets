@@ -5274,5 +5274,31 @@ hint. `[true, false].includes(true)` now compiles and matches node.
 
 All three are pinned in `test/array-includes.test.ts`.
 
+## `Object.is` — implemented over primitives, REFUSED on a reference
+
+`Object.is` is SameValue (ES 7.2.10), the third equality in the language. It is now
+implemented for `number`, `string` and `boolean`:
+
+|  | `NaN` vs `NaN` | `+0` vs `-0` |
+|---|---|---|
+| `===` | `false` | `true` |
+| SameValueZero (`Array#includes`, `Set`/`Map` keys) | `true` | `true` |
+| SameValue (`Object.is`) | `true` | **`false`** |
+
+The two "NaN-aware" comparators are deliberately **opposite on signed zero**, so
+`js_same_value` and `nt_arr_includes_num` must never be unified — pinned by the
+cross-check in `test/object-is.test.ts`.
+
+On a **non-primitive** argument node's SameValue is reference identity, which this value
+model does not carry (copy-on-write arrays, single-owner moves), so it is refused —
+`NT1002`, with a hint that says *that*.
+
+**The old hint was a lie, and it is the reason this is written down.** `Object.is` fell
+through to the blanket `Object.<p>` refusal, whose hint reads *"object literals need the
+heap value model"*. `Object.is` is a **static method over two primitives** — no object
+literal is involved, and the advice is unactionable. Worse, `Object.is` is the natural
+`-0` probe, so a wrong hint at exactly that spelling pushed callers onto the clumsier
+`1 / x === -Infinity`.
+
 When a feature ships: delete its row here, move its corpus case out of `KNOWN_UNSUPPORTED`
 in the relevant `test/*conformance*`/`test/gap.test.ts` allow-list, and drop the `NYI` entry.

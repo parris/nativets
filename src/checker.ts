@@ -5219,6 +5219,31 @@ class Checker {
           // the length test comes first: nativets panics on the out-of-range read where node
           // would have handed `exprLoc` an `undefined` and let the `??` pick the fallback.
           (e.args.length > 0 ? exprLoc(e.args[0]!) : undefined) ?? e.loc);
+      // `Object.is(a, b)` is SameValue (ES 7.2.10) — the THIRD equality, agreeing with
+      // `===` except at NaN (equal) and with SameValueZero except at signed zero (NOT
+      // equal). It takes two PRIMITIVES here; on a non-primitive node's answer is
+      // reference identity, which this value model does not carry, so that is refused with
+      // a hint that says so. It used to fall through to the blanket `Object.${p}` refusal
+      // below, whose hint reads "object literals need the heap value model" — untrue of a
+      // static method over two primitives, and `Object.is` is the natural `-0` probe, so
+      // the wrong hint sent readers to `1 / x` instead.
+      if (p === "is") {
+        if (e.args.length !== 2) throw typeError("Object.is expects 2 arguments");
+        const at = this.type(e.args[0]!, scope);
+        const bt = this.type(e.args[1]!, scope);
+        const prim = (t: Ty): boolean => t === "number" || t === "string" || t === "boolean";
+        for (const [t, i] of [[at, 0], [bt, 1]] as Array<[Ty, number]>)
+          if (!prim(t))
+            throw nyi(NYI.OBJECT, `Object.is on ${t}`,
+              "on a non-primitive, `Object.is` is reference IDENTITY — whether the two names " +
+              "denote the same allocation. nativets copies freely (copy-on-write arrays, " +
+              "single-owner moves), so identity is not an observable this value model carries " +
+              "and answering it would be a guess. Compare the primitives you care about " +
+              "instead — `Object.is(a.length, b.length)` — or use `===`, which IS pointer " +
+              "identity on an array or object. `Object.is` over `number`/`string`/`boolean` works.",
+              exprLoc(e.args[i]!) ?? e.loc);
+        return "boolean";
+      }
       if (p !== "keys" && p !== "values" && p !== "entries" && p !== "getOwnPropertyNames") throw nyi(NYI.OBJECT, `Object.${p}`);
       if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
       const ot = this.type(e.args[0]!, scope);

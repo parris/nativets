@@ -849,6 +849,25 @@ double js_str_len(const char *s) { return (double)nt_strlen(s); }
 
 int32_t js_str_eq(const char *a, const char *b) { return strcmp(a, b) == 0 ? 1 : 0; }
 
+/* `Object.is` on two numbers — SameValue (ES 7.2.10), the THIRD equality in the language
+ * and NOT a spelling of either of the other two. It differs from `===` at NaN (equal here)
+ * and from SameValueZero at signed zero (NOT equal here):
+ *
+ *                  NaN vs NaN     +0 vs -0
+ *   ===              false          true
+ *   SameValueZero     true          true     <- nt_arr_includes_num, above
+ *   SameValue         true          false    <- this
+ *
+ * So it must NOT be routed through `nt_arr_includes_num`'s predicate, and that one must
+ * not be "tightened" into this: the two are deliberately opposite on zero. `signbit`
+ * rather than `1/x`, because it is the only reading that survives a zero of either sign
+ * without a division. See test/object-is.test.ts. */
+int32_t js_same_value(double a, double b) {
+  if (isnan(a) || isnan(b)) return (isnan(a) && isnan(b)) ? 1 : 0;
+  if (a == 0.0 && b == 0.0) return signbit(a) == signbit(b) ? 1 : 0;
+  return a == b ? 1 : 0;
+}
+
 /* Lexicographic compare for `<` `<=` `>` `>=` and the default `.toSorted()`.
  * Returns <0 / 0 / >0. node compares UTF-16 code units; strcmp on our UTF-8 bytes
  * is code-POINT order, which agrees everywhere except astral (>= U+10000) chars
