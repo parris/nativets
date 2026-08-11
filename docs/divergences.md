@@ -1969,15 +1969,61 @@ still holds the spelling.
 is untouched, and so is every applied generic `parseGenericType` maps to a real shape. A
 bare container names its fix (`Map` → "write `Map<string, number>`").
 
-**The residue — three names, annotation position only.** `unknown`, `never` and `object`
-still erase in an annotation, because `src/` uses all three and none has an honest rewrite:
+**The residue — now two names erase, not three.** `never` and `object` still erase to
+`number` in an annotation, because `src/` uses both and neither has an honest rewrite:
 `never` is a divergent return and the exhaustiveness witness `src/ast.ts` calls load-bearing
 (`default: { const impossible: never = e; … }` — "add an `Expr` member and this stops
-compiling"), and `unknown`/`object` are the parameter and identity-set types of the
-reflective AST walks in `checker.ts`/`ownership.ts`/`codegen.ts`. Closing them needs a
-**feature**, not a deletion: a bottom type for `never`; an opaque unusable `Ty`, or
-reflective walks the subset can express, for `unknown`/`object`. Refusing them instead would
-mean deleting a real `tsc`-checked invariant to satisfy a subset limitation.
+compiling"), and `object` is the identity-set type (`Set<object>`, `Map<string, object>`) of
+the reflective AST walks in `ownership.ts`. Closing them needs a **feature**, not a
+deletion: a bottom type for `never`; an opaque unusable `Ty`, or reflective walks the subset
+can express, for `object`. Refusing them instead would mean deleting a real `tsc`-checked
+invariant to satisfy a subset limitation.
+
+**`unknown` got that feature.** It no longer erases: it resolves to the opaque `"unknown"`
+arm of `ScalarTy` (`src/ast.ts`), a type-level name with **no representation and no
+inhabitants**. Nothing is
+assignable to it, so no value ever carries the type and codegen is never reached with it —
+that is the mechanism, not a half-finished version of one. A `Ty` that could hold a value
+would need a runtime tag this compiler does not have.
+
+*What it bought, measured per function* on a linked `src/cli.ts`: **125 of 767 functions
+refused before, 125 after — not one clears.** Every one of the 19 affected bodies is a
+reflective walk (`Object.values(node)`, `Object.keys(obj)` + `obj[k]`, `Set<object>`
+identity) or a caller of one, and each is independently outside the subset. What changed is
+that all 19 diagnostics stop naming `number`:
+
+| function | before | after |
+|---|---|---|
+| `daUse`, `isIdentNode`, `frameThrows`, … | `Cannot compare number with null` | `Cannot compare unknown with null` |
+| `daStmt`, `inferThrowType`, `ModuleGen.build`, … | `arg 0 expects number, got Stmt[]` | `arg 0 expects unknown, got Stmt[]` |
+| `hasHostCall` | `number method 'some' is not supported yet` | `method call on unknown is not supported yet` |
+| `daReads` | `for-of over number is not supported yet` | `for-of over unknown is not supported yet` |
+
+A diagnostic naming a type the source never contains is a defect in its own right: three
+separate lanes read one of these and went looking for a type bug that was not there.
+
+*It also closes the `asStr` hole below, one step earlier.* Nothing is assignable to the
+placeholder, so `asStr(42)` is refused at the **call** and the body's cast is unreachable.
+
+*The cost, stated because it is real.* `function handle(e: unknown) {…}; handle(42)`
+compiled and matched node before; it is refused now. That only ever held where every value
+reaching the slot was a number — i.e. where `unknown` was not needed, since `handle("x")`
+was already refused and with a lying message — but it is capability given up, not merely
+honesty gained.
+
+*Why `unknown` is still listed in `ERASURE_STILL_ALLOWED`.* That set gates the **parse-time**
+refusal, and a parse refusal is fatal to the whole **file** rather than scoped to one
+function body. Measured: removing `unknown` from it stops a linked `src/cli.ts` from parsing
+at all, which takes every per-function number in `docs/self-hosting.md` with it. Rewriting
+`src/`'s 18 `unknown` sites is what would let it leave the set entirely — and those rewrites
+are blocked on the reflective-walk features above, not on `unknown`.
+
+*Why it cannot reuse `Dyn`*, the one tagged box this compiler has. `Dyn` refuses `d === null`
+and `Object.keys(d)`, ICEs on `typeof d` in value position (see below), is not spellable in
+source, and could only receive an AST node by **deep-copying** it into a box tree — which
+would silently break the reference-identity sets (`Set<object>`, the `seen` cycle guards)
+the ownership walks depend on. That is the miscompile direction, so the placeholder stays
+uninhabited on purpose.
 
 All three are refused inside an `as`/`satisfies` **assertion** regardless: an annotation is
 *checked* against the value it annotates, so a wrong erased type produces a refusal, while
@@ -2010,6 +2056,30 @@ boxes whose `as` behaviour `nt_as_unbox`/`nt_as_tag` already check at run time, 
 classifying them would refuse the narrowing casts those checks exist to allow. node erases
 `as` and answers `undefined`; there is no such value here, and the same reasoning already
 refuses an assertion to a *wider object*. Pinned by `test/as-cast.test.ts` section 3b.
+
+#### STILL OPEN — `typeof` a `Dyn` in VALUE position is an internal compiler error
+
+Found while pricing `unknown` against `Dyn`, and unrelated to the erasure — it needs no
+ambient type name and no `unknown` to reproduce:
+
+```ts
+const d = JSON.parse('{"kind":"Identifier"}');
+console.log(typeof d);                  // node: "object", exit 0
+```
+
+nativets raises `InternalError: internal compiler error: no constant 'typeof' for Dyn`
+(`typeofNameOf`, `src/codegen.ts`) — a raw stack trace with no `NT` code and no location in
+the user's program, which is the "frontend accepted something codegen cannot lower" path.
+
+The seam is **value position vs comparison**. `typeof d === "string"` is a supported runtime
+narrowing on a `Dyn` and works; `typeof d` as a *value* — printed, concatenated, assigned —
+has no lowering, because it needs a runtime tag→string dispatch nobody wrote. `Array.isArray(d)`
+and `d.field` are fine, so this is one missing lowering rather than a hole in `Dyn`.
+
+Either answer would be an improvement on an ICE: emit the dispatch (`Dyn` already carries the
+tag, so `"object"`/`"string"`/`"number"`/`"boolean"` is a lookup), or refuse it in the
+**checker** with an `NT` code, which is where the rule says a construct codegen cannot lower
+belongs. Not fixed here — this lane's diff is confined to the `unknown` type itself.
 
 ### Generic `type`/`interface` parameters (`NT1013`) — the same erasure, a third source
 
@@ -3301,6 +3371,44 @@ they were not covered, and that was a defect, not a decision — `é` → `É` i
 bytes in either encoding, so no unit question arises. It is fixed; the *remaining* limit on
 case mapping is its own entry, **§A.4** below.
 
+**Scope, second half: §A.2 MAKES ill-formed UTF-8 reachable, so it does not get to treat it
+as impossible.** Cutting by byte means `" ".slice(0, 2)` is a truncated lead pair
+`E2 80` and `" ".slice(1, 2)` is a lone continuation byte `A0` — both from ordinary
+source, no host input required. `readFileSync(p, "utf8")` hands over file bytes verbatim and
+reaches the rest of the space (overlong forms, `0xF8..0xFF`). So **every scanner in the
+runtime must be correct on input that is not valid UTF-8**, and "we only handle well-formed
+strings" is not a position this document supports.
+
+The rule, and it is the same in every consumer: **an ill-formed sequence is ONE RAW BYTE, and
+the scan advances one byte.** Not U+FFFD, and never re-framed. Two properties follow, and
+both are tested:
+
+- **Lossless.** `Array.from(s).join("") === s` and `s.split("").join("") === s` for *every*
+  byte string. Substituting U+FFFD would rewrite the program's own bytes to "correct" them.
+- **Consistent across accessors.** `.charCodeAt(i)` and `.at(i)` are the raw byte by the
+  paragraph above, so `.codePointAt(i)` answers the raw byte too rather than inventing a code
+  point the string does not contain.
+
+**A raw byte is not a code point**, and that distinction is where this went wrong twice.
+Whitespace, case and framing tables are indexed by *code point*; feeding a raw byte to one
+re-interprets it. `trim`'s table contains U+00A0 NBSP, which encodes as `C2 A0`, so the byte
+`A0` tested true as whitespace and `trimStart` deleted it while `trimEnd` kept it. A
+whitespace/case test therefore runs **only on a code point that was actually decoded**.
+
+**Surrogates are deliberately accepted** — this is WTF-8, not strict UTF-8. The lexer and
+`String.fromCharCode` emit `ED A0 80` for `\ud800`, and node's `codePointAt` says 55296;
+rejecting the sequence would answer 237 and *lose* agreement with node. "Ill-formed" here
+means truncated, a missing continuation byte, an overlong form, a continuation or `0xF8..0xFF`
+byte in lead position, or a value above U+10FFFF — deliberately not "encodes a surrogate".
+
+Historically this section's blind spot was a decoder that sized a sequence from its **lead
+byte alone**: `" ".slice(0, 2) + "Axx"` is `E2 80 41 78 78`, which recombined to U+2001 EM
+QUAD, so `.trim()` consumed three bytes and **deleted the `A`** — `"xx"` against node's
+`"Axx"`, at exit 0, with well-formed output on both sides. Tested by `test/trim.test.ts`
+("ill-formed UTF-8 is never re-framed"), which pins `trim`/`trimStart`/`trimEnd`,
+`codePointAt` and `Array.from` against each other and against node on the well-formed twin of
+every case.
+
 > `typeof undefined` (a former divergence) is now **supported** and matches node.
 
 ### 3. Pipeline operator `|>` (Elixir semantics, not TC39 Hack-style)
@@ -3694,6 +3802,52 @@ it, and never reaches this check:
 let s: string | undefined;   // starts as undefined — matches node ✅
 console.log(s);              // prints "undefined", like node
 ```
+
+#### The same rule on a CLASS FIELD (`NT1015`) — and the two holes it used to have
+
+A field is a real slot in the instance's heap block, so the rule above applies unchanged:
+a field nothing ever stores into has **no value**, and the slot's zero is not one. A field
+the constructor never assigns is therefore **refused**:
+
+```ts
+class C { y: number; z: number; constructor(y: number) { this.y = y; } }
+new C(7).z          // node: undefined   — we REFUSE (NT1015)
+```
+
+`tsc --strict` rejects that program too (`TS2564`), so this row is a divergence from
+**node**, not from TypeScript. The escape hatch is the same one locals have, and it is
+likewise not a divergence: widen the type and the field genuinely *is* `undefined`.
+
+| Field | node | us |
+|---|---|---|
+| `z: number;` never assigned | `undefined` | **NT1015** — no value of type `number` |
+| `z: number = 0;` | `0` | `0` ✅ |
+| `z: number \| undefined;` never assigned | `undefined` | `undefined` ✅ |
+| `z?: number;` never assigned | `undefined` | `undefined` ✅ |
+
+Both accepting rows in that table were **wrong answers** until they were fixed, and they
+are worth stating because they are the two ways one rule drifted apart from itself:
+
+- **`z: number | undefined` SEGFAULTED.** The slot-filling store was gated on the `?`
+  *token* rather than on the field's *type*, so `z?: T` was filled and the equivalent
+  explicit union was not — although the parser runs both through the same
+  `makeNullable("undefined", …)` and nothing downstream can tell them apart. The unwritten
+  slot stayed zero and the read dereferenced NULL: **exit 139** against node's `0`, on a
+  program `tsc --strict` accepts (`undefined` *is* in the declared type, so
+  `strictPropertyInitialization` is satisfied).
+- **`z: number` printed `0`.** The refusal was gated on the class having *no* constructor,
+  so the moment a class had one the guard stopped running and that constructor was never
+  checked for actually assigning each field. node prints `undefined`, we printed `0`, and
+  **both exited 0** — nothing in the tree observed it.
+
+One scan over the constructor body now answers both, because parameter properties and
+field initializers are folded into that body before it runs. That scan is deliberately an
+**over-approximation** of definite assignment — a store under an `if` counts as coverage —
+so it can only ever accept, never refuse a valid program. The cost is a residual hole: a
+field assigned on only *some* constructor paths is still accepted and still reads the
+slot's zero on the others. Closing it needs the path-sensitive analysis the `let` rule
+above already has, which is a checker pass and not a syntactic question the parser can
+answer.
 
 ### Block scopes get their own storage
 

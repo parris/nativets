@@ -265,3 +265,110 @@ describe("the annotation is also the CONTEXT for the body, as it is for a `retur
     );
   });
 });
+
+/*
+ * A STATEMENT ARROW PASSED TO A `=> void` PARAMETER. The mirror image of the block above:
+ * there the annotation was DROPPED, here the missing one was never inferred.
+ *
+ * `inferBlockReturn` answers `number` for a body with no `return` at all — `number` is
+ * this checker's universal default, and that answer is right for `inferReturnType` on an
+ * unannotated `function`, whose callers may use the value. For an arrow being PASSED into
+ * a `(x: number) => void` slot it is a lie: the body returns nothing, and the resulting
+ * `(number)=>number` does not fit `(number)=>void`.
+ *
+ *   function loopA(n: number, iter: (x: number) => void): void { iter(n); }
+ *   loopA(1, (x) => { console.log(x); });
+ *   → error[NT2001]: 'loopA' arg 1 expects (number)=>void, got (number)=>number
+ *
+ * node prints `1`. tsc accepts it — a block-bodied arrow with no `return` HAS return type
+ * `void` (TypeScript spec §"Arrow function expressions"; conformance
+ * tests/cases/conformance/types/typeRelationships/assignmentCompatibility and the
+ * `voidReturn` shapes). And the refusal had NO ESCAPE HATCH: annotating the arrow
+ * `(x): void => { … }` was refused with the identical message, because `typeArrowReturn`
+ * maps a `void` annotation to "no declared type" and falls through to the same inference.
+ * So there was no spelling of a statement callback that a `=> void` parameter accepted.
+ *
+ * FIXED BY MAKING THE TYPE TRUE, not by widening assignability. `(P)=>R` fitting a
+ * `(P)=>void` slot for any `R` is TypeScript's actual rule, but it is not safe to adopt
+ * HERE: a `=> void` parameter is CALLED as `call void %fp(…)` (verified in the emitted IR),
+ * so accepting an arrow that codegen lowers as `define double @arrow_0` would put a
+ * return-type mismatch into the IR and rest the answer on ABI luck. Instead the arrow's
+ * return type BECOMES `void` when the body cannot produce a value, which is what it
+ * already meant — codegen's arrow path handles `void` (`ret void`) and the two sides then
+ * agree by construction rather than by tolerance.
+ *
+ * WHY THIS IS SAFE IN THE ONLY DIRECTION IT MOVES: the rewrite applies only when the body
+ * has no value-carrying `return` ANYWHERE, so there is no value for a caller to lose. A
+ * body with `return 1;` in it keeps inferring `number` and keeps being refused.
+ *
+ * `src/ownership.ts`'s `Analyzer.arrowScope` is the self-hosting instance —
+ * `this.loop(state, (st) => { this.scoped(list, st); })`.
+ */
+describe("a statement arrow with no `return` fits a `=> void` parameter", () => {
+  test("unannotated, block body, no return", async () => {
+    await same(
+      'function loopA(n: number, iter: (x: number) => void): void { iter(n); }\n' +
+      'loopA(1, (x) => { console.log(x); });\n',
+    );
+  });
+
+  test("the `(x): void => { … }` spelling, which was refused identically", async () => {
+    await same(
+      'function loopA(n: number, iter: (x: number) => void): void { iter(n); }\n' +
+      'loopA(2, (x): void => { console.log(x); });\n',
+    );
+  });
+
+  test("a bare `return;` still counts as returning nothing", async () => {
+    await same(
+      'function loopA(n: number, iter: (x: number) => void): void { iter(n); }\n' +
+      'loopA(3, (x) => { if (x > 0) { console.log(x); return; } console.log(0); });\n',
+    );
+  });
+
+  test("the `Analyzer.arrowScope` shape: a method call through `this`", async () => {
+    await same(
+      'class A {\n' +
+      '  private scoped(list: string[], st: Map<string, number>): void {\n' +
+      '    console.log(list.length + st.size);\n' +
+      '  }\n' +
+      '  private loop(state: Map<string, number>, iter: (st: Map<string, number>) => void): void { iter(state); }\n' +
+      '  run(list: string[], state: Map<string, number>): void {\n' +
+      '    this.loop(state, (st) => { this.scoped(list, st); });\n' +
+      '  }\n' +
+      '}\n' +
+      'const a = new A();\n' +
+      'a.run(["x"], new Map<string, number>());\n',
+    );
+  });
+
+  /* NOT over-accepted: a body that DOES produce a value keeps the refusal, because the
+   * value would be silently discarded and the emitted signatures would disagree. */
+  test("a body with a value-carrying `return` is still refused", () => {
+    const d = rejectionOf(
+      'function loopA(n: number, iter: (x: number) => void): void { iter(n); }\n' +
+      'loopA(1, (x) => { return x + 1; });\n',
+    );
+    expect(d?.code).toBe("NT2001");
+    expect(d?.message).toContain("=>void");
+  });
+
+  /* And the value-carrying `return` is found at DEPTH, not only at the top level —
+   * `inferBlockReturn` scans top-level returns only, so a nested one must not be able to
+   * sneak a `double`-returning body into a `call void` slot. */
+  test("a nested value-carrying `return` is still refused", () => {
+    const d = rejectionOf(
+      'function loopA(n: number, iter: (x: number) => void): void { iter(n); }\n' +
+      'loopA(1, (x) => { if (x > 0) { return x + 1; } });\n',
+    );
+    expect(d?.code).toBe("NT2001");
+  });
+
+  /* A nested ARROW's `return` belongs to that arrow, not to this one. */
+  test("a nested arrow's `return` does not make the outer body value-carrying", async () => {
+    await same(
+      'function loopA(n: number, iter: (x: number) => void): void { iter(n); }\n' +
+      'loopA(4, (x) => { const g = (y: number): number => { return y + x; }; console.log(g(1)); });\n',
+    );
+  });
+});

@@ -793,6 +793,60 @@ interface Val { v: string; ty: Ty; }
  *  always the safe answer and is what every shape not proved below gets. */
 interface StrTemp { v: string; fresh: boolean; }
 
+/** A value a lowering allocated and handed back UNOWNED, and the runtime call that
+ *  reclaims it (`nt_arr_free` / `nt_str_release`). See `FnGen.discardFree`. */
+interface DiscardFree { v: string; call: string; }
+
+/**
+ * One live `try`'s finalizer, and the abrupt exits parked on it.
+ *
+ * A finalizer is entered by BRANCH from every path that leaves the `try`, and a slot
+ * says which path that was: 0 = fell out the bottom, 1 = a `return` is pending, and one
+ * fresh id per `break`/`continue` that crosses this finalizer on its way somewhere else.
+ * The dispatch at the end of the finalizer reads the slot back and resumes the pending
+ * completion — that is the whole mechanism, and `break`/`continue` simply had no ids in
+ * it, so they branched around the finalizer instead of through it.
+ *
+ * `scopeDepth` is `blockScopes.length` at the `try` itself, i.e. NOT counting the try
+ * block's own scope. Everything at or above it is inside the `try` and is dropped BEFORE
+ * the finalizer runs; everything below is outside and is dropped after, on the way to
+ * the next finalizer out or to the jump's real target.
+ */
+interface FinallyFrame {
+  /** Identity, so a pending exit can name the frame it is parked on WITHOUT the frame
+   *  holding the list. The list lives on the emitter (`jumpExits`) for a reason the
+   *  self-host subset dictates: `frame.exits.push(…)` mutates an array reached through a
+   *  parameter, which the checker refuses (NT1606) — `this.jumpExits.push(…)` mutates a
+   *  field of the `@@mutable` emitter, which it allows. `src/` stays inside the subset it
+   *  compiles, so the side table is the shape, not the aggregate. */
+  id: number;
+  finallyLbl: string;
+  modeSlot: string;
+  retSlot: string | null;
+  scopeDepth: number;
+}
+
+/**
+ * A `break`/`continue` that is mid-flight through `chain[idx]`'s finalizer.
+ *
+ * It has to be a RECORD rather than a callback because the resume code is emitted long
+ * after the jump: the finalizer's dispatch is written when the `TryStmt` finishes, by
+ * which time `blockScopes` has popped every scope the jump still owes drops for. So the
+ * scope drop sets are SNAPSHOT at the jump (`scopes`, absolute indices), and the chain of
+ * finalizers still to run is captured with it.
+ */
+interface PendingExit {
+  /** The `FinallyFrame.id` this exit is parked on — `chain[idx]`'s, always. */
+  frameId: number;
+  mode: number;
+  scopes: string[][];
+  chain: FinallyFrame[];
+  /** Index into `chain` of the finalizer this exit is currently parked on. */
+  idx: number;
+  targetLbl: string;
+  targetDepth: number;
+}
+
 /**
  * Does lowering THIS expression to a `string` allocate a fresh heap string that nothing
  * else can already own?
@@ -1149,8 +1203,13 @@ class FnGen {
    * from the enclosing loop — so a `continue` inside a switch inside a loop leaves the
    * case's scope AND the loop body's, while a `break` at the same spot leaves only the
    * case's. One depth would fix one of them and leave the other leaking.
+   *
+   * `brkFin`/`contFin` are the same idea one stack over: the `finallyStack` DEPTH the
+   * target sits at. A jump crosses every finalizer above that mark and has to RUN each
+   * one on the way out (node does), and it inherits the switch's split for exactly the
+   * reason the scope depths do — `break` stops at the switch, `continue` does not.
    */
-  private loops: { brk: string; cont: string; brkDepth: number; contDepth: number }[] = [];
+  private loops: { brk: string; cont: string; brkDepth: number; contDepth: number; brkFin: number; contFin: number }[] = [];
   /**
    * The stack of live block scopes' drop sets — `blockScopes[i]` is the `BlockDrops`
    * names of the i-th enclosing statement list (empty when that list has no marker).
@@ -1196,7 +1255,28 @@ class FnGen {
     return n > 0 ? this.tryHandlers[n - 1]! : null;
   }
   /** Active finally blocks (a `return` inside runs finally first, mode=1). */
-  private finallyStack: { finallyLbl: string; modeSlot: string; retSlot: string | null }[] = [];
+  private finallyStack: FinallyFrame[] = [];
+  /**
+   * Next free finalizer dispatch mode. 0 and 1 are reserved (fall-through, `return`), so
+   * jump ids start at 2 and one jump burns one id PER finalizer it crosses — the resume
+   * block after finalizer N stores a fresh id into finalizer N-1's slot before branching
+   * on. Per function: `reset` puts it back, and the slots are per-`try` allocas anyway.
+   */
+  private jumpMode = 2;
+  /**
+   * The innermost live finalizer, or null when nothing encloses. Spelled as a length
+   * test for the reason `innermostHandler` is: an EMPTY stack is the ordinary case, and
+   * `xs[xs.length - 1]` forms index -1 there, which node answers `undefined` and nativets
+   * PANICS on (test/no-index-last.test.ts). One helper so the call sites cannot drift.
+   */
+  private innermostFinally(): FinallyFrame | null {
+    const n = this.finallyStack.length;
+    return n > 0 ? this.finallyStack[n - 1]! : null;
+  }
+  /** Abrupt exits parked on a live finalizer, keyed by `FinallyFrame.id`. */
+  private jumpExits: PendingExit[] = [];
+  /** Next `FinallyFrame.id`. */
+  private finId = 0;
   /**
    * True while emitting `main`. `retTy` is "number" there (top-level expressions are typed
    * like any others), but the FUNCTION returns `i32` — so any `ret` emitted from a generic
@@ -1224,6 +1304,42 @@ class FnGen {
    *  (so the declaration's store and every top-level read/write hit the same cell a
    *  function body reads). Empty in every other frame. */
   private globalVars = new Set<string>();
+  /**
+   * The SSA name of a value a lowering just allocated and handed back UNOWNED, and the
+   * runtime call that reclaims it — the one signal `ExprStmt` needs in order to free a
+   * DISCARDED result rather than leak it. A statement in expression position throws its
+   * value away, so nothing names it: no binding exists, no drop set can refer to it, and
+   * `freeReceiverTemp` only ever reaches the RECEIVER of a chain, never its result.
+   *
+   * Marked at the point of construction, NOT recognised by shape at the discard. The
+   * shape test is available (`freshArray` in ast.ts, which already answers "yes" for
+   * `.concat` and `.keys`) and it is the wrong instrument here: it matches on the
+   * METHOD NAME, so a user class with a `concat`/`map`/`keys` method that hands back a
+   * field would match it too, and freeing that field is a use-after-free rather than a
+   * leak. `freshArray` is safe where it is used today only because both callers have
+   * already established that the receiver is a builtin array. At a discard there is no
+   * such context, so freshness has to come from the code that did the allocating.
+   *
+   * Set by exactly the lowerings whose freshness is a fact of the lowering itself:
+   * `Object.keys`/`values`/`entries`/`getOwnPropertyNames` (built here out of
+   * `nt_arr_new`), `Array#concat` (`nt_arr_concat` returns a new header), and
+   * `JSON.stringify` (a fold of `js_str_concat`, whose result this frame owns at rc=1).
+   * Anything that does not set it is simply left to leak, as before — a wrong claim here
+   * is a premature free, so the default has to be "unclaimed".
+   *
+   * Read by ONE consumer, immediately after the `genExpr` that set it, and compared by
+   * SSA identity: a nested lowering that set it for some inner value cannot be mistaken
+   * for the statement's own result, because the value returned would not be that name.
+   */
+  private discardFree: DiscardFree | null = null;
+
+  /** Read the pending discard claim and clear it, so the next statement starts unclaimed
+   *  whether or not this one used it. */
+  private takeDiscardFree(): DiscardFree | null {
+    const claim = this.discardFree;
+    this.discardFree = null;
+    return claim;
+  }
 
   constructor(private mod: ModuleGen) {}
 
@@ -1321,6 +1437,9 @@ class FnGen {
     this.captures = new Map();
     this.tryHandlers = [];
     this.finallyStack = [];
+    this.jumpMode = 2;
+    this.jumpExits = [];
+    this.finId = 0;
     this.hofReturnStack = [];
     this.strLocals = new Set();
     this.frameLocals = new Set();
@@ -1394,6 +1513,76 @@ class FnGen {
    */
   private emitJumpDrops(depth: number): void {
     for (let i = this.blockScopes.length - 1; i >= depth; i--) this.emitDrops(this.blockScopes[i] ?? []);
+  }
+
+  /** Drops for the snapshot scopes `[low, high)`, innermost first — the segment of a
+   *  jump's unwind that lies between two finalizers, replayed from the snapshot because
+   *  `blockScopes` has long since popped it by the time the resume block is emitted. */
+  private emitSnapshotDrops(scopes: string[][], high: number, low: number): void {
+    for (let i = high - 1; i >= low; i--) this.emitDrops(scopes[i] ?? []);
+  }
+
+  /**
+   * Lower a `break`/`continue`: unwind to `targetDepth` and branch to `targetLbl`, RUNNING
+   * every finalizer between here and `targetFin` on the way, innermost first.
+   *
+   * With nothing crossed this is the plain branch it always was. With one or more `try`s
+   * crossed the jump cannot branch to its target at all — it has to reach the innermost
+   * finalizer, let it run, and be resumed by its dispatch, which may in turn hand it to
+   * the next finalizer out. So the jump stores an id and parks a `PendingExit`; the
+   * `TryStmt` case pays it off when it writes the dispatch.
+   *
+   * The drops INTERLEAVE with the finalizers rather than all happening first, which is
+   * the property that makes this compose with the block-scope unwinding beside it: a
+   * local declared inside the `try` is still live while that `try`'s finalizer runs, and
+   * a local declared outside it is not freed until the finalizer is done.
+   */
+  private emitJump(targetDepth: number, targetFin: number, targetLbl: string): void {
+    const nCross = this.finallyStack.length - targetFin;
+    if (nCross <= 0) {
+      this.emitJumpDrops(targetDepth);
+      this.terminate(`br label %${targetLbl}`);
+      return;
+    }
+    // Snapshot, because the resume blocks are emitted after these scopes have popped.
+    const scopes = this.blockScopes.map((names) => names);
+    const chain = this.finallyStack.slice(targetFin); // outermost .. innermost
+    const inner = chain[nCross - 1]!;
+    this.emitSnapshotDrops(scopes, scopes.length, inner.scopeDepth);
+    this.enterFinally(scopes, chain, nCross - 1, targetLbl, targetDepth);
+  }
+
+  /** Store a fresh dispatch id into `chain[idx]`'s mode slot, park the exit on it under
+   *  that id, and branch into the finalizer. The id is minted here so the jump site and
+   *  every resume block after it share one spelling of "hand this exit to that one". */
+  private enterFinally(scopes: string[][], chain: FinallyFrame[], idx: number, targetLbl: string, targetDepth: number): void {
+    const f = chain[idx]!;
+    const mode = this.jumpMode++;
+    this.emit(`store double ${llvmDouble(mode)}, ptr ${f.modeSlot}`);
+    this.jumpExits.push({ frameId: f.id, mode, scopes, chain, idx, targetLbl, targetDepth });
+    this.terminate(`br label %${f.finallyLbl}`);
+  }
+
+  /** The exits parked on `f`, in the order they were parked — the order the dispatch
+   *  tests them in, which keeps the emitted IR deterministic. */
+  private exitsOn(f: FinallyFrame): PendingExit[] {
+    return this.jumpExits.filter((ex) => ex.frameId === f.id);
+  }
+
+  /** The resume block for one pending exit, emitted after its finalizer's body: finish
+   *  the segment of unwinding this finalizer was blocking, then either hand the exit to
+   *  the next finalizer out or land on the jump's real target. */
+  private emitResume(ex: PendingExit): void {
+    const here = ex.chain[ex.idx]!.scopeDepth;
+    const next = ex.idx - 1;
+    if (next >= 0) {
+      const outer = ex.chain[next]!;
+      this.emitSnapshotDrops(ex.scopes, here, outer.scopeDepth);
+      this.enterFinally(ex.scopes, ex.chain, next, ex.targetLbl, ex.targetDepth);
+      return;
+    }
+    this.emitSnapshotDrops(ex.scopes, here, ex.targetDepth);
+    this.terminate(`br label %${ex.targetLbl}`);
   }
 
   /** Emit deterministic drops (RAII frees) for owned linear locals. */
@@ -1838,7 +2027,21 @@ class FnGen {
         }
         return;
       }
-      case "ExprStmt": this.genExpr(s.expr); return;
+      case "ExprStmt": {
+        // `Object.keys(o);`, `a.concat(b);` and `JSON.stringify(o);` each allocated a
+        // value the statement then threw away, leaking it once per evaluation without
+        // bound. See `discardFree` for why freshness is marked at the point the value is
+        // BUILT rather than recognised by shape here.
+        this.discardFree = null;
+        const v = this.genExpr(s.expr);
+        // Through a method, not a field read: `this.discardFree = null` above NARROWS the
+        // field to `null` for the rest of the block, and TypeScript does not widen it back
+        // across the `genExpr` call — so reading it inline typed the claim `never`. The
+        // method's declared return type is the honest one.
+        const claim = this.takeDiscardFree();
+        if (claim !== null && claim.v === v.v) this.emit(`call void @${claim.call}(ptr ${v.v})`);
+        return;
+      }
       case "ReturnStmt": {
         // Inside an inlined HOF block callback: a `return` yields the per-element
         // result — store it and branch to the callback's join (not a function ret).
@@ -1856,9 +2059,10 @@ class FnGen {
           this.terminate(`br label %${h.done}`);
           return;
         }
-        if (this.finallyStack.length > 0) {
+        const fin = this.innermostFinally();
+        if (fin !== null) {
           // return inside a try/catch with a finally: stash value, run finally (mode=1)
-          const f = this.finallyStack[this.finallyStack.length - 1]!;
+          const f = fin;
           // Coerced to the DECLARED return type, exactly as the ordinary return path
           // below is. Without this the stash STORED the raw value under the declared
           // type's LLVM type: `function g(): string | boolean { try { return "hi" } finally {…} }`
@@ -1928,7 +2132,7 @@ class FnGen {
         // Both depths are the CURRENT one: the body's own scope is pushed by the
         // `genStmts` below, so a jump inside the body unwinds it and every block nested
         // in it. A real loop is the one place `break` and `continue` agree (see `loops`).
-        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
@@ -1954,7 +2158,7 @@ class FnGen {
           this.terminate(`br label %${bodyLbl}`);
         }
         this.to(this.block(bodyLbl));
-        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -1973,7 +2177,7 @@ class FnGen {
         // Both depths are the CURRENT one: the body's own scope is pushed by the
         // `genStmts` below, so a jump inside the body unwinds it and every block nested
         // in it. A real loop is the one place `break` and `continue` agree (see `loops`).
-        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
@@ -2032,7 +2236,7 @@ class FnGen {
             this.emit(`store ${llvmTy(vt)} ${this.fromSlot(vs, vt)}, ptr ${this.addr(s.name2!)}`);
           }
         }
-        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -2077,7 +2281,8 @@ class FnGen {
         const outer = this.loops.length ? this.loops[this.loops.length - 1]! : null;
         const outerCont = outer ? outer.cont : endLbl;
         const brkDepth = this.blockScopes.length;
-        this.loops.push({ brk: endLbl, cont: outerCont, brkDepth, contDepth: outer ? outer.contDepth : brkDepth });
+        const brkFin = this.finallyStack.length;
+        this.loops.push({ brk: endLbl, cont: outerCont, brkDepth, contDepth: outer ? outer.contDepth : brkDepth, brkFin, contFin: outer ? outer.contFin : brkFin });
         // dispatch chain
         for (let i = 0; i < s.cases.length; i++) {
           const c = s.cases[i]!;
@@ -2124,7 +2329,7 @@ class FnGen {
         const slot = this.fresh();
         this.emit(`${slot} = call i64 @nt_arr_get(ptr ${arr}, double ${iB})`);
         this.emit(`store ptr ${this.fromSlot(slot, "string")}, ptr ${this.addr(s.name)}`);
-        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -2222,7 +2427,8 @@ class FnGen {
           this.emit(`store ptr null, ptr ${this.addr(s.param)}`);
         }
         this.tryHandlers.push({ catchLbl, excVar: s.param, eType, catchless: !s.handler });
-        if (hasFinally) this.finallyStack.push({ finallyLbl, modeSlot, retSlot: retSlot || null });
+        const frame: FinallyFrame = { id: this.finId++, finallyLbl, modeSlot, retSlot: retSlot || null, scopeDepth: this.blockScopes.length };
+        if (hasFinally) this.finallyStack.push(frame);
         this.genStmts(s.block);
         this.tryHandlers.pop();
         if (!this.isTerminated()) gotoFinally();
@@ -2235,15 +2441,56 @@ class FnGen {
           this.finallyStack.pop();
           this.to(this.block(finallyLbl));
           this.genStmts(s.finalizer!);
+          // A finalizer that ends TERMINATED — one that itself does a `return`, `break` or
+          // `continue` on every path — has no dispatch at all, and that is exactly right:
+          // ECMAScript's `UpdateEmpty` says the finalizer's own abrupt completion REPLACES
+          // the pending one. Verified against node, not assumed:
+          //   for (…) { try { return 7; } finally { break; } } return 9;   -> node prints 9.
+          // The pending exits parked on this frame are then simply never resumed, and the
+          // stores that named them are dead. A finalizer that jumps only on SOME path still
+          // reaches the dispatch on the others, which is the same rule falling out for free.
           if (!this.isTerminated()) {
             const m = this.fresh(); this.emit(`${m} = load double, ptr ${modeSlot}`);
+            // Jump modes first: each is one id, and a miss falls through to the next test.
+            // The load dominates every block in this chain, so the `%m` uses are legal.
+            for (const ex of this.exitsOn(frame)) {
+              const hit = this.fresh(); this.emit(`${hit} = fcmp oeq double ${m}, ${llvmDouble(ex.mode)}`);
+              const jumpLbl = this.label("finjump");
+              const nextLbl = this.label("findisp");
+              this.terminate(`br i1 ${hit}, label %${jumpLbl}, label %${nextLbl}`);
+              this.to(this.block(jumpLbl));
+              this.emitResume(ex);
+              this.to(this.block(nextLbl));
+            }
             const isRet = this.fresh(); this.emit(`${isRet} = fcmp oeq double ${m}, ${llvmDouble(1)}`);
             const retLbl = this.label("finret");
             this.terminate(`br i1 ${isRet}, label %${retLbl}, label %${endLbl}`);
             this.to(this.block(retLbl));
+            // FORWARD RATHER THAN `ret` when another finalizer still encloses this one.
+            // This block sits INSIDE the outer `try` — it is emitted while generating it —
+            // so returning from here jumped clean over the outer finalizer, which node
+            // runs. That was a live silent wrong answer with `return` and TWO finalizers,
+            // exactly the defect `break` had, and it survived because `return` was
+            // verified against a single `finally` only. So: copy the stashed value into
+            // the outer frame's slot, re-arm mode 1 there, and hand the return on. The
+            // outer dispatch repeats the test, which is what makes it a CHAIN — three
+            // deep works for the same reason two does.
+            //
+            // `finallyStack` has already popped THIS frame (just above), so the innermost
+            // entry left is precisely the next finalizer out.
+            const outerFin = this.innermostFinally();
+            if (outerFin !== null) {
+              if (retSlot && outerFin.retSlot) {
+                const fv = this.fresh();
+                this.emit(`${fv} = load ${llvmTy(this.retTy)}, ptr ${retSlot}`);
+                this.emit(`store ${llvmTy(this.retTy)} ${fv}, ptr ${outerFin.retSlot}`);
+              }
+              this.emit(`store double ${llvmDouble(1)}, ptr ${outerFin.modeSlot}`);
+              this.terminate(`br label %${outerFin.finallyLbl}`);
+            }
             // In `main` this block is unreachable (no top-level `return`), but it must still
             // type-check against `define i32 @main` — see `inMain`.
-            if (this.inMain) this.terminate("ret i32 0");
+            else if (this.inMain) this.terminate("ret i32 0");
             else if (this.retTy === "void" || !retSlot) this.terminate("ret void");
             else { const rv = this.fresh(); this.emit(`${rv} = load ${llvmTy(this.retTy)}, ptr ${retSlot}`); this.terminate(`ret ${llvmTy(this.retTy)} ${rv}`); }
           }
@@ -2271,14 +2518,12 @@ class FnGen {
         return;
       case "BreakStmt": {
         const t = this.loops[this.loops.length - 1]!;
-        this.emitJumpDrops(t.brkDepth);
-        this.terminate(`br label %${t.brk}`);
+        this.emitJump(t.brkDepth, t.brkFin, t.brk);
         return;
       }
       case "ContinueStmt": {
         const t = this.loops[this.loops.length - 1]!;
-        this.emitJumpDrops(t.contDepth);
-        this.terminate(`br label %${t.cont}`);
+        this.emitJump(t.contDepth, t.contFin, t.cont);
         return;
       }
       case "FuncDecl":
@@ -2739,6 +2984,35 @@ class FnGen {
   private concat(a: string, b: string): string {
     const t = this.fresh();
     this.emit(`${t} = call ptr @js_str_concat(ptr ${a}, ptr ${b})`);
+    return t;
+  }
+
+  /**
+   * `concat`, releasing the operands the JSON serializer itself allocated.
+   *
+   * The serializer is a left fold of `js_str_concat`, so every accumulator but the last
+   * is dead the instant the next concatenation has copied it — and none of them was ever
+   * released: `JSON.stringify({a, b})` allocated EIGHT strings and returned one, so seven
+   * escaped per call, without bound. `js_str_concat` copies both inputs (it always
+   * allocates; there is no "return the operand when the other side is empty" fast path),
+   * so a release emitted after it is the last reference and the buffer is reclaimed.
+   *
+   * `own` says the operand is one this serializer produced. An interned `@.str` constant
+   * is passed `false` — not because releasing one would be wrong (`nt_str_release` is a
+   * documented no-op on a pointer the RC side table never saw) but so the emitted IR does
+   * not grow a dead call per separator.
+   *
+   * A `genJsonStringify` result is always safe to pass `true`: every arm of it either
+   * ALLOCATES (`nt_json_num`, `js_json_quote`, `nt_date_to_json`, a nested object/array's
+   * own final concat) or hands back a pointer that is not in the table at all (an
+   * interned `null`/`{}`, `js_bool_to_str`'s static `"true"`/`"false"`, `nt_json_num`'s
+   * static `"null"` for a non-finite). No arm returns the CALLER's value, which is the
+   * one thing that would make this a premature free.
+   */
+  private jsonCat(a: string, aOwn: boolean, b: string, bOwn: boolean): string {
+    const t = this.concat(a, b);
+    if (aOwn) this.emit(`call void @nt_str_release(ptr ${a})`);
+    if (bOwn) this.emit(`call void @nt_str_release(ptr ${b})`);
     return t;
   }
 
@@ -3741,7 +4015,14 @@ class FnGen {
       }
       // `e.args.length > 2` guards the read: `JSON.stringify(v)` is the common call and
       // `e.args[2]` would be an index == length read, which nativets PANICS on.
-      return this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args.length > 2 ? e.args[2] : undefined), 0);
+      const json = this.genJsonStringify(this.genExpr(e.args[0]!), this.jsonIndentUnit(e.args.length > 2 ? e.args[2] : undefined), 0);
+      // The serializer's result is this frame's at rc=1 (a `js_str_concat` fold), so a
+      // DISCARDED `JSON.stringify(o);` can be reclaimed rather than leaked. The degenerate
+      // shapes — `{}` for a Map/Set/fieldless object, `null` — hand back an interned
+      // constant instead, which `nt_str_release` ignores. Never `val` itself: no arm of
+      // `genJsonStringify` returns its argument.
+      this.discardFree = { v: json.v, call: "nt_str_release" };
+      return json;
     }
 
     // Object.keys(o) / Object.values(o) — keys are compile-time known from o's type.
@@ -3795,6 +4076,7 @@ class FnGen {
           this.emit(`call double @nt_arr_push(ptr ${pair}, i64 ${slot})`);
           this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot({ v: pair, ty: "string[]" })})`);
         });
+        this.discardFree = { v: arr, call: "nt_arr_free" }; // built here out of nt_arr_new; nothing else names it
         return { v: arr, ty: "string[][]" };
       }
       // stdlib Batch 3: `Object.freeze(o)` is the identity (objects are ALREADY
@@ -3805,9 +4087,12 @@ class FnGen {
       // checker now refuses `isFrozen`/`isSealed`/`isExtensible` (NT1002), so nothing
       // reaches here — and the constant is gone rather than left as unreachable code,
       // because that is the shape a future edit would resurrect.
-      if (e.callee.property === "freeze") return o;
-      if (e.callee.property === "keys" || e.callee.property === "getOwnPropertyNames")
-        return this.buildStringArray(objectFields(o.ty).map((f) => f.key));
+      if (e.callee.property === "freeze") return o; // the IDENTITY — never mark this fresh
+      if (e.callee.property === "keys" || e.callee.property === "getOwnPropertyNames") {
+        const keys = this.buildStringArray(objectFields(o.ty).map((f) => f.key));
+        this.discardFree = { v: keys.v, call: "nt_arr_free" }; // a fresh nt_arr_new of interned key literals
+        return keys;
+      }
       // values: read each field slot into a fresh homogeneous array (checker enforced).
       const fields = objectFields(o.ty);
       const arr = this.fresh();
@@ -3820,6 +4105,7 @@ class FnGen {
         const val: Val = { v: this.fromSlot(slot, f.ty), ty: f.ty };
         this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(val)})`);
       });
+      this.discardFree = { v: arr, call: "nt_arr_free" }; // Object.values: a fresh nt_arr_new of field slots
       return { v: arr, ty: makeArrayTy(fields[0]!.ty) };
     }
 
@@ -5636,8 +5922,17 @@ class FnGen {
           const b = this.genExpr(arg).v;
           const t = this.fresh();
           this.emit(`${t} = call ptr @nt_arr_concat(ptr ${acc}, ptr ${b})`);
+          // The FOLD's intermediates: every `acc` past the receiver is a header this
+          // lowering allocated one line earlier and has just copied out of, so nothing
+          // else can name it — `a.concat(b, c)` allocated two and returned one. The
+          // receiver itself is skipped: it is the caller's binding (or, if it was a
+          // temporary, `freeReceiverTemp`'s to release).
+          if (acc !== recv.v) this.emit(`call void @nt_arr_free(ptr ${acc})`);
           acc = t;
         }
+        // Fresh by construction: `nt_arr_concat` returns a NEW header (and `concat` with
+        // no arguments is `recv` itself, which this frame does not own).
+        if (acc !== recv.v) this.discardFree = { v: acc, call: "nt_arr_free" };
         return { v: acc, ty: recv.ty };
       }
       case "at": {
@@ -6372,12 +6667,17 @@ class FnGen {
     // constants) so it does not churn every record's IR snapshot.
     if (!fields.some((f) => optional(f.ty))) {
       let acc = this.mod.intern(pretty ? `{\n${inner}` : "{");
+      // `own` tracks whether `acc` is still the interned opening constant (borrowed) or
+      // has become a concatenation this frame allocated. It flips on the first concat and
+      // never flips back; see `jsonCat`.
+      let own = false;
       fields.forEach((f, i) => {
-        if (i > 0) acc = this.concat(acc, this.mod.intern(pretty ? `,\n${inner}` : ","));
-        acc = this.concat(acc, this.mod.intern(pretty ? `"${f.key}": ` : `"${f.key}":`));
-        acc = this.concat(acc, this.genJsonStringify(this.loadField(val, f.key, f.ty), indent, depth + 1).v);
+        if (i > 0) { acc = this.jsonCat(acc, own, this.mod.intern(pretty ? `,\n${inner}` : ","), false); own = true; }
+        acc = this.jsonCat(acc, own, this.mod.intern(pretty ? `"${f.key}": ` : `"${f.key}":`), false); own = true;
+        const fv = this.genJsonStringify(this.loadField(val, f.key, f.ty), indent, depth + 1).v;
+        acc = this.jsonCat(acc, own, fv, true); own = true;
       });
-      return { v: this.concat(acc, this.mod.intern(pretty ? `\n${close}}` : "}")), ty: "string" };
+      return { v: this.jsonCat(acc, own, this.mod.intern(pretty ? `\n${close}}` : "}"), false), ty: "string" };
     }
 
     const sep = this.mod.intern(pretty ? `,\n${inner}` : ",");
@@ -6392,9 +6692,14 @@ class FnGen {
       const had = this.fresh(); this.emit(`${had} = load i1, ptr ${emittedSlot}`);
       const lead = this.fresh();
       this.emit(`${lead} = select i1 ${had}, ptr ${sep}, ptr ${this.mod.intern("")}`);
-      let a = this.concat(cur, lead);
-      a = this.concat(a, this.mod.intern(pretty ? `"${key}": ` : `"${key}":`));
-      a = this.concat(a, jsonV);
+      // `cur` is the interned `""` on the first write and a concatenation this frame
+      // allocated on every later one — a RUNTIME distinction, since a field can vanish.
+      // Released unconditionally: the two cases are exactly "owned" and "not in the RC
+      // table", and `nt_str_release` is a no-op on the second. `lead` is a select between
+      // two interned constants, so it is never owned.
+      let a = this.jsonCat(cur, true, lead, false);
+      a = this.jsonCat(a, true, this.mod.intern(pretty ? `"${key}": ` : `"${key}":`), false);
+      a = this.jsonCat(a, true, jsonV, true);
       this.emit(`store ptr ${a}, ptr ${accSlot}`);
       this.emit(`store i1 true, ptr ${emittedSlot}`);
     };
@@ -6427,7 +6732,9 @@ class FnGen {
     this.emit(`${openV} = select i1 ${any}, ptr ${open}, ptr ${bareOpen}`);
     const closeV = this.fresh();
     this.emit(`${closeV} = select i1 ${any}, ptr ${fullClose}, ptr ${bareClose}`);
-    return { v: this.concat(this.concat(openV, body), closeV), ty: "string" };
+    // `openV`/`closeV` select between interned constants; `body` is the accumulator, owned
+    // whenever any field survived and the interned `""` when none did.
+    return { v: this.jsonCat(this.jsonCat(openV, false, body, true), true, closeV, false), ty: "string" };
   }
 
   /** Load object field `key` (typed `ty`) out of the record `val`. */
@@ -6465,22 +6772,25 @@ class FnGen {
     this.terminate(`br i1 ${first}, label %${firstL}, label %${comma}`);
     // First element: pretty prints a leading newline + indent before it.
     this.to(this.block(firstL));
+    // Every accumulator load below is released once the next concatenation has copied it:
+    // owned on all but the first iteration, and the interned `[` on that one, which
+    // `nt_str_release` ignores. Without this the loop leaked one string per ELEMENT.
     if (pretty) {
       const af0 = this.fresh(); this.emit(`${af0} = load ptr, ptr ${accSlot}`);
-      this.emit(`store ptr ${this.concat(af0, this.mod.intern(`\n${inner}`))}, ptr ${accSlot}`);
+      this.emit(`store ptr ${this.jsonCat(af0, true, this.mod.intern(`\n${inner}`), false)}, ptr ${accSlot}`);
     }
     this.terminate(`br label %${after}`);
     // Subsequent elements: separator (compact `,` or pretty `,\n<indent>`).
     this.to(this.block(comma));
     const a1 = this.fresh(); this.emit(`${a1} = load ptr, ptr ${accSlot}`);
-    this.emit(`store ptr ${this.concat(a1, this.mod.intern(pretty ? `,\n${inner}` : ","))}, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.jsonCat(a1, true, this.mod.intern(pretty ? `,\n${inner}` : ","), false)}, ptr ${accSlot}`);
     this.terminate(`br label %${after}`);
     this.to(this.block(after));
     const iB2 = this.fresh(); this.emit(`${iB2} = load double, ptr ${idx}`);
     const slot = this.fresh(); this.emit(`${slot} = call i64 @nt_arr_get(ptr ${val.v}, double ${iB2})`);
     const es = this.genJsonStringify({ v: this.fromSlot(slot, el), ty: el }, indent, depth + 1);
     const a3 = this.fresh(); this.emit(`${a3} = load ptr, ptr ${accSlot}`);
-    this.emit(`store ptr ${this.concat(a3, es.v)}, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.jsonCat(a3, true, es.v, true)}, ptr ${accSlot}`);
     this.terminate(`br label %${upd}`);
     this.to(this.block(upd));
     const iU = this.fresh(); this.emit(`${iU} = load double, ptr ${idx}`);
@@ -6490,7 +6800,7 @@ class FnGen {
     this.to(this.block(end));
     if (!pretty) {
       const af = this.fresh(); this.emit(`${af} = load ptr, ptr ${accSlot}`);
-      return { v: this.concat(af, this.mod.intern("]")), ty: "string" };
+      return { v: this.jsonCat(af, true, this.mod.intern("]"), false), ty: "string" };
     }
     // Pretty close: an empty array stays inline `[]`; a non-empty one gets `\n<close>]`.
     const emptyL = this.label("jsE"), neL = this.label("jsN"), joinL = this.label("jsJ");
@@ -6498,11 +6808,11 @@ class FnGen {
     this.terminate(`br i1 ${isEmpty}, label %${emptyL}, label %${neL}`);
     this.to(this.block(emptyL));
     const ae = this.fresh(); this.emit(`${ae} = load ptr, ptr ${accSlot}`);
-    this.emit(`store ptr ${this.concat(ae, this.mod.intern("]"))}, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.jsonCat(ae, true, this.mod.intern("]"), false)}, ptr ${accSlot}`);
     this.terminate(`br label %${joinL}`);
     this.to(this.block(neL));
     const an = this.fresh(); this.emit(`${an} = load ptr, ptr ${accSlot}`);
-    this.emit(`store ptr ${this.concat(an, this.mod.intern(`\n${close}]`))}, ptr ${accSlot}`);
+    this.emit(`store ptr ${this.jsonCat(an, true, this.mod.intern(`\n${close}]`), false)}, ptr ${accSlot}`);
     this.terminate(`br label %${joinL}`);
     this.to(this.block(joinL));
     const afj = this.fresh(); this.emit(`${afj} = load ptr, ptr ${accSlot}`);

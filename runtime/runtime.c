@@ -79,6 +79,21 @@ void (*nt_rt_lock)(int acquire) = 0;
 #define NT_RC_LOCK()   do { if (nt_rt_lock) nt_rt_lock(1); } while (0)
 #define NT_RC_UNLOCK() do { if (nt_rt_lock) nt_rt_lock(0); } while (0)
 
+/* THE END OF A HEAP OBJECT'S / STRING'S LIFE, announced — the second hook installed by
+ * nt_actor.c, and by the same rule as `nt_rt_lock` above: this file must not NAME a
+ * symbol defined in nt_actor.c, because the actor runtime is linked ONLY for programs
+ * that use actors (src/driver.ts writeIR gates it on `nt_sched_init` appearing in the
+ * IR). A direct call would break the link for every other program.
+ *
+ * WHY IT EXISTS. An actor's crash record carries a "triggering message" causal tag that
+ * BORROWS the last message the actor consumed — and consuming a message is exactly what
+ * hands it to the receiving frame, which frees it at scope exit. The tag therefore has
+ * to learn when its borrow ends, and this is the only place that knows: the free itself.
+ * Called BEFORE the free, so the pointer handed over is still valid, and only ever
+ * COMPARED by the hook (see tag_forget in nt_actor.c) — never dereferenced, never freed.
+ * NULL for every non-actor program: one predictable, well-predicted NULL test. */
+void (*nt_rt_drop_notify)(const void *p) = 0;
+
 /* `len` is the string's BYTE length, memoized: -1 until something asks. Lazy, not
  * eager, because `alloc_str` REGISTERS the buffer before the producer fills it —
  * measuring at registration would read uninitialized bytes — and because a string is
@@ -171,6 +186,11 @@ void nt_str_release(void *p) {
     size_t i = str_tab_slot(p);
     if (g_str_tab[i].key == p) {       /* else: literal / already freed / untracked */
       if (--g_str_tab[i].rc <= 0) {
+        /* Same contract as nt_obj_free: announce the death BEFORE the free, so a crash
+         * record's borrowed causal tag stops pointing at this buffer. The hook takes no
+         * lock (it only touches the running actor's own fields), so calling it under the
+         * RC lock cannot invert a lock order. */
+        if (nt_rt_drop_notify) nt_rt_drop_notify(p);
         free(p);
         str_tab_remove_at(i);
         g_str_frees++;
@@ -1453,22 +1473,74 @@ static int nt_ws_cp(unsigned cp) {
          cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F ||
          cp == 0x3000 || cp == 0xFEFF;
 }
-/* Decode the UTF-8 sequence at `p` (which must not be the end), storing its byte
- * length in `*len`. Same decoder shape as js_str_code_point_at. */
-static unsigned nt_utf8_cp(const unsigned char *p, const unsigned char *end, long *len) {
+/* ---- The ONE UTF-8 decoder every string scanner shares. --------------------------
+ *
+ * `nt_utf8_len` decodes the sequence at `p` ONLY IF IT IS WELL FORMED, returning its byte
+ * length (1..4); it returns 0 for anything else and touches `*cp` not at all. Every caller
+ * answers a 0 the same way — TAKE THE ONE RAW BYTE AND ADVANCE ONE — which is what makes
+ * ill-formed input pass through byte-identical instead of being re-framed or "corrected".
+ *
+ * WHY THIS IS A CORRECTNESS FIX AND NOT ROBUSTNESS POLISH. This used to size a sequence
+ * from its LEAD BYTE ALONE and never check that the bytes after it were continuations. That
+ * is safe only if strings are always well-formed UTF-8, and §A.2 guarantees the opposite:
+ * `.length` and `.slice` are BYTE-oriented, so `" ".slice(0, 2)` is an ordinary
+ * expression yielding the truncated lead pair `E2 80`. Append `"Axx"` and the old decoder
+ * read `E2 80 41` as U+2001 EM QUAD — which `nt_ws_cp` calls whitespace — so `.trim()`
+ * consumed all three bytes and DELETED THE `A`: `"xx"` where node prints `"Axx"`, exit 0,
+ * well-formed output. `readFileSync(p, "utf8")` hands over file bytes verbatim, which
+ * reaches the same class from outside the process, and reaches the OVERLONG forms too:
+ * `C0 A0` decoded to U+0020 and was trimmed as a space.
+ *
+ * SURROGATES ARE DELIBERATELY ACCEPTED (this is WTF-8, not strict UTF-8). Our lexer and
+ * `String.fromCharCode` emit `ED A0 80` for `\ud800`, and node's `codePointAt` answers
+ * 55296; rejecting the sequence would answer 237 and BREAK agreement with node. So
+ * "ill-formed" here means truncated, a missing continuation byte, an overlong form, a
+ * continuation or `0xF8..0xFF` byte in lead position, or a value above U+10FFFF.
+ *
+ * `utf8_next` in the base64 section is the other decoder in this file. It is already strict
+ * for the same reasons; it stays separate only because `btoa` needs a MALFORMED/-1 signal
+ * rather than a fall-back-to-byte, which is the one place the raw-byte policy is wrong. */
+static int nt_utf8_len(const unsigned char *p, const unsigned char *end, unsigned *cp) {
   unsigned c = p[0];
-  long need = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
-  if (need == 0 || p + need >= end) { *len = 1; return c; } /* ASCII, or truncated */
-  unsigned cp = c & (unsigned)(0x7F >> (need + 1));
-  for (long k = 1; k <= need; k++) cp = (cp << 6) | (p[k] & 0x3F);
-  *len = need + 1; return cp;
+  if (c < 0x80) { *cp = c; return 1; }
+  int need; unsigned v, min;
+  if      ((c & 0xE0) == 0xC0) { need = 1; v = c & 0x1Fu; min = 0x80; }
+  else if ((c & 0xF0) == 0xE0) { need = 2; v = c & 0x0Fu; min = 0x800; }
+  else if ((c & 0xF8) == 0xF0) { need = 3; v = c & 0x07u; min = 0x10000; }
+  else return 0;                                /* a continuation byte, or 0xF8..0xFF */
+  /* Truncated. This one guard is an EQUIVALENT MUTANT today — deleting it keeps every
+   * test green, and that is a proof about the CALLERS, not a gap in them: both windows
+   * that reach here end on a byte that can never be a continuation (`s + strlen(s)` is the
+   * NUL, and `nt_ws_skip_back`'s window always ends at a character boundary), so the loop
+   * below would stop on its own and in bounds. It stays because it is what makes this
+   * function correct for an ARBITRARY window, which is the property the next caller will
+   * assume and the one neither invariant above is written down to defend. */
+  if (end - p <= (long)need) return 0;
+  for (int k = 1; k <= need; k++) {
+    if ((p[k] & 0xC0) != 0x80) return 0;        /* NOT a continuation — load-bearing */
+    v = (v << 6) | (unsigned)(p[k] & 0x3F);
+  }
+  if (v < min || v > 0x10FFFF) return 0;        /* overlong, or beyond Unicode */
+  *cp = v; return need + 1;
 }
+/* AN ILL-FORMED BYTE IS NEVER WHITESPACE, and the two scanners below say so by testing
+ * `nt_ws_cp` ONLY on a code point `nt_utf8_len` actually decoded.
+ *
+ * The tempting shape — fall back to the raw byte and ask `nt_ws_cp` about that — is wrong
+ * for the same reason the lead-byte-only decoder was: a RAW BYTE IS NOT A CODE POINT.
+ * `nt_ws_cp` holds U+00A0 NBSP, so the byte 0xA0 tests TRUE, and `" ".slice(1, 2)` is
+ * exactly how ordinary source produces a lone 0xA0 (§A.2 cuts bytes; NBSP encodes `C2 A0`).
+ * That made `(tail + "x").trimStart()` eat the byte while `("x" + tail).trimEnd()` kept it
+ * — the two ends of one `trim` disagreeing about one byte, which is proof on its own that
+ * one of them was wrong. Found by MUTATION: swapping the fall-back value to U+FFFD changed
+ * nothing any test could see, which is what pointed at the fall-back being consulted at all. */
+
 /* Scan FORWARD past whitespace from `s`. */
 static const char *nt_ws_skip_fwd(const char *s, const char *end) {
   const unsigned char *p = (const unsigned char *)s, *e = (const unsigned char *)end;
   while (p < e) {
-    long len; unsigned cp = nt_utf8_cp(p, e, &len);
-    if (!nt_ws_cp(cp)) break;
+    unsigned cp; int len = nt_utf8_len(p, e, &cp);
+    if (len == 0 || !nt_ws_cp(cp)) break;
     p += len;
   }
   return (const char *)p;
@@ -1481,10 +1553,10 @@ static const char *nt_ws_skip_back(const char *start, const char *end) {
   while (p > s) {
     const unsigned char *q = p - 1;
     while (q > s && (*q & 0xC0) == 0x80) q--;
-    long len; unsigned cp = nt_utf8_cp(q, p, &len);
-    /* Only treat it as one character if it spans exactly back to `p`; a stray
-     * continuation byte is not whitespace and stops the scan. */
-    if (q + len != p || !nt_ws_cp(cp)) break;
+    unsigned cp; int len = nt_utf8_len(q, p, &cp);
+    /* Only treat it as one character if it decoded AND spans exactly back to `p`; a
+     * stray continuation byte is not whitespace and stops the scan. */
+    if (len == 0 || q + len != p || !nt_ws_cp(cp)) break;
     p = q;
   }
   return (const char *)p;
@@ -1976,6 +2048,7 @@ void *nt_obj_new(double nfields) {
 }
 void nt_obj_free(void *o) {
   if (!o) return;
+  if (nt_rt_drop_notify) nt_rt_drop_notify(o);  /* before the free: `o` is still valid */
   free(o);
   NT_STAT_INC(g_obj_frees);
 }
@@ -3618,15 +3691,23 @@ int32_t nt_num_is_safe_integer(double x) {
 
 /* ---- Array.from(str) → string[] of code-point characters (node iterates by
  * code point, not byte, so multi-byte UTF-8 stays one element). Builds the
- * generic slot-vector directly via nt_arr_new/nt_arr_push. ---- */
+ * generic slot-vector directly via nt_arr_new/nt_arr_push.
+ *
+ * The framing comes from `nt_utf8_len`, not from the lead byte alone. Sizing a piece from
+ * the lead byte and only guarding the END of the buffer let a lead byte SWALLOW whatever
+ * followed it: for `E2 80 41 78 78` (`" ".slice(0, 2) + "Axx"`, ordinary source under
+ * §A.2) this returned THREE elements, the first of them the bogus 3-byte glob `E2 80 41`,
+ * so `Array.from(s).indexOf("A")` was -1 with the byte still sitting in the string. An
+ * ill-formed byte is now its own one-byte element, which keeps the split LOSSLESS —
+ * `Array.from(s).join("") === s` for every byte string, well formed or not. ---- */
 void *nt_arr_from_str(const char *s) {
   void *a = nt_arr_new(1);
   size_t i = 0, n = nt_strlen(s);
+  const unsigned char *b = (const unsigned char *)s;
   while (i < n) {
-    unsigned char c = (unsigned char)s[i];
-    size_t len = 1;
-    if (c >= 0xF0) len = 4; else if (c >= 0xE0) len = 3; else if (c >= 0xC0) len = 2;
-    if (i + len > n) len = 1;
+    unsigned cp;
+    int k = nt_utf8_len(b + i, b + n, &cp);
+    size_t len = k ? (size_t)k : 1;
     char *o = alloc_str(len);
     memcpy(o, s + i, len);
     o[len] = 0;
@@ -3849,18 +3930,20 @@ double js_str_char_code_at(const char *s, double id) {
 /* String#codePointAt(i) — decodes the UTF-8 sequence starting at BYTE i, so an
  * ASCII string matches node's UTF-16 code point exactly. NaN is the
  * out-of-range sentinel, which codegen turns into node's `undefined`
- * (a code point is never NaN, so the sentinel is unambiguous). */
+ * (a code point is never NaN, so the sentinel is unambiguous).
+ *
+ * This once carried its OWN copy of the decoder, lead-byte-sized and unvalidated, and
+ * `nt_utf8_cp` was written from its shape — so one defect, copied, was two. Both now go
+ * through `nt_utf8_len`: an ill-formed sequence reports the RAW BYTE at `i`, which is the
+ * only answer that agrees with `.charCodeAt(i)` and `.at(i)` about the same position. */
 double js_str_code_point_at(const char *s, double id) {
   long n = (long)nt_strlen(s);
   if (isnan(id)) id = 0;
   long i = (long)id;
   if (i < 0 || i >= n) return NAN;
   const unsigned char *p = (const unsigned char *)s + i;
-  unsigned c = p[0];
-  long need = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
-  if (need == 0 || i + need >= n) return (double)c; /* ASCII, or a truncated/continuation byte */
-  unsigned cp = c & (unsigned)(0x7F >> (need + 1));
-  for (long k = 1; k <= need; k++) cp = (cp << 6) | (p[k] & 0x3F);
+  unsigned cp;
+  if (nt_utf8_len(p, (const unsigned char *)s + n, &cp) == 0) return (double)p[0];
   return (double)cp;
 }
 
@@ -4581,11 +4664,23 @@ static const char *uri_encode(const char *s, int keep_reserved) {
   char *o = alloc_str(j);
   memcpy(o, buf, j);
   o[j] = 0;
+  free(buf); /* see uri_decode below: unregistered scratch, freed on every path */
   return o;
 }
 const char *nt_encode_uri_component(const char *s) { return uri_encode(s, 0); }
 const char *nt_encode_uri(const char *s) { return uri_encode(s, 1); }
 
+/* `buf` here is SCRATCH, not a result: the decoded bytes are copied into a fresh
+ * `alloc_str` and it is `buf` that must be reclaimed. It is UNREGISTERED memory —
+ * `nt_str_register` never saw it — so it carries no refcount and `__strLive`
+ * cannot count it, which is exactly why the missing free survived: no in-process
+ * counter and no leak test could observe it, and LeakSanitizer is Linux-only.
+ * Measured on macOS with `leaks --atExit`: 20,000 `decodeURIComponent` calls on a
+ * 75-byte input leaked 20,000 blocks / 1.83 MB, one per call, against ZERO in the
+ * same loop with the call removed. Both exits free it — the raise path does NOT
+ * longjmp (`nt_exc_raise` sets a pending flag and returns), so the early `return`
+ * really did leak too. Same shape, same fix, in `uri_encode` above; `free` is the
+ * right pair for `nativets_alloc`, which is a bare `malloc` (cf. `nt_atob`). */
 static const char *uri_decode(const char *s, int keep_reserved) {
   size_t n = strlen(s);
   char *buf = (char *)nativets_alloc(n + 1);
@@ -4594,6 +4689,7 @@ static const char *uri_decode(const char *s, int keep_reserved) {
     if (s[i] != '%') { buf[j++] = s[i]; continue; }
     if (i + 2 >= n || url_hexval(s[i + 1]) < 0 || url_hexval(s[i + 2]) < 0) {
       nt_exc_raise_msg("URIError: URI malformed");
+      free(buf);
       return url_empty();
     }
     unsigned char b = (unsigned char)(url_hexval(s[i + 1]) * 16 + url_hexval(s[i + 2]));
@@ -4607,6 +4703,7 @@ static const char *uri_decode(const char *s, int keep_reserved) {
   char *o = alloc_str(j);
   memcpy(o, buf, j);
   o[j] = 0;
+  free(buf);
   return o;
 }
 const char *nt_decode_uri_component(const char *s) { return uri_decode(s, 0); }

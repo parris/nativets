@@ -295,6 +295,82 @@ function returnsUnderFinally(body: Stmt[], under = false): boolean {
 }
 
 /**
+ * Can this body hand a VALUE back to its caller? `return x` anywhere in it, at any depth.
+ *
+ * Read by `typeArrow` to decide whether an arrow being passed into a `=> void` slot really
+ * returns nothing, in which case its type is `void` rather than `inferBlockReturn`'s
+ * default of `number`. So the answer has a safe direction and an unsafe one, and they are
+ * NOT symmetric:
+ *
+ *   - a false NO turns an arrow that does produce a `double` into a `void` signature, and
+ *     a `=> void` parameter is CALLED as `call void %fp(…)` — a return-type mismatch in
+ *     the emitted IR, resting on ABI luck. That is the miscompile direction.
+ *   - a false YES leaves today's refusal in place. Merely unhelpful.
+ *
+ * Hence `default: return true`. Every kind that cannot carry a value is listed explicitly,
+ * so a NEW `Stmt` kind added later re-refuses rather than silently taking the unsafe arm —
+ * the opposite default from `returnsUnderFinally` above, which answers a question whose
+ * safe direction is `false`.
+ *
+ * STATEMENT children only, never expressions, and that is what makes nested frames free: a
+ * nested arrow's body hangs off an `ArrowFunction` EXPRESSION, so this walk cannot reach it
+ * and its `return` is correctly attributed to that arrow rather than to this one. A
+ * `FuncDecl` is skipped for the same reason, explicitly.
+ *
+ * A BARE `return;` carries nothing and does not count — node's value there is `undefined`,
+ * which is exactly what a `void` slot expects.
+ */
+function carriesReturnValue(body: Stmt[]): boolean {
+  for (const s of body) {
+    switch (s.kind) {
+      case "ReturnStmt": if (s.argument !== null) return true; break;
+      // One `case` per kind rather than a combined label, for the reason
+      // `returnsUnderFinally` documents: a combined label narrows `s` only to the union of
+      // those members, and the field read is then NT2001 in the subset `src/` must stay in.
+      case "IfStmt": {
+        if (carriesReturnValue(s.consequent)) return true;
+        const alt = s.alternate;
+        if (alt !== null && carriesReturnValue(alt)) return true;
+        break;
+      }
+      case "TryStmt": {
+        if (carriesReturnValue(s.block)) return true;
+        const handler = s.handler;
+        if (handler !== null && carriesReturnValue(handler)) return true;
+        const fin = s.finalizer;
+        if (fin !== null && carriesReturnValue(fin)) return true;
+        break;
+      }
+      case "WhileStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "DoWhileStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "ForStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "ForOfStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "ForInStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "BlockStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "MultiStmt": if (carriesReturnValue(s.stmts)) return true; break;
+      case "SwitchStmt": for (const c of s.cases) if (carriesReturnValue(c.body)) return true; break;
+      // Cannot carry a value out of THIS frame. `FuncDecl` is a frame of its own; the rest
+      // are leaves. Listed rather than defaulted — see the header.
+      case "VarDecl": break;
+      case "FuncDecl": break;
+      case "ThrowStmt": break;
+      case "ExprStmt": break;
+      case "BreakStmt": break;
+      case "ContinueStmt": break;
+      // `BlockDrops`, not `BlockDropsStmt` — the INTERFACE is `BlockDropsStmt` but the tag
+      // it carries is `"BlockDrops"`. Written wrong first, and the way it surfaced is the
+      // argument for both this switch's shape and for test/tsc.test.ts: the label matched
+      // nothing, so the statement fell to `default` and answered `true` — the SAFE arm, an
+      // over-refusal rather than a `double`-returning body in a `call void` slot — and
+      // `tsc` named it (TS2678) rather than leaving it to be found by a leak.
+      case "BlockDrops": break;
+      default: return true; // an unrecognized kind: refuse rather than guess
+    }
+  }
+  return false;
+}
+
+/**
  * The UTF-8 byte length of `s` — exactly what `Buffer.byteLength(s, "utf8")` returns.
  *
  * `Buffer` is a node global with no representation here (`NT2001`), so it cannot appear in
@@ -6862,6 +6938,35 @@ class Checker {
       this.bodyChain.pop();
       this.selfArrows.pop();
     }
+    /*
+     * A STATEMENT ARROW GOING INTO A `=> void` SLOT returns `void`, not `number`.
+     *
+     * `inferBlockReturn` answers `number` for a body with no `return` — the checker's
+     * universal default, and the right answer for an unannotated `function`, whose callers
+     * may read the value. Here it is a lie that nothing could work around: the resulting
+     * `(P)=>number` does not fit `(P)=>void`, and neither did the documented escape hatch,
+     * because `typeArrowReturn` maps a `: void` annotation to "no declared type" and lands
+     * on the same inference. There was NO spelling of a statement callback a `=> void`
+     * parameter accepted, on code node runs and tsc accepts.
+     *
+     * NOT fixed by widening assignability. `(P)=>R` fitting a `(P)=>void` slot for any `R`
+     * is TypeScript's real rule, but a `=> void` parameter is CALLED as `call void %fp(…)`
+     * here, so accepting an arrow codegen lowers as `define double @arrow_0` would put a
+     * return-type mismatch into the IR. Making the TYPE true instead keeps the two sides in
+     * agreement by construction — codegen's arrow path already emits `ret void` for a
+     * `void` `retTy`.
+     *
+     * ONE-DIRECTIONAL, which is the property `inferBlockReturn` is held to and this must
+     * not break. It fires only where `expected` is a function type returning `void`, and no
+     * arrow typed `(P)=>number` has ever fit such a slot — so every program this changes was
+     * previously REFUSED. No inferred type moves anywhere a program compiled before.
+     *
+     * Gated on `carriesReturnValue`, not on the absence of a top-level `return`: a `return x`
+     * nested inside an `if` is invisible to `inferBlockReturn` and would otherwise sneak a
+     * `double`-returning body into a `call void` slot.
+     */
+    const expRet = expected !== undefined && isFuncTy(expected) ? funcRet(expected) : undefined;
+    if (expRet === "void" && !arrow.exprBody && !carriesReturnValue(arrow.stmts ?? [])) retTy = "void";
     arrow.retTy = retTy;
     arrow.captures = this.computeCaptures(arrow, scope);
     const ty = makeFuncTy(paramTys, retTy);

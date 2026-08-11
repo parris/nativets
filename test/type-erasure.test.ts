@@ -202,16 +202,108 @@ console.log(g());
     expect(err!.diag.message).toContain("number");
   });
 
-  /* Needs either an opaque unusable `Ty`, or reflective walks the subset can express. */
-  test("`unknown` and `object` still erase in an annotation", () => {
-    for (const src of [
-      `function f(x: unknown): number { return 1; }\nconsole.log(f(1));`,
-      `function f(x: object): number { return 1; }\nconsole.log(f({ a: 1 }));`,
-    ]) {
-      let err: NTError | undefined;
-      try { sourceToIR(src); } catch (e) { err = e as NTError; }
-      expect(err?.diag.code).not.toBe("NT1035");
-    }
+  /* `object` still erases. Needs either an opaque unusable `Ty` — the route `unknown`
+   * took below — or reflective walks the subset can express. */
+  test("`object` still erases in an annotation", () => {
+    let err: NTError | undefined;
+    try {
+      sourceToIR(`function f(x: object): number { return 1; }\nconsole.log(f({ a: 1 }));`);
+    } catch (e) { err = e as NTError; }
+    expect(err?.diag.code).not.toBe("NT1035");
+    // The erasure, visible: `{a:number}` is refused against a slot the source called
+    // `object`, and the refusal names `number`.
+    expect(err!.diag.message).toContain("number");
+  });
+
+  /*
+   * `unknown` NO LONGER ERASES — it resolves to the opaque `"unknown"` arm of `ScalarTy`
+   * (src/ast.ts), which has no representation and no inhabitants. This is the one member
+   * of the residue that got its feature, and it is a TYPE-LEVEL one only: no value can
+   * ever carry the type, so codegen is never reached with it.
+   *
+   * The point of the placeholder is the MESSAGE. `unknown` erasing to `number` is why 19
+   * functions in this compiler's own source were refused with a diagnostic naming
+   * `number` — a type not one of those files contains — which is what sent three separate
+   * lanes to fix `unknown` as if it were a type bug.
+   */
+  test("`unknown` in an annotation names `unknown`, not `number`", () => {
+    let err: NTError | undefined;
+    try {
+      sourceToIR(`function f(x: unknown): number { return 1; }\nconsole.log(f(1));`);
+    } catch (e) { err = e as NTError; }
+    expect(err!.diag.code).toBe("NT2001");
+    // The SLOT is described by the word the source wrote. Under the erasure this read
+    // "'f' arg 0 expects number, got number" — a sentence that cannot be acted on.
+    expect(err!.diag.message).toContain("expects unknown");
+    // `number` still appears, and correctly: it names the ARGUMENT, which really is one.
+    expect(err!.diag.message).toBe("'f' arg 0 expects unknown, got number");
+  });
+
+  /*
+   * THE SHAPE THE 19 src/ SITES ACTUALLY HIT. Every reflective walk opens with a null
+   * test, and against the erasure that read `Cannot compare number with null` — a
+   * sentence about a program containing no `number`.
+   */
+  test("a null test against `unknown` blames `unknown`", () => {
+    let err: NTError | undefined;
+    try {
+      sourceToIR(`function f(n: unknown): boolean { return n === null; }\nconsole.log(f(null));`);
+    } catch (e) { err = e as NTError; }
+    expect(err!.diag.message).toContain("unknown");
+    expect(err!.diag.message).not.toContain("number");
+  });
+
+  /*
+   * THE HOLE `ERASURE_STILL_ALLOWED` DOCUMENTS, closed for `unknown`. Under the erasure
+   * `e` really WAS a `number`, so `e as string` inside the body adopted it one
+   * indirection later and reached clang as "'%t0' defined with type 'double' but expected
+   * 'ptr'". Nothing is assignable to the placeholder, so the CALL is refused and the cast
+   * is unreachable. node prints "42"; we refuse rather than miscompile.
+   */
+  test("`unknown` no longer launders a number into a string through a body cast", () => {
+    let err: NTError | undefined;
+    try {
+      sourceToIR(`function asStr(e: unknown): string { return e as string; }\nconsole.log(asStr(42));`);
+    } catch (e) { err = e as NTError; }
+    expect(err!.diag.code).toBe("NT2001");
+    expect(err!.diag.message).toContain("unknown");
+  });
+});
+
+/*
+ * THE HINT'S ADVICE HAS TO COMPILE. `ambientTypeHint("unknown")` tells the reader to
+ * "write the concrete type, or a discriminated union of object types (a literal-typed tag
+ * field `switch` narrows on)". A refusal whose advice does not work is worse than no
+ * advice, so both spellings are compiled and diffed against node.
+ */
+describe("the `unknown` hint's advice compiles and matches node", () => {
+  test("the concrete type it recommends", async () => {
+    const source = `
+function handle(e: string): string { return "got " + e; }
+console.log(handle("x"));
+`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  test("the discriminated union it recommends", async () => {
+    const source = `
+type Node = { kind: "num"; value: number } | { kind: "str"; text: string };
+function show(n: Node): string {
+  switch (n.kind) {
+    case "num": return "n:" + n.value;
+    case "str": return "s:" + n.text;
+  }
+}
+console.log(show({ kind: "num", value: 7 }));
+console.log(show({ kind: "str", text: "hi" }));
+`;
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
   });
 
   /* The residue is exactly three names and must not grow — every other ambient name is
