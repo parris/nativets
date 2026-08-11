@@ -873,8 +873,8 @@ class Analyzer {
    * is what makes the re-walk safe (test/block-drops.test.ts).
    */
   private arrowScope(list: Stmt[], state: State): void {
-    const own = new Set<string>();
-    collectLinear(list, own);
+    let own = new Set<string>();
+    own = collectLinear(list, own);
     const aliases = new Map<string, string>();
     collectAliases(list, (t) => this.isMutableInstance(t), aliases);
     // Both removals below are spelled as FILTERS, for the reason `popBorrow` documents:
@@ -2007,16 +2007,36 @@ function collectVarTys(stmts: Stmt[], out: Map<string, Ty>): void {
   }
 }
 
-function collectLinear(stmts: Stmt[], out: Set<string>): void {
+/*
+ * RETURNS the accumulator; every caller and every recursive step threads it back with
+ * `out = collectLinear(…, out)`.
+ *
+ * This is fix #2 from test/discarded-mutator.test.ts, and it is the only one available
+ * here. `out` is a PARAMETER the caller reads back, so the rebind that works for a local
+ * (`out = out.add(n)` with no return) would compile and silently lose every write — the
+ * caller keeps its own binding and never sees the new set. Under nativets a `Set` is
+ * persistent, so the bare `out.add(n)` this used to be is a guaranteed no-op, and the
+ * name would never be linear: `scoped()` intersects the block's declarations with this
+ * set, so an empty answer means an empty drop marker and one leaked allocation per
+ * execution — the exact failure the `TryStmt` comment below records from the last time
+ * this set came back short.
+ *
+ * A NO-OP under bun, where `src/` runs today, and that is what makes the change checkable:
+ * node's `.add` returns the RECEIVER, so `out = out.add(n)` self-assigns and
+ * `out = collectLinear(s.body, out)` re-binds the same object. Byte-identical IR over the
+ * corpus is therefore the expected result, not merely a hoped-for one — any drift would
+ * mean a threading mistake.
+ */
+function collectLinear(stmts: Stmt[], out: Set<string>): Set<string> {
   for (const s of stmts) {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out.add(d.name); break;
-      case "IfStmt": collectLinear(s.consequent, out); if (s.alternate) collectLinear(s.alternate, out); break;
-      case "WhileStmt": case "DoWhileStmt": collectLinear(s.body, out); break;
-      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectLinear([s.init as Stmt], out); collectLinear(s.body, out); break;
-      case "ForOfStmt": collectLinear(s.body, out); break;
-      case "SwitchStmt": for (const c of s.cases) collectLinear(c.body, out); break;
-      case "BlockStmt": collectLinear(s.body, out); break;
+      case "VarDecl": for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out = out.add(d.name); break;
+      case "IfStmt": out = collectLinear(s.consequent, out); if (s.alternate) out = collectLinear(s.alternate, out); break;
+      case "WhileStmt": case "DoWhileStmt": out = collectLinear(s.body, out); break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") out = collectLinear([s.init as Stmt], out); out = collectLinear(s.body, out); break;
+      case "ForOfStmt": out = collectLinear(s.body, out); break;
+      case "SwitchStmt": for (const c of s.cases) out = collectLinear(c.body, out); break;
+      case "BlockStmt": out = collectLinear(s.body, out); break;
       // A `try` was MISSING here, and it was a LEAK rather than a refusal: `scoped()` is
       // called on all three lists, so `declaredLinear` did find an array declared inside
       // one — but `scoped` then intersects that with `this.linear`, which is what this
@@ -2029,16 +2049,17 @@ function collectLinear(stmts: Stmt[], out: Set<string>): void {
         // the `TryStmt` case in `stmt`) and `declaredLinear` cannot see it, so `scoped`
         // is handed it explicitly and needs it to be linear for that to count.
         const bound = s.param;
-        if (s.handler !== null && bound !== null && isLinearTy(s.catchTy ?? "string")) out.add(bound);
-        collectLinear(s.block, out);
-        if (s.handler) collectLinear(s.handler, out);
-        if (s.finalizer) collectLinear(s.finalizer, out);
+        if (s.handler !== null && bound !== null && isLinearTy(s.catchTy ?? "string")) out = out.add(bound);
+        out = collectLinear(s.block, out);
+        if (s.handler) out = collectLinear(s.handler, out);
+        if (s.finalizer) out = collectLinear(s.finalizer, out);
         break;
       }
-      case "MultiStmt": collectLinear(s.stmts, out); break;
+      case "MultiStmt": out = collectLinear(s.stmts, out); break;
       default: break;
     }
   }
+  return out;
 }
 
 export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
@@ -2176,7 +2197,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     }
     let linear = new Set<string>();
     for (const p of params) if (isLinearTy(p.ty)) linear = linear.add(p.name);
-    collectLinear(body, linear);
+    linear = collectLinear(body, linear);
     for (const a of aliases.keys()) linear.delete(a); // an alias owns nothing
     for (const u of untrack) linear.delete(u);
     // Droppable = linear locals declared directly in this scope (NOT params — those
