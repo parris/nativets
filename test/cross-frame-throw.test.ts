@@ -64,6 +64,58 @@ describe("a throw crosses one frame into the caller's catch", () => {
     ].join("\n"));
   });
 
+  // A CLASS METHOD is a top-level `Class.m` whose call sites name only `m`, so the scan
+  // has to resolve them by property or it would admit a method nobody catches.
+  test("a class method raises and its caller catches", async () => {
+    await differential([
+      `class Lexer {`,
+      `  src: string;`,
+      `  constructor(src: string) { this.src = src; }`,
+      `  scan(): number {`,
+      `    if (this.src === "bad") throw "LexError";`,
+      `    return this.src.length;`,
+      `  }`,
+      `}`,
+      `function run(s: string): number {`,
+      `  const l = new Lexer(s);`,
+      `  try { return l.scan(); } catch (e) { console.log("caught", e); return -1; }`,
+      `}`,
+      `console.log(run("ok"));`,
+      `console.log(run("bad"));`,
+      ``,
+    ].join("\n"));
+  });
+
+  // THE DROP SET, at its widest: the throw is three scopes deep and every one of them
+  // owns an array. `ownedInScope` is what makes this exact, and it is the same list a
+  // `return` written at that point would take. Scaled to 4000 iterations / 2000 unwinds
+  // because a leak proportional to work is invisible at n=3; the compiled binary reports
+  // `str 0 arr 0 obj 0` under NATIVETS_ASAN=1 (checked by hand — the probes are not
+  // node-runnable, so the differential below can only assert the ANSWER).
+  test("a throw three block scopes deep, each owning an array", async () => {
+    await differential([
+      `function lex(n: number): number {`,
+      `  const outer: number[] = [1, 2, 3];`,
+      `  if (n > -1) {`,
+      `    const inner: number[] = [4, 5];`,
+      `    for (let i = 0; i < 2; i++) {`,
+      `      const deep: number[] = [6];`,
+      `      if (n % 2 === 1) throw "boom";`,
+      `      if (deep.length + inner.length > 99) return 0;`,
+      `    }`,
+      `  }`,
+      `  return outer.length;`,
+      `}`,
+      `function run(n: number): number {`,
+      `  try { return lex(n); } catch (e) { return -1; }`,
+      `}`,
+      `let acc = 0;`,
+      `for (let i = 0; i < 400; i++) acc = acc + run(i);`,
+      `console.log(acc);`,
+      ``,
+    ].join("\n"));
+  });
+
   // The frame that raises must still be able to leave NORMALLY, many times over.
   test("the escaping function also returns normally", async () => {
     await differential([
