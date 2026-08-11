@@ -792,6 +792,10 @@ interface Val { v: string; ty: Ty; }
  *  always the safe answer and is what every shape not proved below gets. */
 interface StrTemp { v: string; fresh: boolean; }
 
+/** A value a lowering allocated and handed back UNOWNED, and the runtime call that
+ *  reclaims it (`nt_arr_free` / `nt_str_release`). See `FnGen.discardFree`. */
+interface DiscardFree { v: string; call: string; }
+
 /**
  * One live `try`'s finalizer, and the abrupt exits parked on it.
  *
@@ -1326,7 +1330,15 @@ class FnGen {
    * SSA identity: a nested lowering that set it for some inner value cannot be mistaken
    * for the statement's own result, because the value returned would not be that name.
    */
-  private discardFree: { v: string; call: string } | null = null;
+  private discardFree: DiscardFree | null = null;
+
+  /** Read the pending discard claim and clear it, so the next statement starts unclaimed
+   *  whether or not this one used it. */
+  private takeDiscardFree(): DiscardFree | null {
+    const claim = this.discardFree;
+    this.discardFree = null;
+    return claim;
+  }
 
   constructor(private mod: ModuleGen) {}
 
@@ -2021,9 +2033,12 @@ class FnGen {
         // BUILT rather than recognised by shape here.
         this.discardFree = null;
         const v = this.genExpr(s.expr);
-        const claim = this.discardFree;
+        // Through a method, not a field read: `this.discardFree = null` above NARROWS the
+        // field to `null` for the rest of the block, and TypeScript does not widen it back
+        // across the `genExpr` call — so reading it inline typed the claim `never`. The
+        // method's declared return type is the honest one.
+        const claim = this.takeDiscardFree();
         if (claim !== null && claim.v === v.v) this.emit(`call void @${claim.call}(ptr ${v.v})`);
-        this.discardFree = null;
         return;
       }
       case "ReturnStmt": {
