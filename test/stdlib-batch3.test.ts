@@ -85,6 +85,30 @@ console.log(new Date(8.64e15 + 1).getTime());
 console.log(new Date(NaN).getTime());
 `,
   },
+  /*
+   * TimeClip is `ToIntegerOrInfinity(t)` clamped (ECMA-262 21.4.1.15), and
+   * ToIntegerOrInfinity maps -0 to +0 (7.1.5 step 3: "If integer is -0, return +0").
+   * So EVERY time value in (-1, 0] clips to POSITIVE zero in node.
+   *
+   * The runtime truncated toward zero and kept the sign, so the stored time value was
+   * `-0` and every reader of it saw a negative zero. That is a real VALUE difference,
+   * not a printing one — but `String()` and `toISOString()` both erase the sign, so
+   * only `console.log` (util.inspect prints `-0`) and a DIVISION expose it. The `1/x`
+   * rows are the load-bearing ones: on main they printed `-Infinity`.
+   */
+  {
+    name: "TimeClip normalises -0 to +0 — probed with 1/x, which the string forms hide",
+    code: `
+console.log(new Date(-0).getTime());
+console.log(new Date(-0.5).getTime());
+console.log(new Date(-0.9).getTime());
+console.log(1 / new Date(-0).getTime());
+console.log(1 / new Date(-0.5).getTime());
+console.log(1 / new Date(0).getTime());
+console.log(new Date(-1.5).getTime());
+console.log(1 / new Date(-1).getTime());
+`,
+  },
 ]);
 
 /*
