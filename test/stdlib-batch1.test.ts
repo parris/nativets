@@ -477,6 +477,117 @@ console.log(Number.isInteger(4), Number.isFinite(1 / 0), Number.isSafeInteger(2 
 ]);
 
 /*
+ * `parseInt` — ECMA-262 19.2.5, the whole grammar.
+ *
+ * The runtime used to be `strtol` behind a hand-rolled prologue, and it was wrong in
+ * three ways that all ran to exit 0. The worst was that `strtol` reads its OWN sign
+ * after the prologue had already read one, so a SECOND sign won: `parseInt("+-1")` was
+ * -1, an INVERTED answer rather than merely a wrong one. `parseInt("-0")` was 0 (the
+ * old body multiplied a `long` by a sign, which cannot produce -0), and `long`
+ * saturates, so every value above 2^63 collapsed onto the single constant
+ * 9223372036854775807.
+ *
+ * BORROWED: tc39/test262 `built-ins/parseInt/` — the StrWhiteSpace table
+ * (S15.1.2.2_A2_T*), the one-sign rule (A3), the radix-validity and ToInt32 rules
+ * (A7/A8), the `0x` prefix (A4/A5) and the signed-zero results.
+ *
+ * A note on the accumulator, because it looks like a bug and is not: for a radix
+ * outside {2, 4, 8, 10, 16, 32} the spec permits "an implementation-dependent
+ * approximation to the mathematical integer value", and node takes it. The
+ * correctly-rounded value of `parseInt("9007199254740993", 36)` is
+ * 1.989698611603181e+24 and node prints 1.9896986116031812e+24, so being exact here
+ * would be a DIVERGENCE. The runtime reproduces V8's chunked accumulation instead.
+ */
+differential("parseInt — the ECMA-262 grammar", [
+  {
+    name: "at most ONE sign, and a bare sign is NaN (a second sign used to INVERT the answer)",
+    code: `
+console.log(parseInt("--1"), parseInt("-+1"), parseInt("+-1"), parseInt("++1"));
+console.log(parseInt("+"), parseInt("-"), parseInt("- 1"), parseInt("+ 1"));
+console.log(parseInt("-1"), parseInt("+1"), parseInt("1-"), parseInt("1+"));
+`,
+  },
+  {
+    name: "a zero result keeps the sign of the string, through every all-zeros spelling",
+    code: `
+console.log(parseInt("-0"), parseInt("+0"), parseInt("0"));
+console.log(parseInt("-00"), parseInt("-000000"), parseInt("-0", 16));
+console.log(parseInt("-0x0"), parseInt("-0x00"), parseInt("-0", 2), parseInt("-0", 36));
+console.log(parseInt("-0.9"), parseInt("-0abc"), parseInt("-000abc"), parseInt("0.9"));
+console.log(1 / parseInt("-0"), 1 / parseInt("0"), 1 / parseInt("-00000"));
+`,
+  },
+  {
+    name: "empty and whitespace-only inputs are NaN, and the leading trim is the FULL StrWhiteSpace set",
+    code: `
+console.log(parseInt(""), parseInt(" "), parseInt("   "), parseInt("\\t\\n\\r"));
+console.log(parseInt("\\u000b"), parseInt("\\u00a0"), parseInt("\\u2028"), parseInt("\\ufeff"));
+console.log(parseInt(" 42 "), parseInt("\\t\\n\\r\\u000b\\u000c 42"));
+console.log(parseInt("\\u00a042"), parseInt("\\u200942"), parseInt("\\u3000-42"), parseInt("\\ufeff-42"));
+`,
+  },
+  {
+    name: "the 0x prefix: taken for radix 0 and 16, never otherwise, and never alone",
+    code: `
+console.log(parseInt("0x"), parseInt("0X"), parseInt("-0x"), parseInt("0x", 16));
+console.log(parseInt("0x1f"), parseInt("0X1F"), parseInt("-0x10"), parseInt("0x1f", 16));
+console.log(parseInt("0x10", 10), parseInt("0x10", 8), parseInt("0x10", 36));
+console.log(parseInt("0xg"), parseInt("0x1fg"), parseInt("0b101"), parseInt("0o17"));
+`,
+  },
+  {
+    name: "radix validity: 0 means 10, 1 and 37 and negatives are NaN, and it is a ToInt32",
+    code: `
+console.log(parseInt("11", 0), parseInt("11", 1), parseInt("11", 2), parseInt("11", 36));
+console.log(parseInt("11", 37), parseInt("11", -1), parseInt("11", -16), parseInt("zz", 36));
+console.log(parseInt("11", NaN), parseInt("11", Infinity), parseInt("11", -Infinity));
+console.log(parseInt("11", 2.9), parseInt("11", 16.9), parseInt("11", -0));
+console.log(parseInt("11", 4294967296), parseInt("11", 4294967312), parseInt("11", 2147483648));
+`,
+  },
+  {
+    name: "leading zeros, trailing junk, and the words that are not numbers",
+    code: `
+console.log(parseInt("00000000000000000000042"), parseInt("007", 8), parseInt("0z", 36));
+console.log(parseInt("42px"), parseInt("  -17rest"), parseInt("1.9"), parseInt("1e3"));
+console.log(parseInt("Infinity"), parseInt("-Infinity"), parseInt("infinity"), parseInt("NaN"));
+console.log(parseInt("abc"), parseInt(".5"), parseInt("-.5"), parseInt("z"));
+`,
+  },
+  {
+    name: "a big value is built as a double: no INT64_MAX saturation, and no exact-bignum divergence",
+    code: `
+console.log(parseInt("9007199254740993"), parseInt("9007199254740993", 16));
+console.log(parseInt("9007199254740993", 36), parseInt("ffffffffffffffffff", 16));
+console.log(parseInt("18446744073709551617"), parseInt("-18446744073709551617"));
+console.log(parseInt("1111111111111111111111111111111111111111111111111111111111111111", 2));
+console.log(parseInt("zzzzzzzzzzzzzzzzzzzz", 36), parseInt("deadbeefdeadbeefdeadbeef", 16));
+console.log(parseInt("777777777777777777777777777777", 8), parseInt("vvvvvvvvvvvvvv", 32));
+`,
+  },
+  {
+    name: "a power-of-two radix rounds an exact halfway case to EVEN, not up",
+    code: `
+console.log(parseInt("82c1e772687684", 16), parseInt("6adcf26fc4a382", 16));
+console.log(parseInt("2258e492e190b1", 16), parseInt("404474672240237741", 8));
+console.log(parseInt("453212362305563271", 8), parseInt("203200003003231121302001331", 4));
+console.log(parseInt("3201130310011311223323311110", 4));
+console.log(parseInt("1" + "0".repeat(52) + "1" + "0".repeat(10), 2));
+console.log(parseInt("1" + "0".repeat(52) + "1" + "1" + "0".repeat(9), 2));
+`,
+  },
+  {
+    name: "a digit string too long for a double overflows to Infinity, with its sign",
+    code: `
+console.log(parseInt("1" + "0".repeat(400)));
+console.log(parseInt("9".repeat(400)), parseInt("-" + "9".repeat(400)));
+console.log(parseInt("1".repeat(2000), 2), parseInt("-" + "f".repeat(300), 16));
+console.log(parseInt("0".repeat(100) + "1"), parseInt("-" + "0".repeat(100)));
+`,
+  },
+]);
+
+/*
  * `Math.round` — ECMAScript 21.3.2.28, which is NOT `floor(x + 0.5)`.
  *
  * The runtime shipped `double js_math_round(double x) { return floor(x + 0.5); }` with
