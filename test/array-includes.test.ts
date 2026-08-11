@@ -16,8 +16,19 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { compileAndRun, runWithNode } from "./harness.ts";
+import { compileAndRun, emitIR, runWithNode } from "./harness.ts";
 import { readFileSync } from "node:fs";
+
+/** Compile-only: the diagnostic a source is rejected with (or null if it compiles). */
+function rejectionOf(source: string): { code: string; message: string; hint?: string } | null {
+  try {
+    emitIR(source);
+    return null;
+  } catch (e) {
+    const d = (e as { diag?: { code: string; message: string; hint?: string } }).diag;
+    return d ?? { code: "?", message: String(e) };
+  }
+}
 
 /** Compile+run ours and assert stdout AND exit code match `node` on the same source. */
 async function matchesNode(src: string): Promise<string> {
@@ -150,6 +161,120 @@ describe("Array#includes is SameValueZero", () => {
    * `readFileSync`, never a shell `grep` (project memory: the shimmed grep on some setups
    * silently drops matching lines, which would make this vacuous).
    */
+  /*
+   * BOOLEAN ELEMENTS — the third slot shape, which had no arm.
+   *
+   * `.includes` split two ways (`el === "number" ? _num : _str`), exactly the split
+   * `.join` already learned was wrong: a `boolean[]` slot holds `zext i1`, so it is
+   * neither a `double` nor a `ptr`. It took the `_str` arm and emitted
+   * `call i32 @nt_arr_includes_str(ptr %t3, ptr true)` — an `i1` in a `ptr` parameter,
+   * which is not valid IR at all. That reached the user as a raw clang
+   * "constant expression type mismatch" with no NT code and no hint. A two-way choice
+   * written twice is how the third case gets missed twice; see `joinFn` in codegen.ts.
+   */
+  test("boolean elements are found by value, not by pointer", async () => {
+    expect(await matchesNode([
+      "const a = [true, false];",
+      "console.log(a.includes(true), a.includes(false));",
+      "const t = [true, true];",
+      "console.log(t.includes(true), t.includes(false));",
+      "const f = [false, false];",
+      "console.log(f.includes(true), f.includes(false));",
+      "const e: boolean[] = [];",
+      "console.log(e.includes(true), e.includes(false));",
+      "",
+    ].join("\n"))).toBe("true true\ntrue false\nfalse true\nfalse false\n");
+  });
+
+  // A computed needle and a computed element must agree with the literals — the runtime
+  // compares slots, so anything that is not exactly 0/1 in the slot would show up here.
+  test("boolean needles and elements from expressions", async () => {
+    expect(await matchesNode([
+      "const n = 1;",
+      "const a = [n > 0, n < 0];",
+      "console.log(a.includes(n === 1), a.includes(n !== 1));",
+      "console.log([!true].includes(false), [!false].includes(false));",
+      "",
+    ].join("\n"))).toBe("true true\ntrue false\n");
+  });
+
+  // Past the persistent-vector threshold the tail is not contiguous with the trie, so a
+  // boolean scan must go through `arr_at` like its siblings.
+  test("boolean scan past the 32-element threshold", async () => {
+    expect(await matchesNode([
+      "let a: boolean[] = [];",
+      "for (let i = 0; i < 50; i++) a = [...a, false];",
+      "console.log(a.length, a.includes(true), a.includes(false));",
+      "a = [...a, true];",
+      "console.log(a.length, a.includes(true));",
+      "",
+    ].join("\n"))).toBe("50 false true\n51 true\n");
+  });
+
+  /*
+   * NON-PRIMITIVE ELEMENTS ARE REFUSED, not answered by strcmp.
+   *
+   * `.lastIndexOf` has carried the guard `el !== "number" && el !== "string"` since it
+   * landed; `.includes` and `.indexOf` never grew it. So a `number[][]` fell through to
+   * `nt_arr_includes_str`, which ran `strcmp` over the bytes of an `NtArray` struct —
+   * both an out-of-bounds read (it walks to the first zero byte) and, when it happened
+   * to match, a SILENT WRONG ANSWER at exit 0:
+   *
+   *   [[1],[2]].includes([1])  node: false   ours: true
+   *   [[1],[2]].indexOf([1])   node: -1      ours: 0
+   *
+   * node's answer is reference identity (SameValueZero on objects), which we do not
+   * model. So this is a refusal, documented in docs/divergences.md — never a guess.
+   * The three siblings now agree.
+   */
+  test("includes/indexOf/lastIndexOf all refuse a non-primitive element type", async () => {
+    const cases: Array<[string, string]> = [
+      ["const a: number[][] = [[1], [2]];\nconst o: number[] = [1];\nconsole.log(a.includes(o));\n", ".includes"],
+      ["const a: number[][] = [[1], [2]];\nconst o: number[] = [1];\nconsole.log(a.indexOf(o));\n", ".indexOf"],
+      ["const a: number[][] = [[1], [2]];\nconst o: number[] = [1];\nconsole.log(a.lastIndexOf(o));\n", ".lastIndexOf"],
+    ];
+    for (const [src, what] of cases) {
+      // node runs every one of these fine — that is why answering them wrongly was worse
+      // than refusing them.
+      expect([what, runWithNode(src).exitCode]).toEqual([what, 0]);
+      const r = rejectionOf(src);
+      expect([what, r?.code, r?.message.includes(what)]).toEqual([what, "NT1001", true]);
+      // One hint for all three, and it names the real reason rather than the generic
+      // "arrays need the heap value model".
+      expect([what, (r?.hint ?? "").includes("reference IDENTITY")]).toEqual([what, true]);
+    }
+  });
+
+  /*
+   * THE HINT ITSELF IS COMPILED. The refusal above is only as good as its way out, and a
+   * hint naming a spelling this compiler also refuses would be worse than none. So every
+   * route it offers is run here, against node — and they reproduce node's answers exactly,
+   * because `===` on an array IS the pointer compare, which is what SameValueZero reduces
+   * to on a reference.
+   */
+  test("everything the refusal hint suggests compiles and matches node", async () => {
+    expect(await matchesNode([
+      "const a: number[][] = [[1], [2]];",
+      "const o: number[] = [1];",
+      "console.log(a.some((x) => x === o));",       // the `.includes` route: false
+      "console.log(a.findIndex((x) => x === o));",  // the `.indexOf` route: -1
+      "console.log(a.some((x) => x === a[0]!));",   // the same allocation: true
+      "console.log(a.findIndex((x) => x === a[1]!));",
+      "console.log(a.some((x) => x.length === o.length));", // the projection route: true
+      "",
+    ].join("\n"))).toBe("false\n-1\ntrue\n1\ntrue\n");
+  });
+
+  // The primitive element types stay ACCEPTED — the guard must not swallow them.
+  test("number, string and boolean elements are still accepted by all three", async () => {
+    expect(await matchesNode([
+      "console.log([1, 2].includes(2), [1, 2].indexOf(2), [1, 2].lastIndexOf(1));",
+      'console.log(["a"].includes("a"), ["a"].indexOf("a"), ["a"].lastIndexOf("a"));',
+      "console.log([true].includes(true));",
+      "",
+    ].join("\n"))).toBe("true 1 0\ntrue 0 0\ntrue\n");
+  });
+
   test("the SameValueZero branch is in includes only, not in indexOf", () => {
     const c = readFileSync(new URL("../runtime/runtime.c", import.meta.url), "utf8");
     const bodyOf = (name: string): string => {
