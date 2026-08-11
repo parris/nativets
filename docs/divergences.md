@@ -206,27 +206,27 @@ and break every growing program, which agrees with node today. It would also giv
 result of the *shrunken* length (2) where node gives the snapshot length (4). The snapshot bound
 was never the bug; the return-0 policy on reads past it was.
 
-**Why not a compile-time refusal,** which would be free and would fire earlier. It is what the
-`for-of` twin does (`NT1603` above), and for the shape written in the callback it would work —
-`.pop` and `.push` are the *only* length-changing operations in the language, since `.shift`,
-`.unshift` and `.splice` are all refused outright, so the set to key on is closed. But it can
-only see a `.pop()` **written** in the callback. Move the shrink one call deep, through a
-parameter carrying its own `@@mutable`, and there is nothing syntactic left to key on while the
-wrong answer is identical:
+**A compile-time refusal remains available and is NOT ruled out** — it is simply not this lane's
+file (`src/ownership.ts`), and the runtime check is what closes the hole today. Stated honestly,
+because the first draft of this section under-sold it:
 
-```ts
-function drop(
-  //@@mutable
-  xs: number[],
-): void { xs.pop(); }
-//@@mutable
-const a = [1, 2, 3, 4];
-const out = a.map((x, i) => { if (i === 0) { drop(a); drop(a); } return x; });   // still panics
-```
+- The pieces already exist. The `for-of` twin is refused by **`NT1603`**, and it is refused
+  **one call deep too** — handing the borrowed array to a parameter carrying its own
+  `@@mutable` is caught at the *call site* by `checkMutableArgs`
+  (`cannot pass \`a\` to the \`@@mutable\` parameter of \`drop\` while it is borrowed`). Marking a
+  HOF receiver borrowed for the callback's duration would plausibly reach the same set.
+- The set to key on is **closed**: `.pop` and `.push` are the only length-changing operations in
+  the language, since `.shift`, `.unshift` and `.splice` are refused outright. A callback that
+  only *reads* the receiver stays legal, because the rule keys on the mutating call.
+- What it would still miss is the imprecision `src/ownership.ts` documents about itself: both
+  rules key on an argument that is a **bare identifier** and a callee that is a **bare name**, so
+  an argument reached by a field or element path (`f(node.body)`) is admitted.
 
-A compile-time rule would need interprocedural "does this callee shrink its argument" reasoning
-to close that, so the runtime check is the one that actually covers the hazard. A refusal on top
-of it remains available as a *nicer diagnostic* for the direct shape, not as the fix.
+The two are complements, not alternatives, and they answer different questions. A refusal fires
+on every program *shaped* like the hazard; the runtime check stops only the programs that
+actually *hit* it. Since the guarantee at the top of this section is about what happens at run
+time, the runtime check is the one that has to exist; a refusal on top of it would be a nicer
+diagnostic, delivered earlier, for the shapes it can see.
 
 **It costs nothing.** `nt_arr_get` already evaluated `i >= a->len` on every iteration, so only
 the taken branch's body changed: **+0 IR instructions** across all 24 perf-corpus programs and a

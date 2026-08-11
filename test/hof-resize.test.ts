@@ -291,18 +291,25 @@ console.log(a.some((x) => x === a.length), a.findIndex((x) => x > 2), a.every((x
 });
 
 /*
- * THE SHAPE A COMPILE-TIME REFUSAL COULD NOT HAVE CAUGHT, which is why the fix is here in
- * the lowering and not in `ownership.ts`.
+ * THE SHRINK ONE CALL DEEP — the shape that decides where the fix belongs.
  *
  * The obvious alternative was to refuse the program: the receiver is `@@mutable` and the
  * callback shrinks it, which is the hazard `NT1603` already reports for the `for-of` this
- * HOF desugars to (`for (const x of a) a.pop()` IS refused today). It would be free and it
- * would fire at compile time — but it can only see a `.pop()` WRITTEN in the callback. Move
- * the shrink one call deep, through a `@@mutable` parameter, and ownership has nothing
- * syntactic left to key on, while the wrong answer is identical. Only the runtime check
- * covers this.
+ * HOF desugars to (`for (const x of a) a.pop()` IS refused today). Worth stating precisely,
+ * because the naive version of that argument is wrong in BOTH directions:
+ *
+ *   - `ownership.ts` is stronger than it looks. The `for-of` form is refused even when the
+ *     shrink is one call deep — `checkMutableArgs` catches the hand-off at the CALL SITE
+ *     ("cannot pass `a` to the `@@mutable` parameter of `drop` while it is borrowed").
+ *     So a refusal for HOFs is viable and would cover the program below.
+ *   - But the HOF form has no such rule today, so this program COMPILES, and until one
+ *     exists the runtime check is the only thing between it and a wrong answer.
+ *
+ * The two are complements: a refusal fires on every program shaped like the hazard, the
+ * runtime check stops only the ones that hit it. Since the Stage 41 guarantee is about run
+ * time, this is where the hole had to be closed; `ownership.ts` belongs to other lanes.
  */
-describe("the shrink happens inside a callee, where no syntactic rule can see it", () => {
+describe("the shrink happens inside a callee", () => {
   test("a `@@mutable` parameter popped by a helper still panics", async () => {
     const src = `function drop(
   //@@mutable
