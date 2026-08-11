@@ -205,7 +205,8 @@ class Renamer {
         f.name = this.dotted(f.name);
         f.params.forEach((p) => this.param(p));
         f.returnAnnot = this.t(f.returnAnnot);
-        f.returnTy = this.t(f.returnTy);
+        // No `returnTy` to rename: the RESOLVED return type is `Sig.ret` in the checker's
+        // table, which does not exist yet (the linker runs before the check).
         f.body.forEach((b) => this.stmt(b));
         return;
       }

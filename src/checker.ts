@@ -761,9 +761,12 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
     const required = s.params.slice(0, fixed).filter((p) => !p.default).length;
     const defaults = s.params.map((p) => p.default ?? null);
     const ret = s.returnAnnot ?? "number";
-    s.returnTy = ret;
     functions = functions.set(s.name, { params, ret, required, defaults, rest });
-    if (s.isStatic) c.statics.add(s.name); // `static m()` → reachable only as `C.m(…)`
+    // `static m()` → reachable only as `C.m(…)`. REBOUND, not `.add`-and-discard: a
+    // nativets `Set` is persistent, so the discarded spelling adds nothing there while
+    // bun's mutating `Set.add` makes it work here — the divergence is invisible until
+    // this compiler compiles itself. `Checker` is `//@@mutable`, so the assignment stands.
+    if (s.isStatic) c.statics = c.statics.add(s.name);
   }
 
   // pass 1.5: pre-declare the module-level bindings, so return-type inference and
@@ -788,8 +791,12 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
   for (const s of program.body) {
     if (s.kind === "FuncDecl" && !s.typeParams?.length && !s.returnAnnot) {
       const inferred = c.inferReturnType(s, moduleScope.child());
-      s.returnTy = inferred;
-      functions.get(s.name)!.ret = inferred;
+      // REPLACE the signature rather than assigning `sig.ret` in place. `Sig` is a plain
+      // record, so the write was `NT1606` — and it was the LINKED first blocker of
+      // checker.ts, codegen.ts and ownership.ts alike, together with the `s.returnTy = …`
+      // it sat next to. The resolved return type now has exactly ONE home (this table);
+      // `FuncDecl.returnTy` was a second copy of it that four in-place writes kept in sync.
+      functions = functions.set(s.name, { ...functions.get(s.name)!, ret: inferred });
     }
   }
 
@@ -1082,7 +1089,11 @@ class Checker {
    * lowers to the same shape of name, must NOT be reachable that way (in node a class
    * object has no such property, so calling it is a TypeError, never a receiver-less call).
    */
-  readonly statics = new Set<string>();
+  // NOT `readonly`: a nativets `Set` is PERSISTENT, so the only way to add to this from
+  // `check` is `c.statics = c.statics.add(name)` — and `Checker` is `//@@mutable`, so that
+  // field assignment is legal and node-exact (verified: test/mutable-set-field.test.ts).
+  // The discarded `c.statics.add(name)` it replaces is a silent no-op in the subset.
+  statics: Set<string> = new Set<string>();
 
   /**
    * The TYPE of a function DECLARATION referenced as a value — `undefined` when the name
@@ -2000,17 +2011,25 @@ class Checker {
     const params: Ty[] = spec.params.map((p) => p.annot ?? (p.default ? this.type(p.default, this.genericBase!()) : "number"));
     spec.params.forEach((p, i) => { if (p.default && p.annot) this.type(p.default, this.genericBase!(), params[i]); });
     const fixed = spec.params.length - (spec.params.at(-1)?.rest ? 1 : 0);
-    const sig: Sig = {
+    const provisional: Sig = {
       params,
       ret: spec.returnAnnot ?? "number",
       required: spec.params.slice(0, fixed).filter((p) => !p.default).length,
       defaults: spec.params.map((p) => p.default ?? null),
       rest: !!spec.params.at(-1)?.rest,
     };
-    spec.returnTy = sig.ret;
-    this.functions = this.functions.set(mangled, sig);
+    // REGISTERED BEFORE the return type is inferred, and that order is load-bearing:
+    // inferring an unannotated specialization's return type checks its body, which can
+    // reach this same specialization again (self-recursion), and that inner call resolves
+    // through the table. So the entry goes in with the PROVISIONAL `ret` and is REPLACED
+    // once inference lands — the entry is what every reader consults, so replacing it is
+    // what the old in-place `sig.ret = …` was doing, minus the record mutation.
+    this.functions = this.functions.set(mangled, provisional);
     this.specialized.push(spec);
-    if (!spec.returnAnnot) { sig.ret = this.inferReturnType(spec, this.genericBase!()); spec.returnTy = sig.ret; }
+    const sig: Sig = spec.returnAnnot
+      ? provisional
+      : { ...provisional, ret: this.inferReturnType(spec, this.genericBase!()) };
+    if (sig !== provisional) this.functions = this.functions.set(mangled, sig);
     this.pending.push(spec); // body checked in the drain loop (keeps recursion finite)
     this.retarget(e, mangled, recvOffset);
     return sig;
@@ -2149,8 +2168,13 @@ class Checker {
     }
     this.declareParams(fn, base);
     this.bodyChain.push(bodyFrame(fn.params, fn.body));
-    try { this.checkBlock(fn.body, base, fn.returnTy ?? "number"); } finally { this.bodyChain.pop(); }
-    this.checkExhaustiveTailSwitch(fn, fn.returnTy ?? "number");
+    // The RESOLVED return type, read from the signature table — the one place it is
+    // recorded. `check` registers every top-level `FuncDecl` there before any body is
+    // checked, and `monomorphize` registers each specialization before draining it, so the
+    // lookup is total; the fallbacks are for a `checkFunction` reached some other way.
+    const ret = this.functions.get(fn.name)?.ret ?? fn.returnAnnot ?? "number";
+    try { this.checkBlock(fn.body, base, ret); } finally { this.bodyChain.pop(); }
+    this.checkExhaustiveTailSwitch(fn, ret);
   }
 
   /**
@@ -5353,7 +5377,19 @@ class Checker {
     // qualifier, because on an undecorated class the same line is NT1023.
     const recvIsOwnField =
       recvExpr.kind === "MemberExpr" && recvExpr.object.kind === "Identifier" && recvExpr.object.name === "this";
-    const rebindable = recvExpr.kind === "Identifier" || recvIsOwnField;
+    // …AND IT IS THE TAG, NOT THE SPELLING, THAT DECIDES A FIELD. `this.f` was on the
+    // rebindable side and `c.f` was not, which is the receiver test `FieldAssign` actually
+    // applies (`!e.viaThis && !this.isMutableTy(ot)`) read one term short: a field of a
+    // `@@mutable` receiver is assignable through ANY path to it, not only through `this`.
+    // The compiler's own `Checker.statics` is exactly that shape — `Checker` is
+    // `//@@mutable`, and `c.statics = c.statics.add(name)` compiles and is node-exact
+    // (test/mutable-set-field.test.ts) — so the container arm was telling the reader "do
+    // NOT write" the one line that fixes it, and then recommending they declare the class
+    // `@@mutable`, which it already was. The type is read from the node's CACHE (the
+    // receiver was typed to get here); no re-typing, so this cannot throw from a hint.
+    const ownerTy = recvExpr.kind === "MemberExpr" ? recvExpr.object.ty : undefined;
+    const recvIsMutableField = ownerTy !== undefined && this.isMutableTy(ownerTy);
+    const rebindable = recvExpr.kind === "Identifier" || recvIsOwnField || recvIsMutableField;
     const fix = recvIsParam && name !== undefined
       ? `\`${name}\` is a PARAMETER, so do NOT write \`${name} = ${name}.${m}(${args})\` — a parameter is a borrow and the CALLER, who owns the ` +
         `${kind.toLowerCase()}, would never see the update. Accumulate into a LOCAL seeded from it and RETURN that ` +
@@ -5369,7 +5405,16 @@ class Checker {
           ? `write \`${name} = ${name}.${m}(${args})\` — the result IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. ` +
             (recvIsOwnField
               ? `The class must be \`@@mutable\` for a field assignment to stand (an undecorated one is NT1023)${chain}. `
-              : `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `)
+              : recvIsMutableField
+                // The receiver holding this field is ALREADY `@@mutable`, so say so — the
+                // reader does not need to declare anything, and does not need the owning
+                // binding to be `let` either (it is the FIELD that is assigned, not the
+                // binding). What they DO need is an OWNED receiver: a write through a
+                // borrowed parameter is NT1607 in the ownership pass, and that is the one
+                // way this line still does not stand.
+                ? `The receiver is already \`@@mutable\`, so the field assignment stands — it must just be reached through an OWNED ` +
+                  `binding (assigning through a borrowed parameter is NT1607)${chain}. `
+                : `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `)
           : `keep the result — it IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. ` +
             `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `;
     // THE TAIL HAS TO BE METHOD-AWARE, and saying "`.delete` … returns the receiver" was

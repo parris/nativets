@@ -1212,8 +1212,12 @@ class FnGen {
   // ---- functions ----
   genFunction(fn: FuncDecl): string {
     this.reset();
-    this.retTy = fn.returnTy ?? "number";
     const sig = this.mod.functions.get(fn.name)!;
+    // The RESOLVED return type comes from the signature table, which is where the checker
+    // records it. It used to be read from `fn.returnTy`, a second copy of `sig.ret` that
+    // the checker kept in sync with four in-place record writes (each one `NT1606` when
+    // this compiler checks itself).
+    this.retTy = sig.ret;
     fn.params.forEach((p, i) => {
       const ty = sig.params[i]!;
       this.varTypes = this.varTypes.set(p.name, ty);
