@@ -356,11 +356,14 @@ describe("fuzz findings — non-ASCII case mapping", () => {
 
 describe("fuzz findings — refusals and stops (ranked last)", () => {
   /*
-   * `String(Math.PI)` is refused, while `console.log(Math.PI)` and `(Math.PI).toFixed(3)`
-   * both compile: `Math` resolves as a value only in some argument positions. A false
-   * refusal, not a wrong answer.
+   * FIXED. The report read this as an argument-position inconsistency — `String(Math.PI)`
+   * refused while `console.log(Math.PI)` and `(Math.PI).toFixed(3)` compiled. Measured,
+   * none of the three compiled: `Math` was recognized ONLY as a call CALLEE, so every
+   * `Math.<constant>` read failed identically and the working neighbours were all
+   * `Math.<method>(…)` calls. `String()` was never involved. The eight data properties
+   * now have a member-read path of their own; see `test/stdlib-batch1.test.ts`.
    */
-  it.failing("String(Math.PI) compiles", async () => {
+  it("String(Math.PI) compiles", async () => {
     await expectSameBytes("console.log(String(Math.PI));\n");
   });
 

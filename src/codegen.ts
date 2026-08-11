@@ -18,7 +18,7 @@ import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, spawnMode, SPAWN_INH
 import { freshArray, RETAINS_RECEIVER, arrayElements } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
-import { NUMBER_CONSTS } from "./checker.ts";
+import { NUMBER_CONSTS, MATH_CONSTS } from "./checker.ts";
 import { isGeneralUnionTy, generalUnionMembers, generalUnionTagOf, staticTypeofName } from "./ast.ts";
 import { isTypeRefTy, unfoldTypeRef, recTypeTable } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectFields, fieldIndex, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isBytesRefTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy, isFetchRefTy } from "./ast.ts";
@@ -2750,6 +2750,12 @@ class FnGen {
         // stdlib Batch 1: `Number.*` numeric constants — folded to their exact IEEE-754 value.
         if (e.object.kind === "Identifier" && e.object.name === "Number" && !this.isBound("Number")) {
           const c = NUMBER_CONSTS.get(e.property);
+          if (c !== undefined) return { v: llvmDouble(c), ty: "number" };
+        }
+        // The `Math.*` data properties — folded the same way, and admitted by the same
+        // guard in the checker (both consult the one table, so neither can drift).
+        if (e.object.kind === "Identifier" && e.object.name === "Math" && !this.isBound("Math")) {
+          const c = MATH_CONSTS.get(e.property);
           if (c !== undefined) return { v: llvmDouble(c), ty: "number" };
         }
         // Host I/O: process.argv (string[]) and process.env.NAME (string). Recognized
