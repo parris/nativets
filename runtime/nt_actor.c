@@ -235,6 +235,34 @@ static _Atomic int64_t g_io_waiters;     /* actors parked WAITING on a file desc
 static _Thread_local NtActor *g_current;
 static _Thread_local NtSched *t_sched;
 
+/* READING `g_current` AFTER A CONTEXT SWITCH, and why it cannot be a plain load.
+ *
+ * A thread-local's address is invariant *for a thread*, so the optimizer computes it once
+ * and reuses it for the rest of the function — a transformation that is correct for every
+ * ordinary program and wrong for this one. `swapcontext` can resume a coroutine on a
+ * DIFFERENT OS thread, so an address computed before the switch names the slot of the
+ * thread we used to be on. That thread's scheduler_loop sets `g_current = NULL` when the
+ * slice ends, so the reload after a yield read NULL and the next field access dereferenced
+ * it: at -O1 with 4 scheduler threads, a deterministic 5/5 SEGV at offset 0x28 in
+ * `wait_for_more`. Clean at -O0 only because nothing is cached there.
+ *
+ * `noinline` is the fix, and it is a real fix rather than a papering-over: the address
+ * computation is sunk into a function the optimizer cannot inline, so it necessarily runs
+ * on whatever thread is executing at the moment of the call. The calls themselves cannot
+ * be CSE'd across a yield either, because `yield_to_sched` is an opaque call that may
+ * write `g_current` — which it does, from the scheduler.
+ *
+ * The rule this encodes: a plain `g_current` read is fine at a function's ENTRY (compiled
+ * code always enters on the thread it is running on); every read that follows a
+ * swapcontext in the same frame must come through here. `t_sched` needs the identical
+ * treatment and for a sharper reason — resuming the WRONG thread's scheduler context is
+ * the SIGBUS that nt_sched_init's comment already documents from another cause. Note that
+ * `switch_out` is small enough to be inlined into a caller that yields in a LOOP, which
+ * would otherwise let both addresses be hoisted out of that loop and be wrong on every
+ * iteration after the first migration. */
+__attribute__((noinline)) static NtActor *current_actor(void) { return g_current; }
+__attribute__((noinline)) static NtSched *current_sched(void) { return t_sched; }
+
 /* Quiescence: schedulers park here when they have nothing to run and nothing to steal. */
 static pthread_mutex_t g_idle_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_idle_cv   = PTHREAD_COND_INITIALIZER;
@@ -559,11 +587,14 @@ static void actor_die(NtActor *a, int64_t reason, int abnormal);
  * enqueue us (they CAS on BLOCKED only), and only the scheduler that regains control may
  * leave it — so nobody can swapcontext into a context we are still writing. */
 static void switch_out(int next_status) {
-  NtActor *a = g_current;
+  /* Both through the accessors: this runs on a migrating stack, and it is inlined into
+   * callers that yield in a loop (see current_actor). */
+  NtActor *a = current_actor();
+  NtSched *s = current_sched();
   a->next_status = next_status;
   atomic_store(&a->status, NT_SWITCHING);
-  NT_FIBER_SWITCH(t_sched);
-  swapcontext(&a->ctx, &t_sched->ctx);
+  NT_FIBER_SWITCH(s);
+  swapcontext(&a->ctx, &s->ctx);
 }
 
 /* actor entry trampoline: runs the body, marks the actor dead, returns to sched */
@@ -572,11 +603,15 @@ static void actor_trampoline(void) {
   if (self->is_closure) self->centry(self->cenv, self->carg);  /* compiler ABI */
   else                  self->entry(self->entry_arg);          /* NtMsg ABI */
   actor_die(self, NT_REASON_NORMAL, 0);   /* normal exit: notify monitors/links */
-  /* hand control back to the scheduler; we never resume */
-  self = g_current;
+  /* Hand control back to the scheduler; we never resume. The BODY above yields, so this
+   * is a post-switch read on a possibly different thread — both TLS reads go through the
+   * accessors (a plain reload here wrote through the old thread's NULL slot: SEGV at
+   * offset 0xc, -O1 / 4 threads). */
+  self = current_actor();
+  NtSched *s = current_sched();
   self->next_status = NT_DEAD;
-  NT_FIBER_SWITCH(t_sched);
-  swapcontext(&self->ctx, &t_sched->ctx);
+  NT_FIBER_SWITCH(s);
+  swapcontext(&self->ctx, &s->ctx);
 }
 
 /* v4: fire the earliest pending receive-timeout, if any. Called ONLY when the run
@@ -735,7 +770,7 @@ int32_t nt_io_wait(int32_t fd, double ms) {
   atomic_fetch_add(&g_io_waiters, 1);
   a->wait_n = INT64_MAX;           /* messages must NOT wake us: we are waiting on IO */
   switch_out(NT_BLOCKED);
-  a = g_current;                   /* resumed, possibly on another scheduler thread */
+  a = current_actor();             /* resumed, possibly on another scheduler thread */
   a->wait_n = 0;
   return atomic_exchange(&a->io_ready, 0) ? 1 : 0;
 }
@@ -979,16 +1014,33 @@ NtMsg nt_receive(void) {
   while (mbox_empty(a)) {
     a->wait_n = 0;                            /* block until ANY message is queued */
     yield_to_sched();                         /* scheduler runs others; wakes us */
-    a = g_current;                            /* same actor, possibly on another thread */
+    a = current_actor();                      /* same actor, possibly on another thread */
   }
-  /* record the causal tag (triggering message + origin) for the crash record */
+  /* Record the causal tag (triggering message + origin) for the crash record.
+   *
+   * This is the C NtMsg API, whose payload is owned by the mailbox node and freed by
+   * mbox_pop below, so the tag is a plain number here — but it must still RESET the rest
+   * of the tag rather than inherit it. `last_kind` and friends are per-message, and
+   * leaving a previous STRUCT message's kind/renderer in place would point the crash
+   * record's renderer at this number. (The typed entry points share `note_last` for
+   * exactly this reason; this path predates it and is kept only for the C harnesses.) */
   a->last_valid = 1;
+  a->last_released = 0;
   a->last_from = a->mbox_head->from;
   a->last_val = (a->mbox_head->msg.tag == NT_INT) ? a->mbox_head->msg.u.i : 0;
+  a->last_kind = NT_MSG_NUM;
+  a->last_shape = NULL;
+  a->last_render = NULL;
   return mbox_pop(a);
 }
 
-NtPid nt_self(void) { return g_current->pid; }
+/* Through the accessor, and not merely for tidiness. This is small enough to be inlined
+ * into an actor BODY, and a body yields — so in the single-translation-unit C harnesses
+ * (which #include this file) the TLS address could be hoisted above a `nt_receive`, making
+ * this an unguarded NULL deref after a migration. Reproduced at -O1 with 8 threads, 6/6,
+ * in actor_test.c's body_ponger. A separately-compiled program cannot inline it today,
+ * but LTO would, so the fix belongs here rather than in the harness. */
+NtPid nt_self(void) { return current_actor()->pid; }
 
 void nt_drain(void) {
   /* Park main, run the scheduler until the run queue drains, then resume here. */
@@ -1574,7 +1626,7 @@ static int wait_for_more(int64_t n, double ms, int has_timeout) {
     a->timed_out = 0;
     a->wait_n = n;                          /* v6: the predicate our scheduler re-checks */
     yield_to_sched();                       /* scheduler runs others / fires timeouts */
-    a = g_current;                          /* same actor, possibly on another thread */
+    a = current_actor();                    /* same actor, possibly on another thread */
     if (mbox_count_of(a) > n) { a->has_deadline = 0; return 1; }
     if (a->timed_out) { a->has_deadline = 0; a->timed_out = 0; return 0; }
   }

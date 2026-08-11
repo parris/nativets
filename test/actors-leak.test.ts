@@ -342,12 +342,19 @@ test("an actor program agrees with node on stdout and exit code", async () => {
  * attribute is ASSERTED PRESENT below rather than assumed. An uninstrumented binary that
  * "reports nothing" is not evidence of anything.
  *
- * BUILT AT -O0 ON PURPOSE. At -O1 an unrelated, PRE-EXISTING fault reproduces identically
- * on a clean tree: `wait_for_more` reads a NULL `g_current` immediately after
- * `yield_to_sched`, i.e. the compiler caches the thread-local's address across a
- * `swapcontext` that migrates the coroutine to another OS thread. That is an M:N scheduler
- * bug, not a message-lifetime one, and pinning it here would only make this file red for
- * someone else's reason — but it does mean -O1 + threads is not an available instrument.
+ * BUILT AT -O1, AND THAT IS ITSELF A PIN. It used to be -O0 because at -O1 a separate,
+ * pre-existing fault reproduced on a clean tree: the compiler cached a thread-local's
+ * ADDRESS across a `swapcontext` that migrates the coroutine to another OS thread, so the
+ * reload after a yield read the slot of the thread we used to be on — which the old
+ * thread's scheduler_loop had already set to NULL. Deterministic, 5/5 SEGV at 4 threads,
+ * in `wait_for_more` and then (once that site was fixed) in `actor_trampoline`.
+ *
+ * That is fixed in runtime/nt_actor.c: `current_actor` / `current_sched` are `noinline`,
+ * so the address computation cannot be hoisted out of the migrating frame. Building this
+ * gate at -O1 is what keeps it fixed — the accessors are the kind of thing an optimizing
+ * reader "simplifies" back into a plain TLS read, and at -O0 nothing would notice.
+ * Optimization also changes which frames ASan instruments, so the message-lifetime
+ * assertions above get a second, differently-compiled look at the same invariants.
  */
 function runUnderAsan(source: string, tag: string, threads: string): { status: number | null; stdout: string; stderr: string } {
   const ll = emitIRAsan(source);
@@ -364,7 +371,7 @@ function runUnderAsan(source: string, tag: string, threads: string): { status: n
     }
     const bin = join(dir, "prog");
     const built = spawnSync("clang", [
-      "-O0", "-g", "-fsanitize=address", "-fno-omit-frame-pointer", "-DNT_PVEC",
+      "-O1", "-g", "-fsanitize=address", "-fno-omit-frame-pointer", "-DNT_PVEC",
       llPath, join(ROOT, "runtime/runtime.c"), join(dir, "nt_actor.c"), join(dir, "nt_pvec.c"),
       "-lm", "-o", bin,
     ], { encoding: "utf8" });
