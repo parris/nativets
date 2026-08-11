@@ -1007,7 +1007,10 @@ class ModuleGen {
     // ONE list: an LLVM parameter and the argument forwarding it are spelled identically
     // (`double %a0`), so the declaration and the call share it. Built with an index loop
     // rather than `.map((p, i) => …)` — `.map` binds `(elem)` only in the subset `src/`
-    // must stay inside, and the point-free spelling put this function outside it.
+    // must stay inside, and the point-free spelling put this function outside it. The list
+    // is built by `.push` into a local nothing else can see, so it takes the `@@mutable`
+    // opt-in rather than a fold.
+    //@@mutable
     const slots: string[] = [];
     for (let i = 0; i < ps.length; i++) slots.push(`${llvmTy(ps[i]!)} %a${i}`);
     const list = slots.join(", ");
