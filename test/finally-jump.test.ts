@@ -27,6 +27,22 @@
 import { test, expect, describe } from "bun:test";
 import { compileAndRun, expectMatchesNode } from "./harness.ts";
 
+/** Compile `src(N)` at two scales and return the trailing `__arrLive()` of each, plus
+ *  the output above it at the small scale. Same instrument as test/break-drops.test.ts,
+ *  and for the same reason: a fixed residue is not a leak, growth with work is. */
+async function liveAtTwoScales(src: (n: number) => string): Promise<{ small: number; large: number; stdout: string }> {
+  const runs: number[] = [];
+  let firstOut = "";
+  for (const n of [200, 2000]) {
+    const r = await compileAndRun(`${src(n)}\nconsole.log(__arrLive());`);
+    expect(r.exitCode).toBe(0); // a double free aborts, and would land here first
+    const lines = r.stdout.trim().split("\n");
+    if (n === 200) firstOut = lines.slice(0, -1).join("\n");
+    runs.push(Number(lines[lines.length - 1]));
+  }
+  return { small: runs[0]!, large: runs[1]!, stdout: firstOut };
+}
+
 /** Compile and run `src`, and assert stdout + exit code both equal node's. */
 async function sameAsNode(src: string): Promise<string> {
   const { ours, oracle } = await expectMatchesNode(src);
@@ -215,5 +231,136 @@ console.log(n);`)).toBe("fin 1\n212\n");
   for (let i = 0; i < 3; i++) { if (i === 1) { break; } console.log("i " + i); }
 } finally { console.log("fin"); }
 console.log("done");`)).toBe("i 0\nfin\ndone\n");
+  });
+});
+
+/*
+ * The two fixes have to COMPOSE. The lane before this one gave `break`/`continue` their
+ * block-scope unwinding — a jump frees the linear locals of every scope between itself
+ * and its target. Routing the jump through a finalizer could have bypassed that entirely
+ * (drops emitted into a block the jump no longer reaches), and getting BOTH to happen in
+ * the wrong ORDER is the other failure: a local declared inside the `try` is still live
+ * while that `try`'s finalizer runs, so its drop belongs before the finalizer, and a
+ * local declared outside belongs after.
+ *
+ * The lowering therefore INTERLEAVES: unwind down to the finalizer, run it, unwind the
+ * next segment, run the next finalizer, land. These measure the result, at two scales,
+ * because a single leaked array reads as a harmless constant at one.
+ */
+describe("drops still happen, and in the right order", () => {
+  test("a jump through a finally frees the try block's locals", async () => {
+    const { small, large, stdout } = await liveAtTwoScales((n) => `let acc = 0;
+for (let i = 0; i < ${n}; i++) {
+  try { const ws: number[] = [1, 2, 3]; acc = acc + ws.length; continue; } finally { acc = acc + 1; }
+}
+console.log(acc);`);
+    expect(stdout).toBe("800");
+    expect(small).toBe(0);
+    expect(large).toBe(0);
+  });
+
+  test("a jump through TWO finallys frees every scope it unwinds", async () => {
+    const { small, large, stdout } = await liveAtTwoScales((n) => `let acc = 0;
+for (let i = 0; i < ${n}; i++) {
+  const outerLocal: number[] = [1];
+  try {
+    const midLocal: number[] = [1, 2];
+    try {
+      const innerLocal: number[] = [1, 2, 3];
+      acc = acc + innerLocal.length + midLocal.length + outerLocal.length;
+      continue;
+    } finally { acc = acc + 1; }
+  } finally { acc = acc + 1; }
+}
+console.log(acc);`);
+    expect(stdout).toBe("1600");
+    expect(small).toBe(0);
+    expect(large).toBe(0);
+  });
+
+  // ORDER, observably: the finalizer READS a local declared in the `try` after the jump
+  // has already begun. If the drop were hoisted in front of the branch to the finalizer,
+  // this would be a use-after-free rather than a leak — the louder half of the same bug.
+  test("the try block's locals are still live inside its own finalizer", async () => {
+    expect(await sameAsNode(`for (let i = 0; i < 2; i++) {
+  const ws: number[] = [1, 2, 3];
+  try {
+    const xs: number[] = [4, 5];
+    if (i === 1) { break; }
+    console.log("body " + xs.length);
+  } finally {
+    console.log("fin " + ws.length);
+  }
+}
+console.log("done");`)).toBe("body 2\nfin 3\nfin 3\ndone\n");
+  });
+});
+
+/*
+ * ONE finalizer, SEVERAL pending completions. The mode slot is a single `double`, so
+ * every exit that can reach a given finalizer needs its own id in that finalizer's
+ * dispatch — a design that stored "a jump is pending" as one bit would compile the first
+ * of these and silently mis-route the second.
+ */
+describe("several completions through one finalizer", () => {
+  test("break, continue, return and fall-through all through the same finally", async () => {
+    expect(await sameAsNode(`function f(): number {
+  let acc = 0;
+  for (let i = 0; i < 5; i++) {
+    try {
+      if (i === 1) { continue; }
+      if (i === 2) { return acc + 100; }
+      if (i === 3) { break; }
+      acc = acc + 1;
+    } finally { console.log("fin " + i); }
+  }
+  return acc;
+}
+console.log(f());`)).toBe("fin 0\nfin 1\nfin 2\n101\n");
+  });
+
+  // The `catch` clause is also a path into the finalizer, and a jump written INSIDE it
+  // crosses the finalizer exactly as one in the `try` block does.
+  test("a break inside the catch clause still runs the finally", async () => {
+    expect(await sameAsNode(`for (let i = 0; i < 3; i++) {
+  try {
+    throw "boom";
+  } catch (e) {
+    console.log("caught " + e);
+    break;
+  } finally {
+    console.log("fin " + i);
+  }
+}
+console.log("done");`)).toBe("caught boom\nfin 0\ndone\n");
+  });
+});
+
+/* Every loop form pushes its own `break`/`continue` target, so every loop form is its own
+ * chance to have forgotten the finalizer depth on the entry. */
+describe("every loop form", () => {
+  test("while", async () => {
+    expect(await sameAsNode(`let i = 0;
+while (i < 3) { i = i + 1; try { continue; } finally { console.log("fin " + i); } }
+console.log(i);`)).toBe("fin 1\nfin 2\nfin 3\n3\n");
+  });
+
+  test("do/while", async () => {
+    expect(await sameAsNode(`let i = 0;
+do { i = i + 1; try { continue; } finally { console.log("fin " + i); } } while (i < 3);
+console.log(i);`)).toBe("fin 1\nfin 2\nfin 3\n3\n");
+  });
+
+  test("for-of", async () => {
+    expect(await sameAsNode(`const xs: number[] = [1, 2, 3];
+let acc = 0;
+for (const x of xs) { try { acc = acc + x; continue; } finally { console.log("fin " + x); } }
+console.log(acc);`)).toBe("fin 1\nfin 2\nfin 3\n6\n");
+  });
+
+  test("for-in", async () => {
+    expect(await sameAsNode(`const o = { a: 1, b: 2 };
+for (const k in o) { try { break; } finally { console.log("fin " + k); } }
+console.log("done");`)).toBe("fin a\ndone\n");
   });
 });
