@@ -138,7 +138,7 @@ describe("fuzz findings — string → number conversions", () => {
    * specifically in whatever decides "this string is blank, therefore 0". Pure ASCII, so it
    * is independent of the UTF-8 byte-orientation divergence (§A.2).
    */
-  it.failing("Number() treats a whitespace-only vertical tab as 0", async () => {
+  it("Number() treats a whitespace-only vertical tab as 0", async () => {
     await expectSameBytes([
       'console.log(Number("\\u000b"));',    // node 0, ours NaN
       'console.log(Number("\\u000b\\u000b"));', // node 0, ours NaN

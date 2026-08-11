@@ -703,14 +703,22 @@ double js_shl(double a, double b)  { return (double)(to_int32(a)  << (to_uint32(
 double js_shr(double a, double b)  { return (double)(to_int32(a)  >> (to_uint32(b) & 31u)); }
 double js_ushr(double a, double b) { return (double)(to_uint32(a) >> (to_uint32(b) & 31u)); }
 
+/* StrWhiteSpace is the SAME set the trims use (ECMAScript WhiteSpace + LineTerminator),
+ * so `Number(x)` and `x.trim()` cannot disagree about what a blank string is. Defined
+ * further down next to js_str_trim; forward-declared here rather than moved, so the one
+ * canonical table stays where its comment explains it. */
+static const char *nt_ws_skip_fwd(const char *s, const char *end);
+static const char *nt_ws_skip_back(const char *start, const char *end);
+
 /* Number(string) / unary + on string, matching JS ToNumber */
 double js_str_to_num(const char *s) {
-  while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-  if (*s == '\0') return 0.0;
-  char *end;
-  double v = strtod(s, &end);
-  while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
-  return *end == '\0' ? v : NAN;
+  const char *end = s + nt_strlen(s);
+  const char *p = nt_ws_skip_fwd(s, end);
+  end = nt_ws_skip_back(p, end);
+  if (p == end) return 0.0;
+  char *q;
+  double v = strtod(p, &q);
+  return q == end ? v : NAN;
 }
 
 /* Math.round — ECMA-262 21.3.2.28, which is NOT `floor(x + 0.5)`.
