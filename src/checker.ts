@@ -762,7 +762,11 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
     const defaults = s.params.map((p) => p.default ?? null);
     const ret = s.returnAnnot ?? "number";
     functions = functions.set(s.name, { params, ret, required, defaults, rest });
-    if (s.isStatic) c.statics.add(s.name); // `static m()` → reachable only as `C.m(…)`
+    // `static m()` → reachable only as `C.m(…)`. REBOUND, not `.add`-and-discard: a
+    // nativets `Set` is persistent, so the discarded spelling adds nothing there while
+    // bun's mutating `Set.add` makes it work here — the divergence is invisible until
+    // this compiler compiles itself. `Checker` is `//@@mutable`, so the assignment stands.
+    if (s.isStatic) c.statics = c.statics.add(s.name);
   }
 
   // pass 1.5: pre-declare the module-level bindings, so return-type inference and
@@ -1085,7 +1089,11 @@ class Checker {
    * lowers to the same shape of name, must NOT be reachable that way (in node a class
    * object has no such property, so calling it is a TypeError, never a receiver-less call).
    */
-  readonly statics = new Set<string>();
+  // NOT `readonly`: a nativets `Set` is PERSISTENT, so the only way to add to this from
+  // `check` is `c.statics = c.statics.add(name)` — and `Checker` is `//@@mutable`, so that
+  // field assignment is legal and node-exact (verified: test/mutable-set-field.test.ts).
+  // The discarded `c.statics.add(name)` it replaces is a silent no-op in the subset.
+  statics: Set<string> = new Set<string>();
 
   /**
    * The TYPE of a function DECLARATION referenced as a value — `undefined` when the name
@@ -5310,7 +5318,19 @@ class Checker {
     // qualifier, because on an undecorated class the same line is NT1023.
     const recvIsOwnField =
       recvExpr.kind === "MemberExpr" && recvExpr.object.kind === "Identifier" && recvExpr.object.name === "this";
-    const rebindable = recvExpr.kind === "Identifier" || recvIsOwnField;
+    // …AND IT IS THE TAG, NOT THE SPELLING, THAT DECIDES A FIELD. `this.f` was on the
+    // rebindable side and `c.f` was not, which is the receiver test `FieldAssign` actually
+    // applies (`!e.viaThis && !this.isMutableTy(ot)`) read one term short: a field of a
+    // `@@mutable` receiver is assignable through ANY path to it, not only through `this`.
+    // The compiler's own `Checker.statics` is exactly that shape — `Checker` is
+    // `//@@mutable`, and `c.statics = c.statics.add(name)` compiles and is node-exact
+    // (test/mutable-set-field.test.ts) — so the container arm was telling the reader "do
+    // NOT write" the one line that fixes it, and then recommending they declare the class
+    // `@@mutable`, which it already was. The type is read from the node's CACHE (the
+    // receiver was typed to get here); no re-typing, so this cannot throw from a hint.
+    const ownerTy = recvExpr.kind === "MemberExpr" ? recvExpr.object.ty : undefined;
+    const recvIsMutableField = ownerTy !== undefined && this.isMutableTy(ownerTy);
+    const rebindable = recvExpr.kind === "Identifier" || recvIsOwnField || recvIsMutableField;
     const fix = recvIsParam && name !== undefined
       ? `\`${name}\` is a PARAMETER, so do NOT write \`${name} = ${name}.${m}(${args})\` — a parameter is a borrow and the CALLER, who owns the ` +
         `${kind.toLowerCase()}, would never see the update. Accumulate into a LOCAL seeded from it and RETURN that ` +
@@ -5326,7 +5346,16 @@ class Checker {
           ? `write \`${name} = ${name}.${m}(${args})\` — the result IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. ` +
             (recvIsOwnField
               ? `The class must be \`@@mutable\` for a field assignment to stand (an undecorated one is NT1023)${chain}. `
-              : `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `)
+              : recvIsMutableField
+                // The receiver holding this field is ALREADY `@@mutable`, so say so — the
+                // reader does not need to declare anything, and does not need the owning
+                // binding to be `let` either (it is the FIELD that is assigned, not the
+                // binding). What they DO need is an OWNED receiver: a write through a
+                // borrowed parameter is NT1607 in the ownership pass, and that is the one
+                // way this line still does not stand.
+                ? `The receiver is already \`@@mutable\`, so the field assignment stands — it must just be reached through an OWNED ` +
+                  `binding (assigning through a borrowed parameter is NT1607)${chain}. `
+                : `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `)
           : `keep the result — it IS the updated ${kind.toLowerCase()}, and dropping it drops the whole operation. ` +
             `Declare the binding \`let\` (\`const\` cannot be rebound)${chain}. `;
     // THE TAIL HAS TO BE METHOD-AWARE, and saying "`.delete` … returns the receiver" was
