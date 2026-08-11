@@ -32,7 +32,54 @@
  */
 
 import { test, expect, describe } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+
 import { compileAndRun, runWithNode, emitIR } from "./harness.ts";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/** Emit with `NATIVETS_ASAN` forced on (restoring it), then build under ASan+UBSan and run.
+ *  Copied in shape from test/asan-instrumentation.test.ts, which is where the reason lives:
+ *  ASan only rewrites `define`s carrying `sanitize_address`, and without it a
+ *  heap-use-after-free READ is invisible — exit 0 with stale bytes, the exact failure this
+ *  lane is most able to introduce. A double free is caught either way (inside `free()`). */
+function runUnderAsan(source: string, tag: string): { status: number | null; stdout: string; stderr: string } {
+  const prev = process.env["NATIVETS_ASAN"];
+  process.env["NATIVETS_ASAN"] = "1";
+  let ll = "";
+  try { ll = emitIR(source); } finally {
+    if (prev === undefined) delete process.env["NATIVETS_ASAN"];
+    else process.env["NATIVETS_ASAN"] = prev;
+  }
+  // Assert the attribute is PRESENT rather than assuming it — an uninstrumented binary
+  // that "reports nothing" is not evidence of anything.
+  expect(ll).toContain("attributes #99 = { sanitize_address }");
+  for (const d of ll.split("\n").filter((l) => l.startsWith("define "))) expect(d.endsWith("#99 {")).toBe(true);
+
+  const dir = mkdtempSync(join(tmpdir(), `nativets-excmove-${tag}-`));
+  try {
+    const llPath = join(dir, "module.ll");
+    writeFileSync(llPath, ll);
+    const bin = join(dir, "prog");
+    const built = spawnSync("clang", [
+      "-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+      llPath, join(ROOT, "runtime/runtime.c"), "-lm", "-o", bin,
+    ], { encoding: "utf8" });
+    expect(built.stderr.includes("error:")).toBe(false);
+    expect(built.status).toBe(0);
+    const run = spawnSync(bin, [], {
+      encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+      env: { ...process.env, ASAN_OPTIONS: "detect_leaks=0" },
+    });
+    return { status: run.status, stdout: run.stdout ?? "", stderr: run.stderr ?? "" };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 async function differential(src: string): Promise<void> {
   const oracle = runWithNode(src);
@@ -202,5 +249,154 @@ describe("exactly one owner, exactly one free", () => {
     expect(large.stdout.split("\n")[1]).toBe("0 0");
     expect(small.exitCode).toBe(0);
     expect(large.exitCode).toBe(0);
+  });
+});
+
+/*
+ * ASAN, on the generated code. The counters above prove there is no LEAK; they cannot see
+ * the opposite fault. A pointer moved onto the pending slot and ALSO freed by the raising
+ * frame is a use-after-free the handler reads and a double free `nt_exc_clear` commits,
+ * and on macOS both are silent (LeakSanitizer is Linux-only, so `-fsanitize=address`
+ * catches these two and nothing about leaks).
+ */
+describe("ASan: the move is not a second owner", () => {
+  const PROG = `
+class E {
+  message: string;
+  code: number;
+  constructor(m: string, c: number) { this.message = m; this.code = c; }
+}
+function lex(n: number): number {
+  const err = new E("boom", n);
+  if (n % 2 === 0) throw err;
+  return n;
+}
+function run(n: number): number {
+  try { if (n === -7) throw new E("never", 0); return lex(n); }
+  catch (e) { return e.code + e.message.length; }
+}
+let acc = 0;
+for (let i = 0; i < 200; i++) acc = acc + run(i);
+console.log(acc);
+console.log(__objLive(), __strLive());`;
+
+  test("200 moved payloads, read in the handler, are clean under ASan", () => {
+    const r = runUnderAsan(PROG, "move");
+    expect(r.stderr).not.toContain("AddressSanitizer");
+    expect(r.stderr).not.toContain("heap-use-after-free");
+    expect(r.stderr).not.toContain("double-free");
+    expect(r.status).toBe(0);
+    // node prints 20300 for the same program, verified by running it (the `__objLive`
+    // line is ours alone). The differential describe blocks above are the general oracle;
+    // this one hard-codes because the ASan path builds its own binary by hand.
+    expect(r.stdout).toBe("20300\n0 0\n");
+  });
+
+  // The catch-less handler is where `nt_exc_clear` does the freeing instead. Same program,
+  // the other owner.
+  test("catch with no binding is clean under ASan too", () => {
+    const r = runUnderAsan(PROG.replace("catch (e) { return e.code + e.message.length; }", "catch { return -1; }"), "clear");
+    expect(r.stderr).not.toContain("AddressSanitizer");
+    expect(r.status).toBe(0);
+  });
+});
+
+/*
+ * THE REFUSALS, and each one's HINT COMPILED against node. A diagnostic that recommends a
+ * fix which does not work is worse than one that says nothing, and thirteen of those were
+ * found in this tree in a single day.
+ */
+describe("a block that can raise two shapes is refused, not guessed", () => {
+  const TWO_SHAPES = [
+    `class A { message: string; code: number; constructor(m: string, c: number) { this.message = m; this.code = c; } }`,
+    `function alpha(n: number): number { if (n < 0) throw new A("a", n); return n; }`,
+    `function beta(n: number): number { if (n > 9) throw new Error("b"); return n; }`,
+    `function run(n: number): number {`,
+    `  try { return alpha(n) + beta(n); } catch (e) { return -1; }`,
+    `}`,
+    `console.log(run(1), run(-1), run(11));`,
+    ``,
+  ].join("\n");
+
+  // node's `catch` parameter is `any`; ours has exactly one type. Two callees raising two
+  // shapes is a union this compiler cannot represent — so it says which two, rather than
+  // picking one and storing the other raw into a slot of the wrong shape.
+  test("two callees raising different types name both, and refuse", () => {
+    expect(() => emitIR(TWO_SHAPES)).toThrow(/can raise both A\{message:string,code:number\} \(from `alpha`\) and \{message:string\} \(from `beta`\)/);
+  });
+
+  test("the hint's first fix compiles: split them into separate `try` blocks", async () => {
+    await differential([
+      `class A { message: string; code: number; constructor(m: string, c: number) { this.message = m; this.code = c; } }`,
+      `function alpha(n: number): number { if (n < 0) throw new A("a", n); return n; }`,
+      `function beta(n: number): number { if (n > 9) throw new Error("b"); return n; }`,
+      `function run(n: number): number {`,
+      `  let a = 0;`,
+      `  try { a = alpha(n); } catch (e) { return -1; }`,
+      `  try { return a + beta(n); } catch (e) { return -1; }`,
+      `}`,
+      `console.log(run(1), run(-1), run(11));`,
+      ``,
+    ].join("\n"));
+  });
+
+  test("the hint's second fix compiles: make both throw the same type", async () => {
+    await differential([
+      `class A { message: string; code: number; constructor(m: string, c: number) { this.message = m; this.code = c; } }`,
+      `function alpha(n: number): number { if (n < 0) throw new A("a", n); return n; }`,
+      `function beta(n: number): number { if (n > 9) throw new A("b", n); return n; }`,
+      `function run(n: number): number {`,
+      `  try { return alpha(n) + beta(n); } catch (e) { return -1; }`,
+      `}`,
+      `console.log(run(1), run(-1), run(11));`,
+      ``,
+    ].join("\n"));
+  });
+});
+
+/*
+ * THE ONE PAYLOAD THE MOVE DOES NOT WIDEN, and the reason it must stay refused: a HOST
+ * call's raise really is one `const char *`. `JSON.parse` and `fs` have a message and no
+ * typed object to hand over, so a handler binding a richer record has nothing to receive —
+ * the case that used to store NOTHING and branch anyway, leaving the binding at whatever
+ * its uninitialised alloca held.
+ */
+describe("a host call still cannot deliver a rich object", () => {
+  const HOST_IN_RICH_TRY = [
+    `import { readFileSync } from "node:fs";`,
+    `function run(p: string): number {`,
+    `  try {`,
+    `    if (p === "") throw { message: "empty", code: 1 };`,
+    `    return readFileSync(p, "utf8").length;`,
+    `  } catch (e) {`,
+    `    return e.code;`,
+    `  }`,
+    `}`,
+    `console.log(run(""));`,
+    ``,
+  ].join("\n");
+
+  test("refused, and the message names the binding type it cannot rebuild", () => {
+    expect(() => emitIR(HOST_IN_RICH_TRY)).toThrow(/`catch \(e\)` is \{message:string,code:number\}/);
+  });
+
+  // The hint's fix, compiled: an inner `try` whose `catch` binds `{message:string}` — the
+  // shape a runtime message CAN be boxed into — leaves the outer handler for the record.
+  test("the hint's fix compiles: an inner try binding {message:string}", async () => {
+    await differential([
+      `import { readFileSync } from "node:fs";`,
+      `function run(p: string): number {`,
+      `  try {`,
+      `    if (p === "") throw { message: "empty", code: 1 };`,
+      `    try { return readFileSync(p, "utf8").length; }`,
+      `    catch (e) { console.log("io:", e.message.length > 0); return -2; }`,
+      `  } catch (e) {`,
+      `    return e.code;`,
+      `  }`,
+      `}`,
+      `console.log(run(""));`,
+      `console.log(run("no-such-file-xyz"));`,
+      ``,
+    ].join("\n"));
   });
 });
