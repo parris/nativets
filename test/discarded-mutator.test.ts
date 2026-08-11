@@ -44,6 +44,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { parse } from "../src/parser.ts";
+import { compileAndRun, emitIR, runWithNode } from "./harness.ts";
 
 const SRC = resolve(import.meta.dir, "..", "src");
 
@@ -360,13 +361,6 @@ describe("discarded persistent mutators in src/", () => {
     "ownership.ts assignInto: dst.set(…)",
     "ownership.ts closureDecls: out.set(…)",
     "ownership.ts closureDecls: out.set(…)",
-    "ownership.ts collectAliases: out.set(…)",
-    "ownership.ts collectAliases: out.set(…)",
-    "ownership.ts collectAliases: out.set(…)",
-    "ownership.ts collectAliases: out.set(…)",
-    "ownership.ts collectAliases: out.set(…)",
-    "ownership.ts collectVarTys: out.set(…)",
-    "ownership.ts collectVarTys: out.set(…)",
     "ownership.ts scanMentions: out.add(…)",
     "ownership.ts scanMentions: seen.add(…)",
     "ownership.ts shadowedNames: count.set(…)",
@@ -388,5 +382,115 @@ describe("discarded persistent mutators in src/", () => {
 
   test("the census is exactly the known, documented set", () => {
     expect(census().map(show).sort()).toEqual([...KNOWN].sort());
+  });
+});
+
+/*
+ * FIX #2, COMPILED. The header above describes three fixes; NT1606's `rejectParamRebind`
+ * hint recommends the second one in as many words —
+ *
+ *     "accumulate into a LOCAL seeded from the parameter and RETURN it:
+ *      `let acc = out; acc = acc.add(…); return acc;` — then rebind at the CALL SITE"
+ *
+ * — and nothing had ever run it. A hint is a promise that a spelling works, and this tree
+ * shipped sixteen that did not. So the advice is compiled here, verbatim, with node as the
+ * oracle: same stdout, same exit code, through the real binary.
+ *
+ * IT MATTERS THAT THE LOCAL IS WHAT MOVES. `out = out.add(n)` on the parameter itself is
+ * refused (`rejectParamRebind`), and correctly: a parameter is a borrow, so under nativets
+ * the caller never sees the new set. Seeding a LOCAL from it and returning that is a
+ * different program — the caller rebinds from the RETURN, which reaches it in both
+ * languages. The two halves are asserted together below, because the rule is only honest if
+ * the refusal has somewhere to go.
+ *
+ * BOTH DIRECTIONS, deliberately. Under bun `.add` mutates and returns the receiver, so a
+ * threading mistake is INVISIBLE there — the accumulator would come out right anyway. The
+ * compiled binary is the only place the threading is load-bearing, which is why every case
+ * here goes through `compileAndRun` and none through a bare `parse`.
+ *
+ * `src/ownership.ts`'s `collectLinear` is the self-hosting instance, and its shape is the
+ * last case: a recursive walk that threads the accumulator through its own child calls.
+ */
+describe("fix #2 (RETURN the accumulator) is a spelling that actually compiles", () => {
+  /** node is the oracle: same stdout, same exit code. */
+  async function same(source: string): Promise<void> {
+    const oracle = runWithNode(source);
+    const ours = await compileAndRun(source);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  }
+
+  test("the hint's spelling, verbatim: `let acc = out; acc = acc.add(…); return acc;`", async () => {
+    await same(
+      'function collect(names: string[], out: Set<string>): Set<string> {\n' +
+      '  let acc = out;\n' +
+      '  for (const n of names) acc = acc.add(n);\n' +
+      '  return acc;\n' +
+      '}\n' +
+      'let seen = new Set<string>();\n' +
+      'seen = collect(["a", "b"], seen);\n' +
+      'seen = collect(["b", "c"], seen);\n' +
+      'console.log([...seen].join(","));\n' +
+      'console.log(seen.size);\n',
+    );
+  });
+
+  test("the same for a `Map` accumulator", async () => {
+    await same(
+      'function collect(names: string[], out: Map<string, number>): Map<string, number> {\n' +
+      '  let acc = out;\n' +
+      '  for (const n of names) acc = acc.set(n, n.length);\n' +
+      '  return acc;\n' +
+      '}\n' +
+      'let seen = new Map<string, number>();\n' +
+      'seen = collect(["a", "bb"], seen);\n' +
+      'seen = collect(["ccc"], seen);\n' +
+      'console.log([...seen.keys()].join(","));\n' +
+      'console.log(seen.size);\n',
+    );
+  });
+
+  /* The refusal the hint is attached to. Asserted next to the fix so the pair cannot drift:
+   * a rule whose recommended escape stops compiling is worse than no rule. */
+  test("...while rebinding the PARAMETER itself is still refused", () => {
+    let diag: { code: string; message: string } | undefined;
+    try {
+      emitIR(
+        'function collect(names: string[], out: Set<string>): Set<string> {\n' +
+        '  for (const n of names) out = out.add(n);\n' +
+        '  return out;\n' +
+        '}\n' +
+        'console.log(collect(["a"], new Set<string>()).size);\n',
+      );
+    } catch (e) {
+      diag = (e as { diag?: { code: string; message: string } }).diag;
+    }
+    expect(diag?.code).toBe("NT1606");
+    expect(diag?.message).toContain("is a PARAMETER");
+  });
+
+  /* `collectLinear`'s shape: a RECURSIVE walk that threads the accumulator through its own
+   * child calls as well as through its loop. This is the case a rebind gets wrong twice
+   * over, and the one where a threading slip is invisible under bun. */
+  test("the recursive shape: the accumulator threads through child calls too", async () => {
+    await same(
+      'type Node = { name: string; kids: Node[] };\n' +
+      'function walk(nodes: Node[], out: Set<string>): Set<string> {\n' +
+      '  let acc = out;\n' +
+      '  for (const n of nodes) {\n' +
+      '    acc = acc.add(n.name);\n' +
+      '    acc = walk(n.kids, acc);\n' +
+      '  }\n' +
+      '  return acc;\n' +
+      '}\n' +
+      'const tree: Node[] = [\n' +
+      '  { name: "a", kids: [{ name: "b", kids: [] }, { name: "c", kids: [{ name: "d", kids: [] }] }] },\n' +
+      '  { name: "e", kids: [] },\n' +
+      '];\n' +
+      'let names = new Set<string>();\n' +
+      'names = walk(tree, names);\n' +
+      'console.log([...names].join(","));\n' +
+      'console.log(names.size);\n',
+    );
   });
 });

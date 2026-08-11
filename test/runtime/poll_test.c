@@ -25,6 +25,10 @@
  * a failure neither lane could see alone, only their merge. */
 #include <stdio.h>
 void (*nt_rt_lock)(int acquire) = 0;
+/* The crash record's causal tag borrows the consumed message, and nt_sched_init installs
+ * `tag_forget` here so runtime.c can announce the free that ends the borrow. A pointer
+ * definition needs no header, so it belongs in THIS block rather than the one below. */
+void (*nt_rt_drop_notify)(const void *p) = 0;
 void nt_str_register(void *p) { (void)p; }
 /* Faithful enough for a test that never renders a crash record; the real one is
  * ECMAScript Number::toString (runtime.c). */

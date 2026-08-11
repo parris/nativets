@@ -342,12 +342,19 @@ test("an actor program agrees with node on stdout and exit code", async () => {
  * attribute is ASSERTED PRESENT below rather than assumed. An uninstrumented binary that
  * "reports nothing" is not evidence of anything.
  *
- * BUILT AT -O0 ON PURPOSE. At -O1 an unrelated, PRE-EXISTING fault reproduces identically
- * on a clean tree: `wait_for_more` reads a NULL `g_current` immediately after
- * `yield_to_sched`, i.e. the compiler caches the thread-local's address across a
- * `swapcontext` that migrates the coroutine to another OS thread. That is an M:N scheduler
- * bug, not a message-lifetime one, and pinning it here would only make this file red for
- * someone else's reason — but it does mean -O1 + threads is not an available instrument.
+ * BUILT AT -O1, AND THAT IS ITSELF A PIN. It used to be -O0 because at -O1 a separate,
+ * pre-existing fault reproduced on a clean tree: the compiler cached a thread-local's
+ * ADDRESS across a `swapcontext` that migrates the coroutine to another OS thread, so the
+ * reload after a yield read the slot of the thread we used to be on — which the old
+ * thread's scheduler_loop had already set to NULL. Deterministic, 5/5 SEGV at 4 threads,
+ * in `wait_for_more` and then (once that site was fixed) in `actor_trampoline`.
+ *
+ * That is fixed in runtime/nt_actor.c: `current_actor` / `current_sched` are `noinline`,
+ * so the address computation cannot be hoisted out of the migrating frame. Building this
+ * gate at -O1 is what keeps it fixed — the accessors are the kind of thing an optimizing
+ * reader "simplifies" back into a plain TLS read, and at -O0 nothing would notice.
+ * Optimization also changes which frames ASan instruments, so the message-lifetime
+ * assertions above get a second, differently-compiled look at the same invariants.
  */
 function runUnderAsan(source: string, tag: string, threads: string): { status: number | null; stdout: string; stderr: string } {
   const ll = emitIRAsan(source);
@@ -364,7 +371,7 @@ function runUnderAsan(source: string, tag: string, threads: string): { status: n
     }
     const bin = join(dir, "prog");
     const built = spawnSync("clang", [
-      "-O0", "-g", "-fsanitize=address", "-fno-omit-frame-pointer", "-DNT_PVEC",
+      "-O1", "-g", "-fsanitize=address", "-fno-omit-frame-pointer", "-DNT_PVEC",
       llPath, join(ROOT, "runtime/runtime.c"), join(dir, "nt_actor.c"), join(dir, "nt_pvec.c"),
       "-lm", "-o", bin,
     ], { encoding: "utf8" });
@@ -396,27 +403,30 @@ describe("actor message lifetime under AddressSanitizer", () => {
   });
 
   /*
-   * A PRE-EXISTING USE-AFTER-FREE, PINNED HERE BECAUSE THIS IS WHERE IT WAS FOUND — it is
-   * NOT this lane's, and NOT a regression. Verified by reproducing it byte-identically on a
-   * clean tree with both files reverted: same `heap-use-after-free ... in nt_msg_render_0`,
-   * same `emit_crash_record -> actor_die -> nt_kill` frames.
+   * WAS A USE-AFTER-FREE, now the pin for the ownership rule that closed it. Originally
+   * found here and NOT caused by the message-lifetime lane: it reproduced byte-identically
+   * on a clean tree, same `heap-use-after-free ... in nt_msg_render_0`, same
+   * `emit_crash_record -> actor_die -> nt_kill` frames.
    *
-   * The crash record's causal tag (`note_last` -> `a->last_val`) is a BORROWED pointer to
-   * the last message the actor CONSUMED, and consuming a message is exactly what transfers
-   * it to the receiving frame — which then drops it at the end of its scope. So an actor
-   * killed from OUTSIDE after it finished an iteration has a `last_val` pointing at freed
-   * memory, and `print_triggering_message` renders it. It is a READ of freed memory, so
-   * without instrumentation it prints plausible garbage at exit 0: the silent-wrong-answer
-   * class, in a diagnostic whose whole job is to be trusted.
+   * The crash record's causal tag (`note_last` -> `a->last_val`) BORROWS the last message
+   * the actor CONSUMED, and consuming a message is exactly what transfers it to the
+   * receiving frame — which then drops it at the end of its scope. So an actor killed from
+   * OUTSIDE after finishing an iteration had a `last_val` pointing at freed memory, and
+   * `print_triggering_message` rendered it: a READ, so without instrumentation it printed
+   * plausible garbage at exit 0.
    *
-   * What this lane DID change is the reach. The receiving frame always dropped its message
-   * when the receive sat in a plain `function`; now that a lifted arrow drops too, every
-   * actor written the natural way (`spawn` takes a closure) reaches it. Fixing it means
-   * deciding who owns the causal tag, and every cheap answer entangles the object model's
-   * shallow `nt_obj_free` (a shallow COPY of the tag is only sound because the shallow free
-   * leaves the string slots alive) — which this lane was told not to take on silently.
+   * THE FIX KEEPS THE BORROW AND ENDS IT (runtime/nt_actor.c note_last / tag_forget):
+   * runtime.c announces every free through `nt_rt_drop_notify`, and the tag stops
+   * rendering a payload it no longer owns. Owning a copy instead was rejected — a shallow
+   * copy is sound ONLY because `nt_obj_free` leaves the string slots alive, which would
+   * make this record depend on the shallow-free leak never being fixed.
+   *
+   * BOTH HALVES ARE ASSERTED, because "prints nothing, ever" would also silence ASan: the
+   * record must NAME the released message rather than render it here, and must still
+   * render it in full when the actor dies holding it (actors-v4 / actors-msg cover that
+   * side — `crash_message.ts` and `struct_crash.ts` both `__crash` mid-iteration).
    */
-  it.failing("the crash record renders a message the receiving frame already freed", () => {
+  it("the crash record NAMES a message the receiving frame already freed, never renders it", () => {
     const src = [
       `const uafW = (n: number): void => {`,
       `  for (let i = 0; i < n; i++) {`,
@@ -436,5 +446,13 @@ describe("actor message lifetime under AddressSanitizer", () => {
     const r = runUnderAsan(src, "uaf", "1");
     expect(r.stderr).not.toContain("heap-use-after-free");
     expect(r.status).toBe(0);
+    // The record is still emitted, and still carries the parts that are sound: the origin
+    // pid (a value) and the shape (a static string from codegen).
+    expect(r.stderr).toContain("triggering-message:");
+    expect(r.stderr).toContain("consumed and released");
+    expect(r.stderr).toContain("(shape {a:number,b:string})");
+    // ...and NOT the payload. `"one"` is the freed string slot: the exact byte sequence
+    // the old renderer reached for, so this fails on any return to rendering it.
+    expect(r.stderr).not.toContain(`"one"`);
   });
 });
