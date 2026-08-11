@@ -4990,12 +4990,35 @@ class Checker {
       // `Object.freeze(o)` is the IDENTITY here and honestly so: objects are already
       // immutable (Stage 29), so freezing changes nothing and node's contract —
       // "returns the same object, now non-writable" — is met exactly.
-      if (p === "freeze" || p === "isFrozen") {
+      if (p === "freeze") {
         if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
         const ot = this.type(e.args[0]!, scope);
         if (!isObjectTy(ot)) throw typeError(`Object.${p} expects an object`);
-        return p === "isFrozen" ? "boolean" : ot;
+        return ot;
       }
+      // …but OBSERVING frozen-ness is a different question, and it is refused rather
+      // than guessed. `isFrozen` used to compile to the constant `true`, on the reasoning
+      // that mutation is impossible here anyway. node does not ask that question: it
+      // reports whether THIS OBJECT was frozen, so `Object.isFrozen({a:1})` is `false`
+      // there and `true` here — exit 0 on both sides, no diagnostic, a silent wrong
+      // answer of exactly the kind this compiler exists to avoid.
+      //
+      // It cannot be answered without a per-object frozen bit, and objects are bare slot
+      // blocks (codegen indexes field i at `getelementptr i64, ptr o, i64 i`) with no
+      // header to carry one. A compile-time approximation would be worse than incomplete,
+      // it would be UNSOUND: `Object.freeze` hands back the SAME object, so
+      // `const f = Object.freeze(o)` makes `Object.isFrozen(o)` true in node as well.
+      // Deciding that from the syntactic form of the argument is alias analysis, and
+      // getting it wrong reproduces the very defect being removed. `isSealed` and
+      // `isExtensible` are the same question and already fall through to the same code.
+      if (p === "isFrozen" || p === "isSealed" || p === "isExtensible")
+        throw nyi(NYI.OBJECT, `Object.${p}`,
+          "frozen-ness is per-OBJECT runtime state and nativets carries no such bit. " +
+          "`Object.freeze(o)` returns the SAME object, so freezing through any alias would have " +
+          "to make this `true` for the original too — that is alias analysis, not a constant. " +
+          "Objects here are already deeply immutable and every mutation is a compile error, so a " +
+          "freeze guard has nothing to guard: drop the check. `Object.freeze` itself still works.",
+          (e.args.length > 0 ? exprLoc(e.args[0]!) : undefined) ?? e.loc);
       // `Object.assign(target, …)` MUTATES its target — the one thing this language
       // does not do. Point at the object spread that expresses the same intent.
       if (p === "assign" || p === "defineProperty" || p === "setPrototypeOf")
