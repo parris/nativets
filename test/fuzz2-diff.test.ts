@@ -301,14 +301,54 @@ describe("fuzz2 findings — leaks", () => {
     );
   });
 
-  /** `Object.keys` allocates a fresh array every call and never releases it. */
-  it.failing("Object.keys leaks one array header per call", async () => {
+  /*
+   * `Object.keys` allocates a fresh array every call and never released it.
+   *
+   * FIXED (lk-runtime), and the interesting part is WHERE the freshness comes from. The
+   * statement DISCARDS the array, so no binding owns it, no drop set names it, and
+   * `freeReceiverTemp` never sees it — that rule frees the RECEIVER of a chain, never
+   * its result. The shape test `freshArray` (ast.ts) already answers "yes" for both
+   * `.keys` and `.concat` and was the wrong instrument to reuse here: it matches on the
+   * METHOD NAME, and at a discard there is no context establishing that the receiver was
+   * a builtin — a user class with a `keys()`/`concat()` method handing back a field would
+   * match it too, and freeing that field is a use-after-free rather than a leak. So the
+   * array is marked at the point it is BUILT (`freshArrayTemp`, src/codegen.ts) by the
+   * lowerings whose freshness is a fact of the lowering itself, and the discard frees it
+   * only on SSA identity. Everything unmarked keeps leaking, as before: a wrong "fresh"
+   * is a premature free, so unclaimed has to stay the default.
+   */
+  it("Object.keys leaks one array header per call", async () => {
     await expectResidueDoesNotScale(`const o = { a: i, b: i }; Object.keys(o);`);
   });
 
-  /** `Array#concat` allocates a fresh array every call and never releases it. */
-  it.failing("Array#concat leaks one array header per call", async () => {
+  /*
+   * `Array#concat` allocates a fresh array every call and never released it. Same fix,
+   * plus the FOLD's own intermediates: `a.concat(b, c)` allocated two headers and
+   * returned one, so the discarded middle leaked even when the result was bound.
+   */
+  it("Array#concat leaks one array header per call", async () => {
     await expectResidueDoesNotScale(`const a = [i]; const b = [i]; a.concat(b);`);
+  });
+
+  /*
+   * The control for the two above, and the reason the fix is attributable: the same
+   * statement shape with a producer that is NOT marked fresh. `[i, i].map(...)` allocates
+   * an array and discards it exactly as `Object.keys(o)` does — its residue still scales,
+   * because `freshArrayTemp` claims only the lowerings whose freshness was established.
+   * Pinned `failing` so that widening the claim later is a deliberate act with a test to
+   * flip, rather than something that quietly starts passing.
+   */
+  it.failing("a DISCARDED map result is still unclaimed (the control)", async () => {
+    await expectResidueDoesNotScale(`const a = [i, i]; a.map((x: number): number => x + 1);`);
+  });
+
+  /* And the receiver side stays owned: a NAMED array whose concat result is discarded is
+   * not freed twice — the residue is flat AND the program still reads `a` afterwards. */
+  it("concat frees only its own result, never its receiver", async () => {
+    await expectResidueDoesNotScale(
+      `const a = [i]; const b = [i]; a.concat(b); use(a.length + b.length);`,
+      `function use(n: number): number { return n; }`,
+    );
   });
 
   /*

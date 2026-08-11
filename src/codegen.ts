@@ -1223,6 +1223,30 @@ class FnGen {
    *  (so the declaration's store and every top-level read/write hit the same cell a
    *  function body reads). Empty in every other frame. */
   private globalVars = new Set<string>();
+  /**
+   * The SSA name of the array a lowering just allocated and handed back UNOWNED — the
+   * one signal `ExprStmt` needs to free a discarded result rather than leak it.
+   *
+   * Marked at the point of construction, NOT recognised by shape at the discard. The
+   * shape test is available (`freshArray` in ast.ts, which already answers "yes" for
+   * `.concat` and `.keys`) and it is the wrong instrument here: it matches on the
+   * METHOD NAME, so a user class with a `concat`/`map`/`keys` method that hands back a
+   * field would match it too, and freeing that field is a use-after-free rather than a
+   * leak. `freshArray` is safe where it is used today only because both callers have
+   * already established that the receiver is a builtin array. At a discard there is no
+   * such context, so freshness has to come from the code that did the allocating.
+   *
+   * Set by exactly the lowerings whose freshness is a fact of the lowering itself:
+   * `Object.keys`/`values`/`entries`/`getOwnPropertyNames` (built here out of
+   * `nt_arr_new`) and `Array#concat` (`nt_arr_concat` returns a new header). Anything
+   * that does not set it is simply left to leak, as before — a wrong `true` here is a
+   * premature free, so the default has to be "unclaimed".
+   *
+   * Read by ONE consumer, immediately after the `genExpr` that set it, and compared by
+   * SSA identity: a nested lowering that set it for some inner array cannot be mistaken
+   * for the statement's own value, because the value returned would not be that name.
+   */
+  private freshArrayTemp: string | null = null;
 
   constructor(private mod: ModuleGen) {}
 
@@ -1828,7 +1852,21 @@ class FnGen {
         }
         return;
       }
-      case "ExprStmt": this.genExpr(s.expr); return;
+      case "ExprStmt": {
+        // A statement in expression position DISCARDS its value, so a fresh array built
+        // for it has no owner at all: no binding exists, so no drop set names it, and
+        // `freeReceiverTemp` only ever reaches the RECEIVER of a chain, never its result.
+        // `Object.keys(o);` and `a.concat(b);` therefore leaked one array header per
+        // evaluation, without bound. See `freshArrayTemp` for why the value is marked at
+        // the point it is BUILT rather than recognised by shape here.
+        this.freshArrayTemp = null;
+        const v = this.genExpr(s.expr);
+        if (this.freshArrayTemp !== null && this.freshArrayTemp === v.v) {
+          this.emit(`call void @nt_arr_free(ptr ${v.v})`);
+        }
+        this.freshArrayTemp = null;
+        return;
+      }
       case "ReturnStmt": {
         // Inside an inlined HOF block callback: a `return` yields the per-element
         // result — store it and branch to the callback's join (not a function ret).
@@ -3781,6 +3819,7 @@ class FnGen {
           this.emit(`call double @nt_arr_push(ptr ${pair}, i64 ${slot})`);
           this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot({ v: pair, ty: "string[]" })})`);
         });
+        this.freshArrayTemp = arr; // built here out of nt_arr_new; nothing else names it
         return { v: arr, ty: "string[][]" };
       }
       // stdlib Batch 3: `Object.freeze(o)` is the identity (objects are ALREADY
@@ -3791,9 +3830,12 @@ class FnGen {
       // checker now refuses `isFrozen`/`isSealed`/`isExtensible` (NT1002), so nothing
       // reaches here — and the constant is gone rather than left as unreachable code,
       // because that is the shape a future edit would resurrect.
-      if (e.callee.property === "freeze") return o;
-      if (e.callee.property === "keys" || e.callee.property === "getOwnPropertyNames")
-        return this.buildStringArray(objectFields(o.ty).map((f) => f.key));
+      if (e.callee.property === "freeze") return o; // the IDENTITY — never mark this fresh
+      if (e.callee.property === "keys" || e.callee.property === "getOwnPropertyNames") {
+        const keys = this.buildStringArray(objectFields(o.ty).map((f) => f.key));
+        this.freshArrayTemp = keys.v; // a fresh nt_arr_new of interned key literals
+        return keys;
+      }
       // values: read each field slot into a fresh homogeneous array (checker enforced).
       const fields = objectFields(o.ty);
       const arr = this.fresh();
@@ -3806,6 +3848,7 @@ class FnGen {
         const val: Val = { v: this.fromSlot(slot, f.ty), ty: f.ty };
         this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(val)})`);
       });
+      this.freshArrayTemp = arr; // Object.values: a fresh nt_arr_new of field slots
       return { v: arr, ty: makeArrayTy(fields[0]!.ty) };
     }
 
@@ -5618,8 +5661,17 @@ class FnGen {
           const b = this.genExpr(arg).v;
           const t = this.fresh();
           this.emit(`${t} = call ptr @nt_arr_concat(ptr ${acc}, ptr ${b})`);
+          // The FOLD's intermediates: every `acc` past the receiver is a header this
+          // lowering allocated one line earlier and has just copied out of, so nothing
+          // else can name it — `a.concat(b, c)` allocated two and returned one. The
+          // receiver itself is skipped: it is the caller's binding (or, if it was a
+          // temporary, `freeReceiverTemp`'s to release).
+          if (acc !== recv.v) this.emit(`call void @nt_arr_free(ptr ${acc})`);
           acc = t;
         }
+        // Fresh by construction: `nt_arr_concat` returns a NEW header (and `concat` with
+        // no arguments is `recv` itself, which this frame does not own).
+        if (acc !== recv.v) this.freshArrayTemp = acc;
         return { v: acc, ty: recv.ty };
       }
       case "at": {
