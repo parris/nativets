@@ -53,3 +53,10 @@ console.log(JSON.stringify(Object.values(f)));
 // member read where the canonical spelling is an identifier-safe name.
 const r = { 1e2: "hundred", 0.5: "half" };
 console.log(r["100"], r["0.5"]);
+
+// The two ends of the double: a literal that OVERFLOWS names the key `Infinity` (a name,
+// not a number, and not an array index), and one that UNDERFLOWS names `0` — which IS an
+// array index, so it enumerates first. Both fall out of `ToString(ToNumber(…))` rather
+// than needing a case of their own, which is the argument for the round trip.
+console.log(JSON.stringify({ 1e400: "over", 5e-400: "under", z: 1 }));
+console.log(JSON.stringify(Object.keys({ 1e400: "over", 5e-400: "under", z: 1 })));

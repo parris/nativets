@@ -50514,6 +50514,7 @@ rede5:
 "
 `;
 
+
 exports[`fixtures stage22-objarr/numeric-key-spelling.ts emits stable LLVM IR (snapshot) 1`] = `
 "; ModuleID = 'nativets'
 declare void @js_print_num(double)
@@ -50532,6 +50533,7 @@ declare double @js_pow(double, double)
 declare ptr @js_str_concat(ptr, ptr)
 declare double @js_str_len(ptr)
 declare i32 @js_str_eq(ptr, ptr)
+declare i32 @js_same_value(double, double)
 declare i32 @js_str_cmp(ptr, ptr)
 declare ptr @js_num_to_str(double)
 declare ptr @js_bool_to_str(i32)
@@ -50587,6 +50589,7 @@ declare ptr @nt_arr_join_str(ptr, ptr)
 declare ptr @nt_arr_join_bool(ptr, ptr)
 declare i32 @nt_arr_includes_num(ptr, double)
 declare i32 @nt_arr_includes_str(ptr, ptr)
+declare i32 @nt_arr_includes_bool(ptr, i32)
 declare double @nt_arr_indexof_num(ptr, double, double)
 declare double @nt_arr_indexof_str(ptr, ptr, double)
 declare ptr @nt_arr_copy(ptr)
@@ -50815,6 +50818,12 @@ declare ptr @nt_dyn_str_or_null(ptr)
 @.str.43 = private unnamed_addr constant [2 x i8] c"3\\00"
 @.str.44 = private unnamed_addr constant [8 x i8] c"hundred\\00"
 @.str.45 = private unnamed_addr constant [5 x i8] c"half\\00"
+@.str.46 = private unnamed_addr constant [5 x i8] c"over\\00"
+@.str.47 = private unnamed_addr constant [6 x i8] c"under\\00"
+@.str.48 = private unnamed_addr constant [5 x i8] c"\\220\\22:\\00"
+@.str.49 = private unnamed_addr constant [12 x i8] c"\\22Infinity\\22:\\00"
+@.str.50 = private unnamed_addr constant [2 x i8] c"0\\00"
+@.str.51 = private unnamed_addr constant [9 x i8] c"Infinity\\00"
 
 define i32 @main(i32 %argc, ptr %argv) {
 entry:
@@ -50830,6 +50839,8 @@ entry:
   %s19 = alloca double
   %s24 = alloca ptr
   %s25 = alloca double
+  %s33 = alloca ptr
+  %s34 = alloca double
   br label %L0
 L0:
   call void @nt_init_args(i32 %argc, ptr %argv)
@@ -50853,21 +50864,32 @@ L0:
   %t13 = inttoptr i64 %t12 to ptr
   %t14 = call ptr @js_json_quote(ptr %t13)
   %t15 = call ptr @js_str_concat(ptr %t10, ptr %t14)
+  call void @nt_str_release(ptr %t10)
+  call void @nt_str_release(ptr %t14)
   %t16 = call ptr @js_str_concat(ptr %t15, ptr @.str.5)
+  call void @nt_str_release(ptr %t15)
   %t17 = call ptr @js_str_concat(ptr %t16, ptr @.str.6)
+  call void @nt_str_release(ptr %t16)
   %t18 = getelementptr i64, ptr %t0, i64 1
   %t19 = load i64, ptr %t18
   %t20 = inttoptr i64 %t19 to ptr
   %t21 = call ptr @js_json_quote(ptr %t20)
   %t22 = call ptr @js_str_concat(ptr %t17, ptr %t21)
+  call void @nt_str_release(ptr %t17)
+  call void @nt_str_release(ptr %t21)
   %t23 = call ptr @js_str_concat(ptr %t22, ptr @.str.5)
+  call void @nt_str_release(ptr %t22)
   %t24 = call ptr @js_str_concat(ptr %t23, ptr @.str.7)
+  call void @nt_str_release(ptr %t23)
   %t25 = getelementptr i64, ptr %t0, i64 2
   %t26 = load i64, ptr %t25
   %t27 = inttoptr i64 %t26 to ptr
   %t28 = call ptr @js_json_quote(ptr %t27)
   %t29 = call ptr @js_str_concat(ptr %t24, ptr %t28)
+  call void @nt_str_release(ptr %t24)
+  call void @nt_str_release(ptr %t28)
   %t30 = call ptr @js_str_concat(ptr %t29, ptr @.str.8)
+  call void @nt_str_release(ptr %t29)
   call void @js_print_str(ptr %t30)
   call void @js_print_newline()
   %t31 = call ptr @nt_obj_new(double 0x3FF0000000000000)
@@ -50881,7 +50903,10 @@ L0:
   %t38 = inttoptr i64 %t37 to ptr
   %t39 = call ptr @js_json_quote(ptr %t38)
   %t40 = call ptr @js_str_concat(ptr %t35, ptr %t39)
+  call void @nt_str_release(ptr %t35)
+  call void @nt_str_release(ptr %t39)
   %t41 = call ptr @js_str_concat(ptr %t40, ptr @.str.8)
+  call void @nt_str_release(ptr %t40)
   call void @js_print_str(ptr %t41)
   call void @js_print_newline()
   %t42 = call ptr @nt_obj_new(double 0x3FF0000000000000)
@@ -50895,7 +50920,10 @@ L0:
   %t49 = inttoptr i64 %t48 to ptr
   %t50 = call ptr @js_json_quote(ptr %t49)
   %t51 = call ptr @js_str_concat(ptr %t46, ptr %t50)
+  call void @nt_str_release(ptr %t46)
+  call void @nt_str_release(ptr %t50)
   %t52 = call ptr @js_str_concat(ptr %t51, ptr @.str.8)
+  call void @nt_str_release(ptr %t51)
   call void @js_print_str(ptr %t52)
   call void @js_print_newline()
   %t53 = call ptr @nt_obj_new(double 0x4008000000000000)
@@ -50917,21 +50945,32 @@ L0:
   %t66 = inttoptr i64 %t65 to ptr
   %t67 = call ptr @js_json_quote(ptr %t66)
   %t68 = call ptr @js_str_concat(ptr %t63, ptr %t67)
+  call void @nt_str_release(ptr %t63)
+  call void @nt_str_release(ptr %t67)
   %t69 = call ptr @js_str_concat(ptr %t68, ptr @.str.5)
+  call void @nt_str_release(ptr %t68)
   %t70 = call ptr @js_str_concat(ptr %t69, ptr @.str.16)
+  call void @nt_str_release(ptr %t69)
   %t71 = getelementptr i64, ptr %t53, i64 1
   %t72 = load i64, ptr %t71
   %t73 = inttoptr i64 %t72 to ptr
   %t74 = call ptr @js_json_quote(ptr %t73)
   %t75 = call ptr @js_str_concat(ptr %t70, ptr %t74)
+  call void @nt_str_release(ptr %t70)
+  call void @nt_str_release(ptr %t74)
   %t76 = call ptr @js_str_concat(ptr %t75, ptr @.str.5)
+  call void @nt_str_release(ptr %t75)
   %t77 = call ptr @js_str_concat(ptr %t76, ptr @.str.17)
+  call void @nt_str_release(ptr %t76)
   %t78 = getelementptr i64, ptr %t53, i64 2
   %t79 = load i64, ptr %t78
   %t80 = inttoptr i64 %t79 to ptr
   %t81 = call ptr @js_json_quote(ptr %t80)
   %t82 = call ptr @js_str_concat(ptr %t77, ptr %t81)
+  call void @nt_str_release(ptr %t77)
+  call void @nt_str_release(ptr %t81)
   %t83 = call ptr @js_str_concat(ptr %t82, ptr @.str.8)
+  call void @nt_str_release(ptr %t82)
   call void @js_print_str(ptr %t83)
   call void @js_print_newline()
   %t84 = call ptr @nt_obj_new(double 0x3FF0000000000000)
@@ -50945,7 +50984,10 @@ L0:
   %t91 = inttoptr i64 %t90 to ptr
   %t92 = call ptr @js_json_quote(ptr %t91)
   %t93 = call ptr @js_str_concat(ptr %t88, ptr %t92)
+  call void @nt_str_release(ptr %t88)
+  call void @nt_str_release(ptr %t92)
   %t94 = call ptr @js_str_concat(ptr %t93, ptr @.str.8)
+  call void @nt_str_release(ptr %t93)
   call void @js_print_str(ptr %t94)
   call void @js_print_newline()
   %t95 = call ptr @nt_obj_new(double 0x3FF0000000000000)
@@ -50959,7 +51001,10 @@ L0:
   %t102 = inttoptr i64 %t101 to ptr
   %t103 = call ptr @js_json_quote(ptr %t102)
   %t104 = call ptr @js_str_concat(ptr %t99, ptr %t103)
+  call void @nt_str_release(ptr %t99)
+  call void @nt_str_release(ptr %t103)
   %t105 = call ptr @js_str_concat(ptr %t104, ptr @.str.8)
+  call void @nt_str_release(ptr %t104)
   call void @js_print_str(ptr %t105)
   call void @js_print_newline()
   %t106 = call ptr @nt_obj_new(double 0x4000000000000000)
@@ -50977,14 +51022,21 @@ L0:
   %t116 = inttoptr i64 %t115 to ptr
   %t117 = call ptr @js_json_quote(ptr %t116)
   %t118 = call ptr @js_str_concat(ptr %t113, ptr %t117)
+  call void @nt_str_release(ptr %t113)
+  call void @nt_str_release(ptr %t117)
   %t119 = call ptr @js_str_concat(ptr %t118, ptr @.str.5)
+  call void @nt_str_release(ptr %t118)
   %t120 = call ptr @js_str_concat(ptr %t119, ptr @.str.24)
+  call void @nt_str_release(ptr %t119)
   %t121 = getelementptr i64, ptr %t106, i64 1
   %t122 = load i64, ptr %t121
   %t123 = inttoptr i64 %t122 to ptr
   %t124 = call ptr @js_json_quote(ptr %t123)
   %t125 = call ptr @js_str_concat(ptr %t120, ptr %t124)
+  call void @nt_str_release(ptr %t120)
+  call void @nt_str_release(ptr %t124)
   %t126 = call ptr @js_str_concat(ptr %t125, ptr @.str.8)
+  call void @nt_str_release(ptr %t125)
   call void @js_print_str(ptr %t126)
   call void @js_print_newline()
   %t127 = call ptr @nt_obj_new(double 0x3FF0000000000000)
@@ -50998,7 +51050,10 @@ L0:
   %t134 = inttoptr i64 %t133 to ptr
   %t135 = call ptr @js_json_quote(ptr %t134)
   %t136 = call ptr @js_str_concat(ptr %t131, ptr %t135)
+  call void @nt_str_release(ptr %t131)
+  call void @nt_str_release(ptr %t135)
   %t137 = call ptr @js_str_concat(ptr %t136, ptr @.str.8)
+  call void @nt_str_release(ptr %t136)
   call void @js_print_str(ptr %t137)
   call void @js_print_newline()
   %t138 = call ptr @nt_obj_new(double 0x4010000000000000)
@@ -51046,6 +51101,7 @@ jsf8:
 jsc7:
   %t162 = load ptr, ptr %s1
   %t163 = call ptr @js_str_concat(ptr %t162, ptr @.str.5)
+  call void @nt_str_release(ptr %t162)
   store ptr %t163, ptr %s1
   br label %jsa9
 jsa9:
@@ -51055,6 +51111,8 @@ jsa9:
   %t167 = call ptr @js_json_quote(ptr %t166)
   %t168 = load ptr, ptr %s1
   %t169 = call ptr @js_str_concat(ptr %t168, ptr %t167)
+  call void @nt_str_release(ptr %t168)
+  call void @nt_str_release(ptr %t167)
   store ptr %t169, ptr %s1
   br label %jsu5
 jsu5:
@@ -51065,6 +51123,7 @@ jsu5:
 jse6:
   %t172 = load ptr, ptr %s1
   %t173 = call ptr @js_str_concat(ptr %t172, ptr @.str.30)
+  call void @nt_str_release(ptr %t172)
   call void @js_print_str(ptr %t173)
   call void @js_print_newline()
   %t174 = load ptr, ptr %idx.addr
@@ -51074,28 +51133,43 @@ jse6:
   %t178 = bitcast i64 %t177 to double
   %t179 = call ptr @nt_json_num(double %t178)
   %t180 = call ptr @js_str_concat(ptr %t175, ptr %t179)
+  call void @nt_str_release(ptr %t175)
+  call void @nt_str_release(ptr %t179)
   %t181 = call ptr @js_str_concat(ptr %t180, ptr @.str.5)
+  call void @nt_str_release(ptr %t180)
   %t182 = call ptr @js_str_concat(ptr %t181, ptr @.str.32)
+  call void @nt_str_release(ptr %t181)
   %t183 = getelementptr i64, ptr %t174, i64 1
   %t184 = load i64, ptr %t183
   %t185 = bitcast i64 %t184 to double
   %t186 = call ptr @nt_json_num(double %t185)
   %t187 = call ptr @js_str_concat(ptr %t182, ptr %t186)
+  call void @nt_str_release(ptr %t182)
+  call void @nt_str_release(ptr %t186)
   %t188 = call ptr @js_str_concat(ptr %t187, ptr @.str.5)
+  call void @nt_str_release(ptr %t187)
   %t189 = call ptr @js_str_concat(ptr %t188, ptr @.str.33)
+  call void @nt_str_release(ptr %t188)
   %t190 = getelementptr i64, ptr %t174, i64 2
   %t191 = load i64, ptr %t190
   %t192 = bitcast i64 %t191 to double
   %t193 = call ptr @nt_json_num(double %t192)
   %t194 = call ptr @js_str_concat(ptr %t189, ptr %t193)
+  call void @nt_str_release(ptr %t189)
+  call void @nt_str_release(ptr %t193)
   %t195 = call ptr @js_str_concat(ptr %t194, ptr @.str.5)
+  call void @nt_str_release(ptr %t194)
   %t196 = call ptr @js_str_concat(ptr %t195, ptr @.str.34)
+  call void @nt_str_release(ptr %t195)
   %t197 = getelementptr i64, ptr %t174, i64 3
   %t198 = load i64, ptr %t197
   %t199 = bitcast i64 %t198 to double
   %t200 = call ptr @nt_json_num(double %t199)
   %t201 = call ptr @js_str_concat(ptr %t196, ptr %t200)
+  call void @nt_str_release(ptr %t196)
+  call void @nt_str_release(ptr %t200)
   %t202 = call ptr @js_str_concat(ptr %t201, ptr @.str.8)
+  call void @nt_str_release(ptr %t201)
   call void @js_print_str(ptr %t202)
   call void @js_print_newline()
   %t203 = call ptr @nt_obj_new(double 0x4010000000000000)
@@ -51141,6 +51215,7 @@ jsf17:
 jsc16:
   %t226 = load ptr, ptr %s10
   %t227 = call ptr @js_str_concat(ptr %t226, ptr @.str.5)
+  call void @nt_str_release(ptr %t226)
   store ptr %t227, ptr %s10
   br label %jsa18
 jsa18:
@@ -51150,6 +51225,8 @@ jsa18:
   %t231 = call ptr @js_json_quote(ptr %t230)
   %t232 = load ptr, ptr %s10
   %t233 = call ptr @js_str_concat(ptr %t232, ptr %t231)
+  call void @nt_str_release(ptr %t232)
+  call void @nt_str_release(ptr %t231)
   store ptr %t233, ptr %s10
   br label %jsu14
 jsu14:
@@ -51160,6 +51237,7 @@ jsu14:
 jse15:
   %t236 = load ptr, ptr %s10
   %t237 = call ptr @js_str_concat(ptr %t236, ptr @.str.30)
+  call void @nt_str_release(ptr %t236)
   call void @js_print_str(ptr %t237)
   call void @js_print_newline()
   %t238 = call ptr @nt_obj_new(double 0x3FF0000000000000)
@@ -51177,7 +51255,10 @@ jse15:
   %t248 = inttoptr i64 %t247 to ptr
   %t249 = call ptr @js_json_quote(ptr %t248)
   %t250 = call ptr @js_str_concat(ptr %t245, ptr %t249)
+  call void @nt_str_release(ptr %t245)
+  call void @nt_str_release(ptr %t249)
   %t251 = call ptr @js_str_concat(ptr %t250, ptr @.str.8)
+  call void @nt_str_release(ptr %t250)
   call void @js_print_str(ptr %t251)
   call void @js_print_newline()
   %t252 = call ptr @nt_obj_new(double 0x3FF0000000000000)
@@ -51199,7 +51280,10 @@ jse15:
   %t265 = inttoptr i64 %t264 to ptr
   %t266 = call ptr @js_json_quote(ptr %t265)
   %t267 = call ptr @js_str_concat(ptr %t262, ptr %t266)
+  call void @nt_str_release(ptr %t262)
+  call void @nt_str_release(ptr %t266)
   %t268 = call ptr @js_str_concat(ptr %t267, ptr @.str.8)
+  call void @nt_str_release(ptr %t267)
   call void @js_print_str(ptr %t268)
   call void @js_print_newline()
   %t269 = call ptr @nt_obj_new(double 0x4010000000000000)
@@ -51327,6 +51411,7 @@ jsf31:
 jsc30:
   %t348 = load ptr, ptr %s24
   %t349 = call ptr @js_str_concat(ptr %t348, ptr @.str.5)
+  call void @nt_str_release(ptr %t348)
   store ptr %t349, ptr %s24
   br label %jsa32
 jsa32:
@@ -51336,6 +51421,8 @@ jsa32:
   %t353 = call ptr @nt_json_num(double %t352)
   %t354 = load ptr, ptr %s24
   %t355 = call ptr @js_str_concat(ptr %t354, ptr %t353)
+  call void @nt_str_release(ptr %t354)
+  call void @nt_str_release(ptr %t353)
   store ptr %t355, ptr %s24
   br label %jsu28
 jsu28:
@@ -51346,6 +51433,7 @@ jsu28:
 jse29:
   %t358 = load ptr, ptr %s24
   %t359 = call ptr @js_str_concat(ptr %t358, ptr @.str.30)
+  call void @nt_str_release(ptr %t358)
   call void @js_print_str(ptr %t359)
   call void @js_print_newline()
   %t360 = call ptr @nt_obj_new(double 0x4000000000000000)
@@ -51371,14 +51459,124 @@ jse29:
   call void @js_print_sep()
   call void @js_print_str(ptr %t374)
   call void @js_print_newline()
-  %t375 = load ptr, ptr %idx.addr
-  call void @nt_obj_free(ptr %t375)
-  %t376 = load ptr, ptr %f.addr
-  call void @nt_obj_free(ptr %t376)
-  %t377 = load ptr, ptr %r.addr
-  call void @nt_obj_free(ptr %t377)
-  %t378 = load ptr, ptr %acc.addr
-  call void @nt_str_release(ptr %t378)
+  %t375 = call ptr @nt_obj_new(double 0x4008000000000000)
+  %rc376 = call ptr @nt_str_retain(ptr @.str.46)
+  %t377 = ptrtoint ptr @.str.46 to i64
+  %t378 = getelementptr i64, ptr %t375, i64 1
+  store i64 %t377, ptr %t378
+  %rc379 = call ptr @nt_str_retain(ptr @.str.47)
+  %t380 = ptrtoint ptr @.str.47 to i64
+  %t381 = getelementptr i64, ptr %t375, i64 0
+  store i64 %t380, ptr %t381
+  %t382 = bitcast double 0x3FF0000000000000 to i64
+  %t383 = getelementptr i64, ptr %t375, i64 2
+  store i64 %t382, ptr %t383
+  %t384 = call ptr @js_str_concat(ptr @.str.3, ptr @.str.48)
+  %t385 = getelementptr i64, ptr %t375, i64 0
+  %t386 = load i64, ptr %t385
+  %t387 = inttoptr i64 %t386 to ptr
+  %t388 = call ptr @js_json_quote(ptr %t387)
+  %t389 = call ptr @js_str_concat(ptr %t384, ptr %t388)
+  call void @nt_str_release(ptr %t384)
+  call void @nt_str_release(ptr %t388)
+  %t390 = call ptr @js_str_concat(ptr %t389, ptr @.str.5)
+  call void @nt_str_release(ptr %t389)
+  %t391 = call ptr @js_str_concat(ptr %t390, ptr @.str.49)
+  call void @nt_str_release(ptr %t390)
+  %t392 = getelementptr i64, ptr %t375, i64 1
+  %t393 = load i64, ptr %t392
+  %t394 = inttoptr i64 %t393 to ptr
+  %t395 = call ptr @js_json_quote(ptr %t394)
+  %t396 = call ptr @js_str_concat(ptr %t391, ptr %t395)
+  call void @nt_str_release(ptr %t391)
+  call void @nt_str_release(ptr %t395)
+  %t397 = call ptr @js_str_concat(ptr %t396, ptr @.str.5)
+  call void @nt_str_release(ptr %t396)
+  %t398 = call ptr @js_str_concat(ptr %t397, ptr @.str.33)
+  call void @nt_str_release(ptr %t397)
+  %t399 = getelementptr i64, ptr %t375, i64 2
+  %t400 = load i64, ptr %t399
+  %t401 = bitcast i64 %t400 to double
+  %t402 = call ptr @nt_json_num(double %t401)
+  %t403 = call ptr @js_str_concat(ptr %t398, ptr %t402)
+  call void @nt_str_release(ptr %t398)
+  call void @nt_str_release(ptr %t402)
+  %t404 = call ptr @js_str_concat(ptr %t403, ptr @.str.8)
+  call void @nt_str_release(ptr %t403)
+  call void @js_print_str(ptr %t404)
+  call void @js_print_newline()
+  %t405 = call ptr @nt_obj_new(double 0x4008000000000000)
+  %rc406 = call ptr @nt_str_retain(ptr @.str.46)
+  %t407 = ptrtoint ptr @.str.46 to i64
+  %t408 = getelementptr i64, ptr %t405, i64 1
+  store i64 %t407, ptr %t408
+  %rc409 = call ptr @nt_str_retain(ptr @.str.47)
+  %t410 = ptrtoint ptr @.str.47 to i64
+  %t411 = getelementptr i64, ptr %t405, i64 0
+  store i64 %t410, ptr %t411
+  %t412 = bitcast double 0x3FF0000000000000 to i64
+  %t413 = getelementptr i64, ptr %t405, i64 2
+  store i64 %t412, ptr %t413
+  %t414 = call ptr @nt_arr_new(double 0x4008000000000000)
+  %rc415 = call ptr @nt_str_retain(ptr @.str.50)
+  %t416 = ptrtoint ptr @.str.50 to i64
+  call double @nt_arr_push(ptr %t414, i64 %t416)
+  %rc417 = call ptr @nt_str_retain(ptr @.str.51)
+  %t418 = ptrtoint ptr @.str.51 to i64
+  call double @nt_arr_push(ptr %t414, i64 %t418)
+  %rc419 = call ptr @nt_str_retain(ptr @.str.2)
+  %t420 = ptrtoint ptr @.str.2 to i64
+  call double @nt_arr_push(ptr %t414, i64 %t420)
+  store ptr @.str.29, ptr %s33
+  store double 0x0000000000000000, ptr %s34
+  %t421 = call double @nt_arr_len(ptr %t414)
+  br label %js35
+js35:
+  %t422 = load double, ptr %s34
+  %t423 = fcmp olt double %t422, %t421
+  br i1 %t423, label %jsb36, label %jse38
+jsb36:
+  %t424 = load double, ptr %s34
+  %t425 = fcmp oeq double %t424, 0.0
+  br i1 %t425, label %jsf40, label %jsc39
+jsf40:
+  br label %jsa41
+jsc39:
+  %t426 = load ptr, ptr %s33
+  %t427 = call ptr @js_str_concat(ptr %t426, ptr @.str.5)
+  call void @nt_str_release(ptr %t426)
+  store ptr %t427, ptr %s33
+  br label %jsa41
+jsa41:
+  %t428 = load double, ptr %s34
+  %t429 = call i64 @nt_arr_get(ptr %t414, double %t428)
+  %t430 = inttoptr i64 %t429 to ptr
+  %t431 = call ptr @js_json_quote(ptr %t430)
+  %t432 = load ptr, ptr %s33
+  %t433 = call ptr @js_str_concat(ptr %t432, ptr %t431)
+  call void @nt_str_release(ptr %t432)
+  call void @nt_str_release(ptr %t431)
+  store ptr %t433, ptr %s33
+  br label %jsu37
+jsu37:
+  %t434 = load double, ptr %s34
+  %t435 = fadd double %t434, 1.0
+  store double %t435, ptr %s34
+  br label %js35
+jse38:
+  %t436 = load ptr, ptr %s33
+  %t437 = call ptr @js_str_concat(ptr %t436, ptr @.str.30)
+  call void @nt_str_release(ptr %t436)
+  call void @js_print_str(ptr %t437)
+  call void @js_print_newline()
+  %t438 = load ptr, ptr %idx.addr
+  call void @nt_obj_free(ptr %t438)
+  %t439 = load ptr, ptr %f.addr
+  call void @nt_obj_free(ptr %t439)
+  %t440 = load ptr, ptr %r.addr
+  call void @nt_obj_free(ptr %t440)
+  %t441 = load ptr, ptr %acc.addr
+  call void @nt_str_release(ptr %t441)
   ret i32 0
 }
 "
