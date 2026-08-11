@@ -793,6 +793,48 @@ interface Val { v: string; ty: Ty; }
 interface StrTemp { v: string; fresh: boolean; }
 
 /**
+ * One live `try`'s finalizer, and the abrupt exits parked on it.
+ *
+ * A finalizer is entered by BRANCH from every path that leaves the `try`, and a slot
+ * says which path that was: 0 = fell out the bottom, 1 = a `return` is pending, and one
+ * fresh id per `break`/`continue` that crosses this finalizer on its way somewhere else.
+ * The dispatch at the end of the finalizer reads the slot back and resumes the pending
+ * completion — that is the whole mechanism, and `break`/`continue` simply had no ids in
+ * it, so they branched around the finalizer instead of through it.
+ *
+ * `scopeDepth` is `blockScopes.length` at the `try` itself, i.e. NOT counting the try
+ * block's own scope. Everything at or above it is inside the `try` and is dropped BEFORE
+ * the finalizer runs; everything below is outside and is dropped after, on the way to
+ * the next finalizer out or to the jump's real target.
+ */
+interface FinallyFrame {
+  finallyLbl: string;
+  modeSlot: string;
+  retSlot: string | null;
+  scopeDepth: number;
+  exits: PendingExit[];
+}
+
+/**
+ * A `break`/`continue` that is mid-flight through `chain[idx]`'s finalizer.
+ *
+ * It has to be a RECORD rather than a callback because the resume code is emitted long
+ * after the jump: the finalizer's dispatch is written when the `TryStmt` finishes, by
+ * which time `blockScopes` has popped every scope the jump still owes drops for. So the
+ * scope drop sets are SNAPSHOT at the jump (`scopes`, absolute indices), and the chain of
+ * finalizers still to run is captured with it.
+ */
+interface PendingExit {
+  mode: number;
+  scopes: string[][];
+  chain: FinallyFrame[];
+  /** Index into `chain` of the finalizer this exit is currently parked on. */
+  idx: number;
+  targetLbl: string;
+  targetDepth: number;
+}
+
+/**
  * Does lowering THIS expression to a `string` allocate a fresh heap string that nothing
  * else can already own?
  *
@@ -1148,8 +1190,13 @@ class FnGen {
    * from the enclosing loop — so a `continue` inside a switch inside a loop leaves the
    * case's scope AND the loop body's, while a `break` at the same spot leaves only the
    * case's. One depth would fix one of them and leave the other leaking.
+   *
+   * `brkFin`/`contFin` are the same idea one stack over: the `finallyStack` DEPTH the
+   * target sits at. A jump crosses every finalizer above that mark and has to RUN each
+   * one on the way out (node does), and it inherits the switch's split for exactly the
+   * reason the scope depths do — `break` stops at the switch, `continue` does not.
    */
-  private loops: { brk: string; cont: string; brkDepth: number; contDepth: number }[] = [];
+  private loops: { brk: string; cont: string; brkDepth: number; contDepth: number; brkFin: number; contFin: number }[] = [];
   /**
    * The stack of live block scopes' drop sets — `blockScopes[i]` is the `BlockDrops`
    * names of the i-th enclosing statement list (empty when that list has no marker).
@@ -1195,7 +1242,14 @@ class FnGen {
     return n > 0 ? this.tryHandlers[n - 1]! : null;
   }
   /** Active finally blocks (a `return` inside runs finally first, mode=1). */
-  private finallyStack: { finallyLbl: string; modeSlot: string; retSlot: string | null }[] = [];
+  private finallyStack: FinallyFrame[] = [];
+  /**
+   * Next free finalizer dispatch mode. 0 and 1 are reserved (fall-through, `return`), so
+   * jump ids start at 2 and one jump burns one id PER finalizer it crosses — the resume
+   * block after finalizer N stores a fresh id into finalizer N-1's slot before branching
+   * on. Per function: `reset` puts it back, and the slots are per-`try` allocas anyway.
+   */
+  private jumpMode = 2;
   /**
    * True while emitting `main`. `retTy` is "number" there (top-level expressions are typed
    * like any others), but the FUNCTION returns `i32` — so any `ret` emitted from a generic
@@ -1320,6 +1374,7 @@ class FnGen {
     this.captures = new Map();
     this.tryHandlers = [];
     this.finallyStack = [];
+    this.jumpMode = 2;
     this.hofReturnStack = [];
     this.strLocals = new Set();
     this.globalVars = new Set();
@@ -1392,6 +1447,69 @@ class FnGen {
    */
   private emitJumpDrops(depth: number): void {
     for (let i = this.blockScopes.length - 1; i >= depth; i--) this.emitDrops(this.blockScopes[i] ?? []);
+  }
+
+  /** Drops for the snapshot scopes `[low, high)`, innermost first — the segment of a
+   *  jump's unwind that lies between two finalizers, replayed from the snapshot because
+   *  `blockScopes` has long since popped it by the time the resume block is emitted. */
+  private emitSnapshotDrops(scopes: string[][], high: number, low: number): void {
+    for (let i = high - 1; i >= low; i--) this.emitDrops(scopes[i] ?? []);
+  }
+
+  /**
+   * Lower a `break`/`continue`: unwind to `targetDepth` and branch to `targetLbl`, RUNNING
+   * every finalizer between here and `targetFin` on the way, innermost first.
+   *
+   * With nothing crossed this is the plain branch it always was. With one or more `try`s
+   * crossed the jump cannot branch to its target at all — it has to reach the innermost
+   * finalizer, let it run, and be resumed by its dispatch, which may in turn hand it to
+   * the next finalizer out. So the jump stores an id and parks a `PendingExit`; the
+   * `TryStmt` case pays it off when it writes the dispatch.
+   *
+   * The drops INTERLEAVE with the finalizers rather than all happening first, which is
+   * the property that makes this compose with the block-scope unwinding beside it: a
+   * local declared inside the `try` is still live while that `try`'s finalizer runs, and
+   * a local declared outside it is not freed until the finalizer is done.
+   */
+  private emitJump(targetDepth: number, targetFin: number, targetLbl: string): void {
+    const nCross = this.finallyStack.length - targetFin;
+    if (nCross <= 0) {
+      this.emitJumpDrops(targetDepth);
+      this.terminate(`br label %${targetLbl}`);
+      return;
+    }
+    // Snapshot, because the resume blocks are emitted after these scopes have popped.
+    const scopes = this.blockScopes.map((names) => names);
+    const chain = this.finallyStack.slice(targetFin); // outermost .. innermost
+    const inner = chain[nCross - 1]!;
+    this.emitSnapshotDrops(scopes, scopes.length, inner.scopeDepth);
+    this.enterFinally(inner, { mode: 0, scopes, chain, idx: nCross - 1, targetLbl, targetDepth });
+  }
+
+  /** Store a fresh dispatch id into `f`'s mode slot, park `ex` on it under that id, and
+   *  branch into the finalizer. The id is minted here so the jump site and every resume
+   *  block after it share one spelling of "hand this exit to that finalizer". */
+  private enterFinally(f: FinallyFrame, ex: PendingExit): void {
+    const mode = this.jumpMode++;
+    this.emit(`store double ${llvmDouble(mode)}, ptr ${f.modeSlot}`);
+    f.exits.push({ mode, scopes: ex.scopes, chain: ex.chain, idx: ex.idx, targetLbl: ex.targetLbl, targetDepth: ex.targetDepth });
+    this.terminate(`br label %${f.finallyLbl}`);
+  }
+
+  /** The resume block for one pending exit, emitted after its finalizer's body: finish
+   *  the segment of unwinding this finalizer was blocking, then either hand the exit to
+   *  the next finalizer out or land on the jump's real target. */
+  private emitResume(ex: PendingExit): void {
+    const here = ex.chain[ex.idx]!.scopeDepth;
+    const next = ex.idx - 1;
+    if (next >= 0) {
+      const outer = ex.chain[next]!;
+      this.emitSnapshotDrops(ex.scopes, here, outer.scopeDepth);
+      this.enterFinally(outer, { mode: 0, scopes: ex.scopes, chain: ex.chain, idx: next, targetLbl: ex.targetLbl, targetDepth: ex.targetDepth });
+      return;
+    }
+    this.emitSnapshotDrops(ex.scopes, here, ex.targetDepth);
+    this.terminate(`br label %${ex.targetLbl}`);
   }
 
   /** Emit deterministic drops (RAII frees) for owned linear locals. */
@@ -1896,7 +2014,7 @@ class FnGen {
         // Both depths are the CURRENT one: the body's own scope is pushed by the
         // `genStmts` below, so a jump inside the body unwinds it and every block nested
         // in it. A real loop is the one place `break` and `continue` agree (see `loops`).
-        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
@@ -1922,7 +2040,7 @@ class FnGen {
           this.terminate(`br label %${bodyLbl}`);
         }
         this.to(this.block(bodyLbl));
-        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -1941,7 +2059,7 @@ class FnGen {
         // Both depths are the CURRENT one: the body's own scope is pushed by the
         // `genStmts` below, so a jump inside the body unwinds it and every block nested
         // in it. A real loop is the one place `break` and `continue` agree (see `loops`).
-        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: condLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${condLbl}`);
@@ -2000,7 +2118,7 @@ class FnGen {
             this.emit(`store ${llvmTy(vt)} ${this.fromSlot(vs, vt)}, ptr ${this.addr(s.name2!)}`);
           }
         }
-        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -2041,7 +2159,8 @@ class FnGen {
         const outer = this.loops.length ? this.loops[this.loops.length - 1]! : null;
         const outerCont = outer ? outer.cont : endLbl;
         const brkDepth = this.blockScopes.length;
-        this.loops.push({ brk: endLbl, cont: outerCont, brkDepth, contDepth: outer ? outer.contDepth : brkDepth });
+        const brkFin = this.finallyStack.length;
+        this.loops.push({ brk: endLbl, cont: outerCont, brkDepth, contDepth: outer ? outer.contDepth : brkDepth, brkFin, contFin: outer ? outer.contFin : brkFin });
         // dispatch chain
         for (let i = 0; i < s.cases.length; i++) {
           const c = s.cases[i]!;
@@ -2088,7 +2207,7 @@ class FnGen {
         const slot = this.fresh();
         this.emit(`${slot} = call i64 @nt_arr_get(ptr ${arr}, double ${iB})`);
         this.emit(`store ptr ${this.fromSlot(slot, "string")}, ptr ${this.addr(s.name)}`);
-        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length });
+        this.loops.push({ brk: endLbl, cont: updLbl, brkDepth: this.blockScopes.length, contDepth: this.blockScopes.length, brkFin: this.finallyStack.length, contFin: this.finallyStack.length });
         this.genStmts(s.body);
         this.loops.pop();
         if (!this.isTerminated()) this.terminate(`br label %${updLbl}`);
@@ -2186,7 +2305,8 @@ class FnGen {
           this.emit(`store ptr null, ptr ${this.addr(s.param)}`);
         }
         this.tryHandlers.push({ catchLbl, excVar: s.param, eType, catchless: !s.handler });
-        if (hasFinally) this.finallyStack.push({ finallyLbl, modeSlot, retSlot: retSlot || null });
+        const frame: FinallyFrame = { finallyLbl, modeSlot, retSlot: retSlot || null, scopeDepth: this.blockScopes.length, exits: [] };
+        if (hasFinally) this.finallyStack.push(frame);
         this.genStmts(s.block);
         this.tryHandlers.pop();
         if (!this.isTerminated()) gotoFinally();
@@ -2199,8 +2319,27 @@ class FnGen {
           this.finallyStack.pop();
           this.to(this.block(finallyLbl));
           this.genStmts(s.finalizer!);
+          // A finalizer that ends TERMINATED — one that itself does a `return`, `break` or
+          // `continue` on every path — has no dispatch at all, and that is exactly right:
+          // ECMAScript's `UpdateEmpty` says the finalizer's own abrupt completion REPLACES
+          // the pending one. Verified against node, not assumed:
+          //   for (…) { try { return 7; } finally { break; } } return 9;   -> node prints 9.
+          // The pending exits parked on this frame are then simply never resumed, and the
+          // stores that named them are dead. A finalizer that jumps only on SOME path still
+          // reaches the dispatch on the others, which is the same rule falling out for free.
           if (!this.isTerminated()) {
             const m = this.fresh(); this.emit(`${m} = load double, ptr ${modeSlot}`);
+            // Jump modes first: each is one id, and a miss falls through to the next test.
+            // The load dominates every block in this chain, so the `%m` uses are legal.
+            for (const ex of frame.exits) {
+              const hit = this.fresh(); this.emit(`${hit} = fcmp oeq double ${m}, ${llvmDouble(ex.mode)}`);
+              const jumpLbl = this.label("finjump");
+              const nextLbl = this.label("findisp");
+              this.terminate(`br i1 ${hit}, label %${jumpLbl}, label %${nextLbl}`);
+              this.to(this.block(jumpLbl));
+              this.emitResume(ex);
+              this.to(this.block(nextLbl));
+            }
             const isRet = this.fresh(); this.emit(`${isRet} = fcmp oeq double ${m}, ${llvmDouble(1)}`);
             const retLbl = this.label("finret");
             this.terminate(`br i1 ${isRet}, label %${retLbl}, label %${endLbl}`);
@@ -2235,14 +2374,12 @@ class FnGen {
         return;
       case "BreakStmt": {
         const t = this.loops[this.loops.length - 1]!;
-        this.emitJumpDrops(t.brkDepth);
-        this.terminate(`br label %${t.brk}`);
+        this.emitJump(t.brkDepth, t.brkFin, t.brk);
         return;
       }
       case "ContinueStmt": {
         const t = this.loops[this.loops.length - 1]!;
-        this.emitJumpDrops(t.contDepth);
-        this.terminate(`br label %${t.cont}`);
+        this.emitJump(t.contDepth, t.contFin, t.cont);
         return;
       }
       case "FuncDecl":
