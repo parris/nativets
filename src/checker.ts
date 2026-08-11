@@ -3760,7 +3760,11 @@ class Checker {
         if (e.op === "!") { this.rejectVacuousCollectionTest(e.operand, "this `!` operand", "the `!` is always `false`"); return "boolean"; }
         if (e.op === "void") return "undefined";
         if (e.op === "~") { if (t !== "number") throw typeError(`'~' needs number`); return "number"; }
-        if (e.op === "+") return "number"; // numeric coercion of number/string/boolean/null/undefined
+        // `+` is ToNumber, and it used to return `number` for EVERY operand without
+        // looking at one — so `coerceToNumber`'s fall-through answered a constant NaN for
+        // a Date, an array and a nullable box alike, at exit 0. Default-deny here, exactly
+        // as `checkStringCoercion` does one operator along.
+        if (e.op === "+") { this.checkNumberCoercion(t, "unary `+`", exprLoc(e.operand) ?? exprLoc(e)); return "number"; }
         if (t !== "number") throw typeError(`Unary '-' needs number, got ${t}`);
         return "number";
       }
@@ -3839,6 +3843,20 @@ class Checker {
           // A general union is a BOX: `===` on it compared the two boxes' TAGS, so
           // `1 === 2` came out true. Refuse until the arms are compared themselves.
           for (const t of [l, r]) refuseUnboxedUnion(t, "`===`");
+          // TWO DATES. node compares Date IDENTITY, not the time value: two distinct Dates
+          // are `false` however equal their instants, and an Invalid Date IS `===` itself
+          // even though `NaN !== NaN`. nativets represents a Date AS its time value, so
+          // there is no identity left to compare and BOTH plausible codegens are wrong for
+          // a program somebody writes. It used to reach codegen's `js_str_eq` fall-through
+          // and emit invalid IR — a build error with no code and no hint, which is worse
+          // than either wrong answer. The hint's `.getTime()` spelling is compiled against
+          // node in test/narrowing.test.ts, including the caveat, because a hint that hands
+          // back a DIFFERENT answer is worse than no hint at all.
+          if (isDateTy(l) && isDateTy(r))
+            throw nyi(NYI.WEBAPI,
+              `\`${e.op}\` between two Dates — node compares object IDENTITY here, and a Date is represented as its time value (a number), so there is no identity to compare`,
+              "compare the TIME VALUES instead: `a.getTime() === b.getTime()` (or `+a === +b`). Note that is a VALUE comparison and node's `===` is not: two distinct Dates at the same instant are `true` by time value and `false` by `===`, and an Invalid Date is `false` against itself by time value (`NaN !== NaN`) and `true` by `===`",
+              exprLoc(e));
           if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`, exprLoc(e));
           return "boolean";
         }
@@ -5363,6 +5381,9 @@ class Checker {
         // rather than supposed — 14 files of the fixture corpus reach it.
         const arg = e.args.length > 0 ? e.args[0] : undefined;
         if (e.callee.name === "String" && arg?.ty) this.checkStringCoercion(arg.ty, "`String(…)`", exprLoc(arg));
+        // `Number(x)` is `+x` by another name — same `coerceToNumber`, same default-deny.
+        // Both spellings shared the NaN fall-through, so both share the guard.
+        if (e.callee.name === "Number" && arg?.ty) this.checkNumberCoercion(arg.ty, "`Number(…)`", exprLoc(arg));
         return g.ret;
       }
 
@@ -6963,6 +6984,46 @@ class Checker {
       ? "a `JSON.parse` result carries its type at RUNTIME, so `${d.f}` has no static string form. Narrow it first — `d.f as string` / `d.f as number`, or type the whole parse (`JSON.parse(s) as { f: string }`) — and the interpolation is ordinary"
       : undefined;
     throw nyi(NYI.STRINGIFY, `${what} with a ${t}`, hint, at);
+  }
+
+  /**
+   * The NUMERIC half of the same contract: what `+x` / `Number(x)` may coerce.
+   *
+   * DEFAULT-DENY, for the reason its string sibling above is: `coerceToNumber`
+   * (src/codegen.ts) used to end in a bare `return llvmDouble(NaN)`, and the checker
+   * returned `number` for every operand without looking at one — so `+new Date(1000)`
+   * printed `NaN` at exit 0 where node prints `1000`, and so did `+[]` (node 0), `+[1]`
+   * (node 1) and a `number | null` holding null (node 0). That is a silent wrong ANSWER,
+   * the worst outcome available; NT1032's fall-through only ever reached clang.
+   *
+   * The allow-list is `checkStringCoercion`'s, and it is the same list on purpose rather
+   * than by copy: ToNumber of a non-primitive is `ToPrimitive(x, number)` = `valueOf` then
+   * `toString`, and an ordinary object's `valueOf` returns the object — so ToNumber IS
+   * StringToNumber of the value's string form, and a value coerces to a number exactly
+   * when it coerces to a string. Delegating keeps the two lists from drifting apart, which
+   * they would if they were spelled twice.
+   *
+   * Date is the one type where the two hints DIVERGE, and so the one addition. The number
+   * hint runs `valueOf` first and yields the time value; the string hint runs `toString`
+   * and yields `"Thu Jan 01 1970 …"`, which is why `"" + date` stays refused (NT1024) while
+   * `+date` is now ordinary. A Date IS its time value here, so codegen's rule is the
+   * identity — the same rule `%d` already applied in `genFormatNumber`.
+   */
+  /* `at` is spelled structurally, for the reason `checkStringCoercion` records above. */
+  private checkNumberCoercion(t: Ty, what: string, at?: { line: number; col: number; file?: string }): void {
+    if (isDateTy(t)) return;
+    try {
+      this.checkStringCoercion(t, what, at);
+    } catch (e) {
+      // Re-file under the NUMERIC code so the hint talks about numbers. A refusal that
+      // advised `JSON.stringify(x)` for a `+x` would be a lying diagnostic — the one
+      // failure mode a shared code makes easy.
+      if (!(e instanceof NTError) || e.diag.code !== NYI.STRINGIFY.code) throw e;
+      const hint = t === "Dyn"
+        ? "a `JSON.parse` result carries its type at RUNTIME, so `+d.f` has no static numeric form. Narrow it first — `d.f as number`, or `d.f as string` if the JSON really holds a numeric string — or type the whole parse (`JSON.parse(s) as { f: number }`), and the coercion becomes ordinary"
+        : undefined;
+      throw nyi(NYI.TONUMBER, `${what} on a ${t}`, hint, at);
+    }
   }
 
   /**

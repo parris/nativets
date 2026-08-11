@@ -582,6 +582,39 @@ export const NYI = {
   // `JSON.parse('{"__proto__":1}')`, which is `CreateDataProperty` and never the setter.
   // `o.__proto__` is untouched by this code — it is the `Object.prototype` accessor, a
   // separate gap noted in docs/divergences.md.
+  // NUMERIC COERCION — `+x`, `Number(x)`. The numeric sibling of NT1032, and it exists for
+  // the identical reason: `coerceToNumber` (src/codegen.ts) handled `number`, `string`,
+  // `boolean` and the `null` LITERAL and then fell through to a constant `NaN`, while the
+  // checker let every type through (`if (e.op === "+") return "number"`). So `+new Date()`
+  // — the everyday "now, as a number" idiom — printed `NaN` at exit 0, and so did `+[]`
+  // (node 0), `+[1]` (node 1) and a `number | null` holding null (node 0). A silent wrong
+  // ANSWER, which is worse than NT1032's clang error ever was.
+  //
+  // WHAT COERCES, and why that is the boundary. ToNumber of a non-primitive is
+  // `ToPrimitive(x, number)` — `valueOf` then `toString` — and for an ordinary object
+  // `valueOf` returns the object itself, so ToNumber IS StringToNumber of the value's
+  // STRING form. A value therefore coerces to a number exactly when it coerces to a
+  // string, and this code's allow-list is `checkStringCoercion`'s, unchanged: the
+  // primitives, a nullable box (by its TAG — `null` is 0 and `undefined` is NaN, which are
+  // different answers), and a `number[]`/`string[]`/`boolean[]` through the join the
+  // runtime already has.
+  //
+  // Date is the ONE addition, and it is a SPECIFIC rule rather than a general one: the
+  // number hint runs `valueOf` FIRST and gets the time value, where the string hint runs
+  // `toString` and gets `"Thu Jan 01 1970 …"` (which is why NT1024 still refuses
+  // `"" + date`). nativets represents a Date AS its time value, so the coercion is the
+  // identity — and `%d` in console.log already had exactly that rule.
+  //
+  // WHY an object/Map/Set/class is refused even though node's answer is a constant `NaN`:
+  // the same reason NT1032 refuses them even though node's answer is a constant
+  // `[object Object]`. The constant holds only for a value with no own `valueOf`/`toString`
+  // — node CALLS the method when a class defines one — and this compiler has no prototype
+  // chain to consult at the coercion site, so answering NaN unconditionally would trade a
+  // loud build error for a silent wrong answer in exactly the programs that defined it.
+  // A Uint8Array is refused because node JOINS it (`+new Uint8Array([5])` is 5, not NaN),
+  // which is the opposite of the fall-through's answer, and a nested/object array for the
+  // same reason its string form is refused.
+  TONUMBER: { code: "NT1039", milestone: "later", hint: "`+x` / `Number(x)` coerce the primitives, a nullable box (`null` is 0, `undefined` is NaN), a `number[]`/`string[]`/`boolean[]` (node joins those with `,` and then parses) and a `Date` (its time value). For an object or class instance node's answer is `NaN` via `[object Object]` — if that is really what the line means, write `NaN`; otherwise read the field you meant (`+o.count`). For a Map/Set use `m.size`, and for a Uint8Array index it (`u[0]`) — node joins it like an array, so `+u` is only a number at all when it has exactly one element" },
   PROTO_KEY: { code: "NT1038", milestone: "later", hint: "`{ __proto__: v }` is not a property in JavaScript — ECMAScript B.3.1 makes it the PROTOTYPE SETTER, so node prints `{}` for `{ __proto__: 1 }` and the key is absent from `Object.keys`, `for-in` and `JSON.stringify`. nativets objects are flat records with no prototype chain, so the setter cannot be honoured and building the field instead would be a silent wrong answer. If you wanted a PROPERTY named `__proto__`, the SHORTHAND is one in node and compiles here: `const __proto__ = v;` then `{ __proto__ }`. If you wanted to set a prototype (`{ __proto__: null }`, `{ __proto__: base }`), nativets has no prototypes — use a plain field, or spread the base in (`{ ...base, … }`)" },
 } as const;
 

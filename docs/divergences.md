@@ -532,6 +532,77 @@ because the failure being closed is precisely "a type nobody added a case for re
 `coerceToString` now raises an internal error rather than falling through, so the two lists
 cannot drift apart silently. Pinned in `test/string-coercion.test.ts`.
 
+### NUMERIC coercion of a non-primitive (`NT1039`) — the same hole, one operator along, and it was a SILENT WRONG ANSWER
+
+`+x` and `Number(x)` share one codegen helper (`coerceToNumber`) exactly as `+`/`${…}`/`String`
+share `coerceToString`. It handled `number`, `string`, `boolean` and the `null` **literal**, and
+then ended in a bare `return llvmDouble(NaN)` — while the checker returned `number` for every
+`+` operand **without looking at one** (`if (e.op === "+") return "number"`). So unlike NT1032,
+whose fall-through emitted invalid IR and at least stopped the build, this one **compiled, ran
+and printed a number node does not print, at exit 0**:
+
+```
+console.log(+new Date(1000));   // node 1000,  we printed NaN
+console.log(+[]);               // node 0,     we printed NaN
+console.log(+[1]);              // node 1,     we printed NaN
+const n: number | null = null;
+console.log(+n);                // node 0,     we printed NaN
+```
+
+`+new Date()` is the everyday *"now, as a number"* idiom, so this was not an exotic corner. The
+asymmetry that hid it: unary **`-`** on a Date is refused (`NT2001` "Unary '-' needs number, got
+Date") while its sibling **`+`** silently answered NaN — one door guarded, the other open. And
+`d.valueOf()` / `d.getTime()` spelled out were both already correct, which pins it on the
+coercion rather than on `Date`.
+
+**The allow-list is `checkStringCoercion`'s, by delegation rather than by copy.** ToNumber of a
+non-primitive is `ToPrimitive(x, number)` = `valueOf` then `toString`, and an ordinary object's
+`valueOf` returns the object itself — so ToNumber **is** StringToNumber of the value's string
+form, and a value coerces to a number exactly when it coerces to a string. `checkNumberCoercion`
+calls `checkStringCoercion` and re-files the refusal under the numeric code, so the two lists
+cannot drift apart. Each row measured against node first:
+
+| expression | node | here |
+|---|---|---|
+| `+[]` / `+([] as string[])` | `0` | **implemented** — `Array#toString` is `join(",")`, and `Number("")` is 0 |
+| `+[1]`, `+["1"]`, `+["  12  "]`, `+[1.5]` | `1` / `1` / `12` / `1.5` | **implemented** |
+| `+[1, 2]`, `+["a"]`, `+[true]` | `NaN` | **implemented** — those really are NaN, via `"1,2"` / `"a"` / `"true"` |
+| `+[-0]` | `0` (and `1/+[-0]` is `Infinity`) | **implemented** — `String([-0])` is `"0"` |
+| `+(null as number \| null)` | `0` | **implemented** — the BOX, by its tag |
+| `+(undefined as number \| undefined)` | `NaN` | **implemented** — a *different* answer from null's |
+| `+new Date(1000)`, `Number(d)` | `1000` | **implemented** — see below |
+| `+{ a: 1 }`, `+new C()` | `NaN`, or its `valueOf()`/`toString()` | `NT1039` |
+| `+new Map()` / `+new Set()` | `NaN` | `NT1039` |
+| `+new Uint8Array([5])` | `5` (node JOINS it) | `NT1039` |
+| `+[[1],[2]]` | `NaN` (via `"1,2"`) | `NT1039` |
+| `+JSON.parse(s).f` | the field's own coercion | `NT1039`, hint: narrow it (`as number`) |
+
+**`Date` is the one addition, and it is a SPECIFIC rule rather than a general one.** It is the
+only type where the two ToPrimitive hints diverge: the *number* hint runs `valueOf` first and
+yields the time value, where the *string* hint runs `toString` and yields
+`"Thu Jan 01 1970 …"` — which is why `"" + date` **stays** refused (`NT1024`, no tz display-name
+tables) while `+date` is now ordinary. nativets represents a Date **as** its time value, so the
+numeric coercion is the identity. The strongest evidence this was an oversight and not a
+decision: `%d` in `console.log` (`genFormatNumber`) already had exactly that rule, with exactly
+that comment, on the other ToNumber path.
+
+**Why an object / class instance / `Map` / `Set` is refused even though node's answer is a
+constant `NaN`** — the identical argument to NT1032's `[object Object]` one directly above. The
+constant holds only for a value with **no own `valueOf`/`toString`**; node calls the method when
+a class defines one, and this compiler has no prototype chain to consult at the coercion site.
+Answering NaN unconditionally would trade a loud build error for a silent wrong answer in
+exactly the programs that bothered to define it. `NaN` is also never the number the line meant,
+so the hint says so: read the field you meant (`+o.count`), use `m.size` for a `Map`/`Set`, and
+— because node **joins** a `Uint8Array` — index it (`u[0]`) rather than coercing the whole thing.
+
+A **general ToPrimitive is not implementable here** and this is not a step toward one: objects
+are flat records whose slot layout is fixed at compile time, and methods resolve from the type
+tag rather than from a chain carried by the value. Every row above is either a rule this
+compiler can state exactly (`Date`'s `valueOf`, an array's `join`, a box's tag) or a refusal.
+
+`coerceToNumber` now raises an internal error rather than falling through to NaN. Pinned in
+`test/number-coercion.test.ts`; the originating reports are in `test/fuzz2-diff.test.ts`.
+
 ### stdlib Batch 3 — `Date` (and the TIMEZONE decision), `URL`, URI encoding
 
 **The timezone decision: local time is REALLY local, and the tests pin `TZ`.**
@@ -566,10 +637,41 @@ Everything else about Batch 3:
   catchably, through the pending-exception protocol. `console.log(date)` prints the ISO string
   (node's `util.inspect` of a Date) and `Invalid Date` for `NaN`; `JSON.stringify` emits the
   quoted ISO string, or `null` for an Invalid Date — all node-exact.
+- **`toJSON()` is NOT `toISOString()` under another name, and it used to be.** ECMA-262
+  21.4.4.37 takes the primitive at **step 3** and returns `null` for a non-finite time value,
+  so step 4's `toISOString` invocation is never reached and the method **cannot throw**. We
+  routed both spellings through one line, so `new Date(NaN).toJSON()` exited **1 with empty
+  stdout** where node prints `null` and carries on. Its type is `string | null` here, exactly as
+  in node, so `?? "…"` and `=== null` compose. `JSON.stringify(invalidDate)` was already
+  correct (the runtime's serializer has its own NaN check), which is precisely what hid this —
+  only the *direct* call was wrong.
+- **`TimeClip` normalises `-0` to `+0`.** TimeClip is `ToIntegerOrInfinity(t)` clamped
+  (21.4.1.15), and ToIntegerOrInfinity ends with *"If integer is -0, return +0"* (7.1.5) — so
+  node's time value for anything in `(-1, 0]` is **positive** zero. We truncated toward zero and
+  kept the sign, so `new Date(-0).getTime()` stored a negative zero and `1 / d.getTime()` was
+  `-Infinity` where node says `Infinity`. `-0.5` and `-0.9` landed on it too. Both `String()`
+  and `toISOString()` erase the sign, which is why it survived every string-shaped test; the
+  regression test probes with `1/x`.
 - **A Date is an IMMUTABLE time value.** `setHours`/`setDate`/… are refused (**`NT1023`**),
   pointing at reconstruction (`new Date(d.getTime() + ms)`). So is `Date#toString`/
   `toLocaleDateString` — those are locale + zone-*display-name* formatting, which needs tables
-  we do not ship. `"" + date` is refused for the same reason.
+  we do not ship. `"" + date` is refused for the same reason. **`+date` is NOT** — the numeric
+  coercion goes through `valueOf`, not `toString`; see the `NT1039` section above.
+- **`date === date` is REFUSED (`NT1024`), and it used to emit invalid IR.** node compares Date
+  **identity**: two distinct Dates are `false` however equal their instants, and an Invalid Date
+  *is* `===` itself even though `NaN !== NaN`. A Date here **is** its time value, so there is no
+  identity left to compare, and both plausible codegens are wrong for a program somebody writes.
+  It previously fell into the equality chain's `js_str_eq` default and produced
+  `'%t2' defined with type 'double' but expected 'ptr'` — a build error with no `NT` code and no
+  hint, which is the one outcome the diagnostics contract rules out. The hint hands back
+  `a.getTime() === b.getTime()` **with** the caveat that it is a value comparison and node's is
+  not; both halves are compiled against node in `test/narrowing.test.ts`.
+
+  That `else` was the **default** arm rather than the string arm, so it swallowed one more type:
+  `null === null` (node `true`) came back as `'%t0' defined with type 'i8' but expected 'ptr'`.
+  `undefined`/`null`/`void` are unit types, so their equality is now the constant it is, and the
+  byte-wise arm asserts its operand is a pointer — the same default-deny the string and numeric
+  coercions got.
 - **`new URL(u)` covers absolute `http(s)` URLs.** Out of subset: relative URLs, other schemes
   (`file:`, `data:`), IPv6 bracket hosts, punycode/IDNA, and path/percent **normalization**
   (input is assumed canonical; node re-normalizes). node throws a `TypeError` on a URL it cannot

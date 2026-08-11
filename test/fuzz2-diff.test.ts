@@ -75,8 +75,13 @@ describe("fuzz2 findings — wrong answers", () => {
    * here and `Infinity` in node. `-0.5` and `-0.9` land on it too — anything in (-1, 0].
    * `String()` and `toISOString()` both hide it, which is why it survived: only a direct
    * `console.log` (util.inspect prints `-0`) or a division exposes the sign.
+   *
+   * FIXED — `nt_time_clip` (runtime/runtime.c) finishes with `+ 0.0`, which IEEE-754
+   * round-to-nearest turns into exactly the `-0 → +0` step ToIntegerOrInfinity specifies
+   * and leaves every other double (NaN included) untouched. Owned with the rest of the
+   * TimeClip rows in test/stdlib-batch3.test.ts.
    */
-  it.failing("new Date(-0) clips to +0, so getTime() is 0 and not -0", async () => {
+  it("new Date(-0) clips to +0, so getTime() is 0 and not -0", async () => {
     await expectSameBytes([
       "console.log(new Date(-0).getTime());",     // node 0, ours -0
       "console.log(new Date(-0.5).getTime());",   // node 0, ours -0
@@ -96,8 +101,15 @@ describe("fuzz2 findings — wrong answers", () => {
    * Note the asymmetry that let it through: unary `-` on a Date is REFUSED (`NT2001`,
    * "Unary '-' needs number, got Date"). One door is guarded, its sibling silently answers
    * NaN — the exact shape the prime directive rules out.
+   *
+   * FIXED — `coerceToNumber` (src/codegen.ts) has a Date case: a Date IS its time value
+   * here, and `ToPrimitive(d, number)` runs `valueOf` first, so the coercion is the
+   * identity. `%d` in console.log already applied that rule, which is the evidence the
+   * missing one was an oversight. `-date` is STILL refused: that is a refusal rather than
+   * a wrong answer, so it breaks no rule, and it is left to the lane that widens `-`.
+   * Owned with the rest of the numeric coercions in test/number-coercion.test.ts.
    */
-  it.failing("unary + on a Date is NaN instead of its time value", async () => {
+  it("unary + on a Date is its time value", async () => {
     await expectSameBytes([
       "console.log(+new Date(0));",     // node 0,     ours NaN
       "console.log(+new Date(1000));",  // node 1000,  ours NaN
@@ -123,8 +135,20 @@ describe("fuzz2 findings — wrong answers", () => {
    *
    * `+[1,2]` really is NaN and `+"  12  "` really is 12, and both agree — so the number and
    * string paths are right and it is only the non-primitive ones that fall through.
+   *
+   * FIXED, with the boundary decided rather than guessed. ToNumber of a non-primitive is
+   * `ToPrimitive(x, number)` = `valueOf` then `toString`, and an ordinary object's
+   * `valueOf` returns the object — so ToNumber IS StringToNumber of the value's STRING
+   * form, and a value coerces to a number exactly when it coerces to a string.
+   * `checkNumberCoercion` therefore DELEGATES to `checkStringCoercion`'s allow-list (the
+   * primitives, a nullable box, a `number[]`/`string[]`/`boolean[]`) and adds Date, the
+   * one type whose two hints diverge. Everything else — an object, a Map/Set, a class
+   * instance, a Uint8Array, a `Dyn` — is refused as NT1039 rather than answered NaN, for
+   * the reason NT1032 refuses their string forms: node calls a `valueOf`/`toString` this
+   * compiler has no prototype chain to see, so the constant is only right for the programs
+   * that did not define one. Owned by test/number-coercion.test.ts.
    */
-  it.failing("Number()/unary + answers NaN for every non-primitive node can coerce", async () => {
+  it("Number()/unary + coerce every non-primitive node can coerce", async () => {
     await expectSameBytes([
       "const e: number[] = [];",
       "console.log(+e);",              // node 0, ours NaN
@@ -151,8 +175,13 @@ describe("fuzz2 findings — wrong answers", () => {
    *
    * `JSON.stringify(invalidDate)` is already correct (`null`), so this is the direct
    * `.toJSON()` call only — which is what makes it easy to miss.
+   *
+   * FIXED — `toJSON` no longer shares `toISOString`'s line. Its result type is now
+   * `string | null`, node-exactly, so `?? "…"` and `=== null` compose; the fallible ISO
+   * call moved behind a branch so it is only evaluated on the finite side. Owned with the
+   * rest of the Date rows in test/stdlib-batch3.test.ts.
    */
-  it.failing("Date#toJSON of an Invalid Date returns null, it does not throw", async () => {
+  it("Date#toJSON of an Invalid Date returns null, it does not throw", async () => {
     await expectSameBytes([
       "console.log(new Date(NaN).toJSON());",              // node null, ours: throws
       "console.log(new Date(8640000000000001).toJSON());", // node null, ours: throws
@@ -176,8 +205,21 @@ describe("fuzz2 findings — invalid IR", () => {
    * the diagnostics contract promises never happens. It wants either an equality rule (node
    * compares Date IDENTITY, so two distinct Dates are `false` whatever their time values) or
    * a refusal with a code.
+   *
+   * FIXED as a REFUSAL (NT1024), because the equality rule is not available: nativets
+   * represents a Date AS its time value, so there is no identity left to compare, and both
+   * plausible codegens are wrong for a program somebody writes — comparing time values
+   * calls two distinct Dates at one instant equal (node: false), and node calls an Invalid
+   * Date equal to itself (time values: false, `NaN !== NaN`). The hint hands back
+   * `.getTime()` WITH that caveat, and both halves are compiled against node in
+   * test/narrowing.test.ts.
+   *
+   * The `else` that produced the invalid IR was the DEFAULT arm of the equality chain, not
+   * the string arm, so it also swallowed `null === null` (node `true`, ours a clang error
+   * about an `i8`). That is answered as the constant it is, and the arm now asserts its
+   * operand is a pointer — the same default-deny the string and number coercions got.
    */
-  it.failing("`date === date` emits invalid IR instead of a diagnostic", async () => {
+  it("`date === date` carries a diagnostic code, never invalid IR", async () => {
     const ours = await ourRun([
       "const a = new Date(1000);",
       "const b = new Date(2000);",
