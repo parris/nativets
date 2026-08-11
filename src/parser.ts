@@ -878,7 +878,23 @@ class Parser {
    * `number`. Empty for ordinary code, so nothing else changes.
    */
   private typeParamScopes: Set<string>[] = [];
+  /**
+   * Type parameters INHERITED from a parser that is lexically outside this one — the
+   * frames open around a `${…}` substitution, which `parseSubstitution` hands to the
+   * fragment's own parser.
+   *
+   * FLAT, where the stack it comes from is not, and that is not a simplification: this
+   * query is "does ANY open frame declare `id`", so a merged set answers it identically,
+   * and the alternative spelling costs a self-hosting blocker. A `Set<string>[]` cannot be
+   * built as a local in the subset `src/` must stay inside (NT1001, "arrays of Set"), and
+   * appending to the sub-parser's own stack from here is NT1606 (it is another object's
+   * array). A flat `Set<string>` is neither. The sub-parser still pushes and POPS its own
+   * frames on top of this for arrows written inside the substitution, so nesting inside
+   * the fragment behaves exactly as it does anywhere else.
+   */
+  private inheritedTypeParams = new Set<string>();
   private inTypeParamScope(id: string): boolean {
+    if (this.inheritedTypeParams.has(id)) return true;
     for (let i = this.typeParamScopes.length - 1; i >= 0; i--) if (this.typeParamScopes[i]!.has(id)) return true;
     return false;
   }
@@ -1315,8 +1331,13 @@ class Parser {
     return asyncArrow || scopedAsync || (name !== null && this.asyncFns.has(name));
   }
 
+  /** The `(…) => Promise<T>` parameter names of the frames open OUTSIDE this parser — the
+   *  `asyncParamScopes` twin of `inheritedTypeParams`, flat for the same reason. */
+  private inheritedAsyncParams = new Set<string>();
+
   /** Is `n` a `(…) => Promise<T>` parameter of some enclosing body being parsed? */
   private inAsyncParamScope(n: string): boolean {
+    if (this.inheritedAsyncParams.has(n)) return true;
     for (const s of this.asyncParamScopes) if (s.has(n)) return true;
     return false;
   }
@@ -4128,13 +4149,94 @@ class Parser {
           src += ch; i++;
         }
         i++;
-        exprs.push(parseExpressionFrom(src, subLine, subCol));
+        exprs.push(this.parseSubstitution(src, subLine, subCol));
         continue;
       }
       cur += raw[i]; i++;
     }
     quasis.push(cur);
     return { kind: "TemplateLiteral", quasis, exprs };
+  }
+
+  /**
+   * Parse ONE `${…}` substitution, in a sub-parser that can see this file's TYPES.
+   *
+   * A substitution is lexed from its own sliced text, so it needs a parser of its own —
+   * and the free `parseExpressionFrom` built that parser from nothing but the tokens. The
+   * fragment therefore had an EMPTY type environment, and every type name written inside
+   * one was refused as undeclared:
+   *
+   *     interface P { v: number }
+   *     console.log(`${xs.map((a: P): number => a.v).length}`);
+   *     // node: 2, exit 0.  nativets, before this: NT2003 Cannot find name 'P'
+   *
+   * The identical annotation OUTSIDE a template compiled, which is what made it a lie
+   * rather than a limitation — and the hint said "'P' is not declared in this file" with
+   * the declaration two lines above it. A parse-time refusal on valid TypeScript that
+   * node runs; a REFUSAL, so never a wrong answer, but a false one.
+   *
+   * SEEDED WITH COPIES, and not harvested. The tables are copied rather than shared for
+   * the reason `hoistTypeDecls` records at length: a nativets `Map`/`Set` is PERSISTENT,
+   * so sharing a receiver and relying on the sub-parser's writes to be visible here is a
+   * bun-ism that compiles and silently does nothing. Nothing is harvested back because a
+   * substitution is an EXPRESSION — `parseExpression` cannot reach `parseTypeAlias`,
+   * `parseInterface` or `parseClass`, so a fragment has no declaration to contribute.
+   *
+   * `file` goes across too: a diagnostic raised inside a substitution of an imported
+   * module was otherwise fileless, and a fileless span is rendered against the ENTRY
+   * source (see `prevLoc`).
+   *
+   * THE FLOATING-ASYNC GUARD IS SEEDED **AND HARVESTED**, which the type tables are not,
+   * and the asymmetry is the whole point. That guard accumulates during the parse
+   * (`identCalls`, `asyncEscapes`, `returnEscapes`, `awaitedCalls`) and is checked ONCE at
+   * the end of `parseProgram` — so state left on the sub-parser is state nothing ever
+   * checks. With the fragment parsed in isolation, `` `${one()}` `` on an `async function`
+   * printed `1` where node prints `[object Promise]`, both exit 0: a SILENT WRONG ANSWER,
+   * and the identical call one character outside the backticks is NT1020. That is a worse
+   * failure than the false refusal above and it was found the same way.
+   *
+   * The seed/harvest split follows what each field means. `asyncParamScopes` is seeded
+   * because `scopedAsync` can only be decided AT the escape, from the parameter scopes open
+   * around it; `asyncFns` is seeded for the same-frame reads, but a name declared LATER in
+   * the file still resolves, because what comes back is the raw `identCalls` entry and
+   * `checkFloatingAsyncCalls` resolves the name against the finished set. `awaitedCalls`
+   * has to come back or `` `${await one()}` `` would be refused as floating.
+   */
+  private parseSubstitution(src: string, line: number, col: number): Expr {
+    const sub = new Parser(rebaseTokens(tokenize(src), line, col), { file: this.file });
+    for (const [k, v] of this.typeAliases) sub.typeAliases = sub.typeAliases.set(k, v);
+    for (const [k, v] of this.recTypes) sub.recTypes = sub.recTypes.set(k, v);
+    for (const [k, v] of this.declaredTypeLines) sub.declaredTypeLines = sub.declaredTypeLines.set(k, v);
+    for (const [k, v] of this.cyclicTypes) sub.cyclicTypes = sub.cyclicTypes.set(k, v);
+    for (const n of this.declaredClassNames) sub.declaredClassNames = sub.declaredClassNames.add(n);
+    for (const n of this.cycleNames) sub.cycleNames = sub.cycleNames.add(n);
+    for (const n of this.mutableRecords) sub.mutableRecords = sub.mutableRecords.add(n);
+    // The three "do not refuse this name" sets, merged rather than assigned: the
+    // constructor's own lexical scan has already filled them from the FRAGMENT's tokens,
+    // and over-collection may only ever preserve today's behavior for a name.
+    for (const n of this.externalNames) sub.externalNames = sub.externalNames.add(n);
+    for (const n of this.fragmentNames) sub.fragmentNames = sub.fragmentNames.add(n);
+    for (const n of this.genericParamNames) sub.genericParamNames = sub.genericParamNames.add(n);
+    // A generic FUNCTION's type parameters are a STACK of frames, and the substitution is
+    // lexically inside every one currently open — `function f<T>(x: T) { return
+    // `${g((y: T) => y)}`; }` names `T`. Flattened into `inheritedTypeParams`, which is
+    // what that field exists for; the query is "any open frame", so merging is exact.
+    for (const s of this.typeParamScopes) for (const n of s) sub.inheritedTypeParams = sub.inheritedTypeParams.add(n);
+    for (const n of this.inheritedTypeParams) sub.inheritedTypeParams = sub.inheritedTypeParams.add(n);
+    // ---- the floating-async guard: seeded, then harvested on every path.
+    for (const n of this.asyncFns) sub.asyncFns = sub.asyncFns.add(n);
+    for (const n of this.returnsAsyncFn) sub.returnsAsyncFn = sub.returnsAsyncFn.add(n);
+    for (const [k, v] of this.promiseParamsByFn) sub.promiseParamsByFn = sub.promiseParamsByFn.set(k, v);
+    for (const s of this.asyncParamScopes) for (const n of s) sub.inheritedAsyncParams = sub.inheritedAsyncParams.add(n);
+    for (const n of this.inheritedAsyncParams) sub.inheritedAsyncParams = sub.inheritedAsyncParams.add(n);
+    const out = sub.parseExpression();
+    for (const c of sub.identCalls) this.identCalls.push(c);
+    for (const e of sub.asyncEscapes) this.asyncEscapes.push(e);
+    for (const r of sub.returnEscapes) this.returnEscapes.push(r);
+    for (const n of sub.awaitedCalls) this.awaitedCalls = this.awaitedCalls.add(n);
+    for (const n of sub.asyncFnExprs) this.asyncFnExprs = this.asyncFnExprs.add(n);
+    for (const n of sub.hostImports) this.hostImports = this.hostImports.add(n);
+    return out;
   }
 }
 
