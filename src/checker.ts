@@ -357,7 +357,13 @@ function carriesReturnValue(body: Stmt[]): boolean {
       case "ExprStmt": break;
       case "BreakStmt": break;
       case "ContinueStmt": break;
-      case "BlockDropsStmt": break;
+      // `BlockDrops`, not `BlockDropsStmt` — the INTERFACE is `BlockDropsStmt` but the tag
+      // it carries is `"BlockDrops"`. Written wrong first, and the way it surfaced is the
+      // argument for both this switch's shape and for test/tsc.test.ts: the label matched
+      // nothing, so the statement fell to `default` and answered `true` — the SAFE arm, an
+      // over-refusal rather than a `double`-returning body in a `call void` slot — and
+      // `tsc` named it (TS2678) rather than leaving it to be found by a leak.
+      case "BlockDrops": break;
       default: return true; // an unrecognized kind: refuse rather than guess
     }
   }
