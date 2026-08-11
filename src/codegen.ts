@@ -808,11 +808,17 @@ interface StrTemp { v: string; fresh: boolean; }
  * the next finalizer out or to the jump's real target.
  */
 interface FinallyFrame {
+  /** Identity, so a pending exit can name the frame it is parked on WITHOUT the frame
+   *  holding the list. The list lives on the emitter (`jumpExits`) for a reason the
+   *  self-host subset dictates: `frame.exits.push(…)` mutates an array reached through a
+   *  parameter, which the checker refuses (NT1606) — `this.jumpExits.push(…)` mutates a
+   *  field of the `@@mutable` emitter, which it allows. `src/` stays inside the subset it
+   *  compiles, so the side table is the shape, not the aggregate. */
+  id: number;
   finallyLbl: string;
   modeSlot: string;
   retSlot: string | null;
   scopeDepth: number;
-  exits: PendingExit[];
 }
 
 /**
@@ -825,6 +831,8 @@ interface FinallyFrame {
  * finalizers still to run is captured with it.
  */
 interface PendingExit {
+  /** The `FinallyFrame.id` this exit is parked on — `chain[idx]`'s, always. */
+  frameId: number;
   mode: number;
   scopes: string[][];
   chain: FinallyFrame[];
@@ -1250,6 +1258,10 @@ class FnGen {
    * on. Per function: `reset` puts it back, and the slots are per-`try` allocas anyway.
    */
   private jumpMode = 2;
+  /** Abrupt exits parked on a live finalizer, keyed by `FinallyFrame.id`. */
+  private jumpExits: PendingExit[] = [];
+  /** Next `FinallyFrame.id`. */
+  private finId = 0;
   /**
    * True while emitting `main`. `retTy` is "number" there (top-level expressions are typed
    * like any others), but the FUNCTION returns `i32` — so any `ret` emitted from a generic
@@ -1375,6 +1387,8 @@ class FnGen {
     this.tryHandlers = [];
     this.finallyStack = [];
     this.jumpMode = 2;
+    this.jumpExits = [];
+    this.finId = 0;
     this.hofReturnStack = [];
     this.strLocals = new Set();
     this.globalVars = new Set();
@@ -1483,17 +1497,24 @@ class FnGen {
     const chain = this.finallyStack.slice(targetFin); // outermost .. innermost
     const inner = chain[nCross - 1]!;
     this.emitSnapshotDrops(scopes, scopes.length, inner.scopeDepth);
-    this.enterFinally(inner, { mode: 0, scopes, chain, idx: nCross - 1, targetLbl, targetDepth });
+    this.enterFinally(scopes, chain, nCross - 1, targetLbl, targetDepth);
   }
 
-  /** Store a fresh dispatch id into `f`'s mode slot, park `ex` on it under that id, and
-   *  branch into the finalizer. The id is minted here so the jump site and every resume
-   *  block after it share one spelling of "hand this exit to that finalizer". */
-  private enterFinally(f: FinallyFrame, ex: PendingExit): void {
+  /** Store a fresh dispatch id into `chain[idx]`'s mode slot, park the exit on it under
+   *  that id, and branch into the finalizer. The id is minted here so the jump site and
+   *  every resume block after it share one spelling of "hand this exit to that one". */
+  private enterFinally(scopes: string[][], chain: FinallyFrame[], idx: number, targetLbl: string, targetDepth: number): void {
+    const f = chain[idx]!;
     const mode = this.jumpMode++;
     this.emit(`store double ${llvmDouble(mode)}, ptr ${f.modeSlot}`);
-    f.exits.push({ mode, scopes: ex.scopes, chain: ex.chain, idx: ex.idx, targetLbl: ex.targetLbl, targetDepth: ex.targetDepth });
+    this.jumpExits.push({ frameId: f.id, mode, scopes, chain, idx, targetLbl, targetDepth });
     this.terminate(`br label %${f.finallyLbl}`);
+  }
+
+  /** The exits parked on `f`, in the order they were parked — the order the dispatch
+   *  tests them in, which keeps the emitted IR deterministic. */
+  private exitsOn(f: FinallyFrame): PendingExit[] {
+    return this.jumpExits.filter((ex) => ex.frameId === f.id);
   }
 
   /** The resume block for one pending exit, emitted after its finalizer's body: finish
@@ -1505,7 +1526,7 @@ class FnGen {
     if (next >= 0) {
       const outer = ex.chain[next]!;
       this.emitSnapshotDrops(ex.scopes, here, outer.scopeDepth);
-      this.enterFinally(outer, { mode: 0, scopes: ex.scopes, chain: ex.chain, idx: next, targetLbl: ex.targetLbl, targetDepth: ex.targetDepth });
+      this.enterFinally(ex.scopes, ex.chain, next, ex.targetLbl, ex.targetDepth);
       return;
     }
     this.emitSnapshotDrops(ex.scopes, here, ex.targetDepth);
@@ -2305,7 +2326,7 @@ class FnGen {
           this.emit(`store ptr null, ptr ${this.addr(s.param)}`);
         }
         this.tryHandlers.push({ catchLbl, excVar: s.param, eType, catchless: !s.handler });
-        const frame: FinallyFrame = { finallyLbl, modeSlot, retSlot: retSlot || null, scopeDepth: this.blockScopes.length, exits: [] };
+        const frame: FinallyFrame = { id: this.finId++, finallyLbl, modeSlot, retSlot: retSlot || null, scopeDepth: this.blockScopes.length };
         if (hasFinally) this.finallyStack.push(frame);
         this.genStmts(s.block);
         this.tryHandlers.pop();
@@ -2331,7 +2352,7 @@ class FnGen {
             const m = this.fresh(); this.emit(`${m} = load double, ptr ${modeSlot}`);
             // Jump modes first: each is one id, and a miss falls through to the next test.
             // The load dominates every block in this chain, so the `%m` uses are legal.
-            for (const ex of frame.exits) {
+            for (const ex of this.exitsOn(frame)) {
               const hit = this.fresh(); this.emit(`${hit} = fcmp oeq double ${m}, ${llvmDouble(ex.mode)}`);
               const jumpLbl = this.label("finjump");
               const nextLbl = this.label("findisp");
