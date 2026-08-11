@@ -432,6 +432,9 @@ interface RecvHint {
   already: boolean;
   /** A dotted path rather than a bare name; its root name, for the "rebound" clause. */
   root?: string;
+  /** Can that root actually be reassigned? A `const` cannot, so the "rebound" clause
+   *  states an impossible cause and prescribes a rename — see `narrowAdvice`. */
+  rootRebindable?: boolean;
 }
 
 // `//@@mutable`, which it could NOT be until the cycle rule landed. `parent: Scope | null`
@@ -2928,9 +2931,12 @@ class Checker {
       // name" is now reachable here as well — and without the root the advice would read
       // `narrow it first (\`if (n.kind === "num")\`)` at a read whose author wrote exactly
       // that test one line up, which is the untruthful-hint shape this repo keeps finding.
-      return { text, stable: true, already: b !== undefined && b.narrowedFrom !== undefined, root: obj.name };
+      return { text, stable: true, already: b !== undefined && b.narrowedFrom !== undefined, root: obj.name, rootRebindable: b === undefined || !b.constant };
     }
-    return { text, stable: true, already: this.narrowedTy(p.binding, p.path) !== undefined, root: p.name };
+    // The ROOT's binding, not the path's own — the "rebound" clause is about `x = …` on
+    // the root, which is the only assignment a path over immutable objects can suffer
+    // (`accessPath` has already declined every `@@mutable` link above this point).
+    return { text, stable: true, already: this.narrowedTy(p.binding, p.path) !== undefined, root: p.name, rootRebindable: !p.binding.constant };
   }
 
   /**
@@ -3045,7 +3051,16 @@ class Checker {
     // A dotted path DOES narrow, so "no test written" is no longer the only way to get
     // here with one: the fact is also dropped when the root is rebound between the proof
     // and this read. Naming both is what keeps the advice true in either case.
-    const rebound = recv !== undefined && recv.root !== undefined
+    //
+    // ...but only where a rebind is POSSIBLE. Both rules that drop a fact here
+    // (`unstableNames` and `closureMayAssign`) key on ASSIGNMENT, and neither can fire on
+    // a `const`, so on a `const` root this clause named an impossible cause and then
+    // prescribed `const v = n;` — a rename of a binding that already has the property the
+    // advice asks for. On `const v = <expr>` it degenerated all the way to
+    // `bind \`const v = v;\``. Third instance of the circular-hint shape in this file; the
+    // other two are `narrowing 5` and the module-level-binding block in
+    // test/narrowing.test.ts.
+    const rebound = recv !== undefined && recv.root !== undefined && (recv.rootRebindable ?? true)
       ? ` — and if that test is already written, '${recv.root}' is assigned between it and this read ` +
         `(anywhere in the region, or inside any arrow), which drops the narrowing; bind ` +
         `\`const v = ${x};\` before the test and narrow \`v\``
@@ -3899,7 +3914,7 @@ class Checker {
           // A general union is a BOX: `===` on it compared the two boxes' TAGS, so
           // `1 === 2` came out true. Refuse until the arms are compared themselves.
           for (const t of [l, r]) refuseUnboxedUnion(t, "`===`");
-          if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`, exprLoc(e));
+          if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`, exprLoc(e), mixedNullableHint(e, l, r));
           return "boolean";
         }
         if (BITWISE.has(e.op)) {
@@ -6781,14 +6796,124 @@ class Checker {
     return this.assignable(declared, inferred) && this.reshapable(arg, declared, inferred);
   }
 
-  /** First top-level return's type in a body (for closure/function return inference). */
+  /**
+   * First top-level return's type in a body (for closure/function return inference).
+   *
+   * TWO JOBS IN ONE LOOP, and they take OPPOSITE answers on the guard-clause idiom —
+   * which is why the narrowing here is deliberately asymmetric rather than a copy of
+   * `checkBlock`.
+   *
+   * The STATEMENT WALK is a full `checkStmt`, so every diagnostic in the body can be
+   * raised from here — and this pass runs BEFORE `checkBlock` does, so whatever it
+   * raises is what the user sees. It therefore has to model control flow exactly as
+   * `checkBlock` does, or it refuses code `checkBlock` would accept and the accepting
+   * pass never runs. It did not, and the guard clause was the casualty:
+   *
+   *     elems.forEach((el) => {
+   *       if (el.name === null) return;    // early-exit guard
+   *       out.push({ name: el.name });     // NT2001 — from HERE, not from checkBlock
+   *     });
+   *
+   * The `for`/`continue` spelling of the same loop compiled, because a `for` body is
+   * only ever walked by `checkBlock`. Nothing was miscompiled; the shape was simply
+   * unreachable in every body whose return type is inferred — every BLOCK-BODIED ARROW
+   * (annotated or not: `typeArrowReturn` calls this unconditionally) and every
+   * UNANNOTATED `function`. So the same three lines were accepted in a `function f():
+   * void` and refused in `const f = (): void =>`.
+   *
+   * THE RETURN ITSELF takes the WIDER of the two readings, and the asymmetry is the whole
+   * design. The type this function answers is not just this return's — `typeArrowReturn`
+   * hands it straight to `checkBlock` as the type EVERY return in the body is validated
+   * against, and a guard above the first top-level return proves nothing about the
+   * returns nested INSIDE that guard:
+   *
+   *     elems.map((el) => {
+   *       if (el.name === null) return null;   // nested — still `null`
+   *       return el.name;                      // first TOP-LEVEL return, narrows to string
+   *     });
+   *
+   * Answering `string` there makes `string` the body's type and refuses the `return null`
+   * above it — a program that compiles today and matches node. So the un-narrowed reading
+   * is preferred WHEN IT EXISTS, and it is the one every return fits.
+   *
+   * But it often does not exist, because the guard is what made the read legal at all:
+   *
+   *     function f(el: { name: string | null }) {
+   *       if (el.name === null) return 0;
+   *       return el.name.length;               // `?Nstring` has no `.length`
+   *     }
+   *
+   * Un-narrowed, that expression has no type — it is the NT2001 this whole method used to
+   * raise. So: type it narrowed (which is what `checkBlock` will do anyway), type it again
+   * un-narrowed, and answer the un-narrowed reading only if it produced a type.
+   *
+   * WHY THIS CANNOT REGRESS ANYTHING. The un-narrowed reading is exactly what this method
+   * computed before early-exit facts existed here, so any body whose first return HAD a
+   * type still gets that same type, unchanged. The narrowed reading is consulted only
+   * where the old code threw — and a thrown diagnostic accepted no program. The change is
+   * one-directional by construction: refusals become acceptances, no inferred type moves.
+   *
+   * Typing the expression twice is safe and is not a third evaluation of anything: both
+   * `checkFunction` and `typeArrowReturn` run a full `checkBlock` over the same body
+   * afterwards, so the `.ty` stamps codegen reads always come from THAT pass, never from
+   * either reading here. The second reading is skipped entirely when no exiting guard
+   * preceded the return (`pushed === 0`), which is every body that behaved correctly
+   * before — so the common path is the original one line.
+   */
   private inferBlockReturn(body: Stmt[], scope: Scope): Ty {
     const inner = scope.child();
-    for (const s of body) {
-      if (s.kind === "ReturnStmt") return s.argument ? this.type(s.argument, inner) : "number";
-      this.checkStmt(s, inner, "void"); // declare vars; don't validate returns
+    let pushed = 0;
+    try {
+      for (let i = 0; i < body.length; i++) {
+        const s = body[i]!;
+        if (s.kind === "ReturnStmt") {
+          if (s.argument === null) return "number";
+          const narrowed = this.type(s.argument, inner);
+          if (pushed === 0) return narrowed; // no guard above it — the two readings agree
+          for (let k = 0; k < pushed; k++) this.narrowStack.pop();
+          pushed = 0;
+          return this.widestReturnTy(s.argument, inner) ?? narrowed;
+        }
+        this.checkStmt(s, inner, "void"); // declare vars; don't validate returns
+        // The identical bookkeeping `checkBlock` does, over the identical region: the
+        // facts an exiting guard establishes cover exactly the statements below it.
+        const rest = body.slice(i + 1);
+        const facts = this.exitGuardFacts(s, inner, rest);
+        this.eliminateAfterEarlyExit(s, inner, rest, facts);
+        if (facts.length) { this.narrowStack.push(facts); pushed++; }
+      }
+    } finally {
+      // `finally`, unlike `checkBlock`'s trailing loop: this walk leaves by `return` on
+      // the common path, and `coverage` keeps going after a thrown diagnostic — either
+      // would otherwise strand a frame on the stack for the next body to read.
+      for (let k = 0; k < pushed; k++) this.narrowStack.pop();
     }
     return "number";
+  }
+
+  /**
+   * The type this return expression has with the enclosing guard facts already dropped,
+   * or `undefined` when it has none — see `inferBlockReturn` for why both readings are
+   * taken and which one wins.
+   *
+   * The `catch` swallows a diagnostic on purpose, and it is not a suppression: the SAME
+   * expression has just been typed successfully with the facts in force, so the program is
+   * known good, and the only question left is whether a wider type also describes it. A
+   * throw here means "no", which is an answer, not an error. Nothing is skipped as a
+   * result — `checkBlock` types this expression again, narrowed, and every diagnostic it
+   * raises is reported normally.
+   *
+   * An `NTError` ONLY. A bare `catch` here would also eat an `InternalError` — the one
+   * class that means the defect is OURS — and turn a loud compiler bug into a silently
+   * wider return type. Anything that is not a diagnostic is re-thrown.
+   */
+  private widestReturnTy(arg: Expr, inner: Scope): Ty | undefined {
+    try {
+      return this.type(arg, inner);
+    } catch (e) {
+      if (e instanceof NTError) return undefined;
+      throw e;
+    }
   }
 
   /** Return type of an unannotated function, inferred from its first top-level return. */
@@ -8575,6 +8700,50 @@ function refuseUnboxedUnion(ty: Ty, what: string): void {
     `${what} of the un-narrowed union ${generalUnionMembers(ty).join(" | ")} — it is a tagged box, so which arm it holds ` +
       `is only known at RUNTIME. Narrow it first (\`if (typeof x === "${generalUnionArmTypeof(generalUnionMembers(ty)[0]!)}") { … }\`) and use the arm`,
   );
+}
+
+/**
+ * The advice for `T === T | undefined` — one raw value, one tagged box.
+ *
+ * `Cannot compare string with ?Ustring` arrived with no `= help:` line at all, and this
+ * is a shape people write on purpose: comparing a value against an optional one is
+ * ordinary, correct JavaScript. The refusal itself is the same one the TWO-nullable case
+ * carries (a `[tag, value]` block and a raw value share no bit pattern, and the FCMP
+ * chain's fall-through would `strcmp` across the tag), and that case has always named the
+ * rewrite. This is the same sentence for the other arity.
+ *
+ * THE REWRITE IS EXACT, not merely compilable, which is why it can be stated flatly. An
+ * absent value never equals a present one, so under node `a === b` is `false` on exactly
+ * the paths where `b` is absent — which is what `b !== undefined && a === b` evaluates
+ * to. The `!==` spelling is its De Morgan dual and is exact for the same reason. Both are
+ * compiled against node in test/narrowing.test.ts, present arm and absent arm.
+ *
+ * The `??` alternative is offered with its condition attached rather than bare: it is
+ * only equivalent for a default the other side can never itself be, and `(b ?? "")`
+ * against an `a` that may be `""` is a wrong answer, not a rewrite.
+ *
+ * `undefined` WHERE THERE IS NOTHING TRUE TO SAY. Comparing a `string` with a `number` is
+ * a plain type error with no rewrite behind it, and this returns nothing for it rather
+ * than inventing one — the predicate is "the other side is exactly this nullable's own
+ * base type", so `?Ustring` against `number` gets no advice either.
+ */
+function mixedNullableHint(e: BinaryExpr, l: Ty, r: Ty): string | undefined {
+  const leftNullable = isNullableTy(l) && !isNullableTy(r) && baseTy(l) === r;
+  const rightNullable = isNullableTy(r) && !isNullableTy(l) && baseTy(r) === l;
+  if (!leftNullable && !rightNullable) return undefined;
+  const box = leftNullable ? l : r;
+  const kind = nullishKind(box);
+  // The comparison keeps the operands in the order the author wrote them, so the
+  // suggestion can be pasted over the line it is about.
+  const boxText = (leftNullable ? exprText(e.left) : exprText(e.right)) ?? "b";
+  const leftText = exprText(e.left) ?? "a";
+  const cmp = `${leftText} ${e.op} ${exprText(e.right) ?? "b"}`;
+  const negated = e.op === "!==" || e.op === "!=";
+  const rewrite = negated ? `${boxText} === ${kind} || ${cmp}` : `${boxText} !== ${kind} && ${cmp}`;
+  return `a \`${box}\` is a tagged box and a \`${baseTy(box)}\` is the raw value, so there is no bit ` +
+    `pattern they share. Narrow the nullable side first — \`${rewrite}\` — which is EXACTLY node's ` +
+    `answer here, because a value that is \`${kind}\` can never equal a present one. (A default works ` +
+    `too, \`${leftText} ${e.op} (${boxText} ?? d)\`, but only for a \`d\` the other side can never be.)`;
 }
 
 /**
