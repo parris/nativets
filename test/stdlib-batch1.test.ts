@@ -26,6 +26,15 @@ function rejectCode(src: string): string | null {
   try { sourceToIR(src); return null; } catch (e) { return e instanceof NTError ? e.diag.code : "throw"; }
 }
 
+/** The full diagnostic a source is rejected with — message and hint, not just the code. */
+function rejectDiag(src: string): { code: string; message: string; hint: string } {
+  try { sourceToIR(src); } catch (e) {
+    if (e instanceof NTError) return { code: e.diag.code, message: e.diag.message, hint: e.diag.hint ?? "" };
+    throw e;
+  }
+  throw new Error(`expected a refusal, but this compiled:\n${src}`);
+}
+
 interface Case { name: string; code: string }
 
 /** Run every case in a table as a differential test against node. */
@@ -475,6 +484,222 @@ console.log(Number.isInteger(4), Number.isFinite(1 / 0), Number.isSafeInteger(2 
 `,
   },
 ]);
+
+/*
+ * `parseInt` — ECMA-262 19.2.5, the whole grammar.
+ *
+ * The runtime used to be `strtol` behind a hand-rolled prologue, and it was wrong in
+ * three ways that all ran to exit 0. The worst was that `strtol` reads its OWN sign
+ * after the prologue had already read one, so a SECOND sign won: `parseInt("+-1")` was
+ * -1, an INVERTED answer rather than merely a wrong one. `parseInt("-0")` was 0 (the
+ * old body multiplied a `long` by a sign, which cannot produce -0), and `long`
+ * saturates, so every value above 2^63 collapsed onto the single constant
+ * 9223372036854775807.
+ *
+ * BORROWED: tc39/test262 `built-ins/parseInt/` — the StrWhiteSpace table
+ * (S15.1.2.2_A2_T*), the one-sign rule (A3), the radix-validity and ToInt32 rules
+ * (A7/A8), the `0x` prefix (A4/A5) and the signed-zero results.
+ *
+ * A note on the accumulator, because it looks like a bug and is not: for a radix
+ * outside {2, 4, 8, 10, 16, 32} the spec permits "an implementation-dependent
+ * approximation to the mathematical integer value", and node takes it. The
+ * correctly-rounded value of `parseInt("9007199254740993", 36)` is
+ * 1.989698611603181e+24 and node prints 1.9896986116031812e+24, so being exact here
+ * would be a DIVERGENCE. The runtime reproduces V8's chunked accumulation instead.
+ */
+differential("parseInt — the ECMA-262 grammar", [
+  {
+    name: "at most ONE sign, and a bare sign is NaN (a second sign used to INVERT the answer)",
+    code: `
+console.log(parseInt("--1"), parseInt("-+1"), parseInt("+-1"), parseInt("++1"));
+console.log(parseInt("+"), parseInt("-"), parseInt("- 1"), parseInt("+ 1"));
+console.log(parseInt("-1"), parseInt("+1"), parseInt("1-"), parseInt("1+"));
+`,
+  },
+  {
+    name: "a zero result keeps the sign of the string, through every all-zeros spelling",
+    code: `
+console.log(parseInt("-0"), parseInt("+0"), parseInt("0"));
+console.log(parseInt("-00"), parseInt("-000000"), parseInt("-0", 16));
+console.log(parseInt("-0x0"), parseInt("-0x00"), parseInt("-0", 2), parseInt("-0", 36));
+console.log(parseInt("-0.9"), parseInt("-0abc"), parseInt("-000abc"), parseInt("0.9"));
+console.log(1 / parseInt("-0"), 1 / parseInt("0"), 1 / parseInt("-00000"));
+`,
+  },
+  {
+    name: "empty and whitespace-only inputs are NaN, and the leading trim is the FULL StrWhiteSpace set",
+    code: `
+console.log(parseInt(""), parseInt(" "), parseInt("   "), parseInt("\\t\\n\\r"));
+console.log(parseInt("\\u000b"), parseInt("\\u00a0"), parseInt("\\u2028"), parseInt("\\ufeff"));
+console.log(parseInt(" 42 "), parseInt("\\t\\n\\r\\u000b\\u000c 42"));
+console.log(parseInt("\\u00a042"), parseInt("\\u200942"), parseInt("\\u3000-42"), parseInt("\\ufeff-42"));
+`,
+  },
+  {
+    name: "the 0x prefix: taken for radix 0 and 16, never otherwise, and never alone",
+    code: `
+console.log(parseInt("0x"), parseInt("0X"), parseInt("-0x"), parseInt("0x", 16));
+console.log(parseInt("0x1f"), parseInt("0X1F"), parseInt("-0x10"), parseInt("0x1f", 16));
+console.log(parseInt("0x10", 10), parseInt("0x10", 8), parseInt("0x10", 36));
+console.log(parseInt("0xg"), parseInt("0x1fg"), parseInt("0b101"), parseInt("0o17"));
+`,
+  },
+  {
+    name: "radix validity: 0 means 10, 1 and 37 and negatives are NaN, and it is a ToInt32",
+    code: `
+console.log(parseInt("11", 0), parseInt("11", 1), parseInt("11", 2), parseInt("11", 36));
+console.log(parseInt("11", 37), parseInt("11", -1), parseInt("11", -16), parseInt("zz", 36));
+console.log(parseInt("11", NaN), parseInt("11", Infinity), parseInt("11", -Infinity));
+console.log(parseInt("11", 2.9), parseInt("11", 16.9), parseInt("11", -0));
+console.log(parseInt("11", 4294967296), parseInt("11", 4294967312), parseInt("11", 2147483648));
+`,
+  },
+  {
+    name: "leading zeros, trailing junk, and the words that are not numbers",
+    code: `
+console.log(parseInt("00000000000000000000042"), parseInt("007", 8), parseInt("0z", 36));
+console.log(parseInt("42px"), parseInt("  -17rest"), parseInt("1.9"), parseInt("1e3"));
+console.log(parseInt("Infinity"), parseInt("-Infinity"), parseInt("infinity"), parseInt("NaN"));
+console.log(parseInt("abc"), parseInt(".5"), parseInt("-.5"), parseInt("z"));
+`,
+  },
+  {
+    name: "a big value is built as a double: no INT64_MAX saturation, and no exact-bignum divergence",
+    code: `
+console.log(parseInt("9007199254740993"), parseInt("9007199254740993", 16));
+console.log(parseInt("9007199254740993", 36), parseInt("ffffffffffffffffff", 16));
+console.log(parseInt("18446744073709551617"), parseInt("-18446744073709551617"));
+console.log(parseInt("1111111111111111111111111111111111111111111111111111111111111111", 2));
+console.log(parseInt("zzzzzzzzzzzzzzzzzzzz", 36), parseInt("deadbeefdeadbeefdeadbeef", 16));
+console.log(parseInt("777777777777777777777777777777", 8), parseInt("vvvvvvvvvvvvvv", 32));
+`,
+  },
+  {
+    name: "a power-of-two radix rounds an exact halfway case to EVEN, not up",
+    code: `
+console.log(parseInt("82c1e772687684", 16), parseInt("6adcf26fc4a382", 16));
+console.log(parseInt("2258e492e190b1", 16), parseInt("404474672240237741", 8));
+console.log(parseInt("453212362305563271", 8), parseInt("203200003003231121302001331", 4));
+console.log(parseInt("3201130310011311223323311110", 4));
+console.log(parseInt("1" + "0".repeat(52) + "1" + "0".repeat(10), 2));
+console.log(parseInt("1" + "0".repeat(52) + "1" + "1" + "0".repeat(9), 2));
+`,
+  },
+  {
+    name: "a digit string too long for a double overflows to Infinity, with its sign",
+    code: `
+console.log(parseInt("1" + "0".repeat(400)));
+console.log(parseInt("9".repeat(400)), parseInt("-" + "9".repeat(400)));
+console.log(parseInt("1".repeat(2000), 2), parseInt("-" + "f".repeat(300), 16));
+console.log(parseInt("0".repeat(100) + "1"), parseInt("-" + "0".repeat(100)));
+`,
+  },
+]);
+
+/*
+ * The `Math.*` DATA properties. `Math` was reachable only as a call callee
+ * (`Math.floor(x)`), so a member READ had no path of its own and fell through to the
+ * generic identifier resolution, which reported `NT2001 'Math' is not defined` — a
+ * message that is FALSE, since `Math.floor(1.5)` on the line above compiles. This
+ * mirrors the `Number.*` constants above, whose member-read path already existed.
+ *
+ * BORROWED: tc39/test262 `built-ins/Math/{E,PI,LN2,LN10,LOG2E,LOG10E,SQRT2,SQRT1_2}/`
+ * — one directory per constant, each with a `value.js` asserting the exact double and a
+ * `prop-desc.js` asserting it is non-writable/non-configurable (so folding the read to a
+ * literal is observationally right — nothing can ever change it). The expected output is
+ * node's, not transcribed.
+ */
+differential("stdlib batch 1: the Math constants match node", [
+  {
+    name: "all eight Math data properties, read as values",
+    code: `
+console.log(Math.E, Math.PI);
+console.log(Math.LN2, Math.LN10);
+console.log(Math.LOG2E, Math.LOG10E);
+console.log(Math.SQRT2, Math.SQRT1_2);
+`,
+  },
+  {
+    name: "a Math constant flows through every position an ordinary number does",
+    code: `
+console.log(String(Math.PI));
+console.log(Number(Math.E));
+console.log(\`\${Math.PI}\`);
+console.log((Math.PI).toFixed(3));
+const x = Math.PI;
+console.log(x * 2, Math.floor(Math.PI), Math.max(Math.E, Math.PI));
+`,
+  },
+]);
+
+/*
+ * The other half of the Math-constant path: what must STAY refused, and with what words.
+ *
+ * `MATH_CONSTS` is a `Map` for a behavioural reason, and this pins it. Were it a plain
+ * object, `Math.constructor` would read through `Object.prototype`, answer a FUNCTION,
+ * satisfy the `!== undefined` guard, and fold to `NaN` — exit 0, wrong output, the
+ * silent-wrong-answer class. `NUMBER_CONSTS` shipped exactly that bug (six inherited
+ * names; see `test/record-dict.test.ts`), so the same six are pinned here.
+ */
+describe("stdlib batch 1: a non-constant Math member is REFUSED, never folded", () => {
+  const REFUSED: string[] = [
+    `console.log(Math.constructor);`,     // node: [Function: Object]
+    `console.log(Math.toString);`,        // node: [Function: toString]
+    `console.log(Math.hasOwnProperty);`,  // node: [Function: hasOwnProperty]
+    `console.log(Math.valueOf);`,         // node: [Function: valueOf]
+    `console.log(Math.NOPE);`,            // node: undefined
+    `console.log(Math.pi);`,              // node: undefined — the constants are CASE-sensitive
+    `console.log(Math.floor);`,           // node: [Function: floor] — a method as a VALUE
+  ];
+  for (const src of REFUSED) {
+    test(`refused: ${src.trim()}`, () => { expect(rejectCode(src)).toBe("NT1002"); });
+  }
+
+  test("a user binding named Math SHADOWS the builtin, as in node", async () => {
+    const { ours, oracle } = await expectMatchesNode(`
+const Math = { PI: 1, floor: 2 };
+console.log(Math.PI, Math.floor);
+`);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
+/*
+ * A builtin named as a bare VALUE. `'Math' is not defined` was a FALSE sentence — the
+ * same one `Math.PI` used to produce — and it points a reader at a missing import rather
+ * than at the unimplemented feature. It is also filed in the wrong band: `src/coverage.ts`
+ * counts only NT1xxx into its blocker histogram, so as an NT2xxx ("the user's type
+ * error") every one of these was invisible to the burn-down meant to find it. Same
+ * argument the `process.*` host reads were re-banded under.
+ *
+ * The hint ASSERTS that the compiler implements the name's members, so every namespace
+ * listed has a member proven against node above or in the fixtures; a name with no member
+ * support (`Promise`) keeps the honest `not defined`.
+ */
+describe("stdlib batch 1: a known builtin used as a value says so, and is not called undefined", () => {
+  for (const name of ["Math", "JSON", "console", "Number", "String", "Object", "Array", "Date"]) {
+    test(`\`const v = ${name}\` names the real gap`, () => {
+      const d = rejectDiag(`const v = ${name};\nconsole.log(typeof v);\n`);
+      expect(d.code).toBe("NT1002");
+      expect(d.message).toContain(`'${name}'`);
+      expect(d.message).not.toContain("is not defined");
+      expect(d.hint).toContain(`${name}.`);
+    });
+  }
+
+  test("a genuinely unknown name is still NT2001 'is not defined'", () => {
+    const d = rejectDiag(`const v = nosuchthing;\nconsole.log(v);\n`);
+    expect(d.code).toBe("NT2001");
+    expect(d.message).toBe("'nosuchthing' is not defined");
+  });
+
+  test("a builtin with no implemented members keeps the honest 'not defined'", () => {
+    // The hint the branch above emits would be a LIE for a name whose members are all
+    // missing, so `Promise` must not be in the set until one of them lands.
+    expect(rejectDiag(`const v = Promise;\nconsole.log(v);\n`).code).toBe("NT2001");
+  });
+});
 
 /*
  * `Math.round` — ECMAScript 21.3.2.28, which is NOT `floor(x + 0.5)`.

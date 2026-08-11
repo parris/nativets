@@ -460,6 +460,9 @@ interface RecvHint {
   already: boolean;
   /** A dotted path rather than a bare name; its root name, for the "rebound" clause. */
   root?: string;
+  /** Can that root actually be reassigned? A `const` cannot, so the "rebound" clause
+   *  states an impossible cause and prescribes a rename — see `narrowAdvice`. */
+  rootRebindable?: boolean;
 }
 
 // `//@@mutable`, which it could NOT be until the cycle rule landed. `parent: Scope | null`
@@ -545,6 +548,28 @@ const MATH_ARITY: Map<string, number> = new Map<string, number>()
   .set("floor", 1).set("ceil", 1).set("round", 1).set("abs", 1)
   .set("sqrt", 1).set("trunc", 1).set("pow", 2);
 const MATH_VARIADIC = new Set(["max", "min"]);
+
+/**
+ * The `Math.*` DATA properties — the eight of them, exact IEEE-754 values like node.
+ *
+ * A `Map` for the same behavioural reason `NUMBER_CONSTS` is one: a plain object read
+ * with a member name falls through to `Object.prototype`, so `Math.constructor` would
+ * answer a FUNCTION, the guard above would take it for a real constant, and the read
+ * would fold to `NaN` where node prints `[Function: Function]` — exit 0 on both sides,
+ * the silent-wrong-answer class. A Map has no prototype chain, so `.get` answers
+ * `undefined` and the refusal fires. ES 21.3.1 makes all eight
+ * non-writable/non-configurable, which is what makes folding the read to a literal
+ * observationally right: nothing can ever assign one.
+ */
+export const MATH_CONSTS: Map<string, number> = new Map<string, number>()
+  .set("E", Math.E)
+  .set("LN10", Math.LN10)
+  .set("LN2", Math.LN2)
+  .set("LOG10E", Math.LOG10E)
+  .set("LOG2E", Math.LOG2E)
+  .set("PI", Math.PI)
+  .set("SQRT1_2", Math.SQRT1_2)
+  .set("SQRT2", Math.SQRT2);
 interface MethodSig { min: number; max: number; argTys: (Ty | null)[]; ret: Ty; }
 /** stdlib Batch 1 (part 2): predicate HOFs — one inline arrow, boolean body. */
 const SEARCH_HOFS = new Set(["some", "every", "find", "findIndex", "findLast", "findLastIndex"]);
@@ -706,6 +731,20 @@ const GLOBAL_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("mousePressed", { min: 0, max: 0, argTys: [], ret: "boolean" }) // left button pressed this frame
   .set("pointInRect", { min: 6, max: 6, argTys: ["number", "number", "number", "number", "number", "number"], ret: "boolean" }) // px,py,x,y,w,h
   .set("setTargetFPS", { min: 1, max: 1, argTys: ["number"], ret: "void" });
+/**
+ * The builtin objects this compiler KNOWS — recognized only through their members
+ * (`Math.floor`, `JSON.stringify`, `Object.keys`, `console.log`, …), never as a value.
+ *
+ * The list exists so that naming one bare (`const m = Math`) does not report `'Math' is
+ * not defined`, which is false and was measurably misleading: it is the same lie
+ * `Math.PI` told before it got a member-read path, and it sends a reader looking for a
+ * missing import instead of an unimplemented feature. Membership is EARNED — every name
+ * here has a member proven to compile and match node in `test/stdlib-batch1.test.ts` /
+ * the fixtures, because the hint asserts exactly that. `Boolean` is deliberately absent:
+ * it has no implemented members, and `Boolean(x)` is its own refusal (NT1003).
+ */
+const BUILTIN_NAMESPACES = new Set(["Math", "JSON", "console", "Number", "String", "Object", "Array", "Date"]);
+
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 const ACTOR_BUILTINS = new Set([
   "spawn", "send", "receive", "self", "__drain",
@@ -1506,11 +1545,18 @@ class Checker {
    */
   private typeReaches(t: Ty, target: string): boolean {
     let seen = new Set<string>();
-    // NOT `//@@mutable`: the worklist is drained with `.pop`, and the opt-in legalizes
-    // `.push` ONLY — the mark would be dead weight, not a fix.
+    // A CURSOR over an append-only worklist, and `//@@mutable` for the appends. `.pop()!`
+    // is what this used to be, and TAKING the popped element is the half of `.pop` the
+    // accumulator opt-in does NOT legalize — so the drain, not the append, was the blocker.
+    // Walking forward makes it breadth-first where it used to be depth-first; the answer is
+    // a least fixpoint over `recTypes` and `seen` bounds the walk, so the ORDER changes only
+    // which `@X` is expanded first, never whether `target` is reached.
+    //@@mutable
     const front: Ty[] = [t];
-    while (front.length) {
-      const { folded, inline } = this.nominalRefs(front.pop()!);
+    let head = 0;
+    while (head < front.length) {
+      const { folded, inline } = this.nominalRefs(front[head]!);
+      head = head + 1;
       for (const n of inline) if (n === target) return true; // its body was in that string
       for (const n of folded) {
         if (n === target) return true;
@@ -1826,7 +1872,19 @@ class Checker {
    * — TypeScript's `controlFlowTruthiness.ts`. Only the positive branch narrows: `0`,
    * `""` and `false` are falsy while present, so the else branch proves nothing.
    */
-  private guardFacts(e: Expr, scope: Scope, positive: boolean, out: NarrowFact[]): void {
+  private guardFacts(
+    e: Expr,
+    scope: Scope,
+    positive: boolean,
+    // The narrowing-fact family is ONE accumulator threaded from `factsFor`'s local (which
+    // is `//@@mutable` already) down through `guardFacts`/`assertFacts` to the three leaves
+    // that actually `.push`. Every hop has to carry the mark, because passing a parameter
+    // into a marked slot carries the obligation with it — that is what makes the leaf
+    // append land in the caller's array. Rebinding instead (`out = [...out, f]`) is NT1608
+    // and would drop every fact on the floor.
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     switch (e.kind) {
       case "Identifier":
       case "MemberExpr":
@@ -1884,7 +1942,13 @@ class Checker {
    *  Takes a plain `Expr` and re-tests `kind`: an `Expr & { kind: … }` intersection is
    *  outside the subset we compile, and writing one here would add a self-host blocker
    *  to our own source (which is exactly how this was caught). */
-  private isArrayFacts(e: Expr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+  private isArrayFacts(
+    e: Expr,
+    scope: Scope,
+    matched: boolean,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     if (e.kind !== "CallExpr") return;
     const c = e.callee;
     if (c.kind !== "MemberExpr" || c.property !== "isArray") return;
@@ -1904,7 +1968,12 @@ class Checker {
    * assertion never returns. Conditional positions (a `&&`/`||`/`??` right operand, a
    * `?:` arm, an arrow body) are skipped: they may not run.
    */
-  private assertFacts(e: Expr, scope: Scope, out: NarrowFact[]): void {
+  private assertFacts(
+    e: Expr,
+    scope: Scope,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     const go = (x: Expr) => this.assertFacts(x, scope, out);
     switch (e.kind) {
       case "NonNullExpr":
@@ -1937,7 +2006,13 @@ class Checker {
    * (the tags never match); `kind` is the literal that was compared against, or null for a
    * truthiness test / `!` assertion, which prove it outright.
    */
-  private addFact(e: Expr, scope: Scope, kind: Ty | null, out: NarrowFact[]): void {
+  private addFact(
+    e: Expr,
+    scope: Scope,
+    kind: Ty | null,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     const p = this.accessPath(e, scope);
     if (p === undefined || !isNullableTy(p.ty)) return;
     if (kind !== null && nullishKind(p.ty) !== kind) return;
@@ -1958,7 +2033,13 @@ class Checker {
    * the binding simply stays the full union (still printable, still tag-correct) and
    * any arm-specific use of it is refused. Conservative, never wrong.
    */
-  private typeofFacts(e: BinaryExpr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+  private typeofFacts(
+    e: BinaryExpr,
+    scope: Scope,
+    matched: boolean,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     for (const [t, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
       if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") continue;
       const p = this.accessPath(t.operand, scope);
@@ -2016,6 +2097,9 @@ class Checker {
   /** Specializations in emission order, and the queue of ones whose body is unchecked. */
   private specialized: FuncDecl[] = [];
   private pending: FuncDecl[] = [];
+  /** How far `drainInstantiations` has walked `pending` — the forward index that replaces
+   *  `.shift()`. `pending` is append-only, so "unchecked" is exactly the tail from here. */
+  private drained = 0;
 
   declareGeneric(fn: FuncDecl, base: () => Scope): void {
     if (this.generics.has(fn.name) || this.functions.has(fn.name)) throw typeError(`Duplicate function '${fn.name}'`);
@@ -2024,10 +2108,21 @@ class Checker {
   }
   specializations(): FuncDecl[] { return this.specialized; }
 
-  /** Check every queued specialization body; checking one may enqueue more. */
+  /**
+   * Check every queued specialization body; checking one may enqueue more.
+   *
+   * A CURSOR, not `.shift()` — the spelling the `.shift` refusal itself prescribes ("a
+   * queue is better spelled as an index that walks forward over a fixed array"), and this
+   * was the one site of `.shift` in the compiler's own source. Same FIFO order and the
+   * same re-read of `length` per iteration, so a body that enqueues more is picked up
+   * exactly as before; `pending` is append-only, so the only difference is that a drained
+   * entry stays in the array instead of being removed from the front (O(n) per call, and
+   * there is no `nt_arr_shift` to lower it to anyway).
+   */
   drainInstantiations(base: () => Scope): void {
-    while (this.pending.length) {
-      const fn = this.pending.shift()!;
+    while (this.drained < this.pending.length) {
+      const fn = this.pending[this.drained]!;
+      this.drained = this.drained + 1;
       this.checkFunction(fn, base());
     }
   }
@@ -2864,9 +2959,12 @@ class Checker {
       // name" is now reachable here as well — and without the root the advice would read
       // `narrow it first (\`if (n.kind === "num")\`)` at a read whose author wrote exactly
       // that test one line up, which is the untruthful-hint shape this repo keeps finding.
-      return { text, stable: true, already: b !== undefined && b.narrowedFrom !== undefined, root: obj.name };
+      return { text, stable: true, already: b !== undefined && b.narrowedFrom !== undefined, root: obj.name, rootRebindable: b === undefined || !b.constant };
     }
-    return { text, stable: true, already: this.narrowedTy(p.binding, p.path) !== undefined, root: p.name };
+    // The ROOT's binding, not the path's own — the "rebound" clause is about `x = …` on
+    // the root, which is the only assignment a path over immutable objects can suffer
+    // (`accessPath` has already declined every `@@mutable` link above this point).
+    return { text, stable: true, already: this.narrowedTy(p.binding, p.path) !== undefined, root: p.name, rootRebindable: !p.binding.constant };
   }
 
   /**
@@ -2981,7 +3079,16 @@ class Checker {
     // A dotted path DOES narrow, so "no test written" is no longer the only way to get
     // here with one: the fact is also dropped when the root is rebound between the proof
     // and this read. Naming both is what keeps the advice true in either case.
-    const rebound = recv !== undefined && recv.root !== undefined
+    //
+    // ...but only where a rebind is POSSIBLE. Both rules that drop a fact here
+    // (`unstableNames` and `closureMayAssign`) key on ASSIGNMENT, and neither can fire on
+    // a `const`, so on a `const` root this clause named an impossible cause and then
+    // prescribed `const v = n;` — a rename of a binding that already has the property the
+    // advice asks for. On `const v = <expr>` it degenerated all the way to
+    // `bind \`const v = v;\``. Third instance of the circular-hint shape in this file; the
+    // other two are `narrowing 5` and the module-level-binding block in
+    // test/narrowing.test.ts.
+    const rebound = recv !== undefined && recv.root !== undefined && (recv.rootRebindable ?? true)
       ? ` — and if that test is already written, '${recv.root}' is assigned between it and this read ` +
         `(anywhere in the region, or inside any arrow), which drops the narrowing; bind ` +
         `\`const v = ${x};\` before the test and narrow \`v\``
@@ -3571,6 +3678,16 @@ class Checker {
         if (!b) {
           const fnv = this.functionValueTy(e.name);
           if (fnv !== undefined) return fnv;
+          // A builtin NAMESPACE named as a bare value (`const m = Math`). These names are
+          // very much defined — `Math.floor(x)`, `JSON.stringify(v)` and `console.log(v)`
+          // all compile — so `'Math' is not defined` was simply a false statement, the
+          // same lie `Math.PI` used to tell one case down. What is actually missing is the
+          // namespace OBJECT as a first-class value; say that, and file it as a missing
+          // feature (NT1xxx, which `src/coverage.ts` counts into the blocker histogram)
+          // rather than as the user's type error.
+          if (BUILTIN_NAMESPACES.has(e.name)) {
+            throw nyi(NYI.OBJECT, `the builtin '${e.name}' as a value`, `'${e.name}' IS defined — this compiler implements its members (\`${e.name}.…\`), not the object itself as a first-class value; name the member you want`, e.loc);
+          }
           throw typeError(`'${e.name}' is not defined`);
         }
         // Control-flow narrowing: on this path the binding was PROVED non-nullish, so it
@@ -3588,6 +3705,10 @@ class Checker {
         if (!scope.lookup("process")) {
           if (e.object.kind === "Identifier" && e.object.name === "process") {
             if (e.property === "argv") return "string[]";
+            // process.platform — node's spelling for the platform the program RUNS on
+            // ("darwin"/"linux"/"win32"/…). Resolved in the C runtime rather than folded
+            // by codegen, so a cross-compiled binary reports its TARGET; see nt_platform().
+            if (e.property === "platform") return "string";
             // NT1028, the HOST FFI code — not a bare `typeError`. `process.stdout.foo`
             // three hundred lines down already refuses through `nyi(NYI.HOSTMOD, …)`,
             // and NT1028's catalog hint is the one that names this exact surface
@@ -3610,6 +3731,17 @@ class Checker {
         // stdlib Batch 1: the `Number.*` numeric constants (MAX_SAFE_INTEGER, EPSILON, …).
         if (e.object.kind === "Identifier" && e.object.name === "Number" && !scope.lookup("Number")) {
           if (NUMBER_CONSTS.get(e.property) === undefined) throw nyi(NYI.OBJECT, `Number.${e.property}`);
+          return "number";
+        }
+        // The `Math.*` data properties. A member READ of `Math` had no path of its own —
+        // `Math` was recognized ONLY as a call callee (`Math.floor(x)`, in `inferCall`) —
+        // so `Math.PI` fell through to `this.type(e.object)` below and came back as
+        // `NT2001 'Math' is not defined`, which is FALSE: the very next line may call
+        // `Math.floor` fine. A METHOD named here (`Math.floor` uncalled) is a function
+        // value, which is a different missing feature, so it keeps the NYI refusal rather
+        // than being folded to a number.
+        if (e.object.kind === "Identifier" && e.object.name === "Math" && !scope.lookup("Math")) {
+          if (MATH_CONSTS.get(e.property) === undefined) throw nyi(NYI.OBJECT, `Math.${e.property}`);
           return "number";
         }
         const ot = this.type(e.object, scope);
@@ -3810,7 +3942,7 @@ class Checker {
           // A general union is a BOX: `===` on it compared the two boxes' TAGS, so
           // `1 === 2` came out true. Refuse until the arms are compared themselves.
           for (const t of [l, r]) refuseUnboxedUnion(t, "`===`");
-          if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`, exprLoc(e));
+          if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`, exprLoc(e), mixedNullableHint(e, l, r));
           return "boolean";
         }
         if (BITWISE.has(e.op)) {
@@ -5012,7 +5144,10 @@ class Checker {
           if (vt !== "number" && vt !== "string" && vt !== "boolean") throw nyi(NYI.OBJECT, `Object.fromEntries value of type ${vt}`);
           fields.push(`${key}:${vt}`);
         }
-        return `{${fields.join(",")}}` as Ty;
+        // Canonicalized like every other minted object type — `Object.fromEntries` builds a
+        // key set as freely as an object literal does, so `[["b",…],["2",…]]` must enumerate
+        // `2` first exactly as `{b:…,"2":…}` does.
+        return objectType(objectFields(`{${fields.join(",")}}` as Ty));
       }
       // --- stdlib Batch 3 ---
       // `Object.freeze(o)` is the IDENTITY here and honestly so: objects are already
@@ -6246,8 +6381,9 @@ class Checker {
       // different name: it removes from the FRONT, so every remaining element moves —
       // O(n) per call, O(n²) to drain — and there is no `nt_arr_shift` in the runtime to
       // lower it to (`nt_arr_pop` is a decrement). The one site in this compiler's own
-      // source, `checker.ts`'s `this.pending.shift()!`, TAKES the removed element anyway,
-      // which is the half of `.pop` that is refused too.
+      // source was `checker.ts`'s `this.pending.shift()!`, which TOOK the removed element
+      // (the half of `.pop` that is refused too); it now walks a cursor, which is what the
+      // hint prescribes and is why `src/` no longer contains a `.shift`.
       //
       // `arr[0]` used to be offered here "for the first element" — the identical defect
       // the `.pop` hint carried above: on an empty array node's `.shift()` and node's
@@ -6711,14 +6847,124 @@ class Checker {
     return this.assignable(declared, inferred) && this.reshapable(arg, declared, inferred);
   }
 
-  /** First top-level return's type in a body (for closure/function return inference). */
+  /**
+   * First top-level return's type in a body (for closure/function return inference).
+   *
+   * TWO JOBS IN ONE LOOP, and they take OPPOSITE answers on the guard-clause idiom —
+   * which is why the narrowing here is deliberately asymmetric rather than a copy of
+   * `checkBlock`.
+   *
+   * The STATEMENT WALK is a full `checkStmt`, so every diagnostic in the body can be
+   * raised from here — and this pass runs BEFORE `checkBlock` does, so whatever it
+   * raises is what the user sees. It therefore has to model control flow exactly as
+   * `checkBlock` does, or it refuses code `checkBlock` would accept and the accepting
+   * pass never runs. It did not, and the guard clause was the casualty:
+   *
+   *     elems.forEach((el) => {
+   *       if (el.name === null) return;    // early-exit guard
+   *       out.push({ name: el.name });     // NT2001 — from HERE, not from checkBlock
+   *     });
+   *
+   * The `for`/`continue` spelling of the same loop compiled, because a `for` body is
+   * only ever walked by `checkBlock`. Nothing was miscompiled; the shape was simply
+   * unreachable in every body whose return type is inferred — every BLOCK-BODIED ARROW
+   * (annotated or not: `typeArrowReturn` calls this unconditionally) and every
+   * UNANNOTATED `function`. So the same three lines were accepted in a `function f():
+   * void` and refused in `const f = (): void =>`.
+   *
+   * THE RETURN ITSELF takes the WIDER of the two readings, and the asymmetry is the whole
+   * design. The type this function answers is not just this return's — `typeArrowReturn`
+   * hands it straight to `checkBlock` as the type EVERY return in the body is validated
+   * against, and a guard above the first top-level return proves nothing about the
+   * returns nested INSIDE that guard:
+   *
+   *     elems.map((el) => {
+   *       if (el.name === null) return null;   // nested — still `null`
+   *       return el.name;                      // first TOP-LEVEL return, narrows to string
+   *     });
+   *
+   * Answering `string` there makes `string` the body's type and refuses the `return null`
+   * above it — a program that compiles today and matches node. So the un-narrowed reading
+   * is preferred WHEN IT EXISTS, and it is the one every return fits.
+   *
+   * But it often does not exist, because the guard is what made the read legal at all:
+   *
+   *     function f(el: { name: string | null }) {
+   *       if (el.name === null) return 0;
+   *       return el.name.length;               // `?Nstring` has no `.length`
+   *     }
+   *
+   * Un-narrowed, that expression has no type — it is the NT2001 this whole method used to
+   * raise. So: type it narrowed (which is what `checkBlock` will do anyway), type it again
+   * un-narrowed, and answer the un-narrowed reading only if it produced a type.
+   *
+   * WHY THIS CANNOT REGRESS ANYTHING. The un-narrowed reading is exactly what this method
+   * computed before early-exit facts existed here, so any body whose first return HAD a
+   * type still gets that same type, unchanged. The narrowed reading is consulted only
+   * where the old code threw — and a thrown diagnostic accepted no program. The change is
+   * one-directional by construction: refusals become acceptances, no inferred type moves.
+   *
+   * Typing the expression twice is safe and is not a third evaluation of anything: both
+   * `checkFunction` and `typeArrowReturn` run a full `checkBlock` over the same body
+   * afterwards, so the `.ty` stamps codegen reads always come from THAT pass, never from
+   * either reading here. The second reading is skipped entirely when no exiting guard
+   * preceded the return (`pushed === 0`), which is every body that behaved correctly
+   * before — so the common path is the original one line.
+   */
   private inferBlockReturn(body: Stmt[], scope: Scope): Ty {
     const inner = scope.child();
-    for (const s of body) {
-      if (s.kind === "ReturnStmt") return s.argument ? this.type(s.argument, inner) : "number";
-      this.checkStmt(s, inner, "void"); // declare vars; don't validate returns
+    let pushed = 0;
+    try {
+      for (let i = 0; i < body.length; i++) {
+        const s = body[i]!;
+        if (s.kind === "ReturnStmt") {
+          if (s.argument === null) return "number";
+          const narrowed = this.type(s.argument, inner);
+          if (pushed === 0) return narrowed; // no guard above it — the two readings agree
+          for (let k = 0; k < pushed; k++) this.narrowStack.pop();
+          pushed = 0;
+          return this.widestReturnTy(s.argument, inner) ?? narrowed;
+        }
+        this.checkStmt(s, inner, "void"); // declare vars; don't validate returns
+        // The identical bookkeeping `checkBlock` does, over the identical region: the
+        // facts an exiting guard establishes cover exactly the statements below it.
+        const rest = body.slice(i + 1);
+        const facts = this.exitGuardFacts(s, inner, rest);
+        this.eliminateAfterEarlyExit(s, inner, rest, facts);
+        if (facts.length) { this.narrowStack.push(facts); pushed++; }
+      }
+    } finally {
+      // `finally`, unlike `checkBlock`'s trailing loop: this walk leaves by `return` on
+      // the common path, and `coverage` keeps going after a thrown diagnostic — either
+      // would otherwise strand a frame on the stack for the next body to read.
+      for (let k = 0; k < pushed; k++) this.narrowStack.pop();
     }
     return "number";
+  }
+
+  /**
+   * The type this return expression has with the enclosing guard facts already dropped,
+   * or `undefined` when it has none — see `inferBlockReturn` for why both readings are
+   * taken and which one wins.
+   *
+   * The `catch` swallows a diagnostic on purpose, and it is not a suppression: the SAME
+   * expression has just been typed successfully with the facts in force, so the program is
+   * known good, and the only question left is whether a wider type also describes it. A
+   * throw here means "no", which is an answer, not an error. Nothing is skipped as a
+   * result — `checkBlock` types this expression again, narrowed, and every diagnostic it
+   * raises is reported normally.
+   *
+   * An `NTError` ONLY. A bare `catch` here would also eat an `InternalError` — the one
+   * class that means the defect is OURS — and turn a loud compiler bug into a silently
+   * wider return type. Anything that is not a diagnostic is re-thrown.
+   */
+  private widestReturnTy(arg: Expr, inner: Scope): Ty | undefined {
+    try {
+      return this.type(arg, inner);
+    } catch (e) {
+      if (e instanceof NTError) return undefined;
+      throw e;
+    }
   }
 
   /** Return type of an unannotated function, inferred from its first top-level return. */
@@ -8508,6 +8754,50 @@ function refuseUnboxedUnion(ty: Ty, what: string): void {
 }
 
 /**
+ * The advice for `T === T | undefined` — one raw value, one tagged box.
+ *
+ * `Cannot compare string with ?Ustring` arrived with no `= help:` line at all, and this
+ * is a shape people write on purpose: comparing a value against an optional one is
+ * ordinary, correct JavaScript. The refusal itself is the same one the TWO-nullable case
+ * carries (a `[tag, value]` block and a raw value share no bit pattern, and the FCMP
+ * chain's fall-through would `strcmp` across the tag), and that case has always named the
+ * rewrite. This is the same sentence for the other arity.
+ *
+ * THE REWRITE IS EXACT, not merely compilable, which is why it can be stated flatly. An
+ * absent value never equals a present one, so under node `a === b` is `false` on exactly
+ * the paths where `b` is absent — which is what `b !== undefined && a === b` evaluates
+ * to. The `!==` spelling is its De Morgan dual and is exact for the same reason. Both are
+ * compiled against node in test/narrowing.test.ts, present arm and absent arm.
+ *
+ * The `??` alternative is offered with its condition attached rather than bare: it is
+ * only equivalent for a default the other side can never itself be, and `(b ?? "")`
+ * against an `a` that may be `""` is a wrong answer, not a rewrite.
+ *
+ * `undefined` WHERE THERE IS NOTHING TRUE TO SAY. Comparing a `string` with a `number` is
+ * a plain type error with no rewrite behind it, and this returns nothing for it rather
+ * than inventing one — the predicate is "the other side is exactly this nullable's own
+ * base type", so `?Ustring` against `number` gets no advice either.
+ */
+function mixedNullableHint(e: BinaryExpr, l: Ty, r: Ty): string | undefined {
+  const leftNullable = isNullableTy(l) && !isNullableTy(r) && baseTy(l) === r;
+  const rightNullable = isNullableTy(r) && !isNullableTy(l) && baseTy(r) === l;
+  if (!leftNullable && !rightNullable) return undefined;
+  const box = leftNullable ? l : r;
+  const kind = nullishKind(box);
+  // The comparison keeps the operands in the order the author wrote them, so the
+  // suggestion can be pasted over the line it is about.
+  const boxText = (leftNullable ? exprText(e.left) : exprText(e.right)) ?? "b";
+  const leftText = exprText(e.left) ?? "a";
+  const cmp = `${leftText} ${e.op} ${exprText(e.right) ?? "b"}`;
+  const negated = e.op === "!==" || e.op === "!=";
+  const rewrite = negated ? `${boxText} === ${kind} || ${cmp}` : `${boxText} !== ${kind} && ${cmp}`;
+  return `a \`${box}\` is a tagged box and a \`${baseTy(box)}\` is the raw value, so there is no bit ` +
+    `pattern they share. Narrow the nullable side first — \`${rewrite}\` — which is EXACTLY node's ` +
+    `answer here, because a value that is \`${kind}\` can never equal a present one. (A default works ` +
+    `too, \`${leftText} ${e.op} (${boxText} ?? d)\`, but only for a \`d\` the other side can never be.)`;
+}
+
+/**
  * Refuse the two `JSON.stringify` shapes an `undefined` arm cannot express here.
  *
  * node DROPS an undefined rather than rendering it, and drops it differently by
@@ -8827,7 +9117,17 @@ type RenameScope = Map<string, string>;
 
 /** The names bound DIRECTLY by this statement list (a `MultiStmt` is a scope-less group).
  *  `hoistedOnly` collects just the `FuncDecl`s, which is what a nested scope pre-binds. */
-function directBound(stmts: Stmt[], out: string[], hoistedOnly = false): void {
+function directBound(
+  stmts: Stmt[],
+  // The per-parameter ACCUMULATOR opt-in (docs/decorators.md). `out` is an out-parameter
+  // the three callers read back, so the two `.push`es below have to land in the CALLER's
+  // array — which is exactly what `@@mutable` on a parameter promises and what rebinding
+  // (`out = [...out, n]`, NT1608) would silently lose. The recursive `MultiStmt` call
+  // passes this same marked parameter along, which carries the obligation with it.
+  //@@mutable
+  out: string[],
+  hoistedOnly = false,
+): void {
   for (const s of stmts) {
     if (s.kind === "VarDecl") { if (!hoistedOnly) for (const d of s.decls) out.push(d.name); }
     else if (s.kind === "FuncDecl") out.push(s.name);

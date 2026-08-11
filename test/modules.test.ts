@@ -120,6 +120,17 @@ const CASES = [
   // `rewriteTy` threads are covered (a class TAG and a recursive `@N` back-edge), and the
   // already-correct `NewExpr` arm is exercised so the fix cannot be a move rather than an add.
   "calltypeargs",
+  // `UpdateExpr` in its NAME form (`x++`/`++x`/`x--`) on a non-entry module's top-level
+  // `let`. `Renamer.expr` renames `target` only when `targetExpr` is absent — `x++` names
+  // a BINDING, while `o.f++`/`a[i]++` update an expression the walk has already rewritten
+  // and their `target` is not a binding reference — and nothing covered that condition:
+  // `state` exercises the ASSIGNMENT form (`counter = counter + 1`) instead. The entry
+  // declares its own `counter` under the same name, so dropping the rename collapses the
+  // two cells into one and the numbers diverge from node with BOTH SIDES EXITING 0
+  // (verified by deleting the arm: `bumpTwice()` answers 0 rather than 2, and the entry's
+  // own counter reaches 102 because the module's `--` reached it) — the silent-wrong-
+  // answer shape `loopvar` records for `ForOfStmt.name2`.
+  "updatetarget",
 ];
 
 describe("modules (differential vs node)", () => {

@@ -671,3 +671,140 @@ console.log(String("abc"[-1]), String("abc".at(-1)));
     });
   });
 });
+
+/*
+ * A string bigger than the host can represent is a controlled PANIC too.
+ *
+ * These builders took their length as `(long)d`, which is UNDEFINED in C for a
+ * non-finite or out-of-range double, and then did the size arithmetic in `size_t`,
+ * which WRAPS. Both halves were reachable from ordinary source:
+ *
+ *   - `"abc".padStart(Infinity, "xy")` — arm64 saturates the conversion to LONG_MAX and
+ *     asks malloc for 9 exabytes (a bare signal); x86-64 yields LONG_MIN, which makes
+ *     `n >= target` TRUE and silently answers `"abc"` at exit 0. Same source, opposite
+ *     failures, decided by the host.
+ *   - `"abcd".repeat(2**62)` — 2^64 bytes truncates to 0, so it allocated ONE byte and
+ *     memcpy'd into it 2^62 times. An out-of-bounds heap write, observed as SIGBUS with
+ *     empty stdout AND empty stderr, the overflow having smashed stdio's own buffer.
+ *   - `"".repeat(1e100)` — hung forever on a LONG_MAX-trip loop of zero-byte copies.
+ *   - `"x".repeat(-1)` — answered "" at exit 0 where node throws.
+ *
+ * The cap is node's own: V8's maximum string length, 2^29-24 = 536870888 BYTES (we count
+ * UTF-8 bytes where node counts UTF-16 code units — the pre-existing A.2 divergence — so
+ * the boundaries coincide for ASCII). Verified by binary search against node v24:
+ * `"abc".padStart(536870888)` succeeds on both sides, 536870889 stops on both.
+ *
+ * Why a panic and not a catchable raise: see the block comment on `nt_panic_str_len` in
+ * runtime/runtime.c. node throws a RangeError, so the EXIT CODE diverges (134 vs 1) —
+ * docs/divergences.md. stdout up to the stop stays byte-comparable, which is what the
+ * differential harness compares.
+ */
+describe("string length", () => {
+  test("`padStart(Infinity)` panics with a diagnostic instead of dying on a bare signal", async () => {
+    const src = `console.log("start");
+console.log("abc".padStart(Infinity, "xy"));
+`;
+    const r = await run(src);
+    // stdout up to the stop is intact and byte-identical to node's.
+    expect(r.stdout).toBe("start\n");
+    expect(r.stdout).toBe(runWithNode(src).stdout);
+    expect(r.stderr).toContain("panic: invalid string length: the padded string would be Infinity bytes");
+    expect(r.exitCode).toBe(134);
+    // node's half of the contract: it stops here too, and says why.
+    expect(runWithNode(src).stderr).toContain("RangeError: Invalid string length");
+  });
+
+  test("the panic names node's exact maximum, so the cap cannot drift by one", async () => {
+    const r = await run(`console.log("abc".padStart(536870889, "x").length);\n`);
+    expect(r.stderr).toContain("the padded string would be 536870889 bytes, past the 536870888-byte maximum");
+    expect(r.exitCode).toBe(134);
+  });
+
+  test("`padEnd` shares the path", async () => {
+    const src = `console.log("start");
+console.log("abc".padEnd(2 ** 31, "xy"));
+`;
+    const r = await run(src);
+    expect(r.stdout).toBe("start\n");
+    expect(r.stderr).toContain("panic: invalid string length: the padded string would be 2147483648 bytes");
+    expect(r.exitCode).toBe(134);
+    expect(runWithNode(src).stderr).toContain("RangeError: Invalid string length");
+  });
+
+  test("`repeat` overflowing size_t panics instead of writing past a 1-byte buffer", async () => {
+    const src = `console.log("start");
+console.log("abcd".repeat(4611686018427387904).length);
+`;
+    const r = await run(src);
+    // The old wrap died with EMPTY stdout: the OOB write had already corrupted stdio's
+    // buffer, so even the line printed before the fault was lost. Asserting it is back
+    // is what distinguishes a controlled stop from the heap overflow.
+    expect(r.stdout).toBe("start\n");
+    expect(r.stderr).toContain("panic: invalid string length: the repeated string would be 18446744073709552000 bytes");
+    expect(r.exitCode).toBe(134);
+    expect(runWithNode(src).stderr).toContain("RangeError: Invalid string length");
+  });
+
+  test("a negative `repeat` count stops instead of silently answering the empty string", async () => {
+    const src = `console.log("start");
+console.log("x".repeat(-1).length);
+`;
+    const r = await run(src);
+    expect(r.stdout).toBe("start\n");
+    expect(r.stderr).toContain("panic: invalid count value: -1");
+    expect(r.stderr).toContain("RangeError: Invalid count value: -1");
+    expect(r.exitCode).toBe(134);
+    expect(runWithNode(src).stderr).toContain("RangeError: Invalid count value: -1");
+  });
+
+  test("the count is rejected BEFORE the length, so `\"\".repeat(Infinity)` stops", async () => {
+    // ES 22.1.3.18 step 3 runs ahead of the length check, which is why an empty receiver
+    // does not excuse an infinite count — while `"".repeat(1e100)` is a plain "".
+    const src = `console.log("start");
+console.log("".repeat(Infinity).length);
+`;
+    const r = await run(src);
+    expect(r.stderr).toContain("panic: invalid count value: Infinity");
+    expect(r.exitCode).toBe(134);
+    expect(runWithNode(src).stderr).toContain("RangeError: Invalid count value: Infinity");
+  });
+
+  test("`\"\".repeat(1e100)` is \"\" — it used to hang forever", async () => {
+    const src = `console.log("".repeat(1e100).length);\n`;
+    const r = await run(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe(runWithNode(src).stdout);
+  });
+
+  test("an empty pad returns the receiver even for an infinite target, exactly like node", async () => {
+    // ES 22.1.3.17: the empty-filler short-circuit runs BEFORE the length is checked, so
+    // this is `"abc"` and not a RangeError. Getting the order wrong would panic here.
+    const src = `console.log("abc".padStart(Infinity, ""));
+console.log("abc".padEnd(Infinity, ""));
+`;
+    const r = await run(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe("abc\nabc\n");
+    expect(r.stdout).toBe(runWithNode(src).stdout);
+  });
+
+  test("every in-range pad/repeat still matches node byte for byte", async () => {
+    const src = `console.log("abc".padStart(NaN, "xy"));
+console.log("abc".padStart(-5, "xy"));
+console.log("abc".padStart(0, "xy"));
+console.log("abc".padStart(10, ""));
+console.log("abc".padStart(10, "xy"));
+console.log("abc".padStart(4.9, "z"));
+console.log("abc".padEnd(10, "xy"));
+console.log("abc".padEnd(3, "xy"));
+console.log("x".repeat(NaN).length);
+console.log("x".repeat(-0.5).length);
+console.log("x".repeat(0).length);
+console.log("ab".repeat(2.9));
+console.log("ab".repeat(3));
+`;
+    const r = await run(src);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe(runWithNode(src).stdout);
+  });
+});
