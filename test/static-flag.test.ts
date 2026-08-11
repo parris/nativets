@@ -13,12 +13,39 @@ import { linkArgv, resolveStatic, supportsStatic, type Target } from "../src/dri
 const FILES = { ll: "/tmp/module.ll", rt: "/tmp/runtime.c", actor: null, extra: [], out: "/tmp/prog" };
 
 describe("--static flag plumbing", () => {
-  test("android is a static-capable target; iOS is not", () => {
+  /*
+   * The PLATFORM-INDEPENDENT targets, which are the ones this can actually pin. Every
+   * answer here is a fixed fact about the target's libc, so a wrong one is a real failure.
+   * `windows` was missing and is the reason this list is worth stating in full: it links
+   * against the UCRT/MSVCRT and has no fully-static libc archive in the default toolchain,
+   * exactly like Apple — a claim nothing was checking.
+   */
+  test("static capability is a fixed fact per target", () => {
     expect(supportsStatic("android")).toBe(true);
     expect(supportsStatic("ios")).toBe(false);
     expect(supportsStatic("ios-sim")).toBe(false);
-    // host is Apple (no static libc) only on macOS; a Linux host can link static.
-    expect(supportsStatic("host")).toBe(process.platform !== "darwin");
+    expect(supportsStatic("windows")).toBe(false);
+  });
+
+  /*
+   * `host` with the platform INJECTED, which is the only way this branch is measurable.
+   *
+   * It used to read `expect(supportsStatic("host")).toBe(process.platform !== "darwin")` —
+   * the implementation's own expression copied into the assertion. That passes on every
+   * machine for every edit to the line it is meant to guard. Verified by mutation:
+   * inverting `case "host"` to `=== "darwin"` was caught by NOTHING. Rerouting the
+   * assertion through `resolveStatic` did not help either, and it is worth writing down
+   * why — `resolveStatic` DELEGATES to `supportsStatic`, so the two move together and the
+   * mutant still survived. A consistency check between a function and its own caller is
+   * not independent evidence.
+   *
+   * With the platform as a parameter both answers are fixed facts, and the mutant dies.
+   */
+  test("host is static-capable on Linux and not on macOS", () => {
+    expect(supportsStatic("host", "linux")).toBe(true);
+    expect(supportsStatic("host", "darwin")).toBe(false);
+    // The default still tracks the real platform — that is what production calls.
+    expect(supportsStatic("host")).toBe(supportsStatic("host", process.platform));
   });
 
   test("resolveStatic emits -static only for capable targets", () => {

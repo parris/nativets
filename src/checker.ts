@@ -2901,8 +2901,12 @@ class Checker {
     const what = ot === "string" ? "a string" : isBytesTy(ot) ? "a Uint8Array" : "an array";
     throw boundsError(
       `index ${idx} is out of bounds for ${what} of length ${len}`,
-      `valid indices are 0..${len - 1}` +
-        (len === 0 ? " (there are none — it is empty)" : "") +
+      // `len === 0` first: the general branch renders "valid indices are 0..-1", which is
+      // not a range and reads as a second, invented error. The parenthetical after it did
+      // explain the emptiness, but only to a reader who had already forgiven the "0..-1".
+      (len === 0
+        ? `${what} of length 0 has no valid indices at all`
+        : `valid indices are 0..${len - 1}`) +
         "; " + atSuggestion(idx),
     );
   }

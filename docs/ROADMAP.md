@@ -363,6 +363,23 @@ that RC handles it, and RC does handle it *at frame scope*, releasing once at fu
 rather than once per iteration (hence n-1, not n). Silent on macOS: LeakSanitizer is
 Linux-only. The fix belongs in codegen's `emitStrDrops`, not in `isLinearTy`.
 
+**FIXED 2026-08-11 (`c2663f9`).** `genStmts` now releases the strings a REPEATING block
+declared — and nulls each slot — at every exit from it: fall-through, `break`/`continue`
+through `emitJumpDrops`, and the inlined-HOF `return` through `emitStrScopeDropsTo`. That
+last path was its own leak of the same class: a callback body that returns early
+*terminates* the block, so the fall-through release never runs, and it is not a `break`, so
+the jump unwinder never sees it — one string per ELEMENT (6 -> 0 on a 5-element `.map`, and
+0 at 50 and 500). Restricted to repeating blocks because a block that runs once per frame
+has no leak to fix; ungated it moved corpus IR +3.16%, past the 3% aggregate threshold.
+
+**And the instrument note this class deserves:** `leaks(1)` reports **ZERO** on the
+400,000-iteration program and is not wrong — the strings stay REACHABLE from the runtime's
+registry, so this was unbounded *growth*, not unreachable memory. No reachability checker
+could have found it. Peak RSS was the measurement that could: **60.3 MiB before, 1.5 MiB
+after**, against 1.7 MiB for the same program at 2,000 iterations. Same family as
+`__arrLive` counting headers instead of blocks — ask what the instrument can see, and scale
+the input until the number has to move.
+
 **A NULLABLE box is a stronger case than any of these, and it is not on the list above because
 it never reaches a drop at all.** `isLinearTy` (src/ownership.ts) is
 `isArrayTy || isObjectTy || isUnionTy || isTypeRefTy` — a nullable is none of them, so a

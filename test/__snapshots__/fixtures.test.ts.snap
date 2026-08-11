@@ -10645,101 +10645,107 @@ then4:
   %t15 = load double, ptr %i.addr
   %t16 = fadd double %t15, 1.0
   store double %t16, ptr %i.addr
+  %t17 = load ptr, ptr %name.addr
+  call void @nt_str_release(ptr %t17)
+  store ptr null, ptr %name.addr
   br label %while1
 endif5:
-  %t17 = load double, ptr %i.addr
-  store double %t17, ptr %j.addr
+  %t18 = load double, ptr %i.addr
+  store double %t18, ptr %j.addr
   br label %while6
 while6:
-  %t18 = load double, ptr %j.addr
-  %t19 = load ptr, ptr %t.addr
-  %t20 = call double @js_str_len(ptr %t19)
-  %t21 = fcmp olt double %t18, %t20
-  store i1 %t21, ptr %s9
-  br i1 %t21, label %rhs10, label %logend11
+  %t19 = load double, ptr %j.addr
+  %t20 = load ptr, ptr %t.addr
+  %t21 = call double @js_str_len(ptr %t20)
+  %t22 = fcmp olt double %t19, %t21
+  store i1 %t22, ptr %s9
+  br i1 %t22, label %rhs10, label %logend11
 rhs10:
-  %t22 = load ptr, ptr %t.addr
-  %t23 = load double, ptr %j.addr
-  %t24 = call ptr @nt_str_index(ptr %t22, double %t23, ptr @.str.34)
-  %t25 = call i1 @isIdentPart(ptr %t24)
-  store i1 %t25, ptr %s9
+  %t23 = load ptr, ptr %t.addr
+  %t24 = load double, ptr %j.addr
+  %t25 = call ptr @nt_str_index(ptr %t23, double %t24, ptr @.str.34)
+  %t26 = call i1 @isIdentPart(ptr %t25)
+  store i1 %t26, ptr %s9
   br label %logend11
 logend11:
-  %t26 = load i1, ptr %s9
-  br i1 %t26, label %body7, label %endwhile8
+  %t27 = load i1, ptr %s9
+  br i1 %t27, label %body7, label %endwhile8
 body7:
-  %t27 = load double, ptr %j.addr
-  %t28 = fadd double %t27, 1.0
-  store double %t28, ptr %j.addr
+  %t28 = load double, ptr %j.addr
+  %t29 = fadd double %t28, 1.0
+  store double %t29, ptr %j.addr
   br label %while6
 endwhile8:
-  %t29 = load ptr, ptr %t.addr
-  %t30 = load double, ptr %i.addr
-  %t31 = load double, ptr %j.addr
-  %t32 = call ptr @js_str_slice(ptr %t29, double %t30, double %t31)
-  store ptr %t32, ptr %name.addr
-  %t33 = load ptr, ptr %t.addr
-  %t34 = load double, ptr %j.addr
-  %t35 = call ptr @nt_str_index(ptr %t33, double %t34, ptr @.str.35)
-  %t37 = call i32 @js_str_eq(ptr %t35, ptr @.str.36)
-  %t36 = icmp ne i32 %t37, 0
-  br i1 %t36, label %then12, label %else14
+  %t30 = load ptr, ptr %t.addr
+  %t31 = load double, ptr %i.addr
+  %t32 = load double, ptr %j.addr
+  %t33 = call ptr @js_str_slice(ptr %t30, double %t31, double %t32)
+  store ptr %t33, ptr %name.addr
+  %t34 = load ptr, ptr %t.addr
+  %t35 = load double, ptr %j.addr
+  %t36 = call ptr @nt_str_index(ptr %t34, double %t35, ptr @.str.35)
+  %t38 = call i32 @js_str_eq(ptr %t36, ptr @.str.36)
+  %t37 = icmp ne i32 %t38, 0
+  br i1 %t37, label %then12, label %else14
 then12:
-  %t38 = load ptr, ptr %out.addr
-  %t39 = load ptr, ptr %tags.addr
-  %t40 = load ptr, ptr %name.addr
-  %rc41 = call ptr @nt_str_retain(ptr %t40)
-  %t42 = ptrtoint ptr %t40 to i64
-  %t43 = call i32 @nt_map_has_slot(ptr %t39, i32 1, i64 %t42)
-  %t44 = call i64 @nt_map_get_slot(ptr %t39, i32 1, i64 %t42)
-  %t45 = icmp ne i32 %t43, 0
-  %t46 = select i1 %t45, i64 2, i64 0
-  %t47 = select i1 %t45, i64 %t44, i64 0
-  %t48 = call ptr @nt_obj_new(double 0x4000000000000000)
-  %t49 = getelementptr i64, ptr %t48, i64 0
-  store i64 %t46, ptr %t49
-  %t50 = getelementptr i64, ptr %t48, i64 1
+  %t39 = load ptr, ptr %out.addr
+  %t40 = load ptr, ptr %tags.addr
+  %t41 = load ptr, ptr %name.addr
+  %rc42 = call ptr @nt_str_retain(ptr %t41)
+  %t43 = ptrtoint ptr %t41 to i64
+  %t44 = call i32 @nt_map_has_slot(ptr %t40, i32 1, i64 %t43)
+  %t45 = call i64 @nt_map_get_slot(ptr %t40, i32 1, i64 %t43)
+  %t46 = icmp ne i32 %t44, 0
+  %t47 = select i1 %t46, i64 2, i64 0
+  %t48 = select i1 %t46, i64 %t45, i64 0
+  %t49 = call ptr @nt_obj_new(double 0x4000000000000000)
+  %t50 = getelementptr i64, ptr %t49, i64 0
   store i64 %t47, ptr %t50
-  %t52 = getelementptr i64, ptr %t48, i64 0
-  %t53 = load i64, ptr %t52
-  %t51 = icmp ult i64 %t53, 2
-  br i1 %t51, label %nc16, label %ncl17
+  %t51 = getelementptr i64, ptr %t49, i64 1
+  store i64 %t48, ptr %t51
+  %t53 = getelementptr i64, ptr %t49, i64 0
+  %t54 = load i64, ptr %t53
+  %t52 = icmp ult i64 %t54, 2
+  br i1 %t52, label %nc16, label %ncl17
 nc16:
-  %t54 = load ptr, ptr %name.addr
-  store ptr %t54, ptr %s15
+  %t55 = load ptr, ptr %name.addr
+  store ptr %t55, ptr %s15
   br label %nce18
 ncl17:
-  %t55 = getelementptr i64, ptr %t48, i64 1
-  %t56 = load i64, ptr %t55
-  %t57 = inttoptr i64 %t56 to ptr
-  store ptr %t57, ptr %s15
+  %t56 = getelementptr i64, ptr %t49, i64 1
+  %t57 = load i64, ptr %t56
+  %t58 = inttoptr i64 %t57 to ptr
+  store ptr %t58, ptr %s15
   br label %nce18
 nce18:
-  %t58 = load ptr, ptr %s15
-  %t59 = call ptr @js_str_concat(ptr @.str.22, ptr %t58)
-  %t60 = call ptr @js_str_concat(ptr %t59, ptr @.str.36)
-  call void @nt_str_release(ptr %t59)
-  %t61 = call ptr @js_str_concat(ptr %t38, ptr %t60)
-  store ptr %t61, ptr %out.addr
-  %t62 = load double, ptr %j.addr
-  %t63 = fadd double %t62, 0x3FF0000000000000
-  store double %t63, ptr %i.addr
+  %t59 = load ptr, ptr %s15
+  %t60 = call ptr @js_str_concat(ptr @.str.22, ptr %t59)
+  %t61 = call ptr @js_str_concat(ptr %t60, ptr @.str.36)
+  call void @nt_str_release(ptr %t60)
+  %t62 = call ptr @js_str_concat(ptr %t39, ptr %t61)
+  store ptr %t62, ptr %out.addr
+  %t63 = load double, ptr %j.addr
+  %t64 = fadd double %t63, 0x3FF0000000000000
+  store double %t64, ptr %i.addr
   br label %endif13
 else14:
-  %t64 = load ptr, ptr %out.addr
-  %t65 = load ptr, ptr %name.addr
-  %t66 = call ptr @js_str_concat(ptr %t64, ptr %t65)
-  store ptr %t66, ptr %out.addr
-  %t67 = load double, ptr %j.addr
-  store double %t67, ptr %i.addr
+  %t65 = load ptr, ptr %out.addr
+  %t66 = load ptr, ptr %name.addr
+  %t67 = call ptr @js_str_concat(ptr %t65, ptr %t66)
+  store ptr %t67, ptr %out.addr
+  %t68 = load double, ptr %j.addr
+  store double %t68, ptr %i.addr
   br label %endif13
 endif13:
-  br label %while1
-endwhile3:
-  %t68 = load ptr, ptr %out.addr
   %t69 = load ptr, ptr %name.addr
   call void @nt_str_release(ptr %t69)
-  ret ptr %t68
+  store ptr null, ptr %name.addr
+  br label %while1
+endwhile3:
+  %t70 = load ptr, ptr %out.addr
+  %t71 = load ptr, ptr %name.addr
+  call void @nt_str_release(ptr %t71)
+  ret ptr %t70
 }
 
 define double @wordIndex(ptr %hay, ptr %word) {
@@ -10893,53 +10899,59 @@ ofbody3:
   %t11 = fcmp olt double %t10, 0x0000000000000000
   br i1 %t11, label %then6, label %endif7
 then6:
+  %t12 = load ptr, ptr %rest.addr
+  call void @nt_str_release(ptr %t12)
+  store ptr null, ptr %rest.addr
   br label %ofupd4
 endif7:
-  %t12 = load ptr, ptr %line.addr
-  %t13 = load double, ptr %at.addr
-  %t14 = fadd double %t13, 0x4010000000000000
-  %t15 = call ptr @js_str_slice(ptr %t12, double %t14, double 0x7FF0000000000000)
-  store ptr %t15, ptr %rest.addr
-  %t16 = load ptr, ptr %prefixes.addr
+  %t13 = load ptr, ptr %line.addr
+  %t14 = load double, ptr %at.addr
+  %t15 = fadd double %t14, 0x4010000000000000
+  %t16 = call ptr @js_str_slice(ptr %t13, double %t15, double 0x7FF0000000000000)
+  store ptr %t16, ptr %rest.addr
+  %t17 = load ptr, ptr %prefixes.addr
   store double 0x0000000000000000, ptr %s8
-  %t17 = call double @nt_arr_len(ptr %t16)
+  %t18 = call double @nt_arr_len(ptr %t17)
   br label %of9
 of9:
-  %t18 = load double, ptr %s8
-  %t19 = fcmp olt double %t18, %t17
-  br i1 %t19, label %ofbody10, label %endof12
+  %t19 = load double, ptr %s8
+  %t20 = fcmp olt double %t19, %t18
+  br i1 %t20, label %ofbody10, label %endof12
 ofbody10:
-  %t20 = load double, ptr %s8
-  %t21 = call i64 @nt_arr_get(ptr %t16, double %t20)
-  %t22 = inttoptr i64 %t21 to ptr
-  store ptr %t22, ptr %p.addr
-  %t23 = load ptr, ptr %rest.addr
-  %t24 = load ptr, ptr %p.addr
-  %t25 = call i32 @js_str_includes(ptr %t23, ptr %t24)
-  %t26 = icmp ne i32 %t25, 0
-  br i1 %t26, label %then13, label %endif14
+  %t21 = load double, ptr %s8
+  %t22 = call i64 @nt_arr_get(ptr %t17, double %t21)
+  %t23 = inttoptr i64 %t22 to ptr
+  store ptr %t23, ptr %p.addr
+  %t24 = load ptr, ptr %rest.addr
+  %t25 = load ptr, ptr %p.addr
+  %t26 = call i32 @js_str_includes(ptr %t24, ptr %t25)
+  %t27 = icmp ne i32 %t26, 0
+  br i1 %t27, label %then13, label %endif14
 then13:
-  %t27 = load ptr, ptr %rest.addr
-  call void @nt_str_release(ptr %t27)
+  %t28 = load ptr, ptr %rest.addr
+  call void @nt_str_release(ptr %t28)
   ret i1 true
 endif14:
   br label %ofupd11
 ofupd11:
-  %t28 = load double, ptr %s8
-  %t29 = fadd double %t28, 1.0
-  store double %t29, ptr %s8
+  %t29 = load double, ptr %s8
+  %t30 = fadd double %t29, 1.0
+  store double %t30, ptr %s8
   br label %of9
 endof12:
+  %t31 = load ptr, ptr %rest.addr
+  call void @nt_str_release(ptr %t31)
+  store ptr null, ptr %rest.addr
   br label %ofupd4
 ofupd4:
-  %t30 = load double, ptr %s1
-  %t31 = fadd double %t30, 1.0
-  store double %t31, ptr %s1
+  %t32 = load double, ptr %s1
+  %t33 = fadd double %t32, 1.0
+  store double %t33, ptr %s1
   br label %of2
 endof5:
   call void @nt_arr_free(ptr %t1)
-  %t32 = load ptr, ptr %rest.addr
-  call void @nt_str_release(ptr %t32)
+  %t34 = load ptr, ptr %rest.addr
+  call void @nt_str_release(ptr %t34)
   ret i1 false
 }
 
@@ -36648,17 +36660,20 @@ forbody2:
   %t10 = load ptr, ptr %word.addr
   %t11 = call ptr @js_str_concat(ptr %t9, ptr %t10)
   store ptr %t11, ptr %out.addr
+  %t12 = load ptr, ptr %t.addr
+  call void @nt_str_release(ptr %t12)
+  store ptr null, ptr %t.addr
   br label %forupd3
 forupd3:
-  %t12 = load double, ptr %i.addr
-  %t13 = fadd double %t12, 0x3FF0000000000000
-  store double %t13, ptr %i.addr
+  %t13 = load double, ptr %i.addr
+  %t14 = fadd double %t13, 0x3FF0000000000000
+  store double %t14, ptr %i.addr
   br label %for1
 endfor4:
-  %t14 = load ptr, ptr %out.addr
-  %t15 = load ptr, ptr %t.addr
-  call void @nt_str_release(ptr %t15)
-  ret ptr %t14
+  %t15 = load ptr, ptr %out.addr
+  %t16 = load ptr, ptr %t.addr
+  call void @nt_str_release(ptr %t16)
+  ret ptr %t15
 }
 
 define i32 @main(i32 %argc, ptr %argv) {
@@ -37039,24 +37054,27 @@ forbody2:
   %t8 = call ptr @js_str_concat(ptr %t7, ptr @.str.3)
   call void @nt_str_release(ptr %t7)
   store ptr %t8, ptr %acc.addr
+  %t9 = load ptr, ptr %s.addr
+  call void @nt_str_release(ptr %t9)
+  store ptr null, ptr %s.addr
   br label %forupd3
 forupd3:
-  %t9 = load double, ptr %i.addr
-  %t10 = fadd double %t9, 0x3FF0000000000000
-  store double %t10, ptr %i.addr
+  %t10 = load double, ptr %i.addr
+  %t11 = fadd double %t10, 0x3FF0000000000000
+  store double %t11, ptr %i.addr
   br label %for1
 endfor4:
-  %t11 = load ptr, ptr %acc.addr
-  call void @js_print_str(ptr %t11)
-  call void @js_print_newline()
   %t12 = load ptr, ptr %acc.addr
-  %t13 = call double @js_str_len(ptr %t12)
-  call void @js_print_num(double %t13)
+  call void @js_print_str(ptr %t12)
   call void @js_print_newline()
-  %t14 = load ptr, ptr %acc.addr
-  call void @nt_str_release(ptr %t14)
-  %t15 = load ptr, ptr %s.addr
+  %t13 = load ptr, ptr %acc.addr
+  %t14 = call double @js_str_len(ptr %t13)
+  call void @js_print_num(double %t14)
+  call void @js_print_newline()
+  %t15 = load ptr, ptr %acc.addr
   call void @nt_str_release(ptr %t15)
+  %t16 = load ptr, ptr %s.addr
+  call void @nt_str_release(ptr %t16)
   ret i32 0
 }
 "

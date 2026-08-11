@@ -371,7 +371,7 @@ function toolchainFor(target: Target): Toolchain {
  * so macOS/iOS keep the default single-file *dynamic*-libc binary; Linux-family targets
  * (Android, and a Linux host) support `-static`.
  */
-export function supportsStatic(target: Target): boolean {
+export function supportsStatic(target: Target, platform: string = process.platform): boolean {
   switch (target) {
     case "android": return true;
     case "ios":
@@ -382,7 +382,15 @@ export function supportsStatic(target: Target): boolean {
     // default toolchain), so `--static` falls back to the dynamic default there, like Apple.
     case "windows": return false;
     // `host` is Apple only when we're building on macOS; on a Linux host it's a Linux ELF.
-    case "host": return process.platform !== "darwin";
+    //
+    // The platform is a PARAMETER so this branch can actually be tested. Reading
+    // `process.platform` inline left only one assertion available to a test —
+    // `expect(supportsStatic("host")).toBe(process.platform !== "darwin")` — which is this
+    // expression copied into the test, and passes on every machine for every edit,
+    // including inverting it. Measured: inverting this line was caught by NOTHING, and
+    // still caught nothing when the assertion was rerouted through `resolveStatic`, which
+    // delegates here and so moves with it.
+    case "host": return platform !== "darwin";
   }
 }
 

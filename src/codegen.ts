@@ -1571,9 +1571,9 @@ class FnGen {
     for (const n of this.strLocals) this.emit(`store ptr null, ptr ${this.addr(n)}`);
   }
   /** Release owned string locals at scope exit (except one transferred out). */
-  private emitStrDrops(exclude?: string): void {
+  private emitStrDrops(exclude: string = ""): void {
     for (const n of this.strLocals) {
-      if (n === exclude) continue;
+      if (n === exclude) continue;   // `""` is the absent-marker — see `emitStrScopeDropsTo`
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       this.emit(`call void @nt_str_release(ptr ${p})`);
@@ -1583,6 +1583,7 @@ class FnGen {
   /** String locals declared DIRECTLY in this statement list (a `MultiStmt` is a
    *  scope-less group, so it counts as direct — same rule as `declaredLinear`). */
   private strDeclaredIn(list: Stmt[]): string[] {
+    //@@mutable
     const out: string[] = [];
     for (const s of list) {
       if (s.kind === "VarDecl") {
@@ -1622,9 +1623,12 @@ class FnGen {
    *  leaked one string per ELEMENT. `exclude` keeps the returned string's lifetime exactly
    *  as it was, so only the strings that genuinely die at the end of the iteration are
    *  released here. */
-  private emitStrScopeDropsTo(depth: number, exclude?: string): void {
+  private emitStrScopeDropsTo(depth: number, exclude: string = ""): void {
     for (let i = this.strScopes.length - 1; i >= depth; i--) {
       for (const n of this.strScopes[i] ?? []) {
+        // `exclude: string = ""` rather than `exclude?: string`: comparing a `string` with
+        // a `?Ustring` is NT2001 in the subset `src/` has to stay inside, and "" is not a
+        // spellable local name so it is an unambiguous absent-marker.
         if (n === exclude) continue;
         const p = this.fresh();
         this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
@@ -2271,7 +2275,7 @@ class FnGen {
           const hofArg = s.argument ?? null;
           const hofXfer = hofArg !== null && hofArg.kind === "Identifier" && this.strLocals.has(hofArg.name)
             ? hofArg.name
-            : undefined;
+            : "";
           this.emitStrScopeDropsTo(h.strDepth, hofXfer);
           this.terminate(`br label %${h.done}`);
           return;
@@ -2303,7 +2307,7 @@ class FnGen {
           // gets an owned +1; a returned producer already carries its rc=1 and escapes.
           if (val.ty === "string") {
             const arg = s.argument;
-            const xfer = arg.kind === "Identifier" && this.strLocals.has(arg.name) ? arg.name : undefined;
+            const xfer = arg.kind === "Identifier" && this.strLocals.has(arg.name) ? arg.name : "";
             if (!xfer && !this.isStrProducer(arg)) this.emit(`%rc${this.tmp++} = call ptr @nt_str_retain(ptr ${val.v})`);
             this.emitStrDrops(xfer);
           } else {
