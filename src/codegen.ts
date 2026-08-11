@@ -2283,8 +2283,15 @@ class FnGen {
     // prints and the fall-through did not. Only the element types `joinFn` renders exactly
     // reach here; the checker refuses the rest, so this is not a fallback.
     if (isArrayTy(val.ty)) {
+      // The join allocates, and `js_str_to_num` only READS it — so this frame is the last
+      // owner and the buffer is dead on the next instruction. Released here for the same
+      // reason `releaseTemp` releases a concat operand: without it `+arr` in a loop would
+      // leak one string per iteration, which is the residue shape test/fuzz2-diff.test.ts
+      // measures.
+      const s = this.coerceToString(val);
       const t = this.fresh();
-      this.emit(`${t} = call double @js_str_to_num(ptr ${this.coerceToString(val)})`);
+      this.emit(`${t} = call double @js_str_to_num(ptr ${s})`);
+      this.emit(`call void @nt_str_release(ptr ${s})`);
       return t;
     }
     throw internalError(`coerceToNumber of ${val.ty} (the checker should have refused it — see NYI.TONUMBER)`);
