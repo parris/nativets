@@ -800,26 +800,32 @@ class Parser {
           .map((n) => `'${n}': ${clip(why.get(n) ?? "no shape was produced", 160)}`);
         this.cycleStall = sample.join("; ") + (deferred.length > sample.length ? ` (and ${deferred.length - sample.length} more that select over them)` : "");
         this.cycleStallSize = { total: names.length, left: deferred.length };
-        // NOT YET SINGLE-OWNER, and deliberately left: these three (and `cyclicTypes`
-        // below) DISCARD a persistent mutator's result, so under this compiler's own
-        // semantics they do nothing. That is NT1606's rule and it REFUSES rather than
-        // miscompiles, so it is a blocker and not a correctness hole — but it is MASKED
-        // here, behind `deferred.push` earlier in this function, so the blocker metric will
-        // only surface it once `push` is solved. Whoever gets there: do NOT take NT1606's
-        // suggested `x = x.delete(k)` literally in this file. It is right about nativets and
-        // says so itself, but src/ also runs under bun, where node's `.delete` returns a
-        // BOOLEAN — measured, `x` becomes `true`. Rebuild or restore wholesale instead.
-        for (const n of names) this.cycleNames.delete(n);
-        this.recTypes.clear();
-        for (const [n, s] of recBefore) this.recTypes = this.recTypes.set(n, s);
+        // SINGLE-OWNER now, by the two routes the note that used to sit here named. Neither
+        // is `x = x.delete(k)`: that is right about nativets but wrong about bun, where
+        // node's `.delete` returns a BOOLEAN and would leave `x === true` (measured).
+        //
+        // `cycleNames` is REBUILT — filtering the survivors into a fresh Set is the only
+        // spelling of "remove these keys" that means the same thing under both runtimes.
+        let keptCycle = new Set<string>();
+        for (const n of this.cycleNames) if (!names.includes(n)) keptCycle = keptCycle.add(n);
+        this.cycleNames = keptCycle;
+        // `recTypes` is RESTORED WHOLESALE, which is what the `.clear()` + replay below it
+        // always spelled the long way — `recBefore` is a snapshot taken on entry, so
+        // assigning a copy of it IS the rollback. `.clear()` has no rebinding form at all
+        // (node's returns `undefined`), and it did not need one.
+        this.recTypes = new Map(recBefore);
         return;
       }
       pending = deferred;
     }
     for (const [n, ty] of resolved) this.typeAliases = this.typeAliases.set(n, ty);
     // These names are no longer an ordering failure, so the NT1030 the main parse would
-    // report for them is withdrawn.
-    for (const n of names) this.cyclicTypes.delete(n);
+    // report for them is withdrawn. Rebuilt rather than deleted from, for the reason on the
+    // stall path above: a discarded `.delete` does nothing here, and the rebinding form
+    // would store a boolean under bun.
+    let keptCyclic = new Map<string, string>();
+    for (const [n, b] of this.cyclicTypes) if (!names.includes(n)) keptCyclic = keptCyclic.set(n, b);
+    this.cyclicTypes = keptCyclic;
   }
 
   private freshTmp(): string { return `__d${this.tmpCounter++}`; }
