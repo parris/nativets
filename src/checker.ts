@@ -1995,6 +1995,10 @@ class Checker {
     //@@mutable
     out: NarrowFact[],
   ): void {
+    // `go` is CALLED, never PASSED. `xs.forEach(go)` hands a function VALUE to `.forEach`,
+    // which needs a captured environment and is NT1003 — this body's first blocker when
+    // the compiler compiles itself. A `for…of` calling `go` per element is the same walk
+    // and keeps every use of the arrow an ordinary call the compiler can inline.
     const go = (x: Expr) => this.assertFacts(x, scope, out);
     switch (e.kind) {
       case "NonNullExpr":
@@ -2011,10 +2015,10 @@ class Checker {
       case "BinaryExpr": go(e.left); go(e.right); return;
       case "LogicalExpr": go(e.left); return; // the right operand is conditional
       case "ConditionalExpr": go(e.test); return; // ditto the arms
-      case "SequenceExpr": e.exprs.forEach(go); return;
-      case "TemplateLiteral": e.exprs.forEach(go); return;
-      case "CallExpr": go(e.callee); e.args.forEach(go); return;
-      case "ArrayLiteral": e.elements.forEach(go); return;
+      case "SequenceExpr": for (const x of e.exprs) go(x); return;
+      case "TemplateLiteral": for (const x of e.exprs) go(x); return;
+      case "CallExpr": go(e.callee); for (const x of e.args) go(x); return;
+      case "ArrayLiteral": for (const x of e.elements) go(x); return;
       case "SpreadExpr": go(e.argument); return;
       default: return;
     }
@@ -2166,7 +2170,11 @@ class Checker {
 
   /** A mangled, LLVM-safe, collision-free name for one instantiation (`first$string__`). */
   private mangle(base: string, args: Ty[]): string {
-    const stem = `${base}$${args.map(mangleTypeArg).join("$")}`;
+    // `(a) => mangleTypeArg(a)`, not the point-free `.map(mangleTypeArg)`: passing a
+    // function by NAME is a function VALUE (NT1003), which was this body's first blocker
+    // when the compiler compiles itself. It is also the safer spelling under bun — `.map`
+    // passes (element, index, array), so a point-free callback gets two extra arguments.
+    const stem = `${base}$${args.map((a) => mangleTypeArg(a)).join("$")}`;
     let name = stem, n = 2;
     while (this.functions.has(name) || this.generics.has(name)) name = `${stem}_${n++}`;
     return name;
@@ -8593,11 +8601,20 @@ function escapingWritesExpr(e: Expr, bound: Set<string>, out: Map<string, string
     case "InExpr": go(e.key); go(e.object); return;
     case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
     case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;
-    case "SequenceExpr": case "TemplateLiteral": (e.exprs as Expr[]).forEach(go); return;
-    case "CallExpr": go(e.callee); e.args.forEach(go); return;
-    case "NewExpr": e.args.forEach(go); return;
-    case "ArrayLiteral": e.elements.forEach(go); return;
-    case "ObjectLiteral": e.properties.forEach((p) => go(p.value)); return;
+    // SPLIT, not `case "SequenceExpr": case "TemplateLiteral":` — the two members both
+    // declare `exprs` but at DIFFERENT slots (1 and 2), so a grouped arm has no constant
+    // offset to load it from and is refused (NT2001). The `as Expr[]` that used to paper
+    // over it is the same unchecked-cast family that made `exprLoc` read slot 0 for thirty
+    // members: a cast never consults the layout, so it would have loaded `quasis` for one
+    // of the two. One arm per tag resolves each member's own offset.
+    case "SequenceExpr": for (const x of e.exprs) go(x); return;
+    case "TemplateLiteral": for (const x of e.exprs) go(x); return;
+    // `for…of` rather than `.forEach(go)` throughout: passing `go` by name is a function
+    // VALUE (NT1003), while calling it per element is an ordinary call.
+    case "CallExpr": go(e.callee); for (const x of e.args) go(x); return;
+    case "NewExpr": for (const x of e.args) go(x); return;
+    case "ArrayLiteral": for (const x of e.elements) go(x); return;
+    case "ObjectLiteral": for (const p of e.properties) go(p.value); return;
     case "SpreadExpr": go(e.argument); return;
     default: return; // literals and identifiers hold no assignment
   }
