@@ -1988,6 +1988,9 @@ class Checker {
   /** Specializations in emission order, and the queue of ones whose body is unchecked. */
   private specialized: FuncDecl[] = [];
   private pending: FuncDecl[] = [];
+  /** How far `drainInstantiations` has walked `pending` — the forward index that replaces
+   *  `.shift()`. `pending` is append-only, so "unchecked" is exactly the tail from here. */
+  private drained = 0;
 
   declareGeneric(fn: FuncDecl, base: () => Scope): void {
     if (this.generics.has(fn.name) || this.functions.has(fn.name)) throw typeError(`Duplicate function '${fn.name}'`);
@@ -1996,10 +1999,21 @@ class Checker {
   }
   specializations(): FuncDecl[] { return this.specialized; }
 
-  /** Check every queued specialization body; checking one may enqueue more. */
+  /**
+   * Check every queued specialization body; checking one may enqueue more.
+   *
+   * A CURSOR, not `.shift()` — the spelling the `.shift` refusal itself prescribes ("a
+   * queue is better spelled as an index that walks forward over a fixed array"), and this
+   * was the one site of `.shift` in the compiler's own source. Same FIFO order and the
+   * same re-read of `length` per iteration, so a body that enqueues more is picked up
+   * exactly as before; `pending` is append-only, so the only difference is that a drained
+   * entry stays in the array instead of being removed from the front (O(n) per call, and
+   * there is no `nt_arr_shift` to lower it to anyway).
+   */
   drainInstantiations(base: () => Scope): void {
-    while (this.pending.length) {
-      const fn = this.pending.shift()!;
+    while (this.drained < this.pending.length) {
+      const fn = this.pending[this.drained]!;
+      this.drained = this.drained + 1;
       this.checkFunction(fn, base());
     }
   }
@@ -6195,8 +6209,9 @@ class Checker {
       // different name: it removes from the FRONT, so every remaining element moves —
       // O(n) per call, O(n²) to drain — and there is no `nt_arr_shift` in the runtime to
       // lower it to (`nt_arr_pop` is a decrement). The one site in this compiler's own
-      // source, `checker.ts`'s `this.pending.shift()!`, TAKES the removed element anyway,
-      // which is the half of `.pop` that is refused too.
+      // source was `checker.ts`'s `this.pending.shift()!`, which TOOK the removed element
+      // (the half of `.pop` that is refused too); it now walks a cursor, which is what the
+      // hint prescribes and is why `src/` no longer contains a `.shift`.
       //
       // `arr[0]` used to be offered here "for the first element" — the identical defect
       // the `.pop` hint carried above: on an empty array node's `.shift()` and node's
