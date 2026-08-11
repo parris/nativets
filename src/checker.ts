@@ -7,7 +7,7 @@
  * supported programs.
  */
 
-import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, FieldAssign, Declarator } from "./ast.ts";
+import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, FieldAssign, Declarator, Param } from "./ast.ts";
 import { mentionsThis } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray, stringLiteralValue, exprTy } from "./ast.ts";
@@ -438,8 +438,18 @@ interface AccessPath { name: string; binding: Binding; path: string; ty: Ty }
  */
 interface BodyFrame { body: Stmt[]; binds: Set<string>; innerBinds: Set<string>; closureAssigned?: Set<string> }
 
-/** A `bodyChain` frame for a body, recording the names it binds itself. */
-function bodyFrame(params: { name: string }[], body: Stmt[]): BodyFrame {
+/** A `bodyChain` frame for a body, recording the names it binds itself.
+ *
+ *  `Param[]`, not the structurally minimal `{ name: string }[]` this and `ownBindings`
+ *  used to declare. Both read `p.name` and nothing else, so the narrow type was the
+ *  honest TypeScript — but it is not a type this compiler can PASS. A record's layout IS
+ *  its field list here, so a `Param` (six slots) and a `{ name: string }` (one) are
+ *  different shapes, and an array of one is not an array of the other however covariant
+ *  tsc is willing to be. Every caller already passes `Param[]` (or `[]`), so naming that
+ *  type costs no generality and puts two more of the compiler's own functions inside the
+ *  subset it compiles. Widening the checker to ACCEPT the old spelling would have been the
+ *  other direction, and the wrong one: it needs the element reshaped, not just permitted. */
+function bodyFrame(params: Param[], body: Stmt[]): BodyFrame {
   const binds = ownBindings(params, body);
   // A SECOND, independent `ownBindings` call seeds `innerBinds` — deliberately NOT `binds`.
   // `blockBindings` accumulates with `out = out.add(n)`, which reads as persistent (it is,
@@ -2315,7 +2325,7 @@ class Checker {
    * `emptyArrayError` — TypeScript's answer there is `any[]`, and guessing an element type
    * is exactly the silent wrong answer we exist to avoid.
    */
-  private defaultParamTy(p: { name: string; default?: Expr }, scope: Scope): Ty | undefined {
+  private defaultParamTy(p: Param, scope: Scope): Ty | undefined {
     if (!p.default) return undefined;
     const t = this.type(p.default, scope);
     if (t === "undefined" || t === "null")
@@ -5425,6 +5435,30 @@ class Checker {
         this.checkArgs(e.args, sig, scope, `'.${e.callee.property}'`);
         return sig.ret;
       }
+      // A NULLABLE receiver, named as itself before the last-resort arm below claims it.
+      //
+      // Both `x?.m()` and `x.m()` land here when `x` is `T | null` / `T | undefined`, and
+      // the generic bucket's catalog hint ("object literals need the heap value model")
+      // is about a milestone that shipped: objects, classes, and `?.` on a FIELD all work.
+      // The one thing that does not is calling a method THROUGH the nullable, and what the
+      // reader has to do about it — narrow, assert, or supply the absent case — is nothing
+      // the inherited hint suggests. Every rewrite named here is compiled and run against
+      // node in test/nullable-assign.test.ts, per "advice a diagnostic gives has to
+      // compile" (docs/self-hosting.md).
+      //
+      // The declared type is quoted rather than the 3 KB structural dump the bare `recv`
+      // produces on the compiler's own `Scope`, which buries the sentence that matters.
+      if (isNullableTy(recv)) {
+        const absent = nullishKind(recv) === "null" ? "null" : "undefined";
+        throw nyi(
+          NYI.OBJECT,
+          `a method call on the nullable receiver \`${exprText(e.callee.object)}\``,
+          `\`${exprText(e.callee.object)}\` may be \`${absent}\`, and a method call through it is not lowered yet — ` +
+          `\`?.\` on a FIELD is, so this is about the CALL. Narrow it first: bind it to a local and test it ` +
+          `(\`const v = ${exprText(e.callee.object)}; if (v !== ${absent}) v.${e.callee.property}();\`), or supply the absent case ` +
+          `(\`v === ${absent} ? … : v.${e.callee.property}()\`). Where it cannot be ${absent}, \`${exprText(e.callee.object)}!.${e.callee.property}()\` asserts that`,
+        );
+      }
       throw nyi(NYI.OBJECT, `method call on ${recv}`);
     }
 
@@ -8156,7 +8190,7 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
  * elsewhere in the same function could still mean the outer one; that direction stays
  * conservative.
  */
-function ownBindings(params: { name: string }[], body: Stmt[]): Set<string> {
+function ownBindings(params: Param[], body: Stmt[]): Set<string> {
   let out = new Set<string>();
   for (const p of params) out = out.add(p.name);
   for (const s of body) {
