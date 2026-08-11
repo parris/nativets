@@ -3837,12 +3837,12 @@ class FnGen {
                 const eq = this.fresh();
                 this.emit(`${eq} = call i32 @js_str_eq(ptr ${safe}, ptr ${other.v})`);
                 this.emit(`${cmp} = icmp ne i32 ${eq}, 0`);
-              } else if (llvmTy(base) === "ptr") {
-                // Arrays/objects/Map/Set compare by REFERENCE, as `===` does elsewhere here.
-                const p0 = this.fresh();
-                this.emit(`${p0} = inttoptr i64 ${raw} to ptr`);
-                this.emit(`${cmp} = icmp eq ptr ${p0}, ${other.v}`);
               } else {
+                // No reference-identity arm on purpose. One was written and it accepted a
+                // string-LITERAL union base (`x.b?.inner.kind === "A"`), where field
+                // resolution then emitted `getelementptr … i64 -1` — a read before the
+                // object, exit 139. The checker admits only number/boolean/string here;
+                // anything else reaching this point is a compiler bug, not a user error.
                 throw internalError(`\`${op}\` between \`${lt}\` and \`${e.right.ty ?? "?"}\`: no unboxing arm for base type \`${base}\` (representation \`${llvmTy(base)}\`)`);
               }
               const present = this.fresh();

@@ -5952,6 +5952,30 @@ literal is involved, and the advice is unactionable. Worse, `Object.is` is the n
 `-0` probe, so a wrong hint at exactly that spelling pushed callers onto the clumsier
 `1 / x === -Infinity`.
 
+### FOUND, UNFIXED: `x.b?.inner.kind` resolves the field to index **-1**
+
+Not a divergence — a latent memory-safety defect, recorded here because it is currently
+unreachable and so has no failing test of its own to carry the explanation.
+
+An optional chain whose last link reads a field of a UNION member resolves that field to
+index `-1`, and codegen emits
+
+    %t13 = getelementptr i64, ptr %t12, i64 -1
+    %t14 = load i64, ptr %t13
+
+— a read BEFORE the object. Measured: **exit 139 (SIGSEGV), empty stdout**, where node
+prints `s`, `n`, `s`.
+
+**Why nobody has hit it.** Every route to that lowering is refused earlier: the tag
+comparison `x.b?.inner.kind === "A"` is `NT2001` ("an OPTIONAL link, whose result is a fresh
+nullable" — `test/unions.test.ts`), and the nullable-vs-base comparison rule excludes
+optional-chain operands for exactly this reason. It surfaced when that rule was first
+written WITHOUT the exclusion, which made the shape reachable for the first time.
+
+**What it means for whoever fixes field resolution:** the guard is a refusal, not a bounds
+check, so widening any rule that lets an optional chain reach a union member access
+re-opens it. `test/narrowing.test.ts` pins the refusal with this explanation attached.
+
 ### `process.cwd()` returns `""` on Windows and wasi
 
 `getcwd` lives in `<unistd.h>`, which the include guard at the top of `runtime/runtime.c`

@@ -4268,7 +4268,26 @@ class Checker {
           // decide, and comparing two boxes would answer PRESENCE rather than value.
           //
           // Codegen unboxes and ANDs with presence, branch-free (`genEq`'s nullable arm).
-          if (isNullableTy(l) !== isNullableTy(r) && baseTy(l) === baseTy(r)) return "boolean";
+          // Restricted to the three SCALAR bases whose unboxing is implemented and tested
+          // (number, boolean, string). A wider rule was written first — "any base whose
+          // representation is a pointer, compared by reference identity" — and it was
+          // WRONG in the way that matters: it accepted `x.b?.inner.kind === "A"`, where
+          // `kind` is a string-LITERAL union, and codegen then emitted
+          // `getelementptr i64, ptr %obj, i64 -1` — a read BEFORE the object, exit 139
+          // with empty stdout. That `-1` is a pre-existing field-resolution defect this
+          // comparison merely made reachable; `test/unions.test.ts` had been holding the
+          // shape behind a refusal. So the refusal stands for every base but these three.
+          const nlBase = baseTy(l), nrBase = baseTy(r);
+          const scalarBase = nlBase === "number" || nlBase === "boolean" || nlBase === "string";
+          // …and NOT an optional chain. `x.b?.inner.kind === "A"` is where the reachable
+          // damage was: the chain's member access on a UNION resolves the field to index
+          // -1 and codegen emits `getelementptr i64, ptr %obj, i64 -1` — a read BEFORE the
+          // object, exit 139 with empty stdout. That defect is pre-existing and lives in
+          // the chain, not in this comparison; `test/unions.test.ts` had been holding the
+          // whole shape behind a refusal ("an OPTIONAL link, whose result is a fresh
+          // nullable"), and that refusal has to keep standing until the `-1` is fixed.
+          const chained = isOptChainExpr(e.left) || isOptChainExpr(e.right);
+          if (isNullableTy(l) !== isNullableTy(r) && nlBase === nrBase && scalarBase && !chained) return "boolean";
           // No hint: the ONE mismatch that had actionable advice — a nullable against its own
           // base — is compiled now (the arm above), so `mixedNullableHint` fired on nothing
           // and was removed with this call. What reaches here is an unrelated pair

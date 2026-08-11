@@ -194,6 +194,38 @@ console.log(w === false, w === true);
 `);
   });
 
+  /*
+   * THE OTHER REFUSAL THAT STAYS, and it is a memory-safety pin rather than a taste call.
+   *
+   * `x.b?.inner.kind === "A"` was accepted by the first version of this rule and SEGFAULTED
+   * — exit 139, empty stdout, where node prints `s n s`. The cause is not the comparison:
+   * the optional chain's member access on a UNION resolves the field to index -1, and
+   * codegen emits `getelementptr i64, ptr %obj, i64 -1`, a read BEFORE the object. That
+   * defect is pre-existing and was unreachable only because `test/unions.test.ts` held the
+   * whole shape behind a refusal.
+   *
+   * So an optional-chain operand stays refused until the `-1` is fixed, and this test is
+   * what says why — a future lane widening the rule without fixing field resolution first
+   * gets a failure that names the real bug instead of a segfault.
+   */
+  test("an OPTIONAL-CHAIN operand stays refused (it reaches a `getelementptr -1`)", () => {
+    expectRejected(
+      `interface A2 { kind: "A"; left: number }
+interface B2 { kind: "B"; right: string }
+type E2 = A2 | B2;
+interface Box2 { name: string; inner: E2 }
+interface Outer2 { b?: Box2 }
+function f(x: Outer2): string {
+  if (x.b?.inner.kind === "A") { return "n"; }
+  return "s";
+}
+console.log(f({}));
+`,
+      "NT2001",
+      "Cannot compare",
+    );
+  });
+
   /* The refusal that STAYS: two nullables compare PRESENCE, not values (see the arm above
    * this one in the checker), so it is still narrowed-first-or-nothing. */
   test("two nullables are still refused", () => {
