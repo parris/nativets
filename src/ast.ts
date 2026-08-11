@@ -1335,7 +1335,13 @@ export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
 
 // `typeArgs` are EXPLICIT call-site type arguments (`id<string>("x")`) — they pin the
 // instantiation of a generic callee instead of inferring it from the argument types.
-export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; loc?: Loc; }
+/** `awaited` is a one-way STAMP, in the family of `nullOnMove`/`narrowed`/`result`: the
+ *  parser sets it on a call that is the operand of an `await`, and the floating-async check
+ *  reads it. It replaced a `Set<Expr>` — identity-keyed collections over the `Expr` union
+ *  are `NT1014` ("Set of U<…>"), which was the first blocker of FIVE of the twelve modules
+ *  through the link. Stamping the node also deletes the sub-parser merge the set needed
+ *  (`for (const n of sub.awaitedCalls) …`): the nodes are shared, so the mark travels. */
+export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; loc?: Loc; awaited?: boolean; }
 export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
 /**
@@ -1449,6 +1455,17 @@ export interface ArrowFunction {
    *  body's CONTEXT and reject a body that does not fit (NT2001). */
   retAnnot?: Ty;
   retTy?: Ty;
+  /** `async () => …`. A one-way STAMP set by the parser and read by the floating-async
+   *  checks, in the family of `nullOnMove`/`narrowed`/`awaited`. It replaced a
+   *  `Set<Expr>`: an identity-keyed collection over the `Expr` union is `NT1014`
+   *  ("Set of U<…>"), which was the first blocker of five of the twelve modules through
+   *  the link. The stamp also removes the sub-parser merge the set required, because the
+   *  node itself is shared. */
+  isAsync?: boolean;
+  /** Indices of this arrow's parameters that take an async function. Another one-way
+   *  stamp, for the same reason as `isAsync`: it replaced a `Map<Expr, …>`, and an
+   *  identity-KEYED map over the union is `NT1014` just as the set was. */
+  promiseParams?: number[];
   /** The name this arrow is bound to, when it is the initializer of a fully-annotated
    *  `const` and may therefore call ITSELF — `const walk = (s: Stmt): void => { … walk(…) … }`.
    *  Set by the checker's `VarDecl` arm (which types an initializer BEFORE it declares the

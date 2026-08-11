@@ -521,10 +521,8 @@ class Parser {
   /** Exported names that are `export async function` — published on the ExportTable so
    *  an importing module can seed its OWN `asyncFns` (see ParseOpts.asyncEnv). */
   private exportAsync = new Set<string>();
-  private awaitedCalls = new Set<Expr>();        // call nodes that are the operand of an `await`
   /** Arrow nodes that were written `async` — the bridge from an erased async ARROW back
    *  to the NAME it gets bound to, which is what `asyncFns` (and the guard) work in. */
-  private asyncFnExprs = new Set<Expr>();
   /** HIGHER-ORDER async. `asyncFns` is name tracking, and a name does not survive a call
    *  boundary: `run(one)` binds the async arrow to `run`'s parameter, where the guard has
    *  never heard of it. The declared TYPE is what crosses that boundary — a parameter
@@ -539,10 +537,14 @@ class Parser {
    *  parseDeclarator). This is the only place the async-ness of an argument can be
    *  RE-ESTABLISHED after it crosses a call, so it is also what says whether an escape is
    *  safe: handing an async value to a parameter NOT in this set loses it silently. */
-  private promiseParamsByFn = new Map<string, Set<number>>();
-  private promiseParamsByArrow = new Map<Expr, Set<number>>();
+  // `number[]` values, not `Set<number>`: a Map whose VALUES are a collection is
+  // `NT1014` ("Map with Set<number> values"), and it was the first blocker of five of the
+  // twelve modules once the `Set<Expr>` above it cleared. The set was only ever tested
+  // with `.has`, which `.includes` answers, and the index lists are two or three entries
+  // long — so nothing is lost but the nesting.
+  private promiseParamsByFn = new Map<string, number[]>();
   /** Filled by whichever parameter list was parsed last; read immediately after. */
-  private lastPromiseParams = new Set<number>();
+  private lastPromiseParams: number[] = [];
   private lastPromiseParamNames = new Set<string>();
   /** SCOPED, unlike `asyncFns`. A parameter name is not a module-level fact: two unrelated
    *  functions both taking an `f` — one `() => Promise<number>`, one `() => number` — must
@@ -1386,7 +1388,7 @@ class Parser {
       // `entrypoint !== null` is written out because comparing an `Expr` with an
       // `Expr | null` is NT2001 here. It changes nothing: `c.node` is an object, so
       // `c.node === null` was already false on the arm the guard removes.
-      if (this.awaitedCalls.has(c.node) || (entrypoint !== null && c.node === entrypoint)) continue;
+      if ((c.node.kind === "CallExpr" && (c.node.awaited ?? false)) || (entrypoint !== null && c.node === entrypoint)) continue;
       throw nyi(
         NYI.ASYNC,
         `calling async function '${c.name}' without 'await' at ${c.line}:${c.col} (its value is a Promise under node; nativets runs it to completion immediately)`,
@@ -1407,7 +1409,7 @@ class Parser {
     const why = "(under node the value it returns is a Promise, so the promise would be dropped)";
     for (const e of this.asyncEscapes) {
       if (!this.isAsyncValue(e.asyncArrow, e.argName, e.scopedAsync)) continue;
-      if (e.callee !== null && this.promiseParamsByFn.get(e.callee)?.has(e.index)) continue;
+      if (e.callee !== null && (this.promiseParamsByFn.get(e.callee) ?? []).includes(e.index)) continue;
       const shown = e.argName !== null ? `'${e.argName}'` : "an async arrow";
       const where = e.callee !== null ? `to '${e.callee}'` : "to a call";
       throw nyi(
@@ -2627,13 +2629,13 @@ class Parser {
     // it is carried by the declared TYPE instead of the name (see fnTyReturnsPromise) and,
     // where the type does not carry it, refused at the argument (see checkAsyncEscapes).
     if (init !== undefined &&
-        (this.asyncFnExprs.has(init) || (init.kind === "Identifier" && this.asyncFns.has(init.name)))) {
+        ((init.kind === "ArrowFunction" && (init.isAsync ?? false)) || (init.kind === "Identifier" && this.asyncFns.has(init.name)))) {
       this.asyncFns = this.asyncFns.add(name);
     }
     // `const run = (f: () => Promise<T>) => …` — bind the arrow's promise-typed parameters
     // to the name calls will actually use, so `run(one)` is a legal escape.
-    if (init !== undefined && this.promiseParamsByArrow.has(init)) {
-      this.promiseParamsByFn = this.promiseParamsByFn.set(name, this.promiseParamsByArrow.get(init)!);
+    if (init !== undefined && init.kind === "ArrowFunction" && init.promiseParams !== undefined) {
+      this.promiseParamsByFn = this.promiseParamsByFn.set(name, init.promiseParams);
     }
     return { name, annot, annotHead, init };
   }
@@ -2781,7 +2783,8 @@ class Parser {
     this.eat("(");
     //@@mutable
     const params: Param[] = [];
-    let promiseIdx = new Set<number>();
+    //@@mutable
+    const promiseIdx: number[] = [];
     let promiseNames = new Set<string>();
     if (!this.at(")")) {
       do {
@@ -2837,7 +2840,7 @@ class Parser {
           // A `(…) => Promise<T>` parameter holds an async function, whoever passed it.
           // Calling it is exactly `one()` on an `async function one`, so it gets the same
           // floating-async guard — scoped to this body (see asyncParamScopes).
-          if (t.asyncFn) { promiseNames = promiseNames.add(pname); promiseIdx = promiseIdx.add(params.length); }
+          if (t.asyncFn) { promiseNames = promiseNames.add(pname); promiseIdx.push(params.length); }
         }
         let def: Expr | undefined;
         if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
@@ -2864,7 +2867,7 @@ class Parser {
     if (typeParams.length) this.typeParamScopes.push(new Set(typeParams));
     try {
       const params = this.parseParamList();
-      if (this.lastPromiseParams.size) this.promiseParamsByFn = this.promiseParamsByFn.set(name, this.lastPromiseParams);
+      if (this.lastPromiseParams.length) this.promiseParamsByFn = this.promiseParamsByFn.set(name, this.lastPromiseParams);
       const promiseNames = this.lastPromiseParamNames;
       const prelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
       let returnAnnot: Ty | undefined;
@@ -3425,7 +3428,7 @@ class Parser {
     // checkAsyncEscapes), and the same declaration carries it back: only a return type
     // written `(…) => Promise<T>` says the caller is getting an async function. Recorded,
     // not thrown, because an `async function` returned before its declaration hoists.
-    const asyncArrow = this.asyncFnExprs.has(argument);
+    const asyncArrow = argument.kind === "ArrowFunction" && (argument.isAsync ?? false);
     if (asyncArrow || argument.kind === "Identifier") {
       const argName = argument.kind === "Identifier" ? argument.name : null;
       this.returnEscapes.push({
@@ -3660,7 +3663,8 @@ class Parser {
   private parseArrow(): Expr {
     //@@mutable
     const params: Param[] = [];
-    let arrowPromiseIdx = new Set<number>();
+    //@@mutable
+    const arrowPromiseIdx: number[] = [];
     let arrowPromiseNames = new Set<string>();
     if (this.at("(")) {
       this.eat("(");
@@ -3677,7 +3681,7 @@ class Parser {
             const t = this.parseTypeAsyncAware();
             annot = t.ty;
             // see parseParamList — same rule, arrow syntax
-            if (t.asyncFn) { arrowPromiseNames = arrowPromiseNames.add(name); arrowPromiseIdx = arrowPromiseIdx.add(params.length); }
+            if (t.asyncFn) { arrowPromiseNames = arrowPromiseNames.add(name); arrowPromiseIdx.push(params.length); }
           }
           let def: Expr | undefined;
           if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
@@ -3692,7 +3696,8 @@ class Parser {
     // Which parameters are `(…) => Promise<T>` — recorded against the arrow NODE, since an
     // arrow has no name of its own until parseDeclarator binds it (see promiseParamsByFn).
     const promiseIdx = arrowPromiseIdx;
-    const mk = (a: Expr): Expr => { if (promiseIdx.size) this.promiseParamsByArrow = this.promiseParamsByArrow.set(a, promiseIdx); return a; };
+    // STAMPED on the arrow — see `ArrowFunction.promiseParams`.
+    const mk = (a: Expr): Expr => { if (promiseIdx.length && a.kind === "ArrowFunction") a.promiseParams = promiseIdx; return a; };
     let retAsyncFn = false;
     // `(x): T => …` — the DECLARED return type. This used to keep only `asyncFn` and drop
     // `ty` on the floor, which is why an arrow was the one function form whose declared
@@ -3724,7 +3729,7 @@ class Parser {
       // Remember WHICH node this is: erasure loses the `async`, but a `const` binding
       // this arrow is every bit as promise-returning as an `async function`, and the
       // floating-async guard is by NAME. parseDeclarator turns this back into a name.
-      this.asyncFnExprs = this.asyncFnExprs.add(arrow);
+      if (arrow.kind === "ArrowFunction") arrow.isAsync = true;   // STAMPED — see `ArrowFunction.isAsync`
       return arrow;
     }
     if (this.at("<")) {
@@ -3950,7 +3955,8 @@ class Parser {
     if (this.at("await") && this.startsExpression(this.peek(1))) {
       this.eat("await");
       const operand = this.parseUnary();
-      this.awaitedCalls = this.awaitedCalls.add(operand); // marks a `await f()` call as legitimately consumed
+      // STAMPED on the node, not collected in a `Set<Expr>` — see `CallExpr.awaited`.
+      if (operand.kind === "CallExpr") operand.awaited = true;
       return operand;
     }
     if (this.at("typeof")) { this.eat("typeof"); return { kind: "TypeofExpr", operand: this.parseUnary() }; }
@@ -4129,7 +4135,7 @@ class Parser {
           const loc = expr.callee.loc ?? { line: 0, col: 0 };
           const scopedAsync = this.inAsyncParamScope(expr.callee.name);
           this.identCalls.push({ node: expr, name: expr.callee.name, line: loc.line, col: loc.col, scopedAsync });
-        } else if (this.asyncFnExprs.has(expr.callee)) {
+        } else if (expr.callee.kind === "ArrowFunction" && (expr.callee.isAsync ?? false)) {
           // An immediately-invoked async arrow, `(async () => …)()`. It never binds a
           // name, so the name-based path above cannot see it; the callee NODE is the
           // identity. Recorded under a descriptive name so the guard reads the same.
@@ -4148,7 +4154,7 @@ class Parser {
         // (see checkAsyncEscapes): both the callee and an `async function` argument hoist.
         const calleeName = expr.callee.kind === "Identifier" ? expr.callee.name : null;
         args.forEach((a, i) => {
-          const asyncArrow = this.asyncFnExprs.has(a);
+          const asyncArrow = a.kind === "ArrowFunction" && (a.isAsync ?? false);
           if (!asyncArrow && a.kind !== "Identifier") return;
           const argName = a.kind === "Identifier" ? a.name : null;
           this.asyncEscapes.push({
@@ -4400,8 +4406,8 @@ class Parser {
     for (const c of sub.identCalls) this.identCalls.push(c);
     for (const e of sub.asyncEscapes) this.asyncEscapes.push(e);
     for (const r of sub.returnEscapes) this.returnEscapes.push(r);
-    for (const n of sub.awaitedCalls) this.awaitedCalls = this.awaitedCalls.add(n);
-    for (const n of sub.asyncFnExprs) this.asyncFnExprs = this.asyncFnExprs.add(n);
+    // (no `awaitedCalls` merge: the stamp lives on the shared node and travels for free)
+    // (no `asyncFnExprs` merge either: the stamp is on the shared node)
     for (const n of sub.hostImports) this.hostImports = this.hostImports.add(n);
     return out;
   }

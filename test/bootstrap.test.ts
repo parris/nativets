@@ -642,7 +642,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // The wall behind all five is `structuredClone` of the recursive `FuncDecl` type.
     // NT1014 is untouched and still holds the OTHER five modules — parser.ts's
     // `Set of U<…>` — so this round moved one of the two tiers, not both.
-    ["NT1002", "NT1014"],
+    // ...and NT1014 LEAVES the tree-wide set too, one round after NT2001 — so BOTH tiers
+    // moved in the same sitting, which this file has not recorded before. Its holder was
+    // three IDENTITY-KEYED collections over the `Expr` union in src/parser.ts
+    // (`Set<Expr>` twice, `Map<Expr, …>` once) plus a `Map<string, Set<number>>`. All are
+    // one-way STAMPS on the node now, or a plain `number[]`. The five land on NT1001
+    // (`arrays of Set<string>`); the three behind checker.ts stay on NT1002.
+    ["NT1001", "NT1002"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -747,7 +753,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // new encoding (and a new set of collisions to check against every predicate) for a
     // single site. The one honest tuple in the tree is now a record.
     // All nine moved together onto NT2001 — asserted below, where that bucket lives.
-    expect(byCode["NT1014"]?.slice().sort() ?? []).toEqual(["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"]);
+    // ...and NT1014 EMPTIES: the three identity-keyed `Expr` collections in src/parser.ts
+    // became node stamps, and the `Map<string, Set<number>>` became `Map<string, number[]>`.
+    // The same five modules move together to NT1001 (`Set<string>[]`), which is asserted
+    // as a membership rather than a bare absence so the next move names its holders.
+    expect(byCode["NT1014"]?.slice().sort() ?? []).toEqual([]);
+    expect(byCode["NT1001"]?.slice().sort() ?? []).toEqual(["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"]);
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
@@ -927,7 +938,12 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // never the ownership rule it read as. The parenthetical in that message belongs to
     // `.at`/`.find`; `.map` constructs rather than borrows, and `mapResultOk` already
     // allowed objects. Widening it to `U<…>`/`@N` needed no new store.
-    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual([]);
+    // ...and NT1001 IS BACK, held by the five modules behind src/parser.ts: `Set<string>[]`,
+    // which is what they landed on when the identity-keyed `Expr` collections (NT1014)
+    // became node stamps. A membership, so the next move names its holders.
+    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+    );
     // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
     // This is the DECISION the entry above named, arrived at: the typed walkers in
     // src/ast.ts write `e.ty = f(e.ty)` exactly where the reflective ones wrote
@@ -1223,7 +1239,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // on a Set), left deliberately for a lane that owns Set accumulators -- `Scope.hits`
     // is read from outside its class, so rebinding it is a real aliasing question.
     expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
-    expect((byCode["NT1014"] ?? []).slice().sort()).toEqual(["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"]);
+    // ...and NT1014 EMPTIES: the identity-keyed `Expr` collections in src/parser.ts are
+    // node stamps now and the `Map<string, Set<number>>` is a `Map<string, number[]>`.
+    // The five move together to NT1001 (`Set<string>[]`), asserted above.
+    expect((byCode["NT1014"] ?? []).slice().sort()).toEqual([]);
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
