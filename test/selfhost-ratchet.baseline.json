@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "d554b8a"
+    "rev": "37be969"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "7b37b51caf523785",
+      "sha256": "72d81df3bbf28198",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "ee1a0e374a0d951b",
+      "sha256": "5202569fa4492aad",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context"
+        "code": "NT2001",
+        "message": "[NT2001] '{kind:string,name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustring,body:@_nts0_m2_Stmt[],endDrops:?Ustring[],typeParams:?Ustring[],copyThis:?Uboolean,setter:?Uboolean,isStatic:?Uboolean,…"
       }
     },
     "codegen.ts": {
@@ -80,12 +80,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context"
+        "code": "NT2001",
+        "message": "[NT2001] '{kind:string,name:string,params:@_nts0_m0_Param[],returnAnnot:?Ustring,body:@_nts0_m0_Stmt[],endDrops:?Ustring[],typeParams:?Ustring[],copyThis:?Uboolean,setter:?Uboolean,isStatic:?Uboolean,…"
       }
     },
     "diagnostics.ts": {
-      "sha256": "985aa330044ab075",
+      "sha256": "a9c48bffe6cdd7e6",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context"
+        "code": "NT2001",
+        "message": "[NT2001] '{kind:string,name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustring,body:@_nts0_m2_Stmt[],endDrops:?Ustring[],typeParams:?Ustring[],copyThis:?Uboolean,setter:?Uboolean,isStatic:?Uboolean,…"
       }
     },
     "lexer.ts": {
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context"
+        "code": "NT2001",
+        "message": "[NT2001] '{kind:string,name:string,params:@_nts0_m2_Param[],returnAnnot:?Ustring,body:@_nts0_m2_Stmt[],endDrops:?Ustring[],typeParams:?Ustring[],copyThis:?Uboolean,setter:?Uboolean,isStatic:?Uboolean,…"
       }
     },
     "ownership.ts": {
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "de1baf2ed767a8b3",
+      "sha256": "af852a40c6f2f2d3",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context"
+        "code": "NT2001",
+        "message": "[NT2001] '{kind:string,name:string,params:@_nt_m2_Param[],returnAnnot:?Ustring,body:@_nt_m2_Stmt[],endDrops:?Ustring[],typeParams:?Ustring[],copyThis:?Uboolean,setter:?Uboolean,isStatic:?Uboolean,untr…"
       }
     }
   }

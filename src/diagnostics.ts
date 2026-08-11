@@ -695,10 +695,11 @@ export function unlinkedImportError(name: string, from: string): NTError {
  * `?:`/`??`. With none of those it is genuinely ambiguous, so we reject rather than guess
  * (`[]` is not `never[]` here) — and name the three ways to supply the missing type.
  */
-export function emptyArrayError(): NTError {
+export function emptyArrayError(at?: { line: number; col: number; file?: string }): NTError {
   return new NTError({
     code: NYI.ARRAY.code,
     milestone: NYI.ARRAY.milestone,
+    spans: at ? [{ line: at.line, col: at.col, file: at.file, label: "here", primary: true }] : undefined,
     message: "cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context",
     hint:
       "supply the element type — annotate the binding (`const xs: number[] = []`), " +

@@ -3886,7 +3886,7 @@ class Checker {
             if (!arrayElementOk(el, false)) throw nyi(NYI.ARRAY, `arrays of ${el}`);
             return hint;
           }
-          throw emptyArrayError();
+          throw emptyArrayError(e.loc);
         }
         const tys = e.elements.map((el) => {
           if (el.kind === "SpreadExpr") {

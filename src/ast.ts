@@ -1169,7 +1169,11 @@ export interface TemplateLiteral {
 
 export interface UndefinedLiteral { kind: "UndefinedLiteral"; ty?: Ty; }
 export interface NullLiteral { kind: "NullLiteral"; ty?: Ty; }
-export interface ArrayLiteral { kind: "ArrayLiteral"; elements: Expr[]; ty?: Ty; }
+/** `loc` is the `[`. Added for the same reason `ArrowFunction.loc` and `AssignExpr.loc`
+ *  were: `cannot infer the element type of an empty array literal` shipped with no
+ *  location and no span, so finding one in a 5,000-line module meant grepping for `[]`.
+ *  Third instance of that class this session. */
+export interface ArrayLiteral { kind: "ArrayLiteral"; elements: Expr[]; ty?: Ty; loc?: Loc; }
 export interface ObjectProperty { key: string; value: Expr; spread?: boolean; }
 export interface ObjectLiteral { kind: "ObjectLiteral"; properties: ObjectProperty[]; ty?: Ty; }
 export interface SpreadExpr { kind: "SpreadExpr"; argument: Expr; ty?: Ty; }

@@ -3246,20 +3246,29 @@ class Parser {
     const prelude = [...paramPropInits, ...fieldInitStmts];
     // A class with initializers but no explicit constructor gets a synthesized zero-arg ctor
     // that runs just the inits (paramProps imply an explicit ctor, so `prelude` is field-inits).
-    if (ctorParams === null && prelude.length) ctorParams = [];
+    // `[] as Param[]` — an empty literal in an ASSIGNMENT position gets no element type
+    // from context here (the target is a `let` whose declared type the checker does not
+    // carry to this arm), so it is NT1001. The annotation is the supported spelling the
+    // diagnostic's own hint prescribes.
+    const noCtorParams: Param[] = [];
+    if (ctorParams === null && prelude.length) ctorParams = noCtorParams;
     if (prelude.length) ctorBody = [...prelude, ...ctorBody];
 
     // `extends Error` inherits a `message: string` field (slot 0); `super(msg)` sets it.
-    if (extendsError) fields.unshift({ key: "message", ty: "string" });
-    // A bare `class X extends Error {}` (no own fields, no ctor) gets a forwarding default
+    // PREPENDED into a new local, not `fields.unshift(…)`. The `//@@mutable` accumulator
+    // opt-in legalizes `.push` only — `unshift` has no in-place runtime primitive (it
+    // would have to shift every element), so it stays refused and the spread is the
+    // supported spelling. Every use below this line is a READ.
+    const allFields = extendsError ? [{ key: "message", ty: "string" as Ty }, ...fields] : fields;
+    // A bare `class X extends Error {}` (no own allFields, no ctor) gets a forwarding default
     // constructor `constructor(message: string) { this.message = message }`, so `new X("m")`
     // works and `x.message === "m"` — matching node's implicit `super(...arguments)`.
-    if (extendsError && ctorParams === null && fields.length === 1) {
+    if (extendsError && ctorParams === null && allFields.length === 1) {
       ctorParams = [{ name: "message", annot: "string" }];
       ctorBody = [{ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: "message", value: this.ident("message"), viaThis: true, inCtor: true } }];
     }
 
-    // Reject-don't-miscompile: fields are only initialized by the constructor, so a field
+    // Reject-don't-miscompile: allFields are only initialized by the constructor, so a field
     // nothing stores into is uninitialized garbage — refuse rather than emit it.
     //
     // This used to be gated on `!hadExplicitCtor`, which meant the guard stopped running
@@ -3287,7 +3296,7 @@ class Parser {
     // unwritten heap POINTER: `e.message.length` printed `0`, and `JSON.stringify(e.message)`
     // aborted with EXIT 255 and empty stdout.
     const stored = extendsError && !hadExplicitCtor ? covered.add("message") : covered;
-    for (const f of fields) {
+    for (const f of allFields) {
       if (stored.has(f.key)) continue;
       // …and it gets its own diagnostic, because "assign it in the constructor" is not the
       // fix: `this.message = m` is a write to the INHERITED slot, and node still throws
@@ -3339,12 +3348,21 @@ class Parser {
     // A method SIGNATURE naming the class keeps the old substitution (`unself`, below): the
     // instance shape does not contain itself there, so there is no cycle to break.
     let selfRecursive = false;
-    for (const f of fields) {
-      if (!f.ty.includes(selfMarker)) continue;
-      selfRecursive = true;
-      f.ty = f.ty.split(selfMarker).join(typeRefTy(name)) as Ty;
+    // REBUILT, not mutated through the loop element. `f.ty = …` on a `for-of` binding is
+    // NT1606 and stays that way: an element is a BORROW (its owner is the array), which
+    // is the one receiver the `//@@mutable` opt-in deliberately does not reach. Building
+    // the resolved list is the supported spelling and says the same thing.
+    //@@mutable
+    const resolvedFields: { key: string; ty: Ty }[] = [];
+    for (const f of allFields) {
+      if (f.ty.includes(selfMarker)) {
+        selfRecursive = true;
+        resolvedFields.push({ key: f.key, ty: f.ty.split(selfMarker).join(typeRefTy(name)) as Ty });
+      } else {
+        resolvedFields.push(f);
+      }
     }
-    const objTy = `${name}${objectType(fields)}` as Ty; // class-tagged instance type
+    const objTy = `${name}${objectType(resolvedFields)}` as Ty; // class-tagged instance type
     // `@@mutable` + recursive is no longer refused HERE either (piece 4). The class
     // spelling now goes the same way the RECORD spelling went in piece 2: the hazard is
     // not the declaration, it is the one WRITE that can close a cycle, and the checker
@@ -3411,7 +3429,7 @@ class Parser {
     // per-call wrap. Function declarations hoist, so a decorator defined further down
     // the file is still in scope here.
     // Static-field initializers run WHERE THE CLASS WAS DECLARED — before the decorator
-    // applications, which is TS's order (static fields are part of class definition).
+    // applications, which is TS's order (static allFields are part of class definition).
     return { kind: "MultiStmt", stmts: [...staticFields, ...decorators] };
   }
 
@@ -4331,6 +4349,8 @@ class Parser {
   }
 
   private parseArrayLiteral(): Expr {
+    // The `[` — stamped so `cannot infer the element type` can say WHERE (ArrayLiteral.loc).
+    const openTok = this.peek(0);
     this.eat("[");
     //@@mutable
     const elements: Expr[] = [];
@@ -4342,7 +4362,7 @@ class Parser {
       } while (this.at(",") && (this.eat(","), true));
     }
     this.eat("]");
-    return { kind: "ArrayLiteral", elements };
+    return { kind: "ArrayLiteral", elements, loc: { line: openTok.line, col: openTok.col, file: this.file } };
   }
 
   private parseObjectLiteral(): Expr {
