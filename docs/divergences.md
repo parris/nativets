@@ -3603,6 +3603,52 @@ let s: string | undefined;   // starts as undefined — matches node ✅
 console.log(s);              // prints "undefined", like node
 ```
 
+#### The same rule on a CLASS FIELD (`NT1015`) — and the two holes it used to have
+
+A field is a real slot in the instance's heap block, so the rule above applies unchanged:
+a field nothing ever stores into has **no value**, and the slot's zero is not one. A field
+the constructor never assigns is therefore **refused**:
+
+```ts
+class C { y: number; z: number; constructor(y: number) { this.y = y; } }
+new C(7).z          // node: undefined   — we REFUSE (NT1015)
+```
+
+`tsc --strict` rejects that program too (`TS2564`), so this row is a divergence from
+**node**, not from TypeScript. The escape hatch is the same one locals have, and it is
+likewise not a divergence: widen the type and the field genuinely *is* `undefined`.
+
+| Field | node | us |
+|---|---|---|
+| `z: number;` never assigned | `undefined` | **NT1015** — no value of type `number` |
+| `z: number = 0;` | `0` | `0` ✅ |
+| `z: number \| undefined;` never assigned | `undefined` | `undefined` ✅ |
+| `z?: number;` never assigned | `undefined` | `undefined` ✅ |
+
+Both accepting rows in that table were **wrong answers** until they were fixed, and they
+are worth stating because they are the two ways one rule drifted apart from itself:
+
+- **`z: number | undefined` SEGFAULTED.** The slot-filling store was gated on the `?`
+  *token* rather than on the field's *type*, so `z?: T` was filled and the equivalent
+  explicit union was not — although the parser runs both through the same
+  `makeNullable("undefined", …)` and nothing downstream can tell them apart. The unwritten
+  slot stayed zero and the read dereferenced NULL: **exit 139** against node's `0`, on a
+  program `tsc --strict` accepts (`undefined` *is* in the declared type, so
+  `strictPropertyInitialization` is satisfied).
+- **`z: number` printed `0`.** The refusal was gated on the class having *no* constructor,
+  so the moment a class had one the guard stopped running and that constructor was never
+  checked for actually assigning each field. node prints `undefined`, we printed `0`, and
+  **both exited 0** — nothing in the tree observed it.
+
+One scan over the constructor body now answers both, because parameter properties and
+field initializers are folded into that body before it runs. That scan is deliberately an
+**over-approximation** of definite assignment — a store under an `if` counts as coverage —
+so it can only ever accept, never refuse a valid program. The cost is a residual hole: a
+field assigned on only *some* constructor paths is still accepted and still reads the
+slot's zero on the others. Closing it needs the path-sensitive analysis the `let` rule
+above already has, which is a checker pass and not a syntactic question the parser can
+answer.
+
 ### Block scopes get their own storage
 
 Until `alphaRenameShadows` (`src/checker.ts`), codegen keyed a function's frame slots by
