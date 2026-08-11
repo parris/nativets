@@ -7,7 +7,7 @@
  * supported programs.
  */
 
-import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, FieldAssign, Declarator } from "./ast.ts";
+import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, FieldAssign, Declarator, Param } from "./ast.ts";
 import { mentionsThis } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray, stringLiteralValue, exprTy } from "./ast.ts";
@@ -410,8 +410,18 @@ interface AccessPath { name: string; binding: Binding; path: string; ty: Ty }
  */
 interface BodyFrame { body: Stmt[]; binds: Set<string>; innerBinds: Set<string>; closureAssigned?: Set<string> }
 
-/** A `bodyChain` frame for a body, recording the names it binds itself. */
-function bodyFrame(params: { name: string }[], body: Stmt[]): BodyFrame {
+/** A `bodyChain` frame for a body, recording the names it binds itself.
+ *
+ *  `Param[]`, not the structurally minimal `{ name: string }[]` this and `ownBindings`
+ *  used to declare. Both read `p.name` and nothing else, so the narrow type was the
+ *  honest TypeScript — but it is not a type this compiler can PASS. A record's layout IS
+ *  its field list here, so a `Param` (six slots) and a `{ name: string }` (one) are
+ *  different shapes, and an array of one is not an array of the other however covariant
+ *  tsc is willing to be. Every caller already passes `Param[]` (or `[]`), so naming that
+ *  type costs no generality and puts two more of the compiler's own functions inside the
+ *  subset it compiles. Widening the checker to ACCEPT the old spelling would have been the
+ *  other direction, and the wrong one: it needs the element reshaped, not just permitted. */
+function bodyFrame(params: Param[], body: Stmt[]): BodyFrame {
   const binds = ownBindings(params, body);
   // A SECOND, independent `ownBindings` call seeds `innerBinds` — deliberately NOT `binds`.
   // `blockBindings` accumulates with `out = out.add(n)`, which reads as persistent (it is,
@@ -2192,7 +2202,7 @@ class Checker {
    * `emptyArrayError` — TypeScript's answer there is `any[]`, and guessing an element type
    * is exactly the silent wrong answer we exist to avoid.
    */
-  private defaultParamTy(p: { name: string; default?: Expr }, scope: Scope): Ty | undefined {
+  private defaultParamTy(p: Param, scope: Scope): Ty | undefined {
     if (!p.default) return undefined;
     const t = this.type(p.default, scope);
     if (t === "undefined" || t === "null")
@@ -7859,7 +7869,7 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
  * elsewhere in the same function could still mean the outer one; that direction stays
  * conservative.
  */
-function ownBindings(params: { name: string }[], body: Stmt[]): Set<string> {
+function ownBindings(params: Param[], body: Stmt[]): Set<string> {
   let out = new Set<string>();
   for (const p of params) out = out.add(p.name);
   for (const s of body) {
