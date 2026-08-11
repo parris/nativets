@@ -615,6 +615,17 @@ export const NYI = {
   // which is the opposite of the fall-through's answer, and a nested/object array for the
   // same reason its string form is refused.
   TONUMBER: { code: "NT1039", milestone: "later", hint: "`+x` / `Number(x)` coerce the primitives, a nullable box (`null` is 0, `undefined` is NaN), a `number[]`/`string[]`/`boolean[]` (node joins those with `,` and then parses) and a `Date` (its time value). For an object, a class instance, a Map or a Set, node's own answer is `NaN` — via `[object Object]` / `[object Map]` — so if that is genuinely what the line means, write `NaN` and it is exact. It usually is not: read the number you meant instead (`+o.count`, `m.size`, `u[0]`), which is a DIFFERENT value from the coercion, not a spelling of it. A Uint8Array is the one that looks safe and is not — node JOINS it, so `+new Uint8Array([5])` is 5 and `+new Uint8Array([1,2])` is NaN" },
+  // An object's LAYOUT is its type string (`{k1:t1,k2:t2}`), split back into slots by
+  // `objectFields` — a depth/angle-aware scan that knows nothing about quoting. A key
+  // carrying one of the characters that scan reacts to therefore moves the slot
+  // boundaries, and it did so SILENTLY: `for (const k in { "a<b": 1, z: 2 })` dropped `z`
+  // entirely at exit 0, and `Object.fromEntries([["a:number,b", "x"]])` forged a two-field
+  // record out of a one-entry list and exited 255 with no output at all.
+  //
+  // Admission is decided by `keyIsEncodable` (src/ast.ts), which round-trips the key
+  // rather than screening its characters — so `a>b`, `a|b`, `a"b`, `a\b`, a balanced
+  // `a<x>b` and `""` are all still keys, because all of them encode faithfully.
+  KEY_ENCODING: { code: "NT1040", milestone: "later", hint: "an object here is a flat slot array whose field list comes from its TYPE, and a type is a flat string `{key:type,…}` — so a key containing `,`, `:` or an unbalanced `(`/`)`/`[`/`]`/`{`/`}`/`<` is split apart as if it were type syntax, silently renaming or DROPPING A NEIGHBOURING FIELD. `\"` and `#` are refused for the same reason one step further out: they are searched for across the whole type string (as a string-literal type, and as a generic parameter), so what they break is decided by the key's neighbours. If the key text is genuinely arbitrary, use a `Map<string, T>` — a Map key is a runtime string with no encoding at all, so it takes any text: `const m = new Map<string, T>().set(k1, v1).set(k2, v2);` then `m.get(k)`. (Chained, because a Map here is PERSISTENT — `.set` returns the new map rather than mutating the receiver, docs/divergences.md §A.) Otherwise rename the field: most punctuation IS a legal key, and `>`, `|`, `@`, `&`, `=`, `?`, `$`, `.`, `-`, `+`, ` `, `\\` and a BALANCED `<…>` all compile" },
   PROTO_KEY: { code: "NT1038", milestone: "later", hint: "`{ __proto__: v }` is not a property in JavaScript — ECMAScript B.3.1 makes it the PROTOTYPE SETTER, so node prints `{}` for `{ __proto__: 1 }` and the key is absent from `Object.keys`, `for-in` and `JSON.stringify`. nativets objects are flat records with no prototype chain, so the setter cannot be honoured and building the field instead would be a silent wrong answer. If you wanted a PROPERTY named `__proto__`, the SHORTHAND is one in node and compiles here: `const __proto__ = v;` then `{ __proto__ }`. If you wanted to set a prototype (`{ __proto__: null }`, `{ __proto__: base }`), nativets has no prototypes — use a plain field, or spread the base in (`{ ...base, … }`)" },
 } as const;
 
