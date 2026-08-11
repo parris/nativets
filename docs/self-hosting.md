@@ -112,6 +112,44 @@ prerequisite for a *correct* self-hosted compiler rather than merely a compiling
 See also the semantic half of the subset rule: out-of-range indexing panics here where bun
 answers `undefined`.
 
+### OPEN: early-exit narrowing does not cross into an INLINED ARROW body
+
+Found 2026-08-11 while clearing `src/parser.ts`'s NT1606 cluster; it cost that module two
+functions. A **refusal, not a miscompile** — safe, but it blocks real code.
+
+The A/B pair is the whole finding — the guard, the field and the use are identical:
+
+```ts
+// A — REFUSED.  NT2001 `.push expects {name:string}, got {name:?Nstring}`
+elems.forEach((el, i) => {
+  if (el.name === null) return;          // early exit inside an inlined arrow
+  out.push({ name: el.name });
+});
+
+// B — COMPILES, matches node.  Same guard, `continue` in a for-of body.
+for (const el of elems) {
+  if (el.name === null) continue;
+  out.push({ name: el.name });
+}
+```
+
+Both print `1 b` under node. So the gap is specifically **early-exit (`return`/`throw`)
+narrowing failing to cross into an inlined arrow body** — *positive* narrowing inside the
+same arrow works, which is what makes it look like a general arrow gap when it is not.
+
+Three related checker gaps found in the same pass, all refusals:
+
+- **`this.<field> !== undefined && … this.<field>` does not narrow across `&&`**, while the
+  same guard on a local or a parameter does. Guarding the field in place moves the refusal to
+  the right operand rather than clearing it.
+- **`T === T | undefined` is refused with NO hint at all** (`Cannot compare string with
+  ?Ustring`) — a common, correct JS idiom, and the message offers no way forward.
+- **A LYING HINT on the arrow case.** It blames reassignment and advises *"bind
+  `const v = el;` before the test and narrow `v`"*. Compiling exactly that reproduces the
+  same error, and the hint then degenerates to *"bind `const v = v;`"*. That is the
+  fourteenth lying diagnostic found today; the standing rule is that every lane **compiles
+  its hint's advice against node** in a test.
+
 ### OPEN: the final concat result leaks once per evaluation
 
 Measured 2026-08-11 at `f954678`, after the string-RC lane closed the *intermediate*
