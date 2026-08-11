@@ -633,4 +633,33 @@ class C {
 console.log(new C(7, true).z, new C(7, false).z);
 `);
   });
+
+  /*
+   * 30. THE PATH-SENSITIVE HALF. Test 27 closed the SYNTACTIC question — "is there a
+   * `this.z = …` anywhere in the constructor at all" — with a scan that is deliberately
+   * an over-approximation (`fieldsStoredViaThis`, src/ast.ts): it can accept, never
+   * falsely refuse. The store below EXISTS, so that scan is satisfied, and the `else`
+   * path still leaves the slot unwritten:
+   *
+   *     node   -> undefined   (exit 0)
+   *     before -> 0           (exit 0)   <- the same silent wrong answer, one level in
+   *
+   * "assigned on EVERY path out of the constructor" is not a syntactic question, which
+   * is the reason that scan cannot answer it. It is the question `checkDefiniteAssignment`
+   * already answers for `let x: T;`, so this runs the SAME flow analysis, with the
+   * class's fields as the tracked bindings and the constructor body as the region.
+   */
+  test("a field assigned on only some constructor paths is refused", () => {
+    const e = expectRefused(`
+class C {
+  y: number;
+  z: number;
+  constructor(y: number, c: boolean) { this.y = y; if (c) this.z = 1; }
+}
+console.log(new C(7, false).z);
+`, "NT1015");
+    expect(e.diag.message).toContain("'z'");
+    expect(e.diag.message).toContain("not assigned on every path");
+    expect(e.diag.hint).toContain("has no such value");
+  });
 });

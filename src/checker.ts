@@ -7731,12 +7731,29 @@ type DAExit = "fall" | "left";
  * `BreakStmt` and `ContinueStmt` have no fields), so "nearest enclosing" is the whole
  * rule. `null` means neither exists, and `break`/`continue` there is already a checker
  * error ("'break' outside loop/switch").
+ *
+ * `rets` is the third escape, and unlike the other two it is never SHADOWED: a `return`
+ * leaves the whole function, so every loop and switch on the way out passes the same
+ * collector through. It is dead weight for the `let x: T;` question — a path that
+ * returned cannot reach a later read — and load-bearing for the CONSTRUCTOR question
+ * below, where a `return` is not divergence at all: the instance is already allocated,
+ * and the caller receives it with exactly what the returning path had assigned.
  */
-type DAEscapes = { breaks: DAFlow[]; conts: DAFlow[] } | null;
+type DAEscapes = { breaks: DAFlow[]; conts: DAFlow[]; rets: DAFlow[] } | null;
 
 /** Live incoming paths, in the shape `daMerge` reads. */
 const daLive = (flows: DAFlow[]): { flow: DAFlow; diverged: boolean }[] =>
   flows.map((flow) => ({ flow, diverged: false }));
+
+/**
+ * The escape collector for a construct that OWNS `break` (every loop, and `switch`).
+ * `conts` is the caller's decision — a loop owns `continue` and passes `[]`, a `switch`
+ * does not and passes the enclosing loop's — while `rets` is never a decision: a
+ * `return` leaves the function, so it always belongs to the collector further out.
+ */
+function daInner(esc: DAEscapes, conts: DAFlow[]): { breaks: DAFlow[]; conts: DAFlow[]; rets: DAFlow[] } {
+  return { breaks: [], conts, rets: esc ? esc.rets : [] };
+}
 
 /** Analyze a statement list. Returns whether control reaches past its end. */
 function daBlock(body: Stmt[], tracked: DATracked | null, flow: DAFlow, esc: DAEscapes): DAExit {
@@ -7780,11 +7797,23 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
         flow.add(e.target);
         return "fall";
       }
+      // …and `this.f = v` at statement level, which is the same form written against a
+      // CONSTRUCTOR field. Truthiness on `viaThis`, not `=== true`: it is optional, and
+      // comparing a `?Uboolean` against a plain `boolean` is outside the subset `src/`
+      // has to stay inside (NT2001).
+      if (e.kind === "FieldAssign" && e.viaThis && tracked !== null && tracked.has(daField(e.field))) {
+        daUse(e.value, tracked, flow);
+        flow.add(daField(e.field));
+        return "fall";
+      }
       daUse(e, tracked, flow);
       return daIsExit(e) ? "left" : "fall";
     }
 
-    case "ReturnStmt": daUse(s.argument, tracked, flow); return "left";
+    // A `return` leaves the function — no later read can be reached from it, which is why
+    // the local question needs nothing more than "left". The flow is still SNAPSHOT here,
+    // for the caller that asks about the function's EXITS rather than a read inside it.
+    case "ReturnStmt": daUse(s.argument, tracked, flow); if (esc) esc.rets.push(new Set(flow)); return "left";
     case "ThrowStmt": daUse(s.argument, tracked, flow); return "left";
     // These land somewhere ELSE that is still reachable, carrying what they have assigned
     // SO FAR — so the snapshot has to be taken right here, where the path leaves.
@@ -7811,7 +7840,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
     // to this loop and must not be charged to the switch around it.
     case "WhileStmt": {
       daUse(s.test, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [] });
+      daBlock(s.body, tracked, new Set(flow), daInner(esc, []));
       return "fall";
     }
 
@@ -7822,7 +7851,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
       // body's flow alone printed the slot's zero where node prints `undefined`:
       //     do { if (c) break; n = 7; } while (false);
       //     do { continue; } while (false);        // `continue` runs the TEST, then exits
-      const mine = { breaks: [] as DAFlow[], conts: [] as DAFlow[] };
+      const mine = daInner(esc, []);
       const body = new Set(flow);
       const exit = daBlock(s.body, tracked, body, mine);
       const after = daMerge(
@@ -7841,20 +7870,20 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
       }
       daUse(s.test, tracked, flow);
       const body = new Set(flow);
-      daBlock(s.body, tracked, body, { breaks: [], conts: [] }); // may run zero times
+      daBlock(s.body, tracked, body, daInner(esc, [])); // may run zero times
       daUse(s.update, tracked, body);
       return "fall";
     }
 
     case "ForOfStmt": {
       daUse(s.iterable, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [] }); // may run zero times
+      daBlock(s.body, tracked, new Set(flow), daInner(esc, [])); // may run zero times
       return "fall";
     }
 
     case "ForInStmt": {
       daUse(s.object, tracked, flow);
-      daBlock(s.body, tracked, new Set(flow), { breaks: [], conts: [] }); // may run zero times
+      daBlock(s.body, tracked, new Set(flow), daInner(esc, [])); // may run zero times
       return "fall";
     }
 
@@ -7868,7 +7897,7 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
       // lands at the switch's exit, so it is a LIVE incoming path and must join the
       // intersection. A `continue` is NOT — it jumps to the enclosing loop's head, past
       // this exit — so `conts` is passed through to the loop that owns it.
-      const mine = { breaks: [] as DAFlow[], conts: esc ? esc.conts : [] };
+      const mine = daInner(esc, esc ? esc.conts : []);
       const paths = s.cases.map((c) => {
         const f = new Set(flow);
         if (c.test) daUse(c.test, tracked, f);
@@ -7923,6 +7952,106 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
   }
 }
 
+/* ------------------------------------------------------------
+ * …and the same analysis, asked about a CONSTRUCTOR's fields.
+ *
+ * A class field is only ever initialized by the constructor, so `class C { z: number;
+ * constructor(c: boolean) { if (c) this.z = 1; } }` leaves the slot unwritten whenever
+ * `c` is false. node reads that as `undefined`; `number` has no such value, so codegen
+ * serves the slot's zero and prints `0` — the silent wrong answer, at exit 0, that the
+ * prime directive puts last. (A `string` field is worse: it printed `(null)`.)
+ *
+ * `fieldsStoredViaThis` (src/ast.ts) already refuses a field NOTHING in the constructor
+ * stores into, and says at its own definition why it cannot go further: it answers a
+ * SYNTACTIC question, and "assigned on every path out of the constructor" is not one.
+ * That is the question this pass already answers for `let x: T;`, so the fields are
+ * tracked as ordinary bindings — under a `this.`-prefixed key, which no local can
+ * collide with — and the constructor body is the region.
+ *
+ * TWO THINGS ARE DIFFERENT from the local question, and both are why this is here and
+ * not in a second copy of the walk:
+ *
+ *   - `return` is an EXIT, not divergence. `constructor(c) { if (c) return; this.z = 1 }`
+ *     hands the caller a live object with `z` unwritten, so the returning path joins the
+ *     intersection rather than dropping out of it. `throw` really does diverge — no
+ *     instance escapes — so a constructor that always throws proves nothing and is
+ *     accepted.
+ *   - only fields the constructor stores into SOMEWHERE are tracked. A field it never
+ *     mentions is the syntactic case, already decided in the parser, and deferring to it
+ *     is what keeps this pass from re-deciding cases it cannot see: `class E extends
+ *     Error` inherits `message`, which `super(...)` sets and the parser exempts.
+ * ------------------------------------------------------------ */
+
+/** The tracked-set key for a constructor field. Locals cannot contain `.`, so a field
+ *  and a local of the same name are never confused — they are different storage. */
+function daField(name: string): string { return `this.${name}`; }
+
+/** Every field this body stores into via `this.f = …` inside a CONSTRUCTOR, at any depth.
+ *
+ *  Shape-blind, for the reason `daReads` gives: the AST is plain data, and a hand-written
+ *  switch over statement kinds goes stale. Over-approximating here is the safe direction
+ *  in only one way — it can add a field to the tracked set that the flow walk then cannot
+ *  see assigned — so `inCtor` is required, not just `viaThis`: it is the parser's own
+ *  answer to "is this a constructor body", set exactly where it sets `inCtorBody`, and a
+ *  METHOD's `this.f = …` must not make the method look like a constructor. */
+function daCtorFields(node: unknown, out: Set<string>): void {
+  if (Array.isArray(node)) { for (const x of node) daCtorFields(x, out); return; }
+  if (node === null || typeof node !== "object") return;
+  const n = node as { kind?: string; field?: unknown; viaThis?: boolean; inCtor?: boolean };
+  if (n.kind === "FieldAssign" && n.viaThis && n.inCtor && typeof n.field === "string") out.add(n.field);
+  for (const v of Object.values(node)) daCtorFields(v, out);
+}
+
+/**
+ * Seed `tracked` with the constructor fields `body` must prove, and return them.
+ *
+ * A field whose declared type ADMITS `undefined` is left out: it has a legal starting
+ * value, and the parser has already given it an unconditional initializer, so it is
+ * never at risk. That is the same carve-out `let x: T | undefined;` gets above, said
+ * about a slot instead of a binding.
+ */
+function daSeedCtorFields(fn: { params?: Param[]; body?: Stmt[] }, tracked: DATracked): string[] {
+  const self = fn.params && fn.params.length > 0 && fn.params[0]!.name === "this" ? fn.params[0]!.annot : undefined;
+  const stored = new Set<string>();
+  daCtorFields(fn.body, stored);
+  const proved: string[] = [];
+  for (const f of stored) {
+    const ty = self === undefined ? undefined : fieldType(self, f);
+    if (ty !== undefined && isNullableTy(ty) && nullishKind(ty) === "undefined") continue;
+    tracked.set(daField(f), ty ?? "unknown");
+    proved.push(f);
+  }
+  return proved;
+}
+
+/** Refuse every field of `fn` that some path out of the constructor leaves unwritten. */
+function daCheckCtorExit(
+  fn: { params?: Param[] }, fields: string[], flow: DAFlow, exit: DAExit, esc: { rets: DAFlow[] },
+): void {
+  const paths = [{ flow, diverged: exit === "left" }, ...daLive(esc.rets)];
+  // Every path left by `throw`: no instance ever escapes, so there is nothing to prove.
+  // `daMerge`'s own fallback would answer "nothing is assigned" here and refuse the lot.
+  if (paths.every((p) => p.diverged)) return;
+  const out = daMerge(paths, new Set<string>());
+  const self = fn.params && fn.params.length > 0 ? fn.params[0]!.annot : undefined;
+  const cls = self === undefined ? "this" : classTag(self) ?? "this";
+  for (const f of fields) {
+    if (out.has(daField(f))) continue;
+    const ty = self === undefined ? undefined : fieldType(self, f);
+    const shown = ty ?? "unknown";
+    throw nyi(
+      NYI.CLASS_FEATURE,
+      `class '${cls}' field '${f}' is not assigned on every path out of its constructor`,
+      `node reads an unassigned field as \`undefined\`, but '${f}' is declared `
+        + `'${shown}', which has no such value — the slot would be served as its zero `
+        + `(\`0\`/\`(null)\`) instead. Assign it on every path (including the one that `
+        + `skips the \`if\`, runs the loop zero times, or \`return\`s early), give it an `
+        + `initializer (\`${f}: ${shown} = …\`), or widen the type to `
+        + `\`${shown} | undefined\`, which really does read as \`undefined\``,
+    );
+  }
+}
+
 /**
  * Run definite assignment over `body` as one control-flow region, then over every
  * nested function body — each independently, with its own tracked set, because each is
@@ -7955,7 +8084,17 @@ function checkDefiniteAssignment(body: Stmt[]): void {
     const n = node as { kind?: string; body?: unknown; stmts?: unknown };
     const nested = n.kind === "FuncDecl" ? n.body : n.kind === "ArrowFunction" ? n.stmts : undefined;
     if (Array.isArray(nested)) {
-      daBlock(nested as Stmt[], new Map<string, Ty | "unknown">(), new Set<string>(), null);
+      // ONE walk, two tracked kinds: the locals this pass has always proved, and — when
+      // this body is a constructor — its fields. Sharing the walk is what keeps the two
+      // diagnostics in source order and stops the constructor question from acquiring a
+      // second, weaker control-flow model of its own.
+      const tracked = new Map<string, Ty | "unknown">();
+      const fn = node as { params?: Param[]; body?: Stmt[] };
+      const fields = n.kind === "FuncDecl" ? daSeedCtorFields(fn, tracked) : [];
+      const flow = new Set<string>();
+      const esc = { breaks: [] as DAFlow[], conts: [] as DAFlow[], rets: [] as DAFlow[] };
+      const exit = daBlock(nested as Stmt[], tracked, flow, esc);
+      if (fields.length > 0) daCheckCtorExit(fn, fields, flow, exit, esc);
     }
     for (const v of Object.values(node)) walk(v);
   };
