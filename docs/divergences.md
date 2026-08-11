@@ -3223,11 +3223,11 @@ that ends at zero because its frame exited proves nothing) and an ASan run with
 `sanitize_address` asserted present on the `define`s — on macOS LeakSanitizer does not exist,
 so use-after-free and double-free are the two faults a sanitizer can actually see here.
 
-##### OPEN BUG: an IN-FRAME `throw` of a local declared OUTSIDE the `try` double-frees
+##### CLOSED: an IN-FRAME `throw` of a local declared OUTSIDE the `try` double-freed
 
 The move above is the CROSS-FRAME path. The in-frame path — a `throw` lowered as a branch to
-the enclosing `catch` — does not move, and where the thrown value is a linear local declared
-outside the `try`, two owners free one block:
+the enclosing `catch` — did not move, and where the thrown value is a linear local declared
+outside the `try`, two owners freed one block:
 
 ```ts
 class E { message: string; code: number; constructor(m: string, c: number) { this.message = m; this.code = c; } }
@@ -3237,19 +3237,20 @@ function run(n: number): number {
 }
 ```
 
-node prints `190` for a loop of 20; nativets **exits 133 with no output and no diagnostic**.
-The handler emits `nt_obj_free` twice on the same pointer — once for the catch binding (an
-owner since the `TryStmt` case in `src/ownership.ts`) and once for `err` (still an owner).
-Present at `47b28d2`, i.e. it predates the move work and is unchanged by it.
+node printed `190` for a loop of 20; nativets **exited 133 with no output and no diagnostic**
+(exit 255 through the test harness). The handler emitted `nt_obj_free` twice on the same
+pointer — once for the catch binding (an owner since the `TryStmt` case in
+`src/ownership.ts`) and once for `err` (still an owner). Present at `47b28d2`, i.e. it
+predated the move work and was unchanged by it.
 
-**The one-word fix does not work, and the reason is a SECOND open bug.** Making the `throw`
-consuming (`this.expr(s.argument, state, true)`) does fix it — the existing conditional-drop
+**The one-word fix needed a SECOND fix first, and the two shipped together.** Making the
+`throw` consuming (`this.expr(s.argument, state, true)`) fixes it — the conditional-drop
 machinery (`condDrops`/`moveSites`/`nullOnMove`) nulls the slot at the move site, so the
-second free is a no-op — but it also refuses `if (c) throw err; use(err);` as `NT1601`, on a
-program node runs: the ownership pass merges an `if` branch back into the state
-unconditionally, so a value moved on a TERMINATING path is seen as maybe-moved afterwards.
-That is not specific to `throw` — `return` is consuming today and has exactly the same false
-positive at `47b28d2`:
+second free is the no-op `nt_obj_free(NULL)` — but on its own it also refuses
+`if (c) throw err; use(err);` as `NT1601`, on a program node runs: the ownership pass merged
+an `if` branch back into the state unconditionally, so a value moved on a TERMINATING path
+was seen as maybe-moved afterwards. That was never specific to `throw` — `return` is
+consuming today and had exactly the same false positive at `47b28d2`:
 
 ```ts
 function pick(n: number): E {
@@ -3259,8 +3260,40 @@ function pick(n: number): E {
 }
 ```
 
-So both want the same change — a branch that `return`s or `throw`s must not merge its moved
-state back — and neither should be fixed without the other.
+**The rule that shipped.** An `if` arm or a `switch` case that LEAVES THE FRAME contributes
+nothing to the fall-through join, because that join is not a program point on any path
+through it (`Analyzer.escapes`, `src/ownership.ts`). Three conditions, each load-bearing:
+
+| condition | why it is there |
+|---|---|
+| `leavesFrame` — every path out of the arm is a `return`/`throw` | a LOOP body never counts however it ends: it may run zero times. An `if` counts only when BOTH arms diverge |
+| `hasJump` — no `break`/`continue` anywhere in the arm | those leave the BLOCK, not the frame. `for (…) { if (c) { const b = a; if (d) break; return 1; } } use(a);` looks diverging on the `return` and reaches `use(a)` down the `break` with `a` moved |
+| `tryDepth === 0` — not lexically inside a `try` | a `return` there runs the `finally` and a `throw` runs the `catch`; both read this state, and the catch/finally ENTRY state *is* the block's fall-through state, so there is nowhere else for the moves to be recorded |
+
+`break` and `continue` therefore still merge unconditionally, and that is a deliberate
+conservatism, not an oversight: `if (c) { const b = a; break; } … ; use(a)` after the loop
+is refused where node runs it. Relaxing them needs the dataflow to grow a second,
+EXCEPTIONAL state — the same split `src/checker.ts` already made for definite assignment
+(`DAExit`/`DAEscapes`, see "`break` is not `return`" above) — not a wider predicate. The
+same goes for the `try` guard.
+
+**One new refusal.** Reading the raised local FROM the handler is now `NT1601` where it used
+to compile and exit 255:
+
+```ts
+const err = new E("boom");
+try { if (n > 0) throw err; return 1; }
+catch (e) { return err.message.length; }   // node: 4. nativets: NT1601
+```
+
+To node `err` and `e` are one object; to us the raise MOVED the pointer to the handler's
+binding, so naming the raiser is a use-after-move. A refusal in place of a silent double
+free is the trade this project always takes. Read it through the catch binding (`e`).
+
+Pinned in `test/move-diverge.test.ts` — seven newly-accepted programs against node, five
+refusals that must stay refused (including both `break` shapes and the `finally` one),
+`__arrLive`/`__objLive`/`__strLive` at two scales 4x apart, and ASan builds with the
+`sanitize_address` attribute asserted present rather than assumed.
 
 The **stderr text divergence above applies to a propagated throw that nobody catches too**:
 it reaches `main`, and `main` prints one line and exits 1 where node prints a stack trace.
