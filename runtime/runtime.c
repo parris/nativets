@@ -450,6 +450,67 @@ void nt_panic_bounds(const char *what, double len, double idx, const char *loc) 
   abort();
 }
 
+/* ============================================================
+ * PANIC — a string the host cannot represent (see docs/divergences.md).
+ *
+ * node's (V8's) maximum string length on 64-bit is 2^29-24; `"x".repeat(536870889)` is
+ * the first `RangeError: Invalid string length` (measured against node v24). We count
+ * UTF-8 BYTES where node counts UTF-16 code units — the pre-existing string-index
+ * divergence (A.2) — so the two boundaries coincide for ASCII and ours is the stricter
+ * one for anything wider.
+ *
+ * WHY A PANIC AND NOT A RAISE. node throws a CATCHABLE RangeError here, and the pending-
+ * exception protocol below could carry one. It deliberately does not: making these
+ * builders fallible would route every `.repeat` / `.padStart` / `.padEnd` call site
+ * through `emitExcCheck`, which REFUSES to compile a fallible call inside a `try` with no
+ * `catch`, and inside a `try` whose `catch` binds an object type. Those are ordinary
+ * formatting calls, so that trades a rare stop for a common REJECTION of programs that
+ * compile and run correctly today. This is the same policy the compiler already applies
+ * to every other unrecoverable size failure — `nativets: out of memory` and
+ * `nt_panic_bounds` — so there is one stop discipline, not two. stdout is flushed first,
+ * so everything printed before the fault stays byte-comparable with node; the exit code
+ * is 134 (SIGABRT) where node's is 1, documented in docs/divergences.md.
+ * ============================================================ */
+#define NT_MAX_STR_LEN 536870888.0
+
+static void nt_panic_str_len(const char *what, double want) {
+  char w[64];
+  js_number_to_string(want, w, sizeof(w));
+  fflush(stdout);
+  fprintf(stderr, "panic: invalid string length: %s would be %s bytes, past the %.0f-byte maximum\n",
+          what, w, NT_MAX_STR_LEN);
+  fprintf(stderr, "  help: node throws `RangeError: Invalid string length` at exactly this "
+                  "boundary; build the text in pieces, or write it out incrementally, instead "
+                  "of materialising one string this large\n");
+  fflush(stderr);
+  abort();
+}
+
+/* `.repeat(count)` rejects its COUNT before it ever looks at the length — ES 22.1.3.18
+ * step 3 — which is why `"".repeat(Infinity)` throws while `"".repeat(1e100)` is "". */
+static void nt_panic_repeat_count(double count) {
+  char c[64];
+  js_number_to_string(count, c, sizeof(c));
+  fflush(stdout);
+  fprintf(stderr, "panic: invalid count value: %s\n", c);
+  fprintf(stderr, "  help: `.repeat(n)` needs `n` to be finite and >= 0; node throws "
+                  "`RangeError: Invalid count value: %s` here\n", c);
+  fflush(stderr);
+  abort();
+}
+
+/* ES 7.1.5 ToIntegerOrInfinity, kept as a DOUBLE so ±Infinity SURVIVES the conversion.
+ * `(long)d` for a non-finite or out-of-range `d` is undefined in C, and the two hosts
+ * disagree in the worst possible way: arm64 saturates to LONG_MAX while x86-64 yields
+ * LONG_MIN. That one line made `"abc".padStart(Infinity, "xy")` abort on one target and
+ * silently answer `"abc"` on the other — a WRONG ANSWER at exit 0, from the same source,
+ * decided by the host. Every length argument below goes through here first. */
+static double nt_to_integer_or_infinity(double d) {
+  if (isnan(d)) return 0.0;
+  if (isinf(d)) return d;
+  return trunc(d);
+}
+
 /* `expr!` — TypeScript's non-null assertion, on an A2 tagged pair [tag, value]
  * (tag 0 = undefined, 1 = null, >=2 = present). Unwraps to the value slot.
  *
@@ -645,6 +706,11 @@ refuse:
 
 const char *js_str_concat(const char *a, const char *b) {
   size_t la = nt_strlen(a), lb = nt_strlen(b);
+  /* `+` shares the cap but NOT the overflow: both operands are strings already in memory,
+   * so `la + lb` cannot wrap. It can still step past what node can represent, and node
+   * raises `Invalid string length` there — so a concatenation that outgrows the maximum
+   * must stop rather than answer a string node would refuse to build. One compare. */
+  if ((double)la + (double)lb > NT_MAX_STR_LEN) nt_panic_str_len("the concatenation", (double)la + (double)lb);
   char *out = (char *)nativets_alloc(la + lb + 1);
   memcpy(out, a, la);
   memcpy(out + la, b, lb);
@@ -892,15 +958,36 @@ static const char *nt_trim_impl(const char *s, int front, int back) {
 const char *js_str_trim(const char *s)       { return nt_trim_impl(s, 1, 1); }
 const char *js_str_trim_end(const char *s)   { return nt_trim_impl(s, 0, 1); }
 const char *js_str_trim_start(const char *s) { return nt_trim_impl(s, 1, 0); }
+/* String#repeat(count) — ES 22.1.3.18. The COUNT is validated first (step 3: a negative
+ * or +Infinity count is a RangeError whatever the receiver is), then the RESULT LENGTH.
+ *
+ * The size arithmetic is done in DOUBLE, not size_t, on purpose. `n * (size_t)count`
+ * wrapped: `"abcd".repeat(2**62)` is 2^64 bytes, which truncates to 0, so this allocated
+ * ONE byte and then memcpy'd 2^62 times into it — an out-of-bounds heap write in a
+ * memory-safe compiler, observed as SIGBUS with empty stdout AND empty stderr (the
+ * overflow had already smashed stdio's own buffer). A double holds every product up to
+ * the 2^29 cap exactly, so the comparison below is exact and cannot itself wrap. */
 const char *js_str_repeat(const char *s, double countd) {
-  long count = (long)countd; if (count < 0) count = 0;
-  size_t n = nt_strlen(s); char *o = alloc_str(n * (size_t)count);
-  for (long i = 0; i < count; i++) memcpy(o + i * n, s, n);
-  o[n * count] = 0; return o;
+  double count = nt_to_integer_or_infinity(countd);
+  if (count < 0.0 || isinf(count)) nt_panic_repeat_count(count);
+  size_t n = nt_strlen(s);
+  double total = (double)n * count;   /* exact for every value that survives the cap */
+  if (total > NT_MAX_STR_LEN) nt_panic_str_len("the repeated string", total);
+  size_t need = (size_t)total;        /* <= 2^29, so the narrowing is lossless */
+  char *o = alloc_str(need);
+  for (size_t i = 0; i < need; i += n) memcpy(o + i, s, n);
+  o[need] = 0; return o;
 }
+/* String#padStart(target, pad) — ES 22.1.3.17. Order matters and is node's: a target at
+ * or below the current length returns the receiver, THEN an empty filler returns the
+ * receiver (so `"abc".padStart(Infinity, "")` is `"abc"`, not a RangeError), and only
+ * then is the result length checked. */
 const char *js_str_pad_start(const char *s, double targetd, const char *pad) {
-  long target = (long)targetd; long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
-  if (n >= target || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, n); o[n] = 0; return o; }
+  double t = nt_to_integer_or_infinity(targetd);
+  long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
+  if (t <= (double)n || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, n); o[n] = 0; return o; }
+  if (t > NT_MAX_STR_LEN) nt_panic_str_len("the padded string", t);
+  long target = (long)t; /* <= 2^29 after the cap, so this conversion is defined */
   long padlen = target - n; char *o = alloc_str((size_t)target);
   for (long i = 0; i < padlen; i++) o[i] = pad[i % pn];
   memcpy(o + padlen, s, (size_t)n); o[target] = 0; return o;
@@ -3030,8 +3117,11 @@ const char *js_str_at(const char *s, double id) {
  * repetition, and a no-op when the string is already long enough or the pad is
  * empty (node's semantics exactly). */
 const char *js_str_pad_end(const char *s, double targetd, const char *pad) {
-  long target = (long)targetd; long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
-  if (n >= target || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, (size_t)n); o[n] = 0; return o; }
+  double t = nt_to_integer_or_infinity(targetd);
+  long n = (long)nt_strlen(s); size_t pn = nt_strlen(pad);
+  if (t <= (double)n || pn == 0) { char *o = alloc_str((size_t)n); memcpy(o, s, (size_t)n); o[n] = 0; return o; }
+  if (t > NT_MAX_STR_LEN) nt_panic_str_len("the padded string", t);
+  long target = (long)t; /* <= 2^29 after the cap, so this conversion is defined */
   char *o = alloc_str((size_t)target);
   memcpy(o, s, (size_t)n);
   for (long i = n; i < target; i++) o[i] = pad[(size_t)(i - n) % pn];
