@@ -2146,7 +2146,7 @@ function mapParams(params: Param[], fe: (x: Expr) => Expr, ft: (t: Ty) => Ty): P
  * on a narrowed union member is "an object literal … must set 'kind' to one of the
  * literals" (NT2001) under nativets itself. Measured, not assumed.
  */
-function walkExprChildren(e: Expr, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Expr {
+export function walkExprChildren(e: Expr, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Expr {
   switch (e.kind) {
     // Leaves: no child expressions. Spelled one arm each rather than sharing a fallthrough
     // label, because each arm has to name its own tag literal (see the note above).
@@ -2222,7 +2222,7 @@ function walkExprChildren(e: Expr, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt,
  * function's first blocker, so removing it moved no number today — it was a blocker that
  * would have surfaced the moment the one above it cleared.
  */
-function walkStmtChildren(s: Stmt, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Stmt {
+export function walkStmtChildren(s: Stmt, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Stmt {
   switch (s.kind) {
     case "VarDecl":
       return { ...s, kind: "VarDecl",
