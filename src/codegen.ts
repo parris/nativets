@@ -1525,9 +1525,15 @@ class FnGen {
     return null;
   }
 
-  /** Emit the frees `argTempFree` selected, once the call has returned. */
-  private emitArgTempFrees(frees: [string, string][]): void {
-    for (const [free, v] of frees) this.emit(`call void @${free}(ptr ${v})`);
+  /** Emit the frees `argTempFree` selected, once the call has returned.
+   *
+   *  A RECORD per entry, not a `[string, string]` tuple. The tuple read back as
+   *  `string[][]`, so the destructuring `for (const [free, v] of frees)` was NT1007
+   *  ("only Map entries are supported") — a self-host blocker — and the two fields were
+   *  positional at four push sites, where nothing marked which string was the free
+   *  function and which was the pointer. */
+  private emitArgTempFrees(frees: { free: string; v: string }[]): void {
+    for (const f of frees) this.emit(`call void @${f.free}(ptr ${f.v})`);
   }
 
   /** The CLASS-INSTANCE half of the rule above — `new P(7).get()`, which leaked 200
@@ -7151,7 +7157,7 @@ class FnGen {
       //@@mutable
       const argVals: string[] = [];
       //@@mutable
-      const frees: [string, string][] = []; // see `argTempFree`
+      const frees: { free: string; v: string }[] = []; // see `argTempFree`
       // The FIXED parameters coerce just like a non-rest call's do (see below) — this
       // path emitted them raw, so a nullable/general-union fixed parameter of a rest
       // function received an unboxed value.
@@ -7159,7 +7165,7 @@ class FnGen {
         const raw = this.argVal(i, args, preArg0, sig);
         const co = this.coerce(raw, sig.params[i]!);
         const free = this.argTempFree(i, args, preArg0, sig, raw, co);
-        if (free !== null) frees.push([free, raw.v]);
+        if (free !== null) frees.push({ free, v: raw.v });
         argVals.push(`${llvmTy(sig.params[i]!)} ${co.v}`);
       }
       const arr = this.fresh(); // pack trailing args into the rest array
@@ -7172,7 +7178,7 @@ class FnGen {
       // is NT1604), so the caller frees the header once the call returns. Shallow: the
       // ELEMENTS are the caller's own values, still owned and dropped by its own scope,
       // and freeing them here would be the double free this rule exists to avoid.
-      frees.push(["nt_arr_free", arr]);
+      frees.push({ free: "nt_arr_free", v: arr });
       const argstr = argVals.join(", ");
       if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); this.emitArgTempFrees(frees); if (raises) this.emitExcCheck(objPayload); return { v: "", ty: "void" }; }
       const t = this.fresh();
@@ -7184,7 +7190,7 @@ class FnGen {
     //@@mutable
     const argVals: string[] = [];
     //@@mutable
-    const frees: [string, string][] = []; // unbound literal temporaries, freed after the call
+    const frees: { free: string; v: string }[] = []; // unbound literal temporaries, freed after the call
     for (let i = 0; i < sig.params.length; i++) {
       // Coerced to the param type — boxing an `undefined` default into a nullable
       // optional param (`f(x?: T)`), and boxing an ARM into a general-union param
@@ -7193,7 +7199,7 @@ class FnGen {
       const raw = this.argVal(i, args, preArg0, sig);
       const co = this.coerce(raw, sig.params[i]!);
       const free = this.argTempFree(i, args, preArg0, sig, raw, co);
-      if (free !== null) frees.push([free, raw.v]);
+      if (free !== null) frees.push({ free, v: raw.v });
       argVals.push(co.v);
     }
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");
