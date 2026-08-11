@@ -120,6 +120,17 @@ const CASES = [
   // `rewriteTy` threads are covered (a class TAG and a recursive `@N` back-edge), and the
   // already-correct `NewExpr` arm is exercised so the fix cannot be a move rather than an add.
   "calltypeargs",
+  // A class-instance type under `| null` / `| undefined` in a non-entry module. Not a
+  // walker-misses-a-field bug like the four above — the walker reached these Tys — but the
+  // same two-spellings-of-one-type symptom one level down, in `rewriteTags` itself. A Ty
+  // writes the nullable constructors as the two-character sigils `?N`/`?U` immediately
+  // before what they wrap, and the rewriter looked for a tag by scanning an IDENTIFIER run
+  // followed by `{`. Starting that scan at the sigil's `N`/`U` reads `NScope`/`UBox`, which
+  // is in no rename table, so exactly the NULLABLE class tags kept the module's pre-rename
+  // spelling while every other position was renamed: `expects ?UBox{label:string}, got
+  // _m0_Box{label:string}`. It is the shape of `Scope`'s own `parent: Scope | null` in
+  // src/checker.ts, which is why the compiler could not compile its own scope chain.
+  "nullclass",
 ];
 
 describe("modules (differential vs node)", () => {
