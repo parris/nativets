@@ -5232,16 +5232,18 @@ class Checker {
         const at = this.type(e.args[0]!, scope);
         const bt = this.type(e.args[1]!, scope);
         const prim = (t: Ty): boolean => t === "number" || t === "string" || t === "boolean";
-        for (const [t, i] of [[at, 0], [bt, 1]] as Array<[Ty, number]>)
-          if (!prim(t))
-            throw nyi(NYI.OBJECT, `Object.is on ${t}`,
-              "on a non-primitive, `Object.is` is reference IDENTITY — whether the two names " +
-              "denote the same allocation. nativets copies freely (copy-on-write arrays, " +
-              "single-owner moves), so identity is not an observable this value model carries " +
-              "and answering it would be a guess. Compare the primitives you care about " +
-              "instead — `Object.is(a.length, b.length)` — or use `===`, which IS pointer " +
-              "identity on an array or object. `Object.is` over `number`/`string`/`boolean` works.",
-              exprLoc(e.args[i]!) ?? e.loc);
+        // Written out per argument rather than looped over `[[at, 0], [bt, 1]]`: that is a
+        // `[Ty, number]` TUPLE, which nativets refuses (NT1037, mixed element types), and
+        // `src/` has to stay inside the subset it compiles. `blocker-metric` caught it.
+        const identityHint =
+          "on a non-primitive, `Object.is` is reference IDENTITY — whether the two names " +
+          "denote the same allocation. nativets copies freely (copy-on-write arrays, " +
+          "single-owner moves), so identity is not an observable this value model carries " +
+          "and answering it would be a guess. Compare the primitives you care about " +
+          "instead — `Object.is(a.length, b.length)` — or use `===`, which IS pointer " +
+          "identity on an array or object. `Object.is` over `number`/`string`/`boolean` works.";
+        if (!prim(at)) throw nyi(NYI.OBJECT, `Object.is on ${at}`, identityHint, exprLoc(e.args[0]!) ?? e.loc);
+        if (!prim(bt)) throw nyi(NYI.OBJECT, `Object.is on ${bt}`, identityHint, exprLoc(e.args[1]!) ?? e.loc);
         return "boolean";
       }
       if (p !== "keys" && p !== "values" && p !== "entries" && p !== "getOwnPropertyNames") throw nyi(NYI.OBJECT, `Object.${p}`);
