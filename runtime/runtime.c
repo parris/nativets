@@ -1522,10 +1522,22 @@ typedef struct { const char *p; } JP;
 static int32_t g_exc_set = 0;
 static const char *g_exc_msg = NULL;
 
-static void nt_exc_raise(const char *msg) { g_exc_set = 1; g_exc_msg = msg; }
+static void nt_exc_raise(const char *msg) { g_exc_set = 1; g_exc_msg = (const char *)nt_str_retain((void *)msg); }
 int32_t nt_exc_pending(void) { return g_exc_set; }
 const char *nt_exc_message(void) { return g_exc_msg ? g_exc_msg : ""; }
-void nt_exc_clear(void) { g_exc_set = 0; g_exc_msg = NULL; }
+/* THE PENDING MESSAGE IS AN OWNER. A raise from a user `throw` that crosses a frame
+ * (`genPropagate`) runs that frame's drop set on its way out, and the message may be a
+ * heap string that very frame owns — so the raise RETAINS it and the clear releases it.
+ * The catch binding takes its own reference (`emitExcCheck`), which is what makes the
+ * handler's own scope-exit release balance. A literal, and every static message the
+ * runtime itself raises, is untracked: `nt_str_retain`/`nt_str_release` are no-ops for
+ * any pointer not in the refcount table, so no existing path changes at all. */
+void nt_exc_clear(void) {
+  const char *m = g_exc_msg;
+  g_exc_set = 0;
+  g_exc_msg = NULL;
+  nt_str_release((void *)m);
+}
 /* Public entry point so the CONDITIONALLY-LINKED runtime pieces (nt_http.c's `fetch`)
  * can raise a catchable throw too — a network/DNS failure must reject like node's
  * fetch does, not abort. The flag/message live here, so they need a real symbol. */
