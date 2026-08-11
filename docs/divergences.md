@@ -2381,6 +2381,54 @@ the same machinery as a by-borrow parameter escaping via `return o`.
 See `docs/ownership.md` and `test/global-return.test.ts` (both directions, exit codes asserted,
 ASan-pinned, live counts at two scales).
 
+#### …and the rule is not about GLOBALS at all — handing out any CAPTURE is `NT1604`
+
+The row above for `=> g` was right about the spelling and wrong about the scope. The same
+double free exists on an ordinary **function local**, which no globals-based rule could ever
+have reached:
+
+```ts
+function f(): number {
+  const local = { a: 1 };
+  const g = () => local;      // NT1604: captured by this closure
+  const x = g();
+  const y = g();              // node: 2, exit 0
+  return x.a + y.a;           // was: EMPTY stdout, exit 133
+}
+```
+
+**Why the module-level rule could not see it.** `checked.globals` is built from
+`moduleScope.hits`, and those are **reset before function bodies are checked** so that only
+reads from inside a function promote a binding. A module-level arrow's body is walked with the
+module's own top level, *before* that reset — so a binding captured by a module-level arrow
+never enters the globals table, and the rule keyed off it never fired.
+
+**Why counting moves is not a substitute.** `=> local` *consumes*, so ONE call looks like one
+perfectly legitimate move; nothing anywhere counts calls. Two calls hand the same pointer to
+two owners with nothing recorded. That is why this read as covered: every arrow case written
+when the module-level rule landed also mentions the binding **after** the call, which trips
+`NT1601` for an unrelated reason and masks the question. Delete that later mention and both
+spellings die — the return-type annotation makes no difference either.
+
+So inside a **non-inlined** arrow body a capture is a BORROW, exactly as a by-borrow parameter
+is. A single call is refused along with the rest: it was safe only by coincidence, and the pass
+has no way to prove a closure is called at most once.
+
+| shape | verdict |
+|---|---|
+| `const g = () => captured; g()` | `NT1604` — even called once |
+| the same with a return-type annotation | `NT1604` — identical; the annotation was never what mattered |
+| a capture that is a **function local** | `NT1604` — the module scope is not special |
+| `xs.map((x) => x)` and every inlined HOF callback | **compiles** — no env, body spliced into a frame that runs once |
+| `() => captured.length` / `() => captured.field` | **compiles** — reads through the borrow |
+| `() => [n, n + 1]` (a FRESH value per call) | **compiles** — each call owns what it returns |
+
+Pinned by `test/global-return.test.ts` (three cases: called twice, annotated, called once) with
+the shapes that stay legal asserted alongside. `test/arrow-returns-array.test.ts` and
+`test/closure-env-drops.test.ts` carried the pre-rule expectations and now assert the refusal;
+their own subject — a closure env must never be reclaimed with `nt_arr_free` — is unaffected and
+is restated on the fresh-literal shape, which captures nothing.
+
 `node` is our oracle. Two kinds of "we differ from node" exist, tracked separately.
 
 ## A. Semantic divergences (we compile it, but differ deliberately)

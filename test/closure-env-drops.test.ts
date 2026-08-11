@@ -354,12 +354,31 @@ console.log(__objLive());`);
    * with `nt_obj_free` or not at all — so the EXIT CODE is the whole assertion here.
    * -------------------------------------------------------------- */
 
-  test("anti-regression: `const g = () => arr` (a closure returning an array) exits clean", async () => {
-    const r = await compileAndRun(`
+  /* Handing a CAPTURED value out of a closure is NT1604 now ("captured by this
+   * closure"): the body runs once per CALL, so two calls made two owners of one pointer
+   * while `run`'s frame still freed it — EMPTY stdout, exit 133. The anti-regression
+   * this test carries is the WILD FREE (a closure env reclaimed with `nt_arr_free`),
+   * and that is preserved by the fresh-literal twin immediately below, which captures
+   * nothing and still compiles. See `test/global-return.test.ts` for the rule. */
+  test("anti-regression: `const g = () => arr` (handing out a capture) is refused", async () => {
+    let msg = "";
+    try {
+      await compileAndRun(`
 function run(): number {
   const arr: number[] = [1, 2, 3];
   const g = (): number[] => arr;
   return g().length;
+}
+console.log(run());`);
+    } catch (e) { msg = String(e); }
+    expect(msg).toContain("NT1604");
+  });
+
+  test("anti-regression: a closure returning a FRESH array exits clean", async () => {
+    const r = await compileAndRun(`
+function run(): number {
+  const g = (n: number): number[] => [n, n + 1, n + 2];
+  return g(1).length;
 }
 console.log(run());`);
     expect(r.stdout).toBe("3\n");

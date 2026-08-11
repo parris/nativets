@@ -52,6 +52,14 @@ function rejectionOf(source: string): { code: string; message: string; hint?: st
   }
 }
 
+/** Assert the program is REFUSED with the given NT code. Handing a CAPTURED value out
+ *  of a closure became NT1604 after this file was written — see the block comment above
+ *  `expression body returning a captured array binding`. */
+async function refused(source: string, code: string): Promise<void> {
+  const d = rejectionOf(source);
+  expect(d?.code ?? "compiled").toBe(code);
+}
+
 /** node is the oracle: same stdout AND same exit code. Both, always — a double free
  *  shows itself in the exit code while stdout still looks perfect. */
 async function same(source: string): Promise<void> {
@@ -62,11 +70,26 @@ async function same(source: string): Promise<void> {
 }
 
 describe("an arrow returning an array does not free itself as one", () => {
-  test("expression body returning a captured array binding", async () => {
-    await same(`const arr = [1, 2, 3];
+  /*
+   * NOW A REFUSAL, and this test changed meaning rather than breaking.
+   *
+   * Handing a CAPTURED value out of a closure is NT1604 ("captured by this closure"):
+   * a closure body runs once per CALL, so `const a = g(); const b = g();` produced two
+   * owners of one pointer while the enclosing scope still freed it — EMPTY stdout and
+   * exit 133, measured at module scope AND on an ordinary function local. The single
+   * call below happened to be safe only because one call is coincidentally one move;
+   * nothing in the pass counted calls, so the accounting could not be relied on. See
+   * `test/global-return.test.ts`, which owns the rule.
+   *
+   * What this FILE is about is untouched: the `isArrayTy` suffix collision is still
+   * pinned by the fresh-literal cases below (`() => [n, n + 1]`), which do not capture
+   * anything and stay legal.
+   */
+  test("expression body returning a captured array binding is refused", async () => {
+    await refused(`const arr = [1, 2, 3];
 const g = () => arr;
 console.log(g().length);
-`);
+`, "NT1604");
   });
 
   test("expression body returning a fresh array literal", async () => {
@@ -137,11 +160,14 @@ console.log(f(1).a);
 `);
   });
 
-  test("returning a captured object binding", async () => {
-    await same(`const o = { a: 1 };
+  /* Also NT1604 now — the capture rule is about OWNERSHIP, not about arrays, so it
+   * applies to every heap shape alike. That uniformity is the point of this describe
+   * block, and it survives the change. */
+  test("returning a captured object binding is refused", async () => {
+    await refused(`const o = { a: 1 };
 const g = () => o;
 console.log(g().a);
-`);
+`, "NT1604");
   });
 
   test("returning a Set", async () => {
@@ -177,11 +203,16 @@ console.log(f(1).length);
 `);
   });
 
-  test("function returning a captured array binding", async () => {
-    await same(`const arr = [1, 2, 3];
+  /* Stale since the module-level-binding rule landed (`test/global-return.test.ts`):
+   * a `function` may not hand out a module-level binding either. The PAIRING this
+   * describe block exists for is what matters, and it is now stronger than when it was
+   * written — both spellings are refused, with the same code, where before the arrow
+   * compiled into a double free and only the `function` was caught. */
+  test("function returning a captured array binding is refused too", async () => {
+    await refused(`const arr = [1, 2, 3];
 function g() { return arr; }
 console.log(g().length);
-`);
+`, "NT1604");
   });
 });
 
@@ -277,14 +308,27 @@ console.log(xs.length);
 });
 
 describe("the IR itself", () => {
+  /* Restated on the FRESH-LITERAL shape: the captured spelling this used to compile is
+   * NT1604 now, and a refused program emits no IR to assert on. The claim is unchanged
+   * — an arrow whose return type ENCODES as `…[]` must not be freed as an array — and
+   * the fresh literal exercises exactly the same `isArrayTy("()=>number[]")` collision,
+   * which is what this test was ever about. */
   test("the closure block is never reclaimed as an array", () => {
-    const ir = emitIR(`const arr = [1, 2, 3];
-const g = () => arr;
-console.log(g().length);
+    // BOUND, not consumed inline: `g(1).length` frees nothing as an array (the temp is
+    // read and dropped), so a bare `nt_arr_free === 1` would be asserting on the wrong
+    // program. Binding it makes both halves of the claim observable at once.
+    const ir = emitIR(`const g = (n: number) => [n, n + 1];
+const a = g(1);
+console.log(a.length);
 `);
     const main = ir.slice(ir.indexOf("define i32 @main"));
-    // exactly one nt_arr_free in main: `arr`. NOT `g`.
+    // The ARRAY is freed as an array — exactly once, `a`.
     expect(main.match(/call void @nt_arr_free/g)?.length ?? 0).toBe(1);
+    // …and the closure env is freed as an OBJECT. This is the half that pins the bug:
+    // `isArrayTy("(number)=>number[]")` answered true, so the env — a bare slot block
+    // with no `NtArray` header — was handed to `nt_arr_free`, which read two words past
+    // its end and freed them as pointers.
+    expect(main.match(/call void @nt_obj_free/g)?.length ?? 0).toBe(1);
   });
 
   // Was "…LEAKS its env exactly like a number-returning one" (1 each): the wild free's
@@ -315,16 +359,20 @@ console.log(__objLive());
     expect(withArray.stdout.trim().split("\n").at(-1)).toBe("0");
   });
 
-  test("the CAPTURED array is still freed, exactly once", async () => {
-    const r = await compileAndRun(`function main(): void {
+  /* The capture is no longer handed out at all — the shape is NT1604 — so "freed
+   * exactly once" is now enforced by REFUSAL rather than by drop placement. Asserted as
+   * a refusal so the case still fails loudly if that rule is ever relaxed without the
+   * drop accounting being fixed first; a plain deletion would leave nothing watching.
+   * The no-leak/no-double-free property for shapes that still compile is covered by
+   * `an array-returning arrow drops its env exactly like a number-returning one`. */
+  test("the CAPTURED array may not be handed out at all", async () => {
+    const d = rejectionOf(`function main(): void {
   const arr = [1, 2, 3];
   const g = () => arr;
   console.log(g().length);
 }
 main();
-console.log(__arrLive());
 `);
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe("3\n0\n"); // no leak, and no double free either
+    expect(d?.code ?? "compiled").toBe("NT1604");
   });
 });

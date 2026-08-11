@@ -24,7 +24,7 @@
  */
 
 import type { CheckedProgram } from "./checker.ts";
-import type { Program, Stmt, Expr, FuncDecl, Ty } from "./ast.ts";
+import type { Program, Stmt, Expr, FuncDecl, ArrowFunction, Ty } from "./ast.ts";
 import { isArrayTy, isObjectTy, isUnionTy, isTypeRefTy, isFuncTy, isNullableTy, baseTy, setBlockDrops, classTag, mutableTags, RETAINS_RECEIVER } from "./ast.ts";
 
 /** The linear (single-owner, move-checked + dropped) types: heap aggregates. A
@@ -566,6 +566,12 @@ class Analyzer {
       this.borrowBindings = this.borrowBindings.add(n);
     }
   }
+
+  /** Names an enclosing frame owns that the arrow body currently being walked CAPTURES.
+   *  Held apart from `globalBorrows` so the refusal can name the right cause: "captured
+   *  by this closure" is the accurate sentence, and the module-level hint would be a
+   *  lie for the function-local case. Set and restored by the `ArrowFunction` case. */
+  private captureBorrows = new Set<string>();
 
   /**
    * `this` IS A BORROW IN THIS FRAME, EVEN THOUGH IT IS NOT MOVE-TRACKED.
@@ -1210,6 +1216,24 @@ class Analyzer {
           });
           return;
         }
+        // A CAPTURE IS A BORROW. The arrow body runs once per call, so handing the
+        // captured value out makes a new owner every time while the enclosing frame
+        // still drops it. Reported ahead of the module-level arm because it is the more
+        // specific cause: a module binding captured by a module-level arrow is both, and
+        // "captured by this closure" is the sentence that tells the user what to change.
+        if (consume && this.captureBorrows.has(e.name)) {
+          const arrayLike = e.ty !== undefined && isArrayTy(e.ty);
+          const borrowExample = arrayLike
+            ? `\`for (const v of ${e.name})\` and \`${e.name}.length\``
+            : `\`${e.name}.field\``;
+          this.report({
+            code: OWN_CODES.MOVE_OUT_OF_BORROW,
+            message: `cannot move out of \`${e.name}\`: it is captured by this closure, and the enclosing scope still owns it`,
+            line: e.loc?.line ?? 0,
+            hint: `a closure body runs once per CALL, so handing out a captured value makes the receiver a new owner EVERY time while the enclosing scope still frees the same pointer once its own scope ends — calling the closure twice is a double free that prints nothing at all, because the allocator's abort discards buffered stdout. Read THROUGH the capture instead: ${borrowExample} are borrows and stay legal. Otherwise build and return a NEW value inside the closure, or declare the value inside the closure so each call owns its own`,
+          });
+          return;
+        }
         if (consume && this.globalBorrows.has(e.name)) {
           // The borrow the rewrite should reach for depends on what the binding IS, and a
           // hint that suggests `for (const v of …)` over an OBJECT is advice that does not
@@ -1679,6 +1703,41 @@ class Analyzer {
         const inlined = this.inlinedCallbacks.has(e);
         this.arrowDepth++;
         if (!inlined) this.envArrowDepth++;
+        // A NON-INLINED ARROW'S BODY RUNS ONCE PER CALL, so a value it CAPTURES and then
+        // hands out gets a fresh owner on every call while the enclosing frame still
+        // holds (and drops) the same pointer. Inside such a body a capture is therefore a
+        // BORROW, exactly as a by-borrow parameter is.
+        //
+        // Counting moves cannot substitute for the rule, which is why this was invisible:
+        // `=> shared` consumes, so ONE call looks like one legitimate move — and two
+        // calls hand the same pointer to two owners with nothing recorded anywhere.
+        // Measured before this, at BOTH scopes: node "1 1" / "2" exit 0, ours EMPTY
+        // stdout and exit 133.
+        //
+        // NOT a module-level rule. NT1604's global-return arm reads `checked.globals`,
+        // which is built from `moduleScope.hits` — and those are RESET before function
+        // bodies are checked, so a module binding captured by a module-level arrow never
+        // enters that table at all. The identical double free exists one scope down, on
+        // an ordinary function local, which no globals-based rule could ever have seen.
+        //
+        // An INLINED HOF callback is excluded and must stay excluded: it allocates no env
+        // and its body is spliced into the enclosing frame, which runs once — so a value
+        // moved there really is moved once, and borrowing it would refuse code that is
+        // correct today (`xs.map((x) => x)` and every sibling).
+        const savedCaptureBorrows = this.captureBorrows;
+        const savedBorrowBindings = this.borrowBindings;
+        if (!inlined) {
+          // Only genuine captures: subtract every name the arrow itself binds. An arrow's
+          // own parameters and locals keep their source spelling (`alphaRenameShadows`
+          // pins a frame's params and top-level declarations), so `(shared) => shared`
+          // must not be read as a capture of the outer `shared`.
+          const own = arrowOwnNames(e);
+          for (const n of this.linear) {
+            if (own.has(n)) continue;
+            this.captureBorrows = this.captureBorrows.add(n);
+            this.borrowBindings = this.borrowBindings.add(n);
+          }
+        }
         // AN EXPRESSION BODY IS A RETURN, and the two spellings of one arrow disagreed
         // about that. `=> { return shared; }` consumes through `ReturnStmt` (via
         // `arrowScope` → `scoped`) and is refused; `=> shared` walked its body as a pure
@@ -1696,6 +1755,8 @@ class Analyzer {
           const b = e.body as Expr;
           this.expr(b, state, b.kind === "Identifier");
         } else this.arrowScope(e.stmts as Stmt[], state);
+        this.captureBorrows = savedCaptureBorrows;
+        this.borrowBindings = savedBorrowBindings;
         if (!inlined) this.envArrowDepth--;
         this.arrowDepth--;
         return;
@@ -1712,6 +1773,24 @@ class Analyzer {
       default: return; // literals, numeric update, unreachable kinds
     }
   }
+}
+
+/** Every name an arrow BINDS ITSELF — its parameters, and any declaration anywhere in
+ *  its body (nested arrows' parameters included). Subtracted from the enclosing frame's
+ *  linear set so that only genuine CAPTURES are treated as borrows inside the body. */
+function arrowOwnNames(e: ArrowFunction): Set<string> {
+  let out = new Set<string>();
+  for (const p of e.params) out = out.add(p.name);
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) { for (const x of n) walk(x); return; }
+    if (n === null || typeof n !== "object") return;
+    const o = n as Record<string, unknown>;
+    if (o["kind"] === "VarDecl") for (const d of o["decls"] as { name: string }[]) out = out.add(d.name);
+    if (o["kind"] === "ArrowFunction") for (const p of o["params"] as { name: string }[]) out = out.add(p.name);
+    for (const v of Object.values(o)) walk(v);
+  };
+  walk(e.exprBody ? e.body : e.stmts);
+  return out;
 }
 
 /** Linear locals declared DIRECTLY in this statement list (a `MultiStmt` is a

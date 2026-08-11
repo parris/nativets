@@ -235,6 +235,52 @@ console.log(shared.a, x.a);
 `, "NT1604");
   });
 
+  /*
+   * CALLING THE ARROW TWICE — the hole every case above walked past.
+   *
+   * Each arrow test written when this rule landed reads the global AGAIN after the call
+   * (`console.log(shared.a, x.a)`), and that later read is what trips NT1601: the
+   * expression body CONSUMES `shared`, so the pass records one move and the second
+   * mention is a use-after-move. Correct, but it masks the actual question. Delete that
+   * read and call the arrow TWICE and the move accounting is simply wrong — a body that
+   * moves a value runs once per CALL, so two calls hand the same pointer to two owners
+   * and `main` frees it twice. Measured before the fix: node "1 1" exit 0, ours EMPTY
+   * stdout and exit 133, for BOTH spellings.
+   *
+   * The annotation is not what separates the two — `(): {a:number} => shared` dies
+   * identically. Every earlier arrow case merely happened to carry one.
+   */
+  test("an arrow called TWICE hands out two owners", async () => {
+    await refused(`
+const shared = { a: 1 };
+const get = () => shared;
+const x = get();
+const y = get();
+console.log(x.a, y.a);
+`, "NT1604");
+  });
+
+  test("...and the annotation makes no difference to that", async () => {
+    await refused(`
+const shared = { a: 1 };
+const get = (): { a: number } => shared;
+const x = get();
+const y = get();
+console.log(x.a, y.a);
+`, "NT1604");
+  });
+
+  /* A single call was equally unsound — it just could not be caught by counting moves,
+   * because one call really is one move. The rule is about the BODY, not the call count. */
+  test("...and a SINGLE call is refused too, for the same reason", async () => {
+    await refused(`
+const arr = [1, 2, 3];
+const g = () => arr;
+const a = g();
+console.log(a.length);
+`, "NT1604");
+  });
+
   test("a class METHOD is not a different frame for this purpose", async () => {
     await refused(`
 const shared = { a: 1 };
