@@ -80,7 +80,7 @@ describe("fuzz findings — string → number conversions", () => {
    * the result NaN. Ours returns a number — and for `"+-1"` the sign it returns is the
    * one from the SECOND character, so the answer is not merely wrong, it is inverted.
    */
-  it.failing("parseInt rejects a second sign character", async () => {
+  it("parseInt rejects a second sign character", async () => {
     await expectSameBytes([
       'console.log(parseInt("--1"));', // node NaN, ours 1
       'console.log(parseInt("-+1"));', // node NaN, ours -1
@@ -155,7 +155,7 @@ describe("fuzz findings — string → number conversions", () => {
    * `parseInt("-0")` is -0, not 0. Invisible through `String()` (both "0") but visible
    * through console.log, which is util.inspect's formatNumber and prints `-0`.
    */
-  it.failing("parseInt preserves the sign of a negative zero", async () => {
+  it("parseInt preserves the sign of a negative zero", async () => {
     await expectSameBytes([
       'console.log(parseInt("-0"));',      // node -0, ours 0
       'console.log(parseInt("-0", 16));',  // node -0, ours 0
@@ -169,7 +169,7 @@ describe("fuzz findings — string → number conversions", () => {
    * accumulates mathematically and rounds to the nearest double at the end, so any input
    * whose value exceeds 2^63 comes back as the same wrong constant here.
    */
-  it.failing("parseInt with a radix does not saturate at INT64_MAX", async () => {
+  it("parseInt with a radix does not saturate at INT64_MAX", async () => {
     await expectSameBytes([
       'console.log(parseInt("9007199254740993", 16));', // node 10378291982571407000, ours 9223372036854776000
       'console.log(parseInt("9007199254740993", 36));', // node 1.9896986116031812e+24, ours the same constant

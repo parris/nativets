@@ -3424,6 +3424,50 @@ scope (`const a = 1; const a = 2;` prints `2`), which node rejects as a `SyntaxE
 are the one case still sharing a frame slot, which is why the ownership pass keeps its
 `shadowedNames` disqualification — it holds that gap to a leak rather than a use-after-free.
 
+**A second shape is still wrong, and it is a `function` DECLARATION inside a block.**
+`alphaRenameShadows` binds every hoisted `FuncDecl` name with `pinned = true` in *every*
+scope, frame or not — "they genuinely hoist and never rename" — so a block-level
+declaration keys the same storage as an enclosing declaration of that name, and the call
+resolves to the *enclosing* one:
+
+```ts
+function fmt(n: number): string { return `outer:${n}`; }
+function run(): string {
+  { function fmt(n: number): string { return `inner:${n * 2}`; }
+    return fmt(21); }
+}
+console.log(run());          // node: inner:42.  nativets: outer:21.
+console.log(fmt(1));         // outer:1 on both.
+```
+
+Exit 0 on both sides, no diagnostic — a silent wrong answer, and the inner body is never
+emitted. It survives at any signature: the shadowing declaration's parameters and return
+type are simply ignored in favour of the outer function's.
+
+It needs an enclosing declaration of the same name to land on. With no outer `fmt` to
+absorb the reference — two **sibling** blocks each declaring `function tag()`, say — the
+call is `NT1003` instead, so the refusal, not the miscompile, is the common case. That is
+the identical structure as the `const g` gap above, and the same root: a name is resolved
+against what the frame already knows rather than against the block that declares it.
+
+Fixing it properly is not a rename. node's block-level function declarations follow
+Annex B — the declaration creates a **var-scoped** binding in the enclosing function,
+assigned where the block *evaluates* it — which is why node prints `4`, not `3`, for
+
+```ts
+function pick(): number { return 1; }
+function outer(): number {
+  let t = 0;
+  { function pick(): number { return 2; } t += pick(); }
+  t += pick();                 // still the INNER one: Annex B var-scoped it
+  return t;
+}
+console.log(outer());        // node: 4.  nativets: 2.
+```
+
+Until that is modelled, the honest interim is to **refuse** a `FuncDecl` in a nested block
+whose name is already bound in the frame, rather than pin it onto the outer one.
+
 ## B. Unimplemented features (we refuse to compile — never miscompile)
 
 Everything else we don't support is **rejected with an `NT1xxx` diagnostic**, not silently
