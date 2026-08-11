@@ -2022,21 +2022,36 @@ function collectVarTys(stmts: Stmt[], out: Map<string, Ty>): void {
  * this set came back short.
  *
  * A NO-OP under bun, where `src/` runs today, and that is what makes the change checkable:
- * node's `.add` returns the RECEIVER, so `out = out.add(n)` self-assigns and
- * `out = collectLinear(s.body, out)` re-binds the same object. Byte-identical IR over the
+ * node's `.add` returns the RECEIVER, so `acc = acc.add(n)` self-assigns and
+ * `acc = collectLinear(s.body, acc)` re-binds the same object. Byte-identical IR over the
  * corpus is therefore the expected result, not merely a hoped-for one — any drift would
  * mean a threading mistake.
+ *
+ * THE ACCUMULATOR IS A LOCAL SEEDED FROM `out`, not `out` itself, and that is the half the
+ * return alone did not buy. Returning the set is necessary but not sufficient: `out = out
+ * .add(n)` still writes to a PARAMETER, and the checker refuses that shape outright
+ * (`rejectParamRebind`, NT1606) without looking at whether the function returns it — as it
+ * must, since the rule cannot see the call sites and one caller ignoring the result is the
+ * silent lost update. So this function stayed a self-hosting blocker while already being
+ * correct. `let acc = out` is the spelling NT1606's own hint names, and the hint is now
+ * compiled against node in test/discarded-mutator.test.ts rather than merely asserted.
+ *
+ * Identical under both languages, which is why it is a rename and not a change: under bun
+ * `acc` and `out` are the same object and `.add` mutates it; under nativets `acc` moves and
+ * `out` does not, and every caller reads the RETURN. The two agree at the only place anyone
+ * looks.
  */
 function collectLinear(stmts: Stmt[], out: Set<string>): Set<string> {
+  let acc = out;
   for (const s of stmts) {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out = out.add(d.name); break;
-      case "IfStmt": out = collectLinear(s.consequent, out); if (s.alternate) out = collectLinear(s.alternate, out); break;
-      case "WhileStmt": case "DoWhileStmt": out = collectLinear(s.body, out); break;
-      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") out = collectLinear([s.init as Stmt], out); out = collectLinear(s.body, out); break;
-      case "ForOfStmt": out = collectLinear(s.body, out); break;
-      case "SwitchStmt": for (const c of s.cases) out = collectLinear(c.body, out); break;
-      case "BlockStmt": out = collectLinear(s.body, out); break;
+      case "VarDecl": for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) acc = acc.add(d.name); break;
+      case "IfStmt": acc = collectLinear(s.consequent, acc); if (s.alternate) acc = collectLinear(s.alternate, acc); break;
+      case "WhileStmt": case "DoWhileStmt": acc = collectLinear(s.body, acc); break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") acc = collectLinear([s.init as Stmt], acc); acc = collectLinear(s.body, acc); break;
+      case "ForOfStmt": acc = collectLinear(s.body, acc); break;
+      case "SwitchStmt": for (const c of s.cases) acc = collectLinear(c.body, acc); break;
+      case "BlockStmt": acc = collectLinear(s.body, acc); break;
       // A `try` was MISSING here, and it was a LEAK rather than a refusal: `scoped()` is
       // called on all three lists, so `declaredLinear` did find an array declared inside
       // one — but `scoped` then intersects that with `this.linear`, which is what this
@@ -2049,17 +2064,17 @@ function collectLinear(stmts: Stmt[], out: Set<string>): Set<string> {
         // the `TryStmt` case in `stmt`) and `declaredLinear` cannot see it, so `scoped`
         // is handed it explicitly and needs it to be linear for that to count.
         const bound = s.param;
-        if (s.handler !== null && bound !== null && isLinearTy(s.catchTy ?? "string")) out = out.add(bound);
-        out = collectLinear(s.block, out);
-        if (s.handler) out = collectLinear(s.handler, out);
-        if (s.finalizer) out = collectLinear(s.finalizer, out);
+        if (s.handler !== null && bound !== null && isLinearTy(s.catchTy ?? "string")) acc = acc.add(bound);
+        acc = collectLinear(s.block, acc);
+        if (s.handler) acc = collectLinear(s.handler, acc);
+        if (s.finalizer) acc = collectLinear(s.finalizer, acc);
         break;
       }
-      case "MultiStmt": out = collectLinear(s.stmts, out); break;
+      case "MultiStmt": acc = collectLinear(s.stmts, acc); break;
       default: break;
     }
   }
-  return out;
+  return acc;
 }
 
 export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
