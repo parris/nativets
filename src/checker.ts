@@ -1289,6 +1289,17 @@ function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
  *  - the scan is by UTF-16 CODE UNIT, like the flagless regex it replaces — so a non-BMP
  *    character yields TWO underscores and the length is preserved. `for (const c of t)`
  *    would iterate code points and quietly produce one.
+ *
+ * ...UNDER BUN. Under the SELF-HOSTED compiler it is by UTF-8 BYTE, because `t.length` and
+ * `t[i]` are (§A.2), so the same three characters give different answers on the two hosts:
+ * `"Boéx"` mangles to `Bo_x` under bun and `Bo__x` here, `"Bo😀x"` to `Bo__x` and `Bo____x`.
+ * MEASURED, not deduced — this exact function, compiled both ways. Latent rather than
+ * live: every type argument in the tree is ASCII, on which the two agree exactly, and the
+ * mangled name never leaves one compile. But "the length is preserved" is a claim about
+ * bun only, and the subset rule (docs/self-hosting.md) says a `src/` function has to mean
+ * the same thing on both hosts. Rewriting it in terms of a unit both hosts share — walking
+ * `Array.from(t)`, which is code-point framed on both — is the fix when someone needs it;
+ * doing it here would change ASCII mangling not at all and is nobody's blocker today.
  */
 function mangleTypeArg(t: string): string {
   let out = "";
