@@ -278,13 +278,26 @@ function merge(a: State, b: State): State {
  * The predicate is deliberately about leaving THE FRAME, not about leaving the block:
  * see `hasJump` for the other half, and `Analyzer.escapes` for the `try` guard. Widening
  * it past that is how a safe refusal becomes a silent use-after-free.
+ *
+ * Spelled as a `switch` per statement rather than a chain of `&&`ed `if`s, the same shape
+ * as `hasJump` below, so that `src/` stays inside the subset it compiles: a `kind ===`
+ * test and a `!== null` test on the SAME line only narrow one at a time here, so the
+ * `&&` spelling read `alternate` as still-nullable and was NT2001 ("narrow it first") —
+ * a self-hosting blocker this lane would have added with its own fix.
  */
 function leavesFrame(list: Stmt[]): boolean {
   for (const s of list) {
-    if (s.kind === "ReturnStmt" || s.kind === "ThrowStmt") return true;
-    if (s.kind === "BlockStmt" && leavesFrame(s.body)) return true;
-    if (s.kind === "MultiStmt" && leavesFrame(s.stmts)) return true;
-    if (s.kind === "IfStmt" && s.alternate !== null && leavesFrame(s.consequent) && leavesFrame(s.alternate)) return true;
+    switch (s.kind) {
+      case "ReturnStmt": case "ThrowStmt": return true;
+      case "BlockStmt": if (leavesFrame(s.body)) return true; break;
+      case "MultiStmt": if (leavesFrame(s.stmts)) return true; break;
+      case "IfStmt": {
+        const alt = s.alternate;
+        if (alt !== null && leavesFrame(s.consequent) && leavesFrame(alt)) return true;
+        break;
+      }
+      default: break;
+    }
   }
   return false;
 }
@@ -921,26 +934,41 @@ class Analyzer {
       case "BlockStmt": this.scoped(s.body, state); return;
       case "MultiStmt": this.seq(s.stmts, state); return; // scope-less group: its decls belong to the enclosing block
       case "ThrowStmt": {
-        this.expr(s.argument, state, false);
+        // THE RAISE IS A MOVE, and it is now spelled as one.
+        //
+        // Both lowerings TAKE the pointer: a cross-frame raise hands it to
+        // `nt_exc_raise_obj`, whose slot owns it until `nt_exc_take_object` gives it to the
+        // catch binding; an IN-FRAME throw stores it straight into the catch binding's
+        // slot and branches (codegen's `ThrowStmt` case). ownership.ts makes that binding
+        // an OWNER either way (see `TryStmt` below) — so the thrower must stop being one.
+        //
+        // It used to be spelled as SUBTRACTION from the drop list below instead, on the
+        // grounds that marking it moved would make `if (c) throw e;` leave `e` maybe-moved
+        // for the code after the `if` — an NT1601 on a program node accepts. That was a
+        // real objection, and it is what `escapes` now answers: a branch that throws does
+        // not merge its moves into the join, so `if (c) { throw err; } use(err);` stays
+        // legal with the move recorded. What subtraction could NOT do was cover the
+        // IN-FRAME throw of a local declared OUTSIDE the `try`, because the double owner
+        // there is not in this list at all — it is the catch binding:
+        //
+        //     const err = new E("boom");
+        //     try { if (n > 0) throw err; return 1; }
+        //     catch (e) { return e.message.length * 19; }   // freed `err` AND `e`
+        //
+        // node prints 76; we exited 255 with empty stdout and no diagnostic. As a MOVE it
+        // is a `condDrops` name, so `nullOnMove` nulls `err`'s slot at the raise and the
+        // handler's drop of it is the no-op `nt_obj_free(NULL)` — one owner, one free.
+        // (Inside a `try`, `escapes` is off by design, so the merge keeps `err`
+        // maybe-moved, which is exactly what asks for the drop flag.)
+        this.expr(s.argument, state, true);
         // The EXCEPTIONAL exit's drop set, and it is the same one `ReturnStmt` takes
         // above for the same reason: a throw that propagates out of its frame leaves by
         // a `ret`, so it must free exactly what a `return` written here would free.
         // Computed unconditionally — whether the throw actually propagates is codegen's
         // question (`scanEscaping`), and a throw that branches to a local catch simply
-        // never reads this list.
-        //
-        // …EXCEPT THE THROWN VALUE ITSELF, WHICH IS MOVED. This used to free it, on the
-        // rationale that `nt_obj_free` is shallow so the message string inside survived to
-        // reach `nt_exc_message`. THE PAYLOAD IS NOW THE OBJECT (`nt_exc_raise_obj`), not a
-        // string copied out of it, so that rationale is inverted: the raise TAKES the
-        // pointer, the slot is its one owner until a `catch` takes it back
-        // (`nt_exc_take_object`), and freeing it here would hand the handler a dangling
-        // block. Subtracting the name is the MOVE, and it is done by subtraction rather
-        // than by passing `true` to `expr` above deliberately: marking it moved would make
-        // `if (c) throw e;` leave `e` maybe-moved for the code after the `if`, which is a
-        // NT1601 on a program node accepts. Nothing else observes this list.
-        const moved = s.argument.kind === "Identifier" ? s.argument.name : "";
-        s.drops = this.ownedInScope(state).filter((n) => n !== moved);
+        // never reads this list. The thrown name is excluded by `droppable` now that it is
+        // moved-on-every-path here, so no filter is needed.
+        s.drops = this.ownedInScope(state);
         return;
       }
       case "TryStmt": {

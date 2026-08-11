@@ -176,6 +176,91 @@ console.log(g(false));
   });
 });
 
+describe("a `throw` MOVES the value it raises", () => {
+  test("A: throwing a linear local declared outside the `try` is not a double free", async () => {
+    await matchesNode(`
+class E { message: string; constructor(m: string) { this.message = m; } }
+function f(n: number): number {
+  const err = new E("boom");
+  try { if (n > 0) throw err; return 1; }
+  catch (e) { return e.message.length * 19; }
+}
+console.log(f(1));
+console.log(f(0));
+`);
+  });
+
+  test("a conditional throw does not poison the local for the fall-through", async () => {
+    // The program the old SUBTRACTION spelling existed to protect, and the reason A and B
+    // had to be fixed together: as a move this is only legal because the throwing branch
+    // no longer merges (`escapes`).
+    await matchesNode(`
+class E { message: string; constructor(m: string) { this.message = m; } }
+function f(n: number): number {
+  const err = new E("boom");
+  if (n > 0) { throw err; }
+  return err.message.length;
+}
+console.log(f(0));
+`);
+  });
+
+  test("reading the thrown local FROM the catch is refused, not double-freed", async () => {
+    // node prints 4 here: `err` and `e` are one object to it. To us the raise moved the
+    // pointer to the handler's binding, so reading the raiser's name is a use-after-move.
+    // Before this lane it compiled and exited 255 with empty stdout — a refusal is the
+    // correct trade (docs/divergences.md: reject, never miscompile).
+    await refused(`
+class E { message: string; constructor(m: string) { this.message = m; } }
+function f(n: number): number {
+  const err = new E("boom");
+  try { if (n > 0) throw err; return 1; }
+  catch (e) { return err.message.length; }
+}
+console.log(f(1));
+`, "NT1601");
+  });
+
+  test("scaled: one object and one string per raise, both released", async () => {
+    const r = await compileAndRun(`
+class E { message: string; constructor(m: string) { this.message = m; } }
+function f(n: number): number {
+  const err = new E("boom");
+  try { if (n > 0) throw err; return 1; }
+  catch (e) { return e.message.length; }
+}
+function run(n: number): number {
+  let t = 0;
+  for (let i = 0; i < n; i++) { t = t + f(i % 2); }
+  return t;
+}
+console.log(run(100));
+console.log(__objLive(), __strLive());
+console.log(run(400));
+console.log(__objLive(), __strLive());
+`);
+    expect(r.stdout).toBe("250\n0 0\n1000\n0 0\n");
+    expect(r.exitCode).toBe(0);
+  });
+
+  test("ASan: the in-frame raise of an outer local is not a double free", () => {
+    const r = runUnderAsan(`
+class E { message: string; constructor(m: string) { this.message = m; } }
+function f(n: number): number {
+  const err = new E("boom");
+  try { if (n > 0) throw err; return 1; }
+  catch (e) { return e.message.length * 19; }
+}
+let t = 0;
+for (let i = 0; i < 200; i++) { t = t + f(i % 2); }
+console.log(t);
+`, "throwmove");
+    expect(r.stderr).not.toContain("AddressSanitizer");
+    expect(r.stdout).toBe("7700\n"); // 100*76 + 100*1 — node agrees
+    expect(r.status).toBe(0);
+  });
+});
+
 /* The safety direction. Each of these is a program `node` accepts and we refuse; every
  * one of them would be a use-after-free or a double free if `escapes` were widened by one
  * more condition, so they are pinned as REFUSALS on purpose. Relaxing any of them needs
