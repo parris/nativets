@@ -3929,7 +3929,7 @@ class Checker {
           // back a DIFFERENT answer is worse than no hint at all.
           if (isDateTy(l) && isDateTy(r))
             throw nyi(NYI.WEBAPI,
-              `\`${e.op}\` between two Dates — node compares object IDENTITY here, and a Date is represented as its time value (a number), so there is no identity to compare`,
+              `\`${e.op}\` between two Dates (node compares object IDENTITY, and a Date here IS its time value — so there is no identity left to compare)`,
               "compare the TIME VALUES instead: `a.getTime() === b.getTime()` (or `+a === +b`). Note that is a VALUE comparison and node's `===` is not: two distinct Dates at the same instant are `true` by time value and `false` by `===`, and an Invalid Date is `false` against itself by time value (`NaN !== NaN`) and `true` by `===`",
               exprLoc(e));
           if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`, exprLoc(e), mixedNullableHint(e, l, r));

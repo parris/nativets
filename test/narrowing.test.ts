@@ -1119,12 +1119,16 @@ console.log(u === v, u !== v);`);
    * ever stops saying so, this is the test that notices.
    */
   test("the hint's `.getTime()` spelling compiles, and its caveat is node-true", async () => {
-    // Half one: the spelling the hint hands back really compiles here, and agrees with node.
+    // Half one: BOTH spellings the hint hands back really compile here, and agree with
+    // node. `+a === +b` only became available in this same change (the numeric coercion of
+    // a Date), so a hint offering it before then would have been a second dead end.
     await expectNode(`const a = new Date(1000);
 const b = new Date(1000);
 const inv = new Date(NaN);
 console.log(a.getTime() === b.getTime());
-console.log(inv.getTime() === inv.getTime());`);
+console.log(+a === +b);
+console.log(inv.getTime() === inv.getTime());
+console.log(+inv === +inv);`);
     // Half two: node's IDENTITY answers for the same two pairs — `false` where the time
     // values are equal, `true` where they are both NaN. Exactly the inversion the hint
     // warns about, so the warning is measured rather than asserted. (node only: the
