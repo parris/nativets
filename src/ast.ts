@@ -301,8 +301,80 @@ export function fieldType(t: Ty, key: string): Ty | undefined {
   const i = fs.findIndex((f) => f.key === key);
   return i < 0 ? undefined : fs[i]!.ty;
 }
+/**
+ * Is `k` a canonical ARRAY INDEX string, per ECMA-262 §6.1.7? That is the exact predicate
+ * `OrdinaryOwnPropertyKeys` uses to decide which keys enumerate FIRST, and it is much
+ * narrower than "looks like a number": `P` is an array index iff
+ * `ToString(ToUint32(P)) === P` and `ToUint32(P) !== 2**32 - 1`.
+ *
+ * Written as a spelling test rather than a round trip through `Number`, because the round
+ * trip is where every near-miss implementation goes wrong. Requiring digits-only, no
+ * leading zero, and a value below 2**32-1 is EXACTLY equivalent and has no parse step:
+ *   - `""`      → `ToString(ToUint32("")) === "0"`, not `""`                → not an index
+ *   - `"01"`    → `"1"` ≠ `"01"` (a leading zero never round-trips)         → not an index
+ *   - `"1.5"`   → `"1"` ≠ `"1.5"`                                          → not an index
+ *   - `"-1"`    → `ToUint32` wraps to 4294967295, `"4294967295"` ≠ `"-1"`  → not an index
+ *   - `" 2"`    → `ToNumber` strips the space, `"2"` ≠ `" 2"`              → not an index
+ *   - `"1e2"`   → `"100"` ≠ `"1e2"`                                        → not an index
+ *   - `"4294967295"` → round-trips, but IS 2**32-1, explicitly excluded    → not an index
+ *   - `"0"`, `"2"`, `"10"`, `"4294967294"`                                 → indices
+ * Each of those is pinned in test/fixtures/stage22-objarr/key-order.ts (differential vs
+ * node) and test/fuzz-diff.test.ts; a key that is NOT an index keeps its insertion
+ * position, so a predicate that is too GENEROUS reorders keys node leaves alone — the same
+ * silent wrong answer in the other direction.
+ */
+export function isArrayIndexKey(k: string): boolean {
+  if (k.length === 0) return false;
+  if (k.length > 1 && k[0] === "0") return false;          // a leading zero never round-trips
+  for (let i = 0; i < k.length; i++) {
+    const c = k[i]!;
+    if (c < "0" || c > "9") return false;                  // sign, dot, space, exponent, letters
+  }
+  // Value < 2**32-1, decided on the SPELLING so no number is ever parsed: with no leading
+  // zero, a shorter digit string is always the smaller value, and equal lengths compare
+  // lexicographically. 4294967295 has 10 digits, so anything longer is out on length alone.
+  if (k.length > 10) return false;
+  return k.length < 10 || k < "4294967295";
+}
+
+/**
+ * Order a field list the way `OrdinaryOwnPropertyKeys` does: every ARRAY-INDEX key first
+ * in ascending NUMERIC order, then every other key in INSERTION order.
+ *
+ * This is applied when an object type is MINTED, not when it is read, because an object
+ * here is a flat slot array whose layout IS its type string — so making the type canonical
+ * makes the slot order canonical, and `Object.keys`, `for-in`, `JSON.stringify` and
+ * `console.log` all read that one order through `objectFields`. Doing it on the read side
+ * instead would leave two type strings that describe the same layout non-identical, and
+ * tagged-union membership (see `assignable`) is a string-identity test.
+ *
+ * The index keys are compared by SPELLING for the same reason `isArrayIndexKey` tests
+ * spelling: with no leading zeros, a shorter digit string is the smaller number, and equal
+ * lengths order lexicographically. The non-index partition is built by a straight filter,
+ * so it is stable by construction and does not lean on `Array#sort` being stable.
+ *
+ * `.sort` is chained DIRECTLY onto `.filter` rather than applied to a bound local, and that
+ * is a subset requirement, not a style choice: arrays are immutable here, so `.sort` is only
+ * accepted on a FRESH receiver — storage with no other owner, where sorting in place is
+ * unobservable. Binding the filter result first (`const idx = …; idx.sort(…)`) makes it an
+ * ordinary array and `NT1606` refuses it, which reintroduces a blocker in ast.ts — a module
+ * that already self-compiles. The self-host ratchet catches exactly that.
+ */
+export function canonicalKeyOrder<T extends { key: string }>(fields: T[]): T[] {
+  // The common case is that no key is an index and nothing moves. It still returns a fresh
+  // array rather than `fields` itself: `fields` is BORROWED from the caller, so handing it
+  // back is a move-out of a borrow (`NT1604`) — the same subset rule that shapes the `.sort`
+  // above. `.map` in `objectType` already allocates, so the copy costs no extra allocation.
+  if (!fields.some((f) => isArrayIndexKey(f.key))) return [...fields];
+  return [
+    ...fields.filter((f) => isArrayIndexKey(f.key))
+      .sort((a, b) => (a.key.length !== b.key.length ? a.key.length - b.key.length : a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
+    ...fields.filter((f) => !isArrayIndexKey(f.key)),
+  ];
+}
+
 export function objectType(fields: { key: string; ty: Ty }[]): Ty {
-  return `{${fields.map((f) => `${f.key}:${f.ty}`).join(",")}}`;
+  return `{${canonicalKeyOrder(fields).map((f) => `${f.key}:${f.ty}`).join(",")}}`;
 }
 
 /* ============================================================
@@ -2074,7 +2146,7 @@ function mapParams(params: Param[], fe: (x: Expr) => Expr, ft: (t: Ty) => Ty): P
  * on a narrowed union member is "an object literal … must set 'kind' to one of the
  * literals" (NT2001) under nativets itself. Measured, not assumed.
  */
-function walkExprChildren(e: Expr, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Expr {
+export function walkExprChildren(e: Expr, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Expr {
   switch (e.kind) {
     // Leaves: no child expressions. Spelled one arm each rather than sharing a fallthrough
     // label, because each arm has to name its own tag literal (see the note above).
@@ -2150,7 +2222,7 @@ function walkExprChildren(e: Expr, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt,
  * function's first blocker, so removing it moved no number today — it was a blocker that
  * would have surfaced the moment the one above it cleared.
  */
-function walkStmtChildren(s: Stmt, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Stmt {
+export function walkStmtChildren(s: Stmt, fe: (x: Expr) => Expr, fs: (x: Stmt) => Stmt, ft: (t: Ty) => Ty): Stmt {
   switch (s.kind) {
     case "VarDecl":
       return { ...s, kind: "VarDecl",

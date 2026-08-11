@@ -2,124 +2,124 @@
   "note": "nativets performance baseline — DETERMINISTIC metrics only (see test/perf.test.ts for the methodology and the reference projects it came from). Regenerate with NATIVETS_PERF_UPDATE=1 bun test test/perf.test.ts, and review the diff: an unexplained jump is the regression this file exists to catch.",
   "ir": {
     "base64.ts": {
-      "instrs": 69,
+      "instrs": 79,
       "funcs": 1,
-      "bytes": 12542
+      "bytes": 12900
     },
     "brainfuck.ts": {
       "instrs": 319,
       "funcs": 6,
-      "bytes": 23192
+      "bytes": 23222
     },
     "calculator.ts": {
       "instrs": 596,
       "funcs": 9,
-      "bytes": 33223
+      "bytes": 33253
     },
     "csv.ts": {
       "instrs": 508,
       "funcs": 2,
-      "bytes": 31779
+      "bytes": 31809
     },
     "diff.ts": {
       "instrs": 331,
       "funcs": 3,
-      "bytes": 24631
+      "bytes": 24661
     },
     "infixcalc.ts": {
       "instrs": 775,
       "funcs": 11,
-      "bytes": 40777
+      "bytes": 40807
     },
     "jobs.ts": {
       "instrs": 766,
       "funcs": 10,
-      "bytes": 42241
+      "bytes": 42271
     },
     "json-pretty.ts": {
       "instrs": 373,
       "funcs": 3,
-      "bytes": 27114
+      "bytes": 27144
     },
     "life.ts": {
       "instrs": 485,
       "funcs": 9,
-      "bytes": 28713
+      "bytes": 28743
     },
     "markdown.ts": {
       "instrs": 539,
       "funcs": 4,
-      "bytes": 33622
+      "bytes": 33652
     },
     "matrix.ts": {
       "instrs": 650,
       "funcs": 10,
-      "bytes": 36901
+      "bytes": 36931
     },
     "maze.ts": {
       "instrs": 666,
       "funcs": 1,
-      "bytes": 36957
+      "bytes": 36987
     },
     "primes.ts": {
       "instrs": 126,
       "funcs": 1,
-      "bytes": 14819
+      "bytes": 14849
     },
     "roman.ts": {
       "instrs": 297,
       "funcs": 4,
-      "bytes": 22485
+      "bytes": 22515
     },
     "router.ts": {
       "instrs": 438,
       "funcs": 9,
-      "bytes": 28775
+      "bytes": 28805
     },
     "rpn.ts": {
       "instrs": 219,
       "funcs": 4,
-      "bytes": 18558
+      "bytes": 18588
     },
     "rule110.ts": {
       "instrs": 228,
       "funcs": 6,
-      "bytes": 18966
+      "bytes": 18996
     },
     "stackvm.ts": {
       "instrs": 430,
       "funcs": 2,
-      "bytes": 28777
+      "bytes": 28807
     },
     "sudoku.ts": {
-      "instrs": 579,
+      "instrs": 578,
       "funcs": 8,
-      "bytes": 35151
+      "bytes": 35149
     },
     "tictactoe.ts": {
       "instrs": 687,
       "funcs": 9,
-      "bytes": 39153
+      "bytes": 39183
     },
     "todo.ts": {
       "instrs": 234,
       "funcs": 2,
-      "bytes": 18748
+      "bytes": 18778
     },
     "units.ts": {
       "instrs": 371,
       "funcs": 7,
-      "bytes": 26217
+      "bytes": 26247
     },
     "vigenere.ts": {
       "instrs": 286,
       "funcs": 2,
-      "bytes": 20858
+      "bytes": 20888
     },
     "wordfreq.ts": {
       "instrs": 358,
       "funcs": 4,
-      "bytes": 23457
+      "bytes": 23487
     }
   },
   "alloc": {
@@ -182,26 +182,26 @@
   },
   "binarySize": {
     "darwin-arm64": {
-      "primes.ts": 150000,
-      "matrix.ts": 150416,
-      "sudoku.ts": 150368,
-      "life.ts": 150360,
-      "maze.ts": 186264,
-      "wordfreq.ts": 169856,
-      "stackvm.ts": 150048,
-      "json-pretty.ts": 150096
+      "primes.ts": 167424,
+      "matrix.ts": 167824,
+      "sudoku.ts": 167776,
+      "life.ts": 167784,
+      "maze.ts": 187160,
+      "wordfreq.ts": 187264,
+      "stackvm.ts": 167472,
+      "json-pretty.ts": 167504
     }
   },
   "textSize": {
     "darwin-arm64": {
-      "primes.ts": 87748,
-      "matrix.ts": 91176,
-      "sudoku.ts": 90844,
-      "life.ts": 89920,
-      "maze.ts": 109004,
-      "wordfreq.ts": 106700,
-      "stackvm.ts": 89708,
-      "json-pretty.ts": 89668
+      "primes.ts": 96900,
+      "matrix.ts": 100328,
+      "sudoku.ts": 99992,
+      "life.ts": 99072,
+      "maze.ts": 118156,
+      "wordfreq.ts": 115852,
+      "stackvm.ts": 98860,
+      "json-pretty.ts": 98820
     }
   },
   "anchors": {
@@ -210,7 +210,7 @@
   },
   "anchorRss": {
     "darwin-arm64": {
-      "append-200k": 5275648
+      "append-200k": 5308416
     }
   }
 }

@@ -15,7 +15,7 @@ import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, spawnMode, SPAWN_INH
 // `blockDrops` is gone: the drop set is a synthesized trailing BlockDrops STATEMENT now,
 // not an expando read back off the array, so codegen reads it in the normal statement loop.
 // `Program` stays — it is still used below, and the lane's branch predated its arrival.
-import { freshArray, RETAINS_RECEIVER, arrayElements } from "./ast.ts";
+import { freshArray, RETAINS_RECEIVER, arrayElements, stringLiteralValue } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS, MATH_CONSTS } from "./checker.ts";
@@ -648,6 +648,9 @@ const DECLARES = [
   "declare void @nt_init_args(i32, ptr)",
   "declare ptr @nt_argv()",
   "declare ptr @nt_getenv(ptr)",
+  // process.platform. A CALL, not a folded constant: the runtime resolves it from the C
+  // preprocessor so it follows `-target`, and the .ll stays triple-free (see nt_platform).
+  "declare ptr @nt_platform()",
   "declare ptr @nt_read_line()",
   "declare ptr @nt_read_stdin()",
   "declare ptr @nt_read_key()",
@@ -2816,6 +2819,16 @@ class FnGen {
             this.emit(`${t} = call ptr @nt_argv()`);
             return { v: t, ty: "string[]" };
           }
+          // process.platform (string). NOT folded to a literal here even though it is a
+          // compile-time constant on the C side: codegen runs once and the SAME .ll is
+          // handed to clang with whatever `-target` the build asked for, so a folded
+          // constant would report the COMPILING host's platform inside a cross-compiled
+          // binary. The runtime's #ifdef follows `-target` instead. See nt_platform().
+          if (e.object.kind === "Identifier" && e.object.name === "process" && e.property === "platform") {
+            const t = this.fresh();
+            this.emit(`${t} = call ptr @nt_platform()`);
+            return { v: t, ty: "string" };
+          }
           if (
             e.object.kind === "MemberExpr" && e.object.object.kind === "Identifier" &&
             e.object.object.name === "process" && e.object.property === "env"
@@ -3538,17 +3551,26 @@ class FnGen {
         // an empty object here would be a silent wrong answer.
         const pairs = arrayElements(e.args[0]!);
         if (pairs === undefined) throw internalError("Object.fromEntries reached codegen with a non-literal argument");
+        const ty = e.ty ?? "number";
         const obj = this.fresh();
         this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(pairs.length)})`);
-        pairs.forEach((pair, i) => {
+        pairs.forEach((pair) => {
           const inner = arrayElements(pair);
           if (inner === undefined) throw internalError("Object.fromEntries reached codegen with a non-literal entry");
+          // Stored by FIELD INDEX, not by the entry's position in the literal — the same
+          // rule `ObjectLiteral` above already follows. Entry order and slot order are two
+          // different things now that a minted object type puts ARRAY-INDEX keys first:
+          // `[["b",…],["2",…]]` has `2` at slot 0, so indexing by position paired every
+          // value with the wrong key. It was silent (the keys and the value SET both still
+          // looked right) and exit 0, which is the worst outcome available.
+          const key = stringLiteralValue(inner[0]!);
+          if (key === undefined) throw internalError("Object.fromEntries reached codegen with a non-literal entry key");
           const v = this.genExpr(inner[1]!);
           const gep = this.fresh();
-          this.emit(`${gep} = getelementptr i64, ptr ${obj}, i64 ${i}`);
+          this.emit(`${gep} = getelementptr i64, ptr ${obj}, i64 ${fieldIndex(ty, key)}`);
           this.emit(`store i64 ${this.toSlot(v)}, ptr ${gep}`);
         });
-        return { v: obj, ty: e.ty ?? "number" };
+        return { v: obj, ty };
       }
       const o = this.genExpr(e.args[0]!);
       if (e.callee.property === "entries") {
@@ -6437,8 +6459,17 @@ class FnGen {
       case "Number": return { v: this.coerceToNumber(this.genExpr(args[0]!)), ty: "number" };
       case "String": return { v: this.coerceToString(this.genExpr(args[0]!)), ty: "string" };
       // --- stdlib (web standards) Batch 1: base64 globals ---
-      case "btoa": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_btoa(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
-      case "atob": { const t = this.fresh(); this.emit(`${t} = call ptr @nt_atob(ptr ${this.genExpr(args[0]!).v})`); return { v: t, ty: "string" }; }
+      // BOTH ARE FALLIBLE, exactly like `decodeURIComponent` two cases below: node throws
+      // `InvalidCharacterError` for a `btoa` code point above U+00FF and for an `atob`
+      // input that is not forgiving-base64. So each needs the pending-exception check —
+      // without it the runtime's raise would set the flag and nothing would read it, which
+      // is how a throw turns back into the exit-0 wrong answer this pair is being fixed for.
+      case "btoa": case "atob": {
+        const t = this.fresh();
+        this.emit(`${t} = call ptr @nt_${name}(ptr ${this.genExpr(args[0]!).v})`);
+        this.emitExcCheck();
+        return { v: t, ty: "string" };
+      }
       // --- stdlib: URL parsing (WHATWG URL functional subset) — string in, string out ---
       // --- stdlib Batch 3: URI encoding. decode* is fallible (node's URIError). ---
       case "encodeURIComponent": case "encodeURI": {

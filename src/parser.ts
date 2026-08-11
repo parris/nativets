@@ -1822,7 +1822,11 @@ class Parser {
       } while ((this.at(",") || this.at(";")) && (this.next(), true));
     }
     this.eat("}");
-    return `{${fields.join(",")}}` as Ty;
+    // Round-tripped through `objectFields`/`objectType` rather than joined straight, so an
+    // ANNOTATION gets the same canonical array-index-first key order a LITERAL gets. If only
+    // one side were canonical the two spellings of one shape would stop being identical
+    // strings, and tagged-union membership is a string-identity test.
+    return objectType(objectFields(`{${fields.join(",")}}` as Ty));
   }
 
   // Consume a generic type-parameter list `<T, U extends V, W = X>` (balanced angles)
