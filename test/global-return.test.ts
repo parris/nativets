@@ -235,6 +235,30 @@ console.log(shared.a, x.a);
 `, "NT1604");
   });
 
+  test("a class METHOD is not a different frame for this purpose", async () => {
+    await refused(`
+const shared = { a: 1 };
+class Holder {
+  get(): { a: number } { return shared; }
+}
+const h = new Holder();
+const x = h.get();
+console.log(shared.a, x.a);
+`, "NT1604");
+  });
+
+  /* The route with no `return` and no local: assigning one module binding to ANOTHER from
+   * inside a function. Both slots then name one pointer and the module frees it twice. */
+  test("assigning a global to a global from inside a function", async () => {
+    await refused(`
+let a = { n: 1 };
+let b = { n: 2 };
+function swapIn(): void { b = a; }
+swapIn();
+console.log(a.n, b.n);
+`, "NT1604");
+  });
+
   /* SH1 merges the import graph into one Program, so a global reached across a module
    * boundary is the same binding under a mangled name — and had the same double free. */
   test("across a module boundary", async () => {
