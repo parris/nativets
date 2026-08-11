@@ -180,8 +180,12 @@ typedef struct NtActor {
   int         supervised;              /* a supervisor owns this child (it emits the record) */
   NtPid       links[NT_MAX_LINKS]; int nlinks;
   NtMon       monitors[NT_MAX_MONS]; int nmons;   /* who is monitoring THIS actor */
-  /* triggering-message causal tag: the last message this actor dequeued */
+  /* triggering-message causal tag: the last message this actor dequeued. `last_val` is a
+   * VALUE for a number message and a BORROWED pointer for a string/structured one — see
+   * note_last / tag_forget for the ownership rule, and `last_released` for the moment
+   * that borrow ends. */
   int         last_valid; NtPid last_from; int64_t last_val;
+  int         last_released;           /* the owning frame has freed it: render no payload */
   /* ---- v1: reduction-counted preemption ---- */
   int64_t     reductions;              /* budget remaining this slice; refills to NT_CONTEXT_REDS */
   /* ---- v4: message kind + virtual-clock receive timeouts ---- */
@@ -255,6 +259,12 @@ static pthread_mutex_t g_tab_lock = PTHREAD_MUTEX_INITIALIZER;
  * default single-threaded mode. nt_sched_init installs it only when g_mt is set.
  * ========================================================================== */
 extern void (*nt_rt_lock)(int);      /* defined in runtime.c; NULL unless M:N */
+/* The other direction of the same arrangement: runtime.c announces every object/string
+ * free through this, so a crash record's BORROWED causal tag can learn that its borrow
+ * ended. Installed unconditionally at nt_sched_init (not just under M:N) — the tag is
+ * borrowed in single-threaded programs too. See tag_forget. */
+extern void (*nt_rt_drop_notify)(const void *);
+static void tag_forget(const void *p);   /* defined with note_last, the borrow it ends */
 static pthread_mutex_t g_rc_lock;    /* RECURSIVE: pvec's public entry points nest */
 static void rc_lock_hook(int acquire) {
   if (acquire) pthread_mutex_lock(&g_rc_lock);
@@ -887,6 +897,9 @@ void nt_sched_init(void) {
     g_nsched = resolve_nsched();
     g_mt = g_nsched > 1;
     if (g_mt) { rc_lock_init(); nt_rt_lock = rc_lock_hook; } /* RC safety under M:N */
+    /* UNCONDITIONAL, unlike the lock hook above: a crash record's causal tag borrows the
+     * consumed message at one scheduler thread just as much as at eight. */
+    nt_rt_drop_notify = tag_forget;
     for (int i = 0; i < g_nsched; i++) {
       NtSched *s = &g_scheds[i];
       memset(s, 0, sizeof(*s));
@@ -1090,6 +1103,18 @@ static void print_triggering_message(NtActor *a) {
     return;
   }
   fprintf(stderr, "triggering-message:\n    from pid=%lld\n", (long long)a->last_from);
+  if (a->last_released) {
+    /* The tag borrowed the payload and the borrow has ended (tag_forget): the receiving
+     * frame dropped this message before the actor died, so it did not trigger anything —
+     * the actor was between messages and something external killed it. Everything still
+     * printed here is a value (the origin pid) or a static string (the shape); the
+     * payload is neither, so it is NAMED as gone rather than rendered from freed memory.
+     * Printing less, and all of it true, is the whole job of this record. */
+    fprintf(stderr, "    <consumed and released — the actor was between messages>\n");
+    if (a->last_kind == NT_MSG_STRUCT)
+      fprintf(stderr, "    (shape %s)\n", a->last_shape ? a->last_shape : "?");
+    return;
+  }
   if (a->last_kind == NT_MSG_STRUCT) {
     /* v5: a structured message is rendered by a codegen-emitted JSON walk for THIS
      * shape (the runtime cannot walk a slot block on its own), so the record still
@@ -1476,14 +1501,65 @@ char *nt_msg_str_copy(const char *s) {
   return (char *)(intptr_t)copy_str_slot((int64_t)(intptr_t)s);
 }
 
-/* Record the causal tag (triggering message) used by the crash record. */
+/* Record the causal tag (triggering message) used by the crash record.
+ *
+ * THE OWNERSHIP RULE, and it is a BORROW — deliberately, because the alternatives are
+ * worse. Consuming a message is exactly what transfers it to the receiving frame (the
+ * pop frees the mailbox NODE and never the payload), so this tag cannot own it: the
+ * frame does, and its scope-exit drop is what frees it. The tag therefore borrows, and
+ * `tag_forget` below ends the borrow at the drop.
+ *
+ * WHY NOT OWN A COPY. Three cheaper-looking answers were weighed and rejected:
+ *   - RETAIN it — strings are refcounted so `nt_str_retain` would work, but objects have
+ *     no refcount at all, so this cannot cover the structured case that matters most.
+ *   - SHALLOW-COPY the slot block — sound ONLY because `nt_obj_free` never walks slots,
+ *     i.e. only because the shallow-free leak leaves the string slots alive. That makes
+ *     this diagnostic's soundness depend on an open bug staying unfixed, and turns the
+ *     day someone fixes it into a silent use-after-free. Not a trade worth making.
+ *   - RENDER to a string at consume time — sound, but it runs the codegen JSON walk and
+ *     allocates on EVERY receive, taxing the hot path of every actor system for a record
+ *     that most runs never print.
+ *
+ * And the borrow is not merely the cheapest option, it is the most TRUTHFUL one. The tag
+ * answers "which message killed it". While the receiving frame still holds the message —
+ * the actor throwing or `__crash`ing mid-iteration — that question has an answer, the
+ * pointer is live, and the record prints it in full. Once the frame has dropped it the
+ * actor was BETWEEN messages, so anything that kills it now (an external `__kill`, a
+ * link) was not triggered by that message at all: rendering it would be both a
+ * use-after-free and a false causal claim. Ending the borrow makes the record say so. */
 static void note_last(NtActor *a, NtMboxNode *n) {
   a->last_valid = 1;
+  a->last_released = 0;          /* a fresh borrow: the receiving frame owns it now */
   a->last_from = n->from;
   a->last_val = node_slot(n);
   a->last_kind = node_kind(n);
   a->last_shape = n->shape;      /* v5: NULL for number/string messages */
   a->last_render = n->render;
+}
+
+/* THE END OF THE BORROW. runtime.c calls this from nt_obj_free / nt_str_release just
+ * before it frees, so a tag pointing at that payload stops rendering it.
+ *
+ * Only a STRING or STRUCTURED tag is a pointer; a number message's `last_val` is the
+ * double's bits — a value, never freed — and is excluded here so that a heap address
+ * that happens to equal some number's bit pattern can never blank a valid tag.
+ *
+ * No ABA: the tag is cleared at the free itself, so the address is already disowned
+ * before the allocator can hand it out again. Cheap enough for the free path — a
+ * thread-local read and two compares, and it is not reached at all in a program that
+ * never calls nt_sched_init.
+ *
+ * It consults the RUNNING actor, which is the one whose frame owns the message: the
+ * receive transferred it to that frame and `send` deep-copies, so no other actor holds a
+ * pointer to it. An object smuggled between actors through a shared global would fall
+ * outside this check — but it would also already be outside the actor isolation
+ * guarantee that makes messages deep-copied in the first place. */
+static void tag_forget(const void *p) {
+  NtActor *a = g_current;
+  if (!a || !a->last_valid || a->last_released) return;
+  if (a->last_kind != NT_MSG_STRUCT && a->last_kind != NT_MSG_STR) return;
+  if ((const void *)(intptr_t)a->last_val != p) return;
+  a->last_released = 1;
 }
 
 /* Block the current actor until its mailbox holds MORE than `n` messages, or the

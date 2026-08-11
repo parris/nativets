@@ -416,7 +416,7 @@ describe("actor message lifetime under AddressSanitizer", () => {
    * shallow `nt_obj_free` (a shallow COPY of the tag is only sound because the shallow free
    * leaves the string slots alive) — which this lane was told not to take on silently.
    */
-  it.failing("the crash record renders a message the receiving frame already freed", () => {
+  it("the crash record renders a message the receiving frame already freed", () => {
     const src = [
       `const uafW = (n: number): void => {`,
       `  for (let i = 0; i < n; i++) {`,
