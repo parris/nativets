@@ -15999,8 +15999,10 @@ L0:
   %t52 = bitcast double 0x4008000000000000 to i64
   call double @nt_arr_push(ptr %t49, i64 %t52)
   %t53 = call double @sum(ptr %t49)
+  call void @nt_arr_free(ptr %t49)
   %t54 = call ptr @nt_arr_new(double 0x3FF0000000000000)
   %t55 = call double @sum(ptr %t54)
+  call void @nt_arr_free(ptr %t54)
   %t56 = call ptr @nt_arr_new(double 0x4010000000000000)
   %t57 = bitcast double 0x4024000000000000 to i64
   call double @nt_arr_push(ptr %t56, i64 %t57)
@@ -16011,6 +16013,7 @@ L0:
   %t60 = bitcast double 0x4044000000000000 to i64
   call double @nt_arr_push(ptr %t56, i64 %t60)
   %t61 = call double @sum(ptr %t56)
+  call void @nt_arr_free(ptr %t56)
   call void @js_print_num(double %t53)
   call void @js_print_sep()
   call void @js_print_num(double %t55)

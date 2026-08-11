@@ -6868,18 +6868,34 @@ class FnGen {
       const fixed = sig.params.length - 1;
       //@@mutable
       const argVals: string[] = [];
+      //@@mutable
+      const frees: [string, string][] = []; // see `argTempFree`
       // The FIXED parameters coerce just like a non-rest call's do (see below) — this
       // path emitted them raw, so a nullable/general-union fixed parameter of a rest
       // function received an unboxed value.
-      for (let i = 0; i < fixed; i++) argVals.push(`${llvmTy(sig.params[i]!)} ${this.coerce(this.argVal(i, args, preArg0, sig), sig.params[i]!).v}`);
+      for (let i = 0; i < fixed; i++) {
+        const raw = this.argVal(i, args, preArg0, sig);
+        const co = this.coerce(raw, sig.params[i]!);
+        const free = this.argTempFree(i, args, preArg0, sig, raw, co);
+        if (free !== null) frees.push([free, raw.v]);
+        argVals.push(`${llvmTy(sig.params[i]!)} ${co.v}`);
+      }
       const arr = this.fresh(); // pack trailing args into the rest array
       this.emit(`${arr} = call ptr @nt_arr_new(double ${llvmDouble(Math.max(args.length - fixed, 1))})`);
       for (let i = fixed; i < args.length; i++) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.genExpr(args[i]!))})`);
       argVals.push(`ptr ${arr}`);
+      // The REST ARRAY is built right here, at this call site, and nothing else can ever
+      // name it — the purest unbound temporary in the language. It is a borrow to the
+      // callee like every other parameter (`function f(...xs: T[]): T[] { return xs; }`
+      // is NT1604), so the caller frees the header once the call returns. Shallow: the
+      // ELEMENTS are the caller's own values, still owned and dropped by its own scope,
+      // and freeing them here would be the double free this rule exists to avoid.
+      frees.push(["nt_arr_free", arr]);
       const argstr = argVals.join(", ");
-      if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); if (raises) this.emitExcCheck(objPayload); return { v: "", ty: "void" }; }
+      if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); this.emitArgTempFrees(frees); if (raises) this.emitExcCheck(objPayload); return { v: "", ty: "void" }; }
       const t = this.fresh();
       this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
+      this.emitArgTempFrees(frees);
       if (raises) this.emitExcCheck(objPayload);
       return { v: t, ty: sig.ret };
     }
