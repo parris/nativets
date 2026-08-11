@@ -39,8 +39,19 @@
  * `object` are the parameter and identity-set types of the reflective AST walks in
  * checker.ts / ownership.ts / codegen.ts. Removing them needs a FEATURE (a bottom type;
  * an opaque unusable `Ty`), not a deletion — see `ERASURE_STILL_ALLOWED` in src/parser.ts.
- * They are refused in an ASSERTION regardless, which is the only position where the
- * erasure was ever a wrong answer rather than a confusing refusal.
+ * They are refused in an ASSERTION regardless — but that sentence used to end "which is
+ * the only position where the erasure was ever a wrong answer rather than a confusing
+ * refusal", and that was not true. The refusal is keyed on the ambient NAME, and a body
+ * can adopt the erased type one indirection later without naming one:
+ *
+ *     function asStr(e: unknown): string { return e as string; }
+ *     console.log(asStr(42));
+ *
+ * `e` is a `number` here, the assertion mentions no ambient type, and failure mode 2 above
+ * came back verbatim — clang's "'%t0' defined with type 'double' but expected 'ptr'".
+ * That is closed in `Checker.type`'s `AsExpr` case rather than here (an assertion across
+ * the scalar/reference boundary is NT2001 whatever produced the operand's type), and it is
+ * pinned by test/as-cast.test.ts section 3b.
  */
 import { test, expect, describe } from "bun:test";
 import { compileAndRun, runWithNode } from "./harness.ts";

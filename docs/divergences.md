@@ -1447,13 +1447,37 @@ reflective AST walks in `checker.ts`/`ownership.ts`/`codegen.ts`. Closing them n
 reflective walks the subset can express, for `unknown`/`object`. Refusing them instead would
 mean deleting a real `tsc`-checked invariant to satisfy a subset limitation.
 
-All three are refused inside an `as`/`satisfies` **assertion** regardless. That is the only
-position where the erasure was ever a wrong answer: an annotation is *checked* against the
-value it annotates, so a wrong erased type produces a refusal, while an assertion *adopts*
-the type and leaves nothing to compare. The line stops at a nested binder — a field
-annotation inside an asserted record, and a type argument — because `node as
-Record<string, unknown>` is how every reflective walk in `src/` opens an unidentified node.
-That boundary is a consequence of the residue and disappears with it.
+All three are refused inside an `as`/`satisfies` **assertion** regardless: an annotation is
+*checked* against the value it annotates, so a wrong erased type produces a refusal, while
+an assertion *adopts* the type and leaves nothing to compare. The line stops at a nested
+binder — a field annotation inside an asserted record, and a type argument — because `node
+as Record<string, unknown>` is how every reflective walk in `src/` opens an unidentified
+node. That boundary is a consequence of the residue and disappears with it.
+
+**A correction.** That paragraph used to open "That is the **only** position where the
+erasure was ever a wrong answer", and it was wrong — the refusal is keyed on the ambient
+NAME, and a body can adopt the erased type one indirection later without writing one:
+
+```ts
+function asStr(e: unknown): string { return e as string; }
+console.log(asStr(42));                 // node: "42", exit 0
+```
+
+`e: unknown` is the residue's own annotation position, so nothing refuses it; from there `e`
+IS a `number`, and `e as string` names no ambient type at all. Row 2 of the table above came
+back verbatim — `'%t0' defined with type 'double' but expected 'ptr'`, a raw LLVM error with
+no `NT` code and no location in the user's program.
+
+That is closed **in the checker, not here**, because the erasure is only one of the ways to
+reach it: `const n = 12345; (n as string).length` emitted the same invalid IR with no
+ambient name in sight. `Checker.type`'s `AsExpr` case now refuses an assertion that crosses
+the **scalar/reference boundary** — `number` is a double, `boolean` is a bit, and a string,
+object, array, `Map` or `Set` is a pointer, so there are no bytes to reinterpret between
+them (`reprClass`, `NT2001`). Nullables and unions are exempt by construction: they are
+boxes whose `as` behaviour `nt_as_unbox`/`nt_as_tag` already check at run time, and
+classifying them would refuse the narrowing casts those checks exist to allow. node erases
+`as` and answers `undefined`; there is no such value here, and the same reasoning already
+refuses an assertion to a *wider object*. Pinned by `test/as-cast.test.ts` section 3b.
 
 ### Generic `type`/`interface` parameters (`NT1013`) — the same erasure, a third source
 
