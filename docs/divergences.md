@@ -3751,11 +3751,74 @@ are worth stating because they are the two ways one rule drifted apart from itse
 One scan over the constructor body now answers both, because parameter properties and
 field initializers are folded into that body before it runs. That scan is deliberately an
 **over-approximation** of definite assignment — a store under an `if` counts as coverage —
-so it can only ever accept, never refuse a valid program. The cost is a residual hole: a
-field assigned on only *some* constructor paths is still accepted and still reads the
-slot's zero on the others. Closing it needs the path-sensitive analysis the `let` rule
-above already has, which is a checker pass and not a syntactic question the parser can
-answer.
+so it can only ever accept, never refuse a valid program.
+
+#### …and the PATH-SENSITIVE half of the same rule (closed)
+
+The over-approximation left a residual hole, and it was the same silent wrong answer one
+level in: the store is *there*, it is just not on every path.
+
+```ts
+class C { y: number; z: number;
+          constructor(y: number, c: boolean) { this.y = y; if (c) this.z = 1; } }
+new C(7, false).z      // node: undefined (exit 0)   — before: 0 (exit 0)
+```
+
+A `string` field is worse — a heap pointer, so the unwritten slot printed `(null)`. Both
+exited 0, and the syntactic scan is satisfied by the store under the `if`, so nothing in
+the tree could see either one.
+
+"Assigned on **every path out of the constructor**" is not a syntactic question, which is
+exactly why the parser's scan cannot answer it. It is the question `checkDefiniteAssignment`
+already answers for `let x: T;`, so the class's fields are now tracked as ordinary bindings
+in that pass — under a `this.`-prefixed key, which no local can collide with — and the
+constructor body is the region. Every shape the local rule already models comes across
+unchanged: the `if` with no `else`, the arm that does not assign, the loop that may run
+zero times (`do…while` excepted — its body always runs), the `catch` that starts from the
+`try`'s **entry** state, the `switch` with no `default`.
+
+**One thing is genuinely different, and it is the reason this needed a new piece rather
+than a new caller.** For a local, `return` is *divergence*: a path that returned cannot
+reach a later read, so it drops out of the intersection. For a constructor it is an
+**exit**: the instance is already allocated, and the caller receives it with exactly what
+the returning path had assigned.
+
+```ts
+class C { z: number; constructor(c: boolean) { if (c) { return; } this.z = 1; } }
+new C(true).z          // node: undefined — the `return` path never wrote the slot
+```
+
+So `DAEscapes` grew a third collector, `rets`, alongside `breaks` and `conts` — and unlike
+those two it is never *shadowed*, because a `return` leaves the whole function and every
+loop and `switch` on the way out passes the same collector through. `throw` still diverges,
+and correctly: a constructor that always throws hands nobody an instance, so it has nothing
+to prove and compiles.
+
+The tracked set is what the constructor stores into **somewhere**, not the class's full
+field list. That is deliberate: a field the constructor never mentions is the *syntactic*
+case, already decided by the parser above — **including its exemptions**, of which `class E
+extends Error` (whose inherited `message` is set by `super(…)`, not by a `this.f = …`) is
+the one that exists today. Deferring keeps one rule from re-deciding cases the other can
+see and it cannot.
+
+`tsc --strict` rejects every refused shape here too (`TS2564`, *"Property 'z' has no
+initializer and is not definitely assigned in the constructor"*), so this widening is again
+a divergence from **node**, not from TypeScript, and the three escape hatches the hint names
+— assign on every path, give an initializer, widen to `T | undefined` — are each compiled
+against node in `test/definite-assignment.test.ts` (case 36).
+
+**Known, still open, and both are REFUSALS of programs node runs** — the safe direction,
+and both predate this rule:
+
+- a field assigned only by a **helper method** the constructor calls (`constructor() {
+  this.init(); }`) is `NT1015`. The scan is constructor-body-only; `tsc` refuses it too.
+- a constructor that **always throws** is `NT1015` if a field is never stored anywhere, for
+  the same reason. The path-sensitive rule accepts that shape; the syntactic one gets there
+  first. `tsc` refuses it too.
+- reading `this.z` **before** it is assigned, *inside* the constructor, is still a wrong
+  answer (`console.log(this.z); this.z = 1;` prints `0`, node prints `undefined`). This is
+  the `daUse` half of the local rule, which is not yet wired to field reads — a read of
+  `this.f` is a `MemberExpr`, and `daReads` collects identifiers.
 
 ### Block scopes get their own storage
 
