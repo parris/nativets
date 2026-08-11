@@ -23,6 +23,16 @@ void nt_num_to_buf(double v, char *out, unsigned long out_len) { snprintf(out, o
 
 #include "../../runtime/nt_actor.c"
 
+/* mbox_discard reclaims a dead actor's undelivered messages through the same two frees the
+ * receiving frame would have used. No compiler messages are sent here (this harness drives
+ * the NtMsg API, which owns its own storage), so plain free / a no-op stands in.
+ *
+ * AFTER the include, like poll_test.c's pair and for the same reason: a `<stdlib.h>` above
+ * it (for `free`) lands before nt_actor.c can set `_XOPEN_SOURCE` / `_DARWIN_C_SOURCE`,
+ * and the ucontext layout the file then compiles against crashes on sight. */
+void nt_obj_free(void *o) { free(o); }
+void nt_str_release(void *p) { (void)p; }
+
 #include <stdio.h>
 #include <string.h>
 
