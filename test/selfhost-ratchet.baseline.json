@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "bddc7a0"
+    "rev": "c42435a"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "c1e53bf5887c7352",
+      "sha256": "41a5cc072fb4002e",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "8231161f2b59eaac",
+      "sha256": "69d2a82ad02e5552",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot assign number to string 'base'"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `t.value = v` would mutate the object in place at L:C"
       }
     },
     "codegen.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot assign number to string 'base'"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `t.value = v` would mutate the object in place at L:C"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot assign number to string 'base'"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `t.value = v` would mutate the object in place at L:C"
       }
     },
     "lexer.ts": {
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot assign number to string 'base'"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `t.value = v` would mutate the object in place at L:C"
       }
     },
     "ownership.ts": {
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "eb651d17821be3cd",
+      "sha256": "50197eae22182791",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT2001",
-        "message": "[NT2001] Cannot assign number to string 'base'"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `t.value = v` would mutate the object in place at L:C"
       }
     }
   }

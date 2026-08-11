@@ -1270,6 +1270,11 @@ export interface AssignExpr {
   target: string;
   value: Expr;
   ty?: Ty;
+  /** Where the assignment is. Added for the same reason `ArrowFunction.loc` was: the
+   *  refusals in this arm (`Cannot assign X to Y 'name'`, `Cannot assign to const`) had
+   *  no location and no span, so finding one in a 5,000-line module meant grepping the
+   *  BINDING NAME — measured, twice, on `base` and on `n`. */
+  loc?: Loc;
   /** Ownership (B2 step 4): the value being OVERWRITTEN is a linear heap value this
    *  scope still owns, so the assignment must free it (RAII on reassignment). Set by
    *  `src/ownership.ts` only when it can prove the old value is dead — not moved out,

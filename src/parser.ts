@@ -1728,7 +1728,17 @@ class Parser {
    * SPECULATION-SAFE, like `refuseUnknownName`: `tryCallTypeArgs` backtracks on any throw,
    * so this must stay a throw with no side effect.
    */
-  private refuseTypeQuery(): never {
+  /**
+   * `: Ty`, not `: never`. The body always throws, so both are true — but `never` is not
+   * modelled here (it erases to `number`, see `AMBIENT_HINTS`), so
+   * `base = this.refuseTypeQuery()` was `Cannot assign number to string 'base'`: the FIRST
+   * BLOCKER of five of the twelve modules through the link, on a call that cannot return.
+   *
+   * `Ty` is the type the one call site wants and the type the function would produce if it
+   * produced anything, which is exactly what that hint prescribes ("write what the function
+   * would return if it returned"). tsc still proves the body diverges.
+   */
+  private refuseTypeQuery(): Ty {
     const kw = this.next().value;                  // `typeof` / `keyof`
     const operand = this.peek();
     const shown = operand.type === "ident" || operand.type === "str" ? `${kw} ${operand.value}` : kw;
@@ -3858,8 +3868,14 @@ class Parser {
         };
       }
       if (left.kind !== "Identifier") throw parseError("Invalid assignment target");
-      const op = this.next().value as AssignOp; // guarded by `ASSIGN_OPS` above
-      return { kind: "AssignExpr", op, target: left.name, value: this.parseAssign() };
+      const opTok = this.next();
+      const op = opTok.value as AssignOp; // guarded by `ASSIGN_OPS` above
+      // LOCATED — see `AssignExpr.loc`. The operator token, not the target, so the caret
+      // lands on the assignment itself.
+      return {
+        kind: "AssignExpr", op, target: left.name, value: this.parseAssign(),
+        loc: { line: opTok.line, col: opTok.col, file: this.file },
+      };
     }
     return left;
   }

@@ -4597,10 +4597,10 @@ class Checker {
               `Assign to a new binding, or move the assignment outside the narrowed arm`,
           );
         }
-        if (b.constant) throw typeError(`Cannot assign to const '${e.target}'`);
+        if (b.constant) throw typeError(`Cannot assign to const '${e.target}'`, e.loc);
         const vt = this.type(e.value, scope, e.op === "=" ? b.ty : undefined); // assignment target is the context (e.g. `a = []`)
         if (e.op === "=") {
-          if (vt !== b.ty && !this.assignable(b.ty, vt)) throw typeError(`Cannot assign ${vt} to ${b.ty} '${e.target}'`);
+          if (vt !== b.ty && !this.assignable(b.ty, vt)) throw typeError(`Cannot assign ${vt} to ${b.ty} '${e.target}'`, e.loc);
           // Types first, so a genuinely ill-typed assignment still reports as one; this
           // rule is about a WELL-TYPED assignment whose effect the caller never sees.
           this.rejectParamRebind(e.target, b, e.value);
