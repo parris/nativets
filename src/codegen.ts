@@ -1783,7 +1783,10 @@ class FnGen {
     out.push(`  br label %${this.blocks[firstBlock]!.label}`);
     for (const b of this.blocks) {
       out.push(`${b.label}:`);
-      out.push(...b.lines);
+      // A loop, not `out.push(...b.lines)`. The spread is NT1006 (a self-host blocker),
+      // and spreading into a variadic call passes one ARGUMENT per line — a block with
+      // enough lines overflows the call stack in the bun-hosted stage-0 too.
+      for (const line of b.lines) out.push(line);
     }
     out.push("}");
     return out.join("\n");
