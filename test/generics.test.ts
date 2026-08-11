@@ -212,6 +212,51 @@ console.log(identity(99));
   });
 });
 
+describe("M3: the parameter-list edges `instantiate` decides positionally", () => {
+  /*
+   * `instantiate` reads the parameter list three ways — clamping the argument index to the
+   * last pattern for a REST parameter, counting the FIXED (non-rest, non-default) params,
+   * and flagging whether the specialization is variadic. All three were spelled with
+   * `patterns.at(-1)` / `spec.params.at(-1)?.rest`, which the compiler refuses on itself
+   * (NT1001: `.at` on an array of records hands back an element that aliases its owner),
+   * and the clamp additionally produced index -1 on a ZERO-parameter template — `undefined`
+   * to node, a PANIC here, the class test/no-index-last.test.ts exists for.
+   *
+   * These pin the observable behaviour those reads decide, so the rewrite to a walk and an
+   * explicit `idx < 0` guard is checked against node rather than against itself.
+   */
+  test("10a. a generic REST parameter: zero, some, and a second instantiation", async () => {
+    const out = await matches(`
+function joinAll<T>(sep: string, ...xs: T[]): string {
+  let out = "";
+  for (let i = 0; i < xs.length; i++) out = i === 0 ? \`\${xs[i]!}\` : \`\${out}\${sep}\${xs[i]!}\`;
+  return out;
+}
+console.log(joinAll<number>("-", 1, 2, 3));
+console.log(joinAll<string>(",", "a", "b"));
+console.log(joinAll<number>("-"));
+`);
+    expect(out).toBe("1-2-3\na,b\n\n");
+  });
+
+  test("10b. a generic DEFAULT parameter is still optional at the call site", async () => {
+    const out = await matches(`
+function firstOr<T>(d: T, xs: T[] = []): T { return xs.length > 0 ? xs[0]! : d; }
+console.log(firstOr<number>(9, [4, 5]));
+console.log(firstOr<number>(9));
+`);
+    expect(out).toBe("4\n9\n");
+  });
+
+  test("10c. a ZERO-parameter template given an argument is an arity error, not a panic", () => {
+    // The clamp has no pattern to fall back on here. It must reach the ordinary arity
+    // check — a self-hosted compiler that read index -1 would abort instead.
+    const r = rejection(`function f<T>(): number { return 1; }\nconsole.log(f<number>(1));\n`);
+    expect(r.code).toBe("NT2001");
+    expect(r.message).toContain("expects 0..0 args, got 1");
+  });
+});
+
 describe("M3: reject-don't-miscompile at the edges of monomorphization", () => {
   test("9a. a type argument that CANNOT be inferred is NT1013 with a hint to pass it", () => {
     const r = rejection(`function make<T>(): number { return 1; }\nconsole.log(make());\n`);

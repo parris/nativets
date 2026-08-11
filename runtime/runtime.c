@@ -79,6 +79,21 @@ void (*nt_rt_lock)(int acquire) = 0;
 #define NT_RC_LOCK()   do { if (nt_rt_lock) nt_rt_lock(1); } while (0)
 #define NT_RC_UNLOCK() do { if (nt_rt_lock) nt_rt_lock(0); } while (0)
 
+/* THE END OF A HEAP OBJECT'S / STRING'S LIFE, announced — the second hook installed by
+ * nt_actor.c, and by the same rule as `nt_rt_lock` above: this file must not NAME a
+ * symbol defined in nt_actor.c, because the actor runtime is linked ONLY for programs
+ * that use actors (src/driver.ts writeIR gates it on `nt_sched_init` appearing in the
+ * IR). A direct call would break the link for every other program.
+ *
+ * WHY IT EXISTS. An actor's crash record carries a "triggering message" causal tag that
+ * BORROWS the last message the actor consumed — and consuming a message is exactly what
+ * hands it to the receiving frame, which frees it at scope exit. The tag therefore has
+ * to learn when its borrow ends, and this is the only place that knows: the free itself.
+ * Called BEFORE the free, so the pointer handed over is still valid, and only ever
+ * COMPARED by the hook (see tag_forget in nt_actor.c) — never dereferenced, never freed.
+ * NULL for every non-actor program: one predictable, well-predicted NULL test. */
+void (*nt_rt_drop_notify)(const void *p) = 0;
+
 /* `len` is the string's BYTE length, memoized: -1 until something asks. Lazy, not
  * eager, because `alloc_str` REGISTERS the buffer before the producer fills it —
  * measuring at registration would read uninitialized bytes — and because a string is
@@ -171,6 +186,11 @@ void nt_str_release(void *p) {
     size_t i = str_tab_slot(p);
     if (g_str_tab[i].key == p) {       /* else: literal / already freed / untracked */
       if (--g_str_tab[i].rc <= 0) {
+        /* Same contract as nt_obj_free: announce the death BEFORE the free, so a crash
+         * record's borrowed causal tag stops pointing at this buffer. The hook takes no
+         * lock (it only touches the running actor's own fields), so calling it under the
+         * RC lock cannot invert a lock order. */
+        if (nt_rt_drop_notify) nt_rt_drop_notify(p);
         free(p);
         str_tab_remove_at(i);
         g_str_frees++;
@@ -848,6 +868,25 @@ const char *js_str_concat(const char *a, const char *b) {
 double js_str_len(const char *s) { return (double)nt_strlen(s); }
 
 int32_t js_str_eq(const char *a, const char *b) { return strcmp(a, b) == 0 ? 1 : 0; }
+
+/* `Object.is` on two numbers — SameValue (ES 7.2.10), the THIRD equality in the language
+ * and NOT a spelling of either of the other two. It differs from `===` at NaN (equal here)
+ * and from SameValueZero at signed zero (NOT equal here):
+ *
+ *                  NaN vs NaN     +0 vs -0
+ *   ===              false          true
+ *   SameValueZero     true          true     <- nt_arr_includes_num, above
+ *   SameValue         true          false    <- this
+ *
+ * So it must NOT be routed through `nt_arr_includes_num`'s predicate, and that one must
+ * not be "tightened" into this: the two are deliberately opposite on zero. `signbit`
+ * rather than `1/x`, because it is the only reading that survives a zero of either sign
+ * without a division. See test/object-is.test.ts. */
+int32_t js_same_value(double a, double b) {
+  if (isnan(a) || isnan(b)) return (isnan(a) && isnan(b)) ? 1 : 0;
+  if (a == 0.0 && b == 0.0) return signbit(a) == signbit(b) ? 1 : 0;
+  return a == b ? 1 : 0;
+}
 
 /* Lexicographic compare for `<` `<=` `>` `>=` and the default `.toSorted()`.
  * Returns <0 / 0 / >0. node compares UTF-16 code units; strcmp on our UTF-8 bytes
@@ -1927,6 +1966,18 @@ int32_t nt_arr_includes_num(NtArray *a, double x) {
   for (int64_t i = 0; i < a->len; i++) if (slot_to_num(arr_at(a, i)) == x) return 1;
   return 0;
 }
+/* A boolean array needs its own scan for the same reason `nt_arr_join_bool` does: the
+ * slot holds `zext i1` — the integers 0 and 1 — so it is neither a `double` nor a `ptr`.
+ * With only a two-way split (`number` vs everything-else) a `boolean[]` took the `_str`
+ * arm and codegen emitted an `i1` into a `ptr` parameter, which is not valid IR: clang
+ * rejected the module with a bare "constant expression type mismatch" and no NT code.
+ * SameValueZero on booleans is plain equality — there is no NaN and no signed zero here —
+ * so the needle arrives already normalized to 0/1 and this is a slot compare.
+ * See test/array-includes.test.ts. */
+int32_t nt_arr_includes_bool(NtArray *a, int32_t x) {
+  for (int64_t i = 0; i < a->len; i++) if ((arr_at(a, i) != 0) == (x != 0)) return 1;
+  return 0;
+}
 int32_t nt_arr_includes_str(NtArray *a, const char *x) {
   for (int64_t i = 0; i < a->len; i++) if (strcmp((const char *)(intptr_t) arr_at(a, i), x) == 0) return 1;
   return 0;
@@ -1974,6 +2025,7 @@ void *nt_obj_new(double nfields) {
 }
 void nt_obj_free(void *o) {
   if (!o) return;
+  if (nt_rt_drop_notify) nt_rt_drop_notify(o);  /* before the free: `o` is still valid */
   free(o);
   NT_STAT_INC(g_obj_frees);
 }
@@ -4589,11 +4641,23 @@ static const char *uri_encode(const char *s, int keep_reserved) {
   char *o = alloc_str(j);
   memcpy(o, buf, j);
   o[j] = 0;
+  free(buf); /* see uri_decode below: unregistered scratch, freed on every path */
   return o;
 }
 const char *nt_encode_uri_component(const char *s) { return uri_encode(s, 0); }
 const char *nt_encode_uri(const char *s) { return uri_encode(s, 1); }
 
+/* `buf` here is SCRATCH, not a result: the decoded bytes are copied into a fresh
+ * `alloc_str` and it is `buf` that must be reclaimed. It is UNREGISTERED memory —
+ * `nt_str_register` never saw it — so it carries no refcount and `__strLive`
+ * cannot count it, which is exactly why the missing free survived: no in-process
+ * counter and no leak test could observe it, and LeakSanitizer is Linux-only.
+ * Measured on macOS with `leaks --atExit`: 20,000 `decodeURIComponent` calls on a
+ * 75-byte input leaked 20,000 blocks / 1.83 MB, one per call, against ZERO in the
+ * same loop with the call removed. Both exits free it — the raise path does NOT
+ * longjmp (`nt_exc_raise` sets a pending flag and returns), so the early `return`
+ * really did leak too. Same shape, same fix, in `uri_encode` above; `free` is the
+ * right pair for `nativets_alloc`, which is a bare `malloc` (cf. `nt_atob`). */
 static const char *uri_decode(const char *s, int keep_reserved) {
   size_t n = strlen(s);
   char *buf = (char *)nativets_alloc(n + 1);
@@ -4602,6 +4666,7 @@ static const char *uri_decode(const char *s, int keep_reserved) {
     if (s[i] != '%') { buf[j++] = s[i]; continue; }
     if (i + 2 >= n || url_hexval(s[i + 1]) < 0 || url_hexval(s[i + 2]) < 0) {
       nt_exc_raise_msg("URIError: URI malformed");
+      free(buf);
       return url_empty();
     }
     unsigned char b = (unsigned char)(url_hexval(s[i + 1]) * 16 + url_hexval(s[i + 2]));
@@ -4615,6 +4680,7 @@ static const char *uri_decode(const char *s, int keep_reserved) {
   char *o = alloc_str(j);
   memcpy(o, buf, j);
   o[j] = 0;
+  free(buf);
   return o;
 }
 const char *nt_decode_uri_component(const char *s) { return uri_decode(s, 0); }

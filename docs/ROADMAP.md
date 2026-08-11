@@ -347,7 +347,21 @@ Shapes that leak today, all by the same mechanism — `nt_obj_free` is `free(o)`
 the slots: object-in-object (`__objLive() === 1`), object-in-array (`objLive 1`, and **`__arrLive`
 reports 0** — it counts headers, so it cannot see this class at all), array-in-object (`arrLive 1`),
 a discriminated-union member's object field, and a `@@mutable` record's object field. Nesting
-depth 3 leaks 2. Refcounted string slots do *not* leak this way.
+depth 3 leaks 2. Refcounted string slots do *not* leak this way — **but see the correction
+below: they leak a DIFFERENT way, and this sentence was read as covering that.**
+
+**CORRECTION 2026-08-11 — a loop-local heap STRING is never freed, one per iteration.**
+Measured on pristine `main`, `for(;;)`, `for-of` and `while` alike:
+
+    +10 iterations -> +9 live      +400 -> +399      +50000 -> +49999
+
+An **array** in the identical position is freed correctly (`+0` at both scales), so this is
+specific to the refcounted-string path and not to block drops. The sentence above is true
+about the shallow-free class it describes and **false as a general statement about strings**,
+which is how the leak survived — `isLinearTy` deliberately excludes `string` on the grounds
+that RC handles it, and RC does handle it *at frame scope*, releasing once at function exit
+rather than once per iteration (hence n-1, not n). Silent on macOS: LeakSanitizer is
+Linux-only. The fix belongs in codegen's `emitStrDrops`, not in `isLinearTy`.
 
 **A NULLABLE box is a stronger case than any of these, and it is not on the list above because
 it never reaches a drop at all.** `isLinearTy` (src/ownership.ts) is

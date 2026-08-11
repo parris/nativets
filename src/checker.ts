@@ -295,6 +295,82 @@ function returnsUnderFinally(body: Stmt[], under = false): boolean {
 }
 
 /**
+ * Can this body hand a VALUE back to its caller? `return x` anywhere in it, at any depth.
+ *
+ * Read by `typeArrow` to decide whether an arrow being passed into a `=> void` slot really
+ * returns nothing, in which case its type is `void` rather than `inferBlockReturn`'s
+ * default of `number`. So the answer has a safe direction and an unsafe one, and they are
+ * NOT symmetric:
+ *
+ *   - a false NO turns an arrow that does produce a `double` into a `void` signature, and
+ *     a `=> void` parameter is CALLED as `call void %fp(…)` — a return-type mismatch in
+ *     the emitted IR, resting on ABI luck. That is the miscompile direction.
+ *   - a false YES leaves today's refusal in place. Merely unhelpful.
+ *
+ * Hence `default: return true`. Every kind that cannot carry a value is listed explicitly,
+ * so a NEW `Stmt` kind added later re-refuses rather than silently taking the unsafe arm —
+ * the opposite default from `returnsUnderFinally` above, which answers a question whose
+ * safe direction is `false`.
+ *
+ * STATEMENT children only, never expressions, and that is what makes nested frames free: a
+ * nested arrow's body hangs off an `ArrowFunction` EXPRESSION, so this walk cannot reach it
+ * and its `return` is correctly attributed to that arrow rather than to this one. A
+ * `FuncDecl` is skipped for the same reason, explicitly.
+ *
+ * A BARE `return;` carries nothing and does not count — node's value there is `undefined`,
+ * which is exactly what a `void` slot expects.
+ */
+function carriesReturnValue(body: Stmt[]): boolean {
+  for (const s of body) {
+    switch (s.kind) {
+      case "ReturnStmt": if (s.argument !== null) return true; break;
+      // One `case` per kind rather than a combined label, for the reason
+      // `returnsUnderFinally` documents: a combined label narrows `s` only to the union of
+      // those members, and the field read is then NT2001 in the subset `src/` must stay in.
+      case "IfStmt": {
+        if (carriesReturnValue(s.consequent)) return true;
+        const alt = s.alternate;
+        if (alt !== null && carriesReturnValue(alt)) return true;
+        break;
+      }
+      case "TryStmt": {
+        if (carriesReturnValue(s.block)) return true;
+        const handler = s.handler;
+        if (handler !== null && carriesReturnValue(handler)) return true;
+        const fin = s.finalizer;
+        if (fin !== null && carriesReturnValue(fin)) return true;
+        break;
+      }
+      case "WhileStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "DoWhileStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "ForStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "ForOfStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "ForInStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "BlockStmt": if (carriesReturnValue(s.body)) return true; break;
+      case "MultiStmt": if (carriesReturnValue(s.stmts)) return true; break;
+      case "SwitchStmt": for (const c of s.cases) if (carriesReturnValue(c.body)) return true; break;
+      // Cannot carry a value out of THIS frame. `FuncDecl` is a frame of its own; the rest
+      // are leaves. Listed rather than defaulted — see the header.
+      case "VarDecl": break;
+      case "FuncDecl": break;
+      case "ThrowStmt": break;
+      case "ExprStmt": break;
+      case "BreakStmt": break;
+      case "ContinueStmt": break;
+      // `BlockDrops`, not `BlockDropsStmt` — the INTERFACE is `BlockDropsStmt` but the tag
+      // it carries is `"BlockDrops"`. Written wrong first, and the way it surfaced is the
+      // argument for both this switch's shape and for test/tsc.test.ts: the label matched
+      // nothing, so the statement fell to `default` and answered `true` — the SAFE arm, an
+      // over-refusal rather than a `double`-returning body in a `call void` slot — and
+      // `tsc` named it (TS2678) rather than leaving it to be found by a leak.
+      case "BlockDrops": break;
+      default: return true; // an unrecognized kind: refuse rather than guess
+    }
+  }
+  return false;
+}
+
+/**
  * The UTF-8 byte length of `s` — exactly what `Buffer.byteLength(s, "utf8")` returns.
  *
  * `Buffer` is a node global with no representation here (`NT2001`), so it cannot appear in
@@ -515,7 +591,13 @@ class Scope {
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
     if (b) { this.hits = this.hits.add(name); return b; }
-    return this.parent?.lookup(name);
+    // `this.parent?.lookup(…)` is NT1002 — a method call on a NULLABLE receiver, which is
+    // this body's first blocker when the compiler compiles itself. Bind, narrow, call. The
+    // root scope's `parent` is `null`, and `undefined` is what `?.` would have produced
+    // there, so the two spellings agree on every input.
+    const up = this.parent;
+    if (up === null) return undefined;
+    return up.lookup(name);
   }
 }
 
@@ -614,6 +696,26 @@ const STRING_METHODS: Map<string, MethodSig> = new Map<string, MethodSig>()
   // 2nd arg = `position`, the index a match may START at (ES 22.1.3.11) — clamped, and
   // omitted means +Infinity, NOT 0. Not symmetric with `.indexOf`'s fromIndex.
   .set("lastIndexOf", { min: 1, max: 2, argTys: ["string", "number"], ret: "number" });
+/**
+ * The shared refusal hint for `.includes` / `.indexOf` / `.lastIndexOf` on an array whose
+ * ELEMENT is not a primitive. One constant, because all three refuse for one reason and a
+ * hint written out three times is how two of them drift.
+ *
+ * The generic `NYI.ARRAY` hint ("arrays need the heap value model") is true but says
+ * nothing a caller can act on, and the way out here is exact rather than "wait": a
+ * predicate closure with `===` reproduces node's answer precisely, because `===` on an
+ * array or object IS the pointer compare (see codegen's `isArrayTy(lt) || isObjectTy(lt)`
+ * arm) and that is what node's SameValueZero reduces to on a reference. Both spellings
+ * below are compiled against node in test/array-includes.test.ts.
+ */
+const SEARCH_NONPRIMITIVE_HINT =
+  "on a non-primitive element, node's answer is reference IDENTITY — the same allocation, " +
+  "not an equal-looking one — and these three routines compare element VALUES. Spell the " +
+  "identity test with a predicate, which does compile and matches node exactly: " +
+  "`arr.some((x) => x === needle)` for `.includes`, and `arr.findIndex((x) => x === needle)` " +
+  "for `.indexOf` (`===` on an array or object is the pointer compare). If you meant " +
+  "structural equality, compare a primitive projection instead — " +
+  "`arr.some((x) => x.length === needle.length)`.";
 /**
  * Host FFI (SH4) — the signatures of the `node:` builtins, keyed by their canonical
  * name. Unlike GLOBAL_FUNCS these are NOT ambient: a name is only in scope when the
@@ -1047,7 +1149,12 @@ function asWritten(annot: Ty, head: string | undefined): string {
  * literal, which is the shape TypeScript accepts and this compiler cannot.
  */
 function dictHint(annot: Ty, head: string | undefined, got: Ty): string | undefined {
-  if (head !== "Record" || !isMapTy(annot) || !isObjectTy(got)) return undefined;
+  // `head === undefined || head !== "Record"`, not the bare `head !== "Record"`: `head` is
+  // a tagged box and `"Record"` is a raw string, so comparing them is NT2001 — this body's
+  // first blocker when the compiler compiles itself, and the exact rewrite the compiler's
+  // own `mixedNullableHint` prescribes for the negated form. An absent `head` took the
+  // early return before and still does.
+  if (head === undefined || head !== "Record" || !isMapTy(annot) || !isObjectTy(got)) return undefined;
   const k = mapKeyTy(annot), v = mapValTy(annot);
   const fs = objectFields(got);
   const sample = fs.length > 0 ? fs[0]!.key : "k";
@@ -1113,30 +1220,59 @@ function keyPresence(key: Expr, ot: Ty): boolean {
     );
   }
   const k = key.value;
-  const f = objectFields(ot).find((x) => x.key === k);
-  if (f !== undefined && isNullableTy(f.ty) && nullishKind(f.ty) === "undefined") {
+  // `.find` over an array of RECORDS is refused (NT1001: the result would alias its
+  // owner), and it was this body's first blocker when the compiler compiles itself. The
+  // loop copies out only the scalar this needs — the field's TYPE — so nothing is aliased.
+  // The `found` flag makes it the FIRST hit that wins, as `.find` does; a field key
+  // cannot repeat, so the two agree on every object anyway.
+  let fty: Ty | undefined;
+  let found = false;
+  for (const x of objectFields(ot)) if (!found && x.key === k) { fty = x.ty; found = true; }
+  if (fty !== undefined && isNullableTy(fty) && nullishKind(fty) === "undefined") {
     throw nyi(
       NYI.OBJECT,
       `${where} on the optional field '${k}'`,
       "a key set is decided at compile time here (from the TYPE), but node decides it per value at runtime — `{}` and " +
       `\`{${k}: …}\` share this type and have different key sets, so there is no answer to give. ` +
-      `Read the field instead (\`o.${k} !== undefined\`), or make it REQUIRED and assign \`undefined\` when it is missing. ` +
-      `Note that \`${k}: T | undefined\` is encoded exactly like \`${k}?: T\` here, so it is refused too even though its key is always present in node`,
+      `Read the field instead (\`o.${k} !== undefined\`); drop the \`?\` so the key is always there; ` +
+      `or use a \`Map\` and \`m.has(k)\`, whose key set really is decided at runtime. ` +
+      `NOT \`${k}: T | undefined\` — that is encoded exactly like \`${k}?: T\` here and lands on this same refusal, ` +
+      `even though its key is always present in node`,
     );
   }
-  return f !== undefined || OBJECT_PROTO_KEYS.includes(k);
+  return found || OBJECT_PROTO_KEYS.includes(k);
 }
 
 function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
-  const opt = objectFields(ot).find((f) => isNullableTy(f.ty) && nullishKind(f.ty) === "undefined");
-  if (opt === undefined) return;
+  // `.find` over an array of RECORDS is refused (NT1001: the result would alias its
+  // owner), and it was this body's first blocker when the compiler compiles itself. Copy
+  // out the one scalar the message needs — the KEY — instead of holding the field. The
+  // first optional field wins, as `.find` did.
+  //
+  // A separate `found` flag, NOT `key === ""` as the sentinel. `{ "": T }` is a legal
+  // object type in TypeScript; this parser does not accept a quoted key in a type
+  // position yet (`NT0001 Expected identifier`, verified), so today the sentinel would
+  // be unreachable rather than wrong. It is spelled this way because the day that
+  // parser gap closes, the sentinel becomes a SKIPPED refusal — a `for…in` we cannot
+  // answer, compiled — and nothing about this line would look wrong at that point.
+  let key = "";
+  let found = false;
+  for (const f of objectFields(ot)) if (!found && isNullableTy(f.ty) && nullishKind(f.ty) === "undefined") { key = f.key; found = true; }
+  if (!found) return;
   throw nyi(
     forIn ? NYI.FOR_IN : NYI.OBJECT,
-    `${what} of an object with the optional field '${opt.key}'`,
+    `${what} of an object with the optional field '${key}'`,
     "a key set is decided at compile time here (from the TYPE), but node decides it per value at runtime — `{}` and " +
-    `\`{${opt.key}: …}\` share this type and have different key sets, so there is no answer to give. ` +
-    `Read the field instead (\`o.${opt.key} !== undefined\`), or make it REQUIRED and assign \`undefined\` when it is missing. ` +
-    `Note that \`${opt.key}: T | undefined\` is encoded exactly like \`${opt.key}?: T\` here, so it is refused too even though its key is always present in node`,
+    `\`{${key}: …}\` share this type and have different key sets, so there is no answer to give. ` +
+    // THE ADVICE IS COMPILED, in test/key-presence.test.ts. It used to read "or make it
+    // REQUIRED and assign `undefined` when it is missing", which is `k: T | undefined` —
+    // the one spelling the very next sentence says is refused, and following it reproduces
+    // this diagnostic VERBATIM. A hint whose own text retracts it still costs the reader
+    // the round trip; both replacements below compile and are node-exact.
+    `Read the field instead (\`o.${key} !== undefined\`); drop the \`?\` so the key is always there; ` +
+    `or use a \`Map\` and \`m.keys()\`/\`m.has(k)\`, whose key set really is decided at runtime. ` +
+    `NOT \`${key}: T | undefined\` — that is encoded exactly like \`${key}?: T\` here and lands on this same refusal, ` +
+    `even though its key is always present in node`,
   );
 }
 
@@ -1910,22 +2046,33 @@ class Checker {
         this.typeofFacts(e, scope, positive === eq, out);
         // The value is non-nullish on the TRUE branch of `!==` and the FALSE branch of `===`.
         if (positive !== ne) return;
-        for (const [v, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
-          // Both operand orders narrow — TypeScript's
-          // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
-          // `exprTy`, not `(lit as { ty?: Ty }).ty` — `ty` lives at five different slots
-          // across the 30 members and the window named slot 0, `kind`, for every one of
-          // them. Compiled, this compared a kind string against "undefined"/"null", never
-          // matched, and so silently dropped EVERY nullish narrowing in the compiler.
-          //
-          // A tag test for `UndefinedLiteral`/`NullLiteral` would not do: the operand does
-          // not have to be the literal. `const u = undefined; if (x !== u)` narrows today
-          // because the read is of the recorded TYPE, not of the syntax, and TypeScript's
-          // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` is about the operand ORDER, not
-          // about it being literal. Reading the real `ty` keeps both.
-          const lt = exprTy(lit);
-          if (lt === "undefined" || lt === "null") this.addFact(v, scope, lt, out);
-        }
+        // Both operand orders narrow — TypeScript's
+        // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` asserts exactly that.
+        //
+        // UNROLLED, not `for (const [v, lit] of [[e.left, e.right], [e.right, e.left]])`:
+        // a `[a, b]` for-of binding is only lowered for Map entries (NT1007), so the loop
+        // spelling refused this body when the compiler compiles itself — and it built two
+        // throwaway arrays holding the operands to say something two lines already say.
+        //
+        // `exprTy`, not `(lit as { ty?: Ty }).ty` — `ty` lives at five different slots
+        // across the 30 members and the window named slot 0, `kind`, for every one of
+        // them. Compiled, this compared a kind string against "undefined"/"null", never
+        // matched, and so silently dropped EVERY nullish narrowing in the compiler.
+        //
+        // A tag test for `UndefinedLiteral`/`NullLiteral` would not do: the operand does
+        // not have to be the literal. `const u = undefined; if (x !== u)` narrows today
+        // because the read is of the recorded TYPE, not of the syntax, and TypeScript's
+        // `nullOrUndefinedTypeGuardIsOrderIndependent.ts` is about the operand ORDER, not
+        // about it being literal. Reading the real `ty` keeps both.
+        //
+        // The `!== undefined` guard is not redundant here even though `=== "undefined"`
+        // implies it under node: `exprTy` returns `Ty | undefined`, a TAGGED BOX, and
+        // comparing a box against the raw string it may contain is NT2001 — the refusal
+        // this compiler's own `mixedNullableHint` prescribes exactly this rewrite for.
+        const rt = exprTy(e.right);
+        if (rt !== undefined && (rt === "undefined" || rt === "null")) this.addFact(e.left, scope, rt, out);
+        const lt = exprTy(e.left);
+        if (lt !== undefined && (lt === "undefined" || lt === "null")) this.addFact(e.right, scope, lt, out);
         return;
       }
       case "LogicalExpr":
@@ -1984,6 +2131,10 @@ class Checker {
     //@@mutable
     out: NarrowFact[],
   ): void {
+    // `go` is CALLED, never PASSED. `xs.forEach(go)` hands a function VALUE to `.forEach`,
+    // which needs a captured environment and is NT1003 — this body's first blocker when
+    // the compiler compiles itself. A `for…of` calling `go` per element is the same walk
+    // and keeps every use of the arrow an ordinary call the compiler can inline.
     const go = (x: Expr) => this.assertFacts(x, scope, out);
     switch (e.kind) {
       case "NonNullExpr":
@@ -2000,10 +2151,10 @@ class Checker {
       case "BinaryExpr": go(e.left); go(e.right); return;
       case "LogicalExpr": go(e.left); return; // the right operand is conditional
       case "ConditionalExpr": go(e.test); return; // ditto the arms
-      case "SequenceExpr": e.exprs.forEach(go); return;
-      case "TemplateLiteral": e.exprs.forEach(go); return;
-      case "CallExpr": go(e.callee); e.args.forEach(go); return;
-      case "ArrayLiteral": e.elements.forEach(go); return;
+      case "SequenceExpr": for (const x of e.exprs) go(x); return;
+      case "TemplateLiteral": for (const x of e.exprs) go(x); return;
+      case "CallExpr": go(e.callee); for (const x of e.args) go(x); return;
+      case "ArrayLiteral": for (const x of e.elements) go(x); return;
       case "SpreadExpr": go(e.argument); return;
       default: return;
     }
@@ -2050,15 +2201,31 @@ class Checker {
     //@@mutable
     out: NarrowFact[],
   ): void {
-    for (const [t, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
-      if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") continue;
-      const p = this.accessPath(t.operand, scope);
-      if (p === undefined || !isGeneralUnionTy(p.ty)) continue;
-      const keep = generalUnionMembers(p.ty).filter((m) => (generalUnionArmTypeof(m) === lit.value) === matched);
-      if (keep.length !== 1) continue;
-      if (out.some((f) => f.binding === p.binding && f.path === p.path)) continue;
-      out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
-    }
+    // Both operand orders, as two CALLS rather than a `[t, lit]` for-of over two throwaway
+    // pair arrays: that binding form is lowered only for Map entries (NT1007), so the loop
+    // spelling refused this body when the compiler compiles itself.
+    this.typeofFact(e.left, e.right, scope, matched, out);
+    this.typeofFact(e.right, e.left, scope, matched, out);
+  }
+
+  /** One operand ORDER of `typeofFacts` — `typeof t === lit`. Appends at most one fact. */
+  private typeofFact(
+    t: Expr,
+    lit: Expr,
+    scope: Scope,
+    matched: boolean,
+    // Marked for the reason `guardFacts` records: the obligation travels with the
+    // parameter, and that is what makes this leaf's `.push` land in `factsFor`'s array.
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
+    if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") return;
+    const p = this.accessPath(t.operand, scope);
+    if (p === undefined || !isGeneralUnionTy(p.ty)) return;
+    const keep = generalUnionMembers(p.ty).filter((m) => (generalUnionArmTypeof(m) === lit.value) === matched);
+    if (keep.length !== 1) return;
+    if (out.some((f) => f.binding === p.binding && f.path === p.path)) return;
+    out.push({ name: p.name, binding: p.binding, path: p.path, ty: keep[0]!, constant: p.binding.constant, arrowDepth: this.arrowDepth });
   }
 
   /** The narrowed type for the path `e` reads here, if a fact covers it. */
@@ -2139,7 +2306,11 @@ class Checker {
 
   /** A mangled, LLVM-safe, collision-free name for one instantiation (`first$string__`). */
   private mangle(base: string, args: Ty[]): string {
-    const stem = `${base}$${args.map(mangleTypeArg).join("$")}`;
+    // `(a) => mangleTypeArg(a)`, not the point-free `.map(mangleTypeArg)`: passing a
+    // function by NAME is a function VALUE (NT1003), which was this body's first blocker
+    // when the compiler compiles itself. It is also the safer spelling under bun — `.map`
+    // passes (element, index, array), so a point-free callback gets two extra arguments.
+    const stem = `${base}$${args.map((a) => mangleTypeArg(a)).join("$")}`;
     let name = stem, n = 2;
     while (this.functions.has(name) || this.generics.has(name)) name = `${stem}_${n++}`;
     return name;
@@ -2162,10 +2333,19 @@ class Checker {
     const sigParams = tmpl.params.slice(recvOffset);
     const what = recvOffset ? "generic method" : "generic function";
 
-    if (e.typeArgs?.length) {
+    // `?? []` up front, not `e.typeArgs?.length` and three more reads through the `?.`:
+    // the optional-chain test does not narrow the FIELD for the reads under it, so those
+    // were `'e.typeArgs' is possibly undefined` (NT2001) — this body's first blocker when
+    // the compiler compiles itself. An absent list and an empty one take the same path.
+    //
+    // An indexed `for`, not `.forEach((t, i) => …)`: the callback ASSIGNS the captured
+    // `bindings`, which is a write to an enclosing binding (NT1031), and the loop says the
+    // same thing with the accumulator plainly in this frame.
+    const explicit = e.typeArgs ?? [];
+    if (explicit.length > 0) {
       // Explicit call-site type args pin the instantiation positionally.
-      if (e.typeArgs.length > tps.length) throw typeError(`'${name}' takes ${tps.length} type argument(s), got ${e.typeArgs.length}`);
-      e.typeArgs.forEach((t, i) => { bindings = bindings.set(tps[i]!, t); });
+      if (explicit.length > tps.length) throw typeError(`'${name}' takes ${tps.length} type argument(s), got ${explicit.length}`);
+      for (let i = 0; i < explicit.length; i++) bindings = bindings.set(tps[i]!, explicit[i]!);
     }
     const patterns = sigParams.map((p) => p.annot ?? "number");
     // Round 1 — plain arguments. An ARROW argument is deferred: it needs the (possibly
@@ -2177,8 +2357,14 @@ class Checker {
       // nativets. Reached today by `function f<T>(): number {…}; f<number>(1)`, which
       // must come back NT2001 "expects 0..0 args, got 1" — a self-hosted compiler would
       // abort here instead of producing that diagnostic.
-      const pat = i < patterns.length ? patterns[i] : patterns.at(-1);
-      if (!pat || !hasTypeParam(pat) || a.kind === "ArrowFunction") return;
+      // Clamp the INDEX, then read once. `i < n ? patterns[i] : patterns.at(-1)` gave the
+      // two arms different types (`string` vs `string | undefined`, NT2001) — an in-bounds
+      // read and an `.at` that may miss — and hid the -1 case inside `!pat`, where it
+      // reads as an ordinary absent-value check rather than as the guard it is.
+      const idx = i < patterns.length ? i : patterns.length - 1;
+      if (idx < 0) return; // a ZERO-parameter template: no pattern to clamp to
+      const pat = patterns[idx]!;
+      if (!hasTypeParam(pat) || a.kind === "ArrowFunction") return;
       bindings = unifyTypeParams(sigParams[i]?.rest ? elemTy(pat) : pat, this.type(a, scope), bindings);
     });
     // Round 2 — arrow arguments, now that the other parameters have bound what they can:
@@ -2188,7 +2374,9 @@ class Checker {
       const pat = patterns[i];
       if (a.kind !== "ArrowFunction" || !pat || !hasTypeParam(pat)) return;
       const ctx = substTypeParams(pat, bindings);
-      if (!isFuncTy(ctx) || funcParams(ctx).some(hasTypeParam)) return; // params still unknown → reported below
+      // `(q) => hasTypeParam(q)`, not the point-free `.some(hasTypeParam)`: passing a
+      // function by NAME is a function VALUE, which `.some` does not inline (NT1003).
+      if (!isFuncTy(ctx) || funcParams(ctx).some((q) => hasTypeParam(q))) return; // params still unknown → reported below
       bindings = unifyTypeParams(pat, this.typeArrow(a, ctx, scope), bindings);
     });
 
@@ -2216,13 +2404,21 @@ class Checker {
     const spec = specializeDecl(tmpl, mangled, bindings);
     const params: Ty[] = spec.params.map((p) => p.annot ?? (p.default ? this.type(p.default, this.genericBase!()) : "number"));
     spec.params.forEach((p, i) => { if (p.default && p.annot) this.type(p.default, this.genericBase!(), params[i]); });
-    const fixed = spec.params.length - (spec.params.at(-1)?.rest ? 1 : 0);
+    // The LAST parameter's `rest` flag, computed by a walk. `.at(-1)` is refused on an
+    // array of RECORDS (NT1001: the element would alias its owner), and
+    // `params[params.length - 1]` is the class test/no-index-last.test.ts exists for — it
+    // forms index -1 on an empty list, which is `undefined` to node and a PANIC here. The
+    // loop leaves the last iteration's value, and `false` when there are no parameters,
+    // which is what both `.at(-1)?.rest` spellings below meant.
+    let restLast = false;
+    for (const p of spec.params) restLast = p.rest ?? false;
+    const fixed = spec.params.length - (restLast ? 1 : 0);
     const provisional: Sig = {
       params,
       ret: spec.returnAnnot ?? "number",
       required: spec.params.slice(0, fixed).filter((p) => !p.default).length,
       defaults: spec.params.map((p) => p.default ?? null),
-      rest: !!spec.params.at(-1)?.rest,
+      rest: restLast,
     };
     // REGISTERED BEFORE the return type is inferred, and that order is load-bearing:
     // inferring an unannotated specialization's return type checks its body, which can
@@ -2406,8 +2602,13 @@ class Checker {
     const last = fn.body[fn.body.length - 1]!;
     if (last.kind !== "SwitchStmt") return;
     const d = last.discriminant;
-    if (d.kind !== "MemberExpr" || d.object.ty === undefined || !isUnionTy(d.object.ty)) return;
-    const u = d.object.ty;
+    if (d.kind !== "MemberExpr") return;
+    // `exprTy`, not `d.object.ty` — the receiver is an un-narrowed `Expr` and `ty` sits at
+    // five different slots across its members, so there is no constant offset to load it
+    // from (see `rejectVacuousCollectionTest`). Split out of the `||` chain for the same
+    // reason the binding exists at all: one read, one narrowing.
+    const u = exprTy(d.object);
+    if (u === undefined || !isUnionTy(u)) return;
     if (unionDiscriminant(u)!.key !== d.property) return;
     if (last.cases.some((c) => c.test === null)) return; // a `default` covers everything left
     // Only a switch every arm of which LEAVES the function is one the author wrote to be
@@ -2629,7 +2830,10 @@ class Checker {
     let len = literalLength(e.object);
     if (len === undefined && e.object.kind === "Identifier") {
       const b = scope.lookup(e.object.name);
-      if (b?.constant) len = b.len;
+      // `b !== undefined && b.constant`, not `b?.constant`: the optional chain tests the
+      // field but does not NARROW `b`, so the `b.len` read under it was `'b' is possibly
+      // undefined` (NT2001) — this body's first blocker when the compiler compiles itself.
+      if (b !== undefined && b.constant) len = b.len;
     }
     if (len === undefined) return;
     if (idx >= 0 && idx < len && Number.isInteger(idx)) return;
@@ -2684,10 +2888,13 @@ class Checker {
     if (test.kind !== "BinaryExpr") return undefined;
     if (test.op !== "===" && test.op !== "!==" && test.op !== "==" && test.op !== "!=") return undefined;
     const negated = test.op === "!==" || test.op === "!=";
-    for (const [a, b] of [[test.left, test.right], [test.right, test.left]] as [Expr, Expr][]) {
-      const d = this.discriminantRead(a, scope);
-      if (d && b.kind === "StringLiteral") return { ...d, tag: b.value, negated };
-    }
+    // Both operand orders, UNROLLED: a `[a, b]` for-of binding is lowered only for Map
+    // entries (NT1007), so the loop spelling refused this body when the compiler compiles
+    // itself — and the two arrays it built existed only to say "either order".
+    const dl = this.discriminantRead(test.left, scope);
+    if (dl !== undefined && test.right.kind === "StringLiteral") return { ...dl, tag: test.right.value, negated };
+    const dr = this.discriminantRead(test.right, scope);
+    if (dr !== undefined && test.left.kind === "StringLiteral") return { ...dr, tag: test.left.value, negated };
     return undefined;
   }
 
@@ -2897,15 +3104,33 @@ class Checker {
     const d = unionDiscriminant(u);
     if (!d) return undefined;
     const tags = unionTagValues(u).map((v) => `"${v}"`).join(" | ");
-    const p = e.properties.find((p) => !p.spread && p.key === d.key);
-    if (!p || p.value.kind !== "StringLiteral") {
+    // `.find` over the property records is refused (NT1001: the found property holds an
+    // `Expr`, so the result would alias the literal it came from), and it was this body's
+    // first blocker when the compiler compiles itself. Copy out the one scalar that is
+    // wanted — the tag STRING — and let the property itself stay owned by `e.properties`.
+    //
+    // `done` marks the FIRST property whose key is the discriminant, exactly as `.find`
+    // picked it, so a repeated key still selects the same one; `tag` stays `undefined`
+    // when that property's value is not a string literal, which is the second half of the
+    // original `!p || p.value.kind !== "StringLiteral"` test.
+    let tag: string | undefined;
+    let done = false;
+    for (const p of e.properties) {
+      // `?? false`, not `p.spread === true`: comparing an OPTIONAL boolean against
+      // `boolean` is NT2001 in the self-host subset (a nullable is a tagged box), which is
+      // the same rewrite `rejectDiscardedMutator` records for its own `?Uboolean` read.
+      if (done || (p.spread ?? false) || p.key !== d.key) continue;
+      done = true;
+      if (p.value.kind === "StringLiteral") tag = p.value.value;
+    }
+    if (tag === undefined) {
       throw typeError(
         `an object literal for ${showUnion(u)} must set '${d.key}' to one of the literals ${tags}` +
           ` — that tag is what selects the member (and, at runtime, IS the value's type)`,
       );
     }
-    const m = unionMemberFor(u, p.value.value);
-    if (!m) throw typeError(`'${d.key}: "${p.value.value}"' matches no member of ${showUnion(u)} (expected ${tags})`);
+    const m = unionMemberFor(u, tag);
+    if (!m) throw typeError(`'${d.key}: "${tag}"' matches no member of ${showUnion(u)} (expected ${tags})`);
     return m;
   }
 
@@ -5219,6 +5444,34 @@ class Checker {
           // the length test comes first: nativets panics on the out-of-range read where node
           // would have handed `exprLoc` an `undefined` and let the `??` pick the fallback.
           (e.args.length > 0 ? exprLoc(e.args[0]!) : undefined) ?? e.loc);
+      // `Object.is(a, b)` is SameValue (ES 7.2.10) — the THIRD equality, agreeing with
+      // `===` except at NaN (equal) and with SameValueZero except at signed zero (NOT
+      // equal). It takes two PRIMITIVES here; on a non-primitive node's answer is
+      // reference identity, which this value model does not carry, so that is refused with
+      // a hint that says so. It used to fall through to the blanket `Object.${p}` refusal
+      // below, whose hint reads "object literals need the heap value model" — untrue of a
+      // static method over two primitives, and `Object.is` is the natural `-0` probe, so
+      // the wrong hint sent readers to `1 / x` instead.
+      if (p === "is") {
+        if (e.args.length !== 2) throw typeError("Object.is expects 2 arguments");
+        const at = this.type(e.args[0]!, scope);
+        const bt = this.type(e.args[1]!, scope);
+        const prim = (t: Ty): boolean => t === "number" || t === "string" || t === "boolean";
+        // Written out per argument rather than looped over `[[at, 0], [bt, 1]]`: that is a
+        // `[Ty, number]` TUPLE, which nativets refuses (NT1037, mixed element types), and
+        // `src/` has to stay inside the subset it compiles. `blocker-metric` caught it.
+        const identityHint =
+          "on a non-primitive, `Object.is` is reference IDENTITY — whether the two names " +
+          "denote the same allocation. nativets copies freely (copy-on-write arrays, " +
+          "single-owner moves), so identity is not an observable this value model carries " +
+          "and answering it would be a guess. Compare the primitives you care about " +
+          "instead — `Object.is(a.length, b.length)` — or use `===`, which on an array or " +
+          "object IS the pointer compare and matches node. `Object.is` over " +
+          "`number`/`string`/`boolean` works, signed zero and NaN included.";
+        if (!prim(at)) throw nyi(NYI.OBJECT, `Object.is on ${at}`, identityHint, exprLoc(e.args[0]!) ?? e.loc);
+        if (!prim(bt)) throw nyi(NYI.OBJECT, `Object.is on ${bt}`, identityHint, exprLoc(e.args[1]!) ?? e.loc);
+        return "boolean";
+      }
       if (p !== "keys" && p !== "values" && p !== "entries" && p !== "getOwnPropertyNames") throw nyi(NYI.OBJECT, `Object.${p}`);
       if (e.args.length !== 1) throw typeError(`Object.${p} expects 1 argument`);
       const ot = this.type(e.args[0]!, scope);
@@ -5800,7 +6053,9 @@ class Checker {
   private rejectDiscardedMutator(e: Expr, scope: Scope): void {
     if (e.kind !== "CallExpr" || e.callee.kind !== "MemberExpr") return;
     const m = e.callee.property;
-    const recv = e.callee.object.ty;
+    // `exprTy`, not `.ty` — see `rejectVacuousCollectionTest` below: the receiver is an
+    // un-narrowed `Expr` and `ty` has no single slot across the union.
+    const recv = exprTy(e.callee.object);
     const isMap = recv !== undefined && isMapTy(recv) && (m === "set" || m === "delete");
     const isSet = recv !== undefined && isSetTy(recv) && (m === "add" || m === "delete");
     if (!isMap && !isSet) return;
@@ -5816,12 +6071,15 @@ class Checker {
     // is what almost every real call passes — would render as `…` and make the suggested
     // line uncopyable. Spell the literals out here rather than widening `exprText`, which
     // is shared with other diagnostics.
-    const argText = (a: Expr): string =>
+    // INLINE, not a named `const argText = (a) => …` passed by name: a callback that is
+    // not an inline arrow is NT1003 in this compiler's own subset (function values need
+    // captured environments), so hoisting it for readability is the difference between a
+    // body that self-compiles and one that does not.
+    const args = e.args.map((a) =>
       a.kind === "StringLiteral" ? JSON.stringify(a.value)
       : a.kind === "NumberLiteral" ? String(a.value)
       : a.kind === "BooleanLiteral" ? String(a.value)
-      : exprText(a) ?? "…";
-    const args = e.args.map(argText).join(", ");
+      : exprText(a) ?? "…").join(", ");
     // The one-chain suggestion is only sane for the ADDING methods — you cannot build a
     // collection out of `.delete` calls, so offering `new Map().delete(…).delete(…)` there
     // would be advice that does not typecheck as a fix for anything.
@@ -5874,7 +6132,9 @@ class Checker {
     // NOT write" the one line that fixes it, and then recommending they declare the class
     // `@@mutable`, which it already was. The type is read from the node's CACHE (the
     // receiver was typed to get here); no re-typing, so this cannot throw from a hint.
-    const ownerTy = recvExpr.kind === "MemberExpr" ? recvExpr.object.ty : undefined;
+    // `exprTy`, not `.ty` — `recvExpr.object` is an un-narrowed `Expr` and `ty` has no
+    // single slot across the union (see `rejectVacuousCollectionTest`).
+    const ownerTy = recvExpr.kind === "MemberExpr" ? exprTy(recvExpr.object) : undefined;
     const recvIsMutableField = ownerTy !== undefined && this.isMutableTy(ownerTy);
     const rebindable = recvExpr.kind === "Identifier" || recvIsOwnField || recvIsMutableField;
     const fix = recvIsParam && name !== undefined
@@ -6070,7 +6330,12 @@ class Checker {
    */
   private rejectVacuousCollectionTest(test: Expr | undefined, where: string, consequence: string): void {
     if (test === undefined) return;
-    const t = test.ty;
+    // `exprTy`, not `test.ty`: `test` is an un-narrowed `Expr`, and `ty` sits at FIVE
+    // different slots across the union's 30 members, so there is no constant offset to
+    // load it from and `unionCommonField` refuses the read (self-compiled this is an
+    // NT2001 on this very line). The helper switches on the tag and reads each narrowed
+    // member's own field. Same value under node, in the subset when compiled.
+    const t = exprTy(test);
     if (t === undefined || (!isMapTy(t) && !isSetTy(t))) return; // nullable `?N…`/`?U…` is a REAL check
     const kind = isMapTy(t) ? "Map" : "Set";
     const lower = kind.toLowerCase();
@@ -6456,7 +6721,19 @@ class Checker {
       case "copyWithin": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.copyWithin\` would overwrite the array in place`, "build a new array from `.slice` + spread instead", exprLoc(callee.object) ?? callee.loc);
       // (`.pop` is handled above `argTys`, next to `.push` — the two are one idiom and the
       // refusal has to see the receiver AND whether the result is taken.)
-      case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
+      // The element-type guard on all three of `.includes` / `.indexOf` / `.lastIndexOf`
+      // is the SAME guard, and it was on `.lastIndexOf` alone. Without it a `number[][]`
+      // fell through to `nt_arr_includes_str`, which `strcmp`s the bytes of an `NtArray`
+      // struct: an out-of-bounds read, and a silent wrong answer at exit 0 whenever it
+      // matched (`[[1],[2]].includes([1])` printed `true`, node says `false`;
+      // `.indexOf` printed `0`, node says `-1`). node's answer is reference identity,
+      // which this value model does not have — so it is refused, not guessed.
+      // `.includes` takes `boolean` too, which the other two have no runtime routine for.
+      case "includes":
+        need(1);
+        if (argTys[0] !== el) throw typeError(`.includes expects ${el}`);
+        if (el !== "number" && el !== "string" && el !== "boolean") throw nyi(NYI.ARRAY, `.includes on ${recv}`, SEARCH_NONPRIMITIVE_HINT);
+        return "boolean";
       // `.indexOf(x, fromIndex?)` — the second parameter is optional in lib.es5.d.ts, so
       // requiring exactly one rejected valid TypeScript with a TYPE error. See the
       // `.lastIndexOf` arm below: same argument, deliberately different clamping.
@@ -6464,6 +6741,7 @@ class Checker {
         if (args.length < 1 || args.length > 2) throw typeError(".indexOf expects 1..2 args");
         if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`);
         if (args.length === 2 && argTys[1] !== "number") throw typeError(".indexOf fromIndex must be a number");
+        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.indexOf on ${recv}`, SEARCH_NONPRIMITIVE_HINT);
         return "number";
       // ACCEPTED, unlike its in-place siblings above: `.reverse` returns its RECEIVER,
       // so the result type is `recv` and the two are the SAME array. `RETAINS_RECEIVER`
@@ -6500,7 +6778,7 @@ class Checker {
         if (args.length < 1 || args.length > 2) throw typeError(".lastIndexOf expects 1..2 args");
         if (argTys[0] !== el) throw typeError(`.lastIndexOf expects ${el}`);
         if (args.length === 2 && argTys[1] !== "number") throw typeError(".lastIndexOf fromIndex must be a number");
-        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.lastIndexOf on ${recv}`);
+        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.lastIndexOf on ${recv}`, SEARCH_NONPRIMITIVE_HINT);
         return "number";
       case "concat": // variadic; every argument must be an array of the same element type
         if (args.length < 1) throw typeError(".concat expects at least 1 array");
@@ -6862,6 +7140,35 @@ class Checker {
       this.bodyChain.pop();
       this.selfArrows.pop();
     }
+    /*
+     * A STATEMENT ARROW GOING INTO A `=> void` SLOT returns `void`, not `number`.
+     *
+     * `inferBlockReturn` answers `number` for a body with no `return` — the checker's
+     * universal default, and the right answer for an unannotated `function`, whose callers
+     * may read the value. Here it is a lie that nothing could work around: the resulting
+     * `(P)=>number` does not fit `(P)=>void`, and neither did the documented escape hatch,
+     * because `typeArrowReturn` maps a `: void` annotation to "no declared type" and lands
+     * on the same inference. There was NO spelling of a statement callback a `=> void`
+     * parameter accepted, on code node runs and tsc accepts.
+     *
+     * NOT fixed by widening assignability. `(P)=>R` fitting a `(P)=>void` slot for any `R`
+     * is TypeScript's real rule, but a `=> void` parameter is CALLED as `call void %fp(…)`
+     * here, so accepting an arrow codegen lowers as `define double @arrow_0` would put a
+     * return-type mismatch into the IR. Making the TYPE true instead keeps the two sides in
+     * agreement by construction — codegen's arrow path already emits `ret void` for a
+     * `void` `retTy`.
+     *
+     * ONE-DIRECTIONAL, which is the property `inferBlockReturn` is held to and this must
+     * not break. It fires only where `expected` is a function type returning `void`, and no
+     * arrow typed `(P)=>number` has ever fit such a slot — so every program this changes was
+     * previously REFUSED. No inferred type moves anywhere a program compiled before.
+     *
+     * Gated on `carriesReturnValue`, not on the absence of a top-level `return`: a `return x`
+     * nested inside an `if` is invisible to `inferBlockReturn` and would otherwise sneak a
+     * `double`-returning body into a `call void` slot.
+     */
+    const expRet = expected !== undefined && isFuncTy(expected) ? funcRet(expected) : undefined;
+    if (expRet === "void" && !arrow.exprBody && !carriesReturnValue(arrow.stmts ?? [])) retTy = "void";
     arrow.retTy = retTy;
     arrow.captures = this.computeCaptures(arrow, scope);
     const ty = makeFuncTy(paramTys, retTy);
@@ -8320,7 +8627,14 @@ function collectIdentsStmt(s: Stmt, out: Set<string>): void {
     case "VarDecl": for (const d of s.decls) if (d.init) collectIdents(d.init, out); return;
     case "ReturnStmt": if (s.argument) collectIdents(s.argument, out); return;
     case "ExprStmt": collectIdents(s.expr, out); return;
-    case "IfStmt": collectIdents(s.test, out); s.consequent.forEach((x) => collectIdentsStmt(x, out)); s.alternate?.forEach((x) => collectIdentsStmt(x, out)); return;
+    // `s.alternate?.forEach(…)` is NT1002 — a method call on a NULLABLE receiver, this
+    // body's first blocker when the compiler compiles itself. `if (…)` then `for…of` is
+    // the same walk: an absent `alternate` visited nothing either way.
+    case "IfStmt":
+      collectIdents(s.test, out);
+      for (const x of s.consequent) collectIdentsStmt(x, out);
+      if (s.alternate) for (const x of s.alternate) collectIdentsStmt(x, out);
+      return;
     case "WhileStmt": case "DoWhileStmt": collectIdents(s.test, out); s.body.forEach((x) => collectIdentsStmt(x, out)); return;
     case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectIdentsStmt(s.init as Stmt, out); else if (s.init) collectIdents(s.init as Expr, out); if (s.test) collectIdents(s.test, out); if (s.update) collectIdents(s.update, out); s.body.forEach((x) => collectIdentsStmt(x, out)); return;
     case "ForOfStmt": collectIdents(s.iterable, out); s.body.forEach((x) => collectIdentsStmt(x, out)); return;
@@ -8671,11 +8985,20 @@ function escapingWritesExpr(e: Expr, bound: Set<string>, out: Map<string, string
     case "InExpr": go(e.key); go(e.object); return;
     case "BinaryExpr": case "LogicalExpr": go(e.left); go(e.right); return;
     case "ConditionalExpr": go(e.test); go(e.consequent); go(e.alternate); return;
-    case "SequenceExpr": case "TemplateLiteral": (e.exprs as Expr[]).forEach(go); return;
-    case "CallExpr": go(e.callee); e.args.forEach(go); return;
-    case "NewExpr": e.args.forEach(go); return;
-    case "ArrayLiteral": e.elements.forEach(go); return;
-    case "ObjectLiteral": e.properties.forEach((p) => go(p.value)); return;
+    // SPLIT, not `case "SequenceExpr": case "TemplateLiteral":` — the two members both
+    // declare `exprs` but at DIFFERENT slots (1 and 2), so a grouped arm has no constant
+    // offset to load it from and is refused (NT2001). The `as Expr[]` that used to paper
+    // over it is the same unchecked-cast family that made `exprLoc` read slot 0 for thirty
+    // members: a cast never consults the layout, so it would have loaded `quasis` for one
+    // of the two. One arm per tag resolves each member's own offset.
+    case "SequenceExpr": for (const x of e.exprs) go(x); return;
+    case "TemplateLiteral": for (const x of e.exprs) go(x); return;
+    // `for…of` rather than `.forEach(go)` throughout: passing `go` by name is a function
+    // VALUE (NT1003), while calling it per element is an ordinary call.
+    case "CallExpr": go(e.callee); for (const x of e.args) go(x); return;
+    case "NewExpr": for (const x of e.args) go(x); return;
+    case "ArrayLiteral": for (const x of e.elements) go(x); return;
+    case "ObjectLiteral": for (const p of e.properties) go(p.value); return;
     case "SpreadExpr": go(e.argument); return;
     default: return; // literals and identifiers hold no assignment
   }
