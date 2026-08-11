@@ -667,6 +667,7 @@ L0:
   %t0 = load ptr, ptr %who.addr
   %t1 = call ptr @js_str_concat(ptr @.str.0, ptr %t0)
   %t2 = call ptr @js_str_concat(ptr %t1, ptr @.str.1)
+  call void @nt_str_release(ptr %t1)
   ret ptr %t2
 }
 
@@ -1474,6 +1475,8 @@ L0:
   %t8 = bitcast i64 %t7 to double
   %t9 = call ptr @js_num_to_str(double %t8)
   %t10 = call ptr @js_str_concat(ptr %t4, ptr %t9)
+  call void @nt_str_release(ptr %t4)
+  call void @nt_str_release(ptr %t9)
   %t11 = load ptr, ptr %this.addr
   %t12 = getelementptr i64, ptr %t11, i64 2
   %t13 = load i64, ptr %t12
@@ -1488,6 +1491,7 @@ ternelse3:
 ternend4:
   %t15 = load ptr, ptr %s1
   %t16 = call ptr @js_str_concat(ptr %t10, ptr %t15)
+  call void @nt_str_release(ptr %t10)
   ret ptr %t16
 }
 
@@ -2502,13 +2506,18 @@ L0:
   %t9 = call double @nt_arr_len(ptr %t8)
   %t10 = call ptr @js_num_to_str(double %t9)
   %t11 = call ptr @js_str_concat(ptr %t4, ptr %t10)
+  call void @nt_str_release(ptr %t4)
+  call void @nt_str_release(ptr %t10)
   %t12 = call ptr @js_str_concat(ptr %t11, ptr @.str.1)
+  call void @nt_str_release(ptr %t11)
   %t13 = load ptr, ptr %this.addr
   %t14 = getelementptr i64, ptr %t13, i64 1
   %t15 = load i64, ptr %t14
   %t16 = bitcast i64 %t15 to double
   %t17 = call ptr @js_num_to_str(double %t16)
   %t18 = call ptr @js_str_concat(ptr %t12, ptr %t17)
+  call void @nt_str_release(ptr %t12)
+  call void @nt_str_release(ptr %t17)
   ret ptr %t18
 }
 
@@ -2874,7 +2883,10 @@ L0:
   %t8 = bitcast i64 %t7 to double
   %t9 = call ptr @js_num_to_str(double %t8)
   %t10 = call ptr @js_str_concat(ptr %t4, ptr %t9)
+  call void @nt_str_release(ptr %t4)
+  call void @nt_str_release(ptr %t9)
   %t11 = call ptr @js_str_concat(ptr %t10, ptr @.str.2)
+  call void @nt_str_release(ptr %t10)
   %t12 = load ptr, ptr %this.addr
   %t13 = getelementptr i64, ptr %t12, i64 2
   %t14 = load i64, ptr %t13
@@ -2882,6 +2894,7 @@ L0:
   %t16 = zext i1 %t15 to i32
   %t17 = call ptr @js_bool_to_str(i32 %t16)
   %t18 = call ptr @js_str_concat(ptr %t11, ptr %t17)
+  call void @nt_str_release(ptr %t11)
   ret ptr %t18
 }
 
@@ -3255,7 +3268,10 @@ L0:
   %t6 = bitcast i64 %t5 to double
   %t7 = call ptr @js_num_to_str(double %t6)
   %t8 = call ptr @js_str_concat(ptr %t2, ptr %t7)
+  call void @nt_str_release(ptr %t2)
+  call void @nt_str_release(ptr %t7)
   %t9 = call ptr @js_str_concat(ptr %t8, ptr @.str.3)
+  call void @nt_str_release(ptr %t8)
   ret ptr %t9
 }
 
@@ -4042,13 +4058,17 @@ L0:
   %t7 = load i64, ptr %t6
   %t8 = inttoptr i64 %t7 to ptr
   %t9 = call ptr @js_str_concat(ptr %t4, ptr %t8)
+  call void @nt_str_release(ptr %t4)
   %t10 = call ptr @js_str_concat(ptr %t9, ptr @.str.1)
+  call void @nt_str_release(ptr %t9)
   %t11 = load ptr, ptr %this.addr
   %t12 = getelementptr i64, ptr %t11, i64 0
   %t13 = load i64, ptr %t12
   %t14 = bitcast i64 %t13 to double
   %t15 = call ptr @js_num_to_str(double %t14)
   %t16 = call ptr @js_str_concat(ptr %t10, ptr %t15)
+  call void @nt_str_release(ptr %t10)
+  call void @nt_str_release(ptr %t15)
   ret ptr %t16
 }
 
@@ -5292,31 +5312,44 @@ L0:
   %t3 = inttoptr i64 %t2 to ptr
   %t4 = call ptr @js_str_concat(ptr @.str.0, ptr %t3)
   %t5 = call ptr @js_str_concat(ptr %t4, ptr @.str.1)
+  call void @nt_str_release(ptr %t4)
   %t6 = load ptr, ptr @nt.g.Cfg.opts
   %t7 = getelementptr i64, ptr %t6, i64 0
   %t8 = load i64, ptr %t7
   %t9 = bitcast i64 %t8 to double
   %t10 = call ptr @js_num_to_str(double %t9)
   %t11 = call ptr @js_str_concat(ptr %t5, ptr %t10)
+  call void @nt_str_release(ptr %t5)
+  call void @nt_str_release(ptr %t10)
   %t12 = call ptr @js_str_concat(ptr %t11, ptr @.str.2)
+  call void @nt_str_release(ptr %t11)
   %t13 = load ptr, ptr @nt.g.Cfg.arr
   %t14 = call i64 @nt_arr_index(ptr %t13, double 0x0000000000000000, ptr @.str.3)
   %t15 = bitcast i64 %t14 to double
   %t16 = call ptr @js_num_to_str(double %t15)
   %t17 = call ptr @js_str_concat(ptr %t12, ptr %t16)
+  call void @nt_str_release(ptr %t12)
+  call void @nt_str_release(ptr %t16)
   %t18 = call ptr @js_str_concat(ptr %t17, ptr @.str.0)
+  call void @nt_str_release(ptr %t17)
   %t19 = load ptr, ptr @nt.g.Cfg.arr
   %t20 = call i64 @nt_arr_index(ptr %t19, double 0x3FF0000000000000, ptr @.str.4)
   %t21 = bitcast i64 %t20 to double
   %t22 = call ptr @js_num_to_str(double %t21)
   %t23 = call ptr @js_str_concat(ptr %t18, ptr %t22)
+  call void @nt_str_release(ptr %t18)
+  call void @nt_str_release(ptr %t22)
   %t24 = call ptr @js_str_concat(ptr %t23, ptr @.str.0)
+  call void @nt_str_release(ptr %t23)
   %t25 = load ptr, ptr @nt.g.Cfg.arr
   %t26 = call i64 @nt_arr_index(ptr %t25, double 0x4000000000000000, ptr @.str.5)
   %t27 = bitcast i64 %t26 to double
   %t28 = call ptr @js_num_to_str(double %t27)
   %t29 = call ptr @js_str_concat(ptr %t24, ptr %t28)
+  call void @nt_str_release(ptr %t24)
+  call void @nt_str_release(ptr %t28)
   %t30 = call ptr @js_str_concat(ptr %t29, ptr @.str.0)
+  call void @nt_str_release(ptr %t29)
   ret ptr %t30
 }
 
@@ -5646,6 +5679,8 @@ L0:
   %t3 = load double, ptr @nt.g.Sym.width
   %t4 = call ptr @js_num_to_str(double %t3)
   %t5 = call ptr @js_str_concat(ptr %t2, ptr %t4)
+  call void @nt_str_release(ptr %t2)
+  call void @nt_str_release(ptr %t4)
   ret ptr %t5
 }
 
@@ -5699,6 +5734,7 @@ L0:
   %t3 = bitcast i64 %t2 to double
   %t4 = call ptr @js_num_to_str(double %t3)
   %t5 = call ptr @js_str_concat(ptr @.str.1, ptr %t4)
+  call void @nt_str_release(ptr %t4)
   %t6 = call ptr @label(ptr %t5)
   ret ptr %t6
 }
@@ -6032,14 +6068,19 @@ L0:
   %t3 = bitcast i64 %t2 to double
   %t4 = call ptr @js_num_to_str(double %t3)
   %t5 = call ptr @js_str_concat(ptr @.str.0, ptr %t4)
+  call void @nt_str_release(ptr %t4)
   %t6 = call ptr @js_str_concat(ptr %t5, ptr @.str.1)
+  call void @nt_str_release(ptr %t5)
   %t7 = load ptr, ptr %this.addr
   %t8 = getelementptr i64, ptr %t7, i64 1
   %t9 = load i64, ptr %t8
   %t10 = bitcast i64 %t9 to double
   %t11 = call ptr @js_num_to_str(double %t10)
   %t12 = call ptr @js_str_concat(ptr %t6, ptr %t11)
+  call void @nt_str_release(ptr %t6)
+  call void @nt_str_release(ptr %t11)
   %t13 = call ptr @js_str_concat(ptr %t12, ptr @.str.2)
+  call void @nt_str_release(ptr %t12)
   ret ptr %t13
 }
 
@@ -6461,6 +6502,7 @@ L0:
   %t0 = load ptr, ptr %name.addr
   %t1 = call ptr @js_str_concat(ptr @.str.0, ptr %t0)
   %t2 = call ptr @js_str_concat(ptr %t1, ptr @.str.1)
+  call void @nt_str_release(ptr %t1)
   ret ptr %t2
 }
 
@@ -8190,10 +8232,14 @@ L0:
   %t0 = load double, ptr %a.addr
   %t1 = call ptr @js_num_to_str(double %t0)
   %t2 = call ptr @js_str_concat(ptr @.str.1, ptr %t1)
+  call void @nt_str_release(ptr %t1)
   %t3 = call ptr @js_str_concat(ptr %t2, ptr @.str.2)
+  call void @nt_str_release(ptr %t2)
   %t4 = load ptr, ptr %b.addr
   %t5 = call ptr @js_str_concat(ptr %t3, ptr %t4)
+  call void @nt_str_release(ptr %t3)
   %t6 = call ptr @js_str_concat(ptr %t5, ptr @.str.3)
+  call void @nt_str_release(ptr %t5)
   ret ptr %t6
 }
 
@@ -8208,10 +8254,14 @@ L0:
   %t0 = load ptr, ptr %a.addr
   %t1 = call ptr @js_str_concat(ptr @.str.1, ptr %t0)
   %t2 = call ptr @js_str_concat(ptr %t1, ptr @.str.2)
+  call void @nt_str_release(ptr %t1)
   %t3 = load double, ptr %b.addr
   %t4 = call ptr @js_num_to_str(double %t3)
   %t5 = call ptr @js_str_concat(ptr %t2, ptr %t4)
+  call void @nt_str_release(ptr %t2)
+  call void @nt_str_release(ptr %t4)
   %t6 = call ptr @js_str_concat(ptr %t5, ptr @.str.3)
+  call void @nt_str_release(ptr %t5)
   ret ptr %t6
 }
 
@@ -10514,6 +10564,7 @@ nce18:
   %t58 = load ptr, ptr %s15
   %t59 = call ptr @js_str_concat(ptr @.str.22, ptr %t58)
   %t60 = call ptr @js_str_concat(ptr %t59, ptr @.str.36)
+  call void @nt_str_release(ptr %t59)
   %t61 = call ptr @js_str_concat(ptr %t38, ptr %t60)
   store ptr %t61, ptr %out.addr
   %t62 = load double, ptr %j.addr
@@ -16746,6 +16797,7 @@ endif7:
   %t6 = load double, ptr %n.addr
   %t7 = call ptr @js_num_to_str(double %t6)
   %t8 = call ptr @js_str_concat(ptr @.str.1, ptr %t7)
+  call void @nt_str_release(ptr %t7)
   store ptr %t8, ptr %s5
   store double 0x3FF0000000000000, ptr %s4
   br label %finally3
@@ -27859,6 +27911,7 @@ nce8:
   %t34 = load ptr, ptr %s5
   %t35 = call ptr @js_str_concat(ptr @.str.0, ptr %t34)
   %t36 = call ptr @js_str_concat(ptr %t35, ptr @.str.2)
+  call void @nt_str_release(ptr %t35)
   call void @js_print_str(ptr %t36)
   call void @js_print_newline()
   %t37 = load ptr, ptr %o.addr
@@ -30250,6 +30303,7 @@ forbody2:
   %t4 = load double, ptr %i.addr
   %t5 = call ptr @js_num_to_str(double %t4)
   %t6 = call ptr @js_str_concat(ptr @.str.0, ptr %t5)
+  call void @nt_str_release(ptr %t5)
   %rc7 = call ptr @nt_str_retain(ptr %t6)
   %t8 = ptrtoint ptr %t6 to i64
   %t9 = load double, ptr %i.addr
@@ -33977,6 +34031,7 @@ L0:
   %t0 = load double, ptr %i.addr
   %t1 = call ptr @js_num_to_str(double %t0)
   %t2 = call ptr @js_str_concat(ptr @.str.0, ptr %t1)
+  call void @nt_str_release(ptr %t1)
   store ptr %t2, ptr %base.addr
   %t3 = load ptr, ptr %base.addr
   %t4 = call ptr @js_str_upper(ptr %t3)
@@ -33989,6 +34044,7 @@ L0:
   %t9 = call ptr @js_str_concat(ptr %t8, ptr @.str.1)
   %t10 = load ptr, ptr %base.addr
   %t11 = call ptr @js_str_concat(ptr %t9, ptr %t10)
+  call void @nt_str_release(ptr %t9)
   %t12 = load ptr, ptr %base.addr
   call void @nt_str_release(ptr %t12)
   %t13 = load ptr, ptr %up.addr
@@ -34024,6 +34080,7 @@ forbody2:
   %t6 = load ptr, ptr %s.addr
   %t7 = call ptr @js_str_concat(ptr %t5, ptr %t6)
   %t8 = call ptr @js_str_concat(ptr %t7, ptr @.str.3)
+  call void @nt_str_release(ptr %t7)
   store ptr %t8, ptr %acc.addr
   br label %forupd3
 forupd3:
@@ -34313,6 +34370,7 @@ L0:
   call void @nt_init_args(i32 %argc, ptr %argv)
   %t0 = call ptr @js_str_concat(ptr @.str.0, ptr @.str.1)
   %t1 = call ptr @js_str_concat(ptr %t0, ptr @.str.2)
+  call void @nt_str_release(ptr %t0)
   call void @js_print_str(ptr %t1)
   call void @js_print_newline()
   ret i32 0
@@ -34862,11 +34920,15 @@ L0:
   %t1 = load ptr, ptr %name.addr
   %t2 = call ptr @js_str_concat(ptr @.str.1, ptr %t1)
   %t3 = call ptr @js_str_concat(ptr %t2, ptr @.str.2)
+  call void @nt_str_release(ptr %t2)
   %t4 = load double, ptr %n.addr
   %t5 = fmul double %t4, 0x4000000000000000
   %t6 = call ptr @js_num_to_str(double %t5)
   %t7 = call ptr @js_str_concat(ptr %t3, ptr %t6)
+  call void @nt_str_release(ptr %t3)
+  call void @nt_str_release(ptr %t6)
   %t8 = call ptr @js_str_concat(ptr %t7, ptr @.str.3)
+  call void @nt_str_release(ptr %t7)
   call void @js_print_str(ptr %t8)
   call void @js_print_newline()
   %t9 = load ptr, ptr %name.addr
@@ -35722,12 +35784,14 @@ tern34:
   %t74 = load double, ptr %scaled.h3.addr
   %t75 = call ptr @js_num_to_str(double %t74)
   %t76 = call ptr @js_str_concat(ptr %t75, ptr @.str.1)
+  call void @nt_str_release(ptr %t75)
   store ptr %t76, ptr %s33
   br label %ternend36
 ternelse35:
   %t77 = load double, ptr %scaled.h3.addr
   %t78 = call ptr @js_num_to_str(double %t77)
   %t79 = call ptr @js_str_concat(ptr %t78, ptr @.str.2)
+  call void @nt_str_release(ptr %t78)
   store ptr %t79, ptr %s33
   br label %ternend36
 ternend36:
@@ -35781,6 +35845,7 @@ redb39:
   %t103 = load ptr, ptr %w.h4.addr
   %t104 = call ptr @js_str_concat(ptr %t102, ptr %t103)
   %t105 = call ptr @js_str_concat(ptr %t104, ptr @.str.8)
+  call void @nt_str_release(ptr %t104)
   store ptr %t105, ptr %piece.h4.addr
   %t106 = load ptr, ptr %piece.h4.addr
   store ptr %t106, ptr %s42
