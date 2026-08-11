@@ -666,6 +666,7 @@ const DECLARES = [
   // --- Host I/O FFI: CLI args / env / stdin / exit (libc-only, cross-links) ---
   "declare void @nt_init_args(i32, ptr)",
   "declare ptr @nt_argv()",
+  "declare ptr @nt_cwd()",
   "declare ptr @nt_getenv(ptr)",
   // process.platform. A CALL, not a folded constant: the runtime resolves it from the C
   // preprocessor so it follows `-target`, and the .ll stays triple-free (see nt_platform).
@@ -4245,6 +4246,18 @@ class FnGen {
       const s = this.genExpr(e.args[0]!);
       this.emit(`call void @js_print_str(ptr ${s.v})`);
       return { v: "0", ty: "void" };
+    }
+
+    // process.cwd() — an OWNED heap string (the runtime registers it), so it flows into
+    // the ordinary string RC discipline with no special case here.
+    if (
+      e.callee.kind === "MemberExpr" && e.callee.object.kind === "Identifier" &&
+      e.callee.object.name === "process" && e.callee.property === "cwd" &&
+      !this.varTypes.has("process") && !this.captures.has("process")
+    ) {
+      const t = this.fresh();
+      this.emit(`${t} = call ptr @nt_cwd()`);
+      return { v: t, ty: "string" };
     }
 
     // process.exit(code?) — flush + exit; the block cannot fall through afterwards.

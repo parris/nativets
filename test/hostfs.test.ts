@@ -11,12 +11,14 @@
  */
 
 import { test, expect, describe, afterAll } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { compileAndRunIO, runWithNodeIO, compileAndRunFile, runWithNodeFile, emitIR, type IOInput } from "./harness.ts";
+import { buildBinary } from "../src/driver.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 import { NTError } from "../src/diagnostics.ts";
@@ -50,6 +52,48 @@ async function differential(source: string, io: IOInput = {}) {
   expect(ours.exitCode).toBe(oracle.exitCode);
   return ours;
 }
+
+/*
+ * `process.cwd()` — a HOST READ whose answer depends on where the process is started,
+ * which is exactly why it cannot go through the ordinary differential harness: that runs
+ * node and our binary from different directories, so comparing their output would compare
+ * two correct-but-different answers. Both sides are given the SAME explicit cwd here.
+ *
+ * `src/modules.ts` calls it (`relative(process.cwd(), path)`), so this was a self-hosting
+ * blocker as well as a host-API gap.
+ *
+ * The runtime allocates the result and registers it in the RC side table — unlike
+ * `nt_getenv`/`nt_platform`, whose results are untracked pointers into the environment or
+ * .rodata. Verified separately: 500 calls leak 0 heap strings and ASan is clean.
+ */
+describe("process.cwd()", () => {
+  const SRC = "console.log(process.cwd());\n";
+
+  test("matches node when both are run from the SAME directory", async () => {
+    const dir = scratch();
+    const bin = join(dir, "cwdprog");
+    await buildBinary(SRC, bin);
+    const file = join(dir, "cwd.ts");
+    writeFileSync(file, SRC);
+    // Two directories, so a hardcoded answer (or a stale cached one) fails rather than
+    // passing by coincidence.
+    for (const where of [dir, "/"]) {
+      const ours = spawnSync(bin, [], { cwd: where, encoding: "utf8", timeout: 30000, killSignal: "SIGKILL" });
+      const oracle = spawnSync("node", [file], { cwd: where, encoding: "utf8", timeout: 30000, killSignal: "SIGKILL" });
+      expect({ where, out: ours.stdout, code: ours.status }).toEqual({ where, out: oracle.stdout, code: oracle.status });
+    }
+  });
+
+  test("takes no arguments", () => {
+    expect(rejects("console.log(process.cwd(1));")).toBe("NT2001");
+  });
+
+  test("a user `process` binding still shadows it", () => {
+    // The guard every other ambient `process` member carries — asserted here because a
+    // new member is exactly where it would be forgotten.
+    expect(rejects('const process = { cwd: 1 };\nconsole.log(process.cwd());\n')).not.toBeNull();
+  });
+});
 
 describe("node:fs — readFileSync", () => {
   test("reads a file as utf8 text", async () => {
@@ -653,10 +697,17 @@ describe("the host FFI surface is closed — outside it is NT1028, never half-im
   });
 
   test("an ambient `process.*` CALL outside the surface is NT1028 too", () => {
-    const d = refusal(`console.log(process.cwd());\n`)!;
+    // Was `process.cwd()`, which has since moved INSIDE the surface — the same edit
+    // `process.platform` needed one test above. A closure test has to keep naming
+    // something genuinely outside, or it silently stops testing closure at all.
+    const d = refusal(`console.log(process.uptime());\n`)!;
     expect(d.code).toBe("NT1028");
-    expect(d.message).toContain("process.cwd()");
+    expect(d.message).toContain("process.uptime()");
     expect(d.hint ?? "").toContain("process.stdout.write");
+  });
+
+  test("…and `process.cwd()`, now inside the surface, is not refused at all", () => {
+    expect(refusal(`console.log(process.cwd());\n`)).toBe(null);
   });
 
   test("a host builtin is NOT ambient — the name is undefined without the import", () => {

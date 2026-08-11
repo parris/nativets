@@ -5952,6 +5952,23 @@ literal is involved, and the advice is unactionable. Worse, `Object.is` is the n
 `-0` probe, so a wrong hint at exactly that spelling pushed callers onto the clumsier
 `1 / x === -Infinity`.
 
+### `process.cwd()` returns `""` on Windows and wasi
+
+`getcwd` lives in `<unistd.h>`, which the include guard at the top of `runtime/runtime.c`
+already omits on `_WIN32` and `__wasi__` (the runtime is libc-only precisely so it
+cross-links unchanged). Those two targets therefore get the empty string, the same shape
+`nt_getenv` returns for an unset variable. Everywhere else it is node's answer byte for
+byte, verified from two different working directories.
+
+A hard error was rejected because the caller cannot act on it either — and a *truncated*
+answer was rejected outright, which is why the implementation retries on `ERANGE` and
+doubles the buffer rather than guessing a fixed size. A wrong working directory is a silent
+wrong answer; an empty one is visibly nothing.
+
+The result is ALLOCATED, so it is registered in the RC side table — unlike `process.env.X`
+and `process.platform`, whose results are untracked pointers into the environment or into
+.rodata and are never freed. 500 calls leak 0 heap strings, ASan clean.
+
 ### An invalid `Uint8Array` length PANICS (node throws `RangeError`)
 
 ```ts

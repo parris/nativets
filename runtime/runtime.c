@@ -2730,6 +2730,51 @@ const char *nt_getenv(const char *name) {
   return v ? v : "";
 }
 
+/* process.cwd() -> the working directory, as an OWNED heap string.
+ *
+ * Unlike `nt_getenv`/`nt_platform` above — whose results are untracked pointers into the
+ * environment or into .rodata — this one ALLOCATES, so it must join the RC side table via
+ * `nt_str_register` or scope exit would release a pointer the table never knew about.
+ *
+ * The retry loop is not defensive padding: POSIX says `getcwd` fails with `ERANGE` when
+ * the buffer is too small, and a path can exceed any fixed guess, so a single fixed buffer
+ * is a silent truncation — a WRONG working directory, not a failure. The failed buffer is
+ * freed on each retry rather than abandoned, since the loop can run several times.
+ *
+ * `getcwd` lives in <unistd.h>, which is absent on Windows and wasi (see the include guard
+ * at the top of this file), so those targets get "" — the same shape `nt_getenv` returns
+ * for an unset variable, and a documented divergence rather than a link failure. The
+ * runtime is libc-only precisely so it cross-links unchanged.
+ */
+const char *nt_cwd(void) {
+#if defined(_WIN32) || defined(__wasi__)
+  char *empty = (char *)nativets_alloc(1);
+  empty[0] = '\0';
+  nt_str_register(empty);
+  return empty;
+#else
+  size_t cap = 256;
+  for (;;) {
+    char *buf = (char *)nativets_alloc(cap);
+    if (getcwd(buf, cap) != NULL) {
+      nt_str_register(buf);
+      return buf;
+    }
+    free(buf);
+    /* Anything other than "buffer too small" is a real failure (the directory was
+       unlinked, or permissions were removed) — node THROWS there; we hand back "" so the
+       caller sees an empty string rather than a truncated wrong path. */
+    if (errno != ERANGE || cap > (size_t)1 << 20) {
+      char *empty = (char *)nativets_alloc(1);
+      empty[0] = '\0';
+      nt_str_register(empty);
+      return empty;
+    }
+    cap *= 2;
+  }
+#endif
+}
+
 /* process.platform -> node's spelling for the platform this binary RUNS on.
  *
  * RESOLVED HERE, BY THE C PREPROCESSOR, AND THAT IS THE WHOLE POINT. For an AOT

@@ -5396,6 +5396,12 @@ class Checker {
     ) {
       // NT1028 for the same reason the member READ above is: an unimplemented host
       // builtin is a FEATURE gap, and NT1028's hint is the one that names what exists.
+      // process.cwd() -> string. The compiler's own `src/modules.ts` calls it, so this is
+      // a self-hosting blocker as much as a host-API gap.
+      if (e.callee.property === "cwd") {
+        if (e.args.length !== 0) throw typeError("process.cwd() takes no arguments");
+        return "string";
+      }
       if (e.callee.property !== "exit") throw nyi(NYI.HOSTMOD, `process.${e.callee.property}()`, undefined, e.loc);
       if (e.args.length > 1) throw typeError("process.exit(code?) takes at most one argument");
       if (e.args.length === 1 && this.type(e.args[0]!, scope) !== "number") throw typeError("process.exit: code must be a number");
