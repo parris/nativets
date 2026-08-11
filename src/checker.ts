@@ -701,6 +701,20 @@ const GLOBAL_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("pointInRect", { min: 6, max: 6, argTys: ["number", "number", "number", "number", "number", "number"], ret: "boolean" }) // px,py,x,y,w,h
   .set("setTargetFPS", { min: 1, max: 1, argTys: ["number"], ret: "void" });
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
+/**
+ * The builtin objects this compiler KNOWS — recognized only through their members
+ * (`Math.floor`, `JSON.stringify`, `Object.keys`, `console.log`, …), never as a value.
+ *
+ * The list exists so that naming one bare (`const m = Math`) does not report `'Math' is
+ * not defined`, which is false and was measurably misleading: it is the same lie
+ * `Math.PI` told before it got a member-read path, and it sends a reader looking for a
+ * missing import instead of an unimplemented feature. Membership is EARNED — every name
+ * here has a member proven to compile and match node in `test/stdlib-batch1.test.ts` /
+ * the fixtures, because the hint asserts exactly that. `Boolean` is deliberately absent:
+ * it has no implemented members, and `Boolean(x)` is its own refusal (NT1003).
+ */
+const BUILTIN_NAMESPACES = new Set(["Math", "JSON", "console", "Number", "String", "Object", "Array", "Date"]);
+
 const ACTOR_BUILTINS = new Set([
   "spawn", "send", "receive", "self", "__drain",
   // v2 registry / links / monitors / trap + fault injection; v3 supervision
@@ -3565,6 +3579,16 @@ class Checker {
         if (!b) {
           const fnv = this.functionValueTy(e.name);
           if (fnv !== undefined) return fnv;
+          // A builtin NAMESPACE named as a bare value (`const m = Math`). These names are
+          // very much defined — `Math.floor(x)`, `JSON.stringify(v)` and `console.log(v)`
+          // all compile — so `'Math' is not defined` was simply a false statement, the
+          // same lie `Math.PI` used to tell one case down. What is actually missing is the
+          // namespace OBJECT as a first-class value; say that, and file it as a missing
+          // feature (NT1xxx, which `src/coverage.ts` counts into the blocker histogram)
+          // rather than as the user's type error.
+          if (BUILTIN_NAMESPACES.has(e.name)) {
+            throw nyi(NYI.OBJECT, `the builtin '${e.name}' as a value`, `'${e.name}' IS defined — this compiler implements its members (\`${e.name}.…\`), not the object itself as a first-class value; name the member you want`, e.loc);
+          }
           throw typeError(`'${e.name}' is not defined`);
         }
         // Control-flow narrowing: on this path the binding was PROVED non-nullish, so it
