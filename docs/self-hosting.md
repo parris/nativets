@@ -187,7 +187,9 @@ type is one the flag can carry and every covering `catch` binds exactly it, no `
 in an arrow body, and the program uses no actors. **One frame, by construction**: the
 escaping set therefore never grows transitively.
 
-**The number.** On stage-1 (`src/cli.ts`, 731 functions):
+**The number.** `bun run test/escape-metric.ts` — the companion to `blocker-metric`, which
+is checker-only and therefore structurally blind to every NT1004. On stage-1 (`src/cli.ts`,
+731 functions):
 
 | | |
 |---|---|
