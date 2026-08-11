@@ -434,6 +434,62 @@ static NtMsg mbox_pop(NtActor *a) {
   return m;
 }
 
+/* ---- MESSAGE OWNERSHIP, and the one place it has no other answer ----
+ *
+ * A message has exactly one owner at every instant. `send` deep-copies it (strings here,
+ * records/arrays in codegen) and HANDS THE COPY OVER: the sender's own local keeps the
+ * ownership it had, and the copy's owner becomes the mailbox node. A `receive` /
+ * `receiveMatch` that dequeues transfers that ownership on again, to the receiving frame,
+ * whose ordinary scope-exit drop frees it — so the pop paths deliberately free the NODE
+ * and never the payload. A message left in the SAVE QUEUE was never dequeued and is still
+ * the mailbox's, which is exactly right.
+ *
+ * That leaves one path with no next owner: the actor DIES with messages still queued.
+ * Nothing else can ever reach them (the pid is dead, so every later send is dropped at the
+ * status check), and until now nothing freed them — a leak proportional to the traffic an
+ * actor never got to, which is precisely the shape a supervised restart produces.
+ *
+ * Shallow by the same convention as everywhere else in this runtime: `nt_obj_free` frees
+ * the record's own slot block and not what its slots point at (a documented, separate
+ * issue), and a string payload is refcounted, so it is RELEASED rather than freed. */
+static void msg_free(NtMsg m) {
+  if (m.tag == NT_STR) { free(m.u.s); return; }
+  if (m.tag == NT_LIST) {
+    for (int64_t i = 0; i < m.u.list.len; i++) msg_free(m.u.list.items[i]);
+    free(m.u.list.items);
+  }
+}
+
+/* runtime.c: the object allocator's free, and the string refcount's release. Both are
+ * NULL-safe, and both are what the OWNING FRAME would have called had the message been
+ * delivered — this is the same free, at the only other place ownership can end. */
+extern void nt_obj_free(void *o);
+extern void nt_str_release(void *p);
+
+static void mbox_node_free(NtMboxNode *n) {
+  /* A non-INT tag is the C-level NtMsg carrier (nt_send / exit + DOWN signals), which owns
+   * its own storage. An INT tag is a COMPILER message: the slot is the payload, and `kind`
+   * says what it means. */
+  if (n->msg.tag != NT_INT)               msg_free(n->msg);
+  else if (n->kind == NT_MSG_STR)         nt_str_release((void *)(intptr_t)n->msg.u.i);
+  else if (n->kind == NT_MSG_STRUCT)      nt_obj_free((void *)(intptr_t)n->msg.u.i);
+  free(n);
+}
+
+/* Reclaim everything still queued for an actor that will never read it again. Called
+ * ONLY from actor_die, and only AFTER the status is DEAD — so no scheduler will swap into
+ * this actor (scheduler_loop CASes RUNNABLE->RUNNING and skips it) and every later send
+ * is refused at the status check. The intake stack is drained first: under M:N a message
+ * posted from another scheduler thread lives there until its owner pulls the batch over,
+ * and a dead actor never will. */
+static void mbox_discard(NtActor *a) {
+  mbox_drain(a);
+  NtMboxNode *p = a->mbox_head;
+  a->mbox_head = NULL;
+  a->mbox_tail = NULL;
+  while (p) { NtMboxNode *nx = p->next; mbox_node_free(p); p = nx; }
+}
+
 /* ======================= actors / scheduler ======================= */
 
 static NtActor *actor_alloc(int with_stack) {
@@ -1080,6 +1136,10 @@ static void actor_die(NtActor *a, int64_t reason, int abnormal) {
     else if (abnormal)        actor_die(peer, reason, 1);       /* cascade the exit */
     /* normal exit to a non-trapping linked peer: ignored (peer keeps running). */
   }
+
+  /* Everything still queued has no next owner — see mbox_discard. Last, so the crash
+   * record and every signal above have already been emitted from a fully intact actor. */
+  mbox_discard(a);
 }
 
 void nt_link(NtPid other) {
