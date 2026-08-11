@@ -234,23 +234,29 @@ describe("fuzz2 findings — invalid IR", () => {
 
 describe("fuzz2 findings — leaks", () => {
   /*
-   * An object literal written DIRECTLY in an argument position is never dropped: the callee
-   * does not own it and the caller never releases it, so one object per call escapes. The
-   * same call with the literal bound to a local first is clean, which is what pins it on the
-   * temporary rather than on the function or on the object.
+   * FIXED (`argTempFree`). An object literal written DIRECTLY in an argument position used
+   * to be dropped by nobody: the callee does not own it and the caller never released it,
+   * so one object per call escaped. The same call with the literal bound to a local first
+   * was already clean, which is what pinned it on the temporary rather than on the function
+   * or on the object — a literal in argument position has NO NAME, so no drop set could
+   * refer to it.
    *
-   * This is ordinary, idiomatic code — `f({x: 1})` — so the residue grows with the program's
-   * work, without bound. It is invisible on macOS (LeakSanitizer is Linux-only).
+   * The caller now frees it after the call returns, which is sound because a parameter
+   * cannot escape its callee: `return o`, `g = o`, `return new Box(o)` and `return [o]` are
+   * each already NT1604 ("cannot move out of `o`: it is borrowed").
+   *
+   * This is ordinary, idiomatic code — `f({x: 1})` — so the residue grew with the program's
+   * work, without bound. It was invisible on macOS (LeakSanitizer is Linux-only).
    */
-  it.failing("an object literal in ARGUMENT position is never freed", async () => {
+  it("an object literal in ARGUMENT position is freed", async () => {
     await expectResidueDoesNotScale(
       `takeObj({ a: i, b: i });`,
       `function takeObj(o: { a: number; b: number }): number { return o.a; }`,
     );
   });
 
-  /** The same defect on the array side: one array header per call. */
-  it.failing("an array literal in ARGUMENT position is never freed", async () => {
+  /** The same defect on the array side — one array header per call — fixed by the same rule. */
+  it("an array literal in ARGUMENT position is freed", async () => {
     await expectResidueDoesNotScale(
       `takeArr([i, i]);`,
       `function takeArr(a: number[]): number { return a.length; }`,

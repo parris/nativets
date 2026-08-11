@@ -617,30 +617,39 @@ describe("the host FFI surface is closed — outside it is NT1028, never half-im
   });
 
   /*
-   * The AMBIENT half of the same surface. NT1028's catalog hint already names exactly
-   * what exists here — "the ambient `process.argv`/`process.env`/`process.exit`/
-   * `process.stdout.write`" — and `process.stdout.foo` was already refused with it. But
-   * `process.platform` (a member READ) and `process.cwd()` (a CALL) went out as bare
-   * NT2001 `typeError`s: no hint, no location, and in the TYPE band rather than the
-   * FEATURE band.
+   * The AMBIENT half of the same surface. NT1028's catalog hint names exactly what
+   * exists here — "the ambient `process.argv`/`process.env`/`process.platform`/
+   * `process.exit`/`process.stdout.write`" — and `process.stdout.foo` was already
+   * refused with it. But an ambient member READ outside that list, and `process.cwd()`
+   * (a CALL), went out as bare NT2001 `typeError`s: no hint, no location, and in the
+   * TYPE band rather than the FEATURE band.
    *
    * That last part is not cosmetic. `src/coverage.ts` counts only the NT1xxx band into
    * its blocker histogram, deliberately — an NT2xxx is a user's type error, not a
    * missing feature — so an unimplemented host builtin filed as NT2001 was STRUCTURALLY
-   * invisible to the burn-down that is supposed to find it. `src/driver.ts` reads
+   * invisible to the burn-down that is supposed to find it. `src/driver.ts` read
    * `process.platform` twice and `src/modules.ts` calls `process.cwd()` once, so the
    * compiler's own three sites were the ones being hidden.
    *
-   * The hint is verified TRUTHFUL by the four members it names, each of which has a
-   * differential case against node already: `process.argv` (test/hostio echo-argv,
-   * sum-argv), `process.env` + `process.exit` (env-exit), `process.stdout.write`
-   * (stdout-write).
+   * `process.platform` was then IMPLEMENTED (it is a differential case of its own now,
+   * test/hostio/platform.ts), so the probe here moved to `process.arch` — its nearest
+   * unimplemented sibling. The point of the test is the BAND and the hint, not the
+   * particular member, and it has to name one we genuinely do not support to test that.
+   *
+   * The hint is verified TRUTHFUL by the five members it names, each of which has a
+   * differential case against node: `process.argv` (test/hostio echo-argv, sum-argv),
+   * `process.env` + `process.exit` (env-exit), `process.stdout.write` (stdout-write),
+   * `process.platform` (platform.ts) — and all five together in ambient-process.ts.
    */
   test("an ambient `process.*` member outside the surface is NT1028, not a bare type error", () => {
-    const d = refusal(`console.log(process.platform);\n`)!;
+    const d = refusal(`console.log(process.arch);\n`)!;
     expect(d.code).toBe("NT1028");
-    expect(d.message).toContain("process.platform");
+    expect(d.message).toContain("process.arch");
     expect(d.hint ?? "").toContain("process.argv");
+  });
+
+  test("…and `process.platform`, now inside the surface, is not refused at all", () => {
+    expect(refusal(`console.log(process.platform);\n`)).toBe(null);
   });
 
   test("an ambient `process.*` CALL outside the surface is NT1028 too", () => {
