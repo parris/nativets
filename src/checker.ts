@@ -3606,6 +3606,10 @@ class Checker {
         if (!scope.lookup("process")) {
           if (e.object.kind === "Identifier" && e.object.name === "process") {
             if (e.property === "argv") return "string[]";
+            // process.platform — node's spelling for the platform the program RUNS on
+            // ("darwin"/"linux"/"win32"/…). Resolved in the C runtime rather than folded
+            // by codegen, so a cross-compiled binary reports its TARGET; see nt_platform().
+            if (e.property === "platform") return "string";
             // NT1028, the HOST FFI code — not a bare `typeError`. `process.stdout.foo`
             // three hundred lines down already refuses through `nyi(NYI.HOSTMOD, …)`,
             // and NT1028's catalog hint is the one that names this exact surface
