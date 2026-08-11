@@ -391,15 +391,28 @@ function llvmTy(ty: Ty): string {
  */
 function userSym(name: string): string { return name === "main" ? "nt_user_main" : name; }
 
+/**
+ * The zero initializer for a module-level binding promoted to an LLVM global (SH1).
+ *
+ * DERIVED from `llvmTy`, deliberately, rather than re-listing the type predicates.
+ * The two lists had drifted: `llvmTy` grew `isUrlRefTy` into its `ptr` arms and this
+ * function did not, so a `URL` global fell to the `default` and emitted
+ * `@nt.g.u = internal global ptr 0` — an integer constant in a pointer slot, which
+ * clang REFUSES to parse ("integer constant must have integer type"). A `Date` global
+ * hit the same fall-through the other way and emitted `double 0`.
+ *
+ * Deriving makes the drift impossible: every `Ty` whose machine type is `ptr` gets
+ * `null` by construction, including the next reference type anyone adds. This is the
+ * same lesson as the AST walkers — a parallel enumeration is a defect waiting for the
+ * next member, so the fix is to stop enumerating rather than to correct the list.
+ */
 function defaultZero(ty: Ty): string {
-  if (isTypeRefTy(ty) || isUnionTy(ty) || isGeneralUnionTy(ty)) return "null";
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "null";
-  switch (ty) {
-    case "number": return "0x0000000000000000";
-    case "boolean": return "false";
-    case "string": return "null";
+  switch (llvmTy(ty)) {
+    case "ptr": return "null";
+    case "double": return "0x0000000000000000";
+    case "i1": return "false";
     case "void": return "";
-    default: return "0"; // undefined | null
+    default: return "0"; // i8 — the unit types (undefined | null)
   }
 }
 

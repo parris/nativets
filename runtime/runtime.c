@@ -4366,6 +4366,10 @@ const char *nt_date_to_json(double t) {
   memcpy(o + 1, iso, n);
   o[n + 1] = '"';
   o[n + 2] = 0;
+  /* `nt_date_to_iso` returns a REGISTERED string, so this one takes the
+   * refcount pair rather than `free` — the quoting copy is the only owner the
+   * caller ever sees, and the intermediate has no other reference. */
+  nt_str_release((void *)iso);
   return o;
 }
 
@@ -4608,6 +4612,11 @@ const char *nt_qs_to_string(const char *q) {
   char *o = alloc_str(j);
   memcpy(o, buf, j);
   o[j] = 0;
+  /* Same scratch-buffer shape as `uri_decode`/`uri_encode` below, and the same
+   * leak: `nativets_alloc` is a bare `malloc`, so `free` is its pair. Measured
+   * before the fix at one block per call, unregistered — no `__strLive` counter
+   * can see it, because only `alloc_str` calls `nt_str_register`. */
+  free(buf);
   return o;
 }
 
