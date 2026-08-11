@@ -145,6 +145,61 @@ patched. Both are the "hint recommends code that does something else" class.
    negative index. The fix wants the suggestion to depend on the `what` argument the caller
    already passes, rather than being unconditional.
 
+### A string past node's maximum length PANICS (node throws a catchable `RangeError`)
+
+`"abc".padStart(Infinity, "xy")`, `"x".repeat(2 ** 53)` and friends are a **`RangeError` at
+exit 1** in node. nativets stops too, but as a **panic**:
+
+```
+panic: invalid string length: the padded string would be Infinity bytes, past the 536870888-byte maximum
+  help: node throws `RangeError: Invalid string length` at exactly this boundary; build the
+        text in pieces, or write it out incrementally, instead of materialising one string this large
+```
+
+```
+panic: invalid count value: -1
+  help: `.repeat(n)` needs `n` to be finite and >= 0; node throws `RangeError: Invalid count value: -1`
+```
+
+on **stderr**, stdout flushed first and byte-comparable up to the stop, `abort()` → **exit 134**.
+**The exit code is the divergence** (node's is 1), and so is catchability: like every other panic
+this does not go through the pending-exception protocol, so `try`/`catch` cannot stop it.
+
+**The cap is node's own number.** V8's maximum string length on 64-bit is `2**29 - 24` =
+**536870888**, found by binary search against node v24: `"abc".padStart(536870888)` succeeds on
+both sides and `536870889` stops on both. We count **UTF-8 bytes** where node counts UTF-16 code
+units (§A.2), so the boundaries coincide for ASCII and ours is the stricter one above U+007F.
+
+**Covered:** `String#padStart`, `String#padEnd`, `String#repeat` (both its `RangeError`s — the
+count check of ES 22.1.3.18 step 3 runs *before* the length check, which is why `"".repeat(Infinity)`
+stops while `"".repeat(1e100)` is a plain `""`), and `+` / `String#concat`. `new Array(n)` never
+reaches this: it is refused at compile time (`NT1012`).
+
+**Why a panic and not a raise, when node throws something catchable.** The pending-exception
+protocol *could* carry a `RangeError`, and that would match node's exit code. It would also make
+every `.repeat` / `.padStart` / `.padEnd` call site a **fallible call**, which `emitExcCheck`
+*refuses to compile* inside a `try` with no `catch`, and inside a `try` whose `catch` binds an
+object type. Those are ordinary formatting calls: the trade would be a rare stop for a common
+**rejection of programs that compile and run correctly today**. One stop discipline — the same one
+as an out-of-range index and `nativets: out of memory` — is worth the exit code.
+
+**What this replaced.** All four builders took their length as `(long)d`, which C leaves
+**undefined** for a non-finite or out-of-range double, and then did the size arithmetic in `size_t`,
+which **wraps**. Measured, that was worse than a divergence:
+
+| | nativets (before) | node |
+|---|---|---|
+| `"abc".padStart(Infinity, "xy")` | SIGABRT, **empty stderr** on arm64; `"abc"` at **exit 0** on x86-64 | `RangeError`, exit 1 |
+| `"abcd".repeat(2 ** 62)` | **SIGBUS, empty stdout AND stderr** — 2^64 bytes truncated to 0, so it wrote 2^62 times into a **1-byte** buffer | `RangeError`, exit 1 |
+| `"".repeat(1e100)` | **hung forever** (a `LONG_MAX`-trip loop of zero-byte copies) | `""` |
+| `"x".repeat(-1)` | `""` at **exit 0** | `RangeError`, exit 1 |
+
+The `repeat` wrap was an out-of-bounds heap write in a memory-safe compiler, and it had smashed
+stdio's own buffer before it died — which is why even the line printed *before* the fault was lost.
+Every length argument now goes through ES 7.1.5 `ToIntegerOrInfinity` **as a double**, so ±Infinity
+survives the conversion, and the size arithmetic is done in double, which is exact below the cap and
+cannot wrap. Regression tests: `test/panic.test.ts`, "string length".
+
 ### Decorators — a class method that assigns a field (`docs/decorators.md`)
 
 Full design in `docs/decorators.md`; these are the three places node cannot be the oracle.
@@ -2917,6 +2972,14 @@ scheduler thread.
 We store strings as NUL-terminated UTF-8 and measure/slice by byte. Identical to JS for
 ASCII (all fixtures); differs for non-ASCII (an emoji is 4 bytes here, 2 UTF-16 units in JS).
 
+**Scope: this is about the UNIT, not about character identity.** §A.2 covers how a string is
+*measured* (`.length`) and *cut* (`slice`, `substring`, `s[i]`, `indexOf`) — byte offsets
+instead of UTF-16 code-unit offsets. It does **not** license returning the wrong *character*.
+`toUpperCase`/`toLowerCase` were once read as covered here and were a no-op outside ASCII;
+they were not covered, and that was a defect, not a decision — `é` → `É` is two bytes to two
+bytes in either encoding, so no unit question arises. It is fixed; the *remaining* limit on
+case mapping is its own entry, **§A.4** below.
+
 > `typeof undefined` (a former divergence) is now **supported** and matches node.
 
 ### 3. Pipeline operator `|>` (Elixir semantics, not TC39 Hack-style)
@@ -2940,6 +3003,69 @@ twin-file strategy (`test/pipeline/*.ts` + hand-desugared `*.twin.ts`, gated by
 `test/pipeline.test.ts`) keeps a defined node oracle. If a Hack-style `|>` ever ships in
 standard JS/TS, our `|>` will diverge from conforming TS (same token, different lowering) — this
 entry is that pre-registered divergence.
+
+### 4. `toUpperCase` / `toLowerCase` map U+0000–U+017F; above that they are the identity
+
+`toUpperCase` and `toLowerCase` are **exact** for every code point up to **U+017F** — ASCII,
+Latin-1 Supplement, and Latin Extended-A. From **U+0180 up** — Latin Extended-B, IPA, Greek,
+Cyrillic, Armenian, Georgian, Latin Extended Additional, and the rest — a character is
+returned **unchanged**, where node maps it:
+
+```ts
+"é".toUpperCase()   // "É"    — covered, matches node
+"straße".toUpperCase()  // "STRASSE" — covered, matches node
+"αβγ".toUpperCase() // "αβγ"  — node gives "ΑΒΓ"        ← the divergence
+"да".toUpperCase()  // "да"   — node gives "ДА"         ← the divergence
+```
+
+**Why the line is here and not further out.** `runtime/` is **libc-only** so it cross-links
+to macOS, Linux, iOS, Android, Windows and wasm. That rules out two otherwise-obvious
+implementations:
+
+- **`toupper`/`towupper` are locale-dependent.** The answer would vary with the environment
+  the binary happens to run in, so the same program would print different bytes on two
+  machines. A divergence that is *stable and documented* is worth more than one that is
+  merely smaller but unpredictable, and an environment-dependent answer cannot be tested
+  against a fixed oracle at all.
+- **The full tables do not fit the constraint.** 2981 code points are cased. Beyond their
+  size, `Default Case Conversion` is not a pure per-character function: it has
+  **context-sensitive** rules (final sigma — `Σ` lowercases to `ς` word-finally and `σ`
+  elsewhere) and **locale-sensitive** ones (Turkish/Azeri dotted and dotless `i`, Lithuanian
+  retained dots). A `const char *` in, `const char *` out, with no locale argument, cannot
+  express either. Implementing the table but not the conditions would be a *wrong* whole,
+  which is worse than a *correct* part.
+
+**What the covered range buys.** Those 360 cased code points collapse to six arithmetic
+rules per direction plus eight exceptions, so the whole thing is exact in ~40 lines with no
+tables at all. It also includes the five **length-changing** unconditional mappings, which
+are the ones an implementation is most likely to get wrong:
+
+| mapping | | note |
+|---|---|---|
+| `ß` U+00DF → `SS` | upper | one character becomes two |
+| `ŉ` U+0149 → `ʼN` | upper | 2 bytes → 3 |
+| `İ` U+0130 → `i` + U+0307 | lower | 2 bytes → 3 — the worst growth ratio, 1.5x |
+| `ı` U+0131 → `I` | upper | 2 bytes → 1 |
+| `ſ` U+017F → `S` | upper | 2 bytes → 1 |
+| `µ` U+00B5 → `Μ` U+039C | upper | leaves the block entirely (into Greek) |
+
+Because of these, neither method can work **in place** or size its output from its input;
+both measure the result with the same mapper that fills it.
+
+**Uncovered input is never damaged, including ill-formed UTF-8.** No decoder is involved:
+the covered range is *self-identifying* in UTF-8 (one byte below 0x80, or two bytes with a
+lead in `0xC2..0xC5` and a real continuation byte after it), so any byte that does not begin
+a covered scalar is copied through singly and longer sequences reassemble untouched. That
+matters more than it sounds, because §A.2 makes ill-formed UTF-8 **reachable from ordinary
+source**: `.slice` cuts bytes, so `"é".slice(0, 1)` is a lone lead byte. `("é".slice(0, 1) +
+"A").toLowerCase()` keeps the stray lead byte as-is and lowers the `A` — it does not re-frame
+the pair into `Á` and eat the `A`, and it does not substitute U+FFFD.
+
+**Tested by** `test/case-mapping.test.ts`: every code point in U+0001–U+017F swept against
+node in both directions, every code point in U+0180–U+FFFF asserted byte-identical (the
+regression test for *this* entry — it fails the day the range widens without this section
+widening), the growth cases built under `-fsanitize=address`, and the half-character slice
+above pinned at the byte level.
 
 ### Template-literal TYPES parse and erase to `string` — the pattern is NOT enforced
 
@@ -4188,6 +4314,32 @@ Only the one-argument string form exists. node's `(chunk, encoding?, callback?)`
 is node's own rule.
 
 | NT1028 | a `node:` builtin module, or a member of one, outside the implemented host FFI surface — and the ambient `process.stdout` members outside `.write(s)` | later | the surface is what a self-hosted compiler needs: `node:fs` (`readFileSync`/`writeFileSync`/`existsSync`), `node:child_process` (`spawnSync`), `process.stdout.write` |
+
+### `process.platform` — the TARGET's platform, and the one value node has no word for
+
+`process.platform` is a host builtin returning node's spelling for the platform the program
+is running on: `darwin`, `linux`, `win32`, `android`. On every platform node itself runs on
+this is **not** a divergence — `node file.ts` and our compiled binary print the same string,
+which is what `test/hostio/platform.ts` asserts differentially on whatever box runs it (so a
+Linux runner checks the branch a macOS laptop cannot).
+
+The interesting part is *when* it is resolved. For an AOT binary "the platform I am running
+on" **is** the platform I was built for, so the answer has to follow `--target`. It is
+therefore computed by the **C preprocessor** in `runtime/runtime.c` (`nt_platform`), not
+folded to a constant by codegen. That is forced by a rule this project keeps elsewhere: the
+emitted `.ll` deliberately carries **no target triple** so clang can retarget it, and
+`linkArgv` puts `-target` on the one clang command that compiles both the `.ll` and the
+runtime `.c`. Codegen runs once and cannot know the target; the preprocessor is told. Had we
+folded a constant, `nativets build --target linux` on a Mac would have produced a Linux ELF
+that reported `darwin` — a silent wrong answer, the worst outcome available.
+
+`__ANDROID__` is tested **before** `__linux__`, because Android defines both and node reports
+`android` there.
+
+**The actual divergence is `wasm` only.** No node build targets wasi, so there is no oracle to
+match, and a wasi binary reports **`wasi`** — a value node never produces. That is deliberate:
+guessing one of node's spellings (`linux`, say) would make a wrong answer *look* right. An
+unrecognized platform reports `unknown` for the same reason.
 
 ### Type declarations HOIST; recursive types are still not representable (NT1030)
 

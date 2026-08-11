@@ -451,10 +451,16 @@ describe("fuzz findings — base64", () => {
 describe("fuzz findings — non-ASCII case mapping", () => {
   /*
    * §A.2 documents that string LENGTH and SLICING are UTF-8 byte oriented. It does not cover
-   * case mapping, and `toUpperCase`/`toLowerCase` are a no-op outside ASCII — the bytes are
-   * well-formed UTF-8, they are simply the unmapped input, so nothing signals the miss.
+   * case mapping, and `toUpperCase`/`toLowerCase` were a no-op outside ASCII — the bytes are
+   * well-formed UTF-8, they are simply the unmapped input, so nothing signalled the miss.
+   *
+   * FIXED: both now map U+0000..U+017F (ASCII, Latin-1 Supplement, Latin Extended-A)
+   * exactly. The range is bounded because `runtime/` is libc-only, which rules out the
+   * locale-dependent `towupper` and the full Unicode tables alike; from U+0180 up the
+   * mapping is the identity and that boundary is now documented (docs/divergences.md §A.4).
+   * The exhaustive sweeps live in `test/case-mapping.test.ts`.
    */
-  it.failing("toUpperCase/toLowerCase map non-ASCII letters", async () => {
+  it("toUpperCase/toLowerCase map non-ASCII letters", async () => {
     await expectSameBytes([
       'console.log("\\u00e9".toUpperCase());', // node É, ours é
       'console.log("\\u00c9".toLowerCase());', // node é, ours É
@@ -478,19 +484,37 @@ describe("fuzz findings — refusals and stops (ranked last)", () => {
   });
 
   /*
-   * `"abc".padStart(Infinity, "xy")` is a RangeError in node (exit 1, a message on stderr).
-   * Here the process dies on a SIGNAL with an EMPTY stderr — no `nativets: out of memory`,
-   * no panic line, nothing. Both sides stop, so it is not a wrong answer, but a silent
-   * signal death is not the documented controlled stop either.
+   * FIXED (fx-padstop). `"abc".padStart(Infinity, "xy")` is a RangeError in node (exit 1,
+   * a message on stderr). Here the process died on a SIGNAL with an EMPTY stderr — no
+   * `nativets: out of memory`, no panic line, nothing: `(long)Infinity` is UB in C, arm64
+   * saturated it to LONG_MAX and asked malloc for 9 exabytes. (On x86-64 the same
+   * conversion yields LONG_MIN, which makes `n >= target` true and silently answers
+   * `"abc"` at exit 0 — the same source, a wrong answer instead of a stop, decided by the
+   * host.) It now stops the documented way, with a `panic:` line naming the length.
+   *
+   * The pinned assertion is REWRITTEN, not merely un-`.failing`ed: as recorded it demanded
+   * `stderrLen: 0`, which describes neither the bug nor a diagnostic. What a fix has to
+   * deliver is asserted instead — stdout byte-identical to node's up to the stop, a real
+   * message on stderr, and a deliberate exit code. The neighbours this shares a path with
+   * (`padEnd`, `.repeat`, and `.repeat`'s far worse size_t WRAP) are covered case by case
+   * in test/panic.test.ts, "string length".
    */
-  it.failing("an over-long padStart stops with a diagnostic, not a bare signal", async () => {
+  it("an over-long padStart stops with a diagnostic, not a bare signal", async () => {
     const src = 'console.log("start");\nconsole.log("abc".padStart(Infinity, "xy"));\n';
     const oracle = nodeRun(src);
     const ours = await ourRun(src);
     if (isRefusal(ours)) throw new Error(`refused: ${ours.refused}`);
     expect(oracle.exitCode).toBe(1);
-    expect(oracle.stderr.toString("utf8")).toContain("RangeError");
-    // Ours: killed by a signal, stderr empty.
-    expect({ signal: ours.signal, stderrLen: ours.stderr.length }).toEqual({ signal: null, stderrLen: 0 });
+    expect(oracle.stderr.toString("utf8")).toContain("RangeError: Invalid string length");
+    // Both sides stop at the same point, so everything printed before it must agree byte
+    // for byte — the part of the contract a differential run actually compares.
+    expect(Buffer.compare(ours.stdout, oracle.stdout)).toBe(0);
+    expect(ours.stdout.toString("latin1")).toBe("start\n");
+    // Ours: a controlled panic (SIGABRT, shell 134) with the reason on stderr, not silence.
+    expect(ours.stderr.toString("utf8")).toContain("panic: invalid string length");
+    expect(ours.signal).toBe("SIGABRT");
+    // The exit code is where we diverge from node's 1 — deliberately, and documented in
+    // docs/divergences.md: this is a panic, like an out-of-range index, not a throw.
+    expect(ours.exitCode).toBe(-1); // spawnSync reports `status: null` for a signalled child
   });
 });

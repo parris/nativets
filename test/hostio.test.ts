@@ -34,6 +34,14 @@ const cases: Case[] = [
   { file: "multi-line.ts", io: { stdin: "one\ntwo\nthree\nfour" } },
   { file: "env-exit.ts", io: { env: { GREETING: "hi there" } } },
   { file: "stdout-write.ts", io: { args: [] } },
+  // process.platform: the compiled binary must agree with node about the platform it is
+  // RUNNING on. For an AOT binary that is its build target, which is why the runtime
+  // resolves it from the C preprocessor rather than from codegen — the .ll deliberately
+  // carries no target triple, so only the C side follows a `-target`.
+  { file: "platform.ts", io: { args: [] } },
+  // Keeps the NT1028 hint honest: it ENUMERATES the ambient `process.*` surface, and this
+  // compiles every name on that list against node in one program.
+  { file: "ambient-process.ts", io: { args: ["one", "two"], env: { GREETING: "hi" } } },
 ];
 
 describe("host I/O (differential vs node)", () => {
