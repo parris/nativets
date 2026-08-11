@@ -12,69 +12,69 @@
       "bytes": 23192
     },
     "calculator.ts": {
-      "instrs": 594,
+      "instrs": 596,
       "funcs": 9,
-      "bytes": 33147
+      "bytes": 33223
     },
     "csv.ts": {
-      "instrs": 496,
+      "instrs": 508,
       "funcs": 2,
-      "bytes": 31317
+      "bytes": 31779
     },
     "diff.ts": {
-      "instrs": 325,
+      "instrs": 331,
       "funcs": 3,
-      "bytes": 24399
+      "bytes": 24631
     },
     "infixcalc.ts": {
-      "instrs": 771,
+      "instrs": 775,
       "funcs": 11,
-      "bytes": 40625
+      "bytes": 40777
     },
     "jobs.ts": {
-      "instrs": 754,
+      "instrs": 766,
       "funcs": 10,
-      "bytes": 41786
+      "bytes": 42241
     },
     "json-pretty.ts": {
-      "instrs": 347,
+      "instrs": 373,
       "funcs": 3,
-      "bytes": 26126
+      "bytes": 27114
     },
     "life.ts": {
-      "instrs": 482,
+      "instrs": 485,
       "funcs": 9,
-      "bytes": 28601
+      "bytes": 28713
     },
     "markdown.ts": {
-      "instrs": 512,
+      "instrs": 539,
       "funcs": 4,
-      "bytes": 32603
+      "bytes": 33622
     },
     "matrix.ts": {
-      "instrs": 621,
+      "instrs": 650,
       "funcs": 10,
-      "bytes": 35799
+      "bytes": 36901
     },
     "maze.ts": {
-      "instrs": 646,
+      "instrs": 666,
       "funcs": 1,
-      "bytes": 36183
+      "bytes": 36957
     },
     "primes.ts": {
-      "instrs": 123,
+      "instrs": 126,
       "funcs": 1,
-      "bytes": 14705
+      "bytes": 14819
     },
     "roman.ts": {
-      "instrs": 292,
+      "instrs": 297,
       "funcs": 4,
-      "bytes": 22295
+      "bytes": 22485
     },
     "router.ts": {
-      "instrs": 436,
+      "instrs": 438,
       "funcs": 9,
-      "bytes": 28699
+      "bytes": 28775
     },
     "rpn.ts": {
       "instrs": 219,
@@ -82,34 +82,34 @@
       "bytes": 18558
     },
     "rule110.ts": {
-      "instrs": 226,
+      "instrs": 228,
       "funcs": 6,
-      "bytes": 18892
+      "bytes": 18966
     },
     "stackvm.ts": {
-      "instrs": 429,
+      "instrs": 430,
       "funcs": 2,
-      "bytes": 28738
+      "bytes": 28777
     },
     "sudoku.ts": {
-      "instrs": 577,
+      "instrs": 579,
       "funcs": 8,
-      "bytes": 35075
+      "bytes": 35151
     },
     "tictactoe.ts": {
-      "instrs": 672,
+      "instrs": 687,
       "funcs": 9,
-      "bytes": 38586
+      "bytes": 39153
     },
     "todo.ts": {
-      "instrs": 230,
+      "instrs": 234,
       "funcs": 2,
-      "bytes": 18596
+      "bytes": 18748
     },
     "units.ts": {
-      "instrs": 348,
+      "instrs": 371,
       "funcs": 7,
-      "bytes": 25345
+      "bytes": 26217
     },
     "vigenere.ts": {
       "instrs": 286,
@@ -117,65 +117,65 @@
       "bytes": 20858
     },
     "wordfreq.ts": {
-      "instrs": 355,
+      "instrs": 358,
       "funcs": 4,
-      "bytes": 23341
+      "bytes": 23457
     }
   },
   "alloc": {
     "primes.ts": {
       "arrLive": 1,
       "objLive": 0,
-      "strLive": 74,
+      "strLive": 25,
       "pvNodes": 5,
       "pvAllocs": 212
     },
     "matrix.ts": {
       "arrLive": 21,
       "objLive": 0,
-      "strLive": 112,
+      "strLive": 36,
       "pvNodes": 0,
       "pvAllocs": 0
     },
     "sudoku.ts": {
       "arrLive": 8385,
       "objLive": 0,
-      "strLive": 498,
+      "strLive": 320,
       "pvNodes": 0,
       "pvAllocs": 0
     },
     "life.ts": {
       "arrLive": 111,
       "objLive": 0,
-      "strLive": 1200,
+      "strLive": 1090,
       "pvNodes": 0,
       "pvAllocs": 0
     },
     "maze.ts": {
       "arrLive": 4,
       "objLive": 33,
-      "strLive": 629,
+      "strLive": 208,
       "pvNodes": 0,
       "pvAllocs": 0
     },
     "wordfreq.ts": {
       "arrLive": 3,
       "objLive": 86,
-      "strLive": 113,
+      "strLive": 102,
       "pvNodes": 0,
       "pvAllocs": 0
     },
     "stackvm.ts": {
       "arrLive": 0,
       "objLive": 0,
-      "strLive": 53,
+      "strLive": 49,
       "pvNodes": 0,
       "pvAllocs": 0
     },
     "json-pretty.ts": {
       "arrLive": 5,
       "objLive": 2,
-      "strLive": 74,
+      "strLive": 42,
       "pvNodes": 0,
       "pvAllocs": 0
     }
@@ -194,14 +194,14 @@
   },
   "textSize": {
     "darwin-arm64": {
-      "primes.ts": 87640,
-      "matrix.ts": 90596,
-      "sudoku.ts": 90744,
-      "life.ts": 89800,
-      "maze.ts": 108616,
-      "wordfreq.ts": 106592,
-      "stackvm.ts": 89636,
-      "json-pretty.ts": 89152
+      "primes.ts": 87748,
+      "matrix.ts": 91176,
+      "sudoku.ts": 90844,
+      "life.ts": 89920,
+      "maze.ts": 109004,
+      "wordfreq.ts": 106700,
+      "stackvm.ts": 89708,
+      "json-pretty.ts": 89668
     }
   },
   "anchors": {
@@ -210,7 +210,7 @@
   },
   "anchorRss": {
     "darwin-arm64": {
-      "append-200k": 5095424
+      "append-200k": 5275648
     }
   }
 }
