@@ -262,22 +262,59 @@ describe("single-owner collections in src/", () => {
   });
 
   /*
-   * THE CENSUS. Every remaining site, named — a correct partial with an honest count beats
-   * a silent sweep, and an empty list here would be a lie by omission.
+   * THE SUB-PARSER SHAPE, both directions — the one `src/parser.ts` used three times, kept
+   * here so a revert to it is caught by a NAMED test and not only by a census delta.
    *
-   * All three are `Parser` fields deliberately SHARED with a sub-parser ("Shared by
-   * reference so a tag the sub-parser discovers is carried back too", `hoistTypeDecls`),
-   * and that carry-back is exactly what a persistent rebind severs. They are LATENT rather
-   * than live: `Parser.hoistTypeDecls` (NT2001) and `Parser.resolveCycle` (NT1606) are both
-   * refused by the checker today for unrelated reasons, so nothing compiles them at all —
-   * but each goes silently wrong the day its function unblocks. src/parser.ts is another
-   * lane's file; this list is the handoff, not a licence to leave them.
+   * The escape and the rebind sit in DIFFERENT methods (`hoistTypeDecls` hands the set
+   * over; `applyRecordAttrs`, a thousand lines away, is what adds to it), which is why the
+   * field frame pairs in any order while the local frame requires source order.
    */
-  const KNOWN = [
-    "parser.ts class Parser: `this.cycleNames` — stored into `sub.cycleNames`, then this.cycleNames = this.cycleNames.add(…)",
-    "parser.ts class Parser: `this.recTypes` — stored into `sub.recTypes`, then this.recTypes = this.recTypes.set(…)",
-    "parser.ts class Parser: `this.mutableRecords` — stored into `sub.mutableRecords`, then this.mutableRecords = this.mutableRecords.add(…)",
-  ];
+  const subParser = (seed: string, harvest: string): string => `
+    //@@mutable
+    class P {
+      private mutableRecords = new Set<string>();
+      private hoist(): void {
+        const sub = new P();
+        ${seed}
+        sub.run();
+        ${harvest}
+      }
+      private applyRecordAttrs(name: string): void {
+        this.mutableRecords = this.mutableRecords.add(name);
+      }
+    }`;
+
+  test("the detector fires on the sub-parser shape that shared by reference", () => {
+    const evs: Ev[] = [];
+    scan(parse(subParser("sub.mutableRecords = this.mutableRecords;", "")).body, evs);
+    expect(pair(evs, false).map((h) => h.name)).toEqual(["this.mutableRecords"]);
+  });
+
+  test("the detector clears the seed-a-copy-then-harvest shape that replaced it", () => {
+    const evs: Ev[] = [];
+    scan(parse(subParser(
+      "sub.mutableRecords = new Set(this.mutableRecords);",
+      "for (const n of sub.mutableRecords) this.mutableRecords = this.mutableRecords.add(n);",
+    )).body, evs);
+    expect(pair(evs, false)).toEqual([]);
+  });
+
+  /*
+   * THE CENSUS, now EMPTY — and empty because the sites were fixed, not because the
+   * detector stopped looking (the two tests above are what keep that honest).
+   *
+   * The last three were `Parser` fields deliberately SHARED with a sub-parser ("Shared by
+   * reference so a tag the sub-parser discovers is carried back too", `hoistTypeDecls`),
+   * and that carry-back is exactly what a persistent rebind severs. Measured, on the
+   * reduced shape, before the fix: node `1`, nativets `0`, BOTH at exit 0. They were
+   * LATENT rather than live — `Parser.hoistTypeDecls` (NT2001 at the `catch` binding) and
+   * `Parser.resolveCycle` (NT1606 on `deferred.push`) are both refused by the checker
+   * today for unrelated reasons — but each would have gone silently wrong the day its
+   * function unblocked. Fixed by giving each collection ONE owner: the sub-parser is
+   * SEEDED with a copy and the parser HARVESTS what it discovered back, so the carry-back
+   * happens for a reason that survives persistent collections.
+   */
+  const KNOWN: string[] = [];
 
   test("no LOCAL is handed to a retaining holder and then rebound", () => {
     // The one that mattered: `check` built its signature table into a LOCAL, handed it to

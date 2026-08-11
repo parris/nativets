@@ -653,24 +653,38 @@ class Parser {
         const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
         sub.pos = this.typeDeclStarts.get(name)!;
         sub.hoisting = true;
-        // SHARED, like `recTypes` in `resolveCycle`: each declaration is re-parsed in a
+        // SEEDED, like `recTypes` in `resolveCycle`: each declaration is re-parsed in a
         // FRESH sub-parser, which has never seen the `//@@mutable` on some OTHER
         // declaration in this file. `discriminatedUnion` asks this set whether a tagged
-        // arm is a record, so without sharing it, a union with a tagged member resolved
+        // arm is a record, so without seeding it, a union with a tagged member resolved
         // during hoisting (i.e. any RECURSIVE one) fell back to the general-union refusal
-        // and stalled the whole cycle. Shared by reference so a tag the sub-parser
-        // discovers is carried back too.
-        sub.mutableRecords = this.mutableRecords;
+        // and stalled the whole cycle. A tag the sub-parser discovers has to come back
+        // too, and that is the HARVEST below — not aliasing.
+        //
+        // A COPY, deliberately, so each set has ONE owner. Handing over the receiver and
+        // relying on the sub's `.add` to be seen here is a bun-ism: `Set.add` mutates and
+        // returns the receiver under node, but a nativets `Set` is PERSISTENT — `.add`
+        // answers a NEW set and leaves this one alone (docs/divergences.md §A). Both
+        // spellings compile and exit 0, and they disagree, so self-hosting this file would
+        // have silently dropped every `@@mutable` tag a sub-parser found. See
+        // test/single-owner.test.ts.
+        sub.mutableRecords = new Set(this.mutableRecords);
+        let parsed = false;
         try {
           sub.parseStatement();
+          parsed = true;
         } catch (e) {
           if (e instanceof NTError && e.diag.code === NYI.FORWARD_TYPE.code) {
             deferred.push(name);
             if (sub.blockedOn !== undefined) blocker = blocker.set(name, sub.blockedOn);
-            continue;
           }
-          continue; // a real refusal — leave it to the main parse, where it belongs
+          // any other refusal — leave it to the main parse, where it belongs
         }
+        // THE HARVEST. On every path, including the throwing one: a sub-parser that
+        // recorded a tag and only then failed still recorded it, which is what sharing
+        // used to give for free.
+        for (const n of sub.mutableRecords) this.mutableRecords = this.mutableRecords.add(n);
+        if (!parsed) continue;
         const ty = sub.typeAliases.get(name);
         if (ty !== undefined) this.typeAliases = this.typeAliases.set(name, ty);
         // A shape with a `@Name` back-edge is meaningless without the table that resolves
@@ -741,16 +755,32 @@ class Parser {
         const sub = new Parser(this.toks, { typeEnv: this.typeAliases, file: this.file });
         sub.pos = this.typeDeclStarts.get(name)!;
         sub.hoisting = true;
-        sub.cycleNames = this.cycleNames;
-        sub.recTypes = this.recTypes; // shared: an earlier round's shapes are what unions expand through
-        sub.mutableRecords = this.mutableRecords; // shared, for the same reason (see hoistTypeDecls)
+        // COPIES, seeded from here and harvested back below — ONE owner each, for the
+        // reason spelled out in `hoistTypeDecls`: a nativets `Map`/`Set` is persistent, so
+        // handing over the receiver and expecting the sub-parser's writes to appear here
+        // is a bun-ism that self-hosting would silently lose.
+        //
+        // `cycleNames` is seeded only. Nothing under `parseStatement` writes it — the one
+        // `.add` is the loop above, and a sub-parser never reaches `resolveCycle` (it is
+        // reached from `parseProgram`, and subs call `parseStatement`) — so it is
+        // read-only in there and has nothing to give back.
+        sub.cycleNames = new Set(this.cycleNames);
+        sub.recTypes = new Map(this.recTypes); // an earlier round's shapes are what unions expand through
+        sub.mutableRecords = new Set(this.mutableRecords); // and see hoistTypeDecls for the tag
+        let parsed = false;
         try {
           sub.parseStatement();
+          parsed = true;
         } catch (e) {
           deferred.push(name); // may only need a member that has not settled yet
           why = why.set(name, String((e as { message?: string }).message ?? e).split("\n")[0]!);
-          continue;
         }
+        // THE HARVEST, on every path (see hoistTypeDecls). A back-edge shape this round
+        // minted is what the NEXT round's unions expand through, so losing it stalls the
+        // component; the stall path below rolls `recTypes` back wholesale regardless.
+        for (const [n, shape] of sub.recTypes) this.recTypes = this.recTypes.set(n, shape);
+        for (const n of sub.mutableRecords) this.mutableRecords = this.mutableRecords.add(n);
+        if (!parsed) continue;
         const ty = sub.typeAliases.get(name);
         if (ty === undefined) { deferred.push(name); continue; }
         resolved = resolved.set(name, ty);
