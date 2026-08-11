@@ -79,6 +79,21 @@ void (*nt_rt_lock)(int acquire) = 0;
 #define NT_RC_LOCK()   do { if (nt_rt_lock) nt_rt_lock(1); } while (0)
 #define NT_RC_UNLOCK() do { if (nt_rt_lock) nt_rt_lock(0); } while (0)
 
+/* THE END OF A HEAP OBJECT'S / STRING'S LIFE, announced — the second hook installed by
+ * nt_actor.c, and by the same rule as `nt_rt_lock` above: this file must not NAME a
+ * symbol defined in nt_actor.c, because the actor runtime is linked ONLY for programs
+ * that use actors (src/driver.ts writeIR gates it on `nt_sched_init` appearing in the
+ * IR). A direct call would break the link for every other program.
+ *
+ * WHY IT EXISTS. An actor's crash record carries a "triggering message" causal tag that
+ * BORROWS the last message the actor consumed — and consuming a message is exactly what
+ * hands it to the receiving frame, which frees it at scope exit. The tag therefore has
+ * to learn when its borrow ends, and this is the only place that knows: the free itself.
+ * Called BEFORE the free, so the pointer handed over is still valid, and only ever
+ * COMPARED by the hook (see tag_forget in nt_actor.c) — never dereferenced, never freed.
+ * NULL for every non-actor program: one predictable, well-predicted NULL test. */
+void (*nt_rt_drop_notify)(const void *p) = 0;
+
 /* `len` is the string's BYTE length, memoized: -1 until something asks. Lazy, not
  * eager, because `alloc_str` REGISTERS the buffer before the producer fills it —
  * measuring at registration would read uninitialized bytes — and because a string is
@@ -171,6 +186,11 @@ void nt_str_release(void *p) {
     size_t i = str_tab_slot(p);
     if (g_str_tab[i].key == p) {       /* else: literal / already freed / untracked */
       if (--g_str_tab[i].rc <= 0) {
+        /* Same contract as nt_obj_free: announce the death BEFORE the free, so a crash
+         * record's borrowed causal tag stops pointing at this buffer. The hook takes no
+         * lock (it only touches the running actor's own fields), so calling it under the
+         * RC lock cannot invert a lock order. */
+        if (nt_rt_drop_notify) nt_rt_drop_notify(p);
         free(p);
         str_tab_remove_at(i);
         g_str_frees++;
@@ -1974,6 +1994,7 @@ void *nt_obj_new(double nfields) {
 }
 void nt_obj_free(void *o) {
   if (!o) return;
+  if (nt_rt_drop_notify) nt_rt_drop_notify(o);  /* before the free: `o` is still valid */
   free(o);
   NT_STAT_INC(g_obj_frees);
 }
