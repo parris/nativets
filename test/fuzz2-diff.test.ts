@@ -112,6 +112,37 @@ describe("fuzz2 findings — wrong answers", () => {
   });
 
   /*
+   * The Date row above is one case of a wider rule: ToNumber answers NaN for every operand
+   * that is not already a number, a string or a boolean — where node has a DEFINED coercion
+   * for each. `Number()` and unary `+` share the fault, so neither spelling escapes it.
+   *
+   *   +[]     node 0     ours NaN     (ToPrimitive([]) is "", ToNumber("") is 0)
+   *   +[1]    node 1     ours NaN     (a one-element array joins to "1")
+   *   +null   node 0     ours NaN
+   *   +date   node <t>   ours NaN
+   *
+   * `+[1,2]` really is NaN and `+"  12  "` really is 12, and both agree — so the number and
+   * string paths are right and it is only the non-primitive ones that fall through.
+   */
+  it.failing("Number()/unary + answers NaN for every non-primitive node can coerce", async () => {
+    await expectSameBytes([
+      "const e: number[] = [];",
+      "console.log(+e);",              // node 0, ours NaN
+      "console.log(Number(e));",       // node 0, ours NaN
+      "const n: number | null = null;",
+      "console.log(+n);",              // node 0, ours NaN
+      "console.log(Number(n));",       // node 0, ours NaN
+      "const one = [1];",
+      "console.log(+one);",            // node 1, ours NaN
+      "console.log(Number(one));",     // node 1, ours NaN
+      "const two = [1, 2];",
+      "console.log(+two);",            // node NaN, ours NaN — agrees
+      'console.log(+"  12  ");',       // node 12,  ours 12  — agrees
+      "",
+    ].join("\n"));
+  });
+
+  /*
    * `Date.prototype.toJSON` is NOT `toISOString`: ECMA-262 21.4.4.37 takes the primitive
    * first and RETURNS null when it is a non-finite Number, so an Invalid Date serialises as
    * `null` and never throws. nativets routes `toJSON` through `toISOString` and throws
@@ -129,6 +160,33 @@ describe("fuzz2 findings — wrong answers", () => {
       'console.log("still here");',
       "",
     ].join("\n"));
+  });
+});
+
+describe("fuzz2 findings — invalid IR", () => {
+  /*
+   * `d1 === d2` between two Dates emits a call to `js_str_eq(ptr, ptr)` with the Date's
+   * `double` in the first slot, so the module does not verify:
+   *
+   *   error: '%t2' defined with type 'double' but expected 'ptr'
+   *     %t5 = call i32 @js_str_eq(ptr %t2, ptr %t3)
+   *
+   * clang catches it, so this is a hard build failure and NOT a miscompile — but it reaches
+   * the user as a raw clang error with no `NT****` code and no hint, which is the one thing
+   * the diagnostics contract promises never happens. It wants either an equality rule (node
+   * compares Date IDENTITY, so two distinct Dates are `false` whatever their time values) or
+   * a refusal with a code.
+   */
+  it.failing("`date === date` emits invalid IR instead of a diagnostic", async () => {
+    const ours = await ourRun([
+      "const a = new Date(1000);",
+      "const b = new Date(2000);",
+      "console.log(a === b);",
+      "",
+    ].join("\n"));
+    // A refusal is acceptable ONLY if it carries a diagnostic code; a bare clang error is not.
+    if (isRefusal(ours)) expect(ours.refused).toMatch(/NT\d{4}/);
+    else expect(ours.stdout.toString("utf8")).toBe("false\n");
   });
 });
 
