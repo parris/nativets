@@ -1805,7 +1805,19 @@ class Checker {
    * — TypeScript's `controlFlowTruthiness.ts`. Only the positive branch narrows: `0`,
    * `""` and `false` are falsy while present, so the else branch proves nothing.
    */
-  private guardFacts(e: Expr, scope: Scope, positive: boolean, out: NarrowFact[]): void {
+  private guardFacts(
+    e: Expr,
+    scope: Scope,
+    positive: boolean,
+    // The narrowing-fact family is ONE accumulator threaded from `factsFor`'s local (which
+    // is `//@@mutable` already) down through `guardFacts`/`assertFacts` to the three leaves
+    // that actually `.push`. Every hop has to carry the mark, because passing a parameter
+    // into a marked slot carries the obligation with it — that is what makes the leaf
+    // append land in the caller's array. Rebinding instead (`out = [...out, f]`) is NT1608
+    // and would drop every fact on the floor.
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     switch (e.kind) {
       case "Identifier":
       case "MemberExpr":
@@ -1863,7 +1875,13 @@ class Checker {
    *  Takes a plain `Expr` and re-tests `kind`: an `Expr & { kind: … }` intersection is
    *  outside the subset we compile, and writing one here would add a self-host blocker
    *  to our own source (which is exactly how this was caught). */
-  private isArrayFacts(e: Expr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+  private isArrayFacts(
+    e: Expr,
+    scope: Scope,
+    matched: boolean,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     if (e.kind !== "CallExpr") return;
     const c = e.callee;
     if (c.kind !== "MemberExpr" || c.property !== "isArray") return;
@@ -1883,7 +1901,12 @@ class Checker {
    * assertion never returns. Conditional positions (a `&&`/`||`/`??` right operand, a
    * `?:` arm, an arrow body) are skipped: they may not run.
    */
-  private assertFacts(e: Expr, scope: Scope, out: NarrowFact[]): void {
+  private assertFacts(
+    e: Expr,
+    scope: Scope,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     const go = (x: Expr) => this.assertFacts(x, scope, out);
     switch (e.kind) {
       case "NonNullExpr":
@@ -1916,7 +1939,13 @@ class Checker {
    * (the tags never match); `kind` is the literal that was compared against, or null for a
    * truthiness test / `!` assertion, which prove it outright.
    */
-  private addFact(e: Expr, scope: Scope, kind: Ty | null, out: NarrowFact[]): void {
+  private addFact(
+    e: Expr,
+    scope: Scope,
+    kind: Ty | null,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     const p = this.accessPath(e, scope);
     if (p === undefined || !isNullableTy(p.ty)) return;
     if (kind !== null && nullishKind(p.ty) !== kind) return;
@@ -1937,7 +1966,13 @@ class Checker {
    * the binding simply stays the full union (still printable, still tag-correct) and
    * any arm-specific use of it is refused. Conservative, never wrong.
    */
-  private typeofFacts(e: BinaryExpr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+  private typeofFacts(
+    e: BinaryExpr,
+    scope: Scope,
+    matched: boolean,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     for (const [t, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
       if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") continue;
       const p = this.accessPath(t.operand, scope);
