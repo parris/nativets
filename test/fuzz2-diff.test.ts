@@ -86,6 +86,50 @@ describe("fuzz2 findings — wrong answers", () => {
       "",
     ].join("\n"));
   });
+
+  /*
+   * `+d` is ToNumber of a Date, which is `ToPrimitive(d, number)` → `d.valueOf()` → the time
+   * value. nativets answers NaN for EVERY Date, in range or out, named or temporary — while
+   * `d.valueOf()` and `d.getTime()` spelled out are both correct. `+new Date()` is the
+   * ordinary JS idiom for "now, as a number", so this is not an exotic corner.
+   *
+   * Note the asymmetry that let it through: unary `-` on a Date is REFUSED (`NT2001`,
+   * "Unary '-' needs number, got Date"). One door is guarded, its sibling silently answers
+   * NaN — the exact shape the prime directive rules out.
+   */
+  it.failing("unary + on a Date is NaN instead of its time value", async () => {
+    await expectSameBytes([
+      "console.log(+new Date(0));",     // node 0,     ours NaN
+      "console.log(+new Date(1000));",  // node 1000,  ours NaN
+      "console.log(+new Date(-1000));", // node -1000, ours NaN
+      "const d = new Date(1000);",
+      "console.log(+d);",               // node 1000,  ours NaN — a NAMED Date too
+      "console.log(+d + 1);",           // node 1001,  ours NaN
+      "console.log(d.valueOf());",      // node 1000,  ours 1000 — the spelled-out form is right
+      "console.log(d.getTime());",      // node 1000,  ours 1000
+      "",
+    ].join("\n"));
+  });
+
+  /*
+   * `Date.prototype.toJSON` is NOT `toISOString`: ECMA-262 21.4.4.37 takes the primitive
+   * first and RETURNS null when it is a non-finite Number, so an Invalid Date serialises as
+   * `null` and never throws. nativets routes `toJSON` through `toISOString` and throws
+   * `RangeError: Invalid time value`, which goes uncaught — exit 1 with EMPTY stdout where
+   * node prints `null` and carries on.
+   *
+   * `JSON.stringify(invalidDate)` is already correct (`null`), so this is the direct
+   * `.toJSON()` call only — which is what makes it easy to miss.
+   */
+  it.failing("Date#toJSON of an Invalid Date returns null, it does not throw", async () => {
+    await expectSameBytes([
+      "console.log(new Date(NaN).toJSON());",              // node null, ours: throws
+      "console.log(new Date(8640000000000001).toJSON());", // node null, ours: throws
+      "console.log(new Date(0).toJSON());",                // node the ISO string
+      'console.log("still here");',
+      "",
+    ].join("\n"));
+  });
 });
 
 describe("fuzz2 findings — leaks", () => {
