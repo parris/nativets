@@ -501,31 +501,43 @@ describe("ill-formed UTF-8 is never re-framed (the shared UTF-8 decoder)", () =>
     });
 
     // ---- lifetime: the character is now sometimes HEAP, which it never used to be. ----
-    test("an ASCII walk still allocates NOTHING — one-byte pieces are interned", async () => {
+    /**
+     * A walk, instrumented two ways. `after` is the live-string delta once the loop is
+     * over — a LEAK detector. `peak` is the largest delta observed FROM INSIDE the body,
+     * i.e. how many heap characters the loop holds at once — which is what separates
+     * "interned" from "allocated and promptly freed", two things `after` cannot tell
+     * apart. (`__strLive` is allocs-minus-frees, so a released allocation is invisible to
+     * it after the fact. Measuring only `after` let a "never intern, always malloc"
+     * mutant survive with every assertion green.)
+     */
+    const WALK_RC = (build: string) =>
+      build + `const before = __strLive();\nlet n = 0;\nlet peak = 0;\n` +
+      `for (const c of s) { n = n + 1; const d = __strLive() - before; if (d > peak) { peak = d; } }\n` +
+      `console.log(n, peak, __strLive() - before);\n`;
+
+    test("an ASCII walk allocates NOTHING — one-byte pieces are still interned", async () => {
       const ours = await bytesOf(
-        `let s = "abcdefghij";\nlet k = 0;\nwhile (k < 10) { s = s + s; k = k + 1; }\n` +
-          `const before = __strLive();\nlet n = 0;\n` +
-          `for (const c of s) { if (c === "a") { n = n + 1; } }\n` +
-          `console.log(n, __strLive() - before);\n`,
+        WALK_RC(`let s = "abcdefghij";\nlet k = 0;\nwhile (k < 10) { s = s + s; k = k + 1; }\n`),
       );
       expect(ours.exitCode).toBe(0);
-      // 10,240 characters walked, of which 1,024 are "a", and ZERO strings left live.
-      expect(ours.stdout.toString("latin1")).toBe("1024 0\n");
+      // 10,240 characters, and the loop never holds a heap string AT ALL: `peak` is 0.
+      // That 0 is the interning — the same 256 statics `s[i]` hands back — and it is the
+      // reason a code-point walk over ASCII costs no more memory than the byte walk it
+      // replaced.
+      expect(ours.stdout.toString("latin1")).toBe("10240 0 0\n");
     });
 
-    test("a MULTI-BYTE walk releases each character as it advances", async () => {
+    test("a MULTI-BYTE walk holds ONE character at a time, and leaks none", async () => {
       const ours = await bytesOf(
-        `let s = "\\u2001\\u00e9\\u{1f600}";\nlet k = 0;\nwhile (k < 10) { s = s + s; k = k + 1; }\n` +
-          `const before = __strLive();\nlet n = 0;\n` +
-          `for (const c of s) { n = n + 1; }\n` +
-          `console.log(n, __strLive() - before);\n`,
+        WALK_RC(`let s = "\\u2001\\u00e9\\u{1f600}";\nlet k = 0;\nwhile (k < 10) { s = s + s; k = k + 1; }\n`),
       );
       expect(ours.exitCode).toBe(0);
-      // 3072 characters walked, ZERO left live. The pieces have to be heap strings (there
-      // is no interning a code point above 0xFF), so without the release in the update
-      // block this is 3072 — a leak invisible to LeakSanitizer, because every one of them
-      // is still REACHABLE from the rc table.
-      expect(ours.stdout.toString("latin1")).toBe("3072 0\n");
+      // 3,072 characters. `peak` is 1 — there is no interning a code point above 0xFF, so
+      // each piece IS a heap string, but only the current one is live: the release in the
+      // update block runs as the cursor advances. Drop it (mutation-checked) and both
+      // numbers become 3,072 — a leak LeakSanitizer cannot see, because every piece is
+      // still REACHABLE from the rc table.
+      expect(ours.stdout.toString("latin1")).toBe("3072 1 0\n");
     });
 
     test("a piece OUTLIVES the step that produced it when the body keeps one", async () => {

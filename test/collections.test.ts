@@ -388,16 +388,23 @@ for (const v of negFirst) console.log(v, 1 / v);`;
     expect(await matchesNode(src)).toBe("1 true\n1 true true\n0 Infinity\n0 Infinity\n");
   });
 
-  test("a STRING argument is refused (NT1014) rather than iterated as bytes", () => {
-    // node iterates a string by CODE POINT: `new Set("a😀b")` has size 3. Our string
-    // for-of walks BYTES today, so building the set that way would give size 6 — a
-    // silent wrong answer. The checker cannot prove a `string` is ASCII, so the
-    // refusal is unconditional. Reject, never miscompile.
+  test("a STRING argument is refused (NT1014), and the hint names a spelling that WORKS", async () => {
+    // node iterates a string by CODE POINT: `new Set("a😀b")` has size 3. Implicit
+    // iteration of a string is not wired up at this construction site, so it is refused
+    // rather than approximated. Reject, never miscompile.
     expect(codeOf(`const s = new Set("abc");`)).toBe("NT1014");
     expect(codeOf(`const t = "abc"; const s = new Set(t);`)).toBe("NT1014");
     let msg = "";
     try { sourceToIR(`const s = new Set("abc");`); } catch (e) { msg = (e as NTError).message; }
     expect(msg).toContain("code point");
+    // A hint is a claim, so it gets compiled and run against node like any other. This
+    // one used to say `new Set(s.split(""))`, which is right only for ASCII: `split("")`
+    // is BYTE-framed (§A.2 — a byte is our code unit, which is what keeps
+    // `split("").length === length`), so it answers 8 for the string below where node
+    // answers 5. `Array.from` is the ITERATOR, code-point framed here as well as in node.
+    expect(msg).toContain("Array.from(s)");
+    const src = `const s = "a\\u{1f600}b a";\nconsole.log(new Set(Array.from(s)).size);\n`;
+    expect(await matchesNode(src)).toBe("4\n");
   });
 });
 

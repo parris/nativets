@@ -412,7 +412,10 @@ which are **refusals or already-documented consequences**, never approximations:
   address BYTES, so for non-ASCII they differ from node's UTF-16 code units (`"é".charCodeAt(0)`
   is `195` here, `233` in node). `.codePointAt` *decodes* the UTF-8 sequence, so it returns the
   same code point as node. ASCII is identical throughout; the non-ASCII behavior is pinned
-  behaviorally in `test/stdlib-batch1.test.ts`.
+  behaviorally in `test/stdlib-batch1.test.ts`. **ITERATION is the exception, and it is not
+  one of these**: `for…of` and `Array.from` walk CODE POINTS and are node-exact for every
+  well-formed string — see "§A.2 sub-clause: ITERATING a string is by CODE POINT" below,
+  which has the full unit-by-unit table.
 - **`.replace`/`.replaceAll` accept STRING patterns only** — there is no `RegExp` (Tier C). The
   `$$`/`$&`/``$` ``/`$'` replacement substitutions are supported; capture-group `$1` is literal,
   as it is in node for a string pattern.
@@ -463,6 +466,85 @@ which are **refusals or already-documented consequences**, never approximations:
   `NT1601`. Pinned in the same block.
 - **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
   monotonic, whole milliseconds, plausible epoch range.
+
+### §A.2 sub-clause: ITERATING a string is by CODE POINT; INDEXING it is by byte
+
+§A.2 says the string index space is UTF-8 bytes. That rule was being applied to
+*iteration* inconsistently, and the result was that **three spellings of "walk a string"
+gave two answers, and only one of them matched node.** On `"\u2001Axx"` — well formed,
+nothing exotic, just a three-byte character followed by ASCII:
+
+| spelling | before | node |
+|---|---|---|
+| `Array.from(s).length` | **4** (code point) | 4 |
+| `for (const c of s)` | **6** (byte) | 4 |
+| `s.split("").length` | **6** (byte) | 4 |
+
+Nobody chose that. `Array.from` had been given code-point framing while the neighbours
+were left on bytes, so `for…of` and `Array.from` — which in node are literally the same
+iterator — disagreed about one ordinary string, and the loop was the one that was wrong.
+
+**The fix comes from node's own structure, which is that node's three do not all agree
+either.** Measured against node:
+
+```
+"\u{1f600}".length          2    UTF-16 code units
+Array.from("\u{1f600}")     1    code POINT
+for…of "\u{1f600}"          1    code POINT — the same %Symbol.iterator%
+"\u{1f600}".split("")       2    code UNITS — two lone surrogates, not characters
+```
+
+So there are **two families**, and the question "is iteration inside or outside §A.2" has
+two different answers depending on which spelling you mean:
+
+- **`Array.from(s)` and `for (const c of s)` are the ITERATOR.** ECMAScript defines
+  `String.prototype[@@iterator]` over **code points**, and both spellings go through it, so
+  they can never disagree. This is now true here as well: `for…of` yields whole UTF-8
+  sequences, which makes it **node-exact for every well-formed string**, astral characters
+  included — agreement we did not have before, and the reason this half moved.
+- **`s.split("")` is the CODE-UNIT decomposition**, and it stays on **bytes**. node
+  guarantees two identities for it, for every string —
+  `s.split("").length === s.length` and `s.split("").join("") === s` — and it keeps them
+  above the BMP by handing back pieces that are *not characters at all*. §A.2 replaces
+  node's code unit with the UTF-8 byte, so byte framing is exactly what carries **both**
+  identities over; both hold here today. Code-point framing would break both and buy node
+  agreement only below U+10000. Its counts still differ from node above U+007F — precisely
+  as `.length` does, and for the one same reason, which is what §A.2 *is*.
+
+`[...str]` is still `NT2001` (spread of a non-array). When it lands it belongs on the
+**iterator** side, with `for…of` and `Array.from` — it is the same iterator in node.
+
+**Where every string-facing operation stands**, so the next lane does not have to
+re-derive it (`test/trim.test.ts` pins the whole table behaviorally):
+
+| operation | unit | node? |
+|---|---|---|
+| `for (const c of s)` | **code point** | **exact** (well-formed input) |
+| `Array.from(s)` | **code point** | **exact** (well-formed input) |
+| `s.codePointAt(i)` | byte-indexed, code-point *valued* | value exact; the index diverges |
+| `s.length` | byte | diverges above U+007F (§A.2) |
+| `s.split("")` | byte | diverges above U+007F (§A.2) |
+| `s[i]`, `s.at(i)`, `s.charAt(i)`, `s.charCodeAt(i)` | byte | diverges above U+007F (§A.2) |
+| `s.slice`, `s.substring` | byte | diverges above U+007F (§A.2) |
+| `s.indexOf`, `lastIndexOf`, `includes` | byte | value exact; the *offset* diverges |
+| `<` `<=` `>` `>=` | byte order (`strcmp`) | see the relational-compare section below |
+| `[...str]` | — | refused, `NT2001` |
+| `s.normalize()` | — | refused, `NT1024` (needs the UCD) |
+| `s.localeCompare(t)` | — | refused, `NT1024` (needs ICU) |
+
+**Ill-formed input keeps the policy every other consumer already uses** — the single raw
+byte, advance one — so `for…of` frames `E2 80 41 78 78` as five pieces, byte-identically to
+`Array.from`, and the walk stays lossless. **A lone surrogate is still one piece**: WTF-8
+is deliberate, because `String.fromCharCode(0xd800).codePointAt(0)` is `55296` in node and
+rejecting the sequence would answer `237` and *lose* node agreement.
+
+**Cost, measured** (`test/perf.test.ts`, not re-recorded): the loop still makes exactly one
+runtime call per step — `nt_str_cp_at` returns the character *and* its byte length through
+an out-parameter — so the whole corpus moves by **+4 IR instructions in the two programs
+that iterate a string** (`csv.ts` 508 → 512, `jobs.ts` 766 → 770) and not at all in the
+other 22. A one-byte character is still one of the 256 interned statics, so an **ASCII walk
+allocates nothing**, exactly as the byte walk did; a multi-byte character has to be a heap
+string, and the loop holds **one at a time** and releases it as the cursor advances.
 
 ### base64 (`btoa`/`atob`) — the BINARY-STRING contract, and it is NOT a divergence
 
@@ -2538,9 +2620,12 @@ first occurrence of a duplicate keeps its position. Accepted: `new Set(array)`, 
 
 Refused:
 - **`new Set(string)`** (`NT1014`). node iterates a string by **code point** — `new Set("a😀b")`
-  has size 3 — while our string `for-of` walks **bytes**, which would silently build a 6-element
-  set. A `string` cannot be proven ASCII at compile time, so the refusal is unconditional; the
-  hint points at `new Set(s.split(""))` for ASCII input.
+  has size 3 — and implicit iteration of a string is simply not wired up at this construction
+  site, so it is refused rather than approximated. The **hint** used to point at
+  `new Set(s.split(""))`, and that was wrong for everything but ASCII: `split("")` is
+  byte-framed (§A.2 sub-clause above), so it answers **8** for `"a😀b a"` where node answers 5.
+  It now points at **`new Set(Array.from(s))`**, which is the iterator — code-point framed here
+  as well as in node — and gives node's answer for every well-formed string.
 - **`new Map([[k, v], …])`**, the entries form (`NT1014`) — it needs the `[key, value]` **tuple
   type** we do not have (`["a", 1]` is already `NT2001`, "array elements must share a type").
   Use `.set`.

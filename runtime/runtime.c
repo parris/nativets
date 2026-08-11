@@ -1541,6 +1541,12 @@ static int nt_utf8_len(const unsigned char *p, const unsigned char *end, unsigne
 const char *nt_str_cp_at(const char *s, double id, double *out_adv) {
   size_t n = nt_strlen(s);
   long i = (long)id;
+  /* An EQUIVALENT MUTANT today, and a statement about the CALLER rather than a gap in it:
+   * the loop's own condition is `i < js_str_len(s)` and its cursor starts at 0, so `i` is
+   * always in range and deleting this line keeps every test green. It stays for the reason
+   * `nt_utf8_len`'s truncation guard does — it is what makes the function correct for an
+   * ARBITRARY offset, which is the property the next caller will assume and which nothing
+   * else here writes down. `*out_adv = 1` so even that caller cannot spin. */
   if (i < 0 || (size_t)i >= n) { *out_adv = 1; return nt_empty_str(); }
   const unsigned char *p = (const unsigned char *)s + i;
   unsigned cp;
