@@ -1514,11 +1514,18 @@ class Checker {
    */
   private typeReaches(t: Ty, target: string): boolean {
     let seen = new Set<string>();
-    // NOT `//@@mutable`: the worklist is drained with `.pop`, and the opt-in legalizes
-    // `.push` ONLY — the mark would be dead weight, not a fix.
+    // A CURSOR over an append-only worklist, and `//@@mutable` for the appends. `.pop()!`
+    // is what this used to be, and TAKING the popped element is the half of `.pop` the
+    // accumulator opt-in does NOT legalize — so the drain, not the append, was the blocker.
+    // Walking forward makes it breadth-first where it used to be depth-first; the answer is
+    // a least fixpoint over `recTypes` and `seen` bounds the walk, so the ORDER changes only
+    // which `@X` is expanded first, never whether `target` is reached.
+    //@@mutable
     const front: Ty[] = [t];
-    while (front.length) {
-      const { folded, inline } = this.nominalRefs(front.pop()!);
+    let head = 0;
+    while (head < front.length) {
+      const { folded, inline } = this.nominalRefs(front[head]!);
+      head = head + 1;
       for (const n of inline) if (n === target) return true; // its body was in that string
       for (const n of folded) {
         if (n === target) return true;
@@ -1834,7 +1841,19 @@ class Checker {
    * — TypeScript's `controlFlowTruthiness.ts`. Only the positive branch narrows: `0`,
    * `""` and `false` are falsy while present, so the else branch proves nothing.
    */
-  private guardFacts(e: Expr, scope: Scope, positive: boolean, out: NarrowFact[]): void {
+  private guardFacts(
+    e: Expr,
+    scope: Scope,
+    positive: boolean,
+    // The narrowing-fact family is ONE accumulator threaded from `factsFor`'s local (which
+    // is `//@@mutable` already) down through `guardFacts`/`assertFacts` to the three leaves
+    // that actually `.push`. Every hop has to carry the mark, because passing a parameter
+    // into a marked slot carries the obligation with it — that is what makes the leaf
+    // append land in the caller's array. Rebinding instead (`out = [...out, f]`) is NT1608
+    // and would drop every fact on the floor.
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     switch (e.kind) {
       case "Identifier":
       case "MemberExpr":
@@ -1892,7 +1911,13 @@ class Checker {
    *  Takes a plain `Expr` and re-tests `kind`: an `Expr & { kind: … }` intersection is
    *  outside the subset we compile, and writing one here would add a self-host blocker
    *  to our own source (which is exactly how this was caught). */
-  private isArrayFacts(e: Expr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+  private isArrayFacts(
+    e: Expr,
+    scope: Scope,
+    matched: boolean,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     if (e.kind !== "CallExpr") return;
     const c = e.callee;
     if (c.kind !== "MemberExpr" || c.property !== "isArray") return;
@@ -1912,7 +1937,12 @@ class Checker {
    * assertion never returns. Conditional positions (a `&&`/`||`/`??` right operand, a
    * `?:` arm, an arrow body) are skipped: they may not run.
    */
-  private assertFacts(e: Expr, scope: Scope, out: NarrowFact[]): void {
+  private assertFacts(
+    e: Expr,
+    scope: Scope,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     const go = (x: Expr) => this.assertFacts(x, scope, out);
     switch (e.kind) {
       case "NonNullExpr":
@@ -1945,7 +1975,13 @@ class Checker {
    * (the tags never match); `kind` is the literal that was compared against, or null for a
    * truthiness test / `!` assertion, which prove it outright.
    */
-  private addFact(e: Expr, scope: Scope, kind: Ty | null, out: NarrowFact[]): void {
+  private addFact(
+    e: Expr,
+    scope: Scope,
+    kind: Ty | null,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     const p = this.accessPath(e, scope);
     if (p === undefined || !isNullableTy(p.ty)) return;
     if (kind !== null && nullishKind(p.ty) !== kind) return;
@@ -1966,7 +2002,13 @@ class Checker {
    * the binding simply stays the full union (still printable, still tag-correct) and
    * any arm-specific use of it is refused. Conservative, never wrong.
    */
-  private typeofFacts(e: BinaryExpr, scope: Scope, matched: boolean, out: NarrowFact[]): void {
+  private typeofFacts(
+    e: BinaryExpr,
+    scope: Scope,
+    matched: boolean,
+    //@@mutable
+    out: NarrowFact[],
+  ): void {
     for (const [t, lit] of [[e.left, e.right], [e.right, e.left]] as [Expr, Expr][]) {
       if (t.kind !== "TypeofExpr" || lit.kind !== "StringLiteral") continue;
       const p = this.accessPath(t.operand, scope);
@@ -2024,6 +2066,9 @@ class Checker {
   /** Specializations in emission order, and the queue of ones whose body is unchecked. */
   private specialized: FuncDecl[] = [];
   private pending: FuncDecl[] = [];
+  /** How far `drainInstantiations` has walked `pending` — the forward index that replaces
+   *  `.shift()`. `pending` is append-only, so "unchecked" is exactly the tail from here. */
+  private drained = 0;
 
   declareGeneric(fn: FuncDecl, base: () => Scope): void {
     if (this.generics.has(fn.name) || this.functions.has(fn.name)) throw typeError(`Duplicate function '${fn.name}'`);
@@ -2032,10 +2077,21 @@ class Checker {
   }
   specializations(): FuncDecl[] { return this.specialized; }
 
-  /** Check every queued specialization body; checking one may enqueue more. */
+  /**
+   * Check every queued specialization body; checking one may enqueue more.
+   *
+   * A CURSOR, not `.shift()` — the spelling the `.shift` refusal itself prescribes ("a
+   * queue is better spelled as an index that walks forward over a fixed array"), and this
+   * was the one site of `.shift` in the compiler's own source. Same FIFO order and the
+   * same re-read of `length` per iteration, so a body that enqueues more is picked up
+   * exactly as before; `pending` is append-only, so the only difference is that a drained
+   * entry stays in the array instead of being removed from the front (O(n) per call, and
+   * there is no `nt_arr_shift` to lower it to anyway).
+   */
   drainInstantiations(base: () => Scope): void {
-    while (this.pending.length) {
-      const fn = this.pending.shift()!;
+    while (this.drained < this.pending.length) {
+      const fn = this.pending[this.drained]!;
+      this.drained = this.drained + 1;
       this.checkFunction(fn, base());
     }
   }
@@ -6259,8 +6315,9 @@ class Checker {
       // different name: it removes from the FRONT, so every remaining element moves —
       // O(n) per call, O(n²) to drain — and there is no `nt_arr_shift` in the runtime to
       // lower it to (`nt_arr_pop` is a decrement). The one site in this compiler's own
-      // source, `checker.ts`'s `this.pending.shift()!`, TAKES the removed element anyway,
-      // which is the half of `.pop` that is refused too.
+      // source was `checker.ts`'s `this.pending.shift()!`, which TOOK the removed element
+      // (the half of `.pop` that is refused too); it now walks a cursor, which is what the
+      // hint prescribes and is why `src/` no longer contains a `.shift`.
       //
       // `arr[0]` used to be offered here "for the first element" — the identical defect
       // the `.pop` hint carried above: on an empty array node's `.shift()` and node's
@@ -8840,7 +8897,17 @@ type RenameScope = Map<string, string>;
 
 /** The names bound DIRECTLY by this statement list (a `MultiStmt` is a scope-less group).
  *  `hoistedOnly` collects just the `FuncDecl`s, which is what a nested scope pre-binds. */
-function directBound(stmts: Stmt[], out: string[], hoistedOnly = false): void {
+function directBound(
+  stmts: Stmt[],
+  // The per-parameter ACCUMULATOR opt-in (docs/decorators.md). `out` is an out-parameter
+  // the three callers read back, so the two `.push`es below have to land in the CALLER's
+  // array — which is exactly what `@@mutable` on a parameter promises and what rebinding
+  // (`out = [...out, n]`, NT1608) would silently lose. The recursive `MultiStmt` call
+  // passes this same marked parameter along, which carries the obligation with it.
+  //@@mutable
+  out: string[],
+  hoistedOnly = false,
+): void {
   for (const s of stmts) {
     if (s.kind === "VarDecl") { if (!hoistedOnly) for (const d of s.decls) out.push(d.name); }
     else if (s.kind === "FuncDecl") out.push(s.name);
