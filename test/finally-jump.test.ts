@@ -90,3 +90,130 @@ console.log(a);`)).toBe("inner 0\nouter 0\ninner 1\nouter 1\n2\n");
 console.log("done");`)).toBe("a\nb\nc\ndone\n");
   });
 });
+
+describe("what the finalizer itself does to a pending completion", () => {
+  /*
+   * ECMAScript `UpdateEmpty`: if the finalizer completes abruptly, ITS completion is the
+   * one that wins and the pending one is discarded. This was checked against node rather
+   * than assumed — the `return 7` never happens, and the function falls out of the loop
+   * to `return 9`.
+   *
+   * It falls out of the lowering for free: the finalizer's `break` TERMINATES the block,
+   * so the mode dispatch that would have done the `return` is never emitted. Pinned here
+   * because the fix could easily have broken it by emitting the dispatch unconditionally.
+   */
+  test("a break IN the finalizer overrides a pending return", async () => {
+    expect(await sameAsNode(`function f(): number {
+  for (let i = 0; i < 3; i++) {
+    try { return 7; } finally { console.log("fin " + i); break; }
+  }
+  return 9;
+}
+console.log(f());`)).toBe("fin 0\n9\n");
+  });
+
+  // The same rule the other way round: a `return` in the finalizer beats a pending
+  // `break`, and the loop's remaining iterations never happen.
+  test("a return IN the finalizer overrides a pending break", async () => {
+    expect(await sameAsNode(`function f(): number {
+  for (let i = 0; i < 3; i++) {
+    try { break; } finally { console.log("fin " + i); return 7; }
+  }
+  return 9;
+}
+console.log(f());`)).toBe("fin 0\n7\n");
+  });
+
+  // ...and a finalizer that jumps on only SOME paths still has to resume the pending
+  // completion on the others, which is the half a "terminated?" test alone would lose.
+  test("a CONDITIONAL break in the finalizer only overrides on that path", async () => {
+    expect(await sameAsNode(`function f(): number {
+  let seen = 0;
+  for (let i = 0; i < 5; i++) {
+    try { seen = seen + 1; continue; } finally { console.log("fin " + i); if (i === 2) { break; } }
+  }
+  return seen;
+}
+console.log(f());`)).toBe("fin 0\nfin 1\nfin 2\n3\n");
+  });
+
+  // A `break` written in an INNER finalizer still has to cross the OUTER one on its way
+  // out — the override discards the pending return, and then becomes a pending jump of
+  // its own with a finalizer left to run.
+  test("a break in an inner finalizer still runs the outer finalizer", async () => {
+    expect(await sameAsNode(`function f(): number {
+  for (let i = 0; i < 3; i++) {
+    try {
+      try { return 7; } finally { console.log("inner"); break; }
+    } finally { console.log("outer"); }
+  }
+  return 9;
+}
+console.log(f());`)).toBe("inner\nouter\n9\n");
+  });
+});
+
+describe("switch, and the jumps that cross nothing", () => {
+  /*
+   * CONTROL. A `break` out of a `switch` that itself sits inside the `try` leaves the
+   * switch and stays inside the `try` — it crosses no finalizer, and the finalizer then
+   * runs once, on the ordinary fall-through out of the block. This was already correct
+   * and is the shape the fix could most easily have double-run.
+   */
+  test("break out of a switch INSIDE the try crosses nothing", async () => {
+    expect(await sameAsNode(`let n = 0;
+for (let i = 0; i < 3; i++) {
+  try {
+    switch (i) { case 1: n = n + 10; break; default: n = n + 1; }
+    n = n + 100;
+  } finally { console.log("fin " + i); }
+}
+console.log(n);`)).toBe("fin 0\nfin 1\nfin 2\n312\n");
+  });
+
+  // The mirror image, and it WAS wrong: the `break` targets the switch, which is outside
+  // the `try`, so the finalizer is crossed. `switch` is a `break` target but not a
+  // `continue` target, so this is the one place the two finalizer depths differ.
+  test("break out of a try/finally that sits inside a switch case runs the finally", async () => {
+    expect(await sameAsNode(`let n = 0;
+for (let i = 0; i < 3; i++) {
+  switch (i) {
+    case 1:
+      try { n = n + 10; break; } finally { console.log("fin " + i); }
+    default:
+      n = n + 1;
+  }
+  n = n + 100;
+}
+console.log(n);`)).toBe("fin 1\n312\n");
+  });
+
+  // A `continue` at the same spot is NOT stopped by the switch: it leaves the case, the
+  // switch and the try, so it crosses the finalizer and lands on the loop's update.
+  test("continue out of a try inside a switch inside a loop runs the finally", async () => {
+    expect(await sameAsNode(`let n = 0;
+for (let i = 0; i < 3; i++) {
+  switch (i) {
+    case 1:
+      try { n = n + 10; continue; } finally { console.log("fin " + i); }
+    default:
+      n = n + 1;
+  }
+  n = n + 100;
+}
+console.log(n);`)).toBe("fin 1\n212\n");
+  });
+
+  /*
+   * CONTROL. The loop is INSIDE the `try`, so the `break` never leaves it and the
+   * finalizer runs exactly once, after the loop. If the fix keyed off "is any finalizer
+   * live" rather than "is any finalizer live ABOVE the target", this program would print
+   * the finalizer's line on every iteration.
+   */
+  test("break whose target loop is inside the try crosses nothing", async () => {
+    expect(await sameAsNode(`try {
+  for (let i = 0; i < 3; i++) { if (i === 1) { break; } console.log("i " + i); }
+} finally { console.log("fin"); }
+console.log("done");`)).toBe("i 0\nfin\ndone\n");
+  });
+});
