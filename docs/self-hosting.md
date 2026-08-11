@@ -5295,6 +5295,40 @@ tsconfig.src.json` clean; all three canary modules still reach IR standalone (16
 119501 / 149960 bytes, redirected to files — a pipe truncates at 65536).
 
 
+## THE DEPTH, measured 2026-08-11 — 88 blockers, 33 shapes, and why peeling does not converge
+
+`bun run test/frontier-depth.ts`. Every other instrument reports the FIRST blocker — per
+module (`sh6`, `selfhost-ratchet`) or per function-then-abort. That is what a build hits and
+the right thing to ratchet on, but it says nothing about how many are BEHIND it.
+
+**Measured the hard way.** Fifteen blockers were cleared in one session — five off the
+`checker.ts` group, ten off `parser.ts` — and the first-blocker view moved every single
+time, so it read like steady progress. The depth never moved, because there were 88.
+
+| n | shape |
+|---|---|
+| **23** | `objects are immutable: o.f = v` |
+| 9 | `Property 'X' does not exist on <the Expr union>` |
+| 8 | `Cannot compare unknown with null` |
+| 7 | `arrays are immutable` |
+| 4 + 4 | discarded persistent `Map.set` / `Set.add` |
+| 3 + 1 | `for-of over unknown` |
+| … | 25 more shapes, 1–3 sites each |
+
+**51 of the 88 are the three architectural features above**: 30 are the object/array
+mutation wall, 13 are the `unknown` generic walkers, 8 are the Map/Set accumulator
+parameters. The remaining 37 spread over ~28 shapes at one to three sites each.
+
+**What that means for a plan.** Peeling first-blockers is *correct work* — every one of the
+fifteen was a real refusal on ordinary TypeScript, several were latent defects (an unlocated
+diagnostic, a stale `as` cast, `never` erasing to `number`), and none of them cost a
+regression. But it is not a route to a bootstrap: at one blocker per fix, the 37-item tail
+alone outlasts any single session, and the 51 in the three buckets do not yield to it at all.
+
+The route that finishes is the three features, and the cheapest of them is the one already
+priced: extend the per-parameter `//@@mutable` opt-in to `Map`/`Set` (8 sites, and the
+cell-passing design in the fork below needs no runtime change).
+
 ## What the frontier is made of, measured 2026-08-11 (94 blockers / 801 functions)
 
 The remaining blockers are **three architectural features**, not a backlog of mechanical
