@@ -335,14 +335,15 @@ describe("discarded persistent mutators in src/", () => {
     "checker.ts daStmt: flow.delete(…)",
     "checker.ts daStmt: tracked.set(…)",
     "checker.ts noteEscapingWrite: out.set(…)",
-    "modules.ts linkProgram: hostImports.add(…)",
-    "modules.ts linkProgram: mods.set(…)",
-    "modules.ts linkProgram: mutableClasses.add(…)",
-    "modules.ts linkProgram: mutableRecords.add(…)",
-    "modules.ts linkProgram: recTypes.set(…)",
-    "modules.ts linkProgram: staticFields.add(…)",
-    "modules.ts moduleOrder: deps.set(…)",
-    "modules.ts moduleOrder: done.add(…)",
+    // THE TWO THAT CANNOT BE FIXED IN THE SUBSET, and the reason is worth carrying: both are
+  // ACCUMULATOR PARAMETERS of a `Map`. Rebinding is not the fix (a parameter is a borrow;
+  // `sources = sources.set(…)` is invisible to the caller — NT1608), and the per-parameter
+  // `//@@mutable` opt-in is ARRAY-ONLY — marking one is NT1023, "'@@mutable' on parameter
+  // 'sources', which is not an array (it is 'Map<string,string>')". So there is NO spelling
+  // that works today, and a self-hosted compiler would discover every module and record
+  // NONE of them. Closing these needs either a Map/Set parameter opt-in or `moduleOrder`
+  // restructured to RETURN its accumulators.
+  "modules.ts moduleOrder: deps.set(…)",
     "modules.ts moduleOrder: sources.set(…)",
     "ownership.ts Analyzer.expr: sites.add(…)",
     "ownership.ts Analyzer.expr: state.set(…)",

@@ -428,7 +428,7 @@ function moduleOrder(
   deps: Map<string, ImportDecl[]> = new Map(),
 ): string[] {
   const order: string[] = [];
-  const done = new Set<string>();
+  let done = new Set<string>();   // rebound: a nativets Set is PERSISTENT
   const stack: string[] = [];
   /** Aligned with `stack`: was the edge that reached `stack[i]` an `import type`? */
   const edges: boolean[] = [];
@@ -494,7 +494,7 @@ function moduleOrder(
       imp.specs.length > 0 && imp.specs.every((s) => s.typeOnly === true));
     stack.pop();
     edges.pop();
-    done.add(path);
+    done = done.add(path);
     order.push(path);
   };
 
@@ -594,28 +594,34 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
   const order = moduleOrder(entry, read, sources, deps);
   const prefixBase = choosePrefixBase([...sources.values()]);
 
-  const mods = new Map<string, ModuleInfo>();
+  let mods = new Map<string, ModuleInfo>();   // rebound: a nativets Map is PERSISTENT
   let body: Stmt[] = [];
   /** `@@mutable` class names, under their FINAL (post-rename) names. Losing these across
    *  the link would silently downgrade a mutable class to copy-on-write, so they travel
    *  with the merged program (see docs/decorators.md). */
-  const mutableClasses = new Set<string>();
+  // `let`, and rebound at every `.add` below: a nativets `Set` is PERSISTENT, so
+  // `mutableClasses.add(x)` returns a NEW set and leaves this one untouched. Under bun the
+  // two spellings are indistinguishable, which is why this survived — and the consequence
+  // is spelled out two lines up: a self-hosted link would keep an EMPTY set here and
+  // silently downgrade every `@@mutable` class to copy-on-write. The neighbours (`names`,
+  // `tags`) already rebind; these two were the odd ones out.
+  let mutableClasses = new Set<string>();
   /** `@@mutable` RECORD tags, likewise under their final (post-rename) names. A record
    *  type binds no VALUE, so it is not in `topLevelNames` — but its tag is embedded in
    *  every Ty that mentions it, so it is renamed per module through `tags` for exactly
    *  the reason class tags are: two modules may each declare a `Cell`. */
-  const mutableRecords = new Set<string>();
+  let mutableRecords = new Set<string>();   // rebound too — see `mutableClasses` above
   /* Recursive-type shapes (`@Name` back-edges, ast.ts). Merged across modules under the
    * SAME per-module renaming class tags get: two modules may each declare a recursive
    * `Node`, and a shape is only meaningful next to the name its back-edge resolves through,
    * so a collision here would silently give one module's nodes the other's layout. */
-  const recTypes = new Map<string, Ty>();
+  let recTypes = new Map<string, Ty>();   // rebound: a nativets Map is PERSISTENT
   /** Host builtins (SH4) imported ANYWHERE in the graph. These are canonical builtin
    *  names, not module bindings, so they are never renamed — a `node:` import binds a
    *  compiler builtin, and the merged program simply needs the union. The compiler's
    *  own source is exactly this shape (src/modules.ts imports node:fs; src/cli.ts is
    *  the entry), so without the union a non-entry module's host call would vanish. */
-  const hostImports = new Set<string>();
+  let hostImports = new Set<string>();   // rebound: a nativets Set is PERSISTENT
 
   order.forEach((path, i) => {
     const source = sources.get(path)!;
@@ -673,8 +679,8 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
       }
     }
     if (!isEntry) for (const r of program.mutableRecords ?? []) tags = tags.set(r, `${prefixBase}${i}_${r}`);
-    for (const c of program.mutableClasses ?? []) mutableClasses.add(names.get(c) ?? c);
-    for (const r of program.mutableRecords ?? []) mutableRecords.add(tags.get(r) ?? r);
+    for (const c of program.mutableClasses ?? []) mutableClasses = mutableClasses.add(names.get(c) ?? c);
+    for (const r of program.mutableRecords ?? []) mutableRecords = mutableRecords.add(tags.get(r) ?? r);
     // Every declaration of this module's cycle(s) is renamed FIRST, so a shape's references
     // to its SIBLINGS are rewritten with the same map its own name is — a mutual cycle is
     // one unit and renaming half of it leaves the other half dangling. The entry keeps its
@@ -682,9 +688,9 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
     let refRenames = new Map<string, string>();
     if (!isEntry) for (const e of program.recTypes ?? []) refRenames = refRenames.set(e.name, `${prefixBase}${i}_${e.name}`);
     for (const e of program.recTypes ?? []) {
-      recTypes.set(refRenames.get(e.name) ?? e.name, rewriteRefs(rewriteTags(e.ty, tags), refRenames) as Ty);
+      recTypes = recTypes.set(refRenames.get(e.name) ?? e.name, rewriteRefs(rewriteTags(e.ty, tags), refRenames) as Ty);
     }
-    for (const h of program.hostImports ?? []) hostImports.add(h);
+    for (const h of program.hostImports ?? []) hostImports = hostImports.add(h);
     // The rename REBUILDS the body (see the `Renamer` header), so its result is what gets
     // merged and published. Everything read below this line other than `body` — `exports`,
     // `recTypes`, `hostImports` — is carried across untouched by the spread, and the
@@ -717,7 +723,7 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
       finalTypes = finalTypes.set(exported, rewriteTy(ty, tags, refRenames));
     }
 
-    mods.set(path, { path, source, program: renamed, finalExports, finalTypes, asyncExports });
+    mods = mods.set(path, { path, source, program: renamed, finalExports, finalTypes, asyncExports });
     body.push(...renamed.body);
   });
 
@@ -726,10 +732,10 @@ export function linkProgram(entrySource: string, entryPath?: string, read: ReadM
   // ANOTHER module is still a `C.f` member expression here. Finish the job over the merged
   // body, where every static field is visible under its FINAL (mangled) name: a dotted
   // binding name is one, and nothing else can produce one (no source identifier has a `.`).
-  const staticFields = new Set<string>();
+  let staticFields = new Set<string>();   // rebound: a nativets Set is PERSISTENT
   const scanStatics = (list: Stmt[]): void => {
     for (const s of list) {
-      if (s.kind === "VarDecl") { for (const d of s.decls) if (d.name.includes(".")) staticFields.add(d.name); }
+      if (s.kind === "VarDecl") { for (const d of s.decls) if (d.name.includes(".")) staticFields = staticFields.add(d.name); }
       else if (s.kind === "MultiStmt") scanStatics(s.stmts); // a class lowers to one of these
     }
   };
