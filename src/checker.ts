@@ -1478,11 +1478,18 @@ class Checker {
    */
   private typeReaches(t: Ty, target: string): boolean {
     let seen = new Set<string>();
-    // NOT `//@@mutable`: the worklist is drained with `.pop`, and the opt-in legalizes
-    // `.push` ONLY — the mark would be dead weight, not a fix.
+    // A CURSOR over an append-only worklist, and `//@@mutable` for the appends. `.pop()!`
+    // is what this used to be, and TAKING the popped element is the half of `.pop` the
+    // accumulator opt-in does NOT legalize — so the drain, not the append, was the blocker.
+    // Walking forward makes it breadth-first where it used to be depth-first; the answer is
+    // a least fixpoint over `recTypes` and `seen` bounds the walk, so the ORDER changes only
+    // which `@X` is expanded first, never whether `target` is reached.
+    //@@mutable
     const front: Ty[] = [t];
-    while (front.length) {
-      const { folded, inline } = this.nominalRefs(front.pop()!);
+    let head = 0;
+    while (head < front.length) {
+      const { folded, inline } = this.nominalRefs(front[head]!);
+      head = head + 1;
       for (const n of inline) if (n === target) return true; // its body was in that string
       for (const n of folded) {
         if (n === target) return true;
