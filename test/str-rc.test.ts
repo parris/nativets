@@ -273,20 +273,24 @@ console.log(__strLive());`;
   });
 
   /*
-   * THE ADJACENT GAP THAT IS *NOT* FIXED, pinned with its control so the boundary is
-   * evidence rather than a claim, and so the next lane inherits a measurement instead of
-   * a suspicion.
+   * CLOSED — this was the "adjacent gap that is NOT fixed", and the numbers below are the
+   * ones its own comment nominated as the intended direction (200 -> 0, 1000 -> 0).
    *
-   * A string local DECLARED IN A LOOP BODY gets a function-scoped slot, released once at
-   * the function's exit. Each iteration overwrites it without releasing what was there, so
-   * every value but the last is dropped on the floor: one heap string per iteration. There
-   * is no `throw`, no `try` and no `catch` in this program — it is the plain shape.
+   * A string local declared in a loop body got a function-scoped slot released once at the
+   * function's exit, so each iteration overwrote it without releasing what was there: one
+   * heap string per iteration. `genStmts` now releases the strings a REPEATING block
+   * declared (and nulls each slot) at every exit from it — fall-through, `break`/`continue`
+   * via `emitJumpDrops`, and the inlined-HOF `return` via `emitStrScopeDropsTo`.
    *
-   * This is why the in-frame throw case above is measured inside a function: with the
-   * `try` written directly in a loop body, THIS is what dominates the counter, and a test
-   * that asserted 0 there would have been asserting something else's bug.
+   * Worth recording how invisible this was to the obvious instrument: `leaks(1)` reports
+   * ZERO on the 400,000-iteration version, and is not wrong — the strings stay REACHABLE
+   * from the runtime's registry, so it is unbounded growth rather than unreachable memory.
+   * Peak RSS was the measurement that showed it: 60.3 MiB before, 1.5 MiB after, against
+   * 1.7 MiB for the same program at 2,000 iterations.
+   *
+   * This is still why the in-frame throw case above is measured inside a function.
    */
-  test("KNOWN GAP: a string local declared in a loop body leaks one per iteration", async () => {
+  test("a string local declared in a loop body is released each iteration", async () => {
     const body = (n: number): string => `
 let acc = 0;
 for (let i = 0; i < ${n}; i++) {
@@ -298,10 +302,10 @@ console.log(__strLive());`;
     const large = await compileAndRun(body(1000));
     expect(small.exitCode).toBe(0);
     expect(large.exitCode).toBe(0);
-    // Recorded as it IS, not as it should be. When this is fixed these become "0\n" —
-    // that is the intended direction, and a change here is a result, not a regression.
-    expect(small.stdout).toBe("200\n");
-    expect(large.stdout).toBe("1000\n");
+    // Zero at BOTH scales, and both are asserted for the reason the two were written: a
+    // per-iteration leak is invisible at one size and obvious across two.
+    expect(small.stdout).toBe("0\n");
+    expect(large.stdout).toBe("0\n");
   });
 
   /*

@@ -1272,6 +1272,11 @@ class FnGen {
    * does; this stack is read only by `break`/`continue`.
    */
   private blockScopes: string[][] = [];
+  /** Parallel to `blockScopes`: the STRING locals each live block declared. Strings are
+   *  refcounted rather than linear, so they are not in a `BlockDrops` marker and needed
+   *  their own stack. Pushed and popped in lockstep by `genStmts`, so the indices of the
+   *  two agree and a jump can unwind both together. */
+  private strScopes: string[][] = [];
   /** Names some `BlockDrops` in THIS frame can free — see `droppableNames` and `alloca`. */
   private droppable: Set<string> = new Set();
   /** In a lifted arrow: captured var name -> its slot in the closure env (%__clo). */
@@ -1346,7 +1351,7 @@ class FnGen {
    *  Storing it anyway would need a slot typed by the body, and a body of `void`
    *  (`xs.forEach((x) => { return console.log(x); })`) has no such type: `alloca void` is
    *  not IR LLVM accepts. The argument is still EVALUATED, for its side effects. */
-  private hofReturnStack: { slot: string; done: string; ty: Ty; discard?: boolean }[] = [];
+  private hofReturnStack: { slot: string; done: string; ty: Ty; discard?: boolean; strDepth: number }[] = [];
   /** Per-inlining counter: gives each inlined HOF callback a frame-unique name suffix
    *  (see freshenHofArrow) so two sibling callbacks reusing a param/local name — possibly
    *  at DIFFERENT types — each get their own correctly-typed slot instead of colliding in
@@ -1530,6 +1535,7 @@ class FnGen {
     this.varTypes = new Map();
     this.loops = [];
     this.blockScopes = [];
+    this.strScopes = [];
     this.droppable = new Set();
     this.captures = new Map();
     this.tryHandlers = [];
@@ -1574,6 +1580,69 @@ class FnGen {
     }
   }
 
+  /** String locals declared DIRECTLY in this statement list (a `MultiStmt` is a
+   *  scope-less group, so it counts as direct — same rule as `declaredLinear`). */
+  private strDeclaredIn(list: Stmt[]): string[] {
+    const out: string[] = [];
+    for (const s of list) {
+      if (s.kind === "VarDecl") {
+        for (const d of s.decls) if ((d.ty ?? "number") === "string" && this.strLocals.has(d.name)) out.push(d.name);
+      } else if (s.kind === "MultiStmt") {
+        for (const n of this.strDeclaredIn(s.stmts)) out.push(n);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Release the strings a BLOCK declared, and null each slot.
+   *
+   * `strLocals` is flat and per-FRAME, so a string declared in a loop body was released
+   * exactly once — for the last iteration's value — and the other n-1 were never
+   * reclaimed. Measured on `for (…400000…) { const s = "abcdefghij" + i; }`: peak RSS
+   * 1.7 MiB at 2,000 iterations against 60.3 MiB at 400,000, growing linearly for a loop
+   * whose live set is one string.
+   *
+   * `leaks(1)` reports ZERO on that program and is not wrong: the strings stay REACHABLE
+   * from the runtime's registry, so this is unbounded growth rather than unreachable
+   * memory. A reachability checker cannot see it — the scaling of the number is the only
+   * instrument that can, which is the same lesson `__arrLive` taught about counting the
+   * wrong object.
+   *
+   * Nulling the slot is what makes it safe to release early: the frame-exit
+   * `emitStrDrops` and the next iteration both re-read the slot, and `nt_str_release`
+   * ignores null (the same reason `emitStrInit` zeroes them on entry). Anything that
+   * ESCAPED the block took its own retain — that is the discipline the frame-exit release
+   * has always relied on, and this only makes the release earlier, never extra.
+   */
+  /** Unwind string scopes from the innermost down to `depth`, skipping one name whose
+   *  ownership is being transferred out. The inlined-HOF `return` needs this: it does not
+   *  go through `emitJumpDrops` (it is not a `break`) and it TERMINATES the block, so the
+   *  fall-through release in `genStmts` never runs — a callback body that returns early
+   *  leaked one string per ELEMENT. `exclude` keeps the returned string's lifetime exactly
+   *  as it was, so only the strings that genuinely die at the end of the iteration are
+   *  released here. */
+  private emitStrScopeDropsTo(depth: number, exclude?: string): void {
+    for (let i = this.strScopes.length - 1; i >= depth; i--) {
+      for (const n of this.strScopes[i] ?? []) {
+        if (n === exclude) continue;
+        const p = this.fresh();
+        this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
+        this.emit(`call void @nt_str_release(ptr ${p})`);
+        this.emit(`store ptr null, ptr ${this.addr(n)}`);
+      }
+    }
+  }
+
+  private emitStrScopeDrops(names: string[]): void {
+    for (const n of names) {
+      const p = this.fresh();
+      this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
+      this.emit(`call void @nt_str_release(ptr ${p})`);
+      this.emit(`store ptr null, ptr ${this.addr(n)}`);
+    }
+  }
+
   /** Generate a statement sequence, stopping once the block is terminated
    *  (so code after return/break/continue isn't emitted as unreachable IR). */
   private genStmts(list: Stmt[]): void {
@@ -1583,10 +1652,23 @@ class FnGen {
     // stacks in step without `genStmts` having to know which lists the ownership pass
     // chose to call `scoped()` on. `dropsOf` reads the marker, which is always LAST.
     this.blockScopes.push(dropsOf(list));
+    // ONLY inside a REPEATING block. A block that runs once per frame has no leak to
+    // fix — the frame-exit `emitStrDrops` already releases its strings, exactly once —
+    // so emitting a release there is pure IR for no behaviour. Restricted to bodies
+    // under a loop (or an inlined HOF callback, which is a loop the `loops` stack does
+    // not carry), the corpus IR cost drops from +3.16% to well under the aggregate
+    // threshold while every measured leak still closes.
+    const repeats = this.loops.length > 0 || this.hofReturnStack.length > 0;
+    const strs = repeats ? this.strDeclaredIn(list) : [];
+    this.strScopes.push(strs);
     for (const s of list) {
       if (this.isTerminated()) break;
       this.genStmt(s);
     }
+    // Fall-through only. A terminated block (`return`/`break`/`continue`) has already had
+    // its strings released by the path that terminated it.
+    if (!this.isTerminated()) this.emitStrScopeDrops(strs);
+    this.strScopes.pop();
     this.blockScopes.pop();
   }
 
@@ -1626,6 +1708,11 @@ class FnGen {
       // The second iteration of a loop is covered by `emitDrops` nulling each slot after
       // freeing it: the name IS in `frameLocals` by then, but the slot reads null.
       this.emitDrops(this.blockScopes[i] ?? []);
+      // …and the same scope's STRINGS. Safe to run for a name whose declaration this path
+      // never reached: `emitStrInit` nulled every string slot on entry and each release
+      // nulls it again, and `nt_str_release` ignores null — so unlike the linear drops
+      // above, this needs no `frameLocals` filter to stay off an unwritten alloca.
+      this.emitStrScopeDrops(this.strScopes[i] ?? []);
     }
   }
 
@@ -2173,11 +2260,19 @@ class FnGen {
           // expression is still evaluated, because it may be the effect the loop is for.
           if (h.discard ?? false) {
             if (s.argument) this.genExpr(s.argument);
+            this.emitStrScopeDropsTo(h.strDepth);
             this.terminate(`br label %${h.done}`);
             return;
           }
           const v = s.argument ? this.coerce(this.genExpr(s.argument), h.ty) : { v: defaultZero(h.ty), ty: h.ty };
           this.emit(`store ${llvmTy(h.ty)} ${v.v}, ptr ${h.slot}`);
+          // AFTER the store, and never the returned binding itself: handing the result out
+          // is a transfer, so releasing it here would free what the caller just took.
+          const hofArg = s.argument ?? null;
+          const hofXfer = hofArg !== null && hofArg.kind === "Identifier" && this.strLocals.has(hofArg.name)
+            ? hofArg.name
+            : undefined;
+          this.emitStrScopeDropsTo(h.strDepth, hofXfer);
           this.terminate(`br label %${h.done}`);
           return;
         }
@@ -6484,7 +6579,7 @@ class FnGen {
     if (arrow.exprBody) return this.genExpr(arrow.body as Expr);
     const slot = this.slot(retTy);
     const done = this.label("hofr");
-    this.hofReturnStack.push({ slot, done, ty: retTy });
+    this.hofReturnStack.push({ slot, done, ty: retTy, strDepth: this.strScopes.length });
     this.genStmts(arrow.stmts as Stmt[]);
     this.hofReturnStack.pop();
     if (!this.isTerminated()) this.terminate(`br label %${done}`); // fall-through (no return hit)
@@ -6519,7 +6614,7 @@ class FnGen {
       this.genExpr(arrow.body as Expr); // evaluated for effect, exactly as an ExprStmt is
     } else {
       const done = this.label("eachr");
-      this.hofReturnStack.push({ slot: "", done, ty: "void", discard: true });
+      this.hofReturnStack.push({ slot: "", done, ty: "void", discard: true, strDepth: this.strScopes.length });
       this.genStmts(arrow.stmts as Stmt[]);
       this.hofReturnStack.pop();
       if (!this.isTerminated()) this.terminate(`br label %${done}`); // fall-through (no return hit)

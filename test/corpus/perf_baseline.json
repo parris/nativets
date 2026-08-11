@@ -2,124 +2,124 @@
   "note": "nativets performance baseline — DETERMINISTIC metrics only (see test/perf.test.ts for the methodology and the reference projects it came from). Regenerate with NATIVETS_PERF_UPDATE=1 bun test test/perf.test.ts, and review the diff: an unexplained jump is the regression this file exists to catch.",
   "ir": {
     "base64.ts": {
-      "instrs": 79,
+      "instrs": 80,
       "funcs": 1,
-      "bytes": 12900
+      "bytes": 13114
     },
     "brainfuck.ts": {
-      "instrs": 319,
+      "instrs": 330,
       "funcs": 6,
-      "bytes": 23222
+      "bytes": 23766
     },
     "calculator.ts": {
-      "instrs": 596,
+      "instrs": 617,
       "funcs": 9,
-      "bytes": 33253
+      "bytes": 34124
     },
     "csv.ts": {
-      "instrs": 512,
+      "instrs": 524,
       "funcs": 2,
-      "bytes": 31955
+      "bytes": 32560
     },
     "diff.ts": {
-      "instrs": 331,
+      "instrs": 334,
       "funcs": 3,
-      "bytes": 24661
+      "bytes": 24933
     },
     "infixcalc.ts": {
-      "instrs": 775,
+      "instrs": 786,
       "funcs": 11,
-      "bytes": 40807
+      "bytes": 41354
     },
     "jobs.ts": {
-      "instrs": 796,
+      "instrs": 800,
       "funcs": 10,
-      "bytes": 43383
+      "bytes": 43696
     },
     "json-pretty.ts": {
-      "instrs": 403,
+      "instrs": 408,
       "funcs": 3,
-      "bytes": 28301
+      "bytes": 28654
     },
     "life.ts": {
-      "instrs": 485,
+      "instrs": 489,
       "funcs": 9,
-      "bytes": 28743
+      "bytes": 29062
     },
     "markdown.ts": {
-      "instrs": 539,
+      "instrs": 555,
       "funcs": 4,
-      "bytes": 33652
+      "bytes": 34414
     },
     "matrix.ts": {
-      "instrs": 650,
+      "instrs": 659,
       "funcs": 10,
-      "bytes": 36931
+      "bytes": 37399
     },
     "maze.ts": {
-      "instrs": 666,
+      "instrs": 691,
       "funcs": 1,
-      "bytes": 36987
+      "bytes": 38043
     },
     "primes.ts": {
-      "instrs": 126,
+      "instrs": 127,
       "funcs": 1,
-      "bytes": 14849
+      "bytes": 15064
     },
     "roman.ts": {
-      "instrs": 297,
+      "instrs": 303,
       "funcs": 4,
-      "bytes": 22515
+      "bytes": 22896
     },
     "router.ts": {
-      "instrs": 438,
+      "instrs": 443,
       "funcs": 9,
-      "bytes": 28805
+      "bytes": 29155
     },
     "rpn.ts": {
-      "instrs": 219,
+      "instrs": 222,
       "funcs": 4,
-      "bytes": 18588
+      "bytes": 18871
     },
     "rule110.ts": {
-      "instrs": 228,
+      "instrs": 229,
       "funcs": 6,
-      "bytes": 18996
+      "bytes": 19209
     },
     "stackvm.ts": {
-      "instrs": 430,
+      "instrs": 445,
       "funcs": 2,
-      "bytes": 28807
+      "bytes": 29480
     },
     "sudoku.ts": {
-      "instrs": 578,
+      "instrs": 588,
       "funcs": 8,
-      "bytes": 35149
+      "bytes": 35668
     },
     "tictactoe.ts": {
-      "instrs": 687,
+      "instrs": 700,
       "funcs": 9,
-      "bytes": 39183
+      "bytes": 39812
     },
     "todo.ts": {
-      "instrs": 234,
+      "instrs": 242,
       "funcs": 2,
-      "bytes": 18778
+      "bytes": 19400
     },
     "units.ts": {
-      "instrs": 371,
+      "instrs": 372,
       "funcs": 7,
-      "bytes": 26247
+      "bytes": 26461
     },
     "vigenere.ts": {
-      "instrs": 286,
+      "instrs": 290,
       "funcs": 2,
-      "bytes": 20888
+      "bytes": 21203
     },
     "wordfreq.ts": {
-      "instrs": 358,
+      "instrs": 363,
       "funcs": 4,
-      "bytes": 23487
+      "bytes": 23839
     }
   },
   "alloc": {
@@ -133,28 +133,28 @@
     "matrix.ts": {
       "arrLive": 21,
       "objLive": 0,
-      "strLive": 36,
+      "strLive": 34,
       "pvNodes": 0,
       "pvAllocs": 0
     },
     "sudoku.ts": {
       "arrLive": 8385,
       "objLive": 0,
-      "strLive": 320,
+      "strLive": 306,
       "pvNodes": 0,
       "pvAllocs": 0
     },
     "life.ts": {
       "arrLive": 111,
       "objLive": 0,
-      "strLive": 1090,
+      "strLive": 1010,
       "pvNodes": 0,
       "pvAllocs": 0
     },
     "maze.ts": {
       "arrLive": 4,
       "objLive": 33,
-      "strLive": 208,
+      "strLive": 197,
       "pvNodes": 0,
       "pvAllocs": 0
     },
@@ -182,26 +182,26 @@
   },
   "binarySize": {
     "darwin-arm64": {
-      "primes.ts": 167520,
-      "matrix.ts": 167904,
-      "sudoku.ts": 167872,
-      "life.ts": 167880,
-      "maze.ts": 187256,
-      "wordfreq.ts": 187360,
-      "stackvm.ts": 167552,
-      "json-pretty.ts": 167600
+      "primes.ts": 167760,
+      "matrix.ts": 168144,
+      "sudoku.ts": 168112,
+      "life.ts": 168104,
+      "maze.ts": 187496,
+      "wordfreq.ts": 187584,
+      "stackvm.ts": 167792,
+      "json-pretty.ts": 167824
     }
   },
   "textSize": {
     "darwin-arm64": {
-      "primes.ts": 98052,
-      "matrix.ts": 101480,
-      "sudoku.ts": 101144,
-      "life.ts": 100224,
-      "maze.ts": 119308,
-      "wordfreq.ts": 117004,
-      "stackvm.ts": 100012,
-      "json-pretty.ts": 100464
+      "primes.ts": 99572,
+      "matrix.ts": 103032,
+      "sudoku.ts": 102700,
+      "life.ts": 101756,
+      "maze.ts": 120944,
+      "wordfreq.ts": 118540,
+      "stackvm.ts": 101596,
+      "json-pretty.ts": 102000
     }
   },
   "anchors": {
