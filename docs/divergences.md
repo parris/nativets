@@ -1504,6 +1504,57 @@ aliased, passed as an argument, stored, captured by another closure) is still ne
 naive version of this — putting function types back into `isLinearTy` — was measured and frees
 the escaping-counter idiom's live env: exit 255. See docs/ROADMAP.md's Phase C.
 
+### An object KEY the type encoding cannot carry is `NT1040` — the same reason, on the key side
+
+Types are strings, and an object's **layout is its type string**: `{k1:t1,k2:t2}`, split back
+into slots by `objectFields` with a depth/angle-aware scan that knows nothing about quoting. A
+key carrying a character that scan reacts to therefore does not merely look odd — it **moves the
+slot boundaries**. Found by scanning every printable ASCII character through
+`{ "a<C>b": 1, z: 2 }` with node as the oracle; nine of them did, all **at exit 0**:
+
+```ts
+for (const k in { "a,b": 1, z: 2 })   // node  a,b  z      was  ""  b  z
+for (const k in { "a:b": 1, z: 2 })   // node  a:b  z      was  a   z
+for (const k in { "a<b": 1, z: 2 })   // node  a<b  z      was  a<b        ← `z` GONE
+```
+
+`JSON.stringify` happened to trip over the resulting garbage type afterwards (an `NT1005` naming
+a type called `a`), which is why the literal path looked "refused" until it was probed through
+`for-in`. **`Object.fromEntries` had no such accident**: it joins `${key}:${vt}` straight into a
+type, so `Object.fromEntries([["a:number,b", "x"]])` forged a well-formed **two**-field record
+out of a **one**-entry list, type-checked it, and **exited 255 with zero bytes of output**.
+
+Admission is a **round trip**, not a forbidden-character list, and the difference is the point:
+it accepts exactly the keys that provably survive. `a>b`, `a|b`, `a@b`, `a\b`, a balanced
+`a<x>b` and `""` are all still keys, because all of them encode faithfully — a blacklist wide
+enough to be safe would have rejected every one.
+
+Two characters a round trip **cannot** judge are named separately, because they are matched
+against the whole type string by substring, so their safety depends on the key's **neighbours**:
+
+- **`"`** — `widenLiteralTys` pairs quotes across the entire string and replaces what lies
+  between them with `string`. One quoted key alone is harmless; two are not.
+  `{ 'a"b': 1, 'c"d': 2, z: 3 }` enumerated `astringd`, `z` — **two keys fused into one**, exit 0.
+- **`#`** — `hasTypeParam` is `t.includes("#")`, so the key makes a fully substituted type look
+  like it still has an open generic parameter. Already refused, but as an `NT1013` about a
+  feature the program never used.
+
+**`@` is not refused, and that was checked rather than assumed.** `hasTypeRef` is a bare
+`includes` too, but every consumer behind it walks by position, so `{ "x@N": 1, z: 2 }` agrees
+with node even with a recursive `type N` really in the table.
+
+The workaround the hint names is a `Map<string, T>`: a Map key is a runtime string with no
+encoding at all. Pinned in `test/objkey-encoding.test.ts`, which also compiles every claim the
+hint makes — that test caught the hint recommending the statement form `m.set(k, v)`, which is
+itself an `NT1606` here because Maps are persistent.
+
+**`JSON.stringify` never escaped a KEY**, found while testing the survivors. The key is a
+compile-time constant interned straight into the output, so it took none of the `js_json_quote`
+treatment the value side has always had: node writes `{"c\\d":1}` and we wrote `{"c\d":1}`,
+which is not JSON and does not survive its own `JSON.parse`; a tab in a key emitted a raw `0x09`
+byte. Both at exit 0. `jsonKey` (src/codegen.ts) now mirrors `js_json_quote` rule for rule, at
+both emission sites (the compile-time-separator fast path and the runtime-omission path).
+
 ### A function DECLARATION used as a VALUE — the diagnostic was FALSE, and the fix is a shim
 
 ```ts
@@ -1959,15 +2010,61 @@ still holds the spelling.
 is untouched, and so is every applied generic `parseGenericType` maps to a real shape. A
 bare container names its fix (`Map` → "write `Map<string, number>`").
 
-**The residue — three names, annotation position only.** `unknown`, `never` and `object`
-still erase in an annotation, because `src/` uses all three and none has an honest rewrite:
+**The residue — now two names erase, not three.** `never` and `object` still erase to
+`number` in an annotation, because `src/` uses both and neither has an honest rewrite:
 `never` is a divergent return and the exhaustiveness witness `src/ast.ts` calls load-bearing
 (`default: { const impossible: never = e; … }` — "add an `Expr` member and this stops
-compiling"), and `unknown`/`object` are the parameter and identity-set types of the
-reflective AST walks in `checker.ts`/`ownership.ts`/`codegen.ts`. Closing them needs a
-**feature**, not a deletion: a bottom type for `never`; an opaque unusable `Ty`, or
-reflective walks the subset can express, for `unknown`/`object`. Refusing them instead would
-mean deleting a real `tsc`-checked invariant to satisfy a subset limitation.
+compiling"), and `object` is the identity-set type (`Set<object>`, `Map<string, object>`) of
+the reflective AST walks in `ownership.ts`. Closing them needs a **feature**, not a
+deletion: a bottom type for `never`; an opaque unusable `Ty`, or reflective walks the subset
+can express, for `object`. Refusing them instead would mean deleting a real `tsc`-checked
+invariant to satisfy a subset limitation.
+
+**`unknown` got that feature.** It no longer erases: it resolves to the opaque `"unknown"`
+arm of `ScalarTy` (`src/ast.ts`), a type-level name with **no representation and no
+inhabitants**. Nothing is
+assignable to it, so no value ever carries the type and codegen is never reached with it —
+that is the mechanism, not a half-finished version of one. A `Ty` that could hold a value
+would need a runtime tag this compiler does not have.
+
+*What it bought, measured per function* on a linked `src/cli.ts`: **125 of 767 functions
+refused before, 125 after — not one clears.** Every one of the 19 affected bodies is a
+reflective walk (`Object.values(node)`, `Object.keys(obj)` + `obj[k]`, `Set<object>`
+identity) or a caller of one, and each is independently outside the subset. What changed is
+that all 19 diagnostics stop naming `number`:
+
+| function | before | after |
+|---|---|---|
+| `daUse`, `isIdentNode`, `frameThrows`, … | `Cannot compare number with null` | `Cannot compare unknown with null` |
+| `daStmt`, `inferThrowType`, `ModuleGen.build`, … | `arg 0 expects number, got Stmt[]` | `arg 0 expects unknown, got Stmt[]` |
+| `hasHostCall` | `number method 'some' is not supported yet` | `method call on unknown is not supported yet` |
+| `daReads` | `for-of over number is not supported yet` | `for-of over unknown is not supported yet` |
+
+A diagnostic naming a type the source never contains is a defect in its own right: three
+separate lanes read one of these and went looking for a type bug that was not there.
+
+*It also closes the `asStr` hole below, one step earlier.* Nothing is assignable to the
+placeholder, so `asStr(42)` is refused at the **call** and the body's cast is unreachable.
+
+*The cost, stated because it is real.* `function handle(e: unknown) {…}; handle(42)`
+compiled and matched node before; it is refused now. That only ever held where every value
+reaching the slot was a number — i.e. where `unknown` was not needed, since `handle("x")`
+was already refused and with a lying message — but it is capability given up, not merely
+honesty gained.
+
+*Why `unknown` is still listed in `ERASURE_STILL_ALLOWED`.* That set gates the **parse-time**
+refusal, and a parse refusal is fatal to the whole **file** rather than scoped to one
+function body. Measured: removing `unknown` from it stops a linked `src/cli.ts` from parsing
+at all, which takes every per-function number in `docs/self-hosting.md` with it. Rewriting
+`src/`'s 18 `unknown` sites is what would let it leave the set entirely — and those rewrites
+are blocked on the reflective-walk features above, not on `unknown`.
+
+*Why it cannot reuse `Dyn`*, the one tagged box this compiler has. `Dyn` refuses `d === null`
+and `Object.keys(d)`, ICEs on `typeof d` in value position (see below), is not spellable in
+source, and could only receive an AST node by **deep-copying** it into a box tree — which
+would silently break the reference-identity sets (`Set<object>`, the `seen` cycle guards)
+the ownership walks depend on. That is the miscompile direction, so the placeholder stays
+uninhabited on purpose.
 
 All three are refused inside an `as`/`satisfies` **assertion** regardless: an annotation is
 *checked* against the value it annotates, so a wrong erased type produces a refusal, while
@@ -2000,6 +2097,30 @@ boxes whose `as` behaviour `nt_as_unbox`/`nt_as_tag` already check at run time, 
 classifying them would refuse the narrowing casts those checks exist to allow. node erases
 `as` and answers `undefined`; there is no such value here, and the same reasoning already
 refuses an assertion to a *wider object*. Pinned by `test/as-cast.test.ts` section 3b.
+
+#### STILL OPEN — `typeof` a `Dyn` in VALUE position is an internal compiler error
+
+Found while pricing `unknown` against `Dyn`, and unrelated to the erasure — it needs no
+ambient type name and no `unknown` to reproduce:
+
+```ts
+const d = JSON.parse('{"kind":"Identifier"}');
+console.log(typeof d);                  // node: "object", exit 0
+```
+
+nativets raises `InternalError: internal compiler error: no constant 'typeof' for Dyn`
+(`typeofNameOf`, `src/codegen.ts`) — a raw stack trace with no `NT` code and no location in
+the user's program, which is the "frontend accepted something codegen cannot lower" path.
+
+The seam is **value position vs comparison**. `typeof d === "string"` is a supported runtime
+narrowing on a `Dyn` and works; `typeof d` as a *value* — printed, concatenated, assigned —
+has no lowering, because it needs a runtime tag→string dispatch nobody wrote. `Array.isArray(d)`
+and `d.field` are fine, so this is one missing lowering rather than a hole in `Dyn`.
+
+Either answer would be an improvement on an ICE: emit the dispatch (`Dyn` already carries the
+tag, so `"object"`/`"string"`/`"number"`/`"boolean"` is a lookup), or refuse it in the
+**checker** with an `NT` code, which is where the rule says a construct codegen cannot lower
+belongs. Not fixed here — this lane's diff is confined to the `unknown` type itself.
 
 ### Generic `type`/`interface` parameters (`NT1013`) — the same erasure, a third source
 
@@ -3176,6 +3297,56 @@ Semantics are borrowed from tc39/test262 `test/language/expressions/in/` — `S8
 `test/key-presence.test.ts`. The four enumerating `Object.*` constructs and `for-in` are
 unchanged: they ask for the WHOLE key set, which an optional field really does make unanswerable.
 
+### An ANNOTATION's field order wins over the literal's — OPEN, priced, not built
+
+node's key order is a property of the **value**: the literal's creation order. Ours is a
+property of the **type**, so an annotation whose fields are written in a different order from
+the literal reorders the enumeration:
+
+```ts
+type T = { b: number; a: number };
+const o: T = { a: 1, b: 2 };
+Object.keys(o);           // node ["a","b"]   — nativets ["b","a"], exit 0, no diagnostic
+```
+
+This is the same root cause as the optional-field section above — the key set (and here its
+order) is decided at compile time from the type — arriving through a different door. The
+mechanism is exact: `retypeLiteral` (src/checker.ts) sets `e.ty = base`, the annotation's type,
+so the literal is built in the annotation's slot layout; `d.ty = d.annot ?? t` then binds the
+name at the annotation's spelling too, and all four enumeration sites read that one order.
+
+Note what is **not** wrong: the index-key rule and the key/value PAIRING are both right.
+`{ b: 1, "2": 2 }` still enumerates `2` first, and each value is still stored by `fieldIndex`
+rather than by the literal's position — the mispairing that a previous lane's reordering
+introduced (right keys, right values, wrong pairing, exit 0) does not come back.
+
+**Why it is not fixed.** Measured, not estimated. Making the literal's order win — reorder the
+annotation's fields to the literal's in `retypeLiteral`, preserving the nominal tag, and bind
+`d.ty` to the result — does fix the case above and leaves all 399 fixture tests green. It then
+fails **18 tests across 4 files**, and they are all one thing:
+
+```
+NT2001: Cannot compare {a:number,b:string} with undefined
+```
+
+Record type identity here is **string identity** — that is what makes tagged-union membership,
+`restrictUnion` and narrowing work — so `{a:number,b:string}` and `{b:string,a:number}` become
+different types describing the same layout, and every narrowing over them stops attaching.
+Making record identity order-INSENSITIVE is a checker-wide change to `assignable` and the union
+machinery, and it needs a **physical reorder** wherever a value of one order meets a slot layout
+of the other, because `fieldIndex` is a `getelementptr` offset.
+
+And that measurement is a **floor**, not the price: it comes from changing the `const x: T = …`
+path alone. Parameters (`fitsArg`), returns, array-element reshape, spreads, monomorphization,
+the actor message deep-copy and cross-module type refs each independently derive a layout from
+an annotation and were not touched.
+
+So: a broad change to type identity and the object layout rules, to fix programs that annotate a
+record, write its fields in a different order from the annotation, **and** observe enumeration
+order. Priced and declined. The **spelling** half of the same cluster — a numeric key being its
+source text rather than `ToString(ToNumber(…))` — was cheap and IS fixed
+(`test/fixtures/stage22-objarr/numeric-key-spelling.ts`).
+
 ### Strings are reference-counted, not linear (memory model)
 
 Heap strings keep JS **value semantics** (free copy/alias) and are reclaimed by **reference
@@ -3725,6 +3896,52 @@ it, and never reaches this check:
 let s: string | undefined;   // starts as undefined — matches node ✅
 console.log(s);              // prints "undefined", like node
 ```
+
+#### The same rule on a CLASS FIELD (`NT1015`) — and the two holes it used to have
+
+A field is a real slot in the instance's heap block, so the rule above applies unchanged:
+a field nothing ever stores into has **no value**, and the slot's zero is not one. A field
+the constructor never assigns is therefore **refused**:
+
+```ts
+class C { y: number; z: number; constructor(y: number) { this.y = y; } }
+new C(7).z          // node: undefined   — we REFUSE (NT1015)
+```
+
+`tsc --strict` rejects that program too (`TS2564`), so this row is a divergence from
+**node**, not from TypeScript. The escape hatch is the same one locals have, and it is
+likewise not a divergence: widen the type and the field genuinely *is* `undefined`.
+
+| Field | node | us |
+|---|---|---|
+| `z: number;` never assigned | `undefined` | **NT1015** — no value of type `number` |
+| `z: number = 0;` | `0` | `0` ✅ |
+| `z: number \| undefined;` never assigned | `undefined` | `undefined` ✅ |
+| `z?: number;` never assigned | `undefined` | `undefined` ✅ |
+
+Both accepting rows in that table were **wrong answers** until they were fixed, and they
+are worth stating because they are the two ways one rule drifted apart from itself:
+
+- **`z: number | undefined` SEGFAULTED.** The slot-filling store was gated on the `?`
+  *token* rather than on the field's *type*, so `z?: T` was filled and the equivalent
+  explicit union was not — although the parser runs both through the same
+  `makeNullable("undefined", …)` and nothing downstream can tell them apart. The unwritten
+  slot stayed zero and the read dereferenced NULL: **exit 139** against node's `0`, on a
+  program `tsc --strict` accepts (`undefined` *is* in the declared type, so
+  `strictPropertyInitialization` is satisfied).
+- **`z: number` printed `0`.** The refusal was gated on the class having *no* constructor,
+  so the moment a class had one the guard stopped running and that constructor was never
+  checked for actually assigning each field. node prints `undefined`, we printed `0`, and
+  **both exited 0** — nothing in the tree observed it.
+
+One scan over the constructor body now answers both, because parameter properties and
+field initializers are folded into that body before it runs. That scan is deliberately an
+**over-approximation** of definite assignment — a store under an `if` counts as coverage —
+so it can only ever accept, never refuse a valid program. The cost is a residual hole: a
+field assigned on only *some* constructor paths is still accepted and still reads the
+slot's zero on the others. Closing it needs the path-sensitive analysis the `let` rule
+above already has, which is a checker pass and not a syntactic question the parser can
+answer.
 
 ### Block scopes get their own storage
 
@@ -5405,6 +5622,64 @@ relaxing it would cost.
 **Related boundary worth stating explicitly:** `verifyModule` passing means *the module
 parses*, explicitly **not** that it is correct. The segfault above is the proof, and the
 distinction has to stay written down or the check becomes a licence to trust.
+
+## `.includes` / `.indexOf` on an array of non-primitives is REFUSED (was a wrong answer)
+
+`Array#includes`, `#indexOf` and `#lastIndexOf` are all SameValueZero-or-`===` over the
+element, and on a **non-primitive** element node's answer is **reference identity**. This
+value model does not carry object identity, so all three now refuse it — `NT1001`, "arrays
+need the heap value model".
+
+Only `.lastIndexOf` used to carry that guard. Its two siblings fell through to the
+`_str` runtime routine, which ran `strcmp` over the bytes of an `NtArray` struct: an
+out-of-bounds read, and — because that walk stops at the first zero byte — a **silent wrong
+answer at exit 0** whenever it happened to match.
+
+```ts
+const a: number[][] = [[1], [2]];
+const o: number[] = [1];
+a.includes(o);   // node: false   ours (before): true
+a.indexOf(o);    // node: -1      ours (before): 0
+a.lastIndexOf(o);// node: -1      ours: NT1001 — already refused
+```
+
+The three now agree. `number`, `string` and `boolean` elements stay accepted; `boolean` is
+`.includes`-only, since `.indexOf`/`.lastIndexOf` have no boolean runtime routine.
+
+A **`boolean[]` was a third bug at the same site**: the split was two-way (`number` vs
+everything-else) where `.join` already splits three ways, so a boolean slot — which holds
+`zext i1`, neither a `double` nor a `ptr` — reached `nt_arr_includes_str` and codegen
+emitted `call i32 @nt_arr_includes_str(ptr %t3, ptr true)`. That is not valid IR, so it
+surfaced as a raw clang *"constant expression type mismatch"* with no `NT` code and no
+hint. `[true, false].includes(true)` now compiles and matches node.
+
+All three are pinned in `test/array-includes.test.ts`.
+
+## `Object.is` — implemented over primitives, REFUSED on a reference
+
+`Object.is` is SameValue (ES 7.2.10), the third equality in the language. It is now
+implemented for `number`, `string` and `boolean`:
+
+|  | `NaN` vs `NaN` | `+0` vs `-0` |
+|---|---|---|
+| `===` | `false` | `true` |
+| SameValueZero (`Array#includes`, `Set`/`Map` keys) | `true` | `true` |
+| SameValue (`Object.is`) | `true` | **`false`** |
+
+The two "NaN-aware" comparators are deliberately **opposite on signed zero**, so
+`js_same_value` and `nt_arr_includes_num` must never be unified — pinned by the
+cross-check in `test/object-is.test.ts`.
+
+On a **non-primitive** argument node's SameValue is reference identity, which this value
+model does not carry (copy-on-write arrays, single-owner moves), so it is refused —
+`NT1002`, with a hint that says *that*.
+
+**The old hint was a lie, and it is the reason this is written down.** `Object.is` fell
+through to the blanket `Object.<p>` refusal, whose hint reads *"object literals need the
+heap value model"*. `Object.is` is a **static method over two primitives** — no object
+literal is involved, and the advice is unactionable. Worse, `Object.is` is the natural
+`-0` probe, so a wrong hint at exactly that spelling pushed callers onto the clumsier
+`1 / x === -Infinity`.
 
 When a feature ships: delete its row here, move its corpus case out of `KNOWN_UNSUPPORTED`
 in the relevant `test/*conformance*`/`test/gap.test.ts` allow-list, and drop the `NYI` entry.

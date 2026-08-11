@@ -66,6 +66,101 @@ describe("for-in over an object with an OPTIONAL field is refused", () => {
   });
 });
 
+describe("the refusal names the FIRST optional field, and only an optional one", () => {
+  /**
+   * WHICH field the message names is observable, and it is decided by a scan that used to
+   * be `objectFields(ot).find(…)`. That `.find` is refused when the compiler compiles
+   * itself (NT1001 — the found record would alias the array that owns it), so it is now a
+   * loop that copies out the KEY and stops at the first hit. These pin the two properties
+   * that rewrite had to preserve: FIRST wins, and a required field is never picked.
+   *
+   * The empty-key case (`{ "": T }`, where the scan's "nothing found" sentinel could
+   * collide with a real key) is not testable from source today — this parser answers
+   * `NT0001 Expected identifier` for a quoted key in a type position — which is why the
+   * scan carries a separate `found` flag rather than treating `""` as absent.
+   */
+  test("two optional fields: the first one is named", () => {
+    const r = rejectionOf(`type O = { a?: number; z?: number; b: number };\nconst o: O = { b: 2 };\nfor (const k in o) console.log(k);\n`);
+    expect(r?.code).toBe("NT1010");
+    expect(r?.message).toContain("'a'");
+    expect(r?.message).not.toContain("'z'");
+  });
+
+  test("a required field BEFORE the optional one is not named", () => {
+    const r = rejectionOf(`type O = { b: number; a?: number };\nconst o: O = { b: 2 };\nfor (const k in o) console.log(k);\n`);
+    expect(r?.code).toBe("NT1010");
+    expect(r?.message).toContain("'a'");
+    expect(r?.message).not.toContain("'b'");
+  });
+
+  test("`T | null` is NOT optional — its key is always present, so enumeration is allowed", async () => {
+    // node prints both keys: a `null` value still HAS its key. Only `| undefined` (which
+    // is how `a?:` is encoded) makes presence a runtime question.
+    const src = `type O = { a: number | null; b: number };\nconst o: O = { a: null, b: 2 };\nfor (const k in o) console.log(k);\n`;
+    expect(rejectionOf(src)).toBeNull();
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
+describe("the hint's advice COMPILES — every clause of it", () => {
+  /*
+   * THE BUG THIS PINS. The hint used to read:
+   *
+   *   "Read the field instead (`o.a !== undefined`), or make it REQUIRED and assign
+   *    `undefined` when it is missing. Note that `a: T | undefined` is encoded exactly
+   *    like `a?: T` here, so it is refused too…"
+   *
+   * The second suggestion IS `a: T | undefined` — there is no other way to have a
+   * required field that can be missing — so the sentence after it retracts the sentence
+   * before it. Measured: following it reproduced this diagnostic verbatim, same code,
+   * same message. A reader pays a full edit-compile round trip to learn what the hint
+   * already knew.
+   *
+   * It now offers only spellings that work, and each is compiled here against node.
+   */
+  const OPT = `type O = { a?: number; b: number };\nconst o: O = { b: 2 };\n`;
+
+  test("the retracted advice really did land on the same refusal", () => {
+    // Kept as evidence, not as a wish: `a: number | undefined` is the encoding `a?:` has.
+    const r = rejectionOf(`type O = { a: number | undefined; b: number };\nconst o: O = { a: undefined, b: 2 };\nfor (const k in o) console.log(k);\n`);
+    expect(r?.code).toBe("NT1010");
+    expect(r?.message).toContain("optional field 'a'");
+  });
+
+  test("the hint no longer suggests it, and says so explicitly", () => {
+    const r = rejectionOf(`${OPT}for (const k in o) console.log(k);\n`);
+    expect(r?.hint).not.toContain("make it REQUIRED");
+    expect(r?.hint).toContain("NOT `a: T | undefined`");
+  });
+
+  test("clause 1 — `o.a !== undefined` compiles and matches node", async () => {
+    const src = `${OPT}console.log(o.a !== undefined);\nconsole.log(o.b);\n`;
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  test("clause 2 — dropping the `?` makes the object enumerable, and matches node", async () => {
+    const src = `type O = { a: number; b: number };\nconst o: O = { a: 1, b: 2 };\nfor (const k of Object.keys(o)) console.log(k);\n`;
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+
+  test("clause 3 — a Map's key set really is decided at runtime, and matches node", async () => {
+    const src = `let m = new Map<string, number>().set("b", 2);\nif (1 > 0) m = m.set("a", 1);\nfor (const k of m.keys()) console.log(k);\nconsole.log(m.has("a"), m.size);\n`;
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
+  });
+});
+
 describe("the sibling enumerating forms are refused too", () => {
   /** All four `Object.*` enumerators read the same compile-time key list, so all four lie. */
   test.each(["values", "entries", "getOwnPropertyNames"])("Object.%s", (p) => {

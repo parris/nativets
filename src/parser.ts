@@ -12,9 +12,10 @@ import { parseError, nyi, NYI, mutationError, decoratorError, nulLiteral, unknow
 import {
   makeNullable, makeMapTy, makeSetTy, makeFuncTy, objectType, typeParamTy, eraseTypeParams, mapTypesDeep, mapTypesDeepExpr,
   isObjectTy, isFuncTy, classTag, makeUnionTy, unionDiscriminant, widenLiteralTys, stringLitTy, isUnionTy,
-  tagValueIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
+  isNullableTy, nullishKind,
+  tagValueIsEncodable, keyIsEncodable, objectFields, isStringLitTy, HOST_MODULES, unionMembers,
   makeGeneralUnionTy, isGeneralUnionArm, generalUnionArmTypeof, extractUnionMembers, unionWidenedMembers,
-  resolveStaticFieldReads, collectBindingNames, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
+  resolveStaticFieldReads, collectBindingNames, fieldsStoredViaThis, typeRefTy, expandTypeRef, makeArrayTy, exprLoc,
 } from "./ast.ts";
 import type {
   Program, Stmt, Expr, Param, VarDecl, Declarator, Ty, BinaryOp, SwitchCase, ObjectProperty, FuncDecl,
@@ -71,7 +72,11 @@ const BIN: Map<string, Op> = new Map<string, Op>()
   .set("&", { prec: 8 }).set("^", { prec: 7 }).set("|", { prec: 6 })
   .set("&&", { prec: 5, logical: true }).set("||", { prec: 4, logical: true })
   .set("??", { prec: 3, logical: true });
-const ASSIGN_OPS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="]);
+// The lexer has tokenized `**=` since it was written (`PUNCT_3`); it was simply never
+// listed here, so `a **= 2` came out as `Expected ';' but found '**='`. It is listed with
+// the rest now — see `compoundArith` in codegen.ts, which is where `**` stops being like
+// its neighbours (it is `js_pow`, not an LLVM instruction).
+const ASSIGN_OPS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "**=", "&=", "|=", "^=", "<<=", ">>=", ">>>="]);
 // Access modifiers erased on class members and, on ctor params, promoted to parameter properties.
 const PARAM_ACCESS = new Set(["private", "public", "protected", "readonly"]);
 // What follows a class member's NAME. A modifier keyword (`readonly`, `static`, …) counts
@@ -120,10 +125,19 @@ const AMBIENT_TYPES = new Set([
   "ReadableStream", "WritableStream", "TransformStream", "Console", "Buffer", "NodeJS", "globalThis",
 ]);
 /**
- * The three ambient names still allowed to erase, and the ONLY three — a documented
- * residue, not a judgement that they are safe. All three are refused inside an
+ * The three ambient names allowed past `refuseUnknownName`, and the ONLY three — a
+ * documented residue, not a judgement that they are safe. All three are refused inside an
  * `as`/`satisfies` assertion regardless (`parseAssertedType`), which is where the erasure
  * stops being a confusing refusal and becomes a wrong answer.
+ *
+ * TWO OF THE THREE STILL ERASE TO `number`. `unknown` no longer does: it resolves to the
+ * opaque `"unknown"` placeholder instead (see the arm at the end of `resolveNamed`, and
+ * the `ScalarTy` comment in src/ast.ts for why an uninhabited type-level name is the whole
+ * mechanism rather than a half-finished one). It stays in this set because the set gates
+ * the parse-time REFUSAL, and refusing here is fatal to the whole file — measured: with
+ * `unknown` removed from this set a linked `src/cli.ts` stops PARSING, taking every
+ * per-function self-hosting number with it. The entry that follows describes what the
+ * placeholder replaced.
  *
  * WHY THEY ARE HERE. src/ uses all three, and none has an honest rewrite today:
  *
@@ -138,7 +152,11 @@ const AMBIENT_TYPES = new Set([
  *   - `unknown` (18 sites: src/checker.ts, src/ownership.ts, src/codegen.ts) is the
  *     parameter of a REFLECTIVE walk (`scanUsesActors(node: unknown)`), where it is the
  *     correct TypeScript type and a concrete one would be a lie. Those functions are
- *     already refused for their own reasons (`for…in`, `Object.values`, index signatures).
+ *     already refused for their own reasons (`for…in`, `Object.values`, index signatures)
+ *     — and that claim is now MEASURED rather than asserted: erasing to the opaque
+ *     placeholder instead of to `number` moves a linked `src/cli.ts` from 125 refused
+ *     functions to 125. Not one clears. What the 19 affected diagnostics stop doing is
+ *     naming `number`, a type none of those sources contains.
  *   - `object` (2 sites, src/ownership.ts) is an IDENTITY set over heterogeneous AST nodes
  *     (`Set<object>`, `Map<string, object>`), where it is likewise the correct type.
  *
@@ -163,9 +181,15 @@ const AMBIENT_TYPES = new Set([
  * erasure is only one of the ways to get there, and `(n as string)` on an honest `number`
  * emitted the same invalid IR with no ambient name in sight.
  *
+ * That hole is now closed for `unknown` a second, earlier way: nothing is assignable to
+ * the placeholder, so `asStr(42)` is refused at the CALL and the body's cast is never
+ * reached. `never` and `object` still erase, so it stays open for them.
+ *
  * This set should shrink to empty. Removing an entry needs the feature, not just the
- * deletion: a bottom type for `never`, and for `unknown`/`object` either an opaque
- * unusable `Ty` or reflective walks the subset can express.
+ * deletion: a bottom type for `never`, and for `object` either an opaque unusable `Ty` —
+ * the route `unknown` took — or reflective walks the subset can express. `unknown` is
+ * half-way: it has the opaque `Ty`, and it stays listed here only because the parse-time
+ * refusal is file-fatal. Rewriting src/'s 18 sites is what would let it leave entirely.
  */
 const ERASURE_STILL_ALLOWED = new Set(["unknown", "never", "object"]);
 /**
@@ -870,6 +894,12 @@ class Parser {
    *  parsed; spliced at the top of that function's body (see parsePatternParam). */
   private paramPrelude: Stmt[] = [];
   private ident(name: string): Expr { return { kind: "Identifier", name }; }
+  /** The implicit `undefined` an optional param/field erases to. A FACTORY rather than an
+   *  inline literal at each site: an object literal assigned INTO an `Expr`-typed slot has
+   *  its `kind` widened to `string` before the union is matched, so it is refused, while
+   *  the same literal RETURNED from an `Expr`-returning function is contextually typed and
+   *  accepted (the `ident` precedent above). One spelling, and the compiler can read it. */
+  private undef(): Expr { return { kind: "UndefinedLiteral" }; }
 
   /**
    * In-scope generic type parameters (M3). Pushed while parsing a generic function's
@@ -996,6 +1026,45 @@ class Parser {
         this.prevLoc(),
       );
     }
+    // `unknown` erases to an OPAQUE PLACEHOLDER rather than to `number` — the "opaque
+    // unusable `Ty`" `ERASURE_STILL_ALLOWED` names as the precondition for removing it
+    // from that set. It is a TYPE-LEVEL name with no representation and no inhabitants:
+    // nothing is assignable TO it (so no value ever carries it), and no operation on it
+    // is supported (so it never reaches codegen). That is not a limitation to fix later
+    // — it is the whole mechanism. A placeholder that could hold a value would need a
+    // runtime tag this compiler does not have.
+    //
+    // WHY A PLACEHOLDER AND NOT A REFUSAL. Refusing `unknown` outright is the honest
+    // shape, and it is what `ambientTypeHint` already writes advice for, but the refusal
+    // fires in the PARSER, and a parse refusal is fatal to the whole FILE rather than
+    // scoped to one function body. Measured: deleting "unknown" from
+    // `ERASURE_STILL_ALLOWED` takes a linked `src/cli.ts` from "125 of 767 functions
+    // refused" to "does not parse" — every per-function self-hosting number in
+    // docs/self-hosting.md goes dark, because src/ names `unknown` 18 times.
+    //
+    // WHAT IT BUYS, measured per function rather than assumed. It clears NOTHING: the
+    // count is 125 either way. Every one of the 19 functions that erasure blocks is a
+    // REFLECTIVE walk (`Object.values(node)`, `Object.keys(obj)` + `obj[k]`,
+    // `Set<object>` identity) or a caller of one, and each of those is independently
+    // outside the subset. What changes is that all 19 diagnostics stop naming a type the
+    // source never contained: `Cannot compare number with null` becomes `Cannot compare
+    // unknown with null`, and `arg 0 expects number, got Stmt[]` becomes `arg 0 expects
+    // unknown, got Stmt[]`. A diagnostic that names a type the program does not contain
+    // sends the reader to fix the wrong thing, which is a defect in its own right.
+    //
+    // IT ALSO CLOSES THE HOLE `ERASURE_STILL_ALLOWED` DOCUMENTS. `function asStr(e:
+    // unknown): string { return e as string; }` reached clang as "'%t0' defined with
+    // type 'double' but expected 'ptr'" because `e` really WAS a `number` and the
+    // assertion adopted the erasure one indirection later. With no value assignable to
+    // the placeholder, `asStr(42)` is refused at the CALL and the cast is unreachable.
+    //
+    // THE COST, stated because it is a real one. Erasure makes a program work whenever
+    // every value reaching the slot happens to be a number: `function handle(e:
+    // unknown){…}; handle(42)` prints today and is refused here. That only ever held in
+    // the degenerate case where `unknown` was not needed — `handle("x")` was already
+    // refused, and with a lying message — but it is capability given up, not merely
+    // honesty gained.
+    if (id === "unknown") return "unknown" as Ty;
     return "number" as Ty;
   }
 
@@ -1199,10 +1268,44 @@ class Parser {
     if (t.type !== "ident") throw parseError(`Expected identifier at ${t.line}:${t.col}`);
     return this.next().value;
   }
+  /**
+   * A `PropertyName`, as the STRING it names — which for a `NumericLiteral` is not its
+   * source text. ECMA-262 `PropName` of a `NumericLiteral` is `ToString(ToNumber(literal))`,
+   * so `{ 1e3: … }` names the property `"1000"`, `{ 0x10: … }` names `"16"`, and `{ 1.0: … }`
+   * names `"1"`. Returning the token spelling named three properties that do not exist.
+   *
+   * It hid for so long because the CANONICAL spellings — `0`, `1`, `42`, `0.5` — are their
+   * own `ToString(ToNumber(…))`, and those are what a hand-written test reaches for. The
+   * forms that differ are the ones nobody types twice.
+   *
+   * `String(Number(text))` and not a hand-rolled decoder: the lexer keeps radix-prefixed
+   * literals as raw text precisely so this one round trip decodes every form — `0x`/`0b`/`0o`
+   * either case, exponents, a bare trailing `.` — and `Number::toString`'s own switch to
+   * exponential notation (`1e21` → `1e+21`, `1e-7` → `1e-7`) is then node's by construction
+   * rather than by imitation. The `_` separator is already dropped by the lexer, which is
+   * required: `Number("1_000")` is `NaN`.
+   *
+   * The normalized key then feeds the array-index rule (`isArrayIndexKey`), so this fixes
+   * the key's POSITION as well as its name — `1e3` is not an index spelling but `1000` is.
+   * It cannot manufacture a false index: the predicate still tests the canonical spelling,
+   * and `1e-7`/`1.5` canonicalize to forms it rejects.
+   */
   private expectKey(): string {
     const t = this.peek();
-    if (t.type === "ident" || t.type === "str") { this.next(); return t.value; }
-    if (t.type === "num") { this.next(); return t.value; }
+    if (t.type === "ident") { this.next(); return t.value; }
+    // Only a QUOTED key can carry text the type encoding cannot hold — an identifier is
+    // safe by construction, and a numeric key is now `String(Number(…))`, which is digits,
+    // `.`, `-`, `+`, `e`, `Infinity` or `NaN`. Refused here, at the one production that
+    // still knows the key's source position, rather than downstream where the corrupted
+    // type string no longer remembers which key wrecked it. NT1040.
+    if (t.type === "str") {
+      this.next();
+      if (!keyIsEncodable(t.value)) {
+        throw nyi(NYI.KEY_ENCODING, `the object key ${JSON.stringify(t.value)} at ${t.line}:${t.col} (its text would be read as type syntax)`, undefined, { line: t.line, col: t.col });
+      }
+      return t.value;
+    }
+    if (t.type === "num") { this.next(); return String(Number(t.value)); }
     throw parseError(`Expected property key at ${t.line}:${t.col}`);
   }
 
@@ -2665,7 +2768,7 @@ class Parser {
   private mkParam(name: string, annot: Ty | undefined, def: Expr | undefined, rest: boolean, optional: boolean): Param {
     if (optional) {
       annot = makeNullable("undefined", annot ?? "number");
-      if (!def) def = { kind: "UndefinedLiteral" };
+      if (!def) def = this.undef();
     }
     return { name, annot, default: def, rest };
   }
@@ -3012,7 +3115,18 @@ class Parser {
       // block and every field is a real slot, so "absent" has to be WRITTEN as the
       // `undefined` arm of the nullable box. Without this the slot stays zero and a read
       // dereferences NULL. A constructor that assigns the field simply overwrites this.
-      if (init === undefined && optional) init = { kind: "UndefinedLiteral" };
+      //
+      // The condition is the field's TYPE, not the `?` token that may have produced it.
+      // Gating on `optional` covered `x?: T` and missed the equivalent explicit union
+      // `x: T | undefined` — the SAME `Ty` (line 3004 runs the `?` spelling through the
+      // very same `makeNullable("undefined", …)`), so nothing downstream could tell the
+      // two apart, and the second one left the slot zero. `x: number | undefined` with no
+      // initializer is valid strict TypeScript (`tsc --strict` accepts it: `undefined` is
+      // in the declared type, so strictPropertyInitialization is satisfied) and node
+      // prints `undefined`; the binary died with SIGSEGV. Only the `undefined` arm is
+      // filled — `?N` (`T | null`) does not admit `undefined`, and a field typed that way
+      // and left unassigned is rejected by tsc for the same reason it has no value here.
+      if (init === undefined && isNullableTy(ty) && nullishKind(ty) === "undefined") init = this.undef();
       if (init !== undefined) fieldInits.push({ field: member, value: init });
       } finally {
         // `finally` also runs on the `continue`s above, so the scope is popped on every
@@ -3054,12 +3168,43 @@ class Parser {
       ctorBody = [{ kind: "ExprStmt", expr: { kind: "FieldAssign", object: this.ident("this"), field: "message", value: this.ident("message"), viaThis: true, inCtor: true } }];
     }
 
-    // Reject-don't-miscompile: fields are only initialized by the constructor. Without an
-    // explicit ctor, only initialized (and, for Error subclasses, `message`) fields are set;
-    // any other field would be uninitialized garbage — refuse rather than emit it.
-    if (!hadExplicitCtor) {
-      const covered = new Set([...fieldInits.map(fi => fi.field), ...(extendsError ? ["message"] : [])]);
-      for (const f of fields) if (!covered.has(f.key)) throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
+    // Reject-don't-miscompile: fields are only initialized by the constructor, so a field
+    // nothing stores into is uninitialized garbage — refuse rather than emit it.
+    //
+    // This used to be gated on `!hadExplicitCtor`, which meant the guard stopped running
+    // the moment a class had ANY constructor, and that constructor was never checked for
+    // assigning every field. `class C { y: number; z: number; constructor(y: number) {
+    // this.y = y } }` then read `z` as the slot's zero and printed `0` where node prints
+    // `undefined` — both at exit 0, so nothing observed it. (`tsc --strict` rejects that
+    // program with TS2564, which is why no fixture carried the shape; refusing it is this
+    // compiler's own job.) There is no value of type `number` to serve, so it is refused
+    // for the same reason `let s: string; console.log(s);` is (NT1600).
+    //
+    // `ctorBody` already carries the prelude — parameter properties and field
+    // initializers were folded into it above — so ONE scan covers every way a field can
+    // be initialized, and the two cases no longer drift apart.
+    const covered = fieldsStoredViaThis(ctorBody);
+    // `extends Error`: `message` is slot 0 and `super(msg)` sets it, which is not a
+    // `this.f = …` store and so cannot appear in the scan above.
+    const stored = extendsError ? covered.add("message") : covered;
+    for (const f of fields) {
+      if (stored.has(f.key)) continue;
+      if (!hadExplicitCtor) {
+        throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
+      }
+      // A TRUTHFUL hint, not the generic "this class feature is deferred" one: nothing is
+      // deferred here, the program simply has no answer at this type. Each of the three
+      // ways out is compiled against node in test/definite-assignment.test.ts (case 29),
+      // because a hint that names a fix which does not work is worse than no hint.
+      throw nyi(
+        NYI.CLASS_FEATURE,
+        `class '${name}' field '${f.key}' is never assigned by its constructor`,
+        `node reads an unassigned field as \`undefined\`, but '${f.key}' is declared `
+          + `'${f.ty}', which has no such value — the slot would be served as its zero `
+          + `(\`0\`/\`(null)\`) instead. Assign it in the constructor (\`this.${f.key} = …\`), `
+          + `give it an initializer (\`${f.key}: ${f.ty} = …\`), or widen the type to `
+          + `\`${f.ty} | undefined\`, which really does read as \`undefined\``,
+      );
     }
 
     // A FIELD naming its own class is a self-referential instance shape, which a flat
@@ -3210,10 +3355,11 @@ class Parser {
     const fnTy = makeFuncTy(fn.params.map((p) => p.annot ?? "number"), fn.returnAnnot);
     decorators.push({ kind: "VarDecl", declKind: "const", decls: [{ name: cname, annot: fnTy, init }] });
     // The replacement method: forward everything to the (once-)decorated value.
-    emitted.push({
+    const forward: FuncDecl = {
       kind: "FuncDecl", name: fn.name, params: fn.params, returnAnnot: fn.returnAnnot,
       body: [{ kind: "ReturnStmt", argument: { kind: "CallExpr", callee: this.ident(cname), args: fn.params.map((p) => this.ident(p.name)) } }],
-    } as FuncDecl);
+    };
+    emitted.push(forward);
   }
 
   /**

@@ -5,7 +5,40 @@
  * fills in; codegen reads it to choose LLVM types/instructions.
  */
 
-export type ScalarTy = "number" | "boolean" | "string" | "void" | "undefined" | "null" | "Dyn";
+/**
+ * Nominal type names with no structural marker. NOT "types that are a machine scalar" —
+ * `Dyn` is a tagged heap box and `unknown` has no representation at all. What the arms
+ * share is that each is recognized by plain string equality, which is why they live in one
+ * union: `parseTypeAtom`'s `SCALARS` (src/parser.ts) is the smaller, genuinely-scalar set
+ * and deliberately holds neither of those two.
+ *
+ * `"unknown"` IS TypeScript's `unknown`, as an OPAQUE PLACEHOLDER — a type-level name with
+ * no machine representation and, in practice, no inhabitants. It is spelled as the bare
+ * word so every diagnostic that interpolates a `Ty` prints the type the programmer
+ * actually wrote. That is the whole point of it: `unknown` used to erase to `number` (see
+ * `ERASURE_STILL_ALLOWED`, src/parser.ts), so a reflective walk written `f(node: unknown)`
+ * was refused with `Cannot compare number with null` — a diagnostic naming a type its
+ * source never contains, which sends the reader to fix the wrong thing.
+ *
+ * NOTHING ELSE CLAIMS IT, and that is what makes it safe. Every structural `Ty` predicate
+ * anchors on a sigil (`{`, `U<`, `@`, `?U`/`?N`, `#`, a `[]` suffix), and the nominal ones
+ * test exact names; `"unknown"` is in no `SCALARS`, `BuiltinTy` or container set. So it
+ * falls off the end of every classifier, including `reprClass` (src/checker.ts), whose
+ * documented answer for "no opinion" is `undefined` and whose caller refuses on it.
+ * Assignability here is string equality, so ONLY another `unknown` is assignable to an
+ * `unknown` slot — which means no value ever carries the type and codegen is never reached
+ * with it.
+ *
+ * DO NOT give it a representation to "finish" it. A `Ty` that can hold a value needs a
+ * runtime tag to narrow from, and the only tagged box this compiler has is `Dyn` — not a
+ * candidate: `Dyn` refuses `d === null` and `Object.keys(d)`, ICEs on `typeof d` in value
+ * position, is not spellable in source, and could only receive an AST node by DEEP-COPYING
+ * it into a box tree, which would silently break the reference-identity sets
+ * (`Set<object>`, the `seen` cycle guards) the ownership walks depend on. That is the
+ * miscompile direction, so the placeholder stays uninhabited on purpose.
+ */
+export type ScalarTy =
+  | "number" | "boolean" | "string" | "void" | "undefined" | "null" | "Dyn" | "unknown";
 /**
  * The NOMINAL builtin types: reserved type names with no structural marker
  * (`{`/`[]`/`(`/`<`/`?`), so no structural predicate matches them and each is
@@ -417,6 +450,59 @@ const TAG_FORBIDDEN = ",{}<>|[]()\"\\"; // the class `[,{}<>|[\]()"\\]`, as a ch
 export function tagValueIsEncodable(v: string): boolean {
   for (let i = 0; i < v.length; i++) if (TAG_FORBIDDEN.includes(v[i]!)) return false;
   return true;
+}
+
+/**
+ * Can `k` be an object KEY without corrupting the layout? An object's slot list IS its
+ * type string — `{k1:t1,k2:t2}`, split back by `objectFields` above — so a key carrying a
+ * character that split reacts to does not merely look odd, it MOVES THE SLOT BOUNDARIES.
+ * Measured on a scan of every printable ASCII character through `{ "a<C>b": 1, z: 2 }`,
+ * with node as the oracle, nine of them did, all at exit 0 with no diagnostic:
+ *
+ *   for (const k in { "a,b": 1, z: 2 })   node → "a,b","z"    was → "","b","z"
+ *   for (const k in { "a:b": 1, z: 2 })   node → "a:b","z"    was → "a","z"
+ *   for (const k in { "a<b": 1, z: 2 })   node → "a<b","z"    was → "a<b"   ← `z` GONE
+ *
+ * This is a ROUND TRIP and deliberately not a forbidden-character list, because the
+ * property that matters is not "contains a suspicious byte", it is "`objectFields` of the
+ * minted type gives back the fields that were minted" — which is exactly what every
+ * consumer relies on (`fields.length` is an allocation size and `fieldIndex` is a
+ * `getelementptr` offset). Testing the property directly cannot be too NARROW, the way a
+ * hand-written list can: a list wide enough to be safe has to ban `>`, `|`, `"`, `\` and a
+ * balanced `<…>` as well, and every one of those encodes faithfully and works today.
+ *
+ * The probe carries a SECOND, known-good field, and that is the whole subtlety: `a<b` on
+ * its own round-trips perfectly (there is no separator for its dangling angle to swallow)
+ * and only eats the comma once a neighbour exists. A single-field probe would have passed
+ * it. `x:boolean` is the neighbour; `k === "x"` is harmless, since then both fields are
+ * genuinely named `x` and the encoding is still faithful.
+ *
+ * The string is built by hand rather than through `objectType` so the probe is not
+ * reordered by `canonicalKeyOrder` — position is irrelevant here, only faithfulness is.
+ *
+ * `KEY_MARKERS` is the one part that CANNOT be a round trip, and the reason is worth
+ * stating: `#` and `"` are read against the whole type string by SUBSTRING, so whether a
+ * key carrying one is safe depends on what its NEIGHBOURS contain, which no single-key
+ * probe can see.
+ *   - `"` — `widenLiteralTys` pairs quotes across the entire string and replaces what lies
+ *     between them with `string`. One quoted key alone is harmless (there is no closing
+ *     quote, so the scan bails); TWO of them, or one beside a field with a string-LITERAL
+ *     type, are not. Measured: `{ 'a"b': 1, 'c"d': 2, z: 3 }` enumerated `astringd`, `z` —
+ *     two keys silently fused into one, at exit 0.
+ *   - `#` — `hasTypeParam` is `t.includes("#")`, so a key carrying one makes a fully
+ *     substituted type look like it still has an open parameter. Already refused today,
+ *     but as an `NT1013` naming the whole mangled type rather than the key.
+ * `@` is NOT here, and was checked rather than assumed: `hasTypeRef` is also a bare
+ * `includes`, but every consumer behind it walks by POSITION, so `{ "x@N": 1, z: 2 }`
+ * agrees with node even with a recursive `type N` in the table. Banning it would have
+ * refused a program that works.
+ */
+const KEY_MARKERS = "#\""; // whole-string markers in the Ty encoding — see above
+export function keyIsEncodable(k: string): boolean {
+  for (let i = 0; i < k.length; i++) if (KEY_MARKERS.includes(k[i]!)) return false;
+  const probe = objectFields(`{${k}:number,x:boolean}` as Ty);
+  if (probe.length !== 2) return false;
+  return probe[0]!.key === k && probe[0]!.ty === "number" && probe[1]!.key === "x" && probe[1]!.ty === "boolean";
 }
 
 export function isUnionTy(t: Ty): boolean { return typeof t === "string" && t.startsWith("U<") && t.endsWith(">"); }
@@ -1172,7 +1258,12 @@ export interface ConditionalExpr {
 }
 
 /** simple assignment or compound (+= -= *= /= %= &= |= ^= <<= >>= >>>=) */
-export type AssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=";
+// `**=` is here with the rest of the compound family, but it is the ONLY one whose bare
+// operator is not an LLVM instruction or a `BITFN` entry — `**` is `Number::exponentiate`,
+// lowered to `js_pow`. See `compoundArith` in codegen.ts, which is the single place that
+// knows it; adding an operator to this list without adding it there emits a call to
+// `@undefined`.
+export type AssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=";
 export interface AssignExpr {
   kind: "AssignExpr";
   op: AssignOp;
@@ -2542,4 +2633,44 @@ export function mentionsThis(e: Expr): boolean {
   const out: ThisHit = { hit: false };
   thisExpr(e, out);
   return out.hit;
+}
+
+/* ---- pass 5: which fields does a constructor body store into? -------------- */
+
+/** The accumulator for `fieldsStoredViaThis`, in the shape `BoundNames`/`ThisHit` set. */
+//@@mutable
+interface StoredFields { names: Set<string> }
+
+function storedExpr(e: Expr, out: StoredFields): Expr {
+  // TRUTHINESS, not `=== true`: `viaThis` is `?Uboolean`, and comparing a nullable
+  // boolean against a plain one is outside the subset src/ must stay inside (NT2001,
+  // "Cannot compare ?Uboolean with boolean") — the spelling `parseClass`'s own
+  // `if (!p.paramProp) continue` already uses.
+  // `out.names = out.names.add(…)`, not `out.names.add(…)`: `Set` is PERSISTENT here, so
+  // the bare call returns a new set and leaves the receiver untouched (NT1606) — the same
+  // reason `BoundNames` above is written this way.
+  if (e.kind === "FieldAssign" && e.viaThis) out.names = out.names.add(e.field);
+  return walkExprChildren(e, (x: Expr): Expr => storedExpr(x, out), (s: Stmt): Stmt => storedStmt(s, out), KEEP_TY);
+}
+function storedStmt(s: Stmt, out: StoredFields): Stmt {
+  return walkStmtChildren(s, (x: Expr): Expr => storedExpr(x, out), (y: Stmt): Stmt => storedStmt(y, out), KEEP_TY);
+}
+/**
+ * Every field a constructor body stores into via `this.f = …`, ANYWHERE inside it — a pure
+ * visitor in the shape `mentionsThis` established.
+ *
+ * DELIBERATELY AN OVER-APPROXIMATION of "definitely assigned", and the caller depends on
+ * that direction. It answers a purely SYNTACTIC question ("is there such a store at all"),
+ * so a store under an `if` counts even though the else path leaves the slot unwritten. The
+ * over-approximation is the SAFE direction for the one caller (`parseClass`'s
+ * uninitialized-field refusal): erring towards "covered" can only ever accept a program,
+ * never refuse a valid one, so this cannot turn a working class into a false NT1015. The
+ * conditional-store hole it leaves is real and stated at that call site — closing it needs
+ * the flow analysis `checkDefiniteAssignment` runs for locals, which is a checker pass and
+ * not a syntactic question the parser can answer.
+ */
+export function fieldsStoredViaThis(body: Stmt[]): Set<string> {
+  const out: StoredFields = { names: new Set<string>() };
+  for (const s of body) storedStmt(s, out);
+  return out.names;
 }
