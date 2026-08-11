@@ -190,6 +190,23 @@ console.log(f(0));
 `);
   });
 
+  test("the docs/divergences.md repro, scaled — 20 iterations, half of them throwing", async () => {
+    // Verbatim from the "OPEN BUG" entry a previous lane left in docs/divergences.md
+    // (now closed): node prints 190, we exited 133/255 with no output and no diagnostic.
+    // Two fields rather than one, so the second slot proves the object really is intact
+    // when the handler reads it rather than freed-and-still-readable.
+    await matchesNode(`
+class E { message: string; code: number; constructor(m: string, c: number) { this.message = m; this.code = c; } }
+function run(n: number): number {
+  const err = new E("x", n);
+  try { if (n % 2 === 0) throw err; return n; } catch (e) { return e.code; }
+}
+let t = 0;
+for (let i = 0; i < 20; i++) { t = t + run(i); }
+console.log(t);
+`);
+  });
+
   test("a conditional throw does not poison the local for the fall-through", async () => {
     // The program the old SUBTRACTION spelling existed to protect, and the reason A and B
     // had to be fixed together: as a move this is only legal because the throwing branch
