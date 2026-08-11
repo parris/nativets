@@ -509,6 +509,9 @@ const DECLARES = [
   "declare ptr @js_str_trim_end(ptr)",
   "declare ptr @js_str_trim_start(ptr)",
   "declare ptr @js_str_char_at(ptr, double)",
+  // One step of the string ITERATOR (`for…of`): the character at a byte offset, plus its
+  // byte length through the out-parameter. Code-point framed, unlike `js_str_char_at`.
+  "declare ptr @nt_str_cp_at(ptr, double, ptr)",
   "declare ptr @js_str_slice(ptr, double, double)",
   "declare ptr @js_str_substring(ptr, double, double)",
   "declare ptr @js_str_repeat(ptr, double)",
@@ -1994,6 +1997,11 @@ class FnGen {
         const isBytes = isBytesTy(src.ty);
         const el = s.elemTy ?? "string";
         const idx = this.slot("number");
+        // A string is walked by CODE POINT, so the cursor advances by the character's byte
+        // length rather than by 1; `nt_str_cp_at` writes that length here. One slot for the
+        // whole loop — it is read in the update block, immediately after the body wrote it.
+        const advS = isStr ? this.slot("number") : "";
+        let chV = ""; // the character this step handed out, released as the loop advances
         this.emit(`store double 0x0000000000000000, ptr ${idx}`);
         const lenT = this.fresh();
         this.emit(`${lenT} = call double @${isStr ? "js_str_len" : isBytes ? "nt_bytes_len" : "nt_arr_len"}(ptr ${src.v})`);
@@ -2013,9 +2021,20 @@ class FnGen {
         const iB = this.fresh();
         this.emit(`${iB} = load double, ptr ${idx}`);
         if (isStr) {
+          // ONE STEP OF THE STRING ITERATOR — a CODE POINT, not a byte. `js_str_char_at`
+          // over `0 .. js_str_len` framed this by byte, so `for (const c of " Axx")`
+          // ran 6 times where node (and our own `Array.from`, which had already been given
+          // code-point framing) says 4. In node both spellings ARE the same iterator, so
+          // they cannot disagree; here they did, and only one of the two matched node.
+          //
+          // `nt_str_cp_at` answers both halves of a step in one call — the character, and
+          // its byte length through `advS` — so the loop still makes exactly one runtime
+          // call per iteration. The advance is read in the update block below; it is never
+          // 0 (an ill-formed byte advances 1), so this cannot spin.
           const ch = this.fresh();
-          this.emit(`${ch} = call ptr @js_str_char_at(ptr ${src.v}, double ${iB})`);
+          this.emit(`${ch} = call ptr @nt_str_cp_at(ptr ${src.v}, double ${iB}, ptr ${advS})`);
           this.emit(`store ptr ${ch}, ptr ${this.addr(s.name)}`);
+          chV = ch;
         } else if (isBytes) {
           const by = this.fresh();
           this.emit(`${by} = call double @nt_bytes_get(ptr ${src.v}, double ${iB})`);
@@ -2038,9 +2057,23 @@ class FnGen {
         this.to(this.block(updLbl));
         const iU = this.fresh();
         this.emit(`${iU} = load double, ptr ${idx}`);
-        const iN = this.fresh();
-        this.emit(`${iN} = fadd double ${iU}, 1.0`);
-        this.emit(`store double ${iN}, ptr ${idx}`);
+        const iNv = this.fresh();
+        if (isStr) {
+          // The step is the CHARACTER's byte length, not 1 — see the body above. This is
+          // also where the character is handed back: a multi-byte one is a fresh rc-string
+          // (a one-byte one is an interned static, for which release is a documented
+          // no-op, so the two share one line). `updLbl` is reachable only from inside the
+          // body, so `chV` dominates it, and `continue` lands here too. `break`/`return`
+          // jump past it and leak ONE character — the same bounded shape, and the same
+          // reason, as the iterable temporary freed at `endLbl` below.
+          const adv = this.fresh();
+          this.emit(`${adv} = load double, ptr ${advS}`);
+          this.emit(`call void @nt_str_release(ptr ${chV})`);
+          this.emit(`${iNv} = fadd double ${iU}, ${adv}`);
+        } else {
+          this.emit(`${iNv} = fadd double ${iU}, 1.0`);
+        }
+        this.emit(`store double ${iNv}, ptr ${idx}`);
         this.terminate(`br label %${condLbl}`);
         this.to(this.block(endLbl));
         // The ITERABLE temporary: `for (const x of [3,2,1])` iterates an array no

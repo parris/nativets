@@ -369,4 +369,47 @@ describe("ill-formed UTF-8 is never re-framed (the shared UTF-8 decoder)", () =>
       WELL + `const a = Array.from(s);\n` + `console.log(a.length, a.join("") === s, a.indexOf("A"));\n`,
     );
   });
+
+  /*
+   * THE THREE SPELLINGS OF "ITERATE A STRING", AND WHICH UNIT EACH ONE USES.
+   * =======================================================================
+   *
+   * `Array.from(s)`, `for (const c of s)` and `s.split("")` used to give TWO answers for
+   * one ordinary string. On `"\u2001Axx"` — well formed, nothing exotic — node says 4, 4, 4
+   * and we said 4, **6**, **6**: `Array.from` had been given code-point framing (above),
+   * while the other two still walked bytes. Not a divergence anybody chose; §A.2 applied to
+   * two of three doors.
+   *
+   * node's own three do NOT all agree, and that is what decides the fix. Measured:
+   *
+   *     "\u{1f600}".length            2      (UTF-16 code units)
+   *     Array.from("\u{1f600}")       1      code POINT
+   *     for…of "\u{1f600}"            1      code POINT — the same String iterator
+   *     "\u{1f600}".split("")         2      code UNITS: two lone surrogates
+   *
+   * So there are two families, not one. `Array.from` and `for…of` are the SAME iterator
+   * (`%Symbol.iterator%`, which is defined over code points) and must agree. `split("")` is
+   * the LENGTH-INDEXED decomposition: node guarantees `s.split("").length === s.length` and
+   * `s.split("").join("") === s` for every string, and it keeps that guarantee above the BMP
+   * by handing back pieces that are not characters at all.
+   *
+   * §A.2 replaces node's code unit with the UTF-8 BYTE. Carrying both families over:
+   *   - `for…of` joins `Array.from` at CODE POINTS — node-exact for every well-formed string,
+   *     including astral ones, which is agreement we did not have before.
+   *   - `split("")` stays at BYTES, because a byte is our code unit. That keeps
+   *     `split("").length === length` and `split("").join("") === s`, the two identities node
+   *     states for it; code-point framing would break BOTH while only matching node on the BMP.
+   * The counts still differ from node above U+007F for `split`, exactly as `.length` does,
+   * and for the same one reason — which is what §A.2 is.
+   */
+  describe("iteration is by CODE POINT; `split(\"\")` is by code unit, i.e. byte", () => {
+    /** `E2 80 81 41 78 78` — U+2001 EM QUAD then ASCII. 4 code points, 6 bytes. */
+    const S3 = `const s = "\\u2001Axx";\n`;
+
+    test("`for…of` over a multi-byte string counts CODE POINTS, matching node", async () => {
+      await sameBytesAsNode(
+        S3 + `let n = 0;\nfor (const c of s) { n = n + 1; }\nconsole.log(n);\n`,
+      );
+    });
+  });
 });
