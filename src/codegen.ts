@@ -771,6 +771,30 @@ const ACTOR_V4_DECLARES = [
 
 interface Val { v: string; ty: Ty; }
 
+/** A string handed to `js_str_concat`, plus whether THIS frame allocated it. `fresh`
+ *  means "no other owner exists, so releasing it after the concat frees it"; `false` is
+ *  always the safe answer and is what every shape not proved below gets. */
+interface StrTemp { v: string; fresh: boolean; }
+
+/**
+ * Does lowering THIS expression to a `string` allocate a fresh heap string that nothing
+ * else can already own?
+ *
+ * Only two shapes qualify, and both allocate by construction: `js_str_concat` always
+ * returns a NEW buffer (see runtime.c — it memcpy's both inputs and retains neither), and
+ * a template literal is a chain of those. Neither result is bound to a name at the point
+ * it is used as an operand, so this frame is its only owner.
+ *
+ * DELIBERATELY NOT LISTED, though they allocate too: a method producer (`.toUpperCase()`,
+ * `.slice()`), because "does this method allocate" is a per-method fact and a wrong `true`
+ * here is a PREMATURE FREE — the failure this predicate exists to avoid, and one macOS
+ * cannot see. `false` only ever means "leak it, exactly as before".
+ */
+function allocatesString(e: Expr): boolean {
+  if (e.kind === "TemplateLiteral") return true;
+  return e.kind === "BinaryExpr" && e.op === "+" && e.ty === "string";
+}
+
 // Like `FnGen` below, a module emitter is an accumulator: `this.strings`/`this.strDefs`
 // grow and `this.arrowCounter` counts up as the module is built. `@@mutable`, in the same
 // pragma spelling.
@@ -2403,6 +2427,41 @@ class FnGen {
     return t;
   }
 
+  /**
+   * Did `coerceToString` ALLOCATE, or hand back a string it borrowed?
+   *
+   * Exactly the two arms that call a REGISTERING runtime producer: `number` reaches
+   * `js_num_to_str` and an array reaches `nt_arr_join_*`, both of which `nt_str_register`
+   * their result at rc=1. Everything else borrows — a `string` is returned unchanged, and
+   * `undefined`/`null`/`boolean` become interned literals, which are not in the refcount
+   * table at all.
+   *
+   * The `isNullableTy` guard is not decoration: it MIRRORS `coerceToString`'s own dispatch
+   * order, which tests nullable BEFORE number. A `?Unumber` takes `coerceToStringNullable`
+   * (which may return a borrowed inner string), so answering "allocated" for it on the
+   * strength of its base type would release a string this frame does not own.
+   */
+  private coercionAllocates(t: Ty): boolean {
+    if (isNullableTy(t)) return false;
+    return t === "number" || isArrayTy(t);
+  }
+
+  /** One operand of a concatenation: lowered, coerced, and labelled with whether this
+   *  frame owns the result. Freshness comes from the COERCION when the operand needed
+   *  one, and from the EXPRESSION SHAPE when it was already a string. */
+  private concatOperand(e: Expr): StrTemp {
+    const val = this.genExpr(e);
+    const fresh = val.ty === "string" ? allocatesString(e) : this.coercionAllocates(val.ty);
+    return { v: this.coerceToString(val), fresh };
+  }
+
+  /** Drop a concat operand this frame allocated. Emitted AFTER the `js_str_concat` that
+   *  consumes it, which copies its inputs — so the release is the last reference and the
+   *  buffer is reclaimed rather than leaked. A no-op for a borrowed operand. */
+  private releaseTemp(t: StrTemp): void {
+    if (t.fresh) this.emit(`call void @nt_str_release(ptr ${t.v})`);
+  }
+
   // ---- expressions ----
   /**
    * The codegen half of the checker's `type()` funnel: a VALUE never carries the folded
@@ -2547,11 +2606,22 @@ class FnGen {
         throw internalError(`codegen reached the expression kind ${e.kind}, which the checker should have expanded or refused`);
 
       case "TemplateLiteral": {
+        // A chain of concats, and every link but the last is garbage the moment the next
+        // one copies it. `acc` starts as an interned QUASI — a literal, never in the
+        // refcount table — and becomes frame-owned as soon as the first concat replaces
+        // it, which is what `accFresh` tracks.
         let acc = this.mod.intern(e.quasis[0]!);
+        let accFresh = false;
         for (let i = 0; i < e.exprs.length; i++) {
-          const part = this.coerceToString(this.genExpr(e.exprs[i]!));
-          acc = this.concat(acc, part);
-          acc = this.concat(acc, this.mod.intern(e.quasis[i + 1]!));
+          const part = this.concatOperand(e.exprs[i]!);
+          const withPart = this.concat(acc, part.v);
+          if (accFresh) this.emit(`call void @nt_str_release(ptr ${acc})`);
+          this.releaseTemp(part);
+          // The trailing quasi is a literal, so only the accumulator needs dropping —
+          // and `withPart` is always a concat result, hence always this frame's.
+          acc = this.concat(withPart, this.mod.intern(e.quasis[i + 1]!));
+          this.emit(`call void @nt_str_release(ptr ${withPart})`);
+          accFresh = true;
         }
         return { v: acc, ty: "string" };
       }
@@ -2894,9 +2964,16 @@ class FnGen {
           return { v: t, ty: "number" };
         }
         if (op === "+" && e.ty === "string") {
-          const l = this.coerceToString(this.genExpr(e.left));
-          const r = this.coerceToString(this.genExpr(e.right));
-          return { v: this.concat(l, r), ty: "string" };
+          // Both operands are CONSUMED by the concat (it copies), so whichever of them
+          // this frame allocated is dead on the next instruction and nothing else owns
+          // it — it is not a local, so no scope exit would ever have released it. The
+          // result is the caller's; it is never released here.
+          const l = this.concatOperand(e.left);
+          const r = this.concatOperand(e.right);
+          const out = this.concat(l.v, r.v);
+          this.releaseTemp(l);
+          this.releaseTemp(r);
+          return { v: out, ty: "string" };
         }
         const l = this.genExpr(e.left);
         const r = this.genExpr(e.right);
