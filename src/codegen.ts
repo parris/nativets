@@ -5687,9 +5687,32 @@ class FnGen {
     // load from the wrong offset. This is the `objectFields("@N")` phantom-record trap,
     // and it has now cost this project two silent wrong answers.
     if (isTypeRefTy(obj.ty)) throw internalError(`field read '.${prop}' on the folded reference ${obj.ty} — the receiver must be unfolded first`);
+    // A UNION receiver is the SAME trap one arm down, and it was live: `objectFields` of a
+    // `U<…>` is empty, so `fieldType` is undefined and `fieldIndex` answers **-1**. The gep
+    // below then read i64 at index -1 — BEFORE the object — which measured as exit 139 with
+    // empty stdout on `x.b?.inner.kind === "A"` (docs/divergences.md). A field common to
+    // every member has a real, shared slot, and `unionCommonField` is the function that
+    // knows it; anything not common to all members cannot be read off the union at all.
+    if (isUnionTy(obj.ty)) {
+      const common = unionCommonField(obj.ty, prop);
+      if (common === undefined)
+        throw internalError(`field read '.${prop}' on the union ${obj.ty}: not a field every member shares, so it has no common slot — the checker should have narrowed or refused first`);
+      const ugep = this.fresh();
+      this.emit(`${ugep} = getelementptr i64, ptr ${obj.v}, i64 ${common.index}`);
+      const uslot = this.fresh();
+      this.emit(`${uslot} = load i64, ptr ${ugep}`);
+      return { v: this.fromSlot(uslot, common.ty), ty: common.ty };
+    }
     const ft = fieldType(obj.ty, prop)!;
+    const idx = fieldIndex(obj.ty, prop);
+    // THE FLOOR. `fieldIndex` answers -1 for "no such field", and every negative index here
+    // is an out-of-bounds READ that LLVM accepts and the verifier cannot see. Two shapes
+    // have reached it (a folded `@N`, guarded above; a union, guarded just now), so the
+    // remaining ones become a loud compiler bug rather than a third silent memory error.
+    if (idx < 0)
+      throw internalError(`field read '.${prop}' on ${obj.ty}: no such field (fieldIndex answered ${idx}), which would emit a getelementptr BEFORE the object`);
     const gep = this.fresh();
-    this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${fieldIndex(obj.ty, prop)}`);
+    this.emit(`${gep} = getelementptr i64, ptr ${obj.v}, i64 ${idx}`);
     const slot = this.fresh();
     this.emit(`${slot} = load i64, ptr ${gep}`);
     return { v: this.fromSlot(slot, ft), ty: ft };

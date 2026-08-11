@@ -1221,15 +1221,28 @@ console.log(f());
     expect(codeOf(src)).toBe("NT2001");
   });
 
-  test("REFUSED: an OPTIONAL link (`?.`), whose result is a fresh nullable", () => {
+  /* NO LONGER REFUSED. The refusal was load-bearing while it stood — lifting it without
+   * the fix below made this SEGFAULT (exit 139, empty stdout, node prints `s n s`), because
+   * the chain's member access on a UNION resolved the field to index -1 and codegen emitted
+   * `getelementptr i64, ptr %obj, i64 -1`. `genFieldRead` resolves a union receiver through
+   * `unionCommonField` now and floors any negative index into a compiler bug, so the
+   * discriminant is read from its real shared slot. Asserted differentially rather than as
+   * a refusal, and both members plus the absent case are covered. */
+  test("an OPTIONAL link (`?.`) reads the discriminant from its shared slot", async () => {
     const src = `${BOX}interface Outer { b?: Box }
 function f(x: Outer): string {
   if (x.b?.inner.kind === "A") { return "n"; }
   return "s";
 }
 console.log(f({}));
+console.log(f({ b: { name: "p", inner: mkA(7) } }));
+console.log(f({ b: { name: "q", inner: mkB("hi") } }));
 `;
-    expect(codeOf(src)).not.toBe(null);
+    expect(codeOf(src)).toBe(null);
+    const oracle = runWithNode(src);
+    const ours = await compileAndRun(src);
+    expect(ours.stdout).toBe(oracle.stdout);
+    expect(ours.exitCode).toBe(oracle.exitCode);
   });
 
   test("the narrowing does not leak PAST the arm it was proved in", () => {

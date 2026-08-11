@@ -4279,15 +4279,12 @@ class Checker {
           // shape behind a refusal. So the refusal stands for every base but these three.
           const nlBase = baseTy(l), nrBase = baseTy(r);
           const scalarBase = nlBase === "number" || nlBase === "boolean" || nlBase === "string";
-          // …and NOT an optional chain. `x.b?.inner.kind === "A"` is where the reachable
-          // damage was: the chain's member access on a UNION resolves the field to index
-          // -1 and codegen emits `getelementptr i64, ptr %obj, i64 -1` — a read BEFORE the
-          // object, exit 139 with empty stdout. That defect is pre-existing and lives in
-          // the chain, not in this comparison; `test/unions.test.ts` had been holding the
-          // whole shape behind a refusal ("an OPTIONAL link, whose result is a fresh
-          // nullable"), and that refusal has to keep standing until the `-1` is fixed.
-          const chained = isOptChainExpr(e.left) || isOptChainExpr(e.right);
-          if (isNullableTy(l) !== isNullableTy(r) && nlBase === nrBase && scalarBase && !chained) return "boolean";
+          // An optional chain is admitted too, but ONLY because the `-1` it used to reach
+          // is fixed: `genFieldRead` now resolves a UNION receiver through
+          // `unionCommonField` and refuses a negative index outright, so
+          // `x.b?.inner.kind === "A"` reads the discriminant's real shared slot. Measured
+          // against node: `s n s`, exit 0, where it was exit 139 with empty stdout.
+          if (isNullableTy(l) !== isNullableTy(r) && nlBase === nrBase && scalarBase) return "boolean";
           // No hint: the ONE mismatch that had actionable advice — a nullable against its own
           // base — is compiled now (the arm above), so `mixedNullableHint` fired on nothing
           // and was removed with this call. What reaches here is an unrelated pair
