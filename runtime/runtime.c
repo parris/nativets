@@ -4120,10 +4120,21 @@ const char *js_num_to_radix_string(double value, double radixd) {
 
 #define NT_DATE_MAX 8.64e15 /* ES TimeClip: |t| > 8.64e15 ms is an Invalid Date */
 
-/* ES TimeClip: NaN or out of range -> NaN, else truncate toward zero. */
+/* ES TimeClip: NaN or out of range -> NaN, else truncate toward zero.
+ *
+ * The `+ 0.0` is NOT redundant. TimeClip is ToIntegerOrInfinity(t) clamped
+ * (21.4.1.15), and ToIntegerOrInfinity ends with "If integer is -0, return +0"
+ * (7.1.5) — so node's time value for anything in (-1, 0] is POSITIVE zero.
+ * Truncation alone keeps the sign (`-0.5` truncates to `-0.0`, and `-0.0 < 0`
+ * is false so `-0` itself falls into the `floor(t)` arm unchanged), which stored
+ * a NEGATIVE zero. That is a real value difference — `1 / new Date(-0).getTime()`
+ * was `-Infinity` where node says `Infinity` — and both `String()` and
+ * `toISOString()` erase the sign, so it survived every string-shaped test.
+ * IEEE-754 round-to-nearest makes `-0.0 + 0.0` exactly `+0.0` and leaves every
+ * other double (NaN included) untouched, so this is the whole normalisation. */
 static double nt_time_clip(double t) {
   if (!(t >= -NT_DATE_MAX && t <= NT_DATE_MAX)) return NAN; /* also catches NaN */
-  return t < 0 ? -floor(-t) : floor(t);
+  return (t < 0 ? -floor(-t) : floor(t)) + 0.0;
 }
 
 /* Howard Hinnant's civil_from_days / days_from_civil (proleptic Gregorian),

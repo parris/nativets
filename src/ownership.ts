@@ -406,11 +406,19 @@ function isInlinedHofArrow(property: string, recvTy: Ty | undefined, cbKind: str
   return recvTy !== undefined && isArrayTy(recvTy);
 }
 
-/** Peel a method CHAIN back to what it started from: `a.bump().bump()` ⇒ `a`. */
+/** Peel a method CHAIN back to what it started from: `a.bump().bump()` ⇒ `a`.
+ *
+ *  RECURSIVE rather than a `let cur` loop, and that is what keeps it inside the subset
+ *  `src/` compiles. Narrowing is killed by ASSIGNMENT to the narrowed name anywhere in
+ *  the region, so `cur = cur.callee.object` in the body made `cur.callee` in the
+ *  CONDITION unreadable — NT2001 "Property 'callee' does not exist on <UNION>", the same
+ *  refusal `isInlinedHofArrow` above documents. A parameter is never reassigned, so the
+ *  tag test narrows for real. Its sibling `fieldRoot` below was already written this way,
+ *  and the two now peel their respective spines identically. Same fixpoint, same result,
+ *  same tail shape — this is a spelling change, not a semantic one. */
 function chainRoot(e: Expr): Expr {
-  let cur = e;
-  while (cur.kind === "CallExpr" && cur.callee.kind === "MemberExpr") cur = cur.callee.object;
-  return cur;
+  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") return chainRoot(e.callee.object);
+  return e;
 }
 
 /** Peel a FIELD path back to what it starts from: `this.mod.strings` ⇒ `this`.
@@ -605,11 +613,24 @@ class Analyzer {
    *  so every pre-existing entry reads exactly as before; the addition is `this.<field>`,
    *  which became reachable when a `@@mutable` class's array field learned `.push`
    *  (`Checker.accumulatorName`). Without the path key that append was a SILENT WRONG
-   *  ANSWER rather than a refusal — see `iterationPath`. */
+   *  ANSWER rather than a refusal — see `iterationPath`.
+   *
+   *  A count of ZERO means "not borrowed"; the key is not removed. That is what keeps
+   *  `popBorrow` inside the subset `src/` compiles, and it is the only spelling that can
+   *  be. `.set`/`.add` return the RECEIVER under node and a NEW collection here, so the
+   *  `x = x.set(…)` rebind means the same thing in both — but `.delete` returns a BOOLEAN
+   *  under node, so `this.borrowed = this.borrowed.delete(n)` would assign `true` when
+   *  this compiler runs on `bun`. There is no `.delete` spelling that is correct in both
+   *  languages, so the count carries the answer instead of the key's presence.
+   *
+   *  Sound because `isBorrowed` is the ONLY reader of this map — nothing iterates it and
+   *  nothing reads `.size`, so a resting zero entry is indistinguishable from an absent
+   *  one. An unmatched `popBorrow` drives the count to 0 or below, which the old code
+   *  reached by deleting an absent key; `> 0` answers false for both. */
   private borrowed = new Map<string, number>();
   private pushBorrow(n: string): void { this.borrowed = this.borrowed.set(n, (this.borrowed.get(n) ?? 0) + 1); }
-  private popBorrow(n: string): void { const c = (this.borrowed.get(n) ?? 1) - 1; if (c <= 0) this.borrowed.delete(n); else this.borrowed = this.borrowed.set(n, c); }
-  private isBorrowed(n: string): boolean { return this.borrowed.has(n); }
+  private popBorrow(n: string): void { this.borrowed = this.borrowed.set(n, (this.borrowed.get(n) ?? 1) - 1); }
+  private isBorrowed(n: string): boolean { return (this.borrowed.get(n) ?? 0) > 0; }
 
   /**
    * The BORROW PATH of a for-of iterable / mutation receiver, or `null` when this scope
@@ -671,15 +692,33 @@ class Analyzer {
    */
   private checkMutableArgs(e: { callee: Expr; args: Expr[] }): void {
     if (this.mutableArgs.size === 0 && this.mutableArgProps.size === 0) return;
-    const [name, idx] = e.callee.kind === "Identifier"
-      ? [e.callee.name, this.mutableArgs.get(e.callee.name)]
-      : e.callee.kind === "MemberExpr"
-        ? [e.callee.property, this.mutableArgProps.get(e.callee.property)]
-        : ["", undefined];
+    // Two PLAIN bindings rather than a destructured pair. `[name, idx]` is a
+    // heterogeneous tuple — `string` in slot 0, `Set<number> | undefined` in slot 1 —
+    // and nativets has no tuple type, so an array literal has to have one element type
+    // (NT2001 "array elements must share a type"). The `else` arm's `["", undefined]`
+    // falls out with it: `idx === undefined` returns on that path anyway, exactly as
+    // before.
+    let name = "";
+    let idx: Set<number> | undefined = undefined;
+    if (e.callee.kind === "Identifier") {
+      name = e.callee.name;
+      idx = this.mutableArgs.get(e.callee.name);
+    } else if (e.callee.kind === "MemberExpr") {
+      name = e.callee.property;
+      idx = this.mutableArgProps.get(e.callee.property);
+    }
     if (idx === undefined) return;
     for (const i of idx) {
-      const a = e.args[i];
-      if (a === undefined || a.kind !== "Identifier") continue;
+      // A LENGTH test rather than `a === undefined`, and it is the stronger spelling in
+      // both languages. Comparing an `Expr` union against `undefined` is NT2001 (nativets
+      // types an element read as the element type, not `T | undefined`) — and the read
+      // that would have produced the `undefined` PANICS out of range here (Stage 41),
+      // so the old guard could never have run. `idx` holds parameter positions, so `i`
+      // is never negative, and a call's `args` is dense: this admits and skips exactly
+      // what the `undefined` test did under node.
+      if (i >= e.args.length) continue;
+      const a = e.args[i]!;
+      if (a.kind !== "Identifier") continue;
       if (this.borrowParams.has(a.name) && !this.mutableParams.has(a.name)) {
         this.report({
           code: OWN_CODES.MUTATE_THROUGH_BORROW,
@@ -772,13 +811,20 @@ class Analyzer {
   /** Linear locals of every ACTIVE scope that are still owned — what a `return` from
    *  inside a nested block must free (innermost first). */
   private ownedInScope(state: State): string[] {
-    const out: string[] = [];
-    for (let i = this.scopes.length - 1; i >= 0; i--) out.push(...this.scopes[i]!.filter((n) => this.droppable(n, state)));
-    out.push(...this.ownedTopLevel(state));
+    // APPEND BY REBUILD, not `push(...)`. Arrays are immutable in nativets (NT1606) and
+    // a spread ARGUMENT is NT1006; `[...a, ...b]` is the supported spelling and is what
+    // `scoped` below already uses. Both the ORDER of the result (innermost scope first —
+    // codegen frees in this sequence) and the order the `droppable` calls happen in are
+    // unchanged, and the second matters as much as the first: `droppable` records into
+    // `condDrops` as a side effect, so re-ordering the appends would re-order the
+    // null-on-move decisions.
+    let out: string[] = [];
+    for (let i = this.scopes.length - 1; i >= 0; i--) out = [...out, ...this.scopes[i]!.filter((n) => this.droppable(n, state))];
+    out = [...out, ...this.ownedTopLevel(state)];
     // A `return` jumps past every block's drop marker, so it frees the enclosing
     // closure envs too. Never both: reaching the marker means not having returned.
-    for (let i = this.closureScopes.length - 1; i >= 0; i--) out.push(...this.closureScopes[i]!);
-    out.push(...this.topClosures);
+    for (let i = this.closureScopes.length - 1; i >= 0; i--) out = [...out, ...this.closureScopes[i]!];
+    out = [...out, ...this.topClosures];
     return out;
   }
 
@@ -811,7 +857,9 @@ class Analyzer {
     state: State,
     extra: string[] = [],
   ): void {
-    const declared = [...extra, ...declaredLinear(list, new Set(this.aliasOf.keys()))].filter((n) => this.linear.has(n));
+    // `new Set([...m.keys()])`, not `new Set(m.keys())`: a Map iterator is only supported
+    // in a for-of, an `Array.from` or a spread (NT1014). Same set, same order.
+    const declared = [...extra, ...declaredLinear(list, new Set([...this.aliasOf.keys()]))].filter((n) => this.linear.has(n));
     // Closure envs the block provably owns (see `nonEscapingClosures`). Purely
     // syntactic, so unlike `declared` they need no move state and no `droppable` check —
     // a name that could be moved anywhere is not a candidate in the first place.
@@ -862,15 +910,35 @@ class Analyzer {
    * is what makes the re-walk safe (test/block-drops.test.ts).
    */
   private arrowScope(list: Stmt[], state: State): void {
-    const own = new Set<string>();
-    collectLinear(list, own);
+    let own = new Set<string>();
+    own = collectLinear(list, own);
     const aliases = new Map<string, string>();
     collectAliases(list, (t) => this.isMutableInstance(t), aliases);
-    for (const a of aliases.keys()) own.delete(a); // an alias owns nothing, so it is never dropped
-    const added: string[] = [];
-    for (const n of own) if (!this.linear.has(n)) { this.linear = this.linear.add(n); added.push(n); }
+    // Both removals below are spelled as FILTERS, for the reason `popBorrow` documents:
+    // `.delete` returns a boolean under node and a new collection here, so no rebind
+    // means the same thing in both languages. Neither filter changes a set.
+    //
+    // An alias owns nothing, so it is never dropped. Tested where `own` is CONSUMED
+    // instead of removed from it beforehand — `own` has no other reader, so
+    // `own \ aliases.keys()` and "skip the alias keys at the single use" are the same
+    // set, element for element.
+    let added = new Set<string>();
+    for (const n of own) {
+      if (aliases.has(n) || this.linear.has(n)) continue;
+      this.linear = this.linear.add(n);
+      added = added.add(n);
+    }
     this.loop(state, (st) => { this.scoped(list, st); });
-    for (const n of added) this.linear.delete(n);
+    // Restore: `this.linear` without exactly the names this scope added. Rebuilt by
+    // keeping the others, which preserves both the membership and the insertion order
+    // the per-name `.delete` loop left behind. Anything a NESTED `arrowScope` left in
+    // `this.linear` is kept, exactly as the targeted delete kept it — the rebuild is
+    // scoped to `added`, never a wholesale snapshot restore.
+    if (added.size > 0) {
+      let restored = new Set<string>();
+      for (const n of this.linear) if (!added.has(n)) restored = restored.add(n);
+      this.linear = restored;
+    }
   }
 
   private stmt(s: Stmt, state: State): void {
@@ -1163,25 +1231,35 @@ class Analyzer {
         }
         if (consume && this.borrowBindings.has(e.name)) {
           const owner = this.aliasOf.get(e.name);
+          // Built as a statement rather than a nested ternary: the arms are `string`,
+          // `string` and `undefined`, so the inner conditional is `string | undefined`
+          // and the outer one is NT2001 "Ternary branches differ: string vs ?Ustring".
+          // Same three arms, same order, same text.
+          let hint: string | undefined = undefined;
+          if (owner !== undefined && owner !== "") {
+            hint = `\`${e.name}\` names the value \`${owner}\` owns, so handing it out would leave \`${owner}\` to free a pointer the receiver still holds — hand out \`${owner}\` itself instead`;
+          } else if (this.borrowParams.has(e.name)) {
+            // The one CONSUMING position the language has, and the way out of this
+            // refusal for the shape it actually blocks: storing a parameter into an
+            // object. `constructor(readonly d: T)` makes the parameter a move rather
+            // than a borrow, and the `new` site gives the value up.
+            hint = `a parameter is a BORROW — the caller still owns the value and drops it when its scope ends, so a second owner here would free it twice. To take OWNERSHIP of an argument, declare it as a constructor PARAMETER PROPERTY (\`constructor(readonly ${e.name}: T)\`), which stores it into the object and moves it at every \`new\` site; otherwise build and return a new value instead of handing this one out`;
+          }
           this.report({
             code: OWN_CODES.MOVE_OUT_OF_BORROW,
             message: `cannot move out of \`${e.name}\`: it is borrowed (the owner is elsewhere)`,
             line: e.loc?.line ?? 0,
-            hint: owner !== undefined && owner !== ""
-              ? `\`${e.name}\` names the value \`${owner}\` owns, so handing it out would leave \`${owner}\` to free a pointer the receiver still holds — hand out \`${owner}\` itself instead`
-              : this.borrowParams.has(e.name)
-                // The one CONSUMING position the language has, and the way out of this
-                // refusal for the shape it actually blocks: storing a parameter into an
-                // object. `constructor(readonly d: T)` makes the parameter a move rather
-                // than a borrow, and the `new` site gives the value up.
-                ? `a parameter is a BORROW — the caller still owns the value and drops it when its scope ends, so a second owner here would free it twice. To take OWNERSHIP of an argument, declare it as a constructor PARAMETER PROPERTY (\`constructor(readonly ${e.name}: T)\`), which stores it into the object and moves it at every \`new\` site; otherwise build and return a new value instead of handing this one out`
-                : undefined,
+            hint: hint,
           });
           return;
         }
         if (!this.linear.has(e.name)) return;
+        // `st !== undefined && st.moved` rather than `st?.moved`: the optional chain does
+        // not carry its narrowing into the body, so `st.at` below is "possibly undefined"
+        // (NT2001). `Map.get` never yields `null`, so the two tests admit exactly the
+        // same states.
         const st = state.get(e.name);
-        if (st?.moved) {
+        if (st !== undefined && st.moved) {
           this.report({ code: OWN_CODES.USE_AFTER_MOVE, message: `use of moved value: \`${e.name}\``, line: e.loc?.line ?? 0, movedAt: st.at });
           return;
         }
@@ -1778,7 +1856,11 @@ function closureDecls(list: Stmt[], out: Map<string, object>): void {
   for (const s of list) {
     if (s.kind === "VarDecl") {
       for (const d of s.decls) {
-        if (d.init === undefined || d.init === null || d.init.kind !== "ArrowFunction") continue;
+        // No `=== null` arm: `Declarator.init` is `init?: Expr`, so it is absent or an
+        // `Expr` and never null — the parser has no site that writes one (the only
+        // nullable `init` in the tree is `ForStmt`'s, a different field). The dead arm
+        // was also a refusal, since comparing the `Expr` union against null is NT2001.
+        if (d.init === undefined || d.init.kind !== "ArrowFunction") continue;
         if (!isFuncTy(d.ty ?? "number")) continue;
         // A name declared twice in one scope would be freed twice for one live slot.
         if (out.has(d.name)) { out.set(d.name, {}); continue; } // an unreachable node ⇒ its `name` disqualifies it below
@@ -1859,7 +1941,8 @@ function nonEscapingClosures(list: Stmt[], shadowed: Set<string>): string[] {
   const decls = new Map<string, object>();
   closureDecls(list, decls);
   if (decls.size === 0) return [];
-  const cands = new Set(decls.keys());
+  // Spread, not the bare iterator — see `scoped` (NT1014). Same set, same order.
+  const cands = new Set([...decls.keys()]);
   const escaped = new Set<string>();
   scanMentions(list, "", cands, new Set(decls.values()), false, undefined, false, new Set(), escaped);
   return [...cands].filter((n) => !escaped.has(n) && !shadowed.has(n));
@@ -1994,16 +2077,36 @@ function collectVarTys(stmts: Stmt[], out: Map<string, Ty>): void {
   }
 }
 
-function collectLinear(stmts: Stmt[], out: Set<string>): void {
+/*
+ * RETURNS the accumulator; every caller and every recursive step threads it back with
+ * `out = collectLinear(…, out)`.
+ *
+ * This is fix #2 from test/discarded-mutator.test.ts, and it is the only one available
+ * here. `out` is a PARAMETER the caller reads back, so the rebind that works for a local
+ * (`out = out.add(n)` with no return) would compile and silently lose every write — the
+ * caller keeps its own binding and never sees the new set. Under nativets a `Set` is
+ * persistent, so the bare `out.add(n)` this used to be is a guaranteed no-op, and the
+ * name would never be linear: `scoped()` intersects the block's declarations with this
+ * set, so an empty answer means an empty drop marker and one leaked allocation per
+ * execution — the exact failure the `TryStmt` comment below records from the last time
+ * this set came back short.
+ *
+ * A NO-OP under bun, where `src/` runs today, and that is what makes the change checkable:
+ * node's `.add` returns the RECEIVER, so `out = out.add(n)` self-assigns and
+ * `out = collectLinear(s.body, out)` re-binds the same object. Byte-identical IR over the
+ * corpus is therefore the expected result, not merely a hoped-for one — any drift would
+ * mean a threading mistake.
+ */
+function collectLinear(stmts: Stmt[], out: Set<string>): Set<string> {
   for (const s of stmts) {
     switch (s.kind) {
-      case "VarDecl": for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out.add(d.name); break;
-      case "IfStmt": collectLinear(s.consequent, out); if (s.alternate) collectLinear(s.alternate, out); break;
-      case "WhileStmt": case "DoWhileStmt": collectLinear(s.body, out); break;
-      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") collectLinear([s.init as Stmt], out); collectLinear(s.body, out); break;
-      case "ForOfStmt": collectLinear(s.body, out); break;
-      case "SwitchStmt": for (const c of s.cases) collectLinear(c.body, out); break;
-      case "BlockStmt": collectLinear(s.body, out); break;
+      case "VarDecl": for (const d of s.decls) if (isLinearTy(d.ty ?? "number")) out = out.add(d.name); break;
+      case "IfStmt": out = collectLinear(s.consequent, out); if (s.alternate) out = collectLinear(s.alternate, out); break;
+      case "WhileStmt": case "DoWhileStmt": out = collectLinear(s.body, out); break;
+      case "ForStmt": if (s.init && (s.init as Stmt).kind === "VarDecl") out = collectLinear([s.init as Stmt], out); out = collectLinear(s.body, out); break;
+      case "ForOfStmt": out = collectLinear(s.body, out); break;
+      case "SwitchStmt": for (const c of s.cases) out = collectLinear(c.body, out); break;
+      case "BlockStmt": out = collectLinear(s.body, out); break;
       // A `try` was MISSING here, and it was a LEAK rather than a refusal: `scoped()` is
       // called on all three lists, so `declaredLinear` did find an array declared inside
       // one — but `scoped` then intersects that with `this.linear`, which is what this
@@ -2016,16 +2119,17 @@ function collectLinear(stmts: Stmt[], out: Set<string>): void {
         // the `TryStmt` case in `stmt`) and `declaredLinear` cannot see it, so `scoped`
         // is handed it explicitly and needs it to be linear for that to count.
         const bound = s.param;
-        if (s.handler !== null && bound !== null && isLinearTy(s.catchTy ?? "string")) out.add(bound);
-        collectLinear(s.block, out);
-        if (s.handler) collectLinear(s.handler, out);
-        if (s.finalizer) collectLinear(s.finalizer, out);
+        if (s.handler !== null && bound !== null && isLinearTy(s.catchTy ?? "string")) out = out.add(bound);
+        out = collectLinear(s.block, out);
+        if (s.handler) out = collectLinear(s.handler, out);
+        if (s.finalizer) out = collectLinear(s.finalizer, out);
         break;
       }
-      case "MultiStmt": collectLinear(s.stmts, out); break;
+      case "MultiStmt": out = collectLinear(s.stmts, out); break;
       default: break;
     }
   }
+  return out;
 }
 
 export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
@@ -2163,7 +2267,7 @@ export function analyzeOwnership(checked: CheckedProgram): OwnDiag[] {
     }
     let linear = new Set<string>();
     for (const p of params) if (isLinearTy(p.ty)) linear = linear.add(p.name);
-    collectLinear(body, linear);
+    linear = collectLinear(body, linear);
     for (const a of aliases.keys()) linear.delete(a); // an alias owns nothing
     for (const u of untrack) linear.delete(u);
     // Droppable = linear locals declared directly in this scope (NOT params — those

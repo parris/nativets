@@ -7,7 +7,7 @@
  * supported programs.
  */
 
-import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, FieldAssign, Declarator } from "./ast.ts";
+import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, FieldAssign, Declarator, Param } from "./ast.ts";
 import { mentionsThis } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
 import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray, stringLiteralValue, exprTy } from "./ast.ts";
@@ -438,8 +438,18 @@ interface AccessPath { name: string; binding: Binding; path: string; ty: Ty }
  */
 interface BodyFrame { body: Stmt[]; binds: Set<string>; innerBinds: Set<string>; closureAssigned?: Set<string> }
 
-/** A `bodyChain` frame for a body, recording the names it binds itself. */
-function bodyFrame(params: { name: string }[], body: Stmt[]): BodyFrame {
+/** A `bodyChain` frame for a body, recording the names it binds itself.
+ *
+ *  `Param[]`, not the structurally minimal `{ name: string }[]` this and `ownBindings`
+ *  used to declare. Both read `p.name` and nothing else, so the narrow type was the
+ *  honest TypeScript — but it is not a type this compiler can PASS. A record's layout IS
+ *  its field list here, so a `Param` (six slots) and a `{ name: string }` (one) are
+ *  different shapes, and an array of one is not an array of the other however covariant
+ *  tsc is willing to be. Every caller already passes `Param[]` (or `[]`), so naming that
+ *  type costs no generality and puts two more of the compiler's own functions inside the
+ *  subset it compiles. Widening the checker to ACCEPT the old spelling would have been the
+ *  other direction, and the wrong one: it needs the element reshaped, not just permitted. */
+function bodyFrame(params: Param[], body: Stmt[]): BodyFrame {
   const binds = ownBindings(params, body);
   // A SECOND, independent `ownBindings` call seeds `innerBinds` — deliberately NOT `binds`.
   // `blockBindings` accumulates with `out = out.add(n)`, which reads as persistent (it is,
@@ -2315,7 +2325,7 @@ class Checker {
    * `emptyArrayError` — TypeScript's answer there is `any[]`, and guessing an element type
    * is exactly the silent wrong answer we exist to avoid.
    */
-  private defaultParamTy(p: { name: string; default?: Expr }, scope: Scope): Ty | undefined {
+  private defaultParamTy(p: Param, scope: Scope): Ty | undefined {
     if (!p.default) return undefined;
     const t = this.type(p.default, scope);
     if (t === "undefined" || t === "null")
@@ -3863,7 +3873,11 @@ class Checker {
         if (e.op === "!") { this.rejectVacuousCollectionTest(e.operand, "this `!` operand", "the `!` is always `false`"); return "boolean"; }
         if (e.op === "void") return "undefined";
         if (e.op === "~") { if (t !== "number") throw typeError(`'~' needs number`); return "number"; }
-        if (e.op === "+") return "number"; // numeric coercion of number/string/boolean/null/undefined
+        // `+` is ToNumber, and it used to return `number` for EVERY operand without
+        // looking at one — so `coerceToNumber`'s fall-through answered a constant NaN for
+        // a Date, an array and a nullable box alike, at exit 0. Default-deny here, exactly
+        // as `checkStringCoercion` does one operator along.
+        if (e.op === "+") { this.checkNumberCoercion(t, "unary `+`", exprLoc(e.operand) ?? exprLoc(e)); return "number"; }
         if (t !== "number") throw typeError(`Unary '-' needs number, got ${t}`);
         return "number";
       }
@@ -3942,6 +3956,20 @@ class Checker {
           // A general union is a BOX: `===` on it compared the two boxes' TAGS, so
           // `1 === 2` came out true. Refuse until the arms are compared themselves.
           for (const t of [l, r]) refuseUnboxedUnion(t, "`===`");
+          // TWO DATES. node compares Date IDENTITY, not the time value: two distinct Dates
+          // are `false` however equal their instants, and an Invalid Date IS `===` itself
+          // even though `NaN !== NaN`. nativets represents a Date AS its time value, so
+          // there is no identity left to compare and BOTH plausible codegens are wrong for
+          // a program somebody writes. It used to reach codegen's `js_str_eq` fall-through
+          // and emit invalid IR — a build error with no code and no hint, which is worse
+          // than either wrong answer. The hint's `.getTime()` spelling is compiled against
+          // node in test/narrowing.test.ts, including the caveat, because a hint that hands
+          // back a DIFFERENT answer is worse than no hint at all.
+          if (isDateTy(l) && isDateTy(r))
+            throw nyi(NYI.WEBAPI,
+              `\`${e.op}\` between two Dates (node compares object IDENTITY, and a Date here IS its time value — so there is no identity left to compare)`,
+              "compare the TIME VALUES instead: `a.getTime() === b.getTime()` (or `+a === +b`). Note that is a VALUE comparison and node's `===` is not: two distinct Dates at the same instant are `true` by time value and `false` by `===`, and an Invalid Date is `false` against itself by time value (`NaN !== NaN`) and `true` by `===`",
+              exprLoc(e));
           if (l !== r) throw typeError(`Cannot compare ${l} with ${r}`, exprLoc(e), mixedNullableHint(e, l, r));
           return "boolean";
         }
@@ -5425,6 +5453,30 @@ class Checker {
         this.checkArgs(e.args, sig, scope, `'.${e.callee.property}'`);
         return sig.ret;
       }
+      // A NULLABLE receiver, named as itself before the last-resort arm below claims it.
+      //
+      // Both `x?.m()` and `x.m()` land here when `x` is `T | null` / `T | undefined`, and
+      // the generic bucket's catalog hint ("object literals need the heap value model")
+      // is about a milestone that shipped: objects, classes, and `?.` on a FIELD all work.
+      // The one thing that does not is calling a method THROUGH the nullable, and what the
+      // reader has to do about it — narrow, assert, or supply the absent case — is nothing
+      // the inherited hint suggests. Every rewrite named here is compiled and run against
+      // node in test/nullable-assign.test.ts, per "advice a diagnostic gives has to
+      // compile" (docs/self-hosting.md).
+      //
+      // The declared type is quoted rather than the 3 KB structural dump the bare `recv`
+      // produces on the compiler's own `Scope`, which buries the sentence that matters.
+      if (isNullableTy(recv)) {
+        const absent = nullishKind(recv) === "null" ? "null" : "undefined";
+        throw nyi(
+          NYI.OBJECT,
+          `a method call on the nullable receiver \`${exprText(e.callee.object)}\``,
+          `\`${exprText(e.callee.object)}\` may be \`${absent}\`, and a method call through it is not lowered yet — ` +
+          `\`?.\` on a FIELD is, so this is about the CALL. Narrow it first: bind it to a local and test it ` +
+          `(\`const v = ${exprText(e.callee.object)}; if (v !== ${absent}) v.${e.callee.property}();\`), or supply the absent case ` +
+          `(\`v === ${absent} ? … : v.${e.callee.property}()\`). Where it cannot be ${absent}, \`${exprText(e.callee.object)}!.${e.callee.property}()\` asserts that`,
+        );
+      }
       throw nyi(NYI.OBJECT, `method call on ${recv}`);
     }
 
@@ -5492,6 +5544,9 @@ class Checker {
         // rather than supposed — 14 files of the fixture corpus reach it.
         const arg = e.args.length > 0 ? e.args[0] : undefined;
         if (e.callee.name === "String" && arg?.ty) this.checkStringCoercion(arg.ty, "`String(…)`", exprLoc(arg));
+        // `Number(x)` is `+x` by another name — same `coerceToNumber`, same default-deny.
+        // Both spellings shared the NaN fall-through, so both share the guard.
+        if (e.callee.name === "Number" && arg?.ty) this.checkNumberCoercion(arg.ty, "`Number(…)`", exprLoc(arg));
         return g.ret;
       }
 
@@ -5670,14 +5725,21 @@ class Checker {
    * ============================================================ */
 
   /** Date component getters. All take no arguments and return a `number`, except
-   * `toISOString()` (a `string`). A Date is an immutable time value here, so the
-   * `setX` MUTATORS are refused (NT1023) pointing at reconstruction. */
+   * `toISOString()` (a `string`) and `toJSON()` (`string | null`). A Date is an immutable
+   * time value here, so the `setX` MUTATORS are refused (NT1023) pointing at
+   * reconstruction. */
   private inferDateMethod(method: string, args: Expr[], scope: Scope): Ty {
     void scope;
     if (DATE_GETTERS.has(method) || method === "getTime" || method === "valueOf" || method === "toISOString"
         || method === "toJSON") {
       if (args.length !== 0) throw typeError(`Date.${method}() takes no arguments`);
-      return method === "toISOString" || method === "toJSON" ? "string" : "number";
+      // `toJSON` is NOT `toISOString` under another name: 21.4.4.37 takes the primitive
+      // first and RETURNS null for a non-finite time value (step 3), never reaching the
+      // `toISOString` invocation in step 4. So an Invalid Date's `toJSON()` is `null` and
+      // the method cannot throw — which makes its type `string | null`, node-exactly, so
+      // `?? "…"` and `=== null` compose the way they do in node.
+      if (method === "toJSON") return makeNullable("null", "string");
+      return method === "toISOString" ? "string" : "number";
     }
     if (method.startsWith("set"))
       throw nyi(NYI.WEBAPI, `Date method '.${method}' (a Date is an immutable time value — build a new one, e.g. \`new Date(d.getTime() + ms)\`)`);
@@ -7199,6 +7261,46 @@ class Checker {
   }
 
   /**
+   * The NUMERIC half of the same contract: what `+x` / `Number(x)` may coerce.
+   *
+   * DEFAULT-DENY, for the reason its string sibling above is: `coerceToNumber`
+   * (src/codegen.ts) used to end in a bare `return llvmDouble(NaN)`, and the checker
+   * returned `number` for every operand without looking at one — so `+new Date(1000)`
+   * printed `NaN` at exit 0 where node prints `1000`, and so did `+[]` (node 0), `+[1]`
+   * (node 1) and a `number | null` holding null (node 0). That is a silent wrong ANSWER,
+   * the worst outcome available; NT1032's fall-through only ever reached clang.
+   *
+   * The allow-list is `checkStringCoercion`'s, and it is the same list on purpose rather
+   * than by copy: ToNumber of a non-primitive is `ToPrimitive(x, number)` = `valueOf` then
+   * `toString`, and an ordinary object's `valueOf` returns the object — so ToNumber IS
+   * StringToNumber of the value's string form, and a value coerces to a number exactly
+   * when it coerces to a string. Delegating keeps the two lists from drifting apart, which
+   * they would if they were spelled twice.
+   *
+   * Date is the one type where the two hints DIVERGE, and so the one addition. The number
+   * hint runs `valueOf` first and yields the time value; the string hint runs `toString`
+   * and yields `"Thu Jan 01 1970 …"`, which is why `"" + date` stays refused (NT1024) while
+   * `+date` is now ordinary. A Date IS its time value here, so codegen's rule is the
+   * identity — the same rule `%d` already applied in `genFormatNumber`.
+   */
+  /* `at` is spelled structurally, for the reason `checkStringCoercion` records above. */
+  private checkNumberCoercion(t: Ty, what: string, at?: { line: number; col: number; file?: string }): void {
+    if (isDateTy(t)) return;
+    try {
+      this.checkStringCoercion(t, what, at);
+    } catch (e) {
+      // Re-file under the NUMERIC code so the hint talks about numbers. A refusal that
+      // advised `JSON.stringify(x)` for a `+x` would be a lying diagnostic — the one
+      // failure mode a shared code makes easy.
+      if (!(e instanceof NTError) || e.diag.code !== NYI.STRINGIFY.code) throw e;
+      const hint = t === "Dyn"
+        ? "a `JSON.parse` result carries its type at RUNTIME, so `+d.f` has no static numeric form. Narrow it first — `d.f as number`, or `d.f as string` if the JSON really holds a numeric string — or type the whole parse (`JSON.parse(s) as { f: number }`), and the coercion becomes ordinary"
+        : undefined;
+      throw nyi(NYI.TONUMBER, `${what} on a ${t}`, hint, at);
+    }
+  }
+
+  /**
    * Are `a` and `b` ONE type written at two FOLD DEPTHS? Type IDENTITY, normalized over
    * the `@N` back-edge — NOT a subtyping or widening relation.
    *
@@ -8156,7 +8258,7 @@ function collectAssigned(e: Expr, direct: Set<string>, closure: Set<string>, inA
  * elsewhere in the same function could still mean the outer one; that direction stays
  * conservative.
  */
-function ownBindings(params: { name: string }[], body: Stmt[]): Set<string> {
+function ownBindings(params: Param[], body: Stmt[]): Set<string> {
   let out = new Set<string>();
   for (const p of params) out = out.add(p.name);
   for (const s of body) {

@@ -85,6 +85,30 @@ console.log(new Date(8.64e15 + 1).getTime());
 console.log(new Date(NaN).getTime());
 `,
   },
+  /*
+   * TimeClip is `ToIntegerOrInfinity(t)` clamped (ECMA-262 21.4.1.15), and
+   * ToIntegerOrInfinity maps -0 to +0 (7.1.5 step 3: "If integer is -0, return +0").
+   * So EVERY time value in (-1, 0] clips to POSITIVE zero in node.
+   *
+   * The runtime truncated toward zero and kept the sign, so the stored time value was
+   * `-0` and every reader of it saw a negative zero. That is a real VALUE difference,
+   * not a printing one — but `String()` and `toISOString()` both erase the sign, so
+   * only `console.log` (util.inspect prints `-0`) and a DIVISION expose it. The `1/x`
+   * rows are the load-bearing ones: on main they printed `-Infinity`.
+   */
+  {
+    name: "TimeClip normalises -0 to +0 — probed with 1/x, which the string forms hide",
+    code: `
+console.log(new Date(-0).getTime());
+console.log(new Date(-0.5).getTime());
+console.log(new Date(-0.9).getTime());
+console.log(1 / new Date(-0).getTime());
+console.log(1 / new Date(-0.5).getTime());
+console.log(1 / new Date(0).getTime());
+console.log(new Date(-1.5).getTime());
+console.log(1 / new Date(-1).getTime());
+`,
+  },
 ]);
 
 /*
@@ -185,6 +209,29 @@ try {
   console.log("caught");
 }
 console.log("after");
+`,
+  },
+  /*
+   * `Date.prototype.toJSON` is NOT `toISOString` by another name. 21.4.4.37 takes the
+   * primitive FIRST and returns `null` when it is a non-finite Number — step 3, before
+   * step 4 ever invokes `toISOString` — so an Invalid Date serialises as `null` and the
+   * method never throws. Its result type is therefore `string | null`, which is why the
+   * `?? "-"` row below is part of the case rather than a separate one.
+   *
+   * `JSON.stringify(invalidDate)` was already correct (`nt_date_to_json` checks for NaN),
+   * which is exactly what hid this: only the DIRECT `.toJSON()` call routed through
+   * `toISOString` and exited 1 with empty stdout where node prints `null` and carries on.
+   */
+  {
+    name: "toJSON() of an Invalid Date is null, not a throw (21.4.4.37 step 3)",
+    code: `
+console.log(new Date(NaN).toJSON());
+console.log(new Date(8640000000000001).toJSON());
+console.log(new Date(0).toJSON());
+console.log(new Date(NaN).toJSON() ?? "-");
+console.log(new Date(0).toJSON() ?? "-");
+console.log(new Date(NaN).toJSON() === null);
+console.log("still here");
 `,
   },
 ]);
