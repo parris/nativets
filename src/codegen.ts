@@ -717,6 +717,13 @@ const DECLARES = [
   "declare ptr @nt_coll_map_new()",
   "declare ptr @nt_coll_map_from_coll(ptr)",
   "declare ptr @nt_map_put_slot(ptr, i32, i64, i64)",
+  // IN-PLACE variants, for a `@@mutable` binding. `NtColl` is a wrapper over the
+  // persistent internals, so these run the ordinary op and copy the new wrapper's fields
+  // back into the receiver — see runtime/nt_mapset.c and test/runtime/collinplace_test.c.
+  "declare void @nt_map_put_slot_inplace(ptr, i32, i64, i64)",
+  "declare void @nt_set_add_slot_inplace(ptr, i32, i64)",
+  "declare void @nt_map_remove_slot_inplace(ptr, i32, i64)",
+  "declare void @nt_set_remove_slot_inplace(ptr, i32, i64)",
   "declare i64 @nt_map_get_slot(ptr, i32, i64)",
   "declare i32 @nt_map_has_slot(ptr, i32, i64)",
   "declare ptr @nt_map_remove_slot(ptr, i32, i64)",
@@ -4639,8 +4646,15 @@ class FnGen {
       // null for a miss), `.has` a boolean, `.getAll` a string[], `.toString` the
       // normalized serialization.
       if (isSearchParamsTy(recv.ty)) return this.genSearchParamsMethod(e.callee.property, recv, e.args);
-      if (isMapTy(recv.ty)) return this.genMapMethod(e.callee.property, recv, e.args);
-      if (isSetTy(recv.ty)) return this.genSetMethod(e.callee.property, recv, e.args);
+      // STAMPED BY THE CHECKER, not inferred here. `rejectDiscardedMutator` is the pass
+      // that knows the receiver's binding carries `@@mutable`, and it sets the flag on the
+      // one call it exempts — so codegen never has to guess which discarded call was
+      // legal. (An earlier version read "is this call the whole statement?" from codegen's
+      // own side, which was right for every case it saw and would have silently emitted
+      // the persistent op for a marked binding the day the checker's rule widened.)
+      const inPlace = e.inPlaceColl ?? false;
+      if (isMapTy(recv.ty)) return this.genMapMethod(e.callee.property, recv, e.args, inPlace);
+      if (isSetTy(recv.ty)) return this.genSetMethod(e.callee.property, recv, e.args, inPlace);
       // Bytes (stdlib batch 2): TextEncoder#encode -> Uint8Array; TextDecoder#decode -> string.
       if (isTextEncoderTy(recv.ty)) {
         const s = this.genExpr(e.args[0]!);
@@ -6118,7 +6132,7 @@ class FnGen {
     return { v: this.nullBox(tag, slot), ty: makeNullable("null", "string") };
   }
 
-  private genMapMethod(method: string, recv: Val, args: Expr[]): Val {
+  private genMapMethod(method: string, recv: Val, args: Expr[], inPlace: boolean = false): Val {
     const k = mapKeyTy(recv.ty), v = mapValTy(recv.ty);
     const tag = this.keyTag(k);
     const keySlot = () => this.toSlot(this.genExpr(args[0]!)); // arg[0] typed as k
@@ -6134,6 +6148,10 @@ class FnGen {
         const ks = keySlot();
         const vs = this.toSlot(this.genExpr(args[1]!));
         const t = this.fresh();
+        if (inPlace) {
+          this.emit(`call void @nt_map_put_slot_inplace(ptr ${recv.v}, i32 ${tag}, i64 ${ks}, i64 ${vs})`);
+          return recv;
+        }
         this.emit(`${t} = call ptr @nt_map_put_slot(ptr ${recv.v}, i32 ${tag}, i64 ${ks}, i64 ${vs})`);
         return { v: t, ty: recv.ty };
       }
@@ -6163,6 +6181,10 @@ class FnGen {
       case "delete": {
         const ks = keySlot();
         const t = this.fresh();
+        if (inPlace) {
+          this.emit(`call void @nt_map_remove_slot_inplace(ptr ${recv.v}, i32 ${tag}, i64 ${ks})`);
+          return recv;
+        }
         this.emit(`${t} = call ptr @nt_map_remove_slot(ptr ${recv.v}, i32 ${tag}, i64 ${ks})`);
         return { v: t, ty: recv.ty };
       }
@@ -6171,7 +6193,7 @@ class FnGen {
   }
 
   /** Immutable Set methods → nt_hamt scalar-ABI wrappers. `.add`/`.delete` return a NEW handle. */
-  private genSetMethod(method: string, recv: Val, args: Expr[]): Val {
+  private genSetMethod(method: string, recv: Val, args: Expr[], inPlace: boolean = false): Val {
     const el = setElemTy(recv.ty);
     const tag = this.keyTag(el);
     const elSlot = () => this.toSlot(this.genExpr(args[0]!));
@@ -6186,6 +6208,10 @@ class FnGen {
       case "add": {
         const es = elSlot();
         const t = this.fresh();
+        if (inPlace) {
+          this.emit(`call void @nt_set_add_slot_inplace(ptr ${recv.v}, i32 ${tag}, i64 ${es})`);
+          return recv;
+        }
         this.emit(`${t} = call ptr @nt_set_add_slot(ptr ${recv.v}, i32 ${tag}, i64 ${es})`);
         return { v: t, ty: recv.ty };
       }
@@ -6199,6 +6225,10 @@ class FnGen {
       case "delete": {
         const es = elSlot();
         const t = this.fresh();
+        if (inPlace) {
+          this.emit(`call void @nt_set_remove_slot_inplace(ptr ${recv.v}, i32 ${tag}, i64 ${es})`);
+          return recv;
+        }
         this.emit(`${t} = call ptr @nt_set_remove_slot(ptr ${recv.v}, i32 ${tag}, i64 ${es})`);
         return { v: t, ty: recv.ty };
       }

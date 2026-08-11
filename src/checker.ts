@@ -5827,8 +5827,39 @@ class Checker {
       // --- stdlib Batch 3: Date / URLSearchParams instance methods ---
       if (isDateTy(recv)) return this.inferDateMethod(e.callee.property, e.args, scope);
       if (isSearchParamsTy(recv)) return this.inferSearchParamsMethod(e.callee.property, e.args, scope);
-      if (isMapTy(recv)) return this.inferMapMethod(recv, e.callee.property, e.args, scope, e);
-      if (isSetTy(recv)) return this.inferSetMethod(recv, e.callee.property, e.args, scope, e);
+      if (isMapTy(recv) || isSetTy(recv)) {
+        // A MUTATOR ON A `@@mutable` BINDING WHOSE RESULT IS USED is refused, and this
+        // guard is the reason the feature is not a silent wrong answer. The attribute
+        // makes the discarded form update the receiver IN PLACE, so
+        //
+        //     //@@mutable
+        //     const m = new Map<string, number>();
+        //     const v = m.set("a", 1);        // node: m.size 1, v === m
+        //
+        // has two plausible readings and the persistent lowering picks the one node does
+        // not: it answered `m.size === 0`. Before `@@mutable` accepted a collection this
+        // shape did not compile at all, so refusing keeps the promise the attribute makes
+        // ("mutate in place, every handle observes it") the ONLY promise it makes.
+        // `discard`, the parameter `inferCall` already carries — NOT the `discardStmt`
+        // FIELD, which `infer` captures and clears before dispatching, so reading it here
+        // is always `false` and refused the legal discarded form too (measured). The
+        // parameter is the captured value, which is the whole reason it is a parameter.
+        const mut = e.callee.object.kind === "Identifier"
+          && (scope.lookup(e.callee.object.name)?.mutable ?? false);
+        const mutator = isMapTy(recv)
+          ? e.callee.property === "set" || e.callee.property === "delete"
+          : e.callee.property === "add" || e.callee.property === "delete";
+        if (mut && mutator && !discard) {
+          throw mutationError(
+            `\`${exprText(e.callee.object) ?? "c"}\` is \`@@mutable\`, so \`.${e.callee.property}\` updates it IN PLACE and its result is the receiver — taking that result as a NEW collection is not what happens`,
+            `drop the result and let the update stand (\`${exprText(e.callee.object) ?? "c"}.${e.callee.property}(…);\`), then read the binding. To build a SEPARATE version instead, remove the \`//@@mutable\` and rebind (\`x = x.${e.callee.property}(…)\`) — a collection is persistent without the attribute`,
+            exprLoc(e.callee.object) ?? e.loc,
+          );
+        }
+        return isMapTy(recv)
+          ? this.inferMapMethod(recv, e.callee.property, e.args, scope, e)
+          : this.inferSetMethod(recv, e.callee.property, e.args, scope, e);
+      }
       // Bytes (stdlib batch 2): TextEncoder#encode(string) -> Uint8Array (UTF-8);
       // TextDecoder#decode(Uint8Array) -> string (UTF-8).
       if (isTextEncoderTy(recv)) {
@@ -6239,6 +6270,19 @@ class Checker {
     const isMap = recv !== undefined && isMapTy(recv) && (m === "set" || m === "delete");
     const isSet = recv !== undefined && isSetTy(recv) && (m === "add" || m === "delete");
     if (!isMap && !isSet) return;
+    // A `@@mutable` BINDING is exempt: the attribute is the opt-in that says "mutate in
+    // place, and every handle observes it", which is exactly what codegen emits for it
+    // (`nt_map_put_slot_inplace` and its siblings — `NtColl` is a wrapper over the
+    // persistent internals, so the update is a field copy into the cell that already
+    // exists; see test/runtime/collinplace_test.c). Without this, `m.set(k, v)` on a
+    // marked binding was refused as a no-op when it is precisely NOT one.
+    //
+    // Deliberately only an IDENTIFIER receiver whose binding carries the flag — a field or
+    // an element is the `@@mutable`-on-fields question, which is a separate feature.
+    if (e.callee.object.kind === "Identifier") {
+      const b = scope.lookup(e.callee.object.name);
+      if (b !== undefined && (b.mutable ?? false)) { e.inPlaceColl = true; return; }
+    }
     const kind = isMap ? "Map" : "Set";
     // Point at the RECEIVER, not at `e.loc` (the argument list's `(`): the receiver is
     // where the statement starts, which is what a reader scans for. Falls back to the
@@ -6618,15 +6662,23 @@ class Checker {
   /**
    * `@@mutable let xs: T[] = []` — validate the ACCUMULATOR opt-in (docs/decorators.md).
    *
-   * The attribute legalizes exactly one thing, `.push` on this binding, so it is refused
-   * on anything that is not an array: on a `Map`/object/scalar it would be read as "this
-   * value is mutable", which is a much bigger promise than the one implemented.
+   * The attribute legalizes in-place accumulation on this binding: `.push` for an array,
+   * and `.set`/`.add`/`.delete` for a `Map`/`Set`. It stays refused on anything else,
+   * where it would be read as "this value is mutable" — a much bigger promise than the
+   * one implemented.
+   *
+   * MAP/SET WERE EXCLUDED UNTIL THE RUNTIME COULD DO IT, and that is the whole history of
+   * this guard: an array had an in-place path (`nt_arr_push`) and a persistent collection
+   * did not, so marking one promised what nothing delivered. `NtColl` turns out to be a
+   * WRAPPER over the persistent internals, so an in-place update is a field copy into a
+   * cell that already exists — `nt_map_put_slot_inplace` and its siblings, proven in
+   * test/runtime/collinplace_test.c.
    */
   private checkAccumulator(s: { mutable?: boolean; declKind: "let" | "const" }, d: Declarator): void {
     if (!s.mutable) return;
-    if (d.ty === undefined || !isArrayTy(d.ty)) {
+    if (d.ty === undefined || !(isArrayTy(d.ty) || isMapTy(d.ty) || isSetTy(d.ty))) {
       throw decoratorError(
-        `'@@mutable' on '${d.name}', which is not an array (it is '${d.ty ?? "unknown"}')`,
+        `'@@mutable' on '${d.name}', which is not an array, Map or Set (it is '${d.ty ?? "unknown"}')`,
         "`@@mutable` on a `let`/`const` marks an ARRAY ACCUMULATOR — a binding `.push` may append to in place. For a record use `@@mutable type`, for a class `@@mutable class`",
       );
     }
@@ -7544,9 +7596,14 @@ class Checker {
     // attribute legalizes `.push`, and on anything else it would read as a much bigger
     // promise than the one implemented.
     fn.params.forEach((p, i) => {
-      if (p.mutable && !isArrayTy(tys[i]!)) {
+      // …and a `Map`/`Set` parameter, which the runtime can now update in place through
+      // the `NtColl` wrapper. The array-only restriction was not a policy choice: an array
+      // HAD an in-place path (`nt_arr_push`) and a collection did not, so marking one
+      // promised more than was implemented. `nt_map_put_slot_inplace` and its siblings are
+      // that implementation (test/runtime/collinplace_test.c).
+      if (p.mutable && !isArrayTy(tys[i]!) && !isMapTy(tys[i]!) && !isSetTy(tys[i]!)) {
         throw decoratorError(
-          `'@@mutable' on parameter '${p.name}', which is not an array (it is '${tys[i]}')`,
+          `'@@mutable' on parameter '${p.name}', which is not an array, Map or Set (it is '${tys[i]}')`,
           "`@@mutable` on a parameter marks an ARRAY the callee may `.push` to in place. For a record parameter use `@@mutable type`, for a class `@@mutable class`",
         );
       }

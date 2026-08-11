@@ -1346,7 +1346,14 @@ export interface TypeofExpr { kind: "TypeofExpr"; operand: Expr; ty?: Ty; }
  *  are `NT1014` ("Set of U<…>"), which was the first blocker of FIVE of the twelve modules
  *  through the link. Stamping the node also deletes the sub-parser merge the set needed
  *  (`for (const n of sub.awaitedCalls) …`): the nodes are shared, so the mark travels. */
-export interface CallExpr { kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; loc?: Loc; awaited?: boolean; }
+export interface CallExpr {
+  kind: "CallExpr"; callee: Expr; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; loc?: Loc; awaited?: boolean;
+  /** A `Map`/`Set` mutator on a `@@mutable` binding whose result is DISCARDED — codegen
+   *  emits the in-place runtime entry point for it. Another one-way stamp: the checker is
+   *  the only writer (it is the pass that knows the binding carries the attribute) and
+   *  codegen the only reader, exactly like `nullOnMove` and `awaited`. */
+  inPlaceColl?: boolean;
+}
 export interface NewExpr { kind: "NewExpr"; callee: string; args: Expr[]; typeArgs?: Ty[]; ty?: Ty; }
 export interface AsExpr { kind: "AsExpr"; expr: Expr; ty: Ty; } // `expr as Type` — identity retype
 /**

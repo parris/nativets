@@ -55,6 +55,87 @@ function rejectionOf(source: string): { code: string; message: string; hint?: st
  * same class of mistake on arrays: `arr.push(x)` is refused (NT1606) with no check for
  * whether `arr` is read afterwards.
  */
+/** node is the oracle: same stdout AND same exit code. */
+async function sameAsNode(source: string): Promise<void> {
+  const oracle = runWithNode(source);
+  const ours = await compileAndRun(source);
+  expect(ours.stdout).toBe(oracle.stdout);
+  expect(ours.exitCode).toBe(oracle.exitCode);
+}
+/** The NT code a source is refused with, or "compiled". */
+function codeOf(source: string): string {
+  return rejectionOf(source)?.code ?? "compiled";
+}
+
+/*
+ * `@@mutable` ON A COLLECTION — the accumulator opt-in, extended from arrays to Map/Set.
+ *
+ * Everything above describes the PERSISTENT default and stays true: without the attribute
+ * `m.set(k, v)` returns a new map and a discarded result is `NT1606`. The attribute is the
+ * opt-in that makes the discarded form update the receiver IN PLACE, which is what node
+ * does and what an accumulator needs.
+ *
+ * The runtime half is a field copy into a cell that already existed — `NtColl` is a
+ * three-field wrapper over the persistent internals (test/runtime/collinplace_test.c).
+ * The checker stamps the one call it exempts (`CallExpr.inPlaceColl`) so codegen never has
+ * to guess which discarded call was legal.
+ */
+describe("`@@mutable` Map/Set accumulate in place", () => {
+  test("a marked Map matches node for set/delete/size/get and insertion order", async () => {
+    await sameAsNode(`//@@mutable
+const m = new Map<string, number>();
+m.set("a", 1); m.set("b", 2); m.set("c", 3);
+m.delete("b");
+let ks = "";
+for (const k of m.keys()) { ks += k; }
+console.log(m.size, m.get("a"), m.get("b"), ks);
+`);
+  });
+
+  test("a marked Set matches node for add/delete/has/size and iteration order", async () => {
+    await sameAsNode(`//@@mutable
+const s = new Set<string>();
+s.add("x"); s.add("y"); s.add("x");
+s.delete("y");
+let es = "";
+for (const e of s) { es += e; }
+console.log(s.size, s.has("x"), s.has("y"), es);
+`);
+  });
+
+  test("a marked Map PARAMETER accumulates for its caller — the shape with no other spelling", async () => {
+    // `moduleOrder`'s `sources`/`deps` are exactly this: rebinding is NT1608 (a parameter
+    // is a borrow, so the caller never sees it) and before this the opt-in was array-only
+    // (NT1023). There was no way to write it.
+    await sameAsNode(`
+function fill(
+  //@@mutable
+  out: Map<string, number>,
+  n: number,
+): void {
+  for (let i = 0; i < n; i++) { out.set("k" + i, i); }
+}
+//@@mutable
+const m = new Map<string, number>();
+fill(m, 3);
+console.log(m.size, m.get("k0"), m.get("k2"));
+`);
+  });
+
+  /* THE TWO GUARDS. Without them this feature is a silent wrong answer, and both were
+   * measured on the way in rather than reasoned about. */
+  test("an UNMARKED binding is still refused — the persistent default is unchanged", () => {
+    expect(codeOf(`const m = new Map<string, number>();\nm.set("a", 1);\nconsole.log(m.size);\n`)).toBe("NT1606");
+  });
+
+  test("a MARKED binding whose result is USED is refused, not silently persistent", () => {
+    // Measured before the guard: `const v = m.set("a", 1)` left `m.size === 0` where node
+    // says 1. The shape did not compile at all before the attribute accepted collections,
+    // so refusing keeps the attribute's promise the only promise it makes.
+    expect(codeOf(`//@@mutable\nconst m = new Map<string, number>();\nconst v = m.set("a", 1);\nconsole.log(m.size, v.size);\n`)).toBe("NT1606");
+  });
+});
+
 describe("a DISCARDED .set/.add/.delete is refused, not silently dropped", () => {
   test("`m.set(k, v);` in statement position is NT1606, not a no-op", () => {
     const r = rejectionOf(`const m = new Map<string, number>();\nm.set("a", 1);\nconsole.log(m.size);\n`);
