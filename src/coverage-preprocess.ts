@@ -22,10 +22,15 @@
  *     (so `export function f` becomes plain `function f`);
  *   - erases `type X = …;` aliases and `interface X { … }` declarations (type-level,
  *     legitimately erasable — not counted as blockers);
- *   - erases `class X { … }` declarations, RECORDING each as an NT1012 blocker (a real
- *     semantic gap, surfaced in the histogram);
  *   - neutralizes regex literals (`/…/flags` → `""`) so the real lexer doesn't crash on
  *     them.
+ *
+ * It NO LONGER erases `class X { … }`. That line used to read "erases class declarations,
+ * RECORDING each as an NT1012 blocker", and it went stale when minimal classes started to
+ * parse and compile: a class now flows through to the real parser as an ordinary statement
+ * and surfaces its own next blocker (NT1015) there. The consequence is that `stripped`
+ * below has NO producer left and is always empty — see its doc comment for why the field
+ * nonetheless stays.
  * Then it splits the surviving code into top-level statements, so a single
  * un-parseable statement (a generic function, an exotic type) is isolated by the
  * caller's recovery loop rather than blanking the whole file.
@@ -35,8 +40,10 @@
  * One blocking feature, grouped by NT code — the unit of the coverage histogram.
  *
  * It is declared HERE, in the leaf, rather than in `coverage.ts` where it is consumed,
- * because this file PRODUCES the first ones (`stripped`, below) and `coverage.ts`
- * already imports this file for `preprocessForCoverage`. Declaring it in the consumer
+ * because this file's `Preprocessed.stripped` is typed in terms of it and `coverage.ts`
+ * already imports this file for `preprocessForCoverage`. (This used to say that this file
+ * PRODUCES the first blockers; it no longer produces any — see `stripped`. The reason the
+ * declaration lives down here is the cycle below, which is unaffected.) Declaring it in the consumer
  * closed a cycle — `coverage.ts → coverage-preprocess.ts → coverage.ts` — whose closing
  * edge was `import type`. node and bun erase that edge, so the cycle was invisible to
  * them, but the linker (src/modules.ts) links modules in dependency order and resolves
@@ -52,7 +59,27 @@ export interface PreStatement { text: string; line: number }
 export interface Preprocessed {
   /** Surviving top-level statements (module preamble removed, regex neutralized). */
   statements: PreStatement[];
-  /** Constructs erased during the strip that are real blockers (classes → NT1012). */
+  /**
+   * Constructs erased during the strip that are themselves real blockers.
+   *
+   * ALWAYS EMPTY TODAY, and that is a statement about the frontier, not an oversight.
+   * `class` was the only producer this ever had; classes compile now, so nothing is
+   * erased-and-blocking any more. Left in place deliberately rather than deleted:
+   *
+   *   - it is a stable OBSERVABLE in the SH6 self-compile differential, which prints
+   *     `pre.stripped.length` from a generated driver and compares bun against the
+   *     nativets-built binary (test/sh6.test.ts, test/sh6-fuzz.ts). Removing it would
+   *     shrink that seam;
+   *   - `test/self-host-coverage.test.ts` asserts it contains no NT1012, which is the
+   *     regression test for "classes are no longer pre-stripped";
+   *   - docs/self-hosting.md records a byte-for-byte diff of the WHOLE `Preprocessed`
+   *     (statements, lines, `stripped`, `erasedNames`) over a 495-file corpus as the
+   *     evidence for a past rewrite; changing the shape invalidates that baseline.
+   *
+   * So it is the re-entry point for the next erase-and-record construct, not dead weight.
+   * Its consumers in `coverage.ts` are correspondingly inert — noted there too, so nobody
+   * reads them as live logic.
+   */
   stripped: Blocker[];
   /**
    * Every name the strip ERASED a declaration (or an import binding) for, collected as it
