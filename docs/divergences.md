@@ -2917,6 +2917,14 @@ scheduler thread.
 We store strings as NUL-terminated UTF-8 and measure/slice by byte. Identical to JS for
 ASCII (all fixtures); differs for non-ASCII (an emoji is 4 bytes here, 2 UTF-16 units in JS).
 
+**Scope: this is about the UNIT, not about character identity.** §A.2 covers how a string is
+*measured* (`.length`) and *cut* (`slice`, `substring`, `s[i]`, `indexOf`) — byte offsets
+instead of UTF-16 code-unit offsets. It does **not** license returning the wrong *character*.
+`toUpperCase`/`toLowerCase` were once read as covered here and were a no-op outside ASCII;
+they were not covered, and that was a defect, not a decision — `é` → `É` is two bytes to two
+bytes in either encoding, so no unit question arises. It is fixed; the *remaining* limit on
+case mapping is its own entry, **§A.4** below.
+
 > `typeof undefined` (a former divergence) is now **supported** and matches node.
 
 ### 3. Pipeline operator `|>` (Elixir semantics, not TC39 Hack-style)
@@ -2940,6 +2948,69 @@ twin-file strategy (`test/pipeline/*.ts` + hand-desugared `*.twin.ts`, gated by
 `test/pipeline.test.ts`) keeps a defined node oracle. If a Hack-style `|>` ever ships in
 standard JS/TS, our `|>` will diverge from conforming TS (same token, different lowering) — this
 entry is that pre-registered divergence.
+
+### 4. `toUpperCase` / `toLowerCase` map U+0000–U+017F; above that they are the identity
+
+`toUpperCase` and `toLowerCase` are **exact** for every code point up to **U+017F** — ASCII,
+Latin-1 Supplement, and Latin Extended-A. From **U+0180 up** — Latin Extended-B, IPA, Greek,
+Cyrillic, Armenian, Georgian, Latin Extended Additional, and the rest — a character is
+returned **unchanged**, where node maps it:
+
+```ts
+"é".toUpperCase()   // "É"    — covered, matches node
+"straße".toUpperCase()  // "STRASSE" — covered, matches node
+"αβγ".toUpperCase() // "αβγ"  — node gives "ΑΒΓ"        ← the divergence
+"да".toUpperCase()  // "да"   — node gives "ДА"         ← the divergence
+```
+
+**Why the line is here and not further out.** `runtime/` is **libc-only** so it cross-links
+to macOS, Linux, iOS, Android, Windows and wasm. That rules out two otherwise-obvious
+implementations:
+
+- **`toupper`/`towupper` are locale-dependent.** The answer would vary with the environment
+  the binary happens to run in, so the same program would print different bytes on two
+  machines. A divergence that is *stable and documented* is worth more than one that is
+  merely smaller but unpredictable, and an environment-dependent answer cannot be tested
+  against a fixed oracle at all.
+- **The full tables do not fit the constraint.** 2981 code points are cased. Beyond their
+  size, `Default Case Conversion` is not a pure per-character function: it has
+  **context-sensitive** rules (final sigma — `Σ` lowercases to `ς` word-finally and `σ`
+  elsewhere) and **locale-sensitive** ones (Turkish/Azeri dotted and dotless `i`, Lithuanian
+  retained dots). A `const char *` in, `const char *` out, with no locale argument, cannot
+  express either. Implementing the table but not the conditions would be a *wrong* whole,
+  which is worse than a *correct* part.
+
+**What the covered range buys.** Those 360 cased code points collapse to six arithmetic
+rules per direction plus eight exceptions, so the whole thing is exact in ~40 lines with no
+tables at all. It also includes the five **length-changing** unconditional mappings, which
+are the ones an implementation is most likely to get wrong:
+
+| mapping | | note |
+|---|---|---|
+| `ß` U+00DF → `SS` | upper | one character becomes two |
+| `ŉ` U+0149 → `ʼN` | upper | 2 bytes → 3 |
+| `İ` U+0130 → `i` + U+0307 | lower | 2 bytes → 3 — the worst growth ratio, 1.5x |
+| `ı` U+0131 → `I` | upper | 2 bytes → 1 |
+| `ſ` U+017F → `S` | upper | 2 bytes → 1 |
+| `µ` U+00B5 → `Μ` U+039C | upper | leaves the block entirely (into Greek) |
+
+Because of these, neither method can work **in place** or size its output from its input;
+both measure the result with the same mapper that fills it.
+
+**Uncovered input is never damaged, including ill-formed UTF-8.** No decoder is involved:
+the covered range is *self-identifying* in UTF-8 (one byte below 0x80, or two bytes with a
+lead in `0xC2..0xC5` and a real continuation byte after it), so any byte that does not begin
+a covered scalar is copied through singly and longer sequences reassemble untouched. That
+matters more than it sounds, because §A.2 makes ill-formed UTF-8 **reachable from ordinary
+source**: `.slice` cuts bytes, so `"é".slice(0, 1)` is a lone lead byte. `("é".slice(0, 1) +
+"A").toLowerCase()` keeps the stray lead byte as-is and lowers the `A` — it does not re-frame
+the pair into `Á` and eat the `A`, and it does not substitute U+FFFD.
+
+**Tested by** `test/case-mapping.test.ts`: every code point in U+0001–U+017F swept against
+node in both directions, every code point in U+0180–U+FFFF asserted byte-identical (the
+regression test for *this* entry — it fails the day the range widens without this section
+widening), the growth cases built under `-fsanitize=address`, and the half-character slice
+above pinned at the byte level.
 
 ### Template-literal TYPES parse and erase to `string` — the pattern is NOT enforced
 

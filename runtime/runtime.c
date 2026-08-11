@@ -915,16 +915,145 @@ double js_parse_float(const char *s) {
  * the pieces produced by nt_str_split). */
 static char *alloc_str(size_t n) { char *p = (char *)nativets_alloc(n + 1); nt_str_register(p); return p; }
 
-const char *js_str_upper(const char *s) {
-  size_t n = nt_strlen(s); char *o = alloc_str(n);
-  for (size_t i = 0; i < n; i++) o[i] = (s[i] >= 'a' && s[i] <= 'z') ? s[i] - 32 : s[i];
-  o[n] = 0; return o;
+/* ---- toUpperCase / toLowerCase over U+0000..U+017F ------------------------------
+ *
+ * These two used to be a byte-wise ASCII shift, so every non-ASCII letter came back
+ * UNMAPPED: `"é".toUpperCase()` returned `"é"` where node gives `"É"`. The bytes were
+ * well-formed UTF-8 either way — just the unmapped input — so nothing signalled the miss.
+ * A silent wrong answer, and docs/divergences.md §A.2 does not cover it: §A.2 is about
+ * the UNIT a string is MEASURED and SLICED in (our UTF-8 bytes vs node's UTF-16 code
+ * units), while this is about WHICH CHARACTER a character maps to. `é` -> `É` is two
+ * bytes to two bytes in either encoding.
+ *
+ * WHERE THE BOUNDARY IS, AND WHY (docs/divergences.md §A.4). `runtime/` is libc-only so
+ * it cross-links to macOS/Linux/iOS/Android/Windows/wasm. That rules out `towupper`,
+ * whose answer depends on the process LOCALE — the same program would print different
+ * bytes on two machines, which is worse than a documented gap. It also rules out the
+ * full Unicode case tables: 2981 code points are cased, plus the CONTEXT-sensitive rules
+ * (final sigma) and the LOCALE-sensitive ones (Turkish dotted/dotless i), none of which a
+ * `const char *` with no locale argument can even express.
+ *
+ * U+0000..U+017F — ASCII, Latin-1 Supplement, Latin Extended-A — is 360 of those code
+ * points and collapses to six arithmetic rules per direction plus eight exceptions, so it
+ * is EXACT at negligible size. From U+0180 up (Latin Extended-B, Greek, Cyrillic, …) the
+ * mapping is the IDENTITY here and differs from node.
+ *
+ * NO UTF-8 DECODER IS NEEDED, and that is the safety argument, not an optimization: the
+ * covered range is SELF-IDENTIFYING in UTF-8. U+0000..U+007F is one byte below 0x80;
+ * U+0080..U+017F is two bytes with a lead in 0xC2..0xC5. No continuation byte (0x80..0xBF)
+ * and no other lead byte can be mistaken for either, so any byte that does not begin a
+ * covered scalar is copied through ONE AT A TIME and a longer sequence reassembles itself
+ * untouched. Ill-formed input therefore passes through verbatim instead of being
+ * "corrected" into different bytes — the failure mode of a decoder that guesses. */
+
+/* Encode a BMP code point as UTF-8. Every mapping target below is < U+0800, but the
+ * three-byte arm is kept so this stays correct if the table ever grows. */
+static int nt_case_enc(unsigned cp, unsigned char *o) {
+  if (cp < 0x80) { o[0] = (unsigned char)cp; return 1; }
+  if (cp < 0x800) { o[0] = (unsigned char)(0xC0 | (cp >> 6)); o[1] = (unsigned char)(0x80 | (cp & 0x3F)); return 2; }
+  o[0] = (unsigned char)(0xE0 | (cp >> 12));
+  o[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+  o[2] = (unsigned char)(0x80 | (cp & 0x3F));
+  return 3;
 }
-const char *js_str_lower(const char *s) {
-  size_t n = nt_strlen(s); char *o = alloc_str(n);
-  for (size_t i = 0; i < n; i++) o[i] = (s[i] >= 'A' && s[i] <= 'Z') ? s[i] + 32 : s[i];
-  o[n] = 0; return o;
+
+/* The case mapping of ONE code point, UTF-8-encoded into `o` (at most 3 bytes).
+ * Returns the byte count, or 0 for "maps to itself" — which lets the caller copy the
+ * ORIGINAL bytes and so never re-encodes anything it did not deliberately change.
+ * `up` selects toUpperCase (1) or toLowerCase (0).
+ *
+ * The exceptions are tested FIRST because two of them sit inside an arithmetic range and
+ * would otherwise be swallowed by it: U+0131 `ı` is odd in U+0100..U+0137 (the pair rule
+ * would say U+0130, node says `I`), and U+0130 `İ` is even in the same run (the pair rule
+ * would say U+0131, node says `i` + COMBINING DOT ABOVE).
+ *
+ * Three of them are LENGTH-CHANGING, which is why neither of these functions can work in
+ * place or size its output from its input: `ß` -> `SS`, `ŉ` -> `ʼN`, `İ` -> `i` + U+0307
+ * all produce more characters than they consume, while `ı` -> `I` and `ſ` -> `S` produce
+ * fewer bytes. All five are the UNCONDITIONAL entries of SpecialCasing.txt; the
+ * conditional ones (final sigma, Lithuanian, Turkish) are out of scope by the paragraph
+ * above, and none of them has a source in this range. */
+static int nt_case_map(unsigned cp, int up, unsigned char *o) {
+  if (up) {
+    switch (cp) {
+      case 0x00B5: return nt_case_enc(0x039C, o);                 /* µ -> Μ (leaves the block) */
+      case 0x00DF: o[0] = 'S'; o[1] = 'S'; return 2;              /* ß -> SS */
+      case 0x00FF: return nt_case_enc(0x0178, o);                 /* ÿ -> Ÿ */
+      case 0x0131: o[0] = 'I'; return 1;                          /* ı -> I */
+      case 0x0149: { int k = nt_case_enc(0x02BC, o); o[k] = 'N'; return k + 1; } /* ŉ -> ʼN */
+      case 0x017F: o[0] = 'S'; return 1;                          /* ſ -> S */
+      default: break;
+    }
+    if (cp >= 0x61 && cp <= 0x7A) return nt_case_enc(cp - 0x20, o);              /* a-z */
+    if (cp >= 0xE0 && cp <= 0xFE && cp != 0xF7) return nt_case_enc(cp - 0x20, o); /* à-þ, not ÷ */
+    /* Latin Extended-A pairs. Three runs are (even = capital, odd = small) and one,
+     * U+0139..U+0148, is offset by one so the parity flips. U+0138 `ĸ` and U+0149 `ŉ`
+     * fall between runs and are caseless / handled above. */
+    if (cp >= 0x100 && cp <= 0x137 && (cp & 1)) return nt_case_enc(cp - 1, o);
+    if (cp >= 0x139 && cp <= 0x148 && !(cp & 1)) return nt_case_enc(cp - 1, o);
+    if (cp >= 0x14A && cp <= 0x177 && (cp & 1)) return nt_case_enc(cp - 1, o);
+    if (cp >= 0x179 && cp <= 0x17E && !(cp & 1)) return nt_case_enc(cp - 1, o);
+    return 0;
+  }
+  switch (cp) {
+    case 0x0130: { o[0] = 'i'; int k = nt_case_enc(0x0307, o + 1); return k + 1; } /* İ -> i̇ */
+    case 0x0178: return nt_case_enc(0x00FF, o);                                    /* Ÿ -> ÿ */
+    default: break;
+  }
+  if (cp >= 0x41 && cp <= 0x5A) return nt_case_enc(cp + 0x20, o);               /* A-Z */
+  if (cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) return nt_case_enc(cp + 0x20, o); /* À-Þ, not × */
+  if (cp >= 0x100 && cp <= 0x137 && !(cp & 1)) return nt_case_enc(cp + 1, o);
+  if (cp >= 0x139 && cp <= 0x148 && (cp & 1)) return nt_case_enc(cp + 1, o);
+  if (cp >= 0x14A && cp <= 0x177 && !(cp & 1)) return nt_case_enc(cp + 1, o);
+  if (cp >= 0x179 && cp <= 0x17E && (cp & 1)) return nt_case_enc(cp + 1, o);
+  return 0;
 }
+
+/* Decode the covered scalar starting at `s[i]`, or report "not one of ours".
+ * Returns its byte length (1 or 2) and stores the code point; returns 0 for every other
+ * byte, which the caller then copies through singly. See the self-identifying argument
+ * in the block comment above. */
+static int nt_case_scalar(const unsigned char *s, size_t n, size_t i, unsigned *cp) {
+  if (s[i] < 0x80) { *cp = s[i]; return 1; }
+  if (s[i] >= 0xC2 && s[i] <= 0xC5 && i + 1 < n && (s[i + 1] & 0xC0) == 0x80) {
+    *cp = ((unsigned)(s[i] & 0x1F) << 6) | (unsigned)(s[i + 1] & 0x3F);
+    return 2;
+  }
+  return 0;
+}
+
+/* Two passes over the input, both driving the SAME mapper: the first sizes the output
+ * exactly, the second fills it. Sizing from the mapper rather than from a growth bound
+ * is deliberate — a mapping added to `nt_case_map` later cannot overrun a buffer that was
+ * measured by `nt_case_map` itself, whereas any "output is at most 1.5x the input" rule
+ * written here would silently stop being true. */
+static const char *nt_case_impl(const char *s, int up) {
+  const unsigned char *b = (const unsigned char *)s;
+  size_t n = nt_strlen(s);
+  unsigned char buf[4];
+  size_t out_n = 0;
+  for (size_t i = 0; i < n;) {
+    unsigned cp; int len = nt_case_scalar(b, n, i, &cp);
+    if (len == 0) { out_n += 1; i += 1; continue; }
+    int m = nt_case_map(cp, up, buf);
+    out_n += m ? (size_t)m : (size_t)len;
+    i += (size_t)len;
+  }
+  char *o = alloc_str(out_n);
+  size_t w = 0;
+  for (size_t i = 0; i < n;) {
+    unsigned cp; int len = nt_case_scalar(b, n, i, &cp);
+    if (len == 0) { o[w++] = (char)b[i]; i += 1; continue; }
+    int m = nt_case_map(cp, up, buf);
+    if (m) { memcpy(o + w, buf, (size_t)m); w += (size_t)m; }
+    else { memcpy(o + w, b + i, (size_t)len); w += (size_t)len; }
+    i += (size_t)len;
+  }
+  o[w] = 0; return o;
+}
+
+const char *js_str_upper(const char *s) { return nt_case_impl(s, 1); }
+const char *js_str_lower(const char *s) { return nt_case_impl(s, 0); }
 const char *js_str_char_at(const char *s, double id) {
   long n = (long)nt_strlen(s); long i = (long)id;
   if (i < 0 || i >= n) return nt_empty_str();
