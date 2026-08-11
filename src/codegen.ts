@@ -5644,11 +5644,57 @@ class FnGen {
 
   /** HOF loop skeleton. `setup(len)` runs in the pre-loop block (create output
    *  arrays etc. exactly once); then the cond/body blocks are set up and entered. */
-  private hofLoop(recv: Val, tag: string, setup: (len: string) => void): { idx: string; cond: string; upd: string; end: string; elem: (el: Ty, pName: string, iName: string) => string } {
-    const src = recv.v;
+  /**
+   * The receiver's length, emitted BEFORE the loop scaffolding — the value a caller that
+   * pre-sizes an output array (`.map`/`.filter`) needs, and the loop bound for everyone.
+   *
+   * It is a separate call rather than a `setup` CALLBACK that `hofLoop` invoked between
+   * the two emissions. The callback shape forced every pre-sizing caller to write its
+   * output register into a `let` in the ENCLOSING function and assign it from inside the
+   * arrow, which is a write to a captured binding — NT1031, and outside the subset `src/`
+   * must stay inside (three of `codegen.ts`'s self-host blockers were exactly this, plus
+   * two more from `() => {}` passed where `(len: string) => void` was expected). Ordering
+   * is unchanged: callers emit their pre-loop setup between `hofLen` and `hofLoop`, which
+   * is where `setup(len)` used to run, so the IR is byte-identical.
+   */
+  private hofLen(recv: Val): string {
     const len = this.fresh();
-    this.emit(`${len} = call double @nt_arr_len(ptr ${src})`);
-    setup(len); // pre-loop, runs once
+    this.emit(`${len} = call double @nt_arr_len(ptr ${recv.v})`);
+    return len;
+  }
+
+  /**
+   * Bind one iteration's element into the callback's parameter slot (and its INDEX slot,
+   * when the callback declared one), returning the element value.
+   *
+   * A METHOD taking `recv`/`idx` rather than a closure member on `hofLoop`'s result. As a
+   * member it was a function-typed FIELD, so every `L.elem(…)` was a method call on an
+   * object literal — NT1002, and outside the subset `src/` must stay inside; it was the
+   * blocker masked directly beneath the `setup` callback in all five HOF generators.
+   * `hofLoop` never called it, only handed it back, so lifting it out moves no emission.
+   */
+  private hofElem(recv: Val, idx: string, el: Ty, pName: string, iName: string): string {
+    const iB = this.fresh();
+    this.emit(`${iB} = load double, ptr ${idx}`);
+    const slot = this.fresh();
+    this.emit(`${slot} = call i64 @nt_arr_get(ptr ${recv.v}, double ${iB})`);
+    const v = this.fromSlot(slot, el);
+    this.emit(`store ${llvmTy(el)} ${v}, ptr ${this.addr(pName)}`);
+    // The INDEX parameter, when the callback declared one: the loop counter this line
+    // just loaded, copied into the callback's own slot. Re-read per iteration inside the
+    // body block rather than hoisted, so a body that ASSIGNS to `i` perturbs only its own
+    // copy and the loop keeps stepping — node's callback parameter is a fresh binding too.
+    //
+    // `""` for "no index parameter", not an optional parameter: `iName?: string` in this
+    // annotation is outside the subset `src/` must stay inside (the parser does not take
+    // `?` on a function-TYPE parameter, and the recovery reported it as `Cannot find name
+    // 'el'` — the whole tree stopped linking). Same sentinel `hofReturnStack`'s `slot`
+    // already uses two screens down.
+    if (iName !== "") this.emit(`store double ${iB}, ptr ${this.addr(iName)}`);
+    return v;
+  }
+
+  private hofLoop(recv: Val, tag: string, len: string): { idx: string; cond: string; upd: string; end: string } {
     const idx = this.slot("number");
     this.emit(`store double 0x0000000000000000, ptr ${idx}`);
     const cond = this.label(tag), body = this.label(`${tag}b`), upd = this.label(`${tag}u`), end = this.label(`${tag}e`);
@@ -5660,27 +5706,7 @@ class FnGen {
     this.emit(`${cmp} = fcmp olt double ${iC}, ${len}`);
     this.terminate(`br i1 ${cmp}, label %${body}, label %${end}`);
     this.to(this.block(body));
-    const elem = (el: Ty, pName: string, iName: string): string => {
-      const iB = this.fresh();
-      this.emit(`${iB} = load double, ptr ${idx}`);
-      const slot = this.fresh();
-      this.emit(`${slot} = call i64 @nt_arr_get(ptr ${src}, double ${iB})`);
-      const v = this.fromSlot(slot, el);
-      this.emit(`store ${llvmTy(el)} ${v}, ptr ${this.addr(pName)}`);
-      // The INDEX parameter, when the callback declared one: the loop counter this line
-      // just loaded, copied into the callback's own slot. Re-read per iteration inside the
-      // body block rather than hoisted, so a body that ASSIGNS to `i` perturbs only its own
-      // copy and the loop keeps stepping — node's callback parameter is a fresh binding too.
-      //
-      // `""` for "no index parameter", not an optional parameter: `iName?: string` in this
-      // annotation is outside the subset `src/` must stay inside (the parser does not take
-      // `?` on a function-TYPE parameter, and the recovery reported it as `Cannot find name
-      // 'el'` — the whole tree stopped linking). Same sentinel `hofReturnStack`'s `slot`
-      // already uses two screens down.
-      if (iName !== "") this.emit(`store double ${iB}, ptr ${this.addr(iName)}`);
-      return v;
-    };
-    return { idx, cond, upd, end, elem };
+    return { idx, cond, upd, end };
   }
 
   /**
@@ -5951,8 +5977,8 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    const L = this.hofLoop(recv, "each", () => {}); // no output array to build
-    L.elem(el, p, ip);
+    const L = this.hofLoop(recv, "each", this.hofLen(recv)); // no output array to build
+    this.hofElem(recv, L.idx, el, p, ip);
     if (arrow.exprBody) {
       this.genExpr(arrow.body as Expr); // evaluated for effect, exactly as an ExprStmt is
     } else {
@@ -5976,9 +6002,11 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    let out = "";
-    const L = this.hofLoop(recv, "map", (len) => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); });
-    L.elem(el, p, ip);
+    const len = this.hofLen(recv);
+    const out = this.fresh();
+    this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); // pre-sized: one element per input
+    const L = this.hofLoop(recv, "map", len);
+    this.hofElem(recv, L.idx, el, p, ip);
     const rv = this.genHofBody(arrow, R);
     this.emit(`call double @nt_arr_push(ptr ${out}, i64 ${this.toSlot(rv)})`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -5996,9 +6024,11 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    let out = "";
-    const L = this.hofLoop(recv, "fmap", () => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double 1.0)`); });
-    L.elem(el, p, ip);
+    const len = this.hofLen(recv);
+    const out = this.fresh();
+    this.emit(`${out} = call ptr @nt_arr_new(double 1.0)`); // flattened length is not known here
+    const L = this.hofLoop(recv, "fmap", len);
+    this.hofElem(recv, L.idx, el, p, ip);
     const rv = this.genHofBody(arrow, R);
     this.emit(`call void @nt_arr_extend(ptr ${out}, ptr ${rv.v})`);
     this.hofStep(L.idx, L.upd, L.cond);
@@ -6013,9 +6043,11 @@ class FnGen {
     this.addLocal(p, el);
     const ip = this.hofIndexParam(arrow, 1);
     this.prepHofLocals(arrow);
-    let out = "";
-    const L = this.hofLoop(recv, "flt", (len) => { out = this.fresh(); this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); });
-    const pv = L.elem(el, p, ip);
+    const len = this.hofLen(recv);
+    const out = this.fresh();
+    this.emit(`${out} = call ptr @nt_arr_new(double ${len})`); // pre-sized: at most one per input
+    const L = this.hofLoop(recv, "flt", len);
+    const pv = this.hofElem(recv, L.idx, el, p, ip);
     const keep = this.genHofBody(arrow, "boolean"); // boolean
     const pushLbl = this.label("fltp");
     const skipLbl = this.label("flts");
@@ -6138,8 +6170,8 @@ class FnGen {
     const ip = this.hofIndexParam(arrow, 2); // `(acc, elem, index)` — index is param TWO here
     this.emit(`store ${llvmTy(A)} ${init.v}, ptr ${this.addr(accName)}`); // pre-loop init
     this.prepHofLocals(arrow);
-    const L = this.hofLoop(recv, "red", () => {});
-    L.elem(el, xName, ip);
+    const L = this.hofLoop(recv, "red", this.hofLen(recv));
+    this.hofElem(recv, L.idx, el, xName, ip);
     const rv = this.genHofBody(arrow, A);
     this.emit(`store ${llvmTy(A)} ${rv.v}, ptr ${this.addr(accName)}`);
     this.hofStep(L.idx, L.upd, L.cond);
