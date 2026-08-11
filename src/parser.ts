@@ -870,6 +870,12 @@ class Parser {
    *  parsed; spliced at the top of that function's body (see parsePatternParam). */
   private paramPrelude: Stmt[] = [];
   private ident(name: string): Expr { return { kind: "Identifier", name }; }
+  /** The implicit `undefined` an optional param/field erases to. A FACTORY rather than an
+   *  inline literal at each site: an object literal assigned INTO an `Expr`-typed slot has
+   *  its `kind` widened to `string` before the union is matched, so it is refused, while
+   *  the same literal RETURNED from an `Expr`-returning function is contextually typed and
+   *  accepted (the `ident` precedent above). One spelling, and the compiler can read it. */
+  private undef(): Expr { return { kind: "UndefinedLiteral" }; }
 
   /**
    * In-scope generic type parameters (M3). Pushed while parsing a generic function's
@@ -2665,7 +2671,7 @@ class Parser {
   private mkParam(name: string, annot: Ty | undefined, def: Expr | undefined, rest: boolean, optional: boolean): Param {
     if (optional) {
       annot = makeNullable("undefined", annot ?? "number");
-      if (!def) def = { kind: "UndefinedLiteral" };
+      if (!def) def = this.undef();
     }
     return { name, annot, default: def, rest };
   }
@@ -3012,7 +3018,7 @@ class Parser {
       // block and every field is a real slot, so "absent" has to be WRITTEN as the
       // `undefined` arm of the nullable box. Without this the slot stays zero and a read
       // dereferences NULL. A constructor that assigns the field simply overwrites this.
-      if (init === undefined && optional) init = { kind: "UndefinedLiteral" };
+      if (init === undefined && optional) init = this.undef();
       if (init !== undefined) fieldInits.push({ field: member, value: init });
       } finally {
         // `finally` also runs on the `continue`s above, so the scope is popped on every
