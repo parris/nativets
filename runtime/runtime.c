@@ -758,6 +758,27 @@ double js_math_min(double a, double b) {
   return a;
 }
 
+/* `**` and Math.pow — ECMA-262 Number::exponentiate, NOT C `pow`.
+ *
+ * The two agree on every input but one FAMILY, and C is deliberately wrong there:
+ * C99 F.10.4.4 specifies pow(+1, y) = 1 for ANY y "even a NaN", and pow(±1, ±inf) = 1,
+ * because C wanted pow to be continuous in the exponent when the base is exactly 1.
+ * ECMA-262 declines both: step 1 returns NaN whenever the exponent is NaN (the base is
+ * never consulted), and step 8 returns NaN when the base is finite with magnitude 1 and
+ * the exponent is ±Infinity. So `1 ** NaN`, `(±1) ** ±Infinity` are all NaN in JS and
+ * all 1 in C — five of the eight (base, exponent) edge pairs, every one of them a
+ * silent wrong answer at exit 0.
+ *
+ * One guard covers the whole family: a unit-magnitude base with a non-finite exponent.
+ * `!isfinite(b)` is true for both NaN and ±Infinity, which is exactly the two clauses.
+ * Everything else — ±0, ±Infinity bases, the odd-integral sign rules, and the
+ * negative-base/fractional-exponent NaN — C already matches the spec on, so it stays
+ * with libm rather than being re-derived here. */
+double js_pow(double a, double b) {
+  if (fabs(a) == 1.0 && !isfinite(b)) return NAN;
+  return pow(a, b);
+}
+
 /* parseInt / parseFloat (prefix parsing, JS-style) */
 double js_parse_int(const char *s, double radixd) {
   while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
