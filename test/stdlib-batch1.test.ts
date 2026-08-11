@@ -477,6 +477,42 @@ console.log(Number.isInteger(4), Number.isFinite(1 / 0), Number.isSafeInteger(2 
 ]);
 
 /*
+ * The `Math.*` DATA properties. `Math` was reachable only as a call callee
+ * (`Math.floor(x)`), so a member READ had no path of its own and fell through to the
+ * generic identifier resolution, which reported `NT2001 'Math' is not defined` — a
+ * message that is FALSE, since `Math.floor(1.5)` on the line above compiles. This
+ * mirrors the `Number.*` constants above, whose member-read path already existed.
+ *
+ * BORROWED: tc39/test262 `built-ins/Math/{E,PI,LN2,LN10,LOG2E,LOG10E,SQRT2,SQRT1_2}/`
+ * — one directory per constant, each with a `value.js` asserting the exact double and a
+ * `prop-desc.js` asserting it is non-writable/non-configurable (so folding the read to a
+ * literal is observationally right — nothing can ever change it). The expected output is
+ * node's, not transcribed.
+ */
+differential("stdlib batch 1: the Math constants match node", [
+  {
+    name: "all eight Math data properties, read as values",
+    code: `
+console.log(Math.E, Math.PI);
+console.log(Math.LN2, Math.LN10);
+console.log(Math.LOG2E, Math.LOG10E);
+console.log(Math.SQRT2, Math.SQRT1_2);
+`,
+  },
+  {
+    name: "a Math constant flows through every position an ordinary number does",
+    code: `
+console.log(String(Math.PI));
+console.log(Number(Math.E));
+console.log(\`\${Math.PI}\`);
+console.log((Math.PI).toFixed(3));
+const x = Math.PI;
+console.log(x * 2, Math.floor(Math.PI), Math.max(Math.E, Math.PI));
+`,
+  },
+]);
+
+/*
  * `Math.round` — ECMAScript 21.3.2.28, which is NOT `floor(x + 0.5)`.
  *
  * The runtime shipped `double js_math_round(double x) { return floor(x + 0.5); }` with
