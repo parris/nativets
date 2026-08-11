@@ -66,6 +66,52 @@ not by having a small first-blocker count. That is the pattern to aim for.
 **Self-hosting is NOT reached.** Stage-1 still dies in `check`; no 3-stage fixed point
 exists. Do not claim one without a measured byte-identical `nativets-2`/`nativets-3`.
 
+### `src/` RELIES ON BUN'S MUTATION SEMANTICS — a blocker class no instrument measures
+
+Found 2026-08-10. Distinct from every blocker in the table below: these sites **parse,
+type-check, and pass the whole suite**, because stage 0 runs under bun. They would make a
+self-hosted compiler *silently wrong*, not refuse.
+
+The confirmed instance, `src/checker.ts:725` vs `:764`:
+
+```ts
+const checker = new Checker(functions, …);   // :725  — captures the map
+…
+functions = functions.set(name, sig);        // :764  — REBINDS the local
+```
+
+Under bun, `Map.set` mutates, so both names are one object and it works. Under the semantics
+this compiler implements, `.set` returns a **new** map, the local rebinds, and
+**`Checker.functions` stays empty for the entire check** — no call in any program would
+resolve. The returned signature table contains the monomorphizer's specializations only by
+the same accident.
+
+Reduced and confirmed against node:
+
+```ts
+let m = new Map<string, number>();
+const alias = m;
+m = m.set("a", 1);
+console.log(alias.size, m.size);   // node: 1 1   nativets: 0 1   — both exit 0
+```
+
+**The checker cannot catch this.** Its NT1606 rule is "the persistent result is *discarded*";
+here the result is kept and assigned. The discarded-result rule is orthogonal to the
+aliasing question, and only the aliasing question matters for correctness under self-hosting.
+
+Two related instances already found: `c.statics.add(s.name)` in `Checker.check` was a silent
+no-op in the subject language (fixed by rebinding), and **`Set.add` written as
+`out = out.add(x)` and handed a caller's set corrupts it silently** — that one disabled a
+soundness guard in a narrowing fix earlier the same day, found by accident rather than by a
+test.
+
+**How to apply:** grep `src/` for a collection that is **captured or passed** and later
+**rebound** via `.set`/`.add`/`.delete`. Fixing the instance above means making the signature
+table single-owner across `check`/`Checker`/`CheckedProgram` — a lane of its own, and a
+prerequisite for a *correct* self-hosted compiler rather than merely a compiling one.
+See also the semantic half of the subset rule: out-of-range indexing panics here where bun
+answers `undefined`.
+
 ### The frontier is gated on CROSS-FRAME UNWINDING, not on a list of checker gaps
 
 Measured 2026-08-10, by asking what a *perfect* fix to the current first blocker would be

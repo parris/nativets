@@ -1,11 +1,11 @@
 {
   "recordedAt": {
-    "date": "2026-08-10",
-    "rev": "91c1a97"
+    "date": "2026-08-11",
+    "rev": "87ce0c1"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "6b69418d8cdd9334",
+      "sha256": "cf1131d22a6d8ff5",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "879a063b18675889",
+      "sha256": "96cc843b3c53f0ed",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] objects are immutable: `s.returnTy = v` would mutate the object in place at L:C"
+        "code": "NT1014",
+        "message": "[NT1014] Set method '.clear' is not supported yet"
       }
     },
     "cli.ts": {
@@ -45,7 +45,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "736d16ed8826b9eb",
+      "sha256": "6d77e8342b5ae3b7",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] objects are immutable: `s.returnTy = v` would mutate the object in place at L:C"
+        "code": "NT1014",
+        "message": "[NT1014] Set method '.clear' is not supported yet"
       }
     },
     "coverage-preprocess.ts": {
@@ -125,7 +125,7 @@
       }
     },
     "modules.ts": {
-      "sha256": "05845418c8b5463f",
+      "sha256": "af0c14bf401ef8b8",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -147,8 +147,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] objects are immutable: `s.returnTy = v` would mutate the object in place at L:C"
+        "code": "NT1014",
+        "message": "[NT1014] Set method '.clear' is not supported yet"
       }
     },
     "parser.ts": {
