@@ -1453,15 +1453,55 @@ static int nt_ws_cp(unsigned cp) {
          cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F ||
          cp == 0x3000 || cp == 0xFEFF;
 }
-/* Decode the UTF-8 sequence at `p` (which must not be the end), storing its byte
- * length in `*len`. Same decoder shape as js_str_code_point_at. */
-static unsigned nt_utf8_cp(const unsigned char *p, const unsigned char *end, long *len) {
+/* ---- The ONE UTF-8 decoder every string scanner shares. --------------------------
+ *
+ * `nt_utf8_len` decodes the sequence at `p` ONLY IF IT IS WELL FORMED, returning its byte
+ * length (1..4); it returns 0 for anything else and touches `*cp` not at all. Every caller
+ * answers a 0 the same way — TAKE THE ONE RAW BYTE AND ADVANCE ONE — which is what makes
+ * ill-formed input pass through byte-identical instead of being re-framed or "corrected".
+ *
+ * WHY THIS IS A CORRECTNESS FIX AND NOT ROBUSTNESS POLISH. This used to size a sequence
+ * from its LEAD BYTE ALONE and never check that the bytes after it were continuations. That
+ * is safe only if strings are always well-formed UTF-8, and §A.2 guarantees the opposite:
+ * `.length` and `.slice` are BYTE-oriented, so `" ".slice(0, 2)` is an ordinary
+ * expression yielding the truncated lead pair `E2 80`. Append `"Axx"` and the old decoder
+ * read `E2 80 41` as U+2001 EM QUAD — which `nt_ws_cp` calls whitespace — so `.trim()`
+ * consumed all three bytes and DELETED THE `A`: `"xx"` where node prints `"Axx"`, exit 0,
+ * well-formed output. `readFileSync(p, "utf8")` hands over file bytes verbatim, which
+ * reaches the same class from outside the process, and reaches the OVERLONG forms too:
+ * `C0 A0` decoded to U+0020 and was trimmed as a space.
+ *
+ * SURROGATES ARE DELIBERATELY ACCEPTED (this is WTF-8, not strict UTF-8). Our lexer and
+ * `String.fromCharCode` emit `ED A0 80` for `\ud800`, and node's `codePointAt` answers
+ * 55296; rejecting the sequence would answer 237 and BREAK agreement with node. So
+ * "ill-formed" here means truncated, a missing continuation byte, an overlong form, a
+ * continuation or `0xF8..0xFF` byte in lead position, or a value above U+10FFFF.
+ *
+ * `utf8_next` in the base64 section is the other decoder in this file. It is already strict
+ * for the same reasons; it stays separate only because `btoa` needs a MALFORMED/-1 signal
+ * rather than a fall-back-to-byte, which is the one place the raw-byte policy is wrong. */
+static int nt_utf8_len(const unsigned char *p, const unsigned char *end, unsigned *cp) {
   unsigned c = p[0];
-  long need = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
-  if (need == 0 || p + need >= end) { *len = 1; return c; } /* ASCII, or truncated */
-  unsigned cp = c & (unsigned)(0x7F >> (need + 1));
-  for (long k = 1; k <= need; k++) cp = (cp << 6) | (p[k] & 0x3F);
-  *len = need + 1; return cp;
+  if (c < 0x80) { *cp = c; return 1; }
+  int need; unsigned v, min;
+  if      ((c & 0xE0) == 0xC0) { need = 1; v = c & 0x1Fu; min = 0x80; }
+  else if ((c & 0xF0) == 0xE0) { need = 2; v = c & 0x0Fu; min = 0x800; }
+  else if ((c & 0xF8) == 0xF0) { need = 3; v = c & 0x07u; min = 0x10000; }
+  else return 0;                                /* a continuation byte, or 0xF8..0xFF */
+  if (end - p <= (long)need) return 0;          /* truncated — the bytes are not there */
+  for (int k = 1; k <= need; k++) {
+    if ((p[k] & 0xC0) != 0x80) return 0;        /* NOT a continuation — load-bearing */
+    v = (v << 6) | (unsigned)(p[k] & 0x3F);
+  }
+  if (v < min || v > 0x10FFFF) return 0;        /* overlong, or beyond Unicode */
+  *cp = v; return need + 1;
+}
+/* Decode the sequence at `p` (which must not be the end), storing its byte length in
+ * `*len`. An ill-formed sequence is ONE byte with that byte's own value. */
+static unsigned nt_utf8_cp(const unsigned char *p, const unsigned char *end, long *len) {
+  unsigned cp; int n = nt_utf8_len(p, end, &cp);
+  if (n == 0) { *len = 1; return p[0]; }
+  *len = n; return cp;
 }
 /* Scan FORWARD past whitespace from `s`. */
 static const char *nt_ws_skip_fwd(const char *s, const char *end) {
@@ -3564,15 +3604,23 @@ int32_t nt_num_is_safe_integer(double x) {
 
 /* ---- Array.from(str) → string[] of code-point characters (node iterates by
  * code point, not byte, so multi-byte UTF-8 stays one element). Builds the
- * generic slot-vector directly via nt_arr_new/nt_arr_push. ---- */
+ * generic slot-vector directly via nt_arr_new/nt_arr_push.
+ *
+ * The framing comes from `nt_utf8_len`, not from the lead byte alone. Sizing a piece from
+ * the lead byte and only guarding the END of the buffer let a lead byte SWALLOW whatever
+ * followed it: for `E2 80 41 78 78` (`" ".slice(0, 2) + "Axx"`, ordinary source under
+ * §A.2) this returned THREE elements, the first of them the bogus 3-byte glob `E2 80 41`,
+ * so `Array.from(s).indexOf("A")` was -1 with the byte still sitting in the string. An
+ * ill-formed byte is now its own one-byte element, which keeps the split LOSSLESS —
+ * `Array.from(s).join("") === s` for every byte string, well formed or not. ---- */
 void *nt_arr_from_str(const char *s) {
   void *a = nt_arr_new(1);
   size_t i = 0, n = nt_strlen(s);
+  const unsigned char *b = (const unsigned char *)s;
   while (i < n) {
-    unsigned char c = (unsigned char)s[i];
-    size_t len = 1;
-    if (c >= 0xF0) len = 4; else if (c >= 0xE0) len = 3; else if (c >= 0xC0) len = 2;
-    if (i + len > n) len = 1;
+    unsigned cp;
+    int k = nt_utf8_len(b + i, b + n, &cp);
+    size_t len = k ? (size_t)k : 1;
     char *o = alloc_str(len);
     memcpy(o, s + i, len);
     o[len] = 0;
@@ -3795,18 +3843,20 @@ double js_str_char_code_at(const char *s, double id) {
 /* String#codePointAt(i) — decodes the UTF-8 sequence starting at BYTE i, so an
  * ASCII string matches node's UTF-16 code point exactly. NaN is the
  * out-of-range sentinel, which codegen turns into node's `undefined`
- * (a code point is never NaN, so the sentinel is unambiguous). */
+ * (a code point is never NaN, so the sentinel is unambiguous).
+ *
+ * This once carried its OWN copy of the decoder, lead-byte-sized and unvalidated, and
+ * `nt_utf8_cp` was written from its shape — so one defect, copied, was two. Both now go
+ * through `nt_utf8_len`: an ill-formed sequence reports the RAW BYTE at `i`, which is the
+ * only answer that agrees with `.charCodeAt(i)` and `.at(i)` about the same position. */
 double js_str_code_point_at(const char *s, double id) {
   long n = (long)nt_strlen(s);
   if (isnan(id)) id = 0;
   long i = (long)id;
   if (i < 0 || i >= n) return NAN;
   const unsigned char *p = (const unsigned char *)s + i;
-  unsigned c = p[0];
-  long need = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
-  if (need == 0 || i + need >= n) return (double)c; /* ASCII, or a truncated/continuation byte */
-  unsigned cp = c & (unsigned)(0x7F >> (need + 1));
-  for (long k = 1; k <= need; k++) cp = (cp << 6) | (p[k] & 0x3F);
+  unsigned cp;
+  if (nt_utf8_len(p, (const unsigned char *)s + n, &cp) == 0) return (double)p[0];
   return (double)cp;
 }
 
