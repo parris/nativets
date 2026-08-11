@@ -253,6 +253,48 @@ describe("exactly one owner, exactly one free", () => {
 });
 
 /*
+ * THE RETHROW, which is the sharpest move there is: the `catch` binding OWNS the object,
+ * and `throw e` hands that very pointer to the pending slot. `ThrowStmt.drops` had to stop
+ * listing the thrown name for this to be anything but a use-after-free one frame up — the
+ * ownership pass used to free it deliberately, on the (now inverted) rationale that
+ * `nt_obj_free` is shallow so the message survived to be read back out of the slot.
+ */
+describe("a rethrow moves the caught object on again", () => {
+  const rethrow = (n: number): string => [
+    `class E { message: string; code: number; constructor(m: string, c: number) { this.message = m; this.code = c; } }`,
+    `function inner(n: number): number {`,
+    `  if (n % 2 === 0) throw new E("inner", n);`,
+    `  return n;`,
+    `}`,
+    `function middle(n: number): number {`,
+    `  try { return inner(n); } catch (e) { throw e; }`,
+    `}`,
+    `function outer(n: number): number {`,
+    `  try { if (n === -7) throw new E("never", 0); return middle(n); }`,
+    `  catch (e) { return e.code + e.message.length; }`,
+    `}`,
+    `let acc = 0;`,
+    `for (let i = 0; i < ${n}; i++) acc = acc + outer(i);`,
+    `console.log(acc);`,
+    ``,
+  ].join("\n");
+
+  test("inner raises, middle catches and rethrows, outer handles — matching node", async () => {
+    await differential(rethrow(100));
+  });
+
+  test("and it does not leak: two scales, one owner throughout", async () => {
+    const probe = (n: number): string => `${rethrow(n).replace("console.log(acc);", "console.log(acc);\nconsole.log(__objLive(), __strLive());")}`;
+    const small = await compileAndRun(probe(100));
+    const large = await compileAndRun(probe(1000));
+    expect(small.stdout.split("\n")[1]).toBe("0 0");
+    expect(large.stdout.split("\n")[1]).toBe("0 0");
+    expect(small.exitCode).toBe(0);
+    expect(large.exitCode).toBe(0);
+  });
+});
+
+/*
  * ASAN, on the generated code. The counters above prove there is no LEAK; they cannot see
  * the opposite fault. A pointer moved onto the pending slot and ALSO freed by the raising
  * frame is a use-after-free the handler reads and a double free `nt_exc_clear` commits,
