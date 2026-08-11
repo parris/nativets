@@ -199,6 +199,9 @@ describe("discarded persistent mutators in src/", () => {
    *   checker.ts  daMerge                   `out.delete` — rebuilt by filtering
    *   checker.ts  collectBlockLocals        returns the extended set; both callers thread a local
    *   parser.ts   Parser.resolveCycle       `cycleNames`/`cyclicTypes` rebuilt, `recTypes` restored
+ *   coverage.ts coverage                  `found` — the ARROW that wrote it (`flag`) became the
+ *                                         top-level `bumpBlocker(found, …) -> Map`, so the
+ *                                         rebind happens in the owner's frame, not a capture
    *
    * WHAT IS LEFT, and why it is not the same job. Almost every remaining entry writes to a
    * collection that is a PARAMETER of the function above it — `collectIdents(e, out)`,
@@ -248,7 +251,6 @@ describe("discarded persistent mutators in src/", () => {
     "codegen.ts FnGen.collectBoundNames: out.add(…)",
     "codegen.ts FnGen.collectBoundNames: out.add(…)",
     "codegen.ts ModuleGen.fnValue: this.fnValues.set(…)",
-    "coverage.ts coverage: found.set(…)",
     "modules.ts linkProgram: hostImports.add(…)",
     "modules.ts linkProgram: mods.set(…)",
     "modules.ts linkProgram: mutableClasses.add(…)",

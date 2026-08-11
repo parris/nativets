@@ -29,6 +29,33 @@ export interface CoverageReport {
 type Spec = { code: string; milestone: string; hint: string };
 
 /**
+ * Add `n` to the histogram bucket for `spec.code`, inserting it when it is new, and answer
+ * the resulting table.
+ *
+ * PURE, and returning the Map rather than mutating one, because both halves of the old
+ * spelling were outside the subset this compiler must compile ITSELF in:
+ *   - `b.count++` on a fetched entry is NT1606 (`objects are immutable`), and
+ *   - `found.set(key, b)` in statement position is the discarded-persistent-mutator class
+ *     (see test/discarded-mutator.test.ts) — a nativets `Map.set` answers a NEW map and
+ *     leaves the receiver alone, so the line was a guaranteed no-op there while working
+ *     under bun. It was the one `coverage.ts` entry on that census.
+ * Rebinding at the call site was not available either: `flag` was an ARROW closing over
+ * `found`, and a write to a captured binding is NT1031. A top-level function taking the
+ * table in and handing it back is the shape that has no such receiver problem.
+ *
+ * Identical under bun, where `.set` answers the receiver, so `found = bump(found, …)` is a
+ * self-assignment. The FIRST spec to arrive under a code owns the label/milestone/hint —
+ * the same rule the two old spellings agreed on.
+ */
+function bumpBlocker(found: Map<string, Blocker>, spec: Spec, feature: string, n: number): Map<string, Blocker> {
+  const prev = found.get(spec.code);
+  if (prev === undefined) {
+    return found.set(spec.code, { code: spec.code, feature, milestone: spec.milestone, hint: spec.hint, count: n });
+  }
+  return found.set(spec.code, { code: prev.code, feature: prev.feature, milestone: prev.milestone, hint: prev.hint, count: prev.count + n });
+}
+
+/**
  * Classify a per-statement parse failure into a blocker spec + feature label.
  *
  * A feature-level NYI thrown by the parser (a general union type, an optional call, …)
@@ -72,19 +99,11 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   const pre = preprocessForCoverage(source);
 
   let found = new Map<string, Blocker>();
-  const flag = (spec: Spec, feature: string) => {
-    const key = spec.code;
-    const b = found.get(key) ?? { code: spec.code, feature, milestone: spec.milestone, hint: spec.hint, count: 0 };
-    b.count++;
-    found.set(key, b);
-  };
   // Constructs the pre-strip erased that are real blockers (classes → NT1012). A linked
   // multi-module program was parsed for real, so the pre-strip's guesses don't apply.
   const stripped = linked ? [] : pre.stripped;
   for (const b of stripped) {
-    const e = found.get(b.code);
-    if (e) e.count += b.count;
-    else found = found.set(b.code, { ...b });
+    found = bumpBlocker(found, { code: b.code, milestone: b.milestone, hint: b.hint }, b.feature, b.count);
   }
 
   let statements = 0;
@@ -147,10 +166,14 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   // Parse each surviving top-level statement in isolation (recovery): a single
   // un-parseable statement is reported as a blocker rather than blanking the file.
   // Survivors are reassembled into one Program so the checker sees whole-program scope.
+  // An accumulator, so it carries the `@@mutable` opt-in `.push` needs (docs/decorators.md);
+  // and appended one at a time, because `push(...xs)` is NT1006. Both are the same subset
+  // rule as `extra` in src/driver.ts's `writeIR`. Identical under bun.
+  //@@mutable
   const body: Stmt[] = [];
   let firstError: { code: string; message: string } | undefined;
   let parseFailures = 0;
-  if (linked) body.push(...linked.body);
+  if (linked) for (const s of linked.body) body.push(s);
   // Statement-at-a-time parsing loses everything a DECLARATION publishes, so the two
   // things later statements need are threaded across the loop by hand: the type-alias
   // table (`collectTypes` in, `typeEnv` out) and the `@@mutable` tag sets. Without them a
@@ -181,11 +204,11 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
       parseFailures++;
       const diag = e instanceof NTError ? e.diag : { code: "NT0001", message: String(e) };
       const { spec, feature } = classifyParseFailure(st.text, diag);
-      flag(spec, feature);
+      found = bumpBlocker(found, spec, feature, 1);
       if (!firstError) firstError = { code: spec.code, message: diag.message };
       continue;
     }
-    body.push(...prog.body);
+    for (const s of prog.body) body.push(s);
   }
 
   body.forEach(walkStmt);
@@ -214,7 +237,7 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
     // which still makes `compiles` false. The checker stops at its first error, so this
     // contributes at most one blocker per file: an under-count, never a fabricated win.
     if (e instanceof NTError && e.diag.code.startsWith("NT1")) {
-      flag({ code: e.diag.code, milestone: e.diag.milestone ?? "later", hint: e.diag.hint ?? "" }, e.diag.message);
+      found = bumpBlocker(found, { code: e.diag.code, milestone: e.diag.milestone ?? "later", hint: e.diag.hint ?? "" }, e.diag.message, 1);
     }
   }
 
