@@ -320,11 +320,19 @@ function isInlinedHofArrow(property: string, recvTy: Ty | undefined, cbKind: str
   return recvTy !== undefined && isArrayTy(recvTy);
 }
 
-/** Peel a method CHAIN back to what it started from: `a.bump().bump()` ⇒ `a`. */
+/** Peel a method CHAIN back to what it started from: `a.bump().bump()` ⇒ `a`.
+ *
+ *  RECURSIVE rather than a `let cur` loop, and that is what keeps it inside the subset
+ *  `src/` compiles. Narrowing is killed by ASSIGNMENT to the narrowed name anywhere in
+ *  the region, so `cur = cur.callee.object` in the body made `cur.callee` in the
+ *  CONDITION unreadable — NT2001 "Property 'callee' does not exist on <UNION>", the same
+ *  refusal `isInlinedHofArrow` above documents. A parameter is never reassigned, so the
+ *  tag test narrows for real. Its sibling `fieldRoot` below was already written this way,
+ *  and the two now peel their respective spines identically. Same fixpoint, same result,
+ *  same tail shape — this is a spelling change, not a semantic one. */
 function chainRoot(e: Expr): Expr {
-  let cur = e;
-  while (cur.kind === "CallExpr" && cur.callee.kind === "MemberExpr") cur = cur.callee.object;
-  return cur;
+  if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") return chainRoot(e.callee.object);
+  return e;
 }
 
 /** Peel a FIELD path back to what it starts from: `this.mod.strings` ⇒ `this`.
