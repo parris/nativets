@@ -309,6 +309,25 @@ console.log(__strLive());`;
   });
 
   /*
+   * CLOSED, and the CONTROL that decides how far the rule may go.
+   *
+   * `freshString` (ast.ts) is a WHITELIST — a template literal or a `+` — for exactly the
+   * reason the comment below gives: codegen's `isStrProducer` admits a plain `CallExpr`,
+   * and a callee handing back a string it still owns would be freed by its CALLER. So a
+   * call result must keep leaking rather than become a use-after-free, and that is
+   * asserted here rather than left to the reader to trust.
+   */
+  test("a CALL result is still not freed — the hazard the whitelist exists to avoid", async () => {
+    const r = await compileAndRun(`
+function give(): string { return "shared"; }
+let n = 0;
+for (const c of give()) { n += c.length; }
+console.log(n);`);
+    expect(r.exitCode).toBe(0);   // never a UAF, whatever the leak
+    expect(r.stdout).toBe("6\n");
+  });
+
+  /*
    * A SECOND, DISTINCT GAP — the one above is about a BINDING; this one has no binding at
    * all. `for (const c of x + y)` iterates a string nothing owns. The array twin of that
    * shape IS reclaimed: `codegen.ts`'s `ForOfStmt` frees the iterable at `endLbl` when
@@ -326,7 +345,7 @@ console.log(__strLive());`;
    * that a leak is recoverable and a dangling pointer is not. The fix belongs with whoever
    * owns the producer/borrow judgment, with the control below as its acceptance test.
    */
-  test("KNOWN GAP: `for (const c of x + y)` leaks the iterable, where the ARRAY twin does not", async () => {
+  test("`for (const c of x + y)` frees the iterable, like the ARRAY twin", async () => {
     const src = `
 const x = "abc";
 const y = "def";
@@ -341,11 +360,11 @@ for (let i = 0; i < 100; i++) { for (const v of [1, 2, 3]) { } }
 console.log("fresh array iterable", __arrLive() - b3);`;
     const r = await compileAndRun(src);
     expect(r.exitCode).toBe(0);
-    // Recorded as it IS. The first number becoming 0 is the intended direction and a
-    // result, not a regression; the other two are the CONTROLS and must stay 0 — they are
-    // what says the gap is the fresh-temporary rule and not the loop or the framing.
+    // All three 0 now. The first was 100 and its own comment nominated 0 as the intended
+    // direction; the other two are the CONTROLS and were always 0 — they are what says
+    // this was the fresh-temporary rule and not the loop or the framing.
     expect(r.stdout).toBe(
-      "fresh string iterable 100\nnamed string iterable 0\nfresh array iterable 0\n",
+      "fresh string iterable 0\nnamed string iterable 0\nfresh array iterable 0\n",
     );
   });
 });

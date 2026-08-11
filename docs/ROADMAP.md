@@ -372,6 +372,20 @@ the jump unwinder never sees it — one string per ELEMENT (6 -> 0 on a 5-elemen
 0 at 50 and 500). Restricted to repeating blocks because a block that runs once per frame
 has no leak to fix; ungated it moved corpus IR +3.16%, past the 3% aggregate threshold.
 
+**The SECOND string gap is closed too (`aaad491`+).** `for (const c of x + y)` walked a
+concatenation no binding owned, so the drop pass never saw it and it leaked once per
+execution of the loop — 100 live strings over 100 iterations, where the ARRAY twin was
+already reclaimed. It now frees at `endLbl`, the single join every exit lands on (`break`
+included; a `return` still jumps past it — a leak, never a UAF, the same trade the array
+case already makes). Measured 5,000 -> 0.
+
+The predicate is `freshString` in ast.ts, a WHITELIST of template literal and `+`, and the
+whitelist is the whole point: codegen's `isStrProducer` also admits a plain `CallExpr`, and
+a callee handing back a string it still owns would then be freed by its caller — a
+use-after-free traded for a leak, the wrong direction. A call result therefore still leaks,
+deliberately, and `test/str-rc.test.ts` asserts that it does rather than leaving it to
+trust.
+
 **And the instrument note this class deserves:** `leaks(1)` reports **ZERO** on the
 400,000-iteration program and is not wrong — the strings stay REACHABLE from the runtime's
 registry, so this was unbounded *growth*, not unreachable memory. No reachability checker

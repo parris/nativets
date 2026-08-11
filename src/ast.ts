@@ -1892,6 +1892,25 @@ export const RETAINS_RECEIVER = new Set(["reverse"]);
  * unobservable), while `a.reverse()` is `a` itself — the recursion bottoms out at the
  * non-fresh Identifier, which is what stops either pass touching an owned binding.
  */
+/**
+ * Strings that are syntactically FRESH — a new allocation the expression itself made,
+ * which no binding names and no callee still owns.
+ *
+ * The string half of `freshArray`, and deliberately a WHITELIST for the same reason that
+ * one is. The tempting predicate is codegen's `isStrProducer`, but it admits a plain
+ * `CallExpr`, and a callee that hands back a string it still owns would then be freed by
+ * its caller — a use-after-free traded for a leak, which is the wrong direction. Concat
+ * and interpolation are the two forms that ALWAYS allocate, so they are the two here.
+ *
+ * `+` reaches this only where the iterable is already known to be a `string` (codegen's
+ * `ForOfStmt` tests `src.ty`), so numeric addition never arrives. A constant-folded
+ * concatenation is safe too: `nt_str_release` is a documented no-op for an untracked
+ * pointer, which is exactly what a literal is.
+ */
+export function freshString(e: Expr): boolean {
+  return e.kind === "TemplateLiteral" || (e.kind === "BinaryExpr" && e.op === "+");
+}
+
 export function freshArray(e: Expr): boolean {
   if (e.kind === "ArrayLiteral") return true;
   if (e.kind === "CallExpr" && e.callee.kind === "MemberExpr") {

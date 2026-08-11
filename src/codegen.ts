@@ -15,7 +15,7 @@ import { consoleMethod, CONSOLE_STREAMS, planConsoleFormat, spawnMode, SPAWN_INH
 // `blockDrops` is gone: the drop set is a synthesized trailing BlockDrops STATEMENT now,
 // not an expando read back off the array, so codegen reads it in the normal statement loop.
 // `Program` stays — it is still used below, and the lane's branch predated its arrival.
-import { freshArray, RETAINS_RECEIVER, arrayElements, stringLiteralValue } from "./ast.ts";
+import { freshArray, freshString, RETAINS_RECEIVER, arrayElements, stringLiteralValue } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
 import type { Stmt, Expr, Ty, FuncDecl, VarDecl, Loc, Program } from "./ast.ts";
 import { NUMBER_CONSTS, MATH_CONSTS } from "./checker.ts";
@@ -2512,6 +2512,17 @@ class FnGen {
         // A `return` out of the body still jumps past this: a leak, never a UAF.
         if (!isStr && !isBytes && (mapV !== null || freshArray(s.iterable))) {
           this.emit(`call void @nt_arr_free(ptr ${src.v})`);
+        }
+        // The STRING half of the same rule, which had no implementation: `for (const c of
+        // x + y)` walks a concatenation no binding owns, so the drop pass never saw it and
+        // it leaked once per execution of the loop. `freshString` is a whitelist for the
+        // same reason `freshArray` is — codegen's own `isStrProducer` admits a plain
+        // `CallExpr`, and a callee handing back a string it still owns would be freed by
+        // its caller. Released at `endLbl`, the single join every exit lands on, `break`
+        // included; a `return` still jumps past it, a leak and never a UAF, exactly as the
+        // array case already trades.
+        if (isStr && freshString(s.iterable)) {
+          this.emit(`call void @nt_str_release(ptr ${src.v})`);
         }
         return;
       }
