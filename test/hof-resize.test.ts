@@ -86,4 +86,128 @@ console.log(JSON.stringify(out), a.length);
     expect(r.stderr).toContain("resized the array it is walking");
     expect(r.exitCode).toBe(134);
   }, 60000);
+
+  // The rest of the family. All five share ONE element read (`hofElem`), so these are
+  // guarding that the choke point stays the choke point — a future lowering that grew its
+  // own read would slip straight back through.
+  const SHRINKERS: [string, string, string][] = [
+    // [method, program, node's answer — measured, not assumed]
+    [".filter", `const out = a.filter((x, i) => { if (i === 0) { a.pop(); a.pop(); } return true; });
+console.log(JSON.stringify(out), a.length);`, "[1,2] 2\n"],
+    [".forEach", `a.forEach((x, i) => { if (i === 0) { a.pop(); a.pop(); } console.log(x); });
+console.log(a.length);`, "1\n2\n2\n"],
+    [".flatMap", `const out = a.flatMap((x, i) => { if (i === 0) { a.pop(); a.pop(); } return [x]; });
+console.log(JSON.stringify(out), a.length);`, "[1,2] 2\n"],
+    [".reduce", `const s = a.reduce((acc, x, i) => { if (i === 0) { a.pop(); a.pop(); } return acc + x; }, 0);
+console.log(s, a.length);`, "3 2\n"],
+  ];
+  for (const [method, body, expected] of SHRINKERS) {
+    test(`${method} — the callback pops twice`, async () => {
+      const src = `//@@mutable
+const a: number[] = [1, 2, 3, 4];
+${body}
+`;
+      const oracle = runWithNodeAttrs(src);
+      expect(oracle.stdout).toBe(expected); // node visits [0,1] only, and never sees a hole
+      expect(oracle.exitCode).toBe(0);
+
+      const r = await run(src);
+      expect(r.stderr).toContain(`\`${method}\` callback resized the array it is walking`);
+      expect(r.exitCode).toBe(134);
+    }, 60000);
+  }
+});
+
+/*
+ * GROWTH IS THE CONTROL, and it is the reason "re-read the length each iteration" was
+ * rejected rather than adopted as the cheap fix. node reads `length` ONCE: a callback that
+ * pushes is visited for the ORIGINAL count and no more. The snapshot bound already does
+ * exactly that, so these programs agree with node today — and a per-iteration re-read
+ * would have walked into the growth and broken every one of them.
+ */
+describe("a callback that GROWS the receiver keeps agreeing with node", () => {
+  const GROWERS: [string, string][] = [
+    [".map", `const out = a.map((x, i) => { if (i === 0) { a.push(99); a.push(98); } return x; });
+console.log(JSON.stringify(out), a.length);`],
+    [".filter", `const out = a.filter((x, i) => { if (i === 0) { a.push(99); } return true; });
+console.log(JSON.stringify(out), a.length);`],
+    [".forEach", `a.forEach((x, i) => { if (i === 0) { a.push(99); } console.log(x); });
+console.log(a.length);`],
+    [".flatMap", `const out = a.flatMap((x, i) => { if (i === 0) { a.push(99); } return [x]; });
+console.log(JSON.stringify(out), a.length);`],
+    [".reduce", `const s = a.reduce((acc, x, i) => { if (i === 0) { a.push(99); } return acc + x; }, 0);
+console.log(s, a.length);`],
+  ];
+  for (const [method, body] of GROWERS) {
+    test(`${method} — the callback pushes, and only the original elements are visited`, async () => {
+      const src = `//@@mutable
+const a: number[] = [1, 2, 3];
+${body}
+`;
+      const oracle = runWithNodeAttrs(src);
+      const r = await run(src);
+      expect(r.stdout).toBe(oracle.stdout);
+      expect(r.exitCode).toBe(oracle.exitCode);
+      expect(r.exitCode).toBe(0); // NOT a panic: growth was never the bug
+    }, 60000);
+  }
+});
+
+/*
+ * THE HINT'S ADVICE, COMPILED. The panic tells the programmer to do the removal AFTER the
+ * walk. That advice is worthless if it does not itself agree with node, so it is spelled
+ * out here as a program and run against the oracle — the same rule this project applies to
+ * a refusal's hint.
+ */
+describe("the advice the panic gives", () => {
+  test("collect inside the walk, `.pop()` after it — and node agrees", async () => {
+    const src = `//@@mutable
+const a: number[] = [1, 2, 3, 4];
+//@@mutable
+const out: number[] = [];
+let drop = 0;
+a.forEach((x, i) => { if (i === 0) { drop = 2; } out.push(x); });
+for (let k = 0; k < drop; k++) { a.pop(); }
+console.log(JSON.stringify(out), a.length);
+`;
+    const oracle = runWithNodeAttrs(src);
+    expect(oracle.stdout).toBe("[1,2,3,4] 2\n");
+    const r = await run(src);
+    expect(r.stdout).toBe(oracle.stdout);
+    expect(r.exitCode).toBe(oracle.exitCode);
+    expect(r.exitCode).toBe(0);
+  }, 60000);
+});
+
+/*
+ * THE SHAPE A COMPILE-TIME REFUSAL COULD NOT HAVE CAUGHT, which is why the fix is here in
+ * the lowering and not in `ownership.ts`.
+ *
+ * The obvious alternative was to refuse the program: the receiver is `@@mutable` and the
+ * callback shrinks it, which is the hazard `NT1603` already reports for the `for-of` this
+ * HOF desugars to (`for (const x of a) a.pop()` IS refused today). It would be free and it
+ * would fire at compile time — but it can only see a `.pop()` WRITTEN in the callback. Move
+ * the shrink one call deep, through a `@@mutable` parameter, and ownership has nothing
+ * syntactic left to key on, while the wrong answer is identical. Only the runtime check
+ * covers this.
+ */
+describe("the shrink happens inside a callee, where no syntactic rule can see it", () => {
+  test("a `@@mutable` parameter popped by a helper still panics", async () => {
+    const src = `function drop(
+  //@@mutable
+  xs: number[],
+): void { xs.pop(); }
+//@@mutable
+const a: number[] = [1, 2, 3, 4];
+const out = a.map((x, i) => { if (i === 0) { drop(a); drop(a); } return x; });
+console.log(JSON.stringify(out), a.length);
+`;
+    const oracle = runWithNodeAttrs(src);
+    expect(oracle.stdout).toBe("[1,2,null,null] 2\n");
+
+    const r = await run(src);
+    expect(r.stdout).not.toContain("[1,2,0,0]"); // the wrong answer this shape used to give
+    expect(r.stderr).toContain("`.map` callback resized the array it is walking");
+    expect(r.exitCode).toBe(134);
+  }, 60000);
 });
