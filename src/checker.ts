@@ -408,18 +408,28 @@ interface RecvHint {
 // so the field-level rule is silent here and the attribute is admissible. See
 // `cycleCapableThisWrite` and test/mutable-records.test.ts (piece 4).
 //
-// `hits` still keeps the DISCARDED-mutator spelling NT1606 refuses, so `Scope.lookup` stays
-// a blocker: rebinding it (`this.hits = this.hits.add(name)`) replaces the Set OBJECT, and
-// this field is read from outside the class, so that is a real aliasing question rather than
-// a transcription — left to the lane that owns `Set` accumulators.
+// `hits` now carries the REBINDING spelling, like `vars` two lines below it. The aliasing
+// question that left it alone is answered rather than assumed: the field has exactly three
+// touch points in the tree — the write in `lookup`, the reset in `check`, and the read in
+// `check`'s global-promotion loop — and the only receiver either of the latter two names is
+// `moduleScope`, a `const` local of `check`. Nothing else ever holds the Set, so replacing
+// the OBJECT is unobservable, and `.add` returning the receiver under node makes the rebind
+// a self-assignment there (see `declare`). That also retires the `.clear()` below it, which
+// has no such spelling — node's `.clear` returns `undefined`, so `x = x.clear()` would store
+// `undefined` under bun. Assigning a fresh empty Set is the replacement that means the same
+// thing under both runtimes, and it is sound here for the same three-touch-point reason.
 //@@mutable
 class Scope {
   private vars = new Map<string, Binding>();
   /** Names of THIS scope's own bindings that some lookup resolved to. Used on the
    *  module scope to learn which top-level bindings a function body reads, so only
    *  those are promoted to LLVM globals (everything else stays a `main` local, and
-   *  every single-file program's IR is unchanged). */
-  readonly hits = new Set<string>();
+   *  every single-file program's IR is unchanged).
+   *
+   *  NOT `readonly`: a persistent Set is advanced by REBINDING the field, so the two
+   *  writers below assign it. `readonly` here would be a claim about the OBJECT that the
+   *  immutable data model makes meaningless — the Set was never mutated in place. */
+  hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
   // `this.vars = this.vars.set(…)`, not the discarded `this.vars.set(…)`. Identical under
@@ -429,7 +439,7 @@ class Scope {
   own(name: string): Binding | undefined { return this.vars.get(name); }
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
-    if (b) { this.hits.add(name); return b; }
+    if (b) { this.hits = this.hits.add(name); return b; }
     return this.parent?.lookup(name);
   }
 }
@@ -816,8 +826,12 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
   c.bodyChain = [bodyFrame([], program.body)]; // the outermost enclosing body, for NT1031
   c.checkBlock(program.body, moduleScope);
   // Only reads made from INSIDE a function body promote a module binding to a global,
-  // so clear the top level's own hits before checking the functions.
-  moduleScope.hits.clear();
+  // so drop the top level's own hits before checking the functions. A FRESH Set rather
+  // than `.clear()`: the Set is persistent, `.clear()` discards its result, and there is
+  // no rebinding spelling for it that survives both runtimes (node's `.clear` returns
+  // `undefined`). `moduleScope` is this function's own `const` and nothing else holds the
+  // Set, so replacing the object is exactly what clearing it meant.
+  moduleScope.hits = new Set<string>();
   // Deliberately an ARROW inside `check`, not a module-level helper: the metric this
   // serves counts top-level `FuncDecl`s of the LINKED COMPILER, so a new one here would
   // move its own denominator (and, since a `catch (e)` binding types as the erased class,
