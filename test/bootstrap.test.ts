@@ -627,7 +627,22 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // The rule still refuses the exact shape that was removed (verified by mutation).
     //
     // ast.ts is now at RUNG 3 -- four modules reach IR where three did.
-    ["NT1014", "NT2001"],
+    // ...and NT2001 LEAVES — the TWELFTH refill this file has recorded, replaced by
+    // NT1002. What held it was ONE EXPRESSION in `src/checker.ts` that THREE modules
+    // inherit at once: `const asBlocker = (fn, e: unknown) => e instanceof NTError ?
+    // e.diag… `, where `instanceof` does not narrow an `unknown`. Behind it, cleared in
+    // the same sitting and in this order: `collectBlockers.push` on an unmarked array
+    // parameter (NT1606); the `//@@mutable` marker REFUSING that parameter because it was
+    // OPTIONAL, so `?U…[]` and not an array (NT1023); the catch binding still typing
+    // `string`, because `checkFunction` dispatches rather than throwing directly — which
+    // is what makes TRANSITIVE raise inference load-bearing, after it had been rejected
+    // one commit earlier on the blocker-metric proxy; and `program.body = …` (NT1606),
+    // now a new `Program` built at the return.
+    //
+    // The wall behind all five is `structuredClone` of the recursive `FuncDecl` type.
+    // NT1014 is untouched and still holds the OTHER five modules — parser.ts's
+    // `Set of U<…>` — so this round moved one of the two tiers, not both.
+    ["NT1002", "NT1014"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -880,7 +895,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // cross-frame `throw` can now carry an OBJECT (pointer-move, single owner transferred),
     // so `parser.ts::tokenize`'s `catch (e) { e.message }` cleared and took the five
     // modules that inherit it to NT1014. The three that link `checker.ts` stay.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
+    // ...and NT2001 EMPTIES AGAIN, taking the three `checker.ts`-linked modules with it.
+    // One expression did it — `asBlocker`'s `e: unknown` with an `instanceof` that does not
+    // narrow — and the four blockers stacked behind it fell in the same sitting, so the
+    // three land on NT1002 (`structuredClone` of the recursive `FuncDecl`) rather than on
+    // another NT2001. The tier list above records the order they came off in.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
       ["checker.ts", "codegen.ts", "ownership.ts"],
     );
     expect(byCode["NT1003"] ?? []).toEqual([]);
@@ -1101,7 +1122,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // one site is gone. In its place lexer.ts's NT1004 joins the tree-wide set — a
     // different module, a different code, and the SAME count of four, which is why the
     // set assertion above needed a comment rather than just a new list.
-    expect(byCode["NT1002"]).toBeUndefined();
+    // ...and NT1002 IS BACK, held by the three modules that link `checker.ts`:
+    // `structuredClone` of the recursive `FuncDecl` type, which is what they landed on
+    // after five blockers came off in one sitting (see the NT2001 note above). Asserted
+    // as a MEMBERSHIP rather than `toBeUndefined()` so the next move names its holders.
+    expect((byCode["NT1002"] ?? []).slice().sort()).toEqual(
+      ["checker.ts", "codegen.ts", "ownership.ts"],
+    );
     // diagnostics.ts has now been round the houses: NT1606 (`[...spans].sort()`, cleared by
     // the fresh-receiver lane) -> NT1006 (`Math.max(...)`, cleared by the variadic lane) ->
     // back to NT1606, this time a `.push` on a NAMED accumulator. That last shape is
@@ -1321,9 +1348,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // cross-frame `throw` can now carry an OBJECT (pointer-move, single owner transferred),
     // so `parser.ts::tokenize`'s `catch (e) { e.message }` cleared and took the five
     // modules that inherit it to NT1014. The three that link `checker.ts` stay.
-    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["checker.ts", "codegen.ts", "ownership.ts"],
-    );
+    // ...and NT2001 EMPTIES AGAIN — the three `checker.ts`-linked modules moved to
+    // NT1002. One expression started it (`asBlocker`'s `e: unknown`, where `instanceof`
+    // does not narrow) and four more blockers came off behind it in the same sitting.
+    expect((byCode["NT2001"] ?? []).slice().sort()).toEqual([]);
     expect(byCode["NT1003"] ?? []).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
     // ...and empty again: the cursor is one `//@@mutable` record now, so nothing writes a
