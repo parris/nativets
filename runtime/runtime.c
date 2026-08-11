@@ -1554,6 +1554,51 @@ static int nt_utf8_len(const unsigned char *p, const unsigned char *end, unsigne
  * one of them was wrong. Found by MUTATION: swapping the fall-back value to U+FFFD changed
  * nothing any test could see, which is what pointed at the fall-back being consulted at all. */
 
+/* ---- `for (const c of s)` — ONE STEP OF THE STRING ITERATOR. ---------------------
+ *
+ * Returns the character starting at BYTE offset `id` and writes its byte length to
+ * `*out_adv`, which is what the loop adds to its cursor. Two answers from one call and
+ * one `nt_strlen`, so a code-point-framed loop costs the same number of runtime calls
+ * per step as the byte-framed one it replaces.
+ *
+ * WHY THIS EXISTS AT ALL, given `js_str_char_at`. `for…of` used to BE `js_str_char_at`
+ * over `0 .. js_str_len`, i.e. one element per byte, while `Array.from` framed the same
+ * string by code point. For `"\u2001Axx"` — well formed, ordinary source — that was 6
+ * against node's 4, with `Array.from` already answering 4. In node the two spellings are
+ * the SAME iterator and can never disagree; here they did. `for…of` is now the code-point
+ * side, which is node-exact for every well-formed string. `split("")` deliberately stays
+ * on the byte side — it is node's CODE-UNIT decomposition, the one that keeps
+ * `split("").length === length`, and a byte is our code unit (§A.2).
+ *
+ * ILL-FORMED INPUT keeps the policy every other consumer uses: the single raw byte,
+ * advance one. `*out_adv` is therefore NEVER 0, so the loop cannot spin.
+ *
+ * LIFETIME. A one-byte character is an INTERNED static (`nt_ch1`), exactly as before, so
+ * an ASCII loop still allocates nothing. A multi-byte character has to be a fresh
+ * rc-string; the loop releases each one as it advances past it (`nt_str_release` is a
+ * documented no-op on the interned pointers, so the two cases share one path). */
+const char *nt_str_cp_at(const char *s, double id, double *out_adv) {
+  size_t n = nt_strlen(s);
+  long i = (long)id;
+  /* An EQUIVALENT MUTANT today, and a statement about the CALLER rather than a gap in it:
+   * the loop's own condition is `i < js_str_len(s)` and its cursor starts at 0, so `i` is
+   * always in range and deleting this line keeps every test green. It stays for the reason
+   * `nt_utf8_len`'s truncation guard does — it is what makes the function correct for an
+   * ARBITRARY offset, which is the property the next caller will assume and which nothing
+   * else here writes down. `*out_adv = 1` so even that caller cannot spin. */
+  if (i < 0 || (size_t)i >= n) { *out_adv = 1; return nt_empty_str(); }
+  const unsigned char *p = (const unsigned char *)s + i;
+  unsigned cp;
+  int k = nt_utf8_len(p, (const unsigned char *)s + n, &cp);
+  size_t len = k ? (size_t)k : 1;
+  *out_adv = (double)len;
+  if (len == 1) return nt_ch1(p[0]);
+  char *o = alloc_str(len);
+  memcpy(o, s + i, len);
+  o[len] = 0;
+  return o;
+}
+
 /* Scan FORWARD past whitespace from `s`. */
 static const char *nt_ws_skip_fwd(const char *s, const char *end) {
   const unsigned char *p = (const unsigned char *)s, *e = (const unsigned char *)end;

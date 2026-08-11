@@ -1289,6 +1289,17 @@ function enumerableOrThrow(ot: Ty, what: string, forIn = false): void {
  *  - the scan is by UTF-16 CODE UNIT, like the flagless regex it replaces — so a non-BMP
  *    character yields TWO underscores and the length is preserved. `for (const c of t)`
  *    would iterate code points and quietly produce one.
+ *
+ * ...UNDER BUN. Under the SELF-HOSTED compiler it is by UTF-8 BYTE, because `t.length` and
+ * `t[i]` are (§A.2), so the same three characters give different answers on the two hosts:
+ * `"Boéx"` mangles to `Bo_x` under bun and `Bo__x` here, `"Bo😀x"` to `Bo__x` and `Bo____x`.
+ * MEASURED, not deduced — this exact function, compiled both ways. Latent rather than
+ * live: every type argument in the tree is ASCII, on which the two agree exactly, and the
+ * mangled name never leaves one compile. But "the length is preserved" is a claim about
+ * bun only, and the subset rule (docs/self-hosting.md) says a `src/` function has to mean
+ * the same thing on both hosts. Rewriting it in terms of a unit both hosts share — walking
+ * `Array.from(t)`, which is code-point framed on both — is the fix when someone needs it;
+ * doing it here would change ASCII mangling not at all and is nobody's blocker today.
  */
 function mangleTypeArg(t: string): string {
   let out = "";
@@ -4613,11 +4624,14 @@ class Checker {
             const at = this.type(e.args[0]!, scope, declared ? makeArrayTy(declared) : undefined);
             if (isArrayTy(at)) el = elemTy(at);
             else if (isSetTy(at)) el = setElemTy(at);
-            // A string is deliberately REFUSED: node iterates it by code point
-            // (`new Set("a😀b")` has size 3) while our string for-of walks bytes, so
-            // building it here would silently produce the wrong set. We cannot prove
-            // a string is ASCII at compile time, so the refusal is unconditional.
-            else if (at === "string") throw nyi(NYI.COLLECTION, "new Set(string) (node iterates a string by code point; split it yourself, e.g. new Set(s.split(\"\")) for ASCII)");
+            // A string is still REFUSED — implicit iteration of one is not wired up here —
+            // but the HINT has to name the spelling that actually matches node, and the
+            // one it used to name did not. `s.split("")` is BYTE-framed (§A.2: a byte is
+            // our code unit, which is what keeps `split("").length === length`), so it is
+            // node-correct for ASCII and only for ASCII — `new Set("a😀b".split(""))` is 8
+            // here against node's 5. `Array.from(s)` is the ITERATOR, code-point framed,
+            // and gives node's 4 for that string and for every well-formed string.
+            else if (at === "string") throw nyi(NYI.COLLECTION, "new Set(string) (node iterates a string by code point — write `new Set(Array.from(s))`, which is code-point framed here too and matches node; `s.split(\"\")` is byte-framed and is only equivalent for ASCII)");
             else throw nyi(NYI.COLLECTION, `new Set(${at}) (only an array or another Set is supported — build others with .add)`);
             if (declared && el !== declared) throw typeError(`new Set<${declared}> from ${at} (element type must match)`);
           }
