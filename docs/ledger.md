@@ -883,3 +883,28 @@ Plus two more the measurement turned up: **parenthesized types** (`(() => Scope)
 **`delete o.k`**, which is now named as the mutation it is (`NT1606`) rather than "unparsed".
 
 ---
+
+## Fuzz wave 3 — generics / classes / destructuring / spread (2026-08-11)
+
+`bun run test/fuzz3-shapes.ts`. **52 programs, ZERO mismatches, ZERO stoppers** — no silent
+wrong answer in these shapes on the subset that compiles. A negative result, recorded because
+the earlier waves' positives (`test/fuzz-diff.test.ts`) are only meaningful next to the sweeps
+that found nothing.
+
+**What bounded it, which matters more than the zero.** 32 of 84 generated cases were refused
+before they ran, and those refusals are the real finding:
+
+| shape | verdict |
+|---|---|
+| `const [p = 9] = xs` / `const { b = 5 } = o` (destructuring DEFAULTS) | `NT0001` — a parse error, not a typed refusal |
+| `const [, s] = xs` (a HOLE) | `NT0001` |
+| `const [p, q] = [1]` (past the end) | `NT2002`, where node gives `undefined` — consistent with the OOB policy |
+| a generic CLASS (`class Box<T>`) | `NT1015` |
+| spreading a non-array into an array literal | `NT2001` |
+
+**The methodology note this wave earned.** The first version used ONE shared prelude, a single
+`get` accessor in it was refused, and every one of the 59 cases went with it — while the summary
+still printed "0 mismatches". That is the project's recurring vacuity failure in a new place, so
+each group now screens its OWN prelude and says *"this group measured NOTHING"* out loud. It
+fired immediately: generic classes are refused, and with `Box` in a shared prelude the nineteen
+generic-FUNCTION cases would have silently measured nothing at all.
