@@ -143,6 +143,10 @@ differential("StringNumericLiteral: the 0b / 0o / 0x productions", [
       'Number("0x20000000000001")',   // 2^53 + 1 -> ties to 2^53
       'Number("0x20000000000003")',   // 2^53 + 3 -> ties UP, to 2^53 + 4
       'Number("0o' + "7".repeat(400) + '")',   // overflows to Infinity
+      // Past 65536 dropped bit-places the fold stops counting, because the answer cannot
+      // be anything but Infinity from there and an unbounded count is signed overflow.
+      // 20000 hex digits is ~80000 places, so this is the saturating branch.
+      'Number("0x1' + "f".repeat(20000) + '")',
     ),
   },
   {
@@ -201,6 +205,8 @@ differential("parseFloat is a prefix read of StrDecimalLiteral", [
     code: log(
       'parseFloat("0x1f")', 'parseFloat("0x10")', 'parseFloat("  0x10  ")',
       'parseFloat("0b101")', 'parseFloat("0o17")', 'parseFloat("0xg")',
+      // What it stops on is the digit `0`, which keeps the SIGN — console.log shows -0.
+      'parseFloat("-0x10")', 'parseFloat("+0x10")',
     ),
   },
   {

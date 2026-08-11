@@ -795,7 +795,10 @@ static const char *nt_scan_nondecimal(const char *s, const char *limit, double *
     else if (bits == 4 && c >= 'A' && c <= 'F') v = c - 'A' + 10;
     else break;
     if (v >= (1u << bits)) break;           /* `8` in an octal literal, `2` in a binary one */
-    if (mant >> (64 - bits)) { shift += bits; if (v) mant |= 1; }  /* full: sticky only */
+    /* `mant` full: the digit is entirely below the significand, so it can only set the
+     * sticky bit. `shift` STOPS at 65536 — anything at all is already Infinity by then,
+     * and letting a long enough literal overflow a signed int would be UB. */
+    if (mant >> (64 - bits)) { if (shift < 65536) shift += bits; if (v) mant |= 1; }
     else mant = (mant << bits) | v;
   }
   if (p == first) return NULL;              /* `0x` with no digits after it */
