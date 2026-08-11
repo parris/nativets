@@ -551,6 +551,38 @@ export const NYI = {
   // (`as [Expr, Expr][]`, `(): [Ty, Ty]`); refusing them would move that module AWAY from
   // self-hosting to buy no soundness. The line is drawn exactly where the erasure lies.
   TUPLE: { code: "NT1037", milestone: "later", hint: "nativets has no tuple type — `[T, U]` would erase to `T[]`, silently giving every later element the first one's type. Spell the pair as a NAMED RECORD and read it by field: `interface Pair { first: number; second: string }`, returned as `{ first: n, second: s }` and destructured as `const { first, second } = …`. A tuple whose elements all share one type (`[T, T]`) is an array and is accepted as written" },
+
+  // `__proto__` written as `PropertyName : AssignmentExpression` in an object literal is not
+  // a property at all. ECMAScript B.3.1 (`__proto__` Property Names in Object Initializers)
+  // rewrites that one production into a [[SetPrototypeOf]], so node's `{ __proto__: 1 }` is
+  // `{}` — the key is absent from `Object.keys`, `for-in` and `JSON.stringify`. We built an
+  // ordinary field, which is a silent wrong answer at exit 0 (test/fuzz-diff.test.ts).
+  //
+  // It cannot be honoured, because nativets has no prototype chain: an object is a flat
+  // record whose slot layout is fixed at compile time from its static type, and methods are
+  // resolved from the type tag rather than carried by the value. All three shapes need the
+  // chain we do not have:
+  //   `{ __proto__: obj }`  — a later `o.b` has to resolve on `obj`, through a link no
+  //                           object here has a place to store;
+  //   `{ __proto__: null }` — the object LOSES `Object.prototype`, so `"toString" in o` flips
+  //                           to false; our `in` answers from `OBJECT_PROTO_KEYS`, a
+  //                           compile-time list with no per-object exception;
+  //   `{ __proto__: 1 }`    — a primitive makes the setter a no-op, so this one alone IS
+  //                           expressible (drop the key) — but such a literal is an
+  //                           obfuscated `{}`, and compiling it would mean a value that is
+  //                           evaluated, owned by nobody and stored nowhere sitting in the
+  //                           one path where every other property MOVES into the object.
+  // Refusing the production entire is both the honest answer and the only uniform one.
+  //
+  // Deliberately narrow. B.3.1 rewrites ONLY `PropertyName : AssignmentExpression`, so the
+  // three neighbouring spellings are ordinary properties in node and stay compiling exactly
+  // as they did: the shorthand `{ __proto__ }` (an `IdentifierReference`, which is why the
+  // hint sends people there — proven against node in test/fuzz-diff.test.ts), the computed
+  // `{ ["__proto__"]: v }` (already NT0001 here, computed keys being unsupported), and
+  // `JSON.parse('{"__proto__":1}')`, which is `CreateDataProperty` and never the setter.
+  // `o.__proto__` is untouched by this code — it is the `Object.prototype` accessor, a
+  // separate gap noted in docs/divergences.md.
+  PROTO_KEY: { code: "NT1038", milestone: "later", hint: "`{ __proto__: v }` is not a property in JavaScript — ECMAScript B.3.1 makes it the PROTOTYPE SETTER, so node prints `{}` for `{ __proto__: 1 }` and the key is absent from `Object.keys`, `for-in` and `JSON.stringify`. nativets objects are flat records with no prototype chain, so the setter cannot be honoured and building the field instead would be a silent wrong answer. If you wanted a PROPERTY named `__proto__`, the SHORTHAND is one in node and compiles here: `const __proto__ = v;` then `{ __proto__ }`. If you wanted to set a prototype (`{ __proto__: null }`, `{ __proto__: base }`), nativets has no prototypes — use a plain field, or spread the base in (`{ ...base, … }`)" },
 } as const;
 
 type NyiSpec = { code: string; milestone: Milestone; hint: string };

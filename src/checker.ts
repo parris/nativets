@@ -517,6 +517,28 @@ const MATH_ARITY: Map<string, number> = new Map<string, number>()
   .set("floor", 1).set("ceil", 1).set("round", 1).set("abs", 1)
   .set("sqrt", 1).set("trunc", 1).set("pow", 2);
 const MATH_VARIADIC = new Set(["max", "min"]);
+
+/**
+ * The `Math.*` DATA properties — the eight of them, exact IEEE-754 values like node.
+ *
+ * A `Map` for the same behavioural reason `NUMBER_CONSTS` is one: a plain object read
+ * with a member name falls through to `Object.prototype`, so `Math.constructor` would
+ * answer a FUNCTION, the guard above would take it for a real constant, and the read
+ * would fold to `NaN` where node prints `[Function: Function]` — exit 0 on both sides,
+ * the silent-wrong-answer class. A Map has no prototype chain, so `.get` answers
+ * `undefined` and the refusal fires. ES 21.3.1 makes all eight
+ * non-writable/non-configurable, which is what makes folding the read to a literal
+ * observationally right: nothing can ever assign one.
+ */
+export const MATH_CONSTS: Map<string, number> = new Map<string, number>()
+  .set("E", Math.E)
+  .set("LN10", Math.LN10)
+  .set("LN2", Math.LN2)
+  .set("LOG10E", Math.LOG10E)
+  .set("LOG2E", Math.LOG2E)
+  .set("PI", Math.PI)
+  .set("SQRT1_2", Math.SQRT1_2)
+  .set("SQRT2", Math.SQRT2);
 interface MethodSig { min: number; max: number; argTys: (Ty | null)[]; ret: Ty; }
 /** stdlib Batch 1 (part 2): predicate HOFs — one inline arrow, boolean body. */
 const SEARCH_HOFS = new Set(["some", "every", "find", "findIndex", "findLast", "findLastIndex"]);
@@ -678,6 +700,20 @@ const GLOBAL_FUNCS: Map<string, MethodSig> = new Map<string, MethodSig>()
   .set("mousePressed", { min: 0, max: 0, argTys: [], ret: "boolean" }) // left button pressed this frame
   .set("pointInRect", { min: 6, max: 6, argTys: ["number", "number", "number", "number", "number", "number"], ret: "boolean" }) // px,py,x,y,w,h
   .set("setTargetFPS", { min: 1, max: 1, argTys: ["number"], ret: "void" });
+/**
+ * The builtin objects this compiler KNOWS — recognized only through their members
+ * (`Math.floor`, `JSON.stringify`, `Object.keys`, `console.log`, …), never as a value.
+ *
+ * The list exists so that naming one bare (`const m = Math`) does not report `'Math' is
+ * not defined`, which is false and was measurably misleading: it is the same lie
+ * `Math.PI` told before it got a member-read path, and it sends a reader looking for a
+ * missing import instead of an unimplemented feature. Membership is EARNED — every name
+ * here has a member proven to compile and match node in `test/stdlib-batch1.test.ts` /
+ * the fixtures, because the hint asserts exactly that. `Boolean` is deliberately absent:
+ * it has no implemented members, and `Boolean(x)` is its own refusal (NT1003).
+ */
+const BUILTIN_NAMESPACES = new Set(["Math", "JSON", "console", "Number", "String", "Object", "Array", "Date"]);
+
 /** B3 v0 actor builtins — special-cased in inferCall (variadic / function-valued). */
 const ACTOR_BUILTINS = new Set([
   "spawn", "send", "receive", "self", "__drain",
@@ -3543,6 +3579,16 @@ class Checker {
         if (!b) {
           const fnv = this.functionValueTy(e.name);
           if (fnv !== undefined) return fnv;
+          // A builtin NAMESPACE named as a bare value (`const m = Math`). These names are
+          // very much defined — `Math.floor(x)`, `JSON.stringify(v)` and `console.log(v)`
+          // all compile — so `'Math' is not defined` was simply a false statement, the
+          // same lie `Math.PI` used to tell one case down. What is actually missing is the
+          // namespace OBJECT as a first-class value; say that, and file it as a missing
+          // feature (NT1xxx, which `src/coverage.ts` counts into the blocker histogram)
+          // rather than as the user's type error.
+          if (BUILTIN_NAMESPACES.has(e.name)) {
+            throw nyi(NYI.OBJECT, `the builtin '${e.name}' as a value`, `'${e.name}' IS defined — this compiler implements its members (\`${e.name}.…\`), not the object itself as a first-class value; name the member you want`, e.loc);
+          }
           throw typeError(`'${e.name}' is not defined`);
         }
         // Control-flow narrowing: on this path the binding was PROVED non-nullish, so it
@@ -3586,6 +3632,17 @@ class Checker {
         // stdlib Batch 1: the `Number.*` numeric constants (MAX_SAFE_INTEGER, EPSILON, …).
         if (e.object.kind === "Identifier" && e.object.name === "Number" && !scope.lookup("Number")) {
           if (NUMBER_CONSTS.get(e.property) === undefined) throw nyi(NYI.OBJECT, `Number.${e.property}`);
+          return "number";
+        }
+        // The `Math.*` data properties. A member READ of `Math` had no path of its own —
+        // `Math` was recognized ONLY as a call callee (`Math.floor(x)`, in `inferCall`) —
+        // so `Math.PI` fell through to `this.type(e.object)` below and came back as
+        // `NT2001 'Math' is not defined`, which is FALSE: the very next line may call
+        // `Math.floor` fine. A METHOD named here (`Math.floor` uncalled) is a function
+        // value, which is a different missing feature, so it keeps the NYI refusal rather
+        // than being folded to a number.
+        if (e.object.kind === "Identifier" && e.object.name === "Math" && !scope.lookup("Math")) {
+          if (MATH_CONSTS.get(e.property) === undefined) throw nyi(NYI.OBJECT, `Math.${e.property}`);
           return "number";
         }
         const ot = this.type(e.object, scope);
