@@ -1394,6 +1394,13 @@ class FnGen {
     this.entryAllocas.push(`%${name} = alloca ${llvmTy(ty)}`);
     return `%${name}`;
   }
+  /** A slot in the universal `i64` SLOT representation (what `toSlot`/`fromSlot` move),
+   *  for holding a value whose type is only known through `el`. */
+  private rawSlot(): string {
+    const name = `s${this.lbl++}`;
+    this.entryAllocas.push(`%${name} = alloca i64`);
+    return `%${name}`;
+  }
   private block(label: string): number {
     this.blocks.push({ label, lines: [], terminated: false });
     return this.blocks.length - 1;
@@ -6435,6 +6442,21 @@ class FnGen {
     this.emit(`${len} = call double @nt_arr_len(ptr ${src})`);
     const hit = this.slot("number"); // index of the first (last) match, -1 = none
     this.emit(`store double 0xBFF0000000000000, ptr ${hit}`); // -1
+    // THE ELEMENT THE MATCH SAW, kept rather than re-read after the loop.
+    //
+    // `.find`/`.findLast` used to produce their result with a second `src[hit]` read down
+    // at the `end` block. That read is not the one the predicate was shown: the MATCHING
+    // callback can shrink the array after being handed its element, and then `hit` points
+    // past the new end and `nt_arr_get` answered 0 —
+    //   `a.find((x, i) => { const m = i === 3; if (m) { a.pop(); a.pop(); } return m; })`
+    //   gave `0` where node gives `4`, exit 0 both ways.
+    // Unlike the loop read above, this one does NOT want a panic: node returns `kValue`,
+    // which it read before the shrink, so the right answer is in hand and matching node
+    // costs one store on the match path. Zero-initialised because that is exactly what
+    // the old miss path read out of `nt_arr_get`, and the `miss` flag masks it either way.
+    const wantElem = method === "find" || method === "findLast";
+    const hitv = wantElem ? this.rawSlot() : "";
+    if (wantElem) this.emit(`store i64 0, ptr ${hitv}`);
     const idx = this.slot("number");
     if (backwards) { const st = this.fresh(); this.emit(`${st} = fsub double ${len}, 1.0`); this.emit(`store double ${st}, ptr ${idx}`); }
     else this.emit(`store double 0x0000000000000000, ptr ${idx}`);
@@ -6477,6 +6499,7 @@ class FnGen {
     const iH = this.fresh();
     this.emit(`${iH} = load double, ptr ${idx}`);
     this.emit(`store double ${iH}, ptr ${hit}`);
+    if (wantElem) this.emit(`store i64 ${slot}, ptr ${hitv}`); // the value the predicate saw
     this.terminate(`br label %${end}`);
 
     this.to(this.block(go));
@@ -6498,7 +6521,7 @@ class FnGen {
     if (method === "every") { const t = this.fresh(); this.emit(`${t} = xor i1 ${found}, true`); return { v: t, ty: "boolean" }; }
     if (method === "findIndex" || method === "findLastIndex") return { v: h, ty: "number" };
     const es = this.fresh();
-    this.emit(`${es} = call i64 @nt_arr_get(ptr ${src}, double ${h})`);
+    this.emit(`${es} = load i64, ptr ${hitv}`);
     const miss = this.fresh();
     this.emit(`${miss} = xor i1 ${found}, true`);
     // A NULLABLE element is ALREADY a `[tag, value]` box, so boxing it again would build

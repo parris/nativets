@@ -237,6 +237,47 @@ console.log(r, a.length);
     }, 60000);
   }
 
+  /*
+   * A THIRD instance, and the only one where node can be MATCHED rather than refused.
+   *
+   * `.find`/`.findLast` return an ELEMENT, and `genSearchHof` produced it by re-reading
+   * `src[hit]` AFTER the loop. If the matching callback shrinks the array on the very
+   * iteration that matches, the loop's own read was in bounds (it happened first) but the
+   * re-read is not — and `nt_arr_get` answered 0.
+   *
+   *     a.find((x, i) => { const m = i === 3; if (m) { a.pop(); a.pop(); } return m; })
+   *     node: 4      nativets (before): 0      both exit 0
+   *
+   * node holds `kValue` from before the shrink, so the right answer is available and no
+   * panic is warranted: keep the element the loop already read instead of re-reading it.
+   * That is strictly better than the other two fixes — same answer as node, exit 0.
+   */
+  test(".find returns the element it saw, not a re-read after the shrink", async () => {
+    const src = `//@@mutable
+const a: number[] = [1, 2, 3, 4];
+const r = a.find((x, i) => { const m = i === 3; if (m) { a.pop(); a.pop(); } return m; });
+console.log(r, a.length);
+`;
+    const oracle = runWithNodeAttrs(src);
+    expect(oracle.stdout).toBe("4 2\n");
+    const r = await run(src);
+    expect(r.stdout).toBe(oracle.stdout); // NOT a panic: node's answer is reachable here
+    expect(r.exitCode).toBe(oracle.exitCode);
+    expect(r.exitCode).toBe(0);
+  }, 60000);
+
+  test(".find that matches nothing still yields undefined, not a panic", async () => {
+    const src = `const a: number[] = [1, 2, 3];
+const r = a.find((x) => x > 99);
+console.log(r);
+`;
+    const oracle = runWithNodeAttrs(src);
+    expect(oracle.stdout).toBe("undefined\n");
+    const r = await run(src);
+    expect(r.stdout).toBe(oracle.stdout);
+    expect(r.exitCode).toBe(0);
+  }, 60000);
+
   test("a search callback that only READS the receiver is untouched", async () => {
     const src = `const a: number[] = [1, 2, 3, 4];
 console.log(a.some((x) => x === a.length), a.findIndex((x) => x > 2), a.every((x) => x <= 4));
