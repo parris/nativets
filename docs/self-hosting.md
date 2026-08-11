@@ -5413,11 +5413,28 @@ So six of the nine fall to ONE feature: extend the per-parameter `//@@mutable` o
 arrays to `Map`/`Set`. That is the highest-leverage item on this list, and it is a language
 feature rather than a rewrite of `src/`.
 
-**And there is a design fork under it, which is why it is not a small job.** The array
-opt-in works because an array HAS an in-place path (`nt_arr_push`). A `Map`/`Set` does not:
-`nt_map_put` (runtime/nt_hamt.h) is *purely persistent* — it returns a NEW `NtMap` and there
-is no in-place or refcount-aware variant anywhere in `nt_hamt.c`. So the feature needs one
-of:
+**CORRECTED 2026-08-11 — the design fork below was WRONG, and the runtime half is done.**
+`NtColl` (runtime/nt_mapset.c) is already a three-field WRAPPER over the persistent
+internals (`m` the HAMT handle, `buf`/`n` the insertion-order log). **The cell already
+exists.** An in-place update is the ordinary persistent op followed by copying the new
+wrapper's three fields back into the old one — `nt_map_put_slot_inplace` and its three
+siblings, ~15 lines, no ABI change and no refcount-aware HAMT insert.
+
+Proven by `test/runtime/collinplace_test.c` (22 checks, registered in
+`test/runtime.test.ts` so it cannot rot): the receiver updates, every holder of that
+wrapper observes it, a version handed out EARLIER by the persistent API is untouched, and
+insertion ORDER survives. It is sound because the internals are structurally shared —
+nothing is freed or overwritten, only one wrapper's view changes — which makes this a
+lost-update question, and `@@mutable` is precisely the opt-in that answers it.
+
+**What remains** is the compiler half: lift the array-only guard at `src/checker.ts:7547`
+for `Map`/`Set`, stop refusing a discarded `.set`/`.add` when the receiver is a `@@mutable`
+binding, and emit the `_inplace` variant from codegen. That closes 8 of the 88 blockers,
+including the two `moduleOrder` parameters for which no spelling exists today.
+
+*The superseded analysis, kept because the reasoning is instructive:* the array opt-in
+works because an array HAS an in-place path (`nt_arr_push`), and `nt_map_put`
+(runtime/nt_hamt.h) is purely persistent, so it looked as though the feature needed one of:
 
 1. **a refcount-aware in-place HAMT insert** — mutate when the node is unshared, copy
    otherwise. Same shape as the array element store (item 2 above), and the same hazard: get

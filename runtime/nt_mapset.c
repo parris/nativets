@@ -165,6 +165,40 @@ extern int64_t nt_arr_get(NtArrayOpaque *a, double idxd);
 /* `new Set(array)` — bulk construction. Routed through coll_put, the SAME path
  * `.add` takes, so dedup (SameValueZero, via ntk) and the insertion-order log are
  * maintained identically: a duplicate keeps its FIRST position and does not append. */
+/* ---- IN-PLACE update, for a `@@mutable` binding ---------------------------
+ *
+ * THE CELL ALREADY EXISTS. `NtColl` is a three-field WRAPPER over the persistent
+ * internals (`m` the HAMT handle, `buf`/`n` the insertion-order log), so "mutate the
+ * binding in place" is: run the ordinary persistent op, then copy the new wrapper's three
+ * fields back into the old one. Every holder of that wrapper observes the update, which is
+ * exactly what `@@mutable` promises — and no new calling convention is needed, which is
+ * where the earlier analysis in docs/self-hosting.md was wrong (it priced a cell-passing
+ * ABI, or a refcount-aware HAMT insert; neither is required).
+ *
+ * SAFE, and the reason is worth stating: the internals are PERSISTENT and structurally
+ * shared, so nothing is freed or overwritten here — only this wrapper's VIEW of them
+ * changes. That makes this a lost-update question, not a memory-safety one, and
+ * `@@mutable` is the opt-in that answers it. A holder of a DIFFERENT wrapper (a previous
+ * version handed out by the persistent API) is untouched.
+ */
+static void coll_become(NtColl *dst, NtColl *src) {
+  dst->m = src->m;
+  dst->buf = src->buf;
+  dst->n = src->n;
+}
+void nt_map_put_slot_inplace(NtColl *c, int ktype, int64_t kslot, int64_t val) {
+  coll_become(c, nt_map_put_slot(c, ktype, kslot, val));
+}
+void nt_set_add_slot_inplace(NtColl *c, int ktype, int64_t kslot) {
+  coll_become(c, nt_set_add_slot(c, ktype, kslot));
+}
+void nt_map_remove_slot_inplace(NtColl *c, int ktype, int64_t kslot) {
+  coll_become(c, nt_map_remove_slot(c, ktype, kslot));
+}
+void nt_set_remove_slot_inplace(NtColl *c, int ktype, int64_t kslot) {
+  coll_become(c, nt_set_remove_slot(c, ktype, kslot));
+}
+
 NtColl *nt_coll_set_from_arr(NtArrayOpaque *a, int ktype) {
   NtColl *c = nt_coll_set_new();
   int64_t n = (int64_t)nt_arr_len(a);
