@@ -339,6 +339,34 @@ function literalLength(e: Expr): number | undefined {
   return undefined;
 }
 
+/**
+ * What to actually DO about an out-of-bounds bracket index — the tail of the NT2002 hint,
+ * and the runtime's `nt_panic_bounds` help line has the same three cases for the same
+ * reason (`runtime/runtime.c`, `bounds_help`).
+ *
+ * It used to be one sentence for every index: "use `.at(N)` if you want `undefined`
+ * instead of a panic". Against node that holds ONLY at or past the end. Following it for
+ * a negative or fractional index does not avoid the panic, it silently returns a
+ * DIFFERENT VALUE:
+ *
+ *     [1,2,3][-1]  -> undefined   but  [1,2,3].at(-1)  -> 3     (counts from the END)
+ *     "abc"[-1]    -> undefined   but  "abc".at(-1)    -> "c"
+ *     [1,2,3][1.5] -> undefined   but  [1,2,3].at(1.5) -> 2     (truncates)
+ *
+ * Only reached for a READ: `checkStaticBounds` runs off the IndexExpr type path, and the
+ * one writable indexed thing (a Uint8Array element) has no compile-time known length.
+ */
+function atSuggestion(idx: number): string {
+  if (!Number.isInteger(idx))
+    return `\`${idx}\` is not an integer, and node reads \`undefined\` there. ` +
+      `\`.at(${idx})\` is not the same value — it truncates towards zero — so use an integer index`;
+  if (idx < 0)
+    return "node reads `undefined` for a negative index. " +
+      `\`.at(${idx})\` is NOT that: it counts from the END (\`.at(-1)\` is the LAST element). ` +
+      "Index from the front, or use `.at()` deliberately if the element from the end is what you meant";
+  return `use \`.at(${idx})\` if you want \`undefined\` instead of a panic`;
+}
+
 /** A literal index, including a negated one (`a[-1]`, which parses as unary minus). */
 function literalIndex(e: Expr): number | undefined {
   if (e.kind === "NumberLiteral") return e.value;
@@ -2505,7 +2533,7 @@ class Checker {
       `index ${idx} is out of bounds for ${what} of length ${len}`,
       `valid indices are 0..${len - 1}` +
         (len === 0 ? " (there are none — it is empty)" : "") +
-        `; use \`.at(${idx})\` if you want \`undefined\` instead of a panic`,
+        "; " + atSuggestion(idx),
     );
   }
 

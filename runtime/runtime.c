@@ -422,6 +422,27 @@ static void js_number_to_string(double v, char *out, size_t out_len) {
   snprintf(out, out_len, "%s%s", sign, body);
 }
 
+/* Is `d` usable as a bracket index at all? NaN and ±Inf are not, and neither is a
+ * FRACTION: JS `a[1.5]` is a property lookup on the string "1.5", which no array, string
+ * or typed array has, so node reads `undefined` — it does NOT truncate to `a[1]`. The
+ * runtime used to truncate (`(int64_t)1.5` is 1) and hand back the neighbouring element:
+ * `[1,2,3][1.5]` was `2`, `"abc"[1.5]` was `"b"`, and `u[1.5] = 7` overwrote byte 1. Exit
+ * 0, no diagnostic — the silent wrong answer this whole panic path exists to stop, and
+ * the checker's compile-time half had always agreed (`checkStaticBounds` requires
+ * `Number.isInteger`, so the literal `a[1.5]` is NT2002). A non-integer is now out of
+ * bounds here too.
+ *
+ * NOT applied to `nt_arr_with`: node's `.with` runs its index through
+ * ToIntegerOrInfinity, so `[1,2,3].with(1.7, 9)` really is `[1,9,3]` and truncating there
+ * MATCHES node. Bracket indexing has no such coercion. (nt_bytes.c carries a guarded copy
+ * of this macro — it is a separate translation unit with no shared runtime header; this
+ * is the definition of record.)
+ *
+ * `floor(d) == d` rather than a cast round-trip: `(int64_t)1e300` is undefined behaviour
+ * and the index is an arbitrary double straight from the program. It is false for NaN
+ * (every comparison is) and true for ±Inf, which `isinf` then rejects. */
+#define NT_IS_INDEX(d) (floor(d) == (d) && !isinf(d))
+
 /* ============================================================
  * PANIC — out-of-bounds index (see docs/divergences.md).
  *
@@ -437,6 +458,112 @@ static void js_number_to_string(double v, char *out, size_t out_len) {
  * and byte-comparable; the report goes to stderr. abort() (SIGABRT -> shell exit
  * 134) matches the existing out-of-memory path.
  * ============================================================ */
+/* The `help:` line, keyed on the ACCESSOR that faulted and on the INDEX.
+ *
+ * There is no single true suggestion, and there used to be one anyway: every caller got
+ * "use `.at(i)` to get `undefined` instead of panicking". Measured against node, that
+ * holds ONLY for a read at or past the end. Following it anywhere else does not avoid a
+ * panic, it silently returns a DIFFERENT value —
+ *
+ *     [1,2,3][-1]  -> undefined   but  [1,2,3].at(-1)  -> 3    (counts from the END)
+ *     "abc"[-1]    -> undefined   but  "abc".at(-1)    -> "c"
+ *     [1,2,3][1.5] -> undefined   but  [1,2,3].at(1.5) -> 2    (truncates)
+ *     [1,2,3][NaN] -> undefined   but  [1,2,3].at(NaN) -> 1    (element 0)
+ *
+ * — and a `.with` or a typed-array WRITE cannot be expressed by `.at` at ALL, since
+ * `.at` is a read. Both were told to use it.
+ *
+ * `what` already told us which accessor this is; it now also distinguishes the typed-
+ * array WRITE from the read, which is the one caller `.at` can never serve. Each branch
+ * is executed against node in test/panic.test.ts ("the advice compiles and matches
+ * node") — a hint whose advice is never run is a hint nobody checked. */
+static void bounds_help(const char *what, double len, double idx, const char *i) {
+  const char *w = (what && *what) ? what : "the index";
+
+  /* `.with(i, v)` — a pure update. node's `.with` takes a RELATIVE index, so a negative
+   * one is legal there and names an element from the end; ours requires 0..len-1, so
+   * name the absolute form that is the same element. Out of range on BOTH sides, node
+   * throws `RangeError: Invalid index : i` — a real difference of kind (it is catchable
+   * there, a panic here), but the index is wrong either way, so point at the append. */
+  if (strcmp(w, "`.with` index") == 0) {
+    /* `floor(idx) == idx` rather than a cast round-trip: `(long long)1e300` is undefined
+     * behaviour, and the index is an arbitrary double straight from the program. */
+    double rel = len + idx;
+    if (idx < 0 && rel >= 0 && floor(idx) == idx) {
+      char n[64];
+      js_number_to_string(-idx, n, sizeof(n));
+      fprintf(stderr,
+              "  help: node's `.with` counts a negative index from the END; nativets requires an "
+              "index in 0..%lld — write `.with(a.length - %s, v)` for the same element\n",
+              (long long)len - 1, n);
+      return;
+    }
+    /* node's `.with` runs its index through ToIntegerOrInfinity, so NaN becomes 0 —
+     * `[1,2,3].with(NaN, 9)` is `[9,2,3]`, where we panic. (A FRACTION needs no branch:
+     * ToIntegerOrInfinity truncates it and so does `nt_arr_with`, so `.with(1.7, 9)`
+     * already agrees with node and never reaches here.) */
+    if (idx != idx) {
+      fprintf(stderr, "  help: node's `.with` treats a NaN index as 0 (`[1,2,3].with(NaN, 9)` is "
+                      "`[9,2,3]`); nativets requires a real index — write `.with(0, v)` if that is what you meant\n");
+      return;
+    }
+    if (len <= 0) {
+      fprintf(stderr,
+              "  help: `.with` on an EMPTY array has no valid index (node throws "
+              "`RangeError: Invalid index : %s` here too); build the array with `[...a, v]` instead\n", i);
+      return;
+    }
+    fprintf(stderr,
+            "  help: `.with` needs an index inside 0..%lld (node throws `RangeError: Invalid index : %s` "
+            "here too); to APPEND, spread instead: `[...a, v]`\n", (long long)len - 1, i);
+    return;
+  }
+
+  /* A typed-array WRITE. node DISCARDS an out-of-range one: nothing is stored, the array
+   * does not grow, and the program reads back what was already there — the silent wrong
+   * answer this panic exists to stop. There is no expression that performs the write, so
+   * the only honest advice is to test the index; `.at` is named only to rule it out. */
+  if (strcmp(w, "Uint8Array write index") == 0) {
+    fprintf(stderr,
+            "  help: node silently DISCARDS an out-of-range typed-array write — nothing is stored and "
+            "the array does not grow — so no accessor replaces this: test `i >= 0 && i < u.length` "
+            "before writing (`.at(%s)` is a READ and cannot express a write)\n", i);
+    return;
+  }
+
+  /* A READ (`a[i]`, `s[i]`, `u[i]`). node's answer is `undefined` for every failing
+   * index; `.at` reproduces it only for an integer at or past the end. */
+  if (idx != idx) {
+    fprintf(stderr,
+            "  help: %s is NaN; node reads `undefined` there. `.at(NaN)` reads element 0, not "
+            "`undefined`, so it is not the same value — test the index instead\n", w);
+    return;
+  }
+  /* An INFINITE index is the one non-finite case `.at` gets right: node reads `undefined`
+   * for `a[Infinity]` and `.at(Infinity)`/`.at(-Infinity)` are `undefined` too. Say so —
+   * but an infinite index is really a bug in the arithmetic that produced it. */
+  if (isinf(idx)) {
+    fprintf(stderr,
+            "  help: %s is infinite; node reads `undefined` there and `.at(%s)` does too — but an "
+            "infinite index means the arithmetic that produced it is wrong; check that first\n", w, i);
+    return;
+  }
+  if (floor(idx) != idx) {
+    fprintf(stderr,
+            "  help: %s is not an integer; node reads `undefined` there. `.at(%s)` truncates towards zero "
+            "(and `.at(NaN)` reads element 0), so it is not the same value — use an integer index\n", w, i);
+    return;
+  }
+  if (idx < 0) {
+    fprintf(stderr,
+            "  help: %s is out of range; node reads `undefined` for a negative index. `.at(%s)` is NOT "
+            "that: it counts from the END (`.at(-1)` is the LAST element). Test the index first, or use "
+            "`.at()` deliberately if the element from the end is what you meant\n", w, i);
+    return;
+  }
+  fprintf(stderr, "  help: %s is out of range; use `.at(%s)` to get `undefined` instead of panicking\n", w, i);
+}
+
 void nt_panic_bounds(const char *what, double len, double idx, const char *loc) {
   char l[64], i[64];
   js_number_to_string(len, l, sizeof(l));
@@ -444,8 +571,7 @@ void nt_panic_bounds(const char *what, double len, double idx, const char *loc) 
   fflush(stdout);
   fprintf(stderr, "panic: index out of bounds: the length is %s but the index is %s\n", l, i);
   if (loc && *loc) fprintf(stderr, "  at %s\n", loc);
-  fprintf(stderr, "  help: %s is out of range; use `.at(%s)` to get `undefined` instead of panicking\n",
-          what && *what ? what : "the index", i);
+  bounds_help(what, len, idx, i);
   fflush(stderr);
   abort();
 }
@@ -826,7 +952,7 @@ const char *js_str_char_at(const char *s, double id) {
  * `string | undefined`; only the bracket index, whose node value is `undefined`, panics. */
 const char *nt_str_index(const char *s, double id, const char *loc) {
   long n = (long)nt_strlen(s); long i = (long)id;
-  if (!(id == id) || i < 0 || i >= n) nt_panic_bounds("string index", (double)n, id, loc);
+  if (!NT_IS_INDEX(id) || i < 0 || i >= n) nt_panic_bounds("string index", (double)n, id, loc);
   return nt_ch1((unsigned char)s[i]);
 }
 static const char *slice_impl(const char *s, double startd, double endd, int clampNeg) {
@@ -1187,7 +1313,7 @@ int64_t nt_arr_get(NtArray *a, double idxd) {
  * through; only indices the programmer wrote reach this one. */
 int64_t nt_arr_index(NtArray *a, double idxd, const char *loc) {
   int64_t i = (int64_t)idxd;
-  if (!(idxd == idxd) || i < 0 || i >= a->len)
+  if (!NT_IS_INDEX(idxd) || i < 0 || i >= a->len)
     nt_panic_bounds("array index", (double)a->len, idxd, loc);
   return arr_at(a, i);
 }
