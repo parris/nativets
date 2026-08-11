@@ -2072,6 +2072,47 @@ no soundness. The line is drawn exactly at the set where the erasure can lie.
 Real tuples remain unimplemented — they need a `Ty` inhabitant with per-index types, which
 is a type-system feature, not a diagnostic. The hint's replacement is a named record.
 
+### Handing a MODULE-LEVEL binding out of a function is `NT1604` (it was a silent double free)
+
+```ts
+const shared = { a: 1 };
+function getShared(): { a: number } { return shared; }   // NT1604
+const x = getShared();
+console.log(shared.a, x.a);                              // node: "1 1", exit 0
+```
+
+The module scope owns `shared` and frees it when the program ends. Returning it made `x` a
+second owner, so `main` emitted **two consecutive `nt_obj_free`s on one pointer**.
+
+**The signature is the worst on this page**: the allocator's abort discards buffered stdout, so
+the compiled binary printed **nothing on stdout AND nothing on stderr** and exited 133/134 — a
+differential test that compares only stdout compares two empty strings and passes whenever node
+also printed nothing. ASan (which, unlike LeakSanitizer, works on macOS) reports `attempting
+double-free`. A `console.log` placed *before* the free is lost too, so no amount of tracing
+inside the program can see it.
+
+Refused rather than compiled, and the reason "just move the global" is not available is worth
+stating: **the module binding is still live and still readable afterwards** — node prints
+`shared.a` fine — so transferring ownership would produce a wrong *answer* instead of a
+refusal. A return-position **borrow** is the expressive fix and is a language feature, not a
+bug fix. Until then, per *reject, never miscompile*, this is `NT1604`, in the same band and by
+the same machinery as a by-borrow parameter escaping via `return o`.
+
+| shape | verdict |
+|---|---|
+| `return g` / `const t = g` / `return c ? g : …` | `NT1604` |
+| `return { w: g }` / `return [g]` | `NT1604` — a container is an owner too |
+| `=> g` (arrow expression body) | refused; it used to disagree with its own `=> { return g; }` spelling, which was already an error |
+| `get()` with the result discarded | `NT1604` — the rule is about the frame the value leaves |
+| across a module boundary | `NT1604`; SH1 links the graph into one program, so it is one binding |
+| `return g.field`, `for (const v of g)`, `g.length` | **compiles** — reads through a borrow |
+| `return g.inner` (a field OF the global) | **compiles** — a distinct allocation |
+| a module-level **string** | **compiles** — strings are refcounted, not linear |
+| a local that SHADOWS a global | **compiles** — it is the function's own binding |
+
+See `docs/ownership.md` and `test/global-return.test.ts` (both directions, exit codes asserted,
+ASan-pinned, live counts at two scales).
+
 `node` is our oracle. Two kinds of "we differ from node" exist, tracked separately.
 
 ## A. Semantic divergences (we compile it, but differ deliberately)
