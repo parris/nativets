@@ -1322,6 +1322,7 @@ class FnGen {
     this.finallyStack = [];
     this.hofReturnStack = [];
     this.strLocals = new Set();
+    this.frameLocals = new Set();
     this.globalVars = new Set();
     this.inMain = false;
     this.selfArrow = null;
@@ -1399,9 +1400,28 @@ class FnGen {
    *  arrow bodies inside their enclosing function, so a `return` inside a block-bodied
    *  arrow carries the ENCLOSING scope's drop list — locals that do not exist (and are
    *  not owned) in the lifted function. Dropping them there emitted a load of an
-   *  undefined `%x.addr` (clang: "use of undefined value"). Suppress drops in a lifted
-   *  arrow: conservative (the enclosing owner still frees at its own scope exit). */
+   *  undefined `%x.addr` (clang: "use of undefined value").
+   *
+   *  That used to suppress drops in a lifted arrow ENTIRELY, which is not conservative —
+   *  it is a leak. An arrow body is a frame of its own, and the enclosing owner it was
+   *  said to defer to does not own the arrow's locals at all: `declaredLinear` never
+   *  descends into an arrow, so an arrow-body local appears in NO other scope's drop
+   *  set and nothing ever freed it. Every value a closure allocated leaked, once per
+   *  call — and because `spawn` takes a CLOSURE, that is every actor message a receiver
+   *  ever consumes (`test/fuzz2-diff.test.ts`, one object per message DELIVERED at every
+   *  scale; the same body written as a `function` was already clean).
+   *
+   *  The precise question was never "is this a lifted arrow" but "does this name have
+   *  storage in THIS frame": `frameLocals` answers it, so an enclosing-scope name in a
+   *  `return`'s drop list is skipped (no slot here, nothing owned) and the arrow's own
+   *  locals are freed exactly where the ownership pass says. */
   private liftedArrow = false;
+
+  /** Names DECLARED in this frame (`addLocal`), so each has an `%n.addr` alloca here.
+   *  Parameters are deliberately excluded — they are borrows the caller drops, and an
+   *  arrow parameter that SHADOWS an enclosing linear local would otherwise be freed by
+   *  that local's name appearing in a `return`'s enclosing-scope drop list. */
+  private frameLocals = new Set<string>();
 
   /** In a lifted arrow that may call ITSELF (`const walk = (s: Stmt): void => { … walk(…) … }`):
    *  the name it is bound to, and its function type. The self-call needs NO new machinery —
@@ -1431,8 +1451,10 @@ class FnGen {
   private consumeTaken = false;
 
   private emitDrops(names: string[]): void {
-    if (this.liftedArrow) return;
     for (const n of names) {
+      // In a lifted arrow the list may name locals of the ENCLOSING scope (see
+      // `liftedArrow`); those have no slot here and this frame owns nothing of theirs.
+      if (this.liftedArrow && !this.frameLocals.has(n)) continue;
       const p = this.fresh();
       this.emit(`${p} = load ptr, ptr ${this.addr(n)}`);
       // Move-aware RAII: objects free via nt_obj_free, arrays via nt_arr_free.
@@ -1586,7 +1608,7 @@ class FnGen {
     if (this.varTypes.has(name)) return;
     this.varTypes = this.varTypes.set(name, ty);
     // A promoted module-level binding lives in its LLVM global, not a frame slot.
-    if (!this.globalVars.has(name)) this.alloca(name, ty);
+    if (!this.globalVars.has(name)) { this.alloca(name, ty); this.frameLocals = this.frameLocals.add(name); }
   }
 
   private collectLocals(body: Stmt[]): void {
