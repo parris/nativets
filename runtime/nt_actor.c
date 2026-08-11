@@ -372,6 +372,10 @@ static int rq_take(NtSched *s, NtPid *out) {
 
 /* ======================= mailbox (MPSC intake + private FIFO list) ======================= */
 
+/* Reclaim the intake stack of an actor that is DEAD — defined with the other message
+ * ownership code below (see mbox_discard), declared here for the producer's re-check. */
+static void intake_discard(NtActor *a);
+
 /* Producer side. Single-threaded: append straight to the owner's private list (the v0
  * path, bit-for-bit). M:N: CAS onto the lock-free intake stack; the owner drains it. */
 static void mbox_push_kind(NtActor *a, NtMsg m, NtPid from,
@@ -388,6 +392,21 @@ static void mbox_push_kind(NtActor *a, NtMsg m, NtPid from,
   do { n->next = h; }
   while (!atomic_compare_exchange_weak_explicit(&a->in_head, &h, n,
                                                 memory_order_release, memory_order_relaxed));
+  /* PUBLISH, THEN RE-CHECK — the send half of the send-vs-die handoff, and the same
+   * two-halves shape wake_actor/finish_slice use for the lost wakeup.
+   *
+   * Every send site checks "is the target DEAD?" BEFORE pushing, which under M:N is a
+   * check-then-act: the target can die in the window, discard its mailbox, and never see
+   * what lands afterwards. So the dier sets DEAD before it discards, and the sender
+   * re-reads the status after its push. One of the two must observe the other (the
+   * seq_cst fence pairs with the seq_cst store in actor_die), so a message pushed to a
+   * dying actor is freed by whichever side saw it — never twice, since `intake_discard`
+   * hands the whole batch to exactly one exchange winner.
+   *
+   * Measured before this half existed: 42 objects per 100 messages at 4 scheduler
+   * threads and 497 per 1000, against a flat 0 single-threaded. */
+  atomic_thread_fence(memory_order_seq_cst);
+  if (atomic_load(&a->status) == NT_DEAD) intake_discard(a);
 }
 
 static void mbox_push_from(NtActor *a, NtMsg m, NtPid from) {
@@ -476,14 +495,21 @@ static void mbox_node_free(NtMboxNode *n) {
   free(n);
 }
 
-/* Reclaim everything still queued for an actor that will never read it again. Called
- * ONLY from actor_die, and only AFTER the status is DEAD — so no scheduler will swap into
- * this actor (scheduler_loop CASes RUNNABLE->RUNNING and skips it) and every later send
- * is refused at the status check. The intake stack is drained first: under M:N a message
- * posted from another scheduler thread lives there until its owner pulls the batch over,
- * and a dead actor never will. */
+/* Reclaim the LOCK-FREE INTAKE stack. Whoever wins the exchange owns that whole batch, so
+ * two threads racing here can never free the same node — which is what lets both halves of
+ * the publish-then-recheck below call it. NULL and free single-threaded (nothing is ever
+ * pushed to the intake there). */
+static void intake_discard(NtActor *a) {
+  NtMboxNode *p = atomic_exchange(&a->in_head, NULL);
+  while (p) { NtMboxNode *nx = p->next; mbox_node_free(p); p = nx; }
+}
+
+/* Reclaim everything still queued for an actor that will never read it again. Called ONLY
+ * from actor_die, and only AFTER the status is DEAD — so no scheduler will swap into this
+ * actor (scheduler_loop CASes RUNNABLE->RUNNING and skips it), and the private list below
+ * has no other reader. */
 static void mbox_discard(NtActor *a) {
-  mbox_drain(a);
+  intake_discard(a);
   NtMboxNode *p = a->mbox_head;
   a->mbox_head = NULL;
   a->mbox_tail = NULL;
@@ -1517,7 +1543,18 @@ int32_t nt_recv_timed_out(void) { return g_timed_out; }
  * shape and renderer. Wake logic is shared with every other send. */
 void nt_send_struct(NtPid to, int64_t slot, const char *shape, void *render) {
   NtActor *a = actor_at(to);
-  if (!a || atomic_load(&a->status) == NT_DEAD) return;  /* unknown/dead pid: drop */
+  if (!a || atomic_load(&a->status) == NT_DEAD) {
+    /* Unknown/dead pid: the message is dropped (BEAM-ish) — but DROPPING IT IS NOT FREE
+     * HERE. Unlike every other send, the deep copy for a structured message is made by
+     * CODEGEN before the call (only the compiler knows the type to walk), so by the time
+     * we refuse it the copy already exists and this is its last reference: the sender gave
+     * it away at the call and its own local kept the ownership it had. Returning without
+     * freeing leaked one object per message sent to a dead actor — invisible
+     * single-threaded, where `__drain` means the receiver cannot die before the sends, and
+     * ~0.5 per message at 4 scheduler threads, where it can. */
+    nt_obj_free((void *)(intptr_t)slot);
+    return;
+  }
   mbox_push_kind(a, nt_int(slot), g_current ? g_current->pid : -1,
                  NT_MSG_STRUCT, shape, (NtMsgRender)render);
   wake_actor(a);
