@@ -16,8 +16,19 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { compileAndRun, runWithNode } from "./harness.ts";
+import { compileAndRun, emitIR, runWithNode } from "./harness.ts";
 import { readFileSync } from "node:fs";
+
+/** Compile-only: the diagnostic a source is rejected with (or null if it compiles). */
+function rejectionOf(source: string): { code: string; message: string; hint?: string } | null {
+  try {
+    emitIR(source);
+    return null;
+  } catch (e) {
+    const d = (e as { diag?: { code: string; message: string; hint?: string } }).diag;
+    return d ?? { code: "?", message: String(e) };
+  }
+}
 
 /** Compile+run ours and assert stdout AND exit code match `node` on the same source. */
 async function matchesNode(src: string): Promise<string> {
@@ -198,6 +209,47 @@ describe("Array#includes is SameValueZero", () => {
       "console.log(a.length, a.includes(true));",
       "",
     ].join("\n"))).toBe("50 false true\n51 true\n");
+  });
+
+  /*
+   * NON-PRIMITIVE ELEMENTS ARE REFUSED, not answered by strcmp.
+   *
+   * `.lastIndexOf` has carried the guard `el !== "number" && el !== "string"` since it
+   * landed; `.includes` and `.indexOf` never grew it. So a `number[][]` fell through to
+   * `nt_arr_includes_str`, which ran `strcmp` over the bytes of an `NtArray` struct —
+   * both an out-of-bounds read (it walks to the first zero byte) and, when it happened
+   * to match, a SILENT WRONG ANSWER at exit 0:
+   *
+   *   [[1],[2]].includes([1])  node: false   ours: true
+   *   [[1],[2]].indexOf([1])   node: -1      ours: 0
+   *
+   * node's answer is reference identity (SameValueZero on objects), which we do not
+   * model. So this is a refusal, documented in docs/divergences.md — never a guess.
+   * The three siblings now agree.
+   */
+  test("includes/indexOf/lastIndexOf all refuse a non-primitive element type", async () => {
+    const cases: Array<[string, string]> = [
+      ["const a: number[][] = [[1], [2]];\nconst o: number[] = [1];\nconsole.log(a.includes(o));\n", ".includes"],
+      ["const a: number[][] = [[1], [2]];\nconst o: number[] = [1];\nconsole.log(a.indexOf(o));\n", ".indexOf"],
+      ["const a: number[][] = [[1], [2]];\nconst o: number[] = [1];\nconsole.log(a.lastIndexOf(o));\n", ".lastIndexOf"],
+    ];
+    for (const [src, what] of cases) {
+      // node runs every one of these fine — that is why answering them wrongly was worse
+      // than refusing them.
+      expect([what, runWithNode(src).exitCode]).toEqual([what, 0]);
+      const r = rejectionOf(src);
+      expect([what, r?.code, r?.message.includes(what)]).toEqual([what, "NT1001", true]);
+    }
+  });
+
+  // The primitive element types stay ACCEPTED — the guard must not swallow them.
+  test("number, string and boolean elements are still accepted by all three", async () => {
+    expect(await matchesNode([
+      "console.log([1, 2].includes(2), [1, 2].indexOf(2), [1, 2].lastIndexOf(1));",
+      'console.log(["a"].includes("a"), ["a"].indexOf("a"), ["a"].lastIndexOf("a"));',
+      "console.log([true].includes(true));",
+      "",
+    ].join("\n"))).toBe("true 1 0\ntrue 0 0\ntrue\n");
   });
 
   test("the SameValueZero branch is in includes only, not in indexOf", () => {

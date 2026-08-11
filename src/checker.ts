@@ -6456,7 +6456,19 @@ class Checker {
       case "copyWithin": throw mutationError(`arrays are immutable: \`${exprText(callee.object) ?? ""}.copyWithin\` would overwrite the array in place`, "build a new array from `.slice` + spread instead", exprLoc(callee.object) ?? callee.loc);
       // (`.pop` is handled above `argTys`, next to `.push` — the two are one idiom and the
       // refusal has to see the receiver AND whether the result is taken.)
-      case "includes": need(1); if (argTys[0] !== el) throw typeError(`.includes expects ${el}`); return "boolean";
+      // The element-type guard on all three of `.includes` / `.indexOf` / `.lastIndexOf`
+      // is the SAME guard, and it was on `.lastIndexOf` alone. Without it a `number[][]`
+      // fell through to `nt_arr_includes_str`, which `strcmp`s the bytes of an `NtArray`
+      // struct: an out-of-bounds read, and a silent wrong answer at exit 0 whenever it
+      // matched (`[[1],[2]].includes([1])` printed `true`, node says `false`;
+      // `.indexOf` printed `0`, node says `-1`). node's answer is reference identity,
+      // which this value model does not have — so it is refused, not guessed.
+      // `.includes` takes `boolean` too, which the other two have no runtime routine for.
+      case "includes":
+        need(1);
+        if (argTys[0] !== el) throw typeError(`.includes expects ${el}`);
+        if (el !== "number" && el !== "string" && el !== "boolean") throw nyi(NYI.ARRAY, `.includes on ${recv}`);
+        return "boolean";
       // `.indexOf(x, fromIndex?)` — the second parameter is optional in lib.es5.d.ts, so
       // requiring exactly one rejected valid TypeScript with a TYPE error. See the
       // `.lastIndexOf` arm below: same argument, deliberately different clamping.
@@ -6464,6 +6476,7 @@ class Checker {
         if (args.length < 1 || args.length > 2) throw typeError(".indexOf expects 1..2 args");
         if (argTys[0] !== el) throw typeError(`.indexOf expects ${el}`);
         if (args.length === 2 && argTys[1] !== "number") throw typeError(".indexOf fromIndex must be a number");
+        if (el !== "number" && el !== "string") throw nyi(NYI.ARRAY, `.indexOf on ${recv}`);
         return "number";
       // ACCEPTED, unlike its in-place siblings above: `.reverse` returns its RECEIVER,
       // so the result type is `recv` and the two are the SAME array. `RETAINS_RECEIVER`
