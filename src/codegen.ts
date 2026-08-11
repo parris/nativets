@@ -1989,6 +1989,20 @@ class FnGen {
           if (hasFinally) this.emit(`store double ${llvmDouble(0)}, ptr ${modeSlot}`); // mode 0 = normal
           this.terminate(`br label %${finallyLbl}`);
         };
+        // NULL THE BINDING ON THE WAY IN. The handler's drop set now frees an object-typed
+        // `catch` binding (see the `TryStmt` case in ownership.ts), and not every entry to
+        // the handler stores one first: `emitExcCheck` reconstructs a value only for the
+        // two shapes it knows, so a handler reached from a fallible call under any OTHER
+        // object `eType` would have freed whatever the uninitialised alloca held — a wild
+        // free, where the bug being fixed was merely a leak. `nt_obj_free(NULL)` is a
+        // no-op, so this makes the unstored path free nothing. Re-run on every entry to
+        // the `try`, which is what makes it correct inside a loop.
+        // (The four arms ARE ownership.ts's `isLinearTy`, which is private to that module;
+        // a fifth spelling of the list would be one more thing to keep in step, so the
+        // condition is deliberately the same four predicates `emitDrops` branches on.)
+        if (s.param && (isArrayTy(eType) || isObjectTy(eType) || isUnionTy(eType) || isTypeRefTy(eType))) {
+          this.emit(`store ptr null, ptr ${this.addr(s.param)}`);
+        }
         this.tryHandlers.push({ catchLbl, excVar: s.param, eType, catchless: !s.handler });
         if (hasFinally) this.finallyStack.push({ finallyLbl, modeSlot, retSlot: retSlot || null });
         this.genStmts(s.block);
@@ -3790,6 +3804,19 @@ class FnGen {
     // `finally`-only `try` has no catch block to branch to. Raised BEFORE the check is
     // emitted, so no half-formed branch survives.
     if (this.escapesCatchlessTry()) throw this.catchlessTryError("a call that can raise");
+    // …and the same discipline for a payload the flag cannot carry. The pending slot is
+    // ONE `const char *`, so the arms below can rebuild a binding for exactly two shapes:
+    // a `string`, and the one-field `{message:string}` the message is boxed into. Under
+    // any OTHER object type this stored NOTHING and branched to the handler regardless,
+    // leaving the binding at whatever its uninitialised alloca held — which the handler
+    // then read as an object pointer. That is a silent wrong answer with a ZERO exit code
+    // (measured: node "Thrown\nSyntaxError", ours "Thrown\n\xef\xbf\xbd", both exit 0),
+    // not a crash and not a diagnostic. Refuse it. Raised BEFORE anything is emitted.
+    const hh = this.tryHandlers.length > 0 ? this.tryHandlers[this.tryHandlers.length - 1]! : null;
+    if (hh !== null && hh.excVar !== null && hh.eType !== "string" && hh.eType !== "{message:string}") {
+      throw nyi(NYI.EXCEPTION, `a call that can raise inside a \`try\` whose \`catch (${hh.excVar})\` is ${hh.eType}, which the pending-exception flag cannot rebuild`,
+        "a raise crosses a frame on a slot that holds ONE string, so a `catch` binding can only be rebuilt from it as a `string` or as `{message:string}` (what `new Error(msg)` is here) — and this handler binds neither, so the runtime has no value to give it. Move the call that can raise OUT of this `try`, or give the raising code a `try` of its own whose `catch` binds one of those two shapes");
+    }
     const p = this.fresh();
     this.emit(`${p} = call i32 @nt_exc_pending()`);
     const cond = this.fresh();

@@ -487,4 +487,90 @@ describe("array methods that ALIAS elements (blockers for a per-type destructor)
     ];
     for (const [src, code] of cases) expect(rejectCode(src)).toBe(code);
   });
+
+  /*
+   * AN OBJECT-TYPED `catch` BINDING IS AN OWNER, and nothing ever freed it.
+   *
+   * `throw new Error(m)` stores the object pointer into the binding and branches; the
+   * thrown value is a temporary with no other owner, so the binding is the only thing
+   * that can free it. `collectLocals` in codegen already gives the binding a slot, and a
+   * STRING-typed one was made a `strLocals` owner when cross-frame throw landed — but the
+   * object case was left out, so the block leaked once per caught exception, plus every
+   * heap string in its slots (`nt_obj_free` is shallow, so a released message needs the
+   * object's own drop to happen at all).
+   *
+   * Scaled, and in a LOOP: the identical body at function scope reports 0 whether or not
+   * it leaks, because the counter is read after the frame is gone.
+   */
+  test("an object-typed catch binding is freed at the handler's scope exit", async () => {
+    const body = (n: number): string => `
+let acc = 0;
+for (let i = 0; i < ${n}; i++) {
+  try {
+    if (i > -1) throw new Error("boom");
+    acc = acc + 1;
+  } catch (e) {
+    acc = acc + e.message.length;
+  }
+}
+console.log(acc);
+console.log(__objLive(), __strLive());`;
+    const small = await compileAndRun(body(200));
+    expect(small.exitCode).toBe(0);
+    expect(small.stdout).toBe("800\n0 0\n");
+    const large = await compileAndRun(body(1000));
+    expect(large.exitCode).toBe(0);
+    expect(large.stdout).toBe("4000\n0 0\n");
+  });
+
+  /*
+   * WHAT THAT FIX DOES *NOT* REACH, pinned with its control so the boundary is evidence
+   * rather than an assertion: the OBJECT BLOCK is freed, but a heap string in one of its
+   * slots is not released, because `nt_obj_free` is shallow (`free(o)`, it never walks
+   * slots). With a TEMPLATE message — a registered heap string, where a literal is
+   * untracked and would read 0 whatever happened — the block returns to 0 live and the
+   * string does not.
+   *
+   * That is NOT a `throw` bug and it is not the catch binding's. The second program here
+   * is the control: it contains no `try`, no `catch` and no `throw`, just an owned object
+   * with a heap string field in a loop, and it leaks the identical one-per-iteration
+   * string. So this is the object model's shallow free, universally — a per-field
+   * ownership question ("does this slot own its string?") that has to be answered for
+   * every object, not one the exception path can answer for itself.
+   */
+  test("the caught object block is freed; its heap string slot is the shallow-free gap", async () => {
+    const thrown = (n: number): string => `
+let acc = 0;
+for (let i = 0; i < ${n}; i++) {
+  try {
+    if (i > -1) throw new Error(\`boom \${i}\`);
+    acc = acc + 1;
+  } catch (e) {
+    acc = acc + e.message.length;
+  }
+}
+console.log(__objLive(), __strLive());`;
+    const a = await compileAndRun(thrown(200));
+    const b = await compileAndRun(thrown(1000));
+    expect(a.exitCode).toBe(0);
+    expect(b.exitCode).toBe(0);
+    // The block: 0 at both scales — that is this fix.
+    expect(a.stdout.split(" ")[0]).toBe("0");
+    expect(b.stdout.split(" ")[0]).toBe("0");
+    // The string: one per iteration, still.
+    expect(a.stdout.trim()).toBe("0 200");
+    expect(b.stdout.trim()).toBe("0 1000");
+
+    // THE CONTROL — no try/catch/throw anywhere, same residue. `nt_obj_free` is shallow.
+    const plain = (n: number): string => `
+let acc = 0;
+for (let i = 0; i < ${n}; i++) {
+  const o: { m: string } = { m: \`boom \${i}\` };
+  acc = acc + o.m.length;
+}
+console.log(__objLive(), __strLive());`;
+    const c = await compileAndRun(plain(200));
+    expect(c.exitCode).toBe(0);
+    expect(c.stdout.trim()).toBe("0 200");
+  });
 });

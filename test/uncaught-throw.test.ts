@@ -174,3 +174,114 @@ describe("a catch-less `try` is not a handler (was: invalid IR, raw clang error)
     await differential(`function f(n: number): number {\n  try {\n    return n * 2;\n  } finally {\n    console.log("cleanup");\n  }\n}\nconsole.log(f(3));\n`);
   });
 });
+
+/*
+ * THE PAYLOAD THE PENDING FLAG CANNOT CARRY — and it was a SILENT WRONG ANSWER, which is
+ * the one outcome this compiler exists not to produce.
+ *
+ * A raise crosses a frame on the runtime's pending-exception slot, which is one
+ * `const char *`. So `emitExcCheck` can reconstruct a catch binding for exactly two
+ * shapes: a `string`, and the one-field `{message:string}` it boxes the message into.
+ * For ANY OTHER object type it stored nothing at all and branched to the handler anyway —
+ * leaving the binding at whatever its uninitialised alloca held, and the handler then read
+ * that as an object pointer.
+ *
+ * Measured on the program below, which has a two-field catch type and a `JSON.parse` that
+ * really does raise into the same handler:
+ *
+ *     node     -> "Thrown\nSyntaxError\n", exit 0
+ *     nativets -> "Thrown\n\xef\xbf\xbd\n",  exit 0     <- garbage, and a ZERO exit code
+ *
+ * Not a crash, not a diagnostic: a wrong answer that reported success. It is now NT1004.
+ */
+describe("a raise whose payload the catch binding cannot be rebuilt from is refused", () => {
+  test("a fallible call under a catch type the flag cannot carry is NT1004", async () => {
+    const { emitIR } = await import("./harness.ts");
+    expect(() =>
+      emitIR([
+        `function run(k: number): string {`,
+        `  try {`,
+        `    if (k < 0) throw { message: "explicit", name: "Thrown" };`,
+        `    const v = JSON.parse("{");`,
+        `    return "parsed";`,
+        `  } catch (e) {`,
+        `    return e.name;`,
+        `  }`,
+        `}`,
+        `console.log(run(-1));`,
+        ``,
+      ].join("\n")),
+    ).toThrow(/cannot rebuild/);
+  });
+
+  // The two shapes that CAN be rebuilt are untouched — this is the regression guard on the
+  // refusal being narrow, since widening it would take working programs down with it.
+  //
+  // Asserted on the EXPLICIT throw only. The same handler also catches the `JSON.parse`
+  // failure, but there node hands it an `Error` where we hand it the rebuilt shape — so
+  // `e.length` is `undefined` under node and a real length here, a divergence of the catch
+  // binding's model (node's is `any`) and not of this refusal. The host-failure path is
+  // still exercised below; it is only its BINDING that is not an oracle question.
+  test("a string binding and an Error binding still compile and match node", async () => {
+    const src = [
+      `function s(k: number): string {`,
+      `  try { if (k < 0) throw "explicit"; const v = JSON.parse("{"); return "parsed"; }`,
+      `  catch (e) { return e; }`,
+      `}`,
+      `function m(k: number): string {`,
+      `  try { if (k < 0) throw new Error("explicit"); const v = JSON.parse("{"); return "parsed"; }`,
+      `  catch (e) { return e.message; }`,
+      `}`,
+      `console.log(s(-1));`,
+      `console.log(m(-1));`,
+      ``,
+    ].join("\n");
+    await differential(src);
+
+    // …and the HOST-failure path through the very same handlers still compiles and runs:
+    // it is the path the refusal above had to leave alone, so "it is not refused" is the
+    // property, and the binding's text is deliberately not compared.
+    const host = await compileAndRun(src.replace("console.log(s(-1));", "console.log(s(1).length > 0);").replace("console.log(m(-1));", "console.log(m(1).length > 0);"));
+    expect(host.exitCode).toBe(0);
+    expect(host.stdout).toBe("true\ntrue\n");
+  });
+
+  // THE HINT MUST NOT LIE. It offers two fixes; this is each of them, applied to the
+  // refused program above and run against node.
+  test("the hint's first fix — move the fallible call out of the `try` — compiles", async () => {
+    await differential([
+      `function run(k: number): string {`,
+      `  try {`,
+      `    if (k < 0) throw { message: "explicit", name: "Thrown" };`,
+      `    return "parsed";`,
+      `  } catch (e) {`,
+      `    return e.name;`,
+      `  }`,
+      `}`,
+      `console.log(run(-1));`,
+      `console.log(run(1));`,
+      ``,
+    ].join("\n"));
+  });
+
+  test("the hint's second fix — a `try` per payload shape — compiles", async () => {
+    await differential([
+      `function run(k: number): string {`,
+      `  try {`,
+      `    if (k < 0) throw { message: "explicit", name: "Thrown" };`,
+      `  } catch (e) {`,
+      `    return e.name;`,
+      `  }`,
+      `  try {`,
+      `    const v = JSON.parse("{");`,
+      `    return "parsed";`,
+      `  } catch (e2) {`,
+      `    return "syntax";`,
+      `  }`,
+      `}`,
+      `console.log(run(-1));`,
+      `console.log(run(1));`,
+      ``,
+    ].join("\n"));
+  });
+});

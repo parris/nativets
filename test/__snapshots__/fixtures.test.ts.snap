@@ -16782,6 +16782,7 @@ entry:
   br label %L0
 L0:
   store double %n, ptr %n.addr
+  store ptr null, ptr %e.addr
   %t0 = load double, ptr %n.addr
   %t1 = fcmp olt double %t0, 0x0000000000000000
   br i1 %t1, label %then6, label %endif7
@@ -17559,6 +17560,7 @@ finally3:
 finret6:
   ret i32 0
 endtry2:
+  store ptr null, ptr %e.addr
   %t2 = call ptr @nt_obj_new(double 0x3FF0000000000000)
   %t3 = getelementptr i64, ptr %t2, i64 0
   %rc4 = call ptr @nt_str_retain(ptr @.str.3)
@@ -17576,19 +17578,21 @@ catch7:
   call void @js_print_sep()
   call void @js_print_str(ptr %t9)
   call void @js_print_newline()
+  %t10 = load ptr, ptr %e.addr
+  call void @nt_obj_free(ptr %t10)
   store double 0x0000000000000000, ptr %s10
   br label %finally9
 finally9:
   call void @js_print_str(ptr @.str.5)
   call void @js_print_newline()
-  %t10 = load double, ptr %s10
-  %t11 = fcmp oeq double %t10, 0x3FF0000000000000
-  br i1 %t11, label %finret12, label %endtry8
+  %t11 = load double, ptr %s10
+  %t12 = fcmp oeq double %t11, 0x3FF0000000000000
+  br i1 %t12, label %finret12, label %endtry8
 finret12:
   ret i32 0
 endtry8:
-  %t12 = call double @f()
-  call void @js_print_num(double %t12)
+  %t13 = call double @f()
+  call void @js_print_num(double %t13)
   call void @js_print_newline()
   ret i32 0
 }

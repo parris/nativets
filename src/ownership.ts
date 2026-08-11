@@ -633,13 +633,18 @@ class Analyzer {
   /** A NESTED statement list: its own linear locals are freed at its fall-through exit
    *  (`blockDrops`), so a value that never leaves the block does not wait for the
    *  function to return. Move-aware — a local moved out of the block is not dropped.
-   *  `break`/`continue`/`throw` jump past the drop point: a leak, never a double free. */
+   *  `break`/`continue`/`throw` jump past the drop point: a leak, never a double free.
+   *
+   *  `extra` names locals this list OWNS without DECLARING: the `catch` binding, which is
+   *  bound by the `try` rather than by a `VarDecl` inside the handler, and is otherwise
+   *  invisible to `declaredLinear`. */
   private scoped(
     //@@mutable
     list: Stmt[],
     state: State,
+    extra: string[] = [],
   ): void {
-    const declared = declaredLinear(list, new Set(this.aliasOf.keys())).filter((n) => this.linear.has(n));
+    const declared = [...extra, ...declaredLinear(list, new Set(this.aliasOf.keys()))].filter((n) => this.linear.has(n));
     // Closure envs the block provably owns (see `nonEscapingClosures`). Purely
     // syntactic, so unlike `declared` they need no move state and no `droppable` check —
     // a name that could be moved anywhere is not a candidate in the first place.
@@ -807,11 +812,25 @@ class Analyzer {
         // free and reaches `nt_exc_message` intact.
         s.drops = this.ownedInScope(state);
         return;
-      case "TryStmt":
+      case "TryStmt": {
         this.scoped(s.block, state);
-        if (s.handler) this.scoped(s.handler, state);
+        // THE CATCH BINDING IS AN OWNER. `throw new Error(m)` stores a temporary with no
+        // other owner into it and branches, and a cross-frame raise reconstructs a FRESH
+        // object into it (codegen's `emitExcCheck`) — either way nothing else can free it.
+        // It is bound by the `try`, not by a `VarDecl` in the handler, so `declaredLinear`
+        // never saw it and the handler's drop marker never carried it: one object leaked
+        // per caught exception, plus every heap string in its slots, since `nt_obj_free`
+        // is shallow and a slot nobody frees is a message nobody releases.
+        // A STRING binding is NOT linear and is not listed here: it is already an owner on
+        // codegen's separate `strLocals` path, and naming it twice would double-free.
+        const bound = s.param;
+        const owns = s.handler !== null && bound !== null && isLinearTy(s.catchTy ?? "string");
+        const caught: string[] = owns && bound !== null ? [bound] : [];
+        for (const n of caught) state.set(n, { moved: false, must: false });
+        if (s.handler) this.scoped(s.handler, state, caught);
         if (s.finalizer) this.scoped(s.finalizer, state);
         return;
+      }
       // `BlockDrops` is this pass's OWN output. A loop body is walked up to five times
       // for the fixpoint, so every walk after the first sees the marker the last one
       // left; it declares and moves nothing, so there is nothing to do with it.
@@ -1758,11 +1777,17 @@ function collectLinear(stmts: Stmt[], out: Set<string>): void {
       // nothing. One array (or object, or closure env) leaked per execution of the `try`.
       // `collectVarTys` directly above already descends here; these two walk the same tree
       // for the same frame and had disagreed about it since the `try` lowering landed.
-      case "TryStmt":
+      case "TryStmt": {
+        // The `catch` binding too, when it holds a heap aggregate — it is an owner (see
+        // the `TryStmt` case in `stmt`) and `declaredLinear` cannot see it, so `scoped`
+        // is handed it explicitly and needs it to be linear for that to count.
+        const bound = s.param;
+        if (s.handler !== null && bound !== null && isLinearTy(s.catchTy ?? "string")) out.add(bound);
         collectLinear(s.block, out);
         if (s.handler) collectLinear(s.handler, out);
         if (s.finalizer) collectLinear(s.finalizer, out);
         break;
+      }
       case "MultiStmt": collectLinear(s.stmts, out); break;
       default: break;
     }
