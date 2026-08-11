@@ -295,6 +295,27 @@ const RECURSIVE_TYPE_HINT =
 /** Truncate for a diagnostic: a type dump is unbounded and a hint has to stay readable. */
 function clip(s: string, n: number): string { return s.length <= n ? s : `${s.slice(0, n)}…`; }
 
+/**
+ * Is the field named `key` of the object type `t` string-literal typed — i.e. usable as a
+ * union discriminant?
+ *
+ * A LOOP, not `objectFields(t).find((f) => f.key === key)!.ty`. `.find` over an array of
+ * RECORDS is NT1001 in the subset this file has to stay inside (the element it answers
+ * would alias its owner), and this call sits three arrows deep inside `.some`/`.every`,
+ * where a `for` cannot go — so the loop has to live in a function of its own.
+ *
+ * A MEMBER WITH NO SUCH FIELD ANSWERS FALSE, which is what the `!` spelling meant rather
+ * than a widening: the only caller passes a `k` drawn from `common`, and `common` is the
+ * keys `keys.every((ks) => ks.includes(k))` kept — so every member has the field and the
+ * missing case is unreachable. It is spelled totally anyway, because "unreachable" is a
+ * claim about today's callers and `!` on a genuinely absent field is a TypeError under
+ * node inside the code that BUILDS a diagnostic.
+ */
+function hasStringLitField(t: Ty, key: string): boolean {
+  for (const f of objectFields(t)) if (f.key === key) return isStringLitTy(f.ty);
+  return false;
+}
+
 /** The shared refusal for `?.` in a write position — one message for all four spellings. */
 function optChainWriteError(what: string): never {
   throw parseError(
@@ -1141,8 +1162,9 @@ class Parser {
     this.checkFloatingAsyncCalls(body);
     this.checkAsyncEscapes();
     // Class members lower to top-level functions (`C.constructor`, `C.method`) so they
-    // register + hoist alongside ordinary functions for the checker/codegen.
-    body.push(...this.hoistedFns);
+    // register + hoist alongside ordinary functions for the checker/codegen. Appended one
+    // at a time — `push(...xs)` is a spread into a variadic call (NT1006) — same order.
+    for (const f of this.hoistedFns) body.push(f);
     // A static field is a module-level `const C.f` (see `parseClass`), so every `C.f` READ
     // becomes that identifier — here, once the whole file is parsed, because a function
     // body may legally read a static of a class declared further down.
@@ -1286,7 +1308,11 @@ class Parser {
     while (this.at("|") || this.at("&")) { if (this.at("&")) sawIntersect = true; this.next(); arms.push(this.parseTypeAtom()); }
     if (arms.length === 1) return arms[0]!;
     // Literal arms of the same base collapse (`"a" | "b"` → string), exactly as before.
-    const uniq = [...new Set(arms.map(widenLiteralTys))];
+    // The arrow is written out rather than passed by NAME: `.map(widenLiteralTys)` is a
+    // first-class function value, which this subset refuses (NT1003). It is also the safer
+    // spelling in plain TypeScript — `.map` hands the callback (value, index, array), so a
+    // by-name callee silently gains two arguments it never declared.
+    const uniq = [...new Set(arms.map((a) => widenLiteralTys(a)))];
     if (uniq.length === 1) return uniq[0]!;
     if (!sawIntersect && uniq.length === 2) {
       const [a, b] = uniq as [Ty, Ty];
@@ -1314,9 +1340,9 @@ class Parser {
       // A GENERAL union: nothing inside the value distinguishes the arms, so it is
       // boxed [tag, value] and `typeof` is the discriminant. Only arms `typeof` can
       // actually tell apart are accepted — see `generalUnionArmsOk`.
-      if (uniq.every(isGeneralUnionArm) && new Set(uniq.map(generalUnionArmTypeof)).size === uniq.length) return makeGeneralUnionTy(uniq);
+      if (uniq.every((a) => isGeneralUnionArm(a)) && new Set(uniq.map((a) => generalUnionArmTypeof(a))).size === uniq.length) return makeGeneralUnionTy(uniq);
     }
-    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.map(widenLiteralTys).join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null', a DISCRIMINATED union of object types — a common literal-typed tag field at the same position in every member — and a general union of arms \`typeof\` can tell apart are supported)`);
+    throw nyi(NYI.OPTIONAL_CHAIN, `general union type '${arms.map((a) => widenLiteralTys(a)).join(sawIntersect ? " & " : " | ")}' (only 'T | undefined' / 'T | null', a DISCRIMINATED union of object types — a common literal-typed tag field at the same position in every member — and a general union of arms \`typeof\` can tell apart are supported)`);
   }
 
   /**
@@ -1351,9 +1377,12 @@ class Parser {
     // union's members already satisfy that among THEMSELVES, never across the splice. So
     // flattening widens what is ACCEPTED without weakening the invariant — the failure mode
     // is still the NT1009 refusal below, never a phantom tag.
+    //@@mutable
     const arms: Ty[] = [];
     for (const a of rawArms.map((a) => expandTypeRef(a, this.recTypes))) {
-      if (isUnionTy(a)) arms.push(...unionMembers(a)); else arms.push(a);
+      // Appended one at a time: `push(...xs)` is a SPREAD into a variadic call, which this
+      // subset refuses (NT1006). Same order, same result.
+      if (isUnionTy(a)) { for (const m of unionMembers(a)) arms.push(m); } else arms.push(a);
     }
     // THE TAG RULE. `classTag(a) === undefined` used to be required of every arm. That
     // clause dates to SH2 behavior 1, when the only carrier of a tag was a CLASS instance
@@ -1379,7 +1408,7 @@ class Parser {
     };
     if (!arms.every((a) => isObjectTy(a) && armTagOk(a))) return null;
     const members = [...new Set(arms)];
-    const shown = members.map(widenLiteralTys).join(" | ");
+    const shown = members.map((m) => widenLiteralTys(m)).join(" | ");
     if (members.length < 2) return null;
     const ty = makeUnionTy(members);
     const d = unionDiscriminant(ty);
@@ -1391,7 +1420,7 @@ class Parser {
     const why =
       common.length === 0
         ? "the members share no field at all, so nothing can tell them apart"
-        : common.some((k) => members.every((m) => isStringLitTy(objectFields(m).find((f) => f.key === k)!.ty)))
+        : common.some((k) => members.every((m) => hasStringLitField(m, k)))
           ? `the shared tag field must sit at the SAME position in every member and carry a DISTINCT string-literal type in each (shared fields: ${common.join(", ")})`
           : `the shared field(s) ${common.join(", ")} are not string-literal typed — a discriminant needs \`kind: "a"\`, not \`kind: string\``;
     throw nyi(NYI.OPTIONAL_CHAIN, `union of object types '${shown}' without a usable discriminant — ${why}`);
@@ -1538,18 +1567,18 @@ class Parser {
         `a lookup needs the base's fields at hand: declare '${display}' as a \`type\`/\`interface\` in THIS file, or write the field's type directly instead of looking it up`,
       );
     }
-    const f = objectFields(base).find((x) => x.key === key);
-    if (!f) {
-      const have = objectFields(base).map((x) => x.key);
-      throw nyi(
-        NYI.INDEXED_ACCESS,
-        `indexed access type '${display}["${key}"]' — '${display}' has no field '${key}'`,
-        have.length === 0
-          ? `'${display}' has no fields to look up`
-          : `'${display}' has: ${have.join(", ")}`,
-      );
-    }
-    return f.ty;
+    // First match wins and the type is returned BY VALUE, exactly as `.find(…)` then
+    // `.ty` did. Written as a loop because `.find` over an array of records is NT1001 in
+    // the subset this file has to stay inside — see `hasStringLitField`.
+    for (const x of objectFields(base)) if (x.key === key) return x.ty;
+    const have = objectFields(base).map((x) => x.key);
+    throw nyi(
+      NYI.INDEXED_ACCESS,
+      `indexed access type '${display}["${key}"]' — '${display}' has no field '${key}'`,
+      have.length === 0
+        ? `'${display}' has no fields to look up`
+        : `'${display}' has: ${have.join(", ")}`,
+    );
   }
   /**
    * Inline import type `import("./mod").Name` (optionally qualified) — resolved to the
