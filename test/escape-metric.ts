@@ -66,7 +66,7 @@ import { fileURLToPath } from "node:url";
 
 import { linkProgram } from "../src/modules.ts";
 import { check } from "../src/checker.ts";
-import { fieldType, isObjectTy, objectFields } from "../src/ast.ts";
+import { isObjectTy } from "../src/ast.ts";
 import type { Program, Stmt, Ty } from "../src/ast.ts";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -152,21 +152,27 @@ export interface EscapeReport {
 }
 
 /**
- * THE PAYLOAD ROW — and the reason SEED overstates the work by more than an order of
- * magnitude on `src/`.
+ * THE PAYLOAD ROW — the one that used to price this work, and the one the MOVE changed.
  *
- * Every other row here is a CALL-GRAPH question, and needs no types. But propagation
- * carries the raise on the runtime's pending-exception slot, which is one `const char *`
- * (runtime.c, `g_exc_msg`). So a `throw` can only cross a frame if its payload fits that
- * slot: a `string`, or the one-field `{message:string}` that `emitExcCheck` already
- * reconstructs. `codegen.ts::raisableTy` is the rule this mirrors.
+ * Every other row here is a CALL-GRAPH question and needs no types. Propagation carries
+ * the raise on the runtime's pending-exception slot, so a `throw` can cross a frame only
+ * if the slot can carry its payload. `codegen.ts::raisableTy` is the rule this mirrors,
+ * and it has two answers now:
  *
- * On stage-1 that is what actually blocks the work. `src/` throws CLASS INSTANCES —
- * `NTError{message,name,diag:{…}}` (145 sites) and `InternalError{message,name}` (16) —
- * which no amount of call-graph reasoning can carry, against 16 sites of the one-field
- * `LexError`/`BuildError`. So of 129 SEED functions only 7 have a carriable payload, and
- * the transitive fixpoint has a ceiling of those 7 no matter how good it is. Widening
- * the payload to an owned object handle is a RUNTIME change, and it is the prerequisite.
+ *   a `string`  — the refcounted `const char *` message slot, as it always was;
+ *   ANY object  — the object BLOCK POINTER, MOVED onto the slot by `nt_exc_raise_obj` and
+ *                 taken back off it by `nt_exc_take_object`, which NULLs the slot so the
+ *                 catch binding becomes its single owner.
+ *
+ * WHAT THAT COST AND WHAT IT BOUGHT, measured on this very tree before it was built. The
+ * old rule — a string or the ONE-FIELD `{message:string}` `emitExcCheck` could rebuild by
+ * boxing the message — cleared 7 of the 129 seed functions, because `src/` throws CLASS
+ * INSTANCES: `NTError{message,name,diag:{…}}` at 145 sites and `InternalError` at 16,
+ * against 16 sites of one-field `LexError`/`BuildError`. Flattening the payload into N
+ * scalar fields cleared 20; flattening it RECURSIVELY cleared 20 as well — literally zero
+ * more — because `NTError.diag` carries `spans?: DiagSpan[]`, an optional ARRAY no
+ * flattening carries. Moving the pointer clears 82, and needs no shape test at all: this
+ * function's object arm is now unconditional, which IS the result.
  *
  * COSTS THE CHECKER, which the rest of this tool deliberately does not need. It is run in
  * the recovering mode `test/blocker-metric.ts` uses and is allowed to abort after the
@@ -174,12 +180,15 @@ export interface EscapeReport {
  * as UNKNOWN rather than quietly as "not carriable". If the pass yields nothing at all,
  * `typesKnown` goes false and the rows print `?` — an instrument that reports a number it
  * did not measure is this file's own stated failure mode.
+ *
+ * STILL A CEILING, not a promise: it is the payload test only, and each of the call-graph
+ * rules (direct calls, never used as a value, matching catch binding) can still disqualify
+ * a function counted here.
  */
 function carriablePayload(t: Ty | undefined): boolean {
   if (t === undefined) return false;
   if (t === "string") return true;
-  if (!isObjectTy(t) || objectFields(t).length !== 1) return false;
-  return fieldType(t, "message") === "string";
+  return isObjectTy(t);
 }
 
 /** The payload types of one frame's uncovered throws — `undefined` for a throw the

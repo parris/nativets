@@ -67,3 +67,32 @@ describe("a raise carries an object across a frame", () => {
     ].join("\n"));
   });
 });
+
+/*
+ * THE CHECKER HALF, and without it the runtime half above is unreachable in real code.
+ *
+ * `inferThrowType` typed the catch binding from the try block's OWN `throw`s. So the PLAIN
+ * idiom — the one `src/parser.ts::tokenize` is written in —
+ *
+ *     try { return lex(s) } catch (e) { e.message }
+ *
+ * left the binding at the `"string"` default, and `scanEscaping` rule 3 requires the
+ * binding to equal the raised type, so an object payload was unreachable no matter what
+ * the slot could hold. The rule now also asks what the block's CALLEES raise.
+ */
+describe("the catch binding takes its type from what the block's callees raise", () => {
+  test("the plain idiom: the try block has no throw of its own", async () => {
+    await differential([
+      `function lex(s: string): number {`,
+      `  if (s === "bad") throw new Error("LexError: bad " + s);`,
+      `  return s.length;`,
+      `}`,
+      `function tokenize(s: string): number {`,
+      `  try { return lex(s); } catch (e) { console.log("caught:", e.message); return -1; }`,
+      `}`,
+      `console.log(tokenize("ok"));`,
+      `console.log(tokenize("bad"));`,
+      ``,
+    ].join("\n"));
+  });
+});

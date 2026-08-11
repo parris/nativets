@@ -4502,17 +4502,134 @@ class Checker {
     throw nyi(NYI.INSTANCEOF, `'instanceof ${c}'${c === "Error" ? " (Error is modelled structurally as {message:string})" : ""}`);
   }
 
-  /** Type of the first `throw` reachable in a body (for the catch binding). */
+  /**
+   * The type of the `catch` binding for a `try` whose block is `stmts`.
+   *
+   * THREE SOURCES, in precedence order, and the third is the one that makes cross-frame
+   * object payloads reachable at all:
+   *
+   *   1. an explicit `throw` in the block — it decides the type it actually throws;
+   *   2. what the block's CALLEES raise, when they all agree on one type;
+   *   3. `{message:string}` if the block calls a host builtin (SH4: an `fs` failure is an
+   *      Error, and `e.message` is then the node-identical text).
+   *
+   * Rule 2 used not to exist, and its absence made the whole payload question moot. The
+   * plain idiom
+   *
+   *     try { return lex(s) } catch (e) { e.message }
+   *
+   * has no `throw` in the block, so the binding fell to the `"string"` default — and
+   * `codegen.ts::scanEscaping` rule 3 admits a raise only when the covering binding equals
+   * the raised type, so `lex`'s `throw new Error(…)` could not cross the frame no matter
+   * what the pending slot was able to carry. Every object payload in `src/` is written this
+   * way.
+   *
+   * A BLOCK THAT CAN RAISE TWO DIFFERENT TYPES IS A REFUSAL, never a pick. The binding is
+   * `any` in node and has exactly one type here; choosing either arm would make the other
+   * one a raw store into a slot of the wrong shape, which is the silent-wrong-answer class
+   * `ThrowStmt` and `emitExcCheck` already refuse from the other side.
+   *
+   * "CANNOT SAY" IS SPELLED AS AN EMPTY `Ty[]` all the way down, never as `""`. `Ty` is a
+   * template-literal union with no empty member, so the `""` sentinel `codegen.ts` uses
+   * for the same job cannot be handed back to a `Ty` position without a cast — and a cast
+   * is exactly what `src/` has to stay clear of. A list of length 0 or 1 says the same
+   * thing and reads back as a `Ty`.
+   */
   private inferThrowType(stmts: Stmt[], scope: Scope): Ty | undefined {
-    // SH4: a host FFI call throws an ERROR, exactly like node's `fs` — so a block
-    // containing one binds `catch (e)` to `{message:string}` and `e.message` is the
-    // node-identical text. Checked before the `throw` scan (an explicit throw in the
-    // same block still wins, since it decides the type it actually throws).
-    if (this.hostImports.size && stmts.some((s) => hasHostCall(s, this.hostImports))) {
-      const explicit = this.firstThrowType(stmts, scope);
-      return explicit ?? "{message:string}";
+    const explicit = this.firstThrowType(stmts, scope);
+    if (explicit !== undefined) return explicit;
+    const host = this.hostImports.size > 0 && stmts.some((s) => hasHostCall(s, this.hostImports));
+    const seed: Ty[] = host ? ["{message:string}"] : [];
+    const fromCallees = this.calleeRaisedTy(stmts, seed);
+    return fromCallees.length > 0 ? fromCallees[0]! : undefined;
+  }
+
+  /**
+   * The ONE type every raise reaching this `try` from a CALL can carry, as a list of 0 or
+   * 1 — empty when the block calls nothing this can say raises. `seed` carries the type a
+   * host call in the block contributes, so a block mixing `readFileSync` with a user
+   * function that throws a record DISAGREES rather than silently preferring one of them.
+   *
+   * REFUSES on disagreement (see `inferThrowType`). It cannot regress a program that
+   * compiles today: a block with no `throw` of its own used to bind `"string"` (or
+   * `{message:string}`), and `scanEscaping` rule 3 then rejected every callee raising
+   * anything else — so every program this refusal can reach was ALREADY an NT1004, and now
+   * says which two shapes collided instead of "not inside a `try`".
+   */
+  private calleeRaisedTy(stmts: Stmt[], seed: Ty[]): Ty[] {
+    //@@mutable
+    const found: Ty[] = [...seed];
+    //@@mutable
+    const from: string[] = seed.length > 0 ? ["a host builtin, which raises an Error"] : [];
+    for (const name of calleesOf(stmts)) {
+      const t = this.raisedTypeOf(name);
+      if (t.length === 0) continue;
+      found.push(t[0]!);
+      from.push(`\`${name}\``);
     }
-    return this.firstThrowType(stmts, scope);
+    if (found.length === 0) return [];
+    const first = found[0]!;
+    for (let i = 1; i < found.length; i++) {
+      const other = found[i]!;
+      if (other === first) continue;
+      throw nyi(NYI.EXCEPTION, `a \`try\` whose block can raise both ${first} (from ${from[0]!}) and ${other} (from ${from[i]!})`,
+        "the `catch` parameter is `any` in node and has exactly ONE type here, so a block that can raise two different shapes has no binding this compiler can give it — and picking either would store the other one raw into a slot of the wrong shape. Split the two calls into separate `try` blocks, each with its own `catch`, or make both raising functions throw the same type");
+    }
+    return [first];
+  }
+
+  /**
+   * The single type a function's UNCOVERED `throw`s all raise, as a list of 0 or 1.
+   *
+   * SYNTACTIC, and deliberately so: this runs while checking some OTHER function's body,
+   * and the callee may not have been checked yet — its `throw` arguments carry no `ty`
+   * annotation, and re-typing them here would mean evaluating an expression in a scope that
+   * is not its own. So only the forms whose type needs no scope are read (`raisedNewTy`),
+   * and every other one answers "cannot say".
+   *
+   * "CANNOT SAY" IS SAFE, and that is what makes the restriction acceptable rather than a
+   * hole: it leaves the binding at today's default, and `scanEscaping` rule 3 then refuses
+   * the raise (NT1004) exactly as it does now. The failure mode is a refusal, never a wrong
+   * binding type.
+   */
+  private raisedTypeOf(name: string): Ty[] {
+    const cached = this.raisedTys.get(name);
+    if (cached !== undefined) return cached;
+    this.raisedTys = this.raisedTys.set(name, []); // recursion guard AND the default answer
+    //@@mutable
+    let args: Expr[] = [];
+    for (const s of this.programBody) {
+      if (s.kind !== "FuncDecl" || s.name !== name) continue;
+      args = [...args, ...uncoveredThrows(s.body, false)];
+    }
+    if (args.length === 0) return [];
+    //@@mutable
+    const answer: Ty[] = [];
+    for (const a of args) {
+      const t = this.raisedNewTy(a);
+      if (t.length === 0) return [];
+      if (answer.length > 0 && t[0]! !== answer[0]!) return []; // this function does not agree with itself
+      if (answer.length === 0) answer.push(t[0]!);
+    }
+    this.raisedTys = this.raisedTys.set(name, answer);
+    return answer;
+  }
+
+  /** Per-function memo for `raisedTypeOf`. The empty list is both "cannot say" and the
+   *  in-progress guard, so a directly or mutually recursive `throw` chain terminates on the
+   *  safe answer rather than recursing. */
+  private raisedTys = new Map<string, Ty[]>();
+
+  /** The type of a `throw` argument whose spelling needs NO scope to type: a string, a
+   *  template (also a string), `new Error(m)`, and `new C(…)` on a user class — whose
+   *  instance type is parameter 0 of its registered `C.constructor` signature, which is
+   *  filled in before any body is checked. Empty for everything else. */
+  private raisedNewTy(e: Expr): Ty[] {
+    if (e.kind === "StringLiteral" || e.kind === "TemplateLiteral") return ["string"];
+    if (e.kind !== "NewExpr") return [];
+    const ctor = this.functions.get(`${e.callee}.constructor`);
+    if (ctor !== undefined) return [ctor.params[0]!];
+    return e.callee === "Error" ? ["{message:string}"] : [];
   }
 
   private firstThrowType(stmts: Stmt[], scope: Scope): Ty | undefined {
@@ -7450,6 +7567,181 @@ function hasHostCall(node: unknown, hosts: Set<string>): boolean {
   const n = node as { kind?: string; callee?: { kind?: string; name?: string } };
   if (n.kind === "CallExpr" && n.callee?.kind === "Identifier" && n.callee.name && hosts.has(n.callee.name)) return true;
   return Object.values(node).some((v) => hasHostCall(v, hosts));
+}
+
+/**
+ * The DIRECT callees of a `try` block, by name — every function a raise could reach this
+ * block's `catch` from (see `Checker.inferThrowType` rule 2).
+ *
+ * A TYPED walk, in `collectIdents`/`firstThrowType`'s shape rather than the `unknown`
+ * structural recursion `codegen.ts::scanUses` uses for the same job. That is a
+ * SELF-HOSTING obligation, not a style preference: `if (n === null || typeof n !==
+ * "object")` on an `unknown` is NT2001 in the subset this compiler compiles, so the
+ * structural spelling would have added two more functions to the blocked census.
+ *
+ * Three things are deliberately NOT collected, and each would only produce a binding type
+ * no raise ever actually arrives as:
+ *
+ *   - calls inside a nested `try` WITH a `catch`: that block handles its own raises;
+ *   - calls inside an ARROW body, which is a frame of its own — a raise leaving a LIFTED
+ *     arrow is one codegen refuses outright (`scanEscaping` rule 4);
+ *   - METHOD calls. They resolve only by PROPERTY name, and this is the one place where
+ *     over-approximating costs something real rather than nothing: pulling in every
+ *     same-named method in the program would let two unrelated ones disagree and turn
+ *     `inferThrowType` into a refusal on a block whose actual callee raises just one type.
+ */
+function calleesOf(stmts: Stmt[]): string[] {
+  //@@mutable
+  let out: string[] = [];
+  for (const s of stmts) out = [...out, ...calleesInStmt(s)];
+  return out;
+}
+
+/* RETURNS a list rather than filling an accumulator, and that is the SUBSET talking, not
+ * taste. `out.push(…)` where `out` is a PARAMETER is NT1606 here (an array is immutable
+ * unless its own declaration carries `//@@mutable`, which a parameter cannot), and the
+ * callback spelling `codegen.ts::frameThrows` uses instead is refused for a different
+ * reason: a block-bodied arrow with no `return` types as `=>number`, so it does not fit a
+ * `(…) => void` parameter. Both of those are why the four `scan*` walkers in codegen.ts sit
+ * in the blocked census; building the list up by return keeps these out of it. */
+function calleesInStmt(s: Stmt): string[] {
+  switch (s.kind) {
+    case "VarDecl": {
+      //@@mutable
+      let out: string[] = [];
+      for (const d of s.decls) if (d.init) out = [...out, ...calleesInExpr(d.init)];
+      return out;
+    }
+    case "ReturnStmt": return s.argument ? calleesInExpr(s.argument) : [];
+    case "ThrowStmt": return calleesInExpr(s.argument);
+    case "ExprStmt": return calleesInExpr(s.expr);
+    case "IfStmt":
+      return [...calleesInExpr(s.test), ...calleesInBody(s.consequent), ...(s.alternate ? calleesInBody(s.alternate) : [])];
+    case "WhileStmt": case "DoWhileStmt":
+      return [...calleesInExpr(s.test), ...calleesInBody(s.body)];
+    // The INIT clause is deliberately not walked. It is `Stmt | Expr | null`, and asking
+    // which by comparing that union with `null` is NT2001 in the subset `src/` must stay
+    // inside — the one construct that put this function in the blocked census. Missing a
+    // call there costs a refusal, never a wrong answer: an uninferred binding stays at the
+    // `"string"` default and `scanEscaping` rule 3 keeps the NT1004, which is exactly where
+    // every one of these programs already was.
+    case "ForStmt":
+      return [...(s.test ? calleesInExpr(s.test) : []), ...(s.update ? calleesInExpr(s.update) : []), ...calleesInBody(s.body)];
+    case "ForOfStmt": return [...calleesInExpr(s.iterable), ...calleesInBody(s.body)];
+    case "ForInStmt": return [...calleesInExpr(s.object), ...calleesInBody(s.body)];
+    case "SwitchStmt": {
+      //@@mutable
+      let out: string[] = calleesInExpr(s.discriminant);
+      for (const c of s.cases) {
+        if (c.test) out = [...out, ...calleesInExpr(c.test)];
+        out = [...out, ...calleesInBody(c.body)];
+      }
+      return out;
+    }
+    case "BlockStmt": return calleesInBody(s.body);
+    case "MultiStmt": return calleesInBody(s.stmts);
+    case "TryStmt":
+      // Its own `catch` handles this nested block's raises; a `finally` does not HANDLE, so
+      // a catch-less `try`'s block still reaches the OUTER handler and its calls count.
+      return [
+        ...(s.handler ? [] : calleesInBody(s.block)),
+        ...(s.handler ? calleesInBody(s.handler) : []),
+        ...(s.finalizer ? calleesInBody(s.finalizer) : []),
+      ];
+    default: return []; // FuncDecl is its own frame; break/continue/BlockDrops call nothing
+  }
+}
+
+function calleesInBody(stmts: Stmt[]): string[] {
+  //@@mutable
+  let out: string[] = [];
+  for (const s of stmts) out = [...out, ...calleesInStmt(s)];
+  return out;
+}
+
+function calleesInExpr(e: Expr): string[] {
+  switch (e.kind) {
+    case "CallExpr": {
+      //@@mutable
+      let out: string[] = e.callee.kind === "Identifier" ? [e.callee.name] : calleesInExpr(e.callee);
+      for (const a of e.args) out = [...out, ...calleesInExpr(a)];
+      return out;
+    }
+    case "TemplateLiteral": return calleesInList(e.exprs);
+    case "MemberExpr": return calleesInExpr(e.object);
+    case "IndexExpr": return [...calleesInExpr(e.object), ...calleesInExpr(e.index)];
+    case "UnaryExpr": return calleesInExpr(e.operand);
+    case "TypeofExpr": return calleesInExpr(e.operand);
+    case "UpdateExpr": return e.targetExpr ? calleesInExpr(e.targetExpr) : [];
+    case "BinaryExpr": return [...calleesInExpr(e.left), ...calleesInExpr(e.right)];
+    case "LogicalExpr": return [...calleesInExpr(e.left), ...calleesInExpr(e.right)];
+    case "ConditionalExpr": return [...calleesInExpr(e.test), ...calleesInExpr(e.consequent), ...calleesInExpr(e.alternate)];
+    case "AssignExpr": return calleesInExpr(e.value);
+    case "IndexAssign": return [...calleesInExpr(e.object), ...calleesInExpr(e.index), ...calleesInExpr(e.value)];
+    case "FieldAssign": return [...calleesInExpr(e.object), ...calleesInExpr(e.value)];
+    case "ArrayLiteral": return calleesInList(e.elements);
+    case "ObjectLiteral": {
+      //@@mutable
+      let out: string[] = [];
+      for (const p of e.properties) out = [...out, ...calleesInExpr(p.value)];
+      return out;
+    }
+    case "SpreadExpr": return calleesInExpr(e.argument);
+    case "SequenceExpr": return calleesInList(e.exprs);
+    case "NewExpr": return calleesInList(e.args);
+    case "AsExpr": case "SatisfiesExpr": return calleesInExpr(e.expr);
+    case "NonNullExpr": return calleesInExpr(e.expr);
+    case "InstanceOfExpr": return calleesInExpr(e.object);
+    case "InExpr": return [...calleesInExpr(e.key), ...calleesInExpr(e.object)];
+    default: return []; // literals, identifiers — and an ARROW BODY, which is another frame
+  }
+}
+
+function calleesInList(es: Expr[]): string[] {
+  //@@mutable
+  let out: string[] = [];
+  for (const e of es) out = [...out, ...calleesInExpr(e)];
+  return out;
+}
+
+/**
+ * The arguments of the `throw`s in ONE frame that no `catch` in that same frame covers —
+ * codegen's `frameThrows` walk, asked for the EXPRESSIONS instead of for their types, and
+ * written over the typed AST for the same self-hosting reason as `calleesOf` above.
+ *
+ * A `throw` inside an ARROW body is therefore invisible here, because this never descends
+ * into an expression — and that is exactly the answer wanted. Such a throw is not this
+ * frame's to propagate (`scanEscaping` rule 4 refuses the whole function over it), so a
+ * function whose throws are ALL in arrows reports none and `raisedTypeOf` answers "cannot
+ * say". A function with both kinds reports only the statement-level ones, which at worst
+ * names a binding type no raise arrives as — and rule 4 has already refused it anyway.
+ */
+function uncoveredThrows(stmts: Stmt[], covered: boolean): Expr[] {
+  //@@mutable
+  let out: Expr[] = [];
+  for (const s of stmts) {
+    switch (s.kind) {
+      case "ThrowStmt": if (!covered) out = [...out, s.argument]; break;
+      case "TryStmt":
+        // Its own `catch` covers its block; a `finally` does not HANDLE, so it does not.
+        out = [...out, ...uncoveredThrows(s.block, s.handler !== null || covered)];
+        if (s.handler) out = [...out, ...uncoveredThrows(s.handler, covered)];
+        if (s.finalizer) out = [...out, ...uncoveredThrows(s.finalizer, covered)];
+        break;
+      case "IfStmt":
+        out = [...out, ...uncoveredThrows(s.consequent, covered)];
+        if (s.alternate) out = [...out, ...uncoveredThrows(s.alternate, covered)];
+        break;
+      case "WhileStmt": case "DoWhileStmt": case "ForStmt": case "ForOfStmt": case "ForInStmt":
+        out = [...out, ...uncoveredThrows(s.body, covered)];
+        break;
+      case "BlockStmt": out = [...out, ...uncoveredThrows(s.body, covered)]; break;
+      case "MultiStmt": out = [...out, ...uncoveredThrows(s.stmts, covered)]; break;
+      case "SwitchStmt": for (const c of s.cases) out = [...out, ...uncoveredThrows(c.body, covered)]; break;
+      default: break; // FuncDecl is its own frame; nothing else can contain a `throw`
+    }
+  }
+  return out;
 }
 
 /** A bare `[]` — the one expression whose type must come from context, not from itself. */
