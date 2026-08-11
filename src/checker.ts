@@ -8276,8 +8276,9 @@ function daStmt(s: Stmt, tracked: DATracked | null, flow: DAFlow, esc: DAEscapes
  *     accepted.
  *   - only fields the constructor stores into SOMEWHERE are tracked. A field it never
  *     mentions is the syntactic case, already decided in the parser, and deferring to it
- *     is what keeps this pass from re-deciding cases it cannot see: `class E extends
- *     Error` inherits `message`, which `super(...)` sets and the parser exempts.
+ *     is what keeps this pass from re-deciding cases it cannot see — including the one
+ *     exemption that rule carries (`class E extends Error` with no constructor of its own,
+ *     whose inherited `message` node sets through the implicit `super(...arguments)`).
  * ------------------------------------------------------------ */
 
 /** The tracked-set key for a constructor field. Locals cannot contain `.`, so a field

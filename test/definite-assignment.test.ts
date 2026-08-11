@@ -802,4 +802,50 @@ class C { z: number | undefined; constructor(c: boolean) { if (c) this.z = 1; } 
 console.log(new C(true).z, new C(false).z);
 `);
   });
+
+  /*
+   * 37. THE EXEMPTION THAT WAS TOO WIDE — found while working out which fields the
+   * path-sensitive pass may re-decide, and the only case in this file where the old
+   * behaviour was not a wrong answer but a CRASH.
+   *
+   * `class E extends Error` inherits `message` (slot 0), and the refusal above exempted
+   * it unconditionally, on the reasoning that `super(msg)` sets it. But `super(msg)`
+   * desugars into an ordinary `this.message = msg`, so the scan finds it WITHOUT any
+   * exemption — and the exemption therefore only ever applied to the one shape where the
+   * store is genuinely absent, which is the shape node REFUSES TO RUN:
+   *
+   *     class E extends Error { c: number; constructor(c: number) { this.c = c; } }
+   *     new E(2)      // node: ReferenceError, "Must call super constructor…", exit 1
+   *
+   * We compiled it clean — `coverage` reported "no unsupported features detected" — and
+   * left `message` as an unwritten heap POINTER. `e.message.length` printed `0`, and
+   * `JSON.stringify(e.message)` aborted: **exit 255 with empty stdout**.
+   *
+   * The exemption now covers only the class with no constructor of its own, where node's
+   * implicit `super(...arguments)` really does set `message` and there is no call in any
+   * body to find.
+   */
+  test("an Error subclass whose constructor never calls super() is refused", () => {
+    const e = expectRefused(`
+class E extends Error { c: number; constructor(c: number) { this.c = c; } }
+console.log(new E(2).c);
+`, "NT1015");
+    expect(e.diag.message).toContain("never calls 'super(");
+    expect(e.diag.hint).toContain("ReferenceError");
+  });
+
+  // 38. …and the two shapes that DO set `message` must still compile: the explicit
+  //     `super(m)` the scan can see, and the implicit one it cannot.
+  test("an Error subclass that does call super, or declares no constructor, still compiles", async () => {
+    await expectNode(`
+class MyErr extends Error { code: number; constructor(m: string, c: number) { super(m); this.code = c; } }
+const e = new MyErr("boom", 7);
+console.log(e.message, e.code, e.message.length);
+`);
+    await expectNode(`
+class LexError extends Error {}
+const a = new LexError("bad token");
+console.log(a.message, a.message.length);
+`);
+  });
 });

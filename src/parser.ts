@@ -3150,11 +3150,32 @@ class Parser {
     // initializers were folded into it above — so ONE scan covers every way a field can
     // be initialized, and the two cases no longer drift apart.
     const covered = fieldsStoredViaThis(ctorBody);
-    // `extends Error`: `message` is slot 0 and `super(msg)` sets it, which is not a
-    // `this.f = …` store and so cannot appear in the scan above.
-    const stored = extendsError ? covered.add("message") : covered;
+    // `extends Error`: `message` is slot 0, and the exemption it needs is NARROWER than
+    // it looks. `super(msg)` IS a `this.message = msg` store — the parser desugars the
+    // call into exactly that `FieldAssign` — so the scan above already sees it and needs
+    // no help. What it cannot see is node's IMPLICIT `super(...arguments)`, which only
+    // exists when the class declares no constructor of its own.
+    //
+    // Exempting unconditionally therefore only ever covered the shape where the store is
+    // genuinely absent — and that shape is one node REFUSES TO RUN (`ReferenceError:
+    // Must call super constructor…`). We compiled it clean and left `message` as an
+    // unwritten heap POINTER: `e.message.length` printed `0`, and `JSON.stringify(e.message)`
+    // aborted with EXIT 255 and empty stdout.
+    const stored = extendsError && !hadExplicitCtor ? covered.add("message") : covered;
     for (const f of fields) {
       if (stored.has(f.key)) continue;
+      // …and it gets its own diagnostic, because "assign it in the constructor" is not the
+      // fix: `this.message = m` is a write to the INHERITED slot, and node still throws
+      // before reaching it. The only fix is the call.
+      if (extendsError && f.key === "message") {
+        throw nyi(
+          NYI.CLASS_FEATURE,
+          `class '${name}' extends Error but its constructor never calls 'super(...)'`,
+          `node throws a ReferenceError here — "Must call super constructor in derived class `
+            + `before accessing 'this' or returning from derived constructor" — so no instance `
+            + `is ever created. Call \`super(message)\` in the constructor`,
+        );
+      }
       if (!hadExplicitCtor) {
         throw nyi(NYI.CLASS_FEATURE, `class '${name}' field '${f.key}' has no initializer and no constructor to initialize it`);
       }

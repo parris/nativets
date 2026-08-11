@@ -2642,9 +2642,10 @@ export function fieldsStoredViaThis(body: Stmt[]): Set<string> {
  * Starting from what the constructor stores SOMEWHERE, rather than from the class's full
  * field list, also keeps this from re-deciding cases it cannot see. A field the
  * constructor never mentions is the SYNTACTIC case, already decided by the caller of
- * `fieldsStoredViaThis` above — including its exemptions, of which `class E extends Error`
- * (whose inherited `message` is set by `super(…)`, not by a `this.f = …`) is the one that
- * exists today.
+ * `fieldsStoredViaThis` above, together with the one exemption it carries (a `class E extends
+ * Error` that declares NO constructor, whose inherited `message` node sets through the
+ * implicit `super(...arguments)` — an explicit `super(msg)` is a plain `this.message = msg`
+ * store and needs no exemption).
  */
 export function ctorFieldsStored(body: Stmt[]): Set<string> {
   return storedFields(body, true);

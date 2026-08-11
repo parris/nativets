@@ -3796,10 +3796,35 @@ to prove and compiles.
 
 The tracked set is what the constructor stores into **somewhere**, not the class's full
 field list. That is deliberate: a field the constructor never mentions is the *syntactic*
-case, already decided by the parser above — **including its exemptions**, of which `class E
-extends Error` (whose inherited `message` is set by `super(…)`, not by a `this.f = …`) is
-the one that exists today. Deferring keeps one rule from re-deciding cases the other can
-see and it cannot.
+case, already decided by the parser above. Deferring keeps one rule from re-deciding cases
+the other can see and it cannot.
+
+#### The `extends Error` exemption was too wide — and it was a CRASH, not a wrong answer
+
+Working out which fields the path-sensitive pass may re-decide turned up the one exemption
+the syntactic refusal carried: `class E extends Error` inherits `message` (slot 0), which
+was exempted **unconditionally**, on the reasoning that `super(msg)` sets it.
+
+But `super(msg)` desugars into an ordinary `this.message = msg`, so the scan finds it with
+no exemption at all. The exemption therefore only ever applied to the shape where the store
+is genuinely absent — which is the shape **node refuses to run**:
+
+```ts
+class E extends Error { c: number; constructor(c: number) { this.c = c; } }
+new E(2)      // node: ReferenceError, "Must call super constructor…", exit 1
+```
+
+We compiled it clean — `coverage` reported *"no unsupported features detected 🎉"* — and
+left `message` as an unwritten heap **pointer**. `e.message.length` printed `0`;
+`JSON.stringify(e.message)` **aborted, exit 255 with empty stdout**. Note the direction:
+this was not a divergence in our favour to keep, because node produces *no* instance here,
+so there is no behaviour to match.
+
+The exemption now covers only a class with **no constructor of its own**, where node's
+implicit `super(...arguments)` really does set `message` and there is no call in any body
+to find. A derived constructor that omits `super(...)` is `NT1015` with its own hint — the
+generic "assign it in the constructor" would be false advice, since `this.message = m` is a
+write to the inherited slot and node throws before reaching it.
 
 `tsc --strict` rejects every refused shape here too (`TS2564`, *"Property 'z' has no
 initializer and is not definitely assigned in the constructor"*), so this widening is again
