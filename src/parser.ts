@@ -1264,7 +1264,10 @@ class Parser {
     const entrypoint = last !== null && last.kind === "ExprStmt" ? last.expr : null;
     for (const c of this.identCalls) {
       if (!(c.scopedAsync || this.asyncFns.has(c.name))) continue;
-      if (this.awaitedCalls.has(c.node) || c.node === entrypoint) continue;
+      // `entrypoint !== null` is written out because comparing an `Expr` with an
+      // `Expr | null` is NT2001 here. It changes nothing: `c.node` is an object, so
+      // `c.node === null` was already false on the arm the guard removes.
+      if (this.awaitedCalls.has(c.node) || (entrypoint !== null && c.node === entrypoint)) continue;
       throw nyi(
         NYI.ASYNC,
         `calling async function '${c.name}' without 'await' at ${c.line}:${c.col} (its value is a Promise under node; nativets runs it to completion immediately)`,
@@ -2795,7 +2798,11 @@ class Parser {
     // `@@mutable` — TRUE in-place mutation: a field-assigning method mutates the receiver
     // and every handle observes it. Without it a field-assigning method is COPY-ON-WRITE
     // (it returns a new instance). See docs/decorators.md.
-    const isMutable = !!dec?.attrs.includes("mutable");
+    // The null test is written out: `dec?.attrs.includes(…)` calls a method on the
+    // `string[] | undefined` the optional chain produces, which is NT1002 in the subset
+    // this file has to stay inside. `!!(undefined)` is `false`, so the two agree on all
+    // three inputs (verified against node).
+    const isMutable = dec !== null && dec.attrs.includes("mutable");
     if (isMutable) this.mutableClasses = this.mutableClasses.add(name);
     if (this.at("<")) throw nyi(NYI.CLASS_FEATURE, `generic class '${name}' (type parameters)`);
     // Only `extends Error` is supported: nativets models Error as `{message:string}`, so the
@@ -2826,6 +2833,7 @@ class Parser {
     while (!this.at("}") && this.peek().type !== "eof") {
       if (this.at(";")) { this.eat(";"); continue; }
       // `@wrapper` on a MEMBER (docs/decorators.md). `@@` attributes are class-level only.
+      //@@mutable
       const memberWrappers: string[] = [];
       while (this.at("@") || this.at("@@")) {
         const sig = this.next();
