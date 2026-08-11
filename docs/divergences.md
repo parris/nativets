@@ -3088,7 +3088,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1001 | arrays: empty `[]`, nested/object element types | M1 | (basic `number[]`/`string[]` are ✅ supported; `console.log(arr)` is ✅ node-exact — see the util.inspect section above) |
 | NT1002 | objects: nested object fields, object methods | M1 | (flat objects, `.f`/`o["f"]`, `Object.keys`, `for-in` are ✅ supported) |
 | NT1003 | arrow functions / function values / closures | M2 | captured environments |
-| NT1004 | a `throw` with no `catch` IN THE SAME FRAME, unless the WHOLE PROGRAM contains no `try` (or the throw is at top level); and any raise inside a `finally`-only `try` | M2 | propagation (see below); `try`/`catch`/`throw` within one frame ✅, and an UNCAUGHT `throw` ✅ where the gate above allows it |
+| NT1004 | a `throw` with no `catch` IN THE SAME FRAME, unless the WHOLE PROGRAM contains no `try` (or the throw is at top level), or every call site of its function catches it one frame up; and any raise inside a `finally`-only `try` | M2 | propagation past ONE frame (see below); `try`/`catch`/`throw` within one frame ✅, an UNCAUGHT `throw` ✅, and a throw crossing ONE frame ✅ where the rule below allows it |
 | NT1005 | `JSON` | M3 | `JSON.stringify` ✅ and `JSON.parse` + `dyn as T` runtime typecheck ✅ (scalars/objects/arrays, nested); code reused to reject un-validatable narrow targets (functions, unions). A compound `Dyn` now PRINTS node-exactly (util.inspect, see above) |
 | NT1006 | spread | M2 | arrays/objects; spreading a VALUE into a call is supported only where the arity is known or the fold has an identity — see below |
 | NT1007 | destructuring | M2 | arrays/objects |
@@ -3099,7 +3099,7 @@ code, milestone, and frequency. The catalog lives in `src/diagnostics.ts` (`NYI`
 | NT1013 | generics | M3 | generic **functions** monomorphize ✅ (Stage 36) and type arguments erase ✅ (SH2); the code now rejects only the corners below |
 | NT1030 | a recursive type with nowhere to put a back-edge (`type P = Q[]`), an in-place write to a **cycle-capable FIELD** of a `@@mutable` record **or class** (in a method always; in a CONSTRUCTOR only when the value names `this`, since a constructor writes into a block nothing else can reach yet), or a cycle one of whose members is refused for its own reason | later | self- AND mutually-recursive object/union declarations now COMPILE via the nominal `@Name` back-edge; ordering was never the problem — see below |
 
-### An UNCAUGHT `throw` compiles; a throw that CROSSES A FRAME is still `NT1004`
+### An UNCAUGHT `throw` compiles, and a throw may now CROSS ONE FRAME; deeper is `NT1004`
 
 `throw` is lowered as a **branch to the enclosing `try`'s catch block**, which is why the
 `try` has to be in the same function: there is no unwinder, and an exception has never been
@@ -3125,12 +3125,40 @@ protocol the host FFI (SH4) has always used for an uncaught `ENOENT`.
 differential asserts (`test/uncaught-throw.test.ts`). A stack trace needs frame metadata the
 compiled program does not carry.
 
-**Still refused, unchanged:** the ordinary "raise in the callee, handle at the call site"
-idiom — a throw in a function with the `try` one or more frames up. The value would have to
-survive the return, which means a checked error return at every call site of every
-may-throw function, a live-set drop at each of those sites, and an interprocedural type for
-the `catch (e)` binding. Also refused: `throw 42` / `throw { … }` with no `message` string,
+**A throw may now cross ONE frame** — the ordinary "raise in the callee, handle at the call
+site" idiom, which was the second thing the single refusal covered. It uses the SAME
+protocol: the escaping frame raises on the pending flag and returns its default, and the
+caller checks the flag after the call exactly as it already does after a fallible host
+call. No unwinder appears, and no IR form that did not exist before.
+
+It is allowed only where a raise **provably cannot reach a call site that fails to check**,
+because a set flag that nobody checks means a zeroed default and a program that carries on —
+a silent wrong answer. So `scanEscaping` (src/codegen.ts) admits a function only when all of:
+
+- every call site is a **direct** call sitting inside a `try` WITH a `catch` in its
+  immediate caller — or in `main`, whose uncaught arm is node's own behaviour;
+- the name is **never used as a value**, so no closure or function-value call can dodge it;
+- the thrown type is one the flag can carry (`string`, or a one-field `{message:string}`)
+  and **every covering `catch` binds exactly that type** — the binding is not `any` here,
+  and reconstructing a different shape into it is the raw-store bug the in-frame `ThrowStmt`
+  already refuses;
+- no `throw` in the function sits in an arrow body, and the program uses no actors (an
+  actor handler is called by the scheduler, from no call site the scan can see).
+
+**One frame, by construction:** the first rule means an escaping callee's raise is always
+consumed by its immediate caller, so no intermediate frame ever has to propagate.
+
+**Still refused:** a throw with the `try` **two or more** frames up. Every intermediate
+frame would have to propagate too, which needs an exception check after every call that can
+raise AND the live owned set dropped at each of those call sites — the drop set exists for
+throws (`ThrowStmt.drops`) but not yet for arbitrary call expressions. On the compiler's own
+program that is the whole cost: only **16 of 1209** call sites reaching a may-throw callee
+sit inside a `try`/`catch` in their own frame, so the one-frame rule clears none of stage-1.
+See docs/self-hosting.md. Also refused: `throw 42` / `throw { … }` with no `message` string,
 because there is nothing to raise and inventing text would be a wrong answer.
+
+The **stderr text divergence above applies to a propagated throw that nobody catches too**:
+it reaches `main`, and `main` prints one line and exits 1 where node prints a stack trace.
 
 #### The second shape is WHOLE-PROGRAM, and narrowing it to the per-throw rule buys nothing
 
@@ -3145,6 +3173,15 @@ console.log(boom(1));            // node: 2. nativets: NT1004 at the throw.
 ```
 
 Delete `unrelated`'s `try` and the identical throw compiles and prints `2`.
+
+> **RESOLVED 2026-08-10.** That exact snippet compiles now, and prints `2` — not by
+> narrowing `scanHasTry` (the paragraphs below still stand: the honest per-throw rule
+> clears zero of the compiler's own sites) but because `boom`'s only call site is in
+> `main`, which the cross-frame rule above admits: the throw raises on the flag, returns,
+> and `main`'s check aborts with node's exit code. Pinned in
+> `test/cross-frame-throw.test.ts`, "uncovered call from main, in a program that HAS a try
+> elsewhere". What remains true is the general point — the whole-program bit still gates
+> every shape the cross-frame rule does NOT admit.
 
 That over-approximation was measured rather than assumed, because the header above promises a
 per-throw property (*crosses a call boundary*) that the code does not implement. The honest

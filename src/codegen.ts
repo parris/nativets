@@ -128,9 +128,10 @@ function scanUsesActors(node: unknown): boolean {
  * ========================================================================== */
 
 /** The type a raise can carry across a frame, or `null` if it cannot. These are exactly
- *  the two shapes `emitExcCheck` already reconstructs into a catch binding. The empty
- *  string is the "cannot" answer -- unambiguous, since no real type is spelled that way. */
-function raisableTy(t: Ty | undefined): Ty {
+ *  the two shapes `emitExcCheck` already reconstructs into a catch binding. The result is a
+ *  `string` rather than a `Ty` so the empty string can be the "cannot" answer — unambiguous,
+ *  since `Ty` has no empty spelling (which is also why tsc rejects `""` as one). */
+function raisableTy(t: Ty | undefined): string {
   if (t === undefined) return "";
   const b: Ty = t;
   if (b === "string") return "string";
@@ -145,7 +146,7 @@ function raisableTy(t: Ty | undefined): Ty {
  *  no local `catch` covers; `bad` is set by anything that disqualifies the whole
  *  function — a throw inside an arrow (a frame this walk is not describing), or a thrown
  *  value the flag cannot carry. */
-function frameThrows(node: unknown, covered: boolean, inArrow: boolean, out: (t: Ty) => void): void {
+function frameThrows(node: unknown, covered: boolean, inArrow: boolean, out: (t: string) => void): void {
   if (node === null || typeof node !== "object") return;
   if (Array.isArray(node)) { for (const x of node) frameThrows(x, covered, inArrow, out); return; }
   const n = node as Record<string, unknown>;
@@ -239,7 +240,7 @@ function scanEscaping(program: Program, usesActors: boolean): Set<string> {
     if (s.kind !== "FuncDecl") continue;
     //@@mutable
     const seen: string[] = [];
-    frameThrows(s.body, false, false, (t: Ty) => { seen.push(t); });
+    frameThrows(s.body, false, false, (t: string) => { seen.push(t); });
     if (seen.length === 0) continue;
     const first = seen[0]!;
     if (first === "" || seen.some((t) => t !== first)) continue; // rules 3+4
