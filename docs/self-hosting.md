@@ -5387,119 +5387,34 @@ capability was absent while its safety mechanism sat in a `static` helper a few 
 (`NtColl` was already a cell; `arr_thaw` was already the sharing fix). Before pricing a
 runtime feature as missing, read the file, not the header.
 
-### 3. `@@mutable` on fields — the 20x "objects are immutable" bucket
+### 3. `@@mutable` on fields — the 23x "objects are immutable" bucket (STILL OPEN)
 
-Already measured **net negative** (179 -> 182): the tag is NOMINAL, so tagged records stop
-accepting structural literals, and `accessPath` declines a `@@mutable` receiver so
-optional-field narrowing stops. Unchanged.
+Every site is an AST field STAMP: `e.ty = v`, `arrow.isAsync = v`, `operand.awaited = v`,
+`d.mutable = v`, `p.paramProp = v`. Three of them were added by this session's own work
+(`awaited`, `isAsync`, `promiseParams`), which is worth knowing — the bucket grows when the
+compiler gains a stamp, so it is not a fixed 23.
 
-### The discarded-mutator census, CLASSIFIED (2026-08-11) — 7 fixed, 9 blocked on two features
+**The recorded "net negative" verdict is about the TYPE-level opt-in and remains true:**
+`//@@mutable` on an AST interface is dead, because the tag is NOMINAL and a tagged member
+makes its union `NT1009`. `Expr` and `Stmt` are exactly such unions.
 
-`s.add(x)` / `m.set(k, v)` with the result discarded is a **no-op** here (a nativets
-`Set`/`Map` is persistent) and indistinguishable from the working spelling under bun. That
-is the "src/ relies on bun's mutation semantics" gate, and it was recorded as a count. It is
-not a count — it is two missing features and a small pile of ordinary bugs.
+**But the two features above did NOT use the type-level opt-in — they used a BINDING-level
+one**, and that route has not been measured. `//@@mutable` on the parameter/local, with the
+write compiled as an ordinary slot store. Today it is `NT1023` ("not an array, Map or Set"),
+which is a guard, not a finding.
 
-**Fixed (7), all LOCALS, so a rebind was the whole fix** — `linkProgram`'s
-`mutableClasses`, `mutableRecords`, `recTypes`, `hostImports`, `mods`, `staticFields`, and
-`moduleOrder`'s `done`. Their neighbours `names`/`tags` in the same loop were already
-written correctly; these were three lines away from code that got it right.
+**What the route needs, and the one real obstacle.** A field write through a UNION receiver
+has to know the slot, and `objectFields` of a `U<…>` is empty — that is the same hole that
+produced the `getelementptr … i64 -1` fixed in `3ea9056`. The answer is already in the
+tree: **`unionCommonField`** (ast.ts) resolves a field common to every member at a shared
+slot, which is exactly the well-definedness test a stamp needs. `e.ty = v` is legal iff
+`ty` sits at the same index in every member — and `ty` is precisely the kind of field that
+does.
 
-**Blocked (9), and every one needs one of exactly TWO things:**
-
-| site | receiver | needs |
-|---|---|---|
-| `moduleOrder` `sources`, `deps` | `Map` **parameter** | a Map/Set accumulator opt-in |
-| `collectIdents` `out` | `Set` parameter | " |
-| `addCaptured` `closure` | `Set` parameter | " |
-| `noteEscapingWrite` `out` | `Map` parameter | " |
-| `Analyzer.stmt` `state` | `Map` parameter (`State`) | " |
-| `collectAssigned` `(inArrow ? closure : direct)` | **conditional receiver** | " (no binding exists to mark) |
-| `alphaRenameShadows` `cur` | an ARRAY ELEMENT (`scopes[len-1]`) | in-place element store |
-| `analyzeOwnership` `mutable.setters` | a FIELD path | `@@mutable` on fields |
-
-**The parameter opt-in is ARRAY-ONLY, measured not assumed.** `//@@mutable` on a `Map`
-parameter is `NT1023`: *"'@@mutable' on parameter 'sources', which is not an array (it is
-'Map<string,string>')"*. And rebinding a parameter is **not** the fix — a parameter is a
-borrow, so `out = out.add(x)` is invisible to the caller (`NT1608`).
-
-So six of the nine fall to ONE feature: extend the per-parameter `//@@mutable` opt-in from
-arrays to `Map`/`Set`. That is the highest-leverage item on this list, and it is a language
-feature rather than a rewrite of `src/`.
-
-**CORRECTED 2026-08-11 — the design fork below was WRONG, and the runtime half is done.**
-`NtColl` (runtime/nt_mapset.c) is already a three-field WRAPPER over the persistent
-internals (`m` the HAMT handle, `buf`/`n` the insertion-order log). **The cell already
-exists.** An in-place update is the ordinary persistent op followed by copying the new
-wrapper's three fields back into the old one — `nt_map_put_slot_inplace` and its three
-siblings, ~15 lines, no ABI change and no refcount-aware HAMT insert.
-
-Proven by `test/runtime/collinplace_test.c` (22 checks, registered in
-`test/runtime.test.ts` so it cannot rot): the receiver updates, every holder of that
-wrapper observes it, a version handed out EARLIER by the persistent API is untouched, and
-insertion ORDER survives. It is sound because the internals are structurally shared —
-nothing is freed or overwritten, only one wrapper's view changes — which makes this a
-lost-update question, and `@@mutable` is precisely the opt-in that answers it.
-
-**DONE (`e9004e6`).** Both guards are lifted, the checker STAMPS the call it exempts
-(`CallExpr.inPlaceColl`) so codegen never guesses, and a marked binding whose result is
-USED is refused rather than silently persistent. Applied to the seven sites it was built
-for — `moduleOrder`'s `sources`/`deps`, `collectIdents`'s `out`, `addCaptured`'s `closure`,
-`noteEscapingWrite`'s `out` — every one of which was a latent silent wrong answer under
-self-hosting. **Depth 88 -> 86.**
-
-Two silent wrong answers were created and caught during the build, both measured rather
-than reasoned about: lifting the checker guard alone printed `0 undefined undefined` for
-node's `2 1 2`, and a marked binding whose result is used printed `0 1` for node's `1 1`.
-
-The census (`test/discarded-mutator.test.ts`) now skips a `@@mutable` receiver **per
-FUNCTION**. A per-FILE set was measured first and silenced twelve sites for seven markers,
-because `collectIdents`, `daReads`, `closureDecls` and `scanMentions` all name a parameter
-`out` — a lint that goes quiet about code nobody fixed is worse than no lint.
-
-*The superseded analysis, kept because the reasoning is instructive:* the array opt-in
-works because an array HAS an in-place path (`nt_arr_push`), and `nt_map_put`
-(runtime/nt_hamt.h) is purely persistent, so it looked as though the feature needed one of:
-
-1. **a refcount-aware in-place HAMT insert** — mutate when the node is unshared, copy
-   otherwise. Same shape as the array element store (item 2 above), and the same hazard: get
-   the sharing test wrong and another holder silently observes the write; or
-2. **a cell-passing calling convention** for `@@mutable` collection parameters — pass a
-   one-slot cell holding the current collection, and lower `m.set(k, v)` to
-   `*cell = nt_coll_set(*cell, k, v)`. This needs NO runtime change and no sharing analysis,
-   because the persistence is preserved and only the BINDING is mutated — but it changes how
-   such parameters are passed, which touches ownership (who drops the cell) and every call
-   site.
-
-Option 2 looks strictly cheaper and safer, and it is the one to price first. The remaining three need the in-place element store
-(itself item 2 of the three architectural features above) or `@@mutable` fields (item 3).
-
-### Measured and REJECTED: transitive raise inference (2026-08-11)
-
-`raisedTypeOf` collects a function's own uncovered throws and does not follow calls. Making
-it transitive — so a dispatcher that throws nothing directly still reports what its helpers
-raise — was implemented and measured, and it does **not** pay:
-
-    93 -> 94 blockers
-
-- It cleared `Parser.hoistTypeDecls`'s NT2001 and the function immediately hit **NT1606**
-  (`deferred.push`) instead. A blocker that changes bucket is not progress.
-- It **broke** `Parser.resolveCycle`: with the binding typed `NTError` instead of `string`,
-  the defensive `String((e as { message?: string }).message ?? e)` at `src/parser.ts:837`
-  became *"'{message:?Ustring}' is not a valid assertion … the field 'message' is at a
-  different slot or type"*. **A more precise catch binding can invalidate an `as` assertion
-  that only type-checked because the binding was imprecise** — worth remembering before any
-  future precision work on binding types.
-
-The first attempt was worse still (93 -> 94 by a different route): letting callees vote
-*alongside* direct throws let one disagreeing callee discard an answer the direct throws had
-already established. Restricting it to "consult callees only when there are no direct
-throws" made it strictly additive and it still did not pay.
-
-Nothing is miscompiled either way — a raise whose shape differs from the binding is refused
-by `scanEscaping` rule 3, never stored — so both variants bought a refusal and cost an
-inference. Reverted; the two changes that DID pay (method-call callees, and typing
-`throw helper(…)` from the callee's declared return type) are in `e2a7668`.
+So the shape is: extend the `@@mutable` guard to objects, add a `FieldAssign` path for a
+non-`this` receiver, and resolve a union receiver's slot through `unionCommonField`.
+Unmeasured — and given §1 and §2 were both wrong about needing new machinery, worth
+measuring before pricing.
 
 ### What that leaves
 
