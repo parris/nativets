@@ -1,11 +1,11 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "87ce0c1"
+    "rev": "f954678"
   },
   "modules": {
     "ast.ts": {
-      "sha256": "cf1131d22a6d8ff5",
+      "sha256": "72741320ee4e871f",
       "standalone": {
         "stage": "clear",
         "code": "",
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "96cc843b3c53f0ed",
+      "sha256": "cc63f0fef2f42a63",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -26,8 +26,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] Set method '.clear' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'diag' does not exist on number at L:C"
       }
     },
     "cli.ts": {
@@ -45,7 +45,7 @@
       }
     },
     "codegen.ts": {
-      "sha256": "6d77e8342b5ae3b7",
+      "sha256": "abaebb3b5707e062",
       "standalone": {
         "stage": "check",
         "code": "NT1012",
@@ -53,8 +53,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] Set method '.clear' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'diag' does not exist on number at L:C"
       }
     },
     "coverage-preprocess.ts": {
@@ -138,7 +138,7 @@
       }
     },
     "ownership.ts": {
-      "sha256": "84a0145f0914a182",
+      "sha256": "870b0ea15c3833dd",
       "standalone": {
         "stage": "check",
         "code": "NT1003",
@@ -147,12 +147,12 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1014",
-        "message": "[NT1014] Set method '.clear' is not supported yet"
+        "code": "NT2001",
+        "message": "[NT2001] Property 'diag' does not exist on number at L:C"
       }
     },
     "parser.ts": {
-      "sha256": "36b6ae1883560f0a",
+      "sha256": "025ea6375ce804f2",
       "standalone": {
         "stage": "check",
         "code": "NT2001",

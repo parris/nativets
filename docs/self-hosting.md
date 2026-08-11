@@ -112,6 +112,39 @@ prerequisite for a *correct* self-hosted compiler rather than merely a compiling
 See also the semantic half of the subset rule: out-of-range indexing panics here where bun
 answers `undefined`.
 
+### OPEN: the final concat result leaks once per evaluation
+
+Measured 2026-08-11 at `f954678`, after the string-RC lane closed the *intermediate*
+coercion and concat-chain leaks. Residue is proportional to work and **invisible on macOS**
+(LeakSanitizer is Linux-only), so scale the input — it does not show at n=3.
+
+```ts
+let acc = 0;
+for (let k = 0; k < 2000; k++) { const s: string = "a" + k + "b"; acc = acc + s.length; }
+console.log(acc, __strLive());
+```
+
+| shape | before (`5602093`) | after (`f954678`) |
+|---|---|---|
+| `"a" + k + "b"` in a loop, bound | 6000 | **2000** |
+| same, **unbound** (`("a"+k+"b").length`) | — | **2000** |
+| `"abcdef".slice(0,3)` in a loop (method producer) | 2000 | 2000 |
+
+Three observations that pin what is left:
+
+- The lane's fix is real: **two of three** leaked strings per iteration are now released
+  (the intermediates). Its own tests report 0 because they are **straight-line code inside a
+  function**, where scope exit reclaims — they do not cover a loop body.
+- The remaining one is the **final** concat result, **not** the block-local binding: the
+  unbound form leaks identically. So this is not a drop-set gap for `const s`.
+- The method-producer row is unchanged **by design**: "does this method allocate" is a
+  per-method fact, and a wrong `true` is a premature free, so the lane deliberately refused
+  to claim it. That is the right call and should not be "fixed" by guessing.
+
+**How to apply:** any leak claim here must be measured at two scales and in a **loop**, not
+just at function scope. A fixture that returns 0 because the frame exits proves nothing about
+a program that runs.
+
 ### The frontier is gated on CROSS-FRAME UNWINDING, not on a list of checker gaps
 
 Measured 2026-08-10, by asking what a *perfect* fix to the current first blocker would be

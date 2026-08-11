@@ -627,7 +627,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // The rule still refuses the exact shape that was removed (verified by mutation).
     //
     // ast.ts is now at RUNG 3 -- four modules reach IR where three did.
-    ["NT1014", "NT2001"],
+    ["NT2001"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -732,7 +732,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // new encoding (and a new set of collisions to check against every predicate) for a
     // single site. The one honest tuple in the tree is now a record.
     // All nine moved together onto NT2001 — asserted below, where that bucket lives.
-    expect(byCode["NT1014"]?.slice().sort() ?? []).toEqual(["checker.ts", "codegen.ts", "ownership.ts"]);
+    expect(byCode["NT1014"]?.slice().sort() ?? []).toEqual([]);
     // The five modules moved TOGETHER onto ast.ts's next one — `HOST_MODULES`, a `Record`
     // initialized with an object literal. Same set, one code further along; asserted here
     // so the group staying a group is visible rather than inferred.
@@ -877,7 +877,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // exactly the five it held before the split -- so this bucket has now emptied and
     // refilled with the same membership, which is what a CONJUNCTION looks like from here.
     expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
     expect(byCode["NT1003"] ?? []).toEqual([]);
     // NT1001 EMPTIES, and it is worth being precise about what did NOT happen: `.find`
@@ -1192,7 +1192,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // on a Set), left deliberately for a lane that owns Set accumulators -- `Scope.hits`
     // is read from outside its class, so rebinding it is a real aliasing question.
     expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
-    expect((byCode["NT1014"] ?? []).slice().sort()).toEqual(["checker.ts", "codegen.ts", "ownership.ts"]);
+    expect((byCode["NT1014"] ?? []).slice().sort()).toEqual([]);
     // ...and NT1604 emptied one round later, which is the END of that module's chain and
     // not another step along it. The blocker was `constructor(readonly diag: Diagnostic)`
     // — an object-typed parameter moved into a field. A linear parameter is a BORROW (the
@@ -1314,7 +1314,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // exactly the five it held before the split -- so this bucket has now emptied and
     // refilled with the same membership, which is what a CONJUNCTION looks like from here.
     expect((byCode["NT2001"] ?? []).slice().sort()).toEqual(
-      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+      ["checker.ts", "cli.ts", "codegen.ts", "coverage.ts", "driver.ts", "modules.ts", "ownership.ts", "parser.ts"],
     );
     expect(byCode["NT1003"] ?? []).toEqual([]);
     // NEW BUCKET, and it is one module deep: the captured-binding write behind the arrow.
