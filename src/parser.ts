@@ -3910,6 +3910,7 @@ class Parser {
     // `async (x) => …` / `async x => …` — `async` is erased (see the async/await note).
     if (this.at("async") && (this.peek(1).value === "(" || this.peek(2).value === "=>")) {
       this.next();
+      //@@mutable
       const arrow = this.parseArrow();
       // Remember WHICH node this is: erasure loses the `async`, but a `const` binding
       // this arrow is every bit as promise-returning as an `async function`, and the
@@ -3926,7 +3927,11 @@ class Parser {
       if (tps.length) this.typeParamScopes.push(tps);
       let arrow: Expr;
       try { arrow = this.parseArrow(); } finally { if (tps.length) this.typeParamScopes.pop(); }
-      if (tps.length && arrow.kind === "ArrowFunction") {
+      // Split, and bound to a CONST first. `arrow` is a `let` assigned inside a `try`, so
+      // a tag test on it inside an `&&` does not narrow — the read of `.params` below was
+      // `Property 'params' does not exist on <the Expr union>`. A const alias narrows.
+      const arrowed = arrow;
+      if (tps.length > 0 && arrowed.kind === "ArrowFunction") {
         // A marker is only meaningful on the arrow's OWN parameter annotations (where the
         // checker substitutes the contextual type). Everywhere else inside the arrow there
         // is nothing to resolve it against, so erase to `number` right here — a `#T` must
@@ -3934,8 +3939,8 @@ class Parser {
         // The RETURN annotation is one of those own positions too (`<T>(x: T): T => x`):
         // the checker resolves it against the contextual type exactly as it does a
         // parameter, so the marker must survive the blanket erasure here.
-        const own = arrow.params.map((p) => p.annot);
-        const ownRet = arrow.retAnnot;
+        const own = arrowed.params.map((p) => p.annot);
+        const ownRet = arrowed.retAnnot;
         // The rewrite RETURNS a new node (see src/ast.ts), so the erased arrow is rebound
         // here and the two `own` positions are restored by REBUILDING the params rather
         // than assigning into them — `p.annot = …` on a `forEach` parameter is a write
@@ -3946,7 +3951,11 @@ class Parser {
             ...erased, kind: "ArrowFunction",
             params: erased.params.map((p: Param, i: number): Param =>
               (own[i] !== undefined ? { ...p, annot: own[i] } : p)),
-            retAnnot: ownRet !== undefined ? ownRet : erased.retAnnot,
+            // `ownRet ?? erased.retAnnot`, not the ternary: the guard proves the first arm
+            // is a `string` while the second stays `?Ustring`, so the two branches differ
+            // (NT2001). `??` is the operator for exactly this and both sides keep their
+            // own type.
+            retAnnot: ownRet ?? erased.retAnnot,
           };
         } else arrow = erased;
       }

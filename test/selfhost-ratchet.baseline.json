@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "f026a36"
+    "rev": "4f75adf"
   },
   "modules": {
     "ast.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] objects are immutable: `arrow.isAsync = v` would mutate the object in place at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] an object literal for {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],exprs:@_nts0_m2_…"
       }
     },
     "codegen.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] objects are immutable: `arrow.isAsync = v` would mutate the object in place at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] an object literal for {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],exprs:@_nts0_m0_…"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] objects are immutable: `arrow.isAsync = v` would mutate the object in place at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] an object literal for {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],exprs:@_nts0_m2_…"
       }
     },
     "lexer.ts": {
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] objects are immutable: `arrow.isAsync = v` would mutate the object in place at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] an object literal for {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],exprs:@_nts0_m2_…"
       }
     },
     "ownership.ts": {
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "a1685cdeedfced98",
+      "sha256": "349ef535915c9985",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1606",
-        "message": "[NT1606] objects are immutable: `arrow.isAsync = v` would mutate the object in place at L:C"
+        "code": "NT2001",
+        "message": "[NT2001] an object literal for {kind:string,value:number,ty:?Ustring} | {kind:string,value:boolean,ty:?Ustring} | {kind:string,value:string,ty:?Ustring} | {kind:string,quasis:string[],exprs:@_nt_m2_Ex…"
       }
     }
   }
