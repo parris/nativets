@@ -745,11 +745,31 @@ class Analyzer {
     collectLinear(list, own);
     const aliases = new Map<string, string>();
     collectAliases(list, (t) => this.isMutableInstance(t), aliases);
-    for (const a of aliases.keys()) own.delete(a); // an alias owns nothing, so it is never dropped
-    const added: string[] = [];
-    for (const n of own) if (!this.linear.has(n)) { this.linear = this.linear.add(n); added.push(n); }
+    // Both removals below are spelled as FILTERS, for the reason `popBorrow` documents:
+    // `.delete` returns a boolean under node and a new collection here, so no rebind
+    // means the same thing in both languages. Neither filter changes a set.
+    //
+    // An alias owns nothing, so it is never dropped. Tested where `own` is CONSUMED
+    // instead of removed from it beforehand — `own` has no other reader, so
+    // `own \ aliases.keys()` and "skip the alias keys at the single use" are the same
+    // set, element for element.
+    let added = new Set<string>();
+    for (const n of own) {
+      if (aliases.has(n) || this.linear.has(n)) continue;
+      this.linear = this.linear.add(n);
+      added = added.add(n);
+    }
     this.loop(state, (st) => { this.scoped(list, st); });
-    for (const n of added) this.linear.delete(n);
+    // Restore: `this.linear` without exactly the names this scope added. Rebuilt by
+    // keeping the others, which preserves both the membership and the insertion order
+    // the per-name `.delete` loop left behind. Anything a NESTED `arrowScope` left in
+    // `this.linear` is kept, exactly as the targeted delete kept it — the rebuild is
+    // scoped to `added`, never a wholesale snapshot restore.
+    if (added.size > 0) {
+      let restored = new Set<string>();
+      for (const n of this.linear) if (!added.has(n)) restored = restored.add(n);
+      this.linear = restored;
+    }
   }
 
   private stmt(s: Stmt, state: State): void {
