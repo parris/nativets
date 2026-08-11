@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "c449d8e"
+    "rev": "f026a36"
   },
   "modules": {
     "ast.ts": {
@@ -18,7 +18,7 @@
       }
     },
     "checker.ts": {
-      "sha256": "5202569fa4492aad",
+      "sha256": "001f82eff6401c4f",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:str…"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `arrow.isAsync = v` would mutate the object in place at L:C"
       }
     },
     "codegen.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:str…"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `arrow.isAsync = v` would mutate the object in place at L:C"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:str…"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `arrow.isAsync = v` would mutate the object in place at L:C"
       }
     },
     "lexer.ts": {
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:str…"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `arrow.isAsync = v` would mutate the object in place at L:C"
       }
     },
     "ownership.ts": {
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "483c0f53830c32ff",
+      "sha256": "a1685cdeedfced98",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1001",
-        "message": "[NT1001] .find on U<{kind:\"NumberLiteral\",value:number,ty:?Ustring}|{kind:\"BooleanLiteral\",value:boolean,ty:?Ustring}|{kind:\"StringLiteral\",value:string,ty:?Ustring}|{kind:\"TemplateLiteral\",quasis:str…"
+        "code": "NT1606",
+        "message": "[NT1606] objects are immutable: `arrow.isAsync = v` would mutate the object in place at L:C"
       }
     }
   }

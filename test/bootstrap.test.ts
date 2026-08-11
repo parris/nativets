@@ -671,7 +671,10 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // without narrowing, a `FuncDecl[]` that is not a `Stmt[]` (the member's `kind` is a
     // literal, the array's widens), a variadic spread, and a field stamp taking the
     // BINDING-level opt-in. The group lands on NT1001.
-    ["NT1001", "NT1002"],
+    // ...and NT1001 leaves: `.find` over an array whose element is the `Expr` UNION would
+    // hand back a heap element the array still owns, and the result was only tested for
+    // PRESENCE — so a loop with a boolean says the same thing and borrows nothing.
+    ["NT1002", "NT1606"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -977,9 +980,7 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // reached after five blockers came off src/parser.ts in one sitting (the
     // BINDING-level `@@mutable` store, six push accumulators, and three narrowing
     // gaps where a value had to be resolved into a definite local).
-    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual(
-      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
-    );
+    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual([]);
     // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
     // This is the DECISION the entry above named, arrived at: the typed walkers in
     // src/ast.ts write `e.ty = f(e.ty)` exactly where the reflective ones wrote
@@ -1034,7 +1035,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // never the three that emptied it. `t.value = v`, a field write on a lexer token.
     // Another holder substitution under an unchanged code, which is the case these
     // assertions were made memberships to catch.
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+    );
     // NT1702 — AN IMPORT CYCLE, and the one entry in this table that was not a missing
     // feature. `coverage.ts` and `coverage-preprocess.ts` imported each other, which the
     // linker refuses by design; it never had a chance to say so while ast.ts's refusal
@@ -1279,7 +1282,9 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // on a Set), left deliberately for a lane that owns Set accumulators -- `Scope.hits`
     // is read from outside its class, so rebinding it is a real aliasing question.
     // ...and NT1606 refills with the parser group (see the note above).
-    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual([]);
+    expect((byCode["NT1606"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+    );
     // ...and NT1014 EMPTIES: the identity-keyed `Expr` collections in src/parser.ts are
     // node stamps now and the `Map<string, Set<number>>` is a `Map<string, number[]>`.
     // The five move together to NT1001 (`Set<string>[]`), asserted above.

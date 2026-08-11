@@ -3545,7 +3545,14 @@ class Parser {
     const returns = valueReturns(fn.body);
     if (!isMutable) {
       fn.copyThis = true;
-      const bad = returns.find((r) => !(r.kind === "Identifier" && r.name === "this"));
+      // A LOOP, not `.find`. `.find` over an array whose element is the `Expr` UNION is
+      // NT1001 — it would hand back a heap element the array still owns — and the result
+      // is only ever tested for presence here, so a boolean says the same thing without
+      // borrowing anything.
+      let bad = false;
+      for (const r of returns) {
+        if (!(r.kind === "Identifier" && r.name === "this")) { bad = true; break; }
+      }
       if (bad || (fn.returnAnnot !== undefined && fn.returnAnnot !== selfTy)) {
         throw decoratorError(
           `method '${cls}.${fn.name.split(".")[1]}' assigns a field, so it produces a NEW ${cls}, but it does not return one`,
@@ -3777,7 +3784,11 @@ class Parser {
   private parenHoldsParams(end: number): boolean {
     const first = this.toks[this.pos + 1];
     if (!first || this.pos + 1 >= end) return true; // `()` — the empty parameter list
-    if (first.value === "..." || first.value === "[" || first.value === "{") return true;
+    // `@@` starts a parameter ATTRIBUTE (`(//@@mutable\n out: T) => …`), so it can only be
+    // a parameter list — an expression never begins with it. Without this the arrow was
+    // not even RECOGNIZED as one, and the attribute failed at `Unexpected token '@@'`
+    // rather than anywhere near the code that reads it.
+    if (first.value === "..." || first.value === "[" || first.value === "{" || first.value === "@@") return true;
     if (first.type !== "ident") return false;
     const nxt = this.toks[this.pos + 2];
     return !!nxt && [",", ")", ":", "?", "="].includes(nxt.value);
@@ -3816,7 +3827,19 @@ class Parser {
       this.eat("(");
       if (!this.at(")")) {
         do {
-          if (this.at("[") || this.at("{")) { params.push(this.parsePatternParam()); continue; } // `([k, v]) => …`
+          // `//@@mutable` on an ARROW parameter — the same opt-in `parseParamList` reads, and
+          // it belongs here for the same reason: an arrow parameter IS a parameter. The
+          // compiler's own AST-stamping callbacks are arrows that write a field of the node
+          // they are handed, so refusing it here made the attribute's reach depend on which
+          // function SPELLING the caller chose.
+          let amutable = false;
+          while (this.at("@@")) {
+            this.eat("@@");
+            const an = this.expectIdent();
+            if (an !== "mutable") throw decoratorError(`compile-time attribute '@@${an}' on an arrow parameter`, "the only attribute a parameter accepts is `@@mutable`");
+            amutable = true;
+          }
+          if (this.at("[") || this.at("{")) { if (amutable) throw decoratorError("'@@mutable' on a destructuring parameter", "mark a plain parameter instead"); params.push(this.parsePatternParam()); continue; }
           let rest = false;
           if (this.at("...")) { this.eat("..."); rest = true; }
           const name = this.expectIdent();
@@ -3831,7 +3854,10 @@ class Parser {
           }
           let def: Expr | undefined;
           if (this.at("=")) { this.eat("="); def = this.parseAssign(); }
-          params.push(this.mkParam(name, annot, def, rest, optional));
+          //@@mutable
+          const ap = this.mkParam(name, annot, def, rest, optional);
+          if (amutable) ap.mutable = true;
+          params.push(ap);
         } while (this.at(",") && (this.eat(","), true));
       }
       this.eat(")");
@@ -3843,7 +3869,20 @@ class Parser {
     // arrow has no name of its own until parseDeclarator binds it (see promiseParamsByFn).
     const promiseIdx = arrowPromiseIdx;
     // STAMPED on the arrow — see `ArrowFunction.promiseParams`.
-    const mk = (a: Expr): Expr => { if (promiseIdx.length && a.kind === "ArrowFunction") a.promiseParams = promiseIdx; return a; };
+    const mk = (
+      //@@mutable
+      a: Expr
+    ): Expr => {
+      // A NESTED `if`, not `promiseIdx.length && a.kind === "ArrowFunction"`. The tag test
+      // narrows `a` to the `ArrowFunction` member — which is what makes the field store
+      // well-defined, since `promiseParams` is NOT a field every `Expr` member shares — and
+      // the narrowing has to reach the STORE. Splitting the conjunction is the spelling
+      // that guarantees it.
+      if (promiseIdx.length > 0) {
+        if (a.kind === "ArrowFunction") a.promiseParams = promiseIdx;
+      }
+      return a;
+    };
     let retAsyncFn = false;
     // `(x): T => …` — the DECLARED return type. This used to keep only `asyncFn` and drop
     // `ty` on the floor, which is why an arrow was the one function form whose declared

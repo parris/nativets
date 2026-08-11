@@ -3182,7 +3182,14 @@ class Checker {
     // stays true through a re-narrowing of an already-shadowed name.
     const b = inner.lookup(name);
     const boxed = b !== undefined && (isNullableTy(b.ty) || (b.nullBox ?? false));
-    inner.declare(name, t, true, undefined, u, undefined, boxed);
+    // `mutable` CARRIES THROUGH the narrowing. The shadow stays `constant` — that is the
+    // rule the comment above defends, and it blocks REBINDING the name to a different
+    // member, which would leave later field reads at the wrong slot. A `@@mutable` field
+    // STORE is the orthogonal operation: it writes a field of the member already there and
+    // changes no layout. Dropping the flag here made the attribute die at exactly the
+    // narrowing that makes the store well-defined — `if (a.kind === "ArrowFunction")
+    // a.promiseParams = …` was refused on a binding explicitly marked for it.
+    inner.declare(name, t, true, undefined, u, b?.mutable, boxed);
   }
 
   /**
@@ -7401,7 +7408,7 @@ class Checker {
     });
     arrow.paramTys = paramTys;
     const inner = scope.child();
-    arrow.params.forEach((p, i) => { inner.declare(p.name, paramTys[i]!, false); inner.own(p.name)!.param = true; });
+    arrow.params.forEach((p, i) => { inner.declare(p.name, paramTys[i]!, false, undefined, undefined, p.mutable); inner.own(p.name)!.param = true; });
     // An arrow used as a VALUE may escape and run long after the guard that narrowed an
     // enclosing binding, so a `let` narrowing stops at this boundary (a `const` one
     // cannot be invalidated, so it crosses). TypeScript draws the line in the same
