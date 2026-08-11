@@ -4610,11 +4610,23 @@ static const char *uri_encode(const char *s, int keep_reserved) {
   char *o = alloc_str(j);
   memcpy(o, buf, j);
   o[j] = 0;
+  free(buf); /* see uri_decode below: unregistered scratch, freed on every path */
   return o;
 }
 const char *nt_encode_uri_component(const char *s) { return uri_encode(s, 0); }
 const char *nt_encode_uri(const char *s) { return uri_encode(s, 1); }
 
+/* `buf` here is SCRATCH, not a result: the decoded bytes are copied into a fresh
+ * `alloc_str` and it is `buf` that must be reclaimed. It is UNREGISTERED memory —
+ * `nt_str_register` never saw it — so it carries no refcount and `__strLive`
+ * cannot count it, which is exactly why the missing free survived: no in-process
+ * counter and no leak test could observe it, and LeakSanitizer is Linux-only.
+ * Measured on macOS with `leaks --atExit`: 20,000 `decodeURIComponent` calls on a
+ * 75-byte input leaked 20,000 blocks / 1.83 MB, one per call, against ZERO in the
+ * same loop with the call removed. Both exits free it — the raise path does NOT
+ * longjmp (`nt_exc_raise` sets a pending flag and returns), so the early `return`
+ * really did leak too. Same shape, same fix, in `uri_encode` above; `free` is the
+ * right pair for `nativets_alloc`, which is a bare `malloc` (cf. `nt_atob`). */
 static const char *uri_decode(const char *s, int keep_reserved) {
   size_t n = strlen(s);
   char *buf = (char *)nativets_alloc(n + 1);
@@ -4623,6 +4635,7 @@ static const char *uri_decode(const char *s, int keep_reserved) {
     if (s[i] != '%') { buf[j++] = s[i]; continue; }
     if (i + 2 >= n || url_hexval(s[i + 1]) < 0 || url_hexval(s[i + 2]) < 0) {
       nt_exc_raise_msg("URIError: URI malformed");
+      free(buf);
       return url_empty();
     }
     unsigned char b = (unsigned char)(url_hexval(s[i + 1]) * 16 + url_hexval(s[i + 2]));
@@ -4636,6 +4649,7 @@ static const char *uri_decode(const char *s, int keep_reserved) {
   char *o = alloc_str(j);
   memcpy(o, buf, j);
   o[j] = 0;
+  free(buf);
   return o;
 }
 const char *nt_decode_uri_component(const char *s) { return uri_decode(s, 0); }

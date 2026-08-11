@@ -19,10 +19,17 @@
  */
 
 import { test, expect, describe } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { expectMatchesNode, compileAndRun, compileAndRunIO, runWithNodeIO } from "./harness.ts";
+import { expectMatchesNode, compileAndRun, compileAndRunIO, runWithNodeIO, emitIR, emitIRAsan } from "./harness.ts";
 import { sourceToIR } from "../src/driver.ts";
 import { NTError } from "../src/diagnostics.ts";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Compile-only: return the NT code a source is rejected with, or null if it compiles. */
 function rejectCode(src: string): string | null {
@@ -598,3 +605,132 @@ console.log("done");
 `,
   },
 ]);
+
+/*
+ * ...AND THE SCRATCH BUFFER THEY BUILD THE ANSWER IN IS FREED.
+ *
+ * `uri_encode`/`uri_decode` (runtime/runtime.c) write into a `nativets_alloc`
+ * worst-case buffer, copy the finished bytes into a fresh `alloc_str`, and used to
+ * return without freeing the scratch — on the success path AND on the URIError path,
+ * which returns early. So every `encodeURIComponent`/`decodeURIComponent`/`encodeURI`/
+ * `decodeURI` call abandoned one block, without bound, in proportion to the program's
+ * work.
+ *
+ * WHY NO EXISTING TEST COULD SEE IT. The scratch is UNREGISTERED memory: only
+ * `alloc_str` calls `nt_str_register`, so the buffer carries no refcount and is not in
+ * the side table at all. `__strLive()` counts registered strings, `__arrLive()` counts
+ * array HEADERS, `__objLive()` counts object blocks — the residue here is invisible to
+ * every counter this compiler exposes, and the value the program observes is correct
+ * either way. Only an allocator-level instrument sees this class.
+ *
+ * So this test uses one, on BOTH platforms rather than skipping half of them:
+ * LeakSanitizer where it exists (Linux, via `-fsanitize=address` +
+ * `ASAN_OPTIONS=detect_leaks=1`) and macOS's `leaks --atExit` where it does not — the
+ * same reachability question, asked by the platform's own tool. That is the difference
+ * from the Linux-only gate in test/transients.test.ts, which had no macOS instrument
+ * available for the abandoned flat blocks it watches.
+ *
+ * TWO SCALES, and the assertion is that the residue does not GROW with the work — the
+ * rule the leak tests in test/fuzz2-diff.test.ts state. A constant residue is
+ * conservative over-retention; a residue proportional to the loop count is the leak.
+ * Measured before the fix with `leaks`: 20,000 `decodeURIComponent` calls left 20,000
+ * blocks / 1.83 MB, one per call, against ZERO for the same loop with the call deleted.
+ */
+describe("stdlib batch 3: URI coding frees its scratch buffer", () => {
+  /** The loop, at a caller-chosen scale. Both exits of `uri_decode` are exercised: the
+   *  success path, and the early return after the URIError raise. */
+  const uriLoop = (n: number) => `
+function work(n: number): number {
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    const enc = encodeURIComponent("a b/c?d=e&f#g");
+    acc = acc + decodeURIComponent(enc).length;
+    acc = acc + decodeURI(encodeURI("http://x.example/a b?q=1")).length;
+    try { acc = acc + decodeURIComponent("bad%zz").length; } catch (e) { acc = acc + 1; }
+  }
+  return acc;
+}
+console.log(work(${n}));
+`;
+
+  /** The CONTROL: the same loop and the same string traffic with no URI call in it, so
+   *  a residue reported for the loop above is attributable to the URI functions rather
+   *  than to the shape around them. */
+  const controlLoop = (n: number) => `
+function work(n: number): number {
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    const enc = "a%20b%2Fc%3Fd%3De%26f%23g".slice(0);
+    acc = acc + enc.length;
+    acc = acc + "http://x.example/a%20b?q=1".slice(0).length;
+    try { acc = acc + "bad%zz".length; } catch (e) { acc = acc + 1; }
+  }
+  return acc;
+}
+console.log(work(${n}));
+`;
+
+  /** Build `src` and return how many blocks the platform's leak checker calls
+   *  unreachable at exit, plus the program's stdout so the run is proved to have
+   *  actually done the work. */
+  function leakedBlocks(src: string): { leaks: number; stdout: string } {
+    const dir = mkdtempSync(join(tmpdir(), "nativets-uri-leak-"));
+    try {
+      const ll = join(dir, "module.ll");
+      const bin = join(dir, "prog");
+      const onDarwin = process.platform === "darwin";
+      // macOS `leaks` reads the process's own allocator, so the plain build is what it
+      // wants; on Linux the leak checker IS ASan, which only instruments defines that
+      // carry `sanitize_address` (see emitIRAsan / test/asan-instrumentation.test.ts).
+      writeFileSync(ll, onDarwin ? emitIR(src) : emitIRAsan(src));
+      const built = spawnSync("clang", [
+        "-O1", "-g", ...(onDarwin ? [] : ["-fsanitize=address"]),
+        ll, join(ROOT, "runtime/runtime.c"), "-lm", "-o", bin,
+      ], { encoding: "utf8" });
+      expect(built.status).toBe(0);
+      if (!onDarwin) {
+        const run = spawnSync(bin, [], {
+          encoding: "utf8", timeout: 60_000, killSignal: "SIGKILL",
+          env: { ...process.env, ASAN_OPTIONS: "detect_leaks=1" },
+        });
+        expect(run.status).toBe(0);
+        // LSan prints one `… leak of N byte(s) in K object(s)` per stack; sum the object
+        // counts, so the number is comparable between the two scales.
+        let leaks = 0;
+        for (const m of run.stderr.matchAll(/in (\d+) object\(s\)/g)) leaks += Number(m[1]);
+        return { leaks, stdout: run.stdout };
+      }
+      const run = spawnSync("leaks", ["--atExit", "--", bin], {
+        encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL",
+        env: { ...process.env, MallocStackLogging: "1" },
+      });
+      // `leaks` exits 1 when it finds leaks and 0 when it does not; both are readings,
+      // so the exit code is not asserted — the COUNT it reports is.
+      const m = /Process \d+: (\d+) leaks? for/.exec(run.stdout);
+      if (!m) throw new Error(`could not read a leak count from \`leaks\`:\n${run.stdout}\n${run.stderr}`);
+      // `leaks --atExit` prefixes the child's own stdout; the program prints one line.
+      const line = /^\d+$/m.exec(run.stdout);
+      return { leaks: Number(m[1]), stdout: line ? `${line[0]}\n` : run.stdout };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("the residue does not grow with the number of URI calls", () => {
+    const small = leakedBlocks(uriLoop(200));
+    const big = leakedBlocks(uriLoop(2000));
+    expect(small.stdout).toBe("7600\n");
+    expect(big.stdout).toBe("76000\n");
+    // 10x the work, the same residue. Before the fix this was 800 vs 8000.
+    expect({ leaks: big.leaks }).toEqual({ leaks: small.leaks });
+  }, 300_000);
+
+  test("the control leaves the same residue as the URI loop (attribution)", () => {
+    const control = leakedBlocks(controlLoop(2000));
+    const uri = leakedBlocks(uriLoop(2000));
+    expect(control.stdout).toBe("114000\n");
+    // The surrounding shape — a counted loop, a string local, a try/catch — accounts for
+    // the whole residue; the URI calls add none of their own.
+    expect({ leaks: uri.leaks }).toEqual({ leaks: control.leaks });
+  }, 300_000);
+});
