@@ -95,7 +95,7 @@ describe("fuzz findings — string → number conversions", () => {
    * reads `"0x1f"` as the decimal `0` and stops at the `x`. Ours runs the `Number()` scanner
    * and returns 31.
    */
-  it.failing("parseFloat does not accept a hex prefix", async () => {
+  it("parseFloat does not accept a hex prefix", async () => {
     await expectSameBytes([
       'console.log(parseFloat("0x1f"));',     // node 0, ours 31
       'console.log(parseFloat("0x10"));',     // node 0, ours 16
@@ -108,7 +108,7 @@ describe("fuzz findings — string → number conversions", () => {
    * The mirror image: `Number(string)` IS defined on StrNumericLiteral, which since ES2015
    * includes the `0b`/`0o` prefixes. Ours knows `0x` and not the other two.
    */
-  it.failing("Number() accepts the 0b / 0o prefixes", async () => {
+  it("Number() accepts the 0b / 0o prefixes", async () => {
     await expectSameBytes([
       'console.log(Number("0b101"));',  // node 5,  ours NaN
       'console.log(Number("0o17"));',   // node 15, ours NaN
@@ -124,7 +124,7 @@ describe("fuzz findings — string → number conversions", () => {
    * `Infinity`. Ours matches case-insensitively, so a string that node reads as NaN becomes
    * a finite-looking Infinity here — the direction that keeps a bad program running.
    */
-  it.failing("Number()/parseFloat() only accept the exact spelling `Infinity`", async () => {
+  it("Number()/parseFloat() only accept the exact spelling `Infinity`", async () => {
     await expectSameBytes([
       'console.log(Number("infinity"));',      // node NaN, ours Infinity
       'console.log(Number("INFINITY"));',      // node NaN, ours Infinity
@@ -141,7 +141,7 @@ describe("fuzz findings — string → number conversions", () => {
    * specifically in whatever decides "this string is blank, therefore 0". Pure ASCII, so it
    * is independent of the UTF-8 byte-orientation divergence (§A.2).
    */
-  it.failing("Number() treats a whitespace-only vertical tab as 0", async () => {
+  it("Number() treats a whitespace-only vertical tab as 0", async () => {
     await expectSameBytes([
       'console.log(Number("\\u000b"));',    // node 0, ours NaN
       'console.log(Number("\\u000b\\u000b"));', // node 0, ours NaN
