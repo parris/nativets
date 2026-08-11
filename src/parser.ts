@@ -3021,10 +3021,15 @@ class Parser {
     const selfMarker = `#self:${name}#` as Ty;
     this.typeAliases = this.typeAliases.set(name, selfMarker);
     this.eat("{");
+    //@@mutable
     const fields: { key: string; ty: Ty }[] = [];
+    //@@mutable
     const fieldInits: { field: string; value: Expr }[] = []; // declared-and-initialized fields → ctor prelude
+    //@@mutable
     const methods: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[]; setter: boolean; wrappers: string[]; typeParams?: string[] }[] = [];
+    //@@mutable
     const statics: { name: string; params: Param[]; returnAnnot?: Ty; body: Stmt[] }[] = []; // `static m(…)`
+    //@@mutable
     const staticFields: Stmt[] = []; // `static f = init` → a module-level `const C.f`
     let ctorParams: Param[] | null = null;
     let ctorBody: Stmt[] = [];
@@ -3111,9 +3116,13 @@ class Parser {
         // so this is a syntax error rather than a deferred feature.
         if (memberTypeParams.length) throw parseError(`Type parameters on a constructor at ${tok.line}:${tok.col} — put them on the class (\`class ${name}<T>\`)`);
         if (ctorParams) throw parseError(`Duplicate constructor at ${tok.line}:${tok.col}`);
-        ctorParams = this.parseParamList(true); // ctor: access-modified params → parameter properties
+        const ctorPs = this.parseParamList(true); // ctor: access-modified params → parameter properties
+        ctorParams = ctorPs;
         const patternPrelude = this.takeParamPrelude(); // binding patterns → `const` decls at the top
-        for (const p of ctorParams) if (p.rest) throw nyi(NYI.CLASS_FEATURE, "rest parameter in a constructor");
+        // Iterated through the CALL RESULT, which is a plain `Param[]`. Reading `ctorParams`
+        // (declared `Param[] | undefined`) is NT1011 even right after the assignment: the
+        // narrowing does not survive to a separate statement through a mutable binding.
+        for (const p of ctorPs) if (p.rest) throw nyi(NYI.CLASS_FEATURE, "rest parameter in a constructor");
         if (this.at(":")) { this.eat(":"); this.parseType(); } // ctor return annot (ignored)
         this.thisWritable = true; this.inErrorCtor = extendsError; this.inCtorBody = true;
         ctorBody = [...patternPrelude, ...this.parseBlock()];
@@ -3168,11 +3177,18 @@ class Parser {
       let init: Expr | undefined;
       if (this.at("=")) { this.eat("="); init = this.parseAssign(); }
       if (this.at(";")) this.eat(";");
+      // RESOLVED ONCE, into a definite local. `ty` is `Ty | undefined`; assigning it inside
+      // the `if` does not narrow it afterwards through a mutable rebind, so every later read
+      // saw `?Ustring` (`makeNullable("undefined", ty)` was NT2001). Both arms produce a
+      // `Ty` here, so nothing below has to ask again.
+      let resolvedTy: Ty;
       if (ty === undefined) {
         if (init === undefined) throw nyi(NYI.CLASS_FEATURE, `class field '${member}' needs a type annotation`);
-        ty = this.inferFieldTy(init, member);
+        resolvedTy = this.inferFieldTy(init, member);
+      } else {
+        resolvedTy = ty;
       }
-      if (optional) ty = makeNullable("undefined", ty);
+      const fieldTy: Ty = optional ? makeNullable("undefined", resolvedTy) : resolvedTy;
       // A STATIC field is not a slot on the instance — it is module-level storage under a
       // class-qualified name (`C.f`), initialized where the class is DECLARED, which is
       // exactly a module-level `const C.f = init`. The dotted name cannot collide with any
@@ -3180,11 +3196,11 @@ class Parser {
       // a read of `C.f` finds it in scope and nothing else can.
       if (isStatic) {
         if (init === undefined) throw nyi(NYI.CLASS_FEATURE, `static field '${name}.${member}' has no initializer (it would read as \`undefined\`)`);
-        staticFields.push({ kind: "VarDecl", declKind: "const", decls: [{ name: `${name}.${member}`, annot: ty, init }] });
+        staticFields.push({ kind: "VarDecl", declKind: "const", decls: [{ name: `${name}.${member}`, annot: fieldTy, init }] });
         this.staticFieldNames = this.staticFieldNames.add(`${name}.${member}`);
         continue;
       }
-      fields.push({ key: member, ty });
+      fields.push({ key: member, ty: fieldTy });
       // An optional field with no initializer still needs one: a class instance is a heap
       // block and every field is a real slot, so "absent" has to be WRITTEN as the
       // `undefined` arm of the nullable box. Without this the slot stays zero and a read
@@ -3200,7 +3216,7 @@ class Parser {
       // prints `undefined`; the binary died with SIGSEGV. Only the `undefined` arm is
       // filled — `?N` (`T | null`) does not admit `undefined`, and a field typed that way
       // and left unassigned is rejected by tsc for the same reason it has no value here.
-      if (init === undefined && isNullableTy(ty) && nullishKind(ty) === "undefined") init = this.undef();
+      if (init === undefined && isNullableTy(fieldTy) && nullishKind(fieldTy) === "undefined") init = this.undef();
       if (init !== undefined) fieldInits.push({ field: member, value: init });
       } finally {
         // `finally` also runs on the `continue`s above, so the scope is popped on every
@@ -3213,6 +3229,7 @@ class Parser {
 
     // Parameter properties (`constructor(private x: T)`): declare a field `x` and initialize
     // it (`this.x = x`) at the top of the ctor body — the TS desugaring.
+    //@@mutable
     const paramPropInits: Stmt[] = [];
     for (const p of ctorParams ?? []) {
       if (!p.paramProp) continue;
@@ -4285,6 +4302,7 @@ class Parser {
       if (t.value === "super") {
         if (!this.inErrorCtor) throw nyi(NYI.CLASS_FEATURE, `'super' is only supported in the constructor of a class that extends Error, at ${t.line}:${t.col}`);
         this.next(); this.eat("(");
+        //@@mutable
         const args: Expr[] = [];
         if (!this.at(")")) { do { if (this.at(")")) break; args.push(this.parseAssign()); } while (this.at(",") && (this.eat(","), true)); }
         this.eat(")");

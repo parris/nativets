@@ -656,7 +656,11 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // permits an in-place field store without making the type nominal, which is what
     // marking the TYPE broke (measured: 4 of 12 modules at IR down to 3). Five sites in
     // src/parser.ts. The group lands on NT1011 (`for-of` over a nullable array).
-    ["NT1002", "NT1011"],
+    // ...and NT1011 leaves too: the `for-of` over a nullable array was a NARROWING gap,
+    // not a feature gap — binding the call RESULT instead of re-reading the field is the
+    // whole fix, and it is the third instance of "narrowing does not survive a mutable
+    // rebind" in this file's own source. The group lands on NT1001.
+    ["NT1001", "NT1002"],
     );
     // RE-MEASURED AT THE MERGE, and NEITHER SIDE WAS RIGHT — which is the whole argument
     // for re-measuring instead of picking one. This lane's list still carried NT1009
@@ -955,7 +959,13 @@ describe("SH0: what actually blocks stage-1, measured (not the coverage heuristi
     // ...and NT1001 IS BACK, held by the five modules behind src/parser.ts: `Set<string>[]`,
     // which is what they landed on when the identity-keyed `Expr` collections (NT1014)
     // became node stamps. A membership, so the next move names its holders.
-    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual([]);
+    // ...and NT1001 REFILLS with the parser group — the empty-array-literal inference,
+    // reached after five blockers came off src/parser.ts in one sitting (the
+    // BINDING-level `@@mutable` store, six push accumulators, and three narrowing
+    // gaps where a value had to be resolved into a definite local).
+    expect((byCode["NT1001"] ?? []).slice().sort()).toEqual(
+      ["cli.ts", "coverage.ts", "driver.ts", "modules.ts", "parser.ts"],
+    );
     // NT1606 — `o.f = v` on an AST node, held by the same nine modules through the link.
     // This is the DECISION the entry above named, arrived at: the typed walkers in
     // src/ast.ts write `e.ty = f(e.ty)` exactly where the reflective ones wrote

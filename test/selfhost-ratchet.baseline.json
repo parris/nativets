@@ -1,7 +1,7 @@
 {
   "recordedAt": {
     "date": "2026-08-11",
-    "rev": "3a88170"
+    "rev": "d554b8a"
   },
   "modules": {
     "ast.ts": {
@@ -40,8 +40,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over ?N{name:string,annot:?Ustring,default:?U@_nts0_m2_Expr,rest:?Uboolean,paramProp:?Uboolean,mutable:?Uboolean}[] is not supported yet at L:C"
+        "code": "NT1001",
+        "message": "[NT1001] cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context"
       }
     },
     "codegen.ts": {
@@ -80,8 +80,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over ?N{name:string,annot:?Ustring,default:?U@_nts0_m0_Expr,rest:?Uboolean,paramProp:?Uboolean,mutable:?Uboolean}[] is not supported yet at L:C"
+        "code": "NT1001",
+        "message": "[NT1001] cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context"
       }
     },
     "diagnostics.ts": {
@@ -107,8 +107,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over ?N{name:string,annot:?Ustring,default:?U@_nts0_m2_Expr,rest:?Uboolean,paramProp:?Uboolean,mutable:?Uboolean}[] is not supported yet at L:C"
+        "code": "NT1001",
+        "message": "[NT1001] cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context"
       }
     },
     "lexer.ts": {
@@ -133,8 +133,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over ?N{name:string,annot:?Ustring,default:?U@_nts0_m2_Expr,rest:?Uboolean,paramProp:?Uboolean,mutable:?Uboolean}[] is not supported yet at L:C"
+        "code": "NT1001",
+        "message": "[NT1001] cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context"
       }
     },
     "ownership.ts": {
@@ -152,7 +152,7 @@
       }
     },
     "parser.ts": {
-      "sha256": "665aa005cceb07b9",
+      "sha256": "de1baf2ed767a8b3",
       "standalone": {
         "stage": "check",
         "code": "NT2001",
@@ -160,8 +160,8 @@
       },
       "linked": {
         "stage": "check",
-        "code": "NT1011",
-        "message": "[NT1011] for-of over ?N{name:string,annot:?Ustring,default:?U@_nt_m2_Expr,rest:?Uboolean,paramProp:?Uboolean,mutable:?Uboolean}[] is not supported yet at L:C"
+        "code": "NT1001",
+        "message": "[NT1001] cannot infer the element type of an empty array literal `[]`: it has no elements and no type from context"
       }
     }
   }
