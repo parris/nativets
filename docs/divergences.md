@@ -3162,10 +3162,10 @@ a silent wrong answer. So `scanEscaping` (src/codegen.ts) admits a function only
 - every call site is a **direct** call sitting inside a `try` WITH a `catch` in its
   immediate caller — or in `main`, whose uncaught arm is node's own behaviour;
 - the name is **never used as a value**, so no closure or function-value call can dodge it;
-- the thrown type is one the flag can carry (`string`, or a one-field `{message:string}`)
-  and **every covering `catch` binds exactly that type** — the binding is not `any` here,
-  and reconstructing a different shape into it is the raw-store bug the in-frame `ThrowStmt`
-  already refuses;
+- the thrown type is one the slot can carry — a `string`, or **any object** (see the next
+  subsection) — and **every covering `catch` binds exactly that type**. The binding is not
+  `any` here, and reconstructing a different shape into it is the raw-store bug the in-frame
+  `ThrowStmt` already refuses;
 - no `throw` in the function sits in an arrow body, and the program uses no actors (an
   actor handler is called by the scheduler, from no call site the scan can see).
 
@@ -3178,8 +3178,50 @@ raise AND the live owned set dropped at each of those call sites — the drop se
 throws (`ThrowStmt.drops`) but not yet for arbitrary call expressions. On the compiler's own
 program that is the whole cost: only **16 of 1209** call sites reaching a may-throw callee
 sit inside a `try`/`catch` in their own frame, so the one-frame rule clears none of stage-1.
-See docs/self-hosting.md. Also refused: `throw 42` / `throw { … }` with no `message` string,
-because there is nothing to raise and inventing text would be a wrong answer.
+See docs/self-hosting.md. Also refused: `throw 42`, and any payload that is neither a string
+nor an object — there is nothing to put on the slot and inventing one would be a wrong
+answer. (`throw { … }` with **no** `message` field is fine now: the object moves, and the
+message was only ever needed for the stderr line an uncaught raise prints.)
+
+#### The payload crosses the frame by MOVE — the object pointer, not a copy
+
+The pending-exception slot used to be one `const char *`, so a raise could carry a `string`
+or the single-field `{message:string}` that `new Error(m)` is here, which `emitExcCheck`
+rebuilt by BOXING the message. Anything richer was `NT1004` — and `src/` throws
+`NTError{message,name,diag:{code,spans}}` at 145 sites.
+
+Widening it by **flattening** was measured against the linked stage-1 tree and is dead:
+today's rule clears **7** of the 129 NT1004 seed functions, N flat scalar fields clears
+**20**, and a DEEP recursive flatten clears **20** as well — literally nothing more, because
+`NTError.diag` carries `spans?: DiagSpan[]`, an optional ARRAY that no flattening carries.
+Moving the pointer clears **83**.
+
+So the object BLOCK POINTER goes on the slot and the single owner transfers with it:
+
+| step | what owns the object |
+|---|---|
+| `nt_exc_raise_obj(obj, msg)` | the slot. `ThrowStmt.drops` subtracts the thrown name, so the raising frame does **not** free it |
+| `nt_exc_take_object()` in the `catch` | the binding. The call **NULLs the slot**, and the handler's existing drop set frees it once |
+| `nt_exc_clear()` | frees only what nobody took — i.e. `catch { }` with no binding |
+| uncaught → `nt_exc_abort()` | nobody; the process exits 1 |
+| a raise while one is already **pending** | the old payload is cleared first. That silently leaked a retained message before, and would now leak the object too |
+
+Exactly one owner and exactly one free, and **nothing is copied** — so a nested `diag` is
+never walked, and a shared sub-object can never be double-freed. `msg` rides alongside as a
+BORROWED view of the object's `message` field (or `null`), used only for the stderr line an
+uncaught raise prints; it is retained and released on the message path independently.
+
+**The `const char *` fast path stays**, and that is a fact about host calls rather than a
+conservatism: `JSON.parse`, `fs` and `fetch` raise a message and have no typed object to
+hand over. So a `catch` binding reached from a HOST call can still only be a `string` or
+`{message:string}`, and one binding a richer record inside the same `try` is `NT1004` — give
+the host call a `try` of its own whose `catch` binds one of those two. A USER function's
+`throw` of that same record does cross the frame.
+
+Pinned in `test/exc-move.test.ts`, including the leak probes (two scales, since a fixture
+that ends at zero because its frame exited proves nothing) and an ASan run with
+`sanitize_address` asserted present on the `define`s — on macOS LeakSanitizer does not exist,
+so use-after-free and double-free are the two faults a sanitizer can actually see here.
 
 The **stderr text divergence above applies to a propagated throw that nobody catches too**:
 it reaches `main`, and `main` prints one line and exits 1 where node prints a stack trace.
@@ -3279,10 +3321,37 @@ clang rejects the module either way — but no `NT****` and no hint either.
 
 ### `catch (e)` takes ONE type — a `try` with throws of two types is `NT1004`
 
-node's `catch` parameter is `any`. Nothing here is, so the binding is given the type of the
-**first `throw` the checker can see in the block** (or `{message:string}` when the block calls
-a host builtin, SH4). A block that throws two different types therefore has no honest binding
-type, and it is refused at the `throw`, naming both types.
+node's `catch` parameter is `any`. Nothing here is, so the binding is given ONE type, from
+three sources in precedence order:
+
+1. the **first `throw` the checker can see in the block** — it decides the type it throws;
+2. what the block's **callees raise**, when they all agree on one type;
+3. `{message:string}` when the block calls a host builtin (SH4) — an `fs` failure is an Error.
+
+A block that can produce two different types therefore has no honest binding type, and is
+refused, naming both and where each came from.
+
+**Rule 2 is new, and without it the payload work above is unreachable in real code.** The
+plain idiom — the one `src/parser.ts::tokenize` is written in —
+
+```ts
+try { return lex(s) } catch (e) { e.message }
+```
+
+has no `throw` in the block at all, so the binding fell to the `"string"` default, and
+`scanEscaping`'s third rule requires the covering binding to EQUAL the raised type. Every
+object payload in `src/` is written this way, so the slot's capacity was never the only
+blocker. Measured: `test/escape-metric.ts`'s `SEED w/ CARRIABLE` row went **7 → 83**.
+
+Rule 2 is **syntactic**, and it has to be: it runs while checking some other function's body,
+so the callee may not have been checked yet and its `throw` arguments carry no type
+annotation. Only the spellings that need no scope are read — a string, a template,
+`new Error(m)`, and `new C(…)` on a user class (whose instance type is parameter 0 of its
+registered constructor signature). Everything else answers **"cannot say"**, which leaves the
+binding at today's default and keeps the NT1004: a refusal, never a wrong binding type. In
+particular `const err = new C(…); throw err;` is not read, because the identifier needs the
+callee's own scope; nor is a **method** call in the block, because a method resolves only by
+PROPERTY name and every same-named method in the program would have to agree.
 
 This was a **silent wrong answer** before it was a refusal, in two shapes:
 
