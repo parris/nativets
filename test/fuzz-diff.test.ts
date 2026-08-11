@@ -258,6 +258,33 @@ describe("fuzz findings — object literals", () => {
   });
 
   /*
+   * A NUMERIC key is taken as its RAW SOURCE TEXT. `expectKey` (src/parser.ts) returns the
+   * number token's spelling straight through, but a `PropertyName` that is a `NumericLiteral`
+   * is `ToString(ToNumber(literal))` — the key is the number's canonical form, not the digits
+   * that were typed. So node's `{ 1e3: "x" }` has the key `1000` and ours has `1e3`.
+   *
+   * Found while refusing `__proto__` above: the same one-line `expectKey` feeds both, and this
+   * is the same failure shape — a key that is a plausible string, so `JSON.stringify` and
+   * `Object.keys` both print something well-formed and exit 0.
+   *
+   * The canonical spellings are already right (`{1: …}`, `{0.5: …}`), which is exactly why
+   * this hid: only a NON-canonical literal witnesses it, and the fix is `ToString(ToNumber(…))`
+   * on the token — the `numToStr` that `test/numtostr.test.ts` already pins, reused here.
+   */
+  it.failing("a numeric object-literal key is ToString(ToNumber(…)), not its source text", async () => {
+    await expectSameBytes([
+      'console.log(Object.keys({ 1: "p", 2: "q" }).join("|"));', // node 1|2, ours 1|2 — correct
+      'console.log(Object.keys({ 1e3: "x" }).join("|"));',       // node 1000,  ours 1e3
+      'console.log(Object.keys({ 1.0: "y" }).join("|"));',       // node 1,     ours 1.0
+      'console.log(Object.keys({ 0x10: "z" }).join("|"));',      // node 16,    ours 0x10
+      'console.log(Object.keys({ 1e21: "w" }).join("|"));',      // node 1e+21, ours 1e21
+      'console.log(Object.keys({ 0.5: "v" }).join("|"));',       // node 0.5,   ours 0.5 — correct
+      'console.log(JSON.stringify({ 1e3: "x" }));',              // node {"1000":"x"}
+      "",
+    ].join("\n"));
+  });
+
+  /*
    * Key ORDER. OrdinaryOwnPropertyKeys puts every ARRAY-INDEX key first, in ascending
    * NUMERIC order, and only then the rest in insertion order. Ours is insertion order
    * throughout, so `{ b: 1, a: 2, "10": 3, "2": 4 }` stringifies with its keys in the wrong
