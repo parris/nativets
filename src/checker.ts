@@ -10,7 +10,7 @@
 import type { Program, Stmt, Expr, Ty, FuncDecl, VarDecl, ForOfStmt, MemberExpr, FieldAssign, Declarator, Param } from "./ast.ts";
 import { mentionsThis, ctorFieldsStored } from "./ast.ts";
 import { isArrayTy, elemTy, isObjectTy, objectType, objectFields, fieldType, isFuncTy, funcParams, funcRet, makeFuncTy, isNullableTy, baseTy, nullishKind, makeNullable, isMapTy, isSetTy, makeMapTy, makeSetTy, mapKeyTy, mapValTy, setElemTy, classTag, isBytesTy, isTextEncoderTy, isTextDecoderTy, isResponseTy, isHeadersTy } from "./ast.ts";
-import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray, stringLiteralValue, exprTy } from "./ast.ts";
+import { hasTypeParam, substTypeParams, eraseTypeParams, unifyTypeParams, mapTypesDeep, mapTypesDeepStmt, mutableTags, exprText, exprLoc, freshArray, stringLiteralValue, keyIsEncodable, exprTy } from "./ast.ts";
 import { makeArrayTy } from "./ast.ts";
 // stdlib Batch 3 (the object-shaped web APIs): Date / URL / URLSearchParams.
 import { isDateTy, isUrlTy, isSearchParamsTy, DATE_GETTERS, URL_COMPONENTS } from "./ast.ts";
@@ -5393,6 +5393,14 @@ class Checker {
           // to `""`, so it cannot become a silent empty key if that guard is ever loosened.
           const key = stringLiteralValue(pair.elements[0]!);
           if (key === undefined) throw nyi(NYI.OBJECT, "Object.fromEntries entries (each must be a literal [\"key\", value] pair)");
+          // The key goes STRAIGHT into a type string below, so it has to survive being
+          // read back out of one. Unchecked, `[["a,b", 1]]` minted `{a,b:number}` — two
+          // garbage fields — and `[["a:number,b", "x"]]` minted `{a:number,b:string}`, a
+          // well-formed TWO-field record forged from a ONE-entry list, which type-checked
+          // and then exited 255 with no output when codegen filled a one-slot object.
+          // An object literal is refused for the same reason in `expectKey`; NT1040.
+          if (!keyIsEncodable(key))
+            throw nyi(NYI.KEY_ENCODING, `the Object.fromEntries key ${JSON.stringify(key)} (its text would be read as type syntax)`);
           const vt = this.type(pair.elements[1]!, scope);
           if (vt !== "number" && vt !== "string" && vt !== "boolean") throw nyi(NYI.OBJECT, `Object.fromEntries value of type ${vt}`);
           fields.push(`${key}:${vt}`);

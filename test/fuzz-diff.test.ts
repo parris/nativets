@@ -271,18 +271,27 @@ describe("fuzz findings — object literals", () => {
    * `Object.keys` both print something well-formed and exit 0.
    *
    * The canonical spellings are already right (`{1: …}`, `{0.5: …}`), which is exactly why
-   * this hid: only a NON-canonical literal witnesses it, and the fix is `ToString(ToNumber(…))`
-   * on the token — the `numToStr` that `test/numtostr.test.ts` already pins, reused here.
+   * this hid: only a NON-canonical literal witnesses it.
+   *
+   * FIXED — `expectKey` returns `String(Number(token))`. Not a hand-rolled decoder: the lexer
+   * keeps radix-prefixed literals as raw text precisely so this one round trip decodes every
+   * form, and `Number::toString`'s own switch to exponential (`1e21` → `1e+21`) is then node's
+   * by construction rather than by imitation. The normalized key feeds `isArrayIndexKey` too,
+   * so it fixes the key's POSITION as well as its name — see the last line here, where `1e1`
+   * becomes the index `10` and moves in front of `z`. Full sweep in
+   * test/fixtures/stage22-objarr/numeric-key-spelling.ts.
    */
-  it.failing("a numeric object-literal key is ToString(ToNumber(…)), not its source text", async () => {
+  it("a numeric object-literal key is ToString(ToNumber(…)), not its source text", async () => {
     await expectSameBytes([
-      'console.log(Object.keys({ 1: "p", 2: "q" }).join("|"));', // node 1|2, ours 1|2 — correct
-      'console.log(Object.keys({ 1e3: "x" }).join("|"));',       // node 1000,  ours 1e3
-      'console.log(Object.keys({ 1.0: "y" }).join("|"));',       // node 1,     ours 1.0
-      'console.log(Object.keys({ 0x10: "z" }).join("|"));',      // node 16,    ours 0x10
-      'console.log(Object.keys({ 1e21: "w" }).join("|"));',      // node 1e+21, ours 1e21
-      'console.log(Object.keys({ 0.5: "v" }).join("|"));',       // node 0.5,   ours 0.5 — correct
-      'console.log(JSON.stringify({ 1e3: "x" }));',              // node {"1000":"x"}
+      'console.log(Object.keys({ 1: "p", 2: "q" }).join("|"));', // 1|2 — canonical, always was
+      'console.log(Object.keys({ 1e3: "x" }).join("|"));',       // 1000  (was 1e3)
+      'console.log(Object.keys({ 1.0: "y" }).join("|"));',       // 1     (was 1.0)
+      'console.log(Object.keys({ 0x10: "z" }).join("|"));',      // 16    (was 0x10)
+      'console.log(Object.keys({ 1e21: "w" }).join("|"));',      // 1e+21 (was 1e21)
+      'console.log(Object.keys({ 0.5: "v" }).join("|"));',       // 0.5 — canonical, always was
+      'console.log(JSON.stringify({ 1e3: "x" }));',              // {"1000":"x"}
+      // The spelling decides the POSITION: `1e1` is not an array-index spelling, `10` is.
+      'console.log(Object.keys({ z: 1, 1e1: 2, 0x2: 3 }).join("|"));', // 2|10|z
       "",
     ].join("\n"));
   });

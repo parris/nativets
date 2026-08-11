@@ -391,15 +391,28 @@ function llvmTy(ty: Ty): string {
  */
 function userSym(name: string): string { return name === "main" ? "nt_user_main" : name; }
 
+/**
+ * The zero initializer for a module-level binding promoted to an LLVM global (SH1).
+ *
+ * DERIVED from `llvmTy`, deliberately, rather than re-listing the type predicates.
+ * The two lists had drifted: `llvmTy` grew `isUrlRefTy` into its `ptr` arms and this
+ * function did not, so a `URL` global fell to the `default` and emitted
+ * `@nt.g.u = internal global ptr 0` — an integer constant in a pointer slot, which
+ * clang REFUSES to parse ("integer constant must have integer type"). A `Date` global
+ * hit the same fall-through the other way and emitted `double 0`.
+ *
+ * Deriving makes the drift impossible: every `Ty` whose machine type is `ptr` gets
+ * `null` by construction, including the next reference type anyone adds. This is the
+ * same lesson as the AST walkers — a parallel enumeration is a defect waiting for the
+ * next member, so the fix is to stop enumerating rather than to correct the list.
+ */
 function defaultZero(ty: Ty): string {
-  if (isTypeRefTy(ty) || isUnionTy(ty) || isGeneralUnionTy(ty)) return "null";
-  if (isArrayTy(ty) || isObjectTy(ty) || isFuncTy(ty) || isNullableTy(ty) || isMapTy(ty) || isSetTy(ty) || (isBytesRefTy(ty) || isFetchRefTy(ty))) return "null";
-  switch (ty) {
-    case "number": return "0x0000000000000000";
-    case "boolean": return "false";
-    case "string": return "null";
+  switch (llvmTy(ty)) {
+    case "ptr": return "null";
+    case "double": return "0x0000000000000000";
+    case "i1": return "false";
     case "void": return "";
-    default: return "0"; // undefined | null
+    default: return "0"; // i8 — the unit types (undefined | null)
   }
 }
 
@@ -6586,6 +6599,44 @@ class FnGen {
   }
 
   /**
+   * A JSON object KEY, quotes included — the compile-time twin of `js_json_quote`, which
+   * a string VALUE has always gone through at runtime.
+   *
+   * The key never did. It comes from the static type, so it is interned as a constant and
+   * was written out raw: node produced `{"c\\d":1}` for the key `c\d` and we produced
+   * `{"c\d":1}`, which is not JSON and does not survive its own `JSON.parse`. A tab in a
+   * key was worse — an actual 0x09 byte inside the string. Both at exit 0.
+   *
+   * node applies the SAME `QuoteJSONString` (ECMA-262 25.5.2.3) to a key as to a value, so
+   * this mirrors `js_json_quote` (runtime/runtime.c) rule for rule rather than inventing a
+   * key-specific one: short forms for \b \t \n \f \r, `\u00XX` below 0x20, and U+007F left
+   * literal because JSON does not treat it as a control character.
+   *
+   * The `"` case is unreachable today — `keyIsEncodable` (src/ast.ts) refuses a key
+   * carrying a quote, because `widenLiteralTys` would fuse it with a neighbour — and it is
+   * kept anyway: this is an ESCAPER, and it should be correct as one independently of what
+   * the admission rule upstream happens to allow this month.
+   */
+  private jsonKey(k: string): string {
+    const HEX = "0123456789abcdef";
+    let out = `"`;
+    for (let i = 0; i < k.length; i++) {
+      const c = k[i]!;
+      const n = k.charCodeAt(i);
+      if (c === `"`) out += `\\"`;
+      else if (c === "\\") out += "\\\\";
+      else if (n === 8) out += "\\b";
+      else if (n === 12) out += "\\f";
+      else if (n === 10) out += "\\n";
+      else if (n === 13) out += "\\r";
+      else if (n === 9) out += "\\t";
+      else if (n < 0x20) out += "\\u00" + HEX[(n >> 4) & 0xf] + HEX[n & 0xf];
+      else out += c;
+    }
+    return out + `"`;
+  }
+
+  /**
    * JSON.stringify — generated recursively from the static type.
    * `indent` is the (compile-time) indent unit ("" = compact); `depth` the current
    * nesting level, so a pretty-printed line is prefixed with indent.repeat(depth).
@@ -6707,7 +6758,7 @@ class FnGen {
       let own = false;
       fields.forEach((f, i) => {
         if (i > 0) { acc = this.jsonCat(acc, own, this.mod.intern(pretty ? `,\n${inner}` : ","), false); own = true; }
-        acc = this.jsonCat(acc, own, this.mod.intern(pretty ? `"${f.key}": ` : `"${f.key}":`), false); own = true;
+        acc = this.jsonCat(acc, own, this.mod.intern(pretty ? `${this.jsonKey(f.key)}: ` : `${this.jsonKey(f.key)}:`), false); own = true;
         const fv = this.genJsonStringify(this.loadField(val, f.key, f.ty), indent, depth + 1).v;
         acc = this.jsonCat(acc, own, fv, true); own = true;
       });
@@ -6732,7 +6783,7 @@ class FnGen {
       // table", and `nt_str_release` is a no-op on the second. `lead` is a select between
       // two interned constants, so it is never owned.
       let a = this.jsonCat(cur, true, lead, false);
-      a = this.jsonCat(a, true, this.mod.intern(pretty ? `"${key}": ` : `"${key}":`), false);
+      a = this.jsonCat(a, true, this.mod.intern(pretty ? `${this.jsonKey(key)}: ` : `${this.jsonKey(key)}:`), false);
       a = this.jsonCat(a, true, jsonV, true);
       this.emit(`store ptr ${a}, ptr ${accSlot}`);
       this.emit(`store i1 true, ptr ${emittedSlot}`);
