@@ -1289,6 +1289,30 @@ class FnGen {
     const b = this.blocks[this.cur]!;
     if (!b.terminated) { b.lines.push("  " + line); b.terminated = true; }
   }
+  /**
+   * `out = l <bare> r` for a COMPOUND assignment, where `bare` is the operator with its
+   * trailing `=` stripped: `"+"`, `"&"`, `"<<"`, `"**"`. ONE function rather than the
+   * choice written at each site, for the same reason `joinFn` is one function.
+   *
+   * The choice used to be two-way and inlined three times — `ARITH.has(bare)` or else
+   * `BITFN.get(bare)!` — which is fine for exactly the operators that existed then. `**`
+   * is in NEITHER map: it is not an LLVM binary instruction, it is `Number::exponentiate`,
+   * and it lowers to `js_pow` because C `pow` answers `1` for a unit base with an infinite
+   * exponent where ES 6.1.6.1.3 says `NaN`. So `**=` would have taken the `else` and
+   * emitted `call double @undefined(...)` at all three sites — which is why `**=` could
+   * not be wired into the parser without this. Adding a fourth operator now means
+   * teaching one place, not remembering three.
+   */
+  private compoundArith(out: string, bare: string, l: string, r: string): void {
+    if (bare === "**") { this.emit(`${out} = call double @js_pow(double ${l}, double ${r})`); return; }
+    if (ARITH.has(bare)) { this.emit(`${out} = ${ARITH.get(bare)!} double ${l}, ${r}`); return; }
+    const fn = BITFN.get(bare);
+    // Not a fallback: an operator the parser accepts and this does not know would
+    // otherwise interpolate `undefined` into a call and surface as a raw clang error with
+    // no NT code — exactly what `**=` did before it was taught here.
+    if (fn === undefined) throw internalError(`compound assignment '${bare}=' has no lowering — teach \`compoundArith\``);
+    this.emit(`${out} = call double @${fn}(double ${l}, double ${r})`);
+  }
   /** Whether the current block already has a terminator.
    *
    *  A METHOD, not a `get` accessor: nativets refuses accessors (NT1015), and a getter is
@@ -3423,10 +3447,8 @@ class FnGen {
           if (e.op === "=") { const v = this.genExpr(e.value); this.writeCapture(e.target, v); return { v: v.v, ty: cty }; }
           const cur = this.readCapture(e.target);
           const rv = this.genExpr(e.value);
-          const bare0 = e.op.slice(0, -1);
           const t0 = this.fresh();
-          if (ARITH.has(bare0)) this.emit(`${t0} = ${ARITH.get(bare0)!} double ${cur.v}, ${rv.v}`);
-          else this.emit(`${t0} = call double @${BITFN.get(bare0)!}(double ${cur.v}, double ${rv.v})`);
+          this.compoundArith(t0, e.op.slice(0, -1), cur.v, rv.v);
           this.writeCapture(e.target, { v: t0, ty: "number" });
           return { v: t0, ty: "number" };
         }
@@ -3476,10 +3498,8 @@ class FnGen {
         const old = this.fresh();
         this.emit(`${old} = load double, ptr ${this.addr(e.target)}`);
         const rv = this.genExpr(e.value);
-        const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
         const t = this.fresh();
-        if (ARITH.has(bare)) this.emit(`${t} = ${ARITH.get(bare)!} double ${old}, ${rv.v}`);
-        else this.emit(`${t} = call double @${BITFN.get(bare)!}(double ${old}, double ${rv.v})`);
+        this.compoundArith(t, e.op.slice(0, -1), old, rv.v); // "+", "&", "<<", "**", ...
         this.emit(`store double ${t}, ptr ${this.addr(e.target)}`);
         return { v: t, ty: "number" };
       }
@@ -3554,10 +3574,8 @@ class FnGen {
             ? `${cur} = call double @nt_bytes_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
             : `${cur} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
           const rv = this.genExpr(e.value);
-          const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
           out = this.fresh();
-          if (ARITH.has(bare)) this.emit(`${out} = ${ARITH.get(bare)!} double ${cur}, ${rv.v}`);
-          else this.emit(`${out} = call double @${BITFN.get(bare)!}(double ${cur}, double ${rv.v})`);
+          this.compoundArith(out, e.op.slice(0, -1), cur, rv.v); // "+", "&", "<<", "**", ...
         }
         this.emit(loc
           ? `call void @nt_bytes_index_set(ptr ${obj.v}, double ${idx.v}, double ${out}, ptr ${loc})`

@@ -1172,7 +1172,12 @@ export interface ConditionalExpr {
 }
 
 /** simple assignment or compound (+= -= *= /= %= &= |= ^= <<= >>= >>>=) */
-export type AssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=";
+// `**=` is here with the rest of the compound family, but it is the ONLY one whose bare
+// operator is not an LLVM instruction or a `BITFN` entry — `**` is `Number::exponentiate`,
+// lowered to `js_pow`. See `compoundArith` in codegen.ts, which is the single place that
+// knows it; adding an operator to this list without adding it there emits a call to
+// `@undefined`.
+export type AssignOp = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>=";
 export interface AssignExpr {
   kind: "AssignExpr";
   op: AssignOp;
