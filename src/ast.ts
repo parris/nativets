@@ -1509,8 +1509,15 @@ export interface SwitchCase { test: Expr | null; body: Stmt[]; } // test null ==
 export interface SwitchStmt { kind: "SwitchStmt"; discriminant: Expr; cases: SwitchCase[]; }
 /** `line`/`col` are the `throw` keyword's own position — codegen refuses a throw it cannot
  *  lower (one with no enclosing `try` in the same function) and has no other way to say
- *  WHICH throw, since the statement is otherwise position-free. */
-export interface ThrowStmt { kind: "ThrowStmt"; argument: Expr; line?: number; col?: number; }
+ *  WHICH throw, since the statement is otherwise position-free.
+ *
+ *  `drops` is `ReturnStmt.drops` for the exceptional exit: the linear locals this frame
+ *  still owns at the throw. A throw that PROPAGATES out of its frame (see `scanEscaping`
+ *  in src/codegen.ts) leaves by a `ret`, so it must free exactly what a `return` here
+ *  would free — the same `ownedInScope` set, computed at the same program point. Unset
+ *  for a throw that stays in-frame (a branch to a local catch, which reaches the block's
+ *  own drop points normally). */
+export interface ThrowStmt { kind: "ThrowStmt"; argument: Expr; line?: number; col?: number; drops?: string[]; }
 export interface TryStmt { kind: "TryStmt"; block: Stmt[]; param: string | null; handler: Stmt[] | null; finalizer: Stmt[] | null; catchTy?: Ty; }
 export interface ExprStmt { kind: "ExprStmt"; expr: Expr; }
 export interface BlockStmt { kind: "BlockStmt"; body: Stmt[]; }

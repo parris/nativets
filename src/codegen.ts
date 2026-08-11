@@ -32,7 +32,7 @@ import { isUnionTy, unionCommonField, widenLiteralTys } from "./ast.ts";
 import { unionDiscriminant, unionTagValues, unionWidenedMembers, objectLayoutFits } from "./ast.ts";
 import { exprLoc } from "./ast.ts";
 import { isOptChainExpr, isStructMsgTy } from "./checker.ts";
-import type { ArrowFunction, AssignExpr } from "./ast.ts";
+import type { ArrowFunction, AssignExpr, ThrowStmt } from "./ast.ts";
 import { nyi, NYI, internalError, NTError } from "./diagnostics.ts";
 
 export function llvmDouble(n: number): string {
@@ -90,6 +90,220 @@ function scanUsesActors(node: unknown): boolean {
   }
   for (const k in n) if (scanUsesActors(n[k])) return true;
   return false;
+}
+
+/* ============================================================================
+ * CROSS-FRAME `throw` — which functions may let one LEAVE their frame.
+ *
+ * A `throw` is lowered as a BRANCH to the enclosing `try`'s catch block, so it has
+ * always had to sit inside a `try` in the SAME function (NT1004). The runtime's
+ * pending-exception protocol already carries a raise across a frame boundary — that is
+ * how a failing `JSON.parse` reaches a `catch` — and nothing about it is specific to the
+ * runtime being the raiser. So an escaping `throw` raises on the SAME flag and returns
+ * the default value; the caller checks the flag after the call, exactly as it already
+ * does after a fallible host call (`emitExcCheck`).
+ *
+ * WHAT MAKES THAT SOUND IS A REFUSAL, NOT A CLEVERNESS. A set flag that no call site
+ * checks is a SILENT WRONG ANSWER — the frame returns a zeroed default and the program
+ * carries on — which is the one outcome this compiler will not produce. So propagation
+ * is allowed for a function only when every way of reaching it has been PROVED to check:
+ *
+ *   1. every call site is a DIRECT call this scan can see, and each one sits inside a
+ *      `try` WITH a `catch` in its own frame (or is in `main`, whose uncaught arm is
+ *      node's own behaviour — stderr and exit 1);
+ *   2. the name is never used as a VALUE, so no closure or function-value call can reach
+ *      it without a check (a lifted arrow is a frame this scan cannot see into);
+ *   3. the thrown type is one the flag can actually carry (`string`, or a one-field
+ *      `{message:string}`) and every covering `catch` binds exactly that type — the
+ *      binding is not `any` here, and reconstructing a DIFFERENT shape into it is the
+ *      raw-store bug `ThrowStmt` already refuses in-frame;
+ *   4. no `throw` anywhere in the function is inside an arrow body, and the program uses
+ *      no actors — an inlined arrow's `throw` really does run in this frame while a
+ *      lifted one does not, and an actor handler is called by the scheduler, from no
+ *      call site this scan can see.
+ *
+ * ONE FRAME, therefore, and by construction: rule 1 means an escaping callee's raise is
+ * always consumed by its immediate caller, so no intermediate frame ever has to
+ * propagate and the "escapes" set never grows transitively. A deeper chain keeps NT1004.
+ * ========================================================================== */
+
+/** The type a raise can carry across a frame, or `null` if it cannot. These are exactly
+ *  the two shapes `emitExcCheck` already reconstructs into a catch binding. The result is a
+ *  `string` rather than a `Ty` so the empty string can be the "cannot" answer — unambiguous,
+ *  since `Ty` has no empty spelling (which is also why tsc rejects `""` as one). */
+function raisableTy(t: Ty | undefined): string {
+  if (t === undefined) return "";
+  const b: Ty = t;
+  if (b === "string") return "string";
+  if (!isObjectTy(b) || objectFields(b).length !== 1) return "";
+  const f = fieldType(b, "message");
+  if (f === undefined) return "";
+  const ft: Ty = f;
+  return ft === "string" ? b : "";
+}
+
+/** Uncovered `throw`s in ONE frame. `out` collects the raisable type of each throw that
+ *  no local `catch` covers; `bad` is set by anything that disqualifies the whole
+ *  function — a throw inside an arrow (a frame this walk is not describing), or a thrown
+ *  value the flag cannot carry. */
+function frameThrows(node: unknown, covered: boolean, inArrow: boolean, out: (t: string) => void): void {
+  if (node === null || typeof node !== "object") return;
+  if (Array.isArray(node)) { for (const x of node) frameThrows(x, covered, inArrow, out); return; }
+  const n = node as Record<string, unknown>;
+  if (n.kind === "ThrowStmt") {
+    const arg = n.argument as Expr;
+    if (inArrow) out(""); // an arrow's throw is not this frame's `ret` to take
+    else if (!covered) out(raisableTy(arg.ty));
+    frameThrows(n.argument, covered, inArrow, out);
+    return;
+  }
+  if (n.kind === "TryStmt") {
+    // A `finally` does not HANDLE, so a catch-less `try` does not cover its block.
+    frameThrows(n.block, !!n.handler || covered, inArrow, out);
+    if (n.handler) frameThrows(n.handler, covered, inArrow, out);
+    if (n.finalizer) frameThrows(n.finalizer, covered, inArrow, out);
+    return;
+  }
+  if (n.kind === "ArrowFunction") { for (const k in n) frameThrows(n[k], covered, true, out); return; }
+  if (n.kind === "FuncDecl") return; // a nested declaration is its own frame
+  for (const k in n) if (k !== "ty") frameThrows(n[k], covered, inArrow, out);
+}
+
+/** Every mention of a function NAME in the program, split into call sites (with the
+ *  binding type of the innermost `catch` covering them, `null` if none) and value uses.
+ *  `nameOf` maps a callee expression to the linked function names it may reach — by
+ *  PROPERTY name for a method call, which over-approximates, and over-approximating call
+ *  sites can only disqualify more. */
+function scanUses(
+  node: unknown, covered: Ty | null, inArrow: boolean,
+  onCall: (names: string[], covered: Ty | null, inArrow: boolean) => void,
+  onValue: (name: string) => void,
+): void {
+  if (node === null || typeof node !== "object") return;
+  if (Array.isArray(node)) { for (const x of node) scanUses(x, covered, inArrow, onCall, onValue); return; }
+  const n = node as Record<string, unknown>;
+  if (n.kind === "TryStmt") {
+    // Defaulted the way `TryStmt` lowering defaults it; `null` (does not cover) for a
+    // `try` with no `catch`, whose `finally` does not handle.
+    const inner: Ty | null = n.handler ? ((n.catchTy as Ty | undefined) ?? "string") : null;
+    scanUses(n.block, inner ?? covered, inArrow, onCall, onValue);
+    if (n.handler) scanUses(n.handler, covered, inArrow, onCall, onValue);
+    if (n.finalizer) scanUses(n.finalizer, covered, inArrow, onCall, onValue);
+    return;
+  }
+  // A nested `function` declaration and an arrow BODY are each a frame of their own, so
+  // an enclosing `try` does not cover their calls. The arrow is stricter than that: a
+  // LIFTED arrow is an LLVM function this scan is not describing, so a call to an
+  // escaping function from inside one is treated as uncovered whatever encloses it.
+  if (n.kind === "FuncDecl") { scanUses(n.body, null, inArrow, onCall, onValue); return; }
+  if (n.kind === "ArrowFunction") { for (const k in n) scanUses(n[k], null, true, onCall, onValue); return; }
+  if (n.kind === "CallExpr") {
+    const callee = n.callee as Record<string, unknown>;
+    if (callee.kind === "Identifier") onCall([callee.name as string], inArrow ? null : covered, inArrow);
+    else if (callee.kind === "MemberExpr") {
+      onCall([`.${callee.property as string}`], inArrow ? null : covered, inArrow);
+      scanUses(callee.object, covered, inArrow, onCall, onValue); // the RECEIVER is a value use
+    } else scanUses(n.callee, covered, inArrow, onCall, onValue);
+    scanUses(n.args, covered, inArrow, onCall, onValue);
+    return;
+  }
+  if (n.kind === "Identifier") { onValue(n.name as string); return; }
+  if (n.kind === "MemberExpr") { onValue(`.${n.property as string}`); scanUses(n.object, covered, inArrow, onCall, onValue); return; }
+  for (const k in n) if (k !== "ty") scanUses(n[k], covered, inArrow, onCall, onValue);
+}
+
+/**
+ * The proved-escaping set. See the block comment above for the four rules; every one of
+ * them is a way to LEAVE the set, so the empty answer is always the safe one and a
+ * program this scan cannot reason about compiles exactly as it did before.
+ *
+ * PARALLEL ARRAYS, not a `Map` keyed by name, and that is a subset obligation rather than
+ * a style choice. The first cut accumulated into a `Set` from inside the `scanUses`
+ * callbacks -- and `Set.add` MUTATES under bun while it is PERSISTENT in the language this
+ * compiler implements, so every disqualification the callbacks recorded would be silently
+ * discarded once this compiler compiles itself. Not a refusal: a scan that answers "every
+ * caller checks" about functions whose callers do not. `.push` on a `//@@mutable` array is
+ * the one accumulator that means the same thing under both.
+ */
+function scanEscaping(program: Program, usesActors: boolean): Set<string> {
+  if (usesActors) return new Set<string>(); // rule 4: the scheduler is a caller we cannot see
+
+  // ---- seed: a function whose own `throw` no local `catch` covers, paired with the one
+  // carriable type all of its uncovered throws agree on. `frameThrows` reports `""` for a
+  // throw that disqualifies the frame outright (one inside an arrow, or a value the flag
+  // cannot carry).
+  //@@mutable
+  const names: string[] = [];
+  //@@mutable
+  const tys: string[] = [];
+  for (const s of program.body) {
+    if (s.kind !== "FuncDecl") continue;
+    //@@mutable
+    const seen: string[] = [];
+    frameThrows(s.body, false, false, (t: string) => { seen.push(t); });
+    if (seen.length === 0) continue;
+    const first = seen[0]!;
+    if (first === "" || seen.some((t) => t !== first)) continue; // rules 3+4
+    names.push(s.name);
+    tys.push(first);
+  }
+  if (names.length === 0) return new Set<string>();
+
+  // ---- every mention of a name, recorded verbatim and judged afterwards. `where` is the
+  // frame the mention sits in: `main`'s own body, some other function's, or an arrow's
+  // (a frame this scan is not describing, so it never counts as covered).
+  //@@mutable
+  const callKey: string[] = [];
+  //@@mutable
+  const callCov: string[] = []; // "" = no `catch` covers this call site
+  //@@mutable
+  const callWhere: string[] = [];
+  //@@mutable
+  const valueUse: string[] = [];
+  const visit = (body: Stmt[], isMain: boolean): void => {
+    scanUses(body, null, false,
+      (keys: string[], cov: Ty | null, inArrow: boolean) => {
+        for (const k of keys) {
+          callKey.push(k);
+          callCov.push(cov ?? "");
+          callWhere.push(inArrow ? "arrow" : (isMain ? "main" : "frame"));
+        }
+      },
+      (n: string) => { valueUse.push(n); },
+    );
+  };
+  visit(program.body.filter((s) => s.kind !== "FuncDecl"), true);
+  for (const s of program.body) if (s.kind === "FuncDecl") visit(s.body, false);
+
+  // ---- judge. `dead[i]` is "seed function i is NOT provably escaping".
+  //@@mutable
+  const dead: boolean[] = names.map(() => false);
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i]!;
+    // A method is a top-level `Class.m` whose call sites name only `m`, so it answers to
+    // the `.m` key too -- resolved by PROPERTY, which over-approximates, and
+    // over-approximating a function's call sites can only disqualify more.
+    const dot = name.lastIndexOf(".");
+    const alt = dot < 0 ? "" : `.${name.slice(dot + 1)}`;
+    for (const u of valueUse) if (u === name || (alt !== "" && u === alt)) dead[i] = true; // rule 2
+    for (let c = 0; c < callKey.length; c++) {
+      const k = callKey[c]!;
+      if (k !== name && (alt === "" || k !== alt)) continue;
+      // Uncovered: in `main` that IS node's uncaught exception, which `emitExcCheck`'s
+      // null-handler arm already renders (stderr, exit 1). Anywhere else it would have to
+      // propagate a SECOND frame, which is the case this lane does not implement.
+      if (callCov[c]! === "") { if (callWhere[c]! !== "main") dead[i] = true; continue; }
+      if (callCov[c]! !== tys[i]!) dead[i] = true; // rule 3: the binding takes ONE type
+    }
+  }
+
+  // REBOUND, not `.add`-and-discard: a nativets `Set` is persistent, so the discarded
+  // spelling adds nothing there while bun's mutating `Set.add` makes it look right —
+  // the same divergence `Checker.statics` already records in src/checker.ts.
+  //@@mutable
+  let out = new Set<string>();
+  for (let i = 0; i < names.length; i++) if (!dead[i]!) out = out.add(names[i]!);
+  return out;
 }
 
 /** Does the program contain a `try` ANYWHERE — including inside an arrow body, a class
@@ -581,6 +795,11 @@ class ModuleGen {
    *  any frame, so a `throw` with no local `try` is an UNCAUGHT exception rather than
    *  the cross-frame propagation NT1004 refuses. See `FnGen.uncatchable`. */
   hasTry = true;
+
+  /** Functions whose `throw` may LEAVE the frame, PROVED (see `scanEscaping`). Empty for
+   *  every program that does not use the callee-raises/caller-catches idiom, which is
+   *  why nothing else's IR moves. */
+  escaping = new Set<string>();
   /** Set when a frame lowered an UNCAUGHT `throw`. Declared conditionally, exactly like
    *  the actor surface: a program with no uncaught throw emits byte-identical IR. */
   usesUncaughtThrow = false;
@@ -769,6 +988,7 @@ class ModuleGen {
   build(program: Program): string {
     this.usesActors = scanUsesActors(program);
     this.hasTry = scanHasTry(program);
+    this.escaping = scanEscaping(program, this.usesActors);
     this.hostImports = new Set(program.hostImports ?? []);
     this.recTypes = recTypeTable(program); // `@Name` back-edges (empty for most programs)
     this.recordTags = new Set(program.mutableRecords ?? []);
@@ -1200,6 +1420,14 @@ class FnGen {
         case "MultiStmt": this.collectLocals(s.stmts); break;
         case "TryStmt":
           if (s.param) this.addLocal(s.param, s.catchTy ?? "string");
+          // A string-typed `catch` binding is a STRING LOCAL like any other: zero-inited
+          // (so the normal path releases a null, a no-op) and released at scope exit.
+          // It was not one before, which was invisible only because every message that
+          // could reach it was UNTRACKED — a literal, or one of the runtime's
+          // `nativets_alloc`ed-but-unregistered buffers, for which release does nothing.
+          // A cross-frame `throw` can now hand it a REGISTERED heap string, and an owner
+          // that never releases is a leak proportional to the number of throws.
+          if (s.param && (s.catchTy ?? "string") === "string") this.strLocals = this.strLocals.add(s.param);
           this.collectLocals(s.block);
           if (s.handler) this.collectLocals(s.handler);
           if (s.finalizer) this.collectLocals(s.finalizer);
@@ -1210,8 +1438,13 @@ class FnGen {
   }
 
   // ---- functions ----
+  /** This frame may let a `throw` LEAVE it (see `scanEscaping`). False in `main`, in a
+   *  lifted arrow, and in every function whose callers were not all proved to check. */
+  private canEscape = false;
+
   genFunction(fn: FuncDecl): string {
     this.reset();
+    this.canEscape = this.mod.escaping.has(fn.name);
     const sig = this.mod.functions.get(fn.name)!;
     // The RESOLVED return type comes from the signature table, which is where the checker
     // records it. It used to be read from `fn.returnTy`, a second copy of `sig.ret` that
@@ -1680,8 +1913,13 @@ class FnGen {
           // frame is `main` (nothing calls module top-level, so no ancestor frame
           // exists) or the whole program contains no `try`.
           if (this.uncatchable() && this.genUncaught(s.argument)) return;
+          // …and a throw the ESCAPE SCAN proved every caller catches leaves by the
+          // pending-exception flag: raise, free what a `return` here would free, and
+          // return the default. `scanEscaping` has already established that every call
+          // site checks the flag, so the default value is never read.
+          if (this.canEscape && this.genPropagate(s)) return;
           throw nyi(NYI.EXCEPTION, `\`throw\`${where(s)} that is not inside a \`try\` in the same function`,
-            "a throw is lowered as a branch to its enclosing `try`, so it must sit inside one IN THE SAME function — crossing a call boundary needs unwinding. Wrap the throwing code in a local `try`/`catch`, or return a result value (e.g. `T | undefined`) and check it at the call site");
+            "a throw is lowered as a branch to its enclosing `try`, so it must sit inside one IN THE SAME function — or else cross exactly ONE frame, which needs EVERY call site of this function to sit inside a `try`/`catch` in its immediate caller (a call from module top level counts, since nothing above it could catch). Put every call in a `try`/`catch`, wrap the throwing code in a local `try`/`catch`, or return a result value (e.g. `T | undefined`) and check it at the call site");
         }
         const v = this.genExpr(s.argument);
         // The store used to be RAW, under `h.eType` whatever the value actually was — and
@@ -1695,6 +1933,10 @@ class FnGen {
           throw nyi(NYI.EXCEPTION, `\`throw\`${where(s)} of ${v.ty} where \`catch (${h.excVar})\` is ${h.eType}`,
             `the catch binding takes ONE type, inferred from the first \`throw\` in the block — node's \`catch\` parameter is \`any\`, which has no equivalent here. Throw the same type from every \`throw\` in a \`try\`, or split them into separate \`try\` blocks`);
         }
+        // The binding is an OWNER now (see `collectLocals`), so the store takes a
+        // reference — `try { throw s; } catch (e) {}` with a heap `s` otherwise has two
+        // slots releasing one string.
+        if (h.excVar && h.eType === "string") this.emit(`${this.fresh()} = call ptr @nt_str_retain(ptr ${v.v})`);
         if (h.excVar) this.emit(`store ${llvmTy(h.eType)} ${v.v}, ptr ${this.addr(h.excVar)}`);
         this.terminate(`br label %${h.catchLbl}`);
         return;
@@ -3473,12 +3715,21 @@ class FnGen {
       if (h.excVar && h.eType === "string") {
         const m = this.fresh();
         this.emit(`${m} = call ptr @nt_exc_message()`);
+        // The binding is a STRING LOCAL, released at scope exit — so it needs its own
+        // reference. The pending message is an owner (see nt_exc_raise in runtime.c) and
+        // `nt_exc_clear` below drops the runtime's; without this retain, a message the
+        // raising frame heap-allocated would be freed while the handler still reads it.
+        // A literal is untracked, so the retain is a no-op and no existing IR behaves
+        // differently.
+        this.emit(`${this.fresh()} = call ptr @nt_str_retain(ptr ${m})`);
         this.emit(`store ptr ${m}, ptr ${this.addr(h.excVar)}`);
       } else if (h.excVar && h.eType === "{message:string}") {
         // SH4: the block calls a host builtin, so its failure is an Error — box the
         // runtime message into `new Error(msg)`'s shape so `e.message` reads it.
         const m = this.fresh();
         this.emit(`${m} = call ptr @nt_exc_message()`);
+        // The slot outlives `nt_exc_clear` below, which drops the runtime's reference.
+        this.emit(`${this.fresh()} = call ptr @nt_str_retain(ptr ${m})`);
         const obj = this.fresh();
         this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(1)})`);
         const g = this.fresh();
@@ -3539,17 +3790,72 @@ class FnGen {
    * Returns false for a thrown value with no message string — `throw 42`, `throw {a:1}`
    * — so the caller keeps the NT1004 refusal rather than inventing text for it.
    */
+  /**
+   * Lower a `throw` that LEAVES this frame: raise the message on the pending-exception
+   * flag, then leave by an ordinary `ret`. The caller checks the flag immediately after
+   * the call (`emitExcCheck` in `genUserCall`) and branches to its own `catch`, so the
+   * returned default is never read — and `scanEscaping` has already proved that every
+   * call site is one that checks.
+   *
+   * THE DROP SET IS THE WHOLE COST, and it is `ReturnStmt`'s: leaving by a `ret` means
+   * freeing exactly what a `return` written at this point would free. `ThrowStmt.drops`
+   * is the ownership pass's `ownedInScope` at the throw, the same annotation and the same
+   * one-line computation `ReturnStmt.drops` already uses — no second analysis, and no
+   * "the unwinder leaks by construction" that a `longjmp` past these frames would have.
+   *
+   * The message is RETAINED by `nt_exc_raise_msg` before the drops run, so a message
+   * string this frame owns (`throw `bad: ${x}`;`) survives its own release. A literal is
+   * untracked and the retain is a no-op, which is why nothing else's behaviour moves.
+   *
+   * Returns false for a thrown value with no message string — the caller then keeps the
+   * NT1004 refusal rather than inventing text, exactly as `genUncaught` does.
+   */
+  private genPropagate(s: ThrowStmt): boolean {
+    const v = this.genExpr(s.argument);
+    const msg = this.raisedMessage(v);
+    if (msg === "") return false;
+    this.mod.usesUncaughtThrow = true;
+    this.emit(`call void @nt_exc_raise_msg(ptr ${msg})`);
+    // `nt_obj_free` is SHALLOW, so freeing a thrown `new Error(m)` here does not touch
+    // the message the raise just retained.
+    this.emitDrops(s.drops ?? []);
+    this.emitStrDrops();
+    this.terminate(this.retTy === "void" ? "ret void" : `ret ${llvmTy(this.retTy)} ${defaultZero(this.retTy)}`);
+    return true;
+  }
+
+  /**
+   * The message string a thrown value raises with, or `""` for a value that carries none
+   * (`throw 42`, `throw {a:1}`) — the caller then keeps the NT1004 refusal rather than
+   * inventing text for it. `""` is unambiguous as the "no message" answer: every message
+   * this returns is an SSA name or a global symbol, never the empty spelling.
+   *
+   * Factored out of `genUncaught` (where `genPropagate` had copied it) because the
+   * comparison it is built on, `fieldType(t, "message") === "string"`, is one this
+   * compiler REFUSES when it checks itself — `fieldType` answers `Ty | undefined` and a
+   * nullable may not be compared with a string. Guarding the `undefined` and rebinding
+   * before the comparison is the spelling that passes, and doing it once means one
+   * function inside the subset instead of two outside it.
+   */
+  private raisedMessage(v: Val): string {
+    const t: Ty = v.ty;
+    if (t === "string") return v.v;
+    if (!isObjectTy(t)) return "";
+    const f = fieldType(t, "message");
+    if (f === undefined) return "";
+    const ft: Ty = f;
+    if (ft !== "string") return "";
+    const g = this.fresh();
+    this.emit(`${g} = getelementptr i64, ptr ${v.v}, i64 ${fieldIndex(t, "message")}`);
+    const raw = this.fresh();
+    this.emit(`${raw} = load i64, ptr ${g}`);
+    return this.fromSlot(raw, "string");
+  }
+
   private genUncaught(argument: Expr): boolean {
     const v = this.genExpr(argument);
-    let msg: string;
-    if (v.ty === "string") msg = v.v;
-    else if (isObjectTy(v.ty) && fieldType(v.ty, "message") === "string") {
-      const g = this.fresh();
-      this.emit(`${g} = getelementptr i64, ptr ${v.v}, i64 ${fieldIndex(v.ty, "message")}`);
-      const raw = this.fresh();
-      this.emit(`${raw} = load i64, ptr ${g}`);
-      msg = this.fromSlot(raw, "string");
-    } else return false;
+    const msg = this.raisedMessage(v);
+    if (msg === "") return false;
     this.mod.usesUncaughtThrow = true;
     this.emit(`call void @nt_exc_raise_msg(ptr ${msg})`);
     this.emit(`call void @nt_exc_abort()`);
@@ -6232,6 +6538,11 @@ class FnGen {
   private genUserCall(name: string, args: Expr[], preArg0 = ""): Val {
     this.emitSafepoint(); // call site: preempt long / deeply-recursive call chains
     const sig = this.mod.functions.get(name)!;
+    // A callee `scanEscaping` proved may RAISE gets the same check a fallible host call
+    // already gets: the pending flag decides between the next statement and this frame's
+    // `catch`. Emitting it is not optional — `scanEscaping` only admits a callee whose
+    // every call site checks, so this line is the other half of that proof.
+    const raises = this.mod.escaping.has(name);
     if (sig.rest) {
       const fixed = sig.params.length - 1;
       //@@mutable
@@ -6245,9 +6556,10 @@ class FnGen {
       for (let i = fixed; i < args.length; i++) this.emit(`call double @nt_arr_push(ptr ${arr}, i64 ${this.toSlot(this.genExpr(args[i]!))})`);
       argVals.push(`ptr ${arr}`);
       const argstr = argVals.join(", ");
-      if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); return { v: "", ty: "void" }; }
+      if (sig.ret === "void") { this.emit(`call void @${userSym(name)}(${argstr})`); if (raises) this.emitExcCheck(); return { v: "", ty: "void" }; }
       const t = this.fresh();
       this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
+      if (raises) this.emitExcCheck();
       return { v: t, ty: sig.ret };
     }
     //@@mutable
@@ -6262,10 +6574,12 @@ class FnGen {
     const argstr = argVals.map((v, i) => `${llvmTy(sig.params[i]!)} ${v}`).join(", ");
     if (sig.ret === "void") {
       this.emit(`call void @${userSym(name)}(${argstr})`);
+      if (raises) this.emitExcCheck();
       return { v: "", ty: "void" };
     }
     const t = this.fresh();
     this.emit(`${t} = call ${llvmTy(sig.ret)} @${userSym(name)}(${argstr})`);
+    if (raises) this.emitExcCheck();
     return { v: t, ty: sig.ret };
   }
 }

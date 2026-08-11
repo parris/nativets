@@ -794,7 +794,19 @@ class Analyzer {
         return;
       case "BlockStmt": this.scoped(s.body, state); return;
       case "MultiStmt": this.seq(s.stmts, state); return; // scope-less group: its decls belong to the enclosing block
-      case "ThrowStmt": this.expr(s.argument, state, false); return;
+      case "ThrowStmt":
+        this.expr(s.argument, state, false);
+        // The EXCEPTIONAL exit's drop set, and it is the same one `ReturnStmt` takes
+        // above for the same reason: a throw that propagates out of its frame leaves by
+        // a `ret`, so it must free exactly what a `return` written here would free.
+        // Computed unconditionally — whether the throw actually propagates is codegen's
+        // question (`scanEscaping`), and a throw that branches to a local catch simply
+        // never reads this list. `false` for the consuming flag above, so the thrown
+        // value is not moved out: `throw e` where `e` is a linear local still frees `e`,
+        // and `nt_obj_free` is shallow, so the message string it points at survives the
+        // free and reaches `nt_exc_message` intact.
+        s.drops = this.ownedInScope(state);
+        return;
       case "TryStmt":
         this.scoped(s.block, state);
         if (s.handler) this.scoped(s.handler, state);

@@ -142,6 +142,86 @@ record: **161 → 160. One function.** The other two sites merely move to `NT160
 next whole-program blocker for all five modules becomes `NT1014 Set of U<Expr>`
 (`parser.ts:464`, `new Set<Expr>()`).
 
+### CROSS-FRAME `throw` LANDED, ONE FRAME DEEP — and stage-1 does not move
+
+Measured 2026-08-10, after building it. Read this before scheduling the rest of the gate:
+the mechanism is no longer the hard part, and the number below says why the frontier
+still did not move.
+
+**What the mechanism turned out to cost.** Not an unwinder. The runtime's
+pending-exception protocol (`nt_exc_raise_msg` / `nt_exc_pending` / `nt_exc_message` /
+`nt_exc_clear`) *already* carries a raise across a frame boundary — that is how a failing
+`JSON.parse` reaches a `catch` — and nothing in it is specific to the runtime being the
+raiser. So an escaping `throw` raises on the same flag and returns the default value, and
+the caller checks the flag after the call exactly as it already does after a fallible host
+call. **No `invoke`/`landingpad`** (which would need the IR validator taught four new
+forms, plus a personality function, plus an unwinder the libc-only runtime cannot have)
+and **no `setjmp`/`longjmp`** (which leaks by construction past frames that own heap
+values).
+
+**And the drop set — the part this document called the real cost — was already computed.**
+Two facts collapse it:
+
+- **Parameters are BORROWS.** The caller owns them and drops them, so an unwinding callee
+  owes nothing for its arguments.
+- **A propagating throw leaves by a `ret`**, so it must free exactly what a `return`
+  written at that point would free — which is `ownedInScope(state)`, the ownership pass's
+  existing one-line computation for `ReturnStmt.drops`. `ThrowStmt.drops` is the same
+  annotation at the same program point. **No second analysis.**
+
+  Proved rather than argued: 4000 iterations / 2000 unwinds, with an owned array and an
+  owned string live at the throw, reports `str 0 arr 0 obj 0`, and a heap-message variant
+  reports a residue identical **with and without the throw**. Both under `NATIVETS_ASAN=1`.
+
+**The caller side needed nothing either.** Branching to a local `catch` keeps the frame,
+so the frame's own drop points still run; that is the model already in production for
+runtime raises, with the same documented "a jump past a block's drop marker leaks, never
+double-frees" characteristic.
+
+**What it does cost is a REFUSAL, and that is what pins the frontier.** A set flag that
+some call site fails to check is a *silent wrong answer* — the frame returns a zeroed
+default and the program carries on. So `scanEscaping` admits a function only when **every**
+call site is a direct call inside a `try`/`catch` in its immediate caller (or in `main`,
+whose uncaught arm is node's own behaviour), the name is never used as a value, the thrown
+type is one the flag can carry and every covering `catch` binds exactly it, no `throw` sits
+in an arrow body, and the program uses no actors. **One frame, by construction**: the
+escaping set therefore never grows transitively.
+
+**The number.** `bun run test/escape-metric.ts` — the companion to `blocker-metric`, which
+is checker-only and therefore structurally blind to every NT1004. On stage-1 (`src/cli.ts`,
+731 functions):
+
+| | |
+|---|---|
+| functions with an NT1004-refused `throw` | **129** (526 throw sites) |
+| functions that would escape under a TRANSITIVE fixpoint | **247 (33.8%)** |
+| direct call sites reaching an escaping callee | **1209** |
+| …of those, sitting inside a `try`/`catch` in their own frame | **16** |
+| indirect / builtin call sites the fixpoint cannot resolve | 2226 |
+
+**16 of 1209.** That is the whole story of why the one-frame slice moves stage-1 by zero.
+`src/`'s throws are `throw nyi(…)` / `throw typeError(…)` raised deep in the call graph and
+caught once, at the very top, by `tokenize` and by `coverage.ts` — so almost every
+intermediate frame would have to propagate a *second* time. Full propagation is therefore
+**an exception check after ~1209 direct call sites plus a conservative one after each of
+2226 unresolvable ones**, and — because a caller with no local `catch` must itself
+propagate — **a drop set at every one of those call sites**, which is the annotation
+`ThrowStmt.drops` provides for throws but not yet for arbitrary call expressions.
+
+**So the remaining work is exactly that, and it is now well-defined**: extend
+`ownedInScope` to a `CallExpr.unwindDrops` annotation, drop the "every call site is
+covered" rule, and let `emitExcCheck` grow a third arm that propagates instead of aborting
+when the frame has no handler. The mechanism, the refcount discipline for the pending
+message, and the drop-set proof are all in place; what is left is the annotation and the
+scale.
+
+**One correctness fix fell out of it.** A string-typed `catch (e)` binding was never in
+`strLocals`, so it was never released — invisible only because every message that could
+reach it was untracked (a literal, or one of the runtime's `nativets_alloc`ed-but-
+unregistered buffers, for which retain/release are no-ops). A cross-frame `throw` can hand
+it a registered heap string. The binding is an owner now; the raise retains and
+`nt_exc_clear` releases.
+
 **How to apply:** NT1004 cross-frame propagation is not one item among many on the tail —
 it is the gate. It is 73% of the post-checker tail *and* it is what makes the checker
 frontier's next several terms worth ~1 function each. Its real cost is not the branch: it
