@@ -690,7 +690,9 @@ class Analyzer {
     state: State,
     extra: string[] = [],
   ): void {
-    const declared = [...extra, ...declaredLinear(list, new Set(this.aliasOf.keys()))].filter((n) => this.linear.has(n));
+    // `new Set([...m.keys()])`, not `new Set(m.keys())`: a Map iterator is only supported
+    // in a for-of, an `Array.from` or a spread (NT1014). Same set, same order.
+    const declared = [...extra, ...declaredLinear(list, new Set([...this.aliasOf.keys()]))].filter((n) => this.linear.has(n));
     // Closure envs the block provably owns (see `nonEscapingClosures`). Purely
     // syntactic, so unlike `declared` they need no move state and no `droppable` check —
     // a name that could be moved anywhere is not a candidate in the first place.
@@ -1701,7 +1703,8 @@ function nonEscapingClosures(list: Stmt[], shadowed: Set<string>): string[] {
   const decls = new Map<string, object>();
   closureDecls(list, decls);
   if (decls.size === 0) return [];
-  const cands = new Set(decls.keys());
+  // Spread, not the bare iterator — see `scoped` (NT1014). Same set, same order.
+  const cands = new Set([...decls.keys()]);
   const escaped = new Set<string>();
   scanMentions(list, "", cands, new Set(decls.values()), false, undefined, false, new Set(), escaped);
   return [...cands].filter((n) => !escaped.has(n) && !shadowed.has(n));
