@@ -239,7 +239,30 @@ describe("Array#includes is SameValueZero", () => {
       expect([what, runWithNode(src).exitCode]).toEqual([what, 0]);
       const r = rejectionOf(src);
       expect([what, r?.code, r?.message.includes(what)]).toEqual([what, "NT1001", true]);
+      // One hint for all three, and it names the real reason rather than the generic
+      // "arrays need the heap value model".
+      expect([what, (r?.hint ?? "").includes("reference IDENTITY")]).toEqual([what, true]);
     }
+  });
+
+  /*
+   * THE HINT ITSELF IS COMPILED. The refusal above is only as good as its way out, and a
+   * hint naming a spelling this compiler also refuses would be worse than none. So every
+   * route it offers is run here, against node — and they reproduce node's answers exactly,
+   * because `===` on an array IS the pointer compare, which is what SameValueZero reduces
+   * to on a reference.
+   */
+  test("everything the refusal hint suggests compiles and matches node", async () => {
+    expect(await matchesNode([
+      "const a: number[][] = [[1], [2]];",
+      "const o: number[] = [1];",
+      "console.log(a.some((x) => x === o));",       // the `.includes` route: false
+      "console.log(a.findIndex((x) => x === o));",  // the `.indexOf` route: -1
+      "console.log(a.some((x) => x === a[0]!));",   // the same allocation: true
+      "console.log(a.findIndex((x) => x === a[1]!));",
+      "console.log(a.some((x) => x.length === o.length));", // the projection route: true
+      "",
+    ].join("\n"))).toBe("false\n-1\ntrue\n1\ntrue\n");
   });
 
   // The primitive element types stay ACCEPTED — the guard must not swallow them.

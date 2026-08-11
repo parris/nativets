@@ -168,6 +168,26 @@ describe("Object.is is SameValue", () => {
     expect((r?.hint ?? "").includes("object literals need the heap value model")).toBe(false);
   });
 
+  /*
+   * THE HINT ITSELF IS COMPILED. A refusal is only as good as its way out, and a hint that
+   * names a spelling this compiler also refuses is worse than none — which is exactly what
+   * the old one was. So every route the new hint offers is run here, against node.
+   */
+  test("everything the hint suggests actually compiles and matches node", async () => {
+    expect(await matchesNode([
+      "const a: number[] = [1, 2];",
+      "const b: number[] = [1, 2];",
+      "console.log(Object.is(a.length, b.length));",  // "compare the primitives you care about"
+      "console.log(a === b, a === a);",               // "`===` … IS the pointer compare"
+      "type P = { v: number };",
+      "const o1: P = { v: 1 };",
+      "const o2: P = { v: 1 };",
+      "console.log(o1 === o2);",
+      "console.log(Object.is(1, 1), Object.is(-0, 0), Object.is(NaN, NaN));", // the last clause
+      "",
+    ].join("\n"))).toBe("true\nfalse true\nfalse\ntrue false true\n");
+  });
+
   // node runs the refused program fine, so the refusal is a real gap and not a node bug.
   test("node answers the refused program (so the refusal is ours, deliberately)", () => {
     const r = runWithNode([
