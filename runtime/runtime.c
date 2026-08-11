@@ -864,6 +864,27 @@ double js_math_min(double a, double b) {
   return a;
 }
 
+/* `**` and Math.pow — ECMA-262 Number::exponentiate, NOT C `pow`.
+ *
+ * The two agree on every input but one FAMILY, and C is deliberately wrong there:
+ * C99 F.10.4.4 specifies pow(+1, y) = 1 for ANY y "even a NaN", and pow(±1, ±inf) = 1,
+ * because C wanted pow to be continuous in the exponent when the base is exactly 1.
+ * ECMA-262 declines both: step 1 returns NaN whenever the exponent is NaN (the base is
+ * never consulted), and step 8 returns NaN when the base is finite with magnitude 1 and
+ * the exponent is ±Infinity. So `1 ** NaN`, `(±1) ** ±Infinity` are all NaN in JS and
+ * all 1 in C — five of the eight (base, exponent) edge pairs, every one of them a
+ * silent wrong answer at exit 0.
+ *
+ * One guard covers the whole family: a unit-magnitude base with a non-finite exponent.
+ * `!isfinite(b)` is true for both NaN and ±Infinity, which is exactly the two clauses.
+ * Everything else — ±0, ±Infinity bases, the odd-integral sign rules, and the
+ * negative-base/fractional-exponent NaN — C already matches the spec on, so it stays
+ * with libm rather than being re-derived here. */
+double js_pow(double a, double b) {
+  if (fabs(a) == 1.0 && !isfinite(b)) return NAN;
+  return pow(a, b);
+}
+
 /* parseInt / parseFloat (prefix parsing, JS-style) */
 double js_parse_int(const char *s, double radixd) {
   while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
@@ -1335,7 +1356,25 @@ const char *nt_arr_join_str(NtArray *a, const char *sep) {
   }
   const char *r = sb_finish(&sb); nt_str_register((void *)r); return r;
 }
+/* `.includes` is SameValueZero (ES 23.1.3.16 -> 7.2.11), NOT the strict equality the two
+ * `indexOf` routines below use. SameValueZero differs from `===` at exactly ONE pair of
+ * values: NaN equals NaN. C `==` is IEEE-754 equality, which is false whenever either
+ * operand is NaN, so the plain scan answered `[NaN].includes(NaN)` with `false` where node
+ * says `true` — at exit 0, so a silent wrong answer.
+ *
+ * The needle is tested for NaN ONCE, outside the loop, and picks the predicate: a NaN
+ * needle matches a NaN element and nothing else, and a non-NaN needle keeps `==` exactly
+ * (so a NaN ELEMENT never answers a non-NaN needle — NaN must not become a wildcard).
+ *
+ * It is SameValueZero and not SameValue: `+0` and `-0` are the SAME value here, which
+ * `==` already gets right and which SameValue would get wrong. Do not "tighten" this into
+ * a bit compare — `[-0].includes(0)` is `true` in node. `indexOf`/`lastIndexOf` stay on
+ * `==` deliberately; `[NaN].indexOf(NaN)` is -1. See test/array-includes.test.ts. */
 int32_t nt_arr_includes_num(NtArray *a, double x) {
+  if (isnan(x)) {
+    for (int64_t i = 0; i < a->len; i++) if (isnan(slot_to_num(arr_at(a, i)))) return 1;
+    return 0;
+  }
   for (int64_t i = 0; i < a->len; i++) if (slot_to_num(arr_at(a, i)) == x) return 1;
   return 0;
 }

@@ -474,7 +474,7 @@ const DECLARES = [
   "declare void @js_eprint_sep()",
   "declare void @js_eprint_newline()",
   "declare void @nt_fmt_guard(ptr, double)",
-  "declare double @pow(double, double)",
+  "declare double @js_pow(double, double)",
   "declare ptr @js_str_concat(ptr, ptr)",
   "declare double @js_str_len(ptr)",
   "declare i32 @js_str_eq(ptr, ptr)",
@@ -3046,7 +3046,9 @@ class FnGen {
         const l = this.genExpr(e.left);
         const r = this.genExpr(e.right);
         const t = this.fresh();
-        if (op === "**") this.emit(`${t} = call double @pow(double ${l.v}, double ${r.v})`);
+        // `**` is Number::exponentiate, which C `pow` gets wrong for a unit base with a
+        // non-finite exponent — `js_pow` is the spec-shaped wrapper. Math.pow shares it.
+        if (op === "**") this.emit(`${t} = call double @js_pow(double ${l.v}, double ${r.v})`);
         else this.emit(`${t} = ${ARITH.get(op)!} double ${l.v}, ${r.v}`);
         return { v: t, ty: "number" };
       }
@@ -4845,8 +4847,10 @@ class FnGen {
     if (method === "max" || method === "min") return this.genMathMinMax(method, args);
     const vals = args.map((a) => this.genExpr(a).v);
     if (method === "pow") {
+      // Math.pow and `**` are the SAME operation in the spec (both Number::exponentiate),
+      // so they share one lowering; C `pow` would answer 1 where node answers NaN.
       const t = this.fresh();
-      this.emit(`${t} = call double @pow(double ${vals[0]}, double ${vals[1]})`);
+      this.emit(`${t} = call double @js_pow(double ${vals[0]}, double ${vals[1]})`);
       return { v: t, ty: "number" };
     }
     const fn = MATH_FN1.get(method);
