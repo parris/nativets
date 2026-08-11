@@ -27,6 +27,13 @@ export class Scope {
 export class Box {
   label: string;
   constructor(label: string) { this.label = label; }
+  describe(): string { return "LIB:" + this.label; }
+}
+
+// Method resolution reads the class TAG, so this is what a stale one would misdispatch:
+// the entry module declares its own `Box` with a `describe` of its own.
+export function describeIt(b: Box | undefined): string {
+  return b === undefined ? "none" : b.describe();
 }
 
 // `?U` in PARAMETER position — the half that fired first. Both return freshly built
