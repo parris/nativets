@@ -271,6 +271,58 @@ which are **refusals or already-documented consequences**, never approximations:
 - **`Date.now()` is not node-differential** (a clock read): it is tested behaviorally —
   monotonic, whole milliseconds, plausible epoch range.
 
+### base64 (`btoa`/`atob`) — the BINARY-STRING contract, and it is NOT a divergence
+
+This one is here because it *was* a divergence, silently, and is not one any more.
+
+`btoa`/`atob` are defined on a **binary string**: one **code point** per byte. Ours were
+implemented as "pure byte ops over the string's bytes" — the one reading of them that is
+never right, because §A.2's UTF-8 byte orientation had reached the single function whose
+entire contract is *which bytes those are*:
+
+| | node | nativets, before |
+|---|---|---|
+| `btoa("é")` | `6Q==` | `w6k=` |
+| `btoa("你")` | **throws** `InvalidCharacterError` | `5L2g`, **exit 0** |
+| `atob("YQ===")` | **throws** | `"a"` |
+| `atob("!!!!")` | **throws** | `""` |
+| `atob("/w==")` stdout | `C3 BF` | the bare byte `FF` — stdout that is not valid UTF-8 |
+
+Two of those are the worst outcome the prime directive names, and the last is the
+byte-level one a text-decoding comparison would have shown as a match.
+
+**Now:** `btoa` decodes its UTF-8 input to code points and takes each one's single byte;
+above U+00FF there is no byte, so it raises — which is also where a **lone surrogate**
+(`\ud800`, WTF-8 in our representation) and a **malformed sequence** land, the latter
+because node's string would hold U+FFFD there, above U+00FF for the same reason. `atob`
+implements WHATWG *forgiving-base64 decode* (strip the five ASCII whitespace code points —
+**VT is not one**; strip up to two trailing `=` only from a length that is already `%4 == 0`;
+then reject a non-alphabet character, then a length leaving remainder 1) and re-encodes each
+decoded byte as the code point of that value. `atob(btoa(s)) === s` for every `s` `btoa`
+accepts.
+
+**The throw follows the `JSON.parse` precedent** rather than inventing one: the runtime
+raises on the pending-exception slot (`nt_exc_raise_msg`) and codegen emits the matching
+`emitExcCheck`, exactly as for `JSON.parse` and `decodeURIComponent`. So it is **catchable
+in a `try` in the same frame**, and uncaught it exits 1 with node's stdout. `emitExcCheck`'s
+existing refusals now reach these calls too, unchanged and for the unchanged reason —
+`btoa("x")` inside a `finally`-only `try` is `NT1004` ("a call that can raise inside a `try`
+that has a `finally` and no `catch`"), exactly as `JSON.parse` there already was. Both are
+pinned in `test/fuzz-diff.test.ts`.
+
+**What still differs, and why neither is a base64 question:**
+
+- **The message shape.** node's `e` is a `DOMException`; ours is the string
+  `"InvalidCharacterError: Invalid character"` (or `"…: The string to be decoded is not
+  correctly encoded."`). That is the pre-existing shape of *every* runtime-raised message —
+  `JSON.parse`, `fs`, `fetch` all do this — not something this pair decides.
+- **`.length` of a non-ASCII decode.** `atob("////").length` is `6` here and `3` in node:
+  three `0xFF` bytes are three code units in node and six UTF-8 bytes here. That is §A.2, the
+  documented index-space divergence. The decoded **value** is equal (`atob("////") ===
+  "ÿÿÿ"` is `true` on both sides); only the index space differs.
+- **A decoded NUL truncates** — `atob("AA==")` is `""`, not `"\0"`. That is the runtime-NUL
+  door, tabulated with the rest of them under `NT1705` above.
+
 ### Number → String is NOT a divergence (it used to be, silently)
 
 `Number::toString` (ECMAScript §6.1.6.1.20) sits under every printed number, and until now the
@@ -1370,6 +1422,15 @@ NUL computed at RUN time still truncates silently, and these all remain open:
 | `("a" + String.fromCharCode(0) + "b").length` | `3` | `2` |
 | `readFileSync(binaryFile, "utf8").length` (NUL inside) | full length | truncated at the NUL |
 | `JSON.parse` of JSON text holding a `\u0000`, then `.length` | `3` | `1` |
+| `atob("AA==")` — base64 that decodes to a zero byte | `"\0"` (length `1`) | `""` (length `0`) |
+
+The `atob` row is the newest; it was found while making that pair node-exact (see
+"base64 (`btoa`/`atob`) — the BINARY-STRING contract" below). It belongs to THIS door, not
+to base64: `atob` is *supposed* to produce a byte of any value, so the single input class it
+cannot represent is exactly the one a NUL-terminated string forbids. Raising there was
+considered and rejected — node **accepts** `atob("AA==")`, so a throw would be a divergence
+invented to paper over a representation limit, in a function whose neighbouring rows in this
+very table stay silent. It closes when they do.
 
 `String.fromCharCode(0)` in particular **must not** be refused: `src/lexer.ts` and
 `src/modules.ts` both call it deliberately (it is how the compiler spells a NUL now that a

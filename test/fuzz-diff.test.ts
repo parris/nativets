@@ -354,6 +354,18 @@ describe("fuzz findings — base64", () => {
    * runs on to exit 0. The handler prints a constant: node's `e` is a DOMException and ours
    * is the message string, a pre-existing difference in every runtime-raised message's
    * SHAPE that is not what this test is about. */
+  /* …and being fallible means `emitExcCheck`'s existing REFUSALS reach these calls, which
+   * is the half of "follow the JSON.parse precedent" that is easy to claim in prose and not
+   * check. A `finally`-only `try` has no catch block to branch to, so `NT1004` — the same
+   * answer `JSON.parse` in that position already gives, reached through the same code. */
+  it("btoa in a `finally`-only try is NT1004, exactly as JSON.parse there is", async () => {
+    for (const call of ['btoa("x")', 'atob("YQ==")', 'JSON.parse("1")']) {
+      const ours = await ourRun(`try { console.log(${call}); } finally { console.log("f"); }\n`);
+      if (!isRefusal(ours)) throw new Error(`${call} compiled; expected NT1004`);
+      expect([call, ours.refused.includes("NT1004")]).toEqual([call, true]);
+    }
+  });
+
   it("the base64 throw is catchable in the same frame", async () => {
     await expectSameBytes([
       "try {",
