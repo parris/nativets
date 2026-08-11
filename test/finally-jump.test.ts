@@ -25,7 +25,7 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { compileAndRun, expectMatchesNode } from "./harness.ts";
+import { compileAndRun, expectMatchesNode, runWithNode } from "./harness.ts";
 
 /** Compile `src(N)` at two scales and return the trailing `__arrLive()` of each, plus
  *  the output above it at the small scale. Same instrument as test/break-drops.test.ts,
@@ -510,4 +510,79 @@ console.log(acc);`)).toBe("fin 1\nfin 2\nfin 3\n6\n");
 for (const k in o) { try { break; } finally { console.log("fin " + k); } }
 console.log("done");`)).toBe("fin a\ndone\n");
   });
+});
+
+/*
+ * ============================================================================
+ * THE DIFFERENTIAL SEAM — random nestings, diffed against node
+ * ============================================================================
+ *
+ * The cases above are the ones a person thinks of. This generates the ones nobody does:
+ * a random stack of loop / try-finally / try-catch-finally / switch / plain block, with a
+ * random abrupt completion at the bottom, compiled and diffed against node on stdout AND
+ * exit code. The seed is FIXED, so the corpus is the same on every run and a failure is
+ * reproducible from the program the assertion prints.
+ *
+ * It is a seam only if it can actually see the defect, which was checked rather than
+ * assumed: run against the pre-fix compiler it reported 5 mismatches in the first 9
+ * programs (the smallest being the reported shape, rediscovered on its own); run against
+ * the fix, 220 programs produced 0. A generator that finds nothing on a broken compiler
+ * is not evidence — "coverage is not the frontier" is already this project's own lesson.
+ */
+describe("differential: random nestings of loop/try/finally/switch", () => {
+  /** A deterministic LCG. `Math.random()` would make a failure unreproducible. */
+  function makeRnd(seed: number): (n: number) => number {
+    let s = seed;
+    return (n: number) => {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      return s % n;
+    };
+  }
+
+  function generate(rnd: (n: number) => number): string {
+    // The OUTERMOST frame is always a loop, so `break`/`continue` always have a target.
+    const frames: string[] = ["loop"];
+    const depth = 2 + rnd(4);
+    for (let i = 1; i < depth; i++) {
+      const pick = rnd(10);
+      frames.push(pick < 4 ? "fin" : pick < 6 ? "catchfin" : pick < 8 ? "switch" : pick < 9 ? "loop" : "block");
+    }
+    const jump = ["break", "continue", "return 7", `log("fall")`][rnd(4)]!;
+    let body = `log("hit " + t); ${jump};`;
+    for (let i = frames.length - 1; i >= 0; i--) {
+      const f = frames[i]!;
+      if (f === "loop") body = `for (let i${i} = 0; i${i} < 2; i${i}++) { t = t + 1; ${body} }`;
+      else if (f === "fin") body = `try { ${body} } finally { log("F${i}"); }`;
+      else if (f === "catchfin") body = `try { ${body} } catch (e${i}) { log("C${i}"); } finally { log("F${i}"); }`;
+      else if (f === "switch") body = `switch (t % 2) { case 0: ${body} break; default: log("D${i}"); }`;
+      // A plain block with a LINEAR local: the jump has to unwind it as well as run the
+      // finalizers, which is where the two mechanisms have to agree.
+      else body = `{ const a${i}: number[] = [1, 2]; t = t + a${i}.length - 2; ${body} }`;
+    }
+    return `let t = 0;
+function log(s: string): void { console.log(s); }
+function run(): number {
+${body}
+  return 9;
+}
+console.log(run());`;
+  }
+
+  test("24 generated programs all match node on stdout and exit code", async () => {
+    const rnd = makeRnd(20260811);
+    const mismatches: string[] = [];
+    for (let k = 0; k < 24; k++) {
+      const src = generate(rnd);
+      const oracle = runWithNode(src);
+      const ours = await compileAndRun(src);
+      // A refusal is a legal outcome under "reject, never miscompile" — but none of this
+      // corpus is refused today, so a NEW one is reported rather than skipped, and cannot
+      // quietly hollow the run out.
+      if (ours.stderr.includes("error[NT")) { mismatches.push(`REFUSED\n${src}\n${ours.stderr.slice(0, 300)}`); continue; }
+      if (ours.stdout !== oracle.stdout || ours.exitCode !== oracle.exitCode) {
+        mismatches.push(`${src}\nnode: ${JSON.stringify(oracle.stdout)} exit ${oracle.exitCode}\nours: ${JSON.stringify(ours.stdout)} exit ${ours.exitCode}`);
+      }
+    }
+    expect(mismatches).toEqual([]);
+  }, 300_000);
 });
