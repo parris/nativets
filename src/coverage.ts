@@ -72,8 +72,14 @@ export function coverage(source: string, entryPath?: string): CoverageReport {
   const pre = preprocessForCoverage(source);
 
   let found = new Map<string, Blocker>();
-  // Constructs the pre-strip erased that are real blockers (classes → NT1012). A linked
-  // multi-module program was parsed for real, so the pre-strip's guesses don't apply.
+  // Constructs the pre-strip erased that are real blockers. A linked multi-module program
+  // was parsed for real, so the pre-strip's guesses don't apply.
+  //
+  // INERT TODAY: `pre.stripped` has had no producer since classes started compiling, so
+  // this is always `[]` — the loop below never runs, and the two `stripped.length` terms
+  // in `parsed`/`compiles` are constants (`false` and `true` respectively, i.e. no-ops).
+  // Kept as the re-entry point for the next erase-and-record construct; see the field's
+  // doc in coverage-preprocess.ts for why deleting it would cost more than it saves.
   const stripped = linked ? [] : pre.stripped;
   for (const b of stripped) {
     found = bumpBlocker(found, { code: b.code, milestone: b.milestone, hint: b.hint }, b.feature, b.count);
