@@ -1175,7 +1175,11 @@ export interface NullLiteral { kind: "NullLiteral"; ty?: Ty; }
  *  Third instance of that class this session. */
 export interface ArrayLiteral { kind: "ArrayLiteral"; elements: Expr[]; ty?: Ty; loc?: Loc; }
 export interface ObjectProperty { key: string; value: Expr; spread?: boolean; }
-export interface ObjectLiteral { kind: "ObjectLiteral"; properties: ObjectProperty[]; ty?: Ty; }
+/** `loc` is the `{`. Fourth node this session to gain one, for the same reason as
+ *  `ArrowFunction`, `AssignExpr` and `ArrayLiteral`: the refusals that name an object
+ *  literal (`must set 'kind' to one of the literals`) had no location, and the union in
+ *  the message is 2 KB of type dump, so there was nothing to grep for either. */
+export interface ObjectLiteral { kind: "ObjectLiteral"; properties: ObjectProperty[]; ty?: Ty; loc?: Loc; }
 export interface SpreadExpr { kind: "SpreadExpr"; argument: Expr; ty?: Ty; }
 
 export interface Loc { line: number; col: number; file?: string; }

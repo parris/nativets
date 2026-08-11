@@ -3945,19 +3945,22 @@ class Parser {
         // here and the two `own` positions are restored by REBUILDING the params rather
         // than assigning into them — `p.annot = …` on a `forEach` parameter is a write
         // through a borrow, which is exactly what this walker rewrite exists to remove.
+        // STORED IN PLACE on the narrowed node, not rebuilt with a spread. `{ ...erased,
+        // kind: "ArrowFunction", … }` assigned to an `Expr` is NT2001 — an object literal for
+        // a union must SET its discriminant to one of the literals, and a spread makes the
+        // member undecidable. The tag test below narrows `erased` to the member, and a
+        // `@@mutable` binding may store its fields, so the two positions that need restoring
+        // are simply assigned.
+        //@@mutable
         const erased = mapTypesDeepExpr(arrow, eraseTypeParams);
         if (erased.kind === "ArrowFunction") {
-          arrow = {
-            ...erased, kind: "ArrowFunction",
-            params: erased.params.map((p: Param, i: number): Param =>
-              (own[i] !== undefined ? { ...p, annot: own[i] } : p)),
-            // `ownRet ?? erased.retAnnot`, not the ternary: the guard proves the first arm
-            // is a `string` while the second stays `?Ustring`, so the two branches differ
-            // (NT2001). `??` is the operator for exactly this and both sides keep their
-            // own type.
-            retAnnot: ownRet ?? erased.retAnnot,
-          };
-        } else arrow = erased;
+          erased.params = erased.params.map((p: Param, i: number): Param =>
+            (own[i] !== undefined ? { ...p, annot: own[i] } : p));
+          // `??`, not a ternary: the guard proves the first arm is a `string` while the
+          // second stays `?Ustring`, so the branches would differ (NT2001).
+          erased.retAnnot = ownRet ?? erased.retAnnot;
+        }
+        arrow = erased;
       }
       return arrow;
     }
@@ -4000,7 +4003,12 @@ class Parser {
         const bin = op.slice(0, -1) as BinaryOp;
         return {
           kind: "FieldAssign", object: left.object, field: left.property, viaThis, inCtor,
-          value: { kind: "BinaryExpr", op: bin, left: { ...left }, right: value },
+          // `left` itself, not `{ ...left }`. A SPREAD-ONLY literal in a union position has
+          // no visible discriminant — the checker cannot tell which member it builds, so it
+          // is NT2001 ("must set 'kind' to one of the literals"). The copy was never
+          // load-bearing: `left` is already the `MemberExpr` this reads, and the desugaring
+          // does not mutate it.
+          value: { kind: "BinaryExpr", op: bin, left, right: value },
         };
       }
       if (left.kind !== "Identifier") throw parseError("Invalid assignment target");
@@ -4154,6 +4162,7 @@ class Parser {
     // expression follows, so `await` stays usable as an ordinary identifier.
     if (this.at("await") && this.startsExpression(this.peek(1))) {
       this.eat("await");
+      //@@mutable
       const operand = this.parseUnary();
       // STAMPED on the node, not collected in a `Set<Expr>` — see `CallExpr.awaited`.
       if (operand.kind === "CallExpr") operand.awaited = true;
@@ -4449,6 +4458,8 @@ class Parser {
   }
 
   private parseObjectLiteral(): Expr {
+    // The `{` — stamped so the union-literal refusals can say WHERE (ObjectLiteral.loc).
+    const braceTok = this.peek(0);
     this.eat("{");
     //@@mutable
     const properties: ObjectProperty[] = [];
@@ -4475,7 +4486,7 @@ class Parser {
       } while (this.at(",") && (this.eat(","), true));
     }
     this.eat("}");
-    return { kind: "ObjectLiteral", properties };
+    return { kind: "ObjectLiteral", properties, loc: { line: braceTok.line, col: braceTok.col, file: this.file } };
   }
 
   private buildTemplate(raw: string, tok: Token): Expr {

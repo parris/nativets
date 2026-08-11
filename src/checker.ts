@@ -3224,10 +3224,13 @@ class Checker {
       throw typeError(
         `an object literal for ${showUnion(u)} must set '${d.key}' to one of the literals ${tags}` +
           ` — that tag is what selects the member (and, at runtime, IS the value's type)`,
+        // LOCATED. The union in this message is kilobytes of type dump, so without a span
+        // there was nothing to grep for either — see `ObjectLiteral.loc`.
+        e.loc,
       );
     }
     const m = unionMemberFor(u, tag);
-    if (!m) throw typeError(`'${d.key}: "${tag}"' matches no member of ${showUnion(u)} (expected ${tags})`);
+    if (!m) throw typeError(`'${d.key}: "${tag}"' matches no member of ${showUnion(u)} (expected ${tags})`, e.loc);
     return m;
   }
 
