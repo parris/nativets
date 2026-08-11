@@ -303,4 +303,45 @@ console.log(__strLive());`;
     expect(small.stdout).toBe("200\n");
     expect(large.stdout).toBe("1000\n");
   });
+
+  /*
+   * A SECOND, DISTINCT GAP — the one above is about a BINDING; this one has no binding at
+   * all. `for (const c of x + y)` iterates a string nothing owns. The array twin of that
+   * shape IS reclaimed: `codegen.ts`'s `ForOfStmt` frees the iterable at `endLbl` when
+   * `freshArray(s.iterable)` says it was syntactically fresh, and the comment there says
+   * exactly why ("a temporary no binding owns, so the drop pass never sees it"). There is
+   * no string half of that rule, so the concat leaks once per execution of the loop.
+   *
+   * Found while giving `for…of` its code-point framing, by measuring the loop's live-string
+   * delta and finding a residue the loop variable could not account for. It is NOT that
+   * change's doing — the byte-framed loop leaked the same string — and it is deliberately
+   * not fixed here. The array rule works because `freshArray` is a narrow syntactic
+   * judgment; the string equivalent, `isStrProducer`, admits a plain `CallExpr`, and a
+   * callee that hands back a string it still owns would be FREED BY ITS CALLER. That is a
+   * use-after-free traded for a leak, which is the wrong direction — this repo's rule is
+   * that a leak is recoverable and a dangling pointer is not. The fix belongs with whoever
+   * owns the producer/borrow judgment, with the control below as its acceptance test.
+   */
+  test("KNOWN GAP: `for (const c of x + y)` leaks the iterable, where the ARRAY twin does not", async () => {
+    const src = `
+const x = "abc";
+const y = "def";
+const b1 = __strLive();
+for (let i = 0; i < 100; i++) { for (const c of x + y) { } }
+console.log("fresh string iterable", __strLive() - b1);
+const b2 = __strLive();
+for (let i = 0; i < 100; i++) { for (const c of x) { } }
+console.log("named string iterable", __strLive() - b2);
+const b3 = __arrLive();
+for (let i = 0; i < 100; i++) { for (const v of [1, 2, 3]) { } }
+console.log("fresh array iterable", __arrLive() - b3);`;
+    const r = await compileAndRun(src);
+    expect(r.exitCode).toBe(0);
+    // Recorded as it IS. The first number becoming 0 is the intended direction and a
+    // result, not a regression; the other two are the CONTROLS and must stay 0 — they are
+    // what says the gap is the fresh-temporary rule and not the loop or the framing.
+    expect(r.stdout).toBe(
+      "fresh string iterable 100\nnamed string iterable 0\nfresh array iterable 0\n",
+    );
+  });
 });
