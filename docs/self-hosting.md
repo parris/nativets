@@ -5377,7 +5377,25 @@ borrow, so `out = out.add(x)` is invisible to the caller (`NT1608`).
 
 So six of the nine fall to ONE feature: extend the per-parameter `//@@mutable` opt-in from
 arrays to `Map`/`Set`. That is the highest-leverage item on this list, and it is a language
-feature rather than a rewrite of `src/`. The remaining three need the in-place element store
+feature rather than a rewrite of `src/`.
+
+**And there is a design fork under it, which is why it is not a small job.** The array
+opt-in works because an array HAS an in-place path (`nt_arr_push`). A `Map`/`Set` does not:
+`nt_map_put` (runtime/nt_hamt.h) is *purely persistent* — it returns a NEW `NtMap` and there
+is no in-place or refcount-aware variant anywhere in `nt_hamt.c`. So the feature needs one
+of:
+
+1. **a refcount-aware in-place HAMT insert** — mutate when the node is unshared, copy
+   otherwise. Same shape as the array element store (item 2 above), and the same hazard: get
+   the sharing test wrong and another holder silently observes the write; or
+2. **a cell-passing calling convention** for `@@mutable` collection parameters — pass a
+   one-slot cell holding the current collection, and lower `m.set(k, v)` to
+   `*cell = nt_coll_set(*cell, k, v)`. This needs NO runtime change and no sharing analysis,
+   because the persistence is preserved and only the BINDING is mutated — but it changes how
+   such parameters are passed, which touches ownership (who drops the cell) and every call
+   site.
+
+Option 2 looks strictly cheaper and safer, and it is the one to price first. The remaining three need the in-place element store
 (itself item 2 of the three architectural features above) or `@@mutable` fields (item 3).
 
 ### Measured and REJECTED: transitive raise inference (2026-08-11)
