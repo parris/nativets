@@ -1786,7 +1786,11 @@ function closureDecls(list: Stmt[], out: Map<string, object>): void {
   for (const s of list) {
     if (s.kind === "VarDecl") {
       for (const d of s.decls) {
-        if (d.init === undefined || d.init === null || d.init.kind !== "ArrowFunction") continue;
+        // No `=== null` arm: `Declarator.init` is `init?: Expr`, so it is absent or an
+        // `Expr` and never null — the parser has no site that writes one (the only
+        // nullable `init` in the tree is `ForStmt`'s, a different field). The dead arm
+        // was also a refusal, since comparing the `Expr` union against null is NT2001.
+        if (d.init === undefined || d.init.kind !== "ArrowFunction") continue;
         if (!isFuncTy(d.ty ?? "number")) continue;
         // A name declared twice in one scope would be freed twice for one live slot.
         if (out.has(d.name)) { out.set(d.name, {}); continue; } // an unreachable node ⇒ its `name` disqualifies it below
