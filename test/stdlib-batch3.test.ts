@@ -371,12 +371,11 @@ console.log("done");
 
 differential("stdlib batch 3: Object.freeze is honest (objects are already immutable)", [
   {
-    name: "freeze returns the SAME object; isFrozen is true; the value is unchanged",
+    name: "freeze returns the SAME object and the value is unchanged",
     code: `
 const o = { a: 1, b: 2 };
 const f = Object.freeze(o);
 console.log(f.a, f.b);
-console.log(Object.isFrozen(f));
 console.log(Object.keys(f).join(","));
 `,
   },
@@ -391,6 +390,50 @@ console.log(Object.getOwnPropertyNames(one).join(","));
 `,
   },
 ]);
+
+/*
+ * `Object.isFrozen` used to compile to the constant `true`, which is the project's own
+ * worst category: node answers about THIS OBJECT's state, so a never-frozen object is
+ * `false` there and both sides exited 0 with no diagnostic.
+ *
+ * It cannot be answered honestly without a per-object frozen bit, and a compile-time
+ * approximation would be UNSOUND rather than merely incomplete: `Object.freeze(o)`
+ * returns the SAME object, so
+ *
+ *     const f = Object.freeze(o);   //  node: Object.isFrozen(o) is now TRUE as well
+ *
+ * — freezing through any alias freezes the original, which is alias analysis, not a
+ * syntactic test. So it is REFUSED, alongside its already-refused neighbours
+ * `Object.isSealed` and `Object.isExtensible` (same NT1002 family, same reason).
+ *
+ * `Object.freeze` ITSELF stays: node's contract for it — the same object back — is met
+ * exactly, and the frozen-ness it establishes is only ever observed through these three
+ * predicates, all of which now refuse.
+ */
+describe("stdlib batch 3: the frozen-STATE predicates are refused, not guessed (NT1002)", () => {
+  for (const [name, src] of [
+    ["Object.isFrozen", `const o = { a: 1 }; console.log(Object.isFrozen(o));`],
+    ["Object.isFrozen of a freeze result", `const o = { a: 1 }; console.log(Object.isFrozen(Object.freeze(o)));`],
+    ["Object.isSealed", `const o = { a: 1 }; console.log(Object.isSealed(o));`],
+    ["Object.isExtensible", `const o = { a: 1 }; console.log(Object.isExtensible(o));`],
+  ] as const) {
+    test(name, () => { expect(rejectCode(src)).toBe("NT1002"); });
+  }
+
+  test("the refusal names the alias reason, and does NOT claim objects are frozen", () => {
+    let hint = "", message = "";
+    try { sourceToIR(`const o = { a: 1 }; console.log(Object.isFrozen(o));`); }
+    catch (e) { if (e instanceof NTError) { hint = e.diag.hint ?? ""; message = e.diag.message; } }
+    expect(message).toContain("Object.isFrozen");
+    expect(hint).toContain("Object.freeze(o)` returns the SAME object");
+    // The old behavior, stated as advice, would be the same wrong answer in a hint.
+    expect(hint).not.toContain("always `true`");
+  });
+
+  test("`Object.freeze` itself still compiles — only the OBSERVATION is refused", () => {
+    expect(rejectCode(`const o = { a: 1 }; const f = Object.freeze(o); console.log(f.a);`)).toBe(null);
+  });
+});
 
 describe("stdlib batch 3: the mutating Object statics are refused (NT1606)", () => {
   for (const [name, src] of [

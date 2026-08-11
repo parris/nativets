@@ -125,6 +125,106 @@ prerequisite for a *correct* self-hosted compiler rather than merely a compiling
 See also the semantic half of the subset rule: out-of-range indexing panics here where bun
 answers `undefined`.
 
+### OPEN LEAD: `codegen.ts` still holds a hand-maintained copy of the AST walk
+
+**Five defects on record are all one class: "the walker forgot a field."** `CallExpr.typeArgs`
+never renamed by the linker (so `countOf<Point>(xs)` cross-module was refused as *two
+spellings of one type*); `ForOfStmt.name2` never bound or renamed in `codegen.ts` (so
+`for (const [k, v] of map)` inlined into two HOF callbacks in one frame **shared a slot**,
+and the second read a string pointer back as a double — node `10:axby,20:axby`, ours
+`10:a2.139169827e-314b…`, **exit 0**); plus three earlier ones recorded in `modules.ts`.
+
+**`modules.ts` closed the class in 2026-08-11** by deleting the Renamer's private walk and
+delegating to `ast.ts`'s `walkExprChildren`/`walkStmtChildren`. 5 blockers cleared, IR
+byte-identical. **`src/codegen.ts` is the remaining copy** — `subStmt`, `subExpr`,
+`collectBoundNames`, `freshenHofArrow`, `liftArrow`.
+
+**Do not design it as a repeat of the `modules.ts` diff.** Two peer reviews corrected the
+hazard twice before it was right:
+
+- **NOT stale identity-keyed lookups.** Measured: `Set<Expr>`, `Map<Expr…>`, `WeakMap`,
+  `WeakSet` all appear **zero** times in `codegen.ts`; `iterOk` is checker-internal,
+  `inlinedCallbacks`/`moveSites` ownership-internal, the parser's three parser-internal.
+- **The real hazard is FIELD STAMPS written onto node objects**, and there are **six**:
+
+  | field | written | reads in codegen |
+  |---|---|---|
+  | `nullOnMove` | ownership | 1 (0 writes) |
+  | `drops` | ownership | 7 (0 writes) |
+  | `endDrops` | ownership | 2 (0 writes) |
+  | `narrowed` | checker | 2 (0 writes) |
+  | `result` | checker | 2 (0 writes) |
+  | `liftedName` | codegen | write + read (intra-pass memo) |
+
+  **Five are strictly ONE-WAY** — written upstream, read here, never written here. That is
+  exactly what makes a dropped field silent: codegen never writes them, so nothing
+  contradicts a missing value. `drops`/`endDrops` are the ownership pass's entire answer for
+  what a frame frees, and **an empty one is a well-formed value** — so losing it is a leak or
+  double free that looks like a clean compile.
+
+### RESOLVED 2026-08-11: delegation is NOT viable for `subExpr`/`subStmt` — do not attempt it
+
+**A lane took this and proved the premise wrong, empirically.** `ast.ts`'s walkers have three
+hooks — `fe` (Expr), `fs` (Stmt), `ft` (Ty). **There is no hook for binding-name strings, and
+the walkers structurally never touch them.** Measured with a scratch harness:
+
+    ForOfStmt  after walkStmtChildren: name=k name2=v   <- unchanged
+    TryStmt    after walkStmtChildren: param=err        <- unchanged
+    VarDecl    after walkStmtChildren: decls[0].name=x  <- unchanged
+    AssignExpr after walkExprChildren: target=x         <- unchanged
+
+`subExpr`/`subStmt` exist **solely** to rewrite those fields. Delegating them would silently
+drop all ten rename positions — `Identifier.name`, `AssignExpr.target`, `UpdateExpr.target`,
+`Declarator.name`, `ForOfStmt.name`, **`ForOfStmt.name2`**, `ForInStmt.name`, `TryStmt.param`,
+`BlockDrops.names`, `Param.name`. **That is the `name2` silent-wrong-answer bug plus nine
+siblings**, i.e. delegating would re-introduce the exact defect the work exists to prevent.
+
+This also explains why `modules.ts` *could* delegate: its Renamer rewrites **types** (via
+`ft`) and **whole identifier nodes** (via `fe`), neither of which is a bare string binding
+field. **The precedent is real but does not transfer.**
+
+Per-walk verdict: `subExpr` no; `subStmt` no; `collectBoundNames` no (delegating its
+recursion would descend into nested arrow bodies and over-collect names from another scope);
+`liftArrow` is not a walk; `freshenHofArrow` is moot, it only orchestrates the other three.
+
+**If the class is to be closed, the shape is:** add an optional fifth parameter
+`fn: (n: string) => string = KEEP_NAME` to `walkExprChildren`/`walkStmtChildren` and apply it
+at the ten binding positions — deliberately **not** at `MemberExpr.property` or
+`ObjectProperty.key`. Defaulted, so it is additive and no existing caller changes.
+
+**The sixth walker-miss was found and fixed on the way**: `collectBoundNames` had no
+`FuncDecl` arm while `subStmt` did, so a nested `function f()` inside an inlined HOF callback
+was never freshened — and in `childRenameMap` an inner `function f` would not mask an outer
+one, so the inner body's references were rewritten to the outer's fresh name. Latent rather
+than live: the declaration compiles, but any *reference* is NT1003.
+
+Two corrections to the stamp table above: **`liftedName` is written AND read only in
+`codegen.ts`** — it is `liftArrow`'s idempotence memo stamped on the node, a form of identity
+state no `Set<Expr>`/`Map<Expr,…>` census can see. The full cross-pass set codegen reads back
+is wider than six: `nullOnMove`, `dropOld`, `endDrops`, `narrowed`, `selfName`, `catchTy`,
+`elemTy`, `copyThis`, `paramTys`, `retTy`, `captures`, `ty`.
+
+**The spread criterion below still holds and was independently confirmed** — every arm of both
+`ast.ts` walkers is `{ ...node, kind: "K", … }`, so stamps survive rebuilds without anyone
+enumerating them. It is necessary but, as the hook finding shows, not sufficient.
+
+**The acceptance criterion, and the reason delegation LOOKED like the fix:** the `modules.ts` Renamer
+is safe from all six **by construction, not by care** — every rebuild is
+`{ ...node, kind: "K", field: v }` and the `ast.ts` walkers are spread-based too (17 and 57
+spread rebuilds respectively), so **unknown fields survive without anyone enumerating them**.
+That lane never had to know `nullOnMove` existed. Six fields is six chances for a
+hand-written object literal to lose one silently; a spread-derived clone is zero, and stays
+zero when a seventh field lands.
+
+**`freshenHofArrow` is the larger half** — it mutates the live arrow in place *by design* and
+writes `p.name` on the caller's `arrow.params`, so reconstruction means returning the new
+arrow and rebinding at every call site.
+
+**`blocker-metric` cannot see this class**, so the work cannot be validated by the number it
+would appear to improve. Use IR byte-identity over the corpus (swap the base file into the
+**same** worktree — the IR embeds absolute paths, and a lane got 53 spurious diffs that way)
+plus the leak counters at two scales in a loop.
+
 ### OPEN: early-exit narrowing does not cross into an INLINED ARROW body
 
 Found 2026-08-11 while clearing `src/parser.ts`'s NT1606 cluster; it cost that module two

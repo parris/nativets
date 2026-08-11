@@ -3670,10 +3670,14 @@ class FnGen {
         return { v: arr, ty: "string[][]" };
       }
       // stdlib Batch 3: `Object.freeze(o)` is the identity (objects are ALREADY
-      // immutable, Stage 29) and `isFrozen` is therefore the constant `true`.
-      // `getOwnPropertyNames` == `keys` for a plain record.
+      // immutable, Stage 29). `getOwnPropertyNames` == `keys` for a plain record.
+      //
+      // There is deliberately NO `isFrozen` case: it used to return the constant `true`,
+      // which is a silent wrong answer for a never-frozen object (node: `false`). The
+      // checker now refuses `isFrozen`/`isSealed`/`isExtensible` (NT1002), so nothing
+      // reaches here — and the constant is gone rather than left as unreachable code,
+      // because that is the shape a future edit would resurrect.
       if (e.callee.property === "freeze") return o;
-      if (e.callee.property === "isFrozen") return { v: "true", ty: "boolean" };
       if (e.callee.property === "keys" || e.callee.property === "getOwnPropertyNames")
         return this.buildStringArray(objectFields(o.ty).map((f) => f.key));
       // values: read each field slot into a fresh homogeneous array (checker enforced).
@@ -5654,6 +5658,17 @@ class FnGen {
         case "SwitchStmt": for (const c of s.cases) acc = this.collectBoundNames(c.body, acc); break;
         case "BlockStmt": acc = this.collectBoundNames(s.body, acc); break;
         case "MultiStmt": acc = this.collectBoundNames(s.stmts, acc); break;
+        // A nested `function f()` binds `f` in the arrow's scope exactly as a `let` does.
+        // Unreachable as a miscompile today only because any REFERENCE to a nested function
+        // is NT1003 ("function values / unknown callee") — the declaration itself compiles
+        // fine, so the binding is already in the tree. Missing it here is the same shape as
+        // the `name2` bug: two inlined callbacks in one frame would both keep the source
+        // name `f`. It also feeds `childRenameMap`, where the omission is a SHADOWING miss —
+        // an inner `function f` would not mask an outer `f`, so the inner body's references
+        // would be rewritten to the outer's fresh name. Collected here for the same reason
+        // `BlockDrops` is renamed in `subStmt`: it costs nothing and stops this being a live
+        // miscompile the day nested functions become callable.
+        case "FuncDecl": acc = acc.add(s.name); break;
         case "TryStmt":
           if (s.param) acc = acc.add(s.param);
           acc = this.collectBoundNames(s.block, acc);

@@ -76,6 +76,22 @@ function isIdentPart(c: string): boolean {
  * where `\{` must be. So the question at each identifier is simply "is the character right
  * after the run a `{`?" — and when it is not, every start position inside that run fails
  * identically, so the scan skips the whole run exactly as the engine's own restarts do.
+ *
+ * THE `?N`/`?U` SIGILS ARE CONSUMED AS ONE TOKEN, and that is the whole of this function's
+ * subtlety. A Ty writes the nullable type constructors as two characters immediately before
+ * what they wrap, so a nullable class instance is `?NScope{…}` with NOTHING between the
+ * sigil and the tag. `?` is not an identifier start, so the loop used to emit it and resume
+ * one character later — on the sigil's `N`, which IS an identifier start — and the maximal
+ * run from there is `NScope`, a name in no rename table. The tag was then left alone, so
+ * exactly the NULLABLE class tags of a non-entry module kept their pre-rename spelling while
+ * every other position was renamed, and the two spellings lost against each other:
+ * `expects ?UBox{label:string}, got _m0_Box{label:string}`. That is the compiler's own
+ * `Scope.parent: Scope | null`. `classTag` in src/checker.ts already anchors past the same
+ * two sigils for the same reason; this is the linker's copy of that knowledge.
+ *
+ * Only the exact pairs are consumed. A `?` before anything else keeps the old behaviour,
+ * because a lone `?` is not a constructor this encoding writes and guessing is how a
+ * rewriter corrupts a type it does not understand.
  */
 /**
  * Rewrite every nominal back-edge `@Name` inside a recursive shape — the `@` twin of
@@ -130,6 +146,11 @@ function rewriteTags(t: string, tags: Map<string, string>): string {
   let out = "";
   let i = 0;
   while (i < t.length) {
+    // `?N` / `?U` in one step, so the sigil's letter cannot start an identifier run.
+    // `i + 1 < t.length` FIRST, for the reason the identifier scan below states: a `?`
+    // that ENDS the string would index at == length, which node answers `undefined` and
+    // nativets PANICS on (Stage 41). Self-compiled, the unguarded spelling is exit 255.
+    if (t[i] === "?" && i + 1 < t.length && (t[i + 1] === "N" || t[i + 1] === "U")) { out += t.slice(i, i + 2); i += 2; continue; }
     if (!isIdentStart(t[i]!)) { out += t[i]; i++; continue; }
     let j = i;
     while (j < t.length && isIdentPart(t[j]!)) j++;
@@ -456,7 +477,15 @@ function moduleOrder(
     edges.push(typeOnly);
     // A discovery parse, just for the import list: the REAL parse happens post-order
     // below, seeded with the dependencies' type exports (unknowable until then).
-    const imports = parse(src).imports ?? [];
+    //
+    // IT STILL GETS THE PATH. This parse is the FIRST to touch every non-entry module, so
+    // it is the one that raises any parse-time refusal the module holds — and without
+    // `file` every span it produced was fileless. `src/cli.ts::diagSources` skips a
+    // fileless span and `formatDiagnostic` renders it against the ENTRY source, so a
+    // refusal at lib.ts:4 printed the entry file's line 4 (`const decoy2 = 2;`) with a
+    // caret under it and never named lib.ts. `file` is not read by the import scan, so
+    // this changes nothing but where the caret points.
+    const imports = parse(src, { file: path }).imports ?? [];
     deps.set(path, imports);
     // An `import type { … }` clause (or one whose every specifier is `type`-prefixed)
     // binds no value. It is still an edge — see the refusal above — but it is a
