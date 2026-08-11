@@ -8776,7 +8776,17 @@ type RenameScope = Map<string, string>;
 
 /** The names bound DIRECTLY by this statement list (a `MultiStmt` is a scope-less group).
  *  `hoistedOnly` collects just the `FuncDecl`s, which is what a nested scope pre-binds. */
-function directBound(stmts: Stmt[], out: string[], hoistedOnly = false): void {
+function directBound(
+  stmts: Stmt[],
+  // The per-parameter ACCUMULATOR opt-in (docs/decorators.md). `out` is an out-parameter
+  // the three callers read back, so the two `.push`es below have to land in the CALLER's
+  // array — which is exactly what `@@mutable` on a parameter promises and what rebinding
+  // (`out = [...out, n]`, NT1608) would silently lose. The recursive `MultiStmt` call
+  // passes this same marked parameter along, which carries the obligation with it.
+  //@@mutable
+  out: string[],
+  hoistedOnly = false,
+): void {
   for (const s of stmts) {
     if (s.kind === "VarDecl") { if (!hoistedOnly) for (const d of s.decls) out.push(d.name); }
     else if (s.kind === "FuncDecl") out.push(s.name);
