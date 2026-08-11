@@ -478,6 +478,7 @@ const DECLARES = [
   "declare ptr @js_str_concat(ptr, ptr)",
   "declare double @js_str_len(ptr)",
   "declare i32 @js_str_eq(ptr, ptr)",
+  "declare i32 @js_same_value(double, double)",
   "declare i32 @js_str_cmp(ptr, ptr)",
   "declare ptr @js_num_to_str(double)",
   "declare ptr @js_bool_to_str(i32)",
@@ -543,6 +544,7 @@ const DECLARES = [
   "declare ptr @nt_arr_join_bool(ptr, ptr)",
   "declare i32 @nt_arr_includes_num(ptr, double)",
   "declare i32 @nt_arr_includes_str(ptr, ptr)",
+  "declare i32 @nt_arr_includes_bool(ptr, i32)",
   "declare double @nt_arr_indexof_num(ptr, double, double)",
   "declare double @nt_arr_indexof_str(ptr, ptr, double)",
   "declare ptr @nt_arr_copy(ptr)",
@@ -1402,6 +1404,30 @@ class FnGen {
   private terminate(line: string): void {
     const b = this.blocks[this.cur]!;
     if (!b.terminated) { b.lines.push("  " + line); b.terminated = true; }
+  }
+  /**
+   * `out = l <bare> r` for a COMPOUND assignment, where `bare` is the operator with its
+   * trailing `=` stripped: `"+"`, `"&"`, `"<<"`, `"**"`. ONE function rather than the
+   * choice written at each site, for the same reason `joinFn` is one function.
+   *
+   * The choice used to be two-way and inlined three times — `ARITH.has(bare)` or else
+   * `BITFN.get(bare)!` — which is fine for exactly the operators that existed then. `**`
+   * is in NEITHER map: it is not an LLVM binary instruction, it is `Number::exponentiate`,
+   * and it lowers to `js_pow` because C `pow` answers `1` for a unit base with an infinite
+   * exponent where ES 6.1.6.1.3 says `NaN`. So `**=` would have taken the `else` and
+   * emitted `call double @undefined(...)` at all three sites — which is why `**=` could
+   * not be wired into the parser without this. Adding a fourth operator now means
+   * teaching one place, not remembering three.
+   */
+  private compoundArith(out: string, bare: string, l: string, r: string): void {
+    if (bare === "**") { this.emit(`${out} = call double @js_pow(double ${l}, double ${r})`); return; }
+    if (ARITH.has(bare)) { this.emit(`${out} = ${ARITH.get(bare)!} double ${l}, ${r}`); return; }
+    const fn = BITFN.get(bare);
+    // Not a fallback: an operator the parser accepts and this does not know would
+    // otherwise interpolate `undefined` into a call and surface as a raw clang error with
+    // no NT code — exactly what `**=` did before it was taught here.
+    if (fn === undefined) throw internalError(`compound assignment '${bare}=' has no lowering — teach \`compoundArith\``);
+    this.emit(`${out} = call double @${fn}(double ${l}, double ${r})`);
   }
   /** Whether the current block already has a terminator.
    *
@@ -3708,10 +3734,8 @@ class FnGen {
           if (e.op === "=") { const v = this.genExpr(e.value); this.writeCapture(e.target, v); return { v: v.v, ty: cty }; }
           const cur = this.readCapture(e.target);
           const rv = this.genExpr(e.value);
-          const bare0 = e.op.slice(0, -1);
           const t0 = this.fresh();
-          if (ARITH.has(bare0)) this.emit(`${t0} = ${ARITH.get(bare0)!} double ${cur.v}, ${rv.v}`);
-          else this.emit(`${t0} = call double @${BITFN.get(bare0)!}(double ${cur.v}, double ${rv.v})`);
+          this.compoundArith(t0, e.op.slice(0, -1), cur.v, rv.v);
           this.writeCapture(e.target, { v: t0, ty: "number" });
           return { v: t0, ty: "number" };
         }
@@ -3761,10 +3785,8 @@ class FnGen {
         const old = this.fresh();
         this.emit(`${old} = load double, ptr ${this.addr(e.target)}`);
         const rv = this.genExpr(e.value);
-        const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
         const t = this.fresh();
-        if (ARITH.has(bare)) this.emit(`${t} = ${ARITH.get(bare)!} double ${old}, ${rv.v}`);
-        else this.emit(`${t} = call double @${BITFN.get(bare)!}(double ${old}, double ${rv.v})`);
+        this.compoundArith(t, e.op.slice(0, -1), old, rv.v); // "+", "&", "<<", "**", ...
         this.emit(`store double ${t}, ptr ${this.addr(e.target)}`);
         return { v: t, ty: "number" };
       }
@@ -3839,10 +3861,8 @@ class FnGen {
             ? `${cur} = call double @nt_bytes_index(ptr ${obj.v}, double ${idx.v}, ptr ${loc})`
             : `${cur} = call double @nt_bytes_get(ptr ${obj.v}, double ${idx.v})`);
           const rv = this.genExpr(e.value);
-          const bare = e.op.slice(0, -1); // "+", "&", "<<", ...
           out = this.fresh();
-          if (ARITH.has(bare)) this.emit(`${out} = ${ARITH.get(bare)!} double ${cur}, ${rv.v}`);
-          else this.emit(`${out} = call double @${BITFN.get(bare)!}(double ${cur}, double ${rv.v})`);
+          this.compoundArith(out, e.op.slice(0, -1), cur, rv.v); // "+", "&", "<<", "**", ...
         }
         this.emit(loc
           ? `call void @nt_bytes_index_set(ptr ${obj.v}, double ${idx.v}, double ${out}, ptr ${loc})`
@@ -4057,6 +4077,33 @@ class FnGen {
           this.emit(`store i64 ${this.toSlot(v)}, ptr ${gep}`);
         });
         return { v: obj, ty };
+      }
+      // `Object.is` is handled BEFORE the shared `genExpr(e.args[0])` below, which types
+      // its result as the object receiver every other `Object.*` static takes. SameValue
+      // (ES 7.2.10): NaN equals NaN, and `+0` does NOT equal `-0` — the opposite of
+      // `.includes`'s SameValueZero on that second pair, so the two never share a routine.
+      // The checker has already refused a non-primitive argument.
+      if (e.callee.property === "is") {
+        const a = this.genExpr(e.args[0]!);
+        const b = this.genExpr(e.args[1]!);
+        const t = this.fresh();
+        // Different TYPES are never SameValue, and nothing is coerced: `Object.is(0, false)`
+        // is `false` where `0 == false` is `true`. Both operands are still evaluated, above,
+        // for their side effects.
+        if (a.ty !== b.ty) return { v: "false", ty: "boolean" };
+        if (a.ty === "number") {
+          const r = this.fresh();
+          this.emit(`${r} = call i32 @js_same_value(double ${a.v}, double ${b.v})`);
+          this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        } else if (a.ty === "boolean") {
+          this.emit(`${t} = icmp eq i1 ${a.v}, ${b.v}`);
+        } else {
+          // string: by value, so an interned literal and a built string are SameValue.
+          const r = this.fresh();
+          this.emit(`${r} = call i32 @js_str_eq(ptr ${a.v}, ptr ${b.v})`);
+          this.emit(`${t} = icmp ne i32 ${r}, 0`);
+        }
+        return { v: t, ty: "boolean" };
       }
       const o = this.genExpr(e.args[0]!);
       if (e.callee.property === "entries") {
@@ -5882,11 +5929,19 @@ class FnGen {
         this.emit(`${t} = call ptr @${joinFn(el)}(ptr ${recv.v}, ptr ${sep})`);
         return { v: t, ty: "string" };
       }
+      // THREE-way on the element type, like `joinFn` above it and for the same reason: a
+      // `boolean[]` slot is `zext i1`, so the old `number ? _num : _str` handed an `i1` to
+      // a `ptr` parameter and clang rejected the whole module with no NT code. The needle
+      // is widened to `i32` here so the runtime never sees a one-bit value.
       case "includes": {
         const x = this.genExpr(args[0]!).v;
         const r = this.fresh();
         if (numeric) this.emit(`${r} = call i32 @nt_arr_includes_num(ptr ${recv.v}, double ${x})`);
-        else this.emit(`${r} = call i32 @nt_arr_includes_str(ptr ${recv.v}, ptr ${x})`);
+        else if (el === "boolean") {
+          const w = this.fresh();
+          this.emit(`${w} = zext i1 ${x} to i32`);
+          this.emit(`${r} = call i32 @nt_arr_includes_bool(ptr ${recv.v}, i32 ${w})`);
+        } else this.emit(`${r} = call i32 @nt_arr_includes_str(ptr ${recv.v}, ptr ${x})`);
         const t = this.fresh();
         this.emit(`${t} = icmp ne i32 ${r}, 0`);
         return { v: t, ty: "boolean" };

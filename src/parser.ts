@@ -72,7 +72,11 @@ const BIN: Map<string, Op> = new Map<string, Op>()
   .set("&", { prec: 8 }).set("^", { prec: 7 }).set("|", { prec: 6 })
   .set("&&", { prec: 5, logical: true }).set("||", { prec: 4, logical: true })
   .set("??", { prec: 3, logical: true });
-const ASSIGN_OPS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="]);
+// The lexer has tokenized `**=` since it was written (`PUNCT_3`); it was simply never
+// listed here, so `a **= 2` came out as `Expected ';' but found '**='`. It is listed with
+// the rest now — see `compoundArith` in codegen.ts, which is where `**` stops being like
+// its neighbours (it is `js_pow`, not an LLVM instruction).
+const ASSIGN_OPS = new Set(["=", "+=", "-=", "*=", "/=", "%=", "**=", "&=", "|=", "^=", "<<=", ">>=", ">>>="]);
 // Access modifiers erased on class members and, on ctor params, promoted to parameter properties.
 const PARAM_ACCESS = new Set(["private", "public", "protected", "readonly"]);
 // What follows a class member's NAME. A modifier keyword (`readonly`, `static`, …) counts

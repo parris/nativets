@@ -5538,5 +5538,63 @@ relaxing it would cost.
 parses*, explicitly **not** that it is correct. The segfault above is the proof, and the
 distinction has to stay written down or the check becomes a licence to trust.
 
+## `.includes` / `.indexOf` on an array of non-primitives is REFUSED (was a wrong answer)
+
+`Array#includes`, `#indexOf` and `#lastIndexOf` are all SameValueZero-or-`===` over the
+element, and on a **non-primitive** element node's answer is **reference identity**. This
+value model does not carry object identity, so all three now refuse it — `NT1001`, "arrays
+need the heap value model".
+
+Only `.lastIndexOf` used to carry that guard. Its two siblings fell through to the
+`_str` runtime routine, which ran `strcmp` over the bytes of an `NtArray` struct: an
+out-of-bounds read, and — because that walk stops at the first zero byte — a **silent wrong
+answer at exit 0** whenever it happened to match.
+
+```ts
+const a: number[][] = [[1], [2]];
+const o: number[] = [1];
+a.includes(o);   // node: false   ours (before): true
+a.indexOf(o);    // node: -1      ours (before): 0
+a.lastIndexOf(o);// node: -1      ours: NT1001 — already refused
+```
+
+The three now agree. `number`, `string` and `boolean` elements stay accepted; `boolean` is
+`.includes`-only, since `.indexOf`/`.lastIndexOf` have no boolean runtime routine.
+
+A **`boolean[]` was a third bug at the same site**: the split was two-way (`number` vs
+everything-else) where `.join` already splits three ways, so a boolean slot — which holds
+`zext i1`, neither a `double` nor a `ptr` — reached `nt_arr_includes_str` and codegen
+emitted `call i32 @nt_arr_includes_str(ptr %t3, ptr true)`. That is not valid IR, so it
+surfaced as a raw clang *"constant expression type mismatch"* with no `NT` code and no
+hint. `[true, false].includes(true)` now compiles and matches node.
+
+All three are pinned in `test/array-includes.test.ts`.
+
+## `Object.is` — implemented over primitives, REFUSED on a reference
+
+`Object.is` is SameValue (ES 7.2.10), the third equality in the language. It is now
+implemented for `number`, `string` and `boolean`:
+
+|  | `NaN` vs `NaN` | `+0` vs `-0` |
+|---|---|---|
+| `===` | `false` | `true` |
+| SameValueZero (`Array#includes`, `Set`/`Map` keys) | `true` | `true` |
+| SameValue (`Object.is`) | `true` | **`false`** |
+
+The two "NaN-aware" comparators are deliberately **opposite on signed zero**, so
+`js_same_value` and `nt_arr_includes_num` must never be unified — pinned by the
+cross-check in `test/object-is.test.ts`.
+
+On a **non-primitive** argument node's SameValue is reference identity, which this value
+model does not carry (copy-on-write arrays, single-owner moves), so it is refused —
+`NT1002`, with a hint that says *that*.
+
+**The old hint was a lie, and it is the reason this is written down.** `Object.is` fell
+through to the blanket `Object.<p>` refusal, whose hint reads *"object literals need the
+heap value model"*. `Object.is` is a **static method over two primitives** — no object
+literal is involved, and the advice is unactionable. Worse, `Object.is` is the natural
+`-0` probe, so a wrong hint at exactly that spelling pushed callers onto the clumsier
+`1 / x === -Infinity`.
+
 When a feature ships: delete its row here, move its corpus case out of `KNOWN_UNSUPPORTED`
 in the relevant `test/*conformance*`/`test/gap.test.ts` allow-list, and drop the `NYI` entry.
