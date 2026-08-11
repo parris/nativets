@@ -789,10 +789,22 @@ interface StrTemp { v: string; fresh: boolean; }
  * `.slice()`), because "does this method allocate" is a per-method fact and a wrong `true`
  * here is a PREMATURE FREE — the failure this predicate exists to avoid, and one macOS
  * cannot see. `false` only ever means "leak it, exactly as before".
+ *
+ * The `ty` test is GUARDED AND REBOUND rather than written as `e.ty === "string"`, which
+ * is the spelling this compiler refuses when it checks itself: `Expr.ty` is `Ty |
+ * undefined` and a nullable may not be compared with a string (NT2001). Exactly the note
+ * `raisedMessage` already carries — and the reason the same comparison survives inside
+ * `genExprInner` is only that a blocker EARLIER in that body masks it, which is the
+ * first-blocker masking `test/blocker-metric.ts` warns hides refusals a lane ADDS.
  */
 function allocatesString(e: Expr): boolean {
   if (e.kind === "TemplateLiteral") return true;
-  return e.kind === "BinaryExpr" && e.op === "+" && e.ty === "string";
+  if (e.kind !== "BinaryExpr") return false;
+  if (e.op !== "+") return false;
+  const t = e.ty;
+  if (t === undefined) return false;
+  const et: Ty = t;
+  return et === "string";
 }
 
 // Like `FnGen` below, a module emitter is an accumulator: `this.strings`/`this.strDefs`
