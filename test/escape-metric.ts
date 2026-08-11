@@ -28,6 +28,13 @@
  *   UNRESOLVED    calls the graph cannot resolve (closures, function values, builtins).
  *                 Full propagation must emit a conservative check after each of these or
  *                 admit a hole, so it is a cost line, not a footnote.
+ *   CARRIABLE     of SEED, the functions whose payload the pending-exception slot can
+ *                 actually HOLD. This is the row that prices the work, and it is the one
+ *                 the first four hide: SEED is 129 and CARRIABLE is 7, because `src/`
+ *                 throws class instances (`NTError{message,name,diag:{…}}`) and the slot
+ *                 is one `const char *`. No call-graph cleverness moves that 7 — widening
+ *                 the payload to an owned object handle is a RUNTIME change, and it is
+ *                 the PREREQUISITE for transitive propagation being worth building.
  *
  * WHAT IT CANNOT SEE — stated up front, because an instrument that overstates is worse
  * than none:
@@ -42,6 +49,13 @@
  *      altogether and undercounted ESCAPES by about 4x, because nearly every call in
  *      `src/` is a method call.
  *   3. TOP-LEVEL STATEMENTS are `main`'s frame and are not in the denominator.
+ *   4. THE CARRIABLE ROW COSTS THE CHECKER, which no other row here needs. It runs in the
+ *      recovering mode blocker-metric uses and may abort after the per-function loop; a
+ *      function it refused has no annotated payload type and is reported as UNKNOWN, never
+ *      silently as "not carriable". If no type is recovered at all the row prints `?`.
+ *      CARRIABLE is therefore a CEILING, not a promise: it is the payload test only, and
+ *      each of the call-graph rules (direct calls, never used as a value, matching catch
+ *      binding) can still disqualify a function it counts.
  *
  * NOT A RATCHET. It reports; it does not gate.
  */
@@ -51,7 +65,9 @@ import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { linkProgram } from "../src/modules.ts";
-import type { Program, Stmt } from "../src/ast.ts";
+import { check } from "../src/checker.ts";
+import { fieldType, isObjectTy, objectFields } from "../src/ast.ts";
+import type { Program, Stmt, Ty } from "../src/ast.ts";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -122,6 +138,83 @@ export interface EscapeReport {
   covered: number;
   unresolved: number;
   seedNames: string[];
+  /** Of `seed`, the functions whose uncovered throws all raise a payload the pending-
+   *  exception flag can actually CARRY. See the `carriable` block comment below. */
+  carriable: number;
+  /** Seed functions whose payload type is unknown because the CHECKER refused the body,
+   *  so no `ty` was ever annotated. Never counted as carriable — a payload nobody typed
+   *  is not a payload anybody proved. */
+  carriableUnknown: number;
+  /** False when the type pass could not run at all, in which case the two rows above are
+   *  meaningless and are printed as `?` rather than as zero. */
+  typesKnown: boolean;
+  carriableNames: string[];
+}
+
+/**
+ * THE PAYLOAD ROW — and the reason SEED overstates the work by more than an order of
+ * magnitude on `src/`.
+ *
+ * Every other row here is a CALL-GRAPH question, and needs no types. But propagation
+ * carries the raise on the runtime's pending-exception slot, which is one `const char *`
+ * (runtime.c, `g_exc_msg`). So a `throw` can only cross a frame if its payload fits that
+ * slot: a `string`, or the one-field `{message:string}` that `emitExcCheck` already
+ * reconstructs. `codegen.ts::raisableTy` is the rule this mirrors.
+ *
+ * On stage-1 that is what actually blocks the work. `src/` throws CLASS INSTANCES —
+ * `NTError{message,name,diag:{…}}` (145 sites) and `InternalError{message,name}` (16) —
+ * which no amount of call-graph reasoning can carry, against 16 sites of the one-field
+ * `LexError`/`BuildError`. So of 129 SEED functions only 7 have a carriable payload, and
+ * the transitive fixpoint has a ceiling of those 7 no matter how good it is. Widening
+ * the payload to an owned object handle is a RUNTIME change, and it is the prerequisite.
+ *
+ * COSTS THE CHECKER, which the rest of this tool deliberately does not need. It is run in
+ * the recovering mode `test/blocker-metric.ts` uses and is allowed to abort after the
+ * per-function loop; a function it refused has no annotated `ty`, and those are counted
+ * as UNKNOWN rather than quietly as "not carriable". If the pass yields nothing at all,
+ * `typesKnown` goes false and the rows print `?` — an instrument that reports a number it
+ * did not measure is this file's own stated failure mode.
+ */
+function carriablePayload(t: Ty | undefined): boolean {
+  if (t === undefined) return false;
+  if (t === "string") return true;
+  if (!isObjectTy(t) || objectFields(t).length !== 1) return false;
+  return fieldType(t, "message") === "string";
+}
+
+/** The payload types of one frame's uncovered throws — `undefined` for a throw the
+ *  checker never typed — plus whether any of them sits inside an ARROW body. Same
+ *  traversal as `frameInfo`, kept separate so the call-graph rows stay computable with no
+ *  checker at all.
+ *
+ *  The arrow flag mirrors `codegen.ts::scanEscaping` rule 4: a LIFTED arrow's `throw` runs
+ *  in a frame that is not this one, so it is not this function's `ret` to take and codegen
+ *  refuses the whole function. Without it this row read 8 rather than 7 on stage-1 — an
+ *  instrument overstating the very ceiling it exists to report. */
+function uncoveredPayloads(body: Stmt[]): { tys: (Ty | undefined)[]; inArrow: boolean } {
+  const tys: (Ty | undefined)[] = [];
+  let inArrow = false;
+  const walk = (n: unknown, covered: boolean, arrow: boolean): void => {
+    if (n === null || typeof n !== "object") return;
+    if (Array.isArray(n)) { for (const x of n) walk(x, covered, arrow); return; }
+    const r = n as Record<string, unknown>;
+    if (r.kind === "ThrowStmt") {
+      if (arrow) inArrow = true;
+      else if (!covered) tys.push((r.argument as { ty?: Ty }).ty);
+      return;
+    }
+    if (r.kind === "TryStmt") {
+      walk(r.block, covered || !!r.handler, arrow);
+      if (r.handler) walk(r.handler, covered, arrow);
+      if (r.finalizer) walk(r.finalizer, covered, arrow);
+      return;
+    }
+    if (r.kind === "ArrowFunction") { for (const k in r) walk(r[k], covered, true); return; }
+    if (r.kind === "FuncDecl") return; // a nested declaration is its own frame
+    for (const k in r) if (k !== "kind" && k !== "ty") walk(r[k], covered, arrow);
+  };
+  walk(body, false, false);
+  return { tys, inArrow };
 }
 
 export function measureEscapes(entryPath: string): EscapeReport {
@@ -173,6 +266,36 @@ export function measureEscapes(entryPath: string): EscapeReport {
     }
   }
 
+  // ---- payload types. A SECOND link, because `check` MUTATES its Program (it splices
+  // generic specializations into the body) and every row above was computed on the
+  // untouched one. Failure here degrades the two payload rows to "unknown"; it never
+  // takes down the call-graph rows, which is the property that lets this tool answer on
+  // a tree whose `check` aborts.
+  let typed: Program | null = null;
+  try {
+    typed = linkProgram(readFileSync(entry, "utf8"), entry);
+    try { check(typed, []); } catch { /* expected: aborts after the per-function loop */ }
+  } catch { typed = null; }
+
+  const seedSet = new Set(seedNames);
+  const carriableNames: string[] = [];
+  let carriableUnknown = 0;
+  let anyTyped = false;
+  for (const s of typed?.body ?? []) {
+    if (s.kind !== "FuncDecl" || !seedSet.has(s.name)) continue;
+    const { tys, inArrow } = uncoveredPayloads(s.body);
+    if (tys.length === 0 && !inArrow) continue;
+    if (tys.some((t) => t !== undefined)) anyTyped = true;
+    if (inArrow) continue; // rule 4: a lifted arrow's throw is not this frame's `ret`
+    // A body the checker refused was never annotated. Counted as UNKNOWN, never as a
+    // "no" — the difference between "we proved it cannot carry" and "we did not look".
+    if (tys.some((t) => t === undefined)) { carriableUnknown++; continue; }
+    // Every uncovered throw must agree on ONE carriable type: the catch binding takes one.
+    const first = tys[0];
+    if (!carriablePayload(first) || tys.some((t) => t !== first)) continue;
+    carriableNames.push(s.name);
+  }
+
   const rel = relative(REPO, entry);
   return {
     entry: rel && !rel.startsWith("..") ? rel : entry,
@@ -185,6 +308,10 @@ export function measureEscapes(entryPath: string): EscapeReport {
     covered,
     unresolved,
     seedNames: [...seedNames].sort(),
+    carriable: carriableNames.length,
+    carriableUnknown,
+    typesKnown: anyTyped,
+    carriableNames: [...carriableNames].sort(),
   };
 }
 
@@ -200,5 +327,11 @@ if (import.meta.main) {
   console.log(`call sites → escaping   ${r.callSitesToEscaping}`);
   console.log(`  …already covered      ${r.covered}   ← what the ONE-FRAME rule can clear`);
   console.log(`unresolved calls        ${r.unresolved}   (closures / function values / builtins)`);
-  if (process.argv.includes("--list")) for (const n of r.seedNames) console.log(`  ${n}`);
+  console.log(`SEED w/ CARRIABLE load  ${r.typesKnown ? r.carriable : "?"}   ← the CEILING on transitive propagation`);
+  console.log(`  …payload type unknown ${r.typesKnown ? r.carriableUnknown : "?"}   (the checker refused the body)`);
+  if (!r.typesKnown) console.log(`  (no type pass — the two rows above were NOT measured)`);
+  if (process.argv.includes("--list")) {
+    for (const n of r.seedNames) console.log(`  seed      ${n}`);
+    for (const n of r.carriableNames) console.log(`  carriable ${n}`);
+  }
 }
