@@ -180,6 +180,57 @@ console.log(JSON.stringify(out), a.length);
 });
 
 /*
+ * THE SEARCH HOFs — the same defect, in a DIFFERENT GENERATOR, found while fixing the
+ * first one and not previously reported.
+ *
+ * `.some`/`.every`/`.find`/`.findIndex`/`.findLast`/`.findLastIndex` do not go through
+ * `hofElem`: `genSearchHof` builds its own loop, takes its own `nt_arr_len` snapshot, and
+ * had its own two `nt_arr_get` reads (a forward scan and a backward one for the `Last`
+ * pair). So fixing `hofElem` alone left half the family miscompiling.
+ *
+ * It is the sharper half, because the phantom is a VALUE fed to a PREDICATE rather than a
+ * value copied into an output array. `nt_arr_get` answered 0, so a predicate that tests
+ * for 0 matches an element that does not exist and the BOOLEAN FLIPS:
+ *
+ *     [1,2,3,4].some((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; })
+ *     node: false      nativets (before): true      both exit 0
+ */
+describe("the search HOFs have the same snapshot bound", () => {
+  const SEARCHES: [string, string][] = [
+    [".some", `const r = a.some((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; });`],
+    [".every", `const r = a.every((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x !== 0; });`],
+    [".findIndex", `const r = a.findIndex((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; });`],
+    [".findLastIndex", `const r = a.findLastIndex((x, i) => { if (i === 0) { a.pop(); a.pop(); } return x === 0; });`],
+  ];
+  for (const [method, body] of SEARCHES) {
+    test(`${method} — the phantom element used to reach the predicate`, async () => {
+      const src = `//@@mutable
+const a: number[] = [1, 2, 3, 4];
+${body}
+console.log(r, a.length);
+`;
+      const oracle = runWithNodeAttrs(src);
+      expect(oracle.exitCode).toBe(0);
+
+      const r = await run(src);
+      expect(r.stderr).toContain(`\`${method}\` callback resized the array it is walking`);
+      expect(r.exitCode).toBe(134);
+    }, 60000);
+  }
+
+  test("a search callback that only READS the receiver is untouched", async () => {
+    const src = `const a: number[] = [1, 2, 3, 4];
+console.log(a.some((x) => x === a.length), a.findIndex((x) => x > 2), a.every((x) => x <= 4));
+`;
+    const oracle = runWithNodeAttrs(src);
+    const r = await run(src);
+    expect(r.stdout).toBe(oracle.stdout);
+    expect(r.exitCode).toBe(oracle.exitCode);
+    expect(r.exitCode).toBe(0);
+  }, 60000);
+});
+
+/*
  * THE SHAPE A COMPILE-TIME REFUSAL COULD NOT HAVE CAUGHT, which is why the fix is here in
  * the lowering and not in `ownership.ts`.
  *
