@@ -27,7 +27,7 @@ import { linkProgram, moduleGraph } from "../src/modules.ts";
 import { parse } from "../src/parser.ts";
 import { check } from "../src/checker.ts";
 import { coverage } from "../src/coverage.ts";
-import { NTError } from "../src/diagnostics.ts";
+import { NTError, formatDiagnostic } from "../src/diagnostics.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DIR = join(HERE, "modules");
@@ -610,5 +610,72 @@ describe("no source compiles alone but not linked", () => {
     const ours = await compileAndRunFile(join(DIR, "closure-drop", "main.ts"));
     expect(ours.exitCode).toBe(0);
     expect(ours.stdout).toBe("7\n1\n0\n"); // the last line is __objLive(): nothing left alive
+  });
+});
+
+/*
+ * A REFUSAL RAISED IN AN IMPORTED MODULE HAS TO NAME THAT MODULE.
+ *
+ * `src/cli.ts::diagSources` reads only the files a diagnostic's spans NAME, and
+ * `formatDiagnostic` renders a span with no `file` against the ENTRY source. So a span
+ * built without one does not merely lose an attribution — it prints the entry file's line
+ * of the same number, with a caret under valid, unrelated code, and never mentions the
+ * file the error is actually in. cli.ts already carries a comment recording that exact
+ * failure for the producers it was fixed for.
+ *
+ * TWO HALVES, and it stayed broken because only one of them was ever fixed:
+ *
+ *   1. `parseUnary`'s `delete` refusal handed `mutationError` the raw `delete` TOKEN.
+ *      `{type,value,line,col}` structurally satisfies the `{line,col,file?}` parameter in
+ *      TypeScript (a variable gets no excess-property check), so it type-checked and left
+ *      `file` undefined. It is ALSO NT2001 under this compiler's own checker, which is
+ *      how it was found — a self-hosting blocker and a user-visible defect in one line.
+ *   2. `moduleOrder`'s DISCOVERY parse — the import scan — passed no `file` at all. That
+ *      parse is the FIRST to touch every non-entry module, so it is the one that raises
+ *      any parse-time refusal the module holds, and every span it produced was fileless
+ *      no matter what the producer did. Fixing only (1) changed nothing; both were needed.
+ *
+ * The fixture makes a wrong answer unmistakable: the `delete` is on lib.ts LINE 5, and
+ * line 5 of main.ts is a valid `const`.
+ */
+describe("a parse-time refusal inside an imported module", () => {
+  const dir = join(DIR, "bad-delete-loc");
+  const entry = join(dir, "main.ts");
+  const lib = join(dir, "lib.ts");
+  const rejection = (): NTError => {
+    let err: unknown;
+    try { sourceToIR(readFileSync(entry, "utf8"), entry); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(NTError);
+    return err as NTError;
+  };
+
+  test("node runs the program — the refusal is ours, and deliberate", async () => {
+    const node = await runWithNodeFile(entry);
+    expect(node.exitCode).toBe(0);
+    expect(node.stdout).toBe("7 2\n");
+  });
+
+  test("the span names lib.ts and the `delete` line, not the entry file", () => {
+    const diag = rejection().diag;
+    expect(diag.code).toBe("NT1606");
+    const spans = diag.spans ?? [];
+    expect(spans.length).toBe(1);
+    expect(spans[0]!.file).toBe(lib);
+    expect(spans[0]!.line).toBe(5);
+    expect(spans[0]!.col).toBe(3);
+  });
+
+  /* The RENDERED text is what a user sees, so it is asserted directly rather than
+   * inferred from the span: the locator has to carry the file, and the quoted source
+   * line has to be the `delete`, never main.ts's `const decoy2 = 2;`. */
+  test("the rendered diagnostic quotes lib.ts's line, not main.ts's", () => {
+    const entryText = readFileSync(entry, "utf8");
+    const text = formatDiagnostic(rejection().diag, entryText, [
+      { file: entry, text: entryText },
+      { file: lib, text: readFileSync(lib, "utf8") },
+    ]);
+    expect(text).toContain("lib.ts:5:3");
+    expect(text).toContain("delete o.b;");
+    expect(text).not.toContain("const decoy2");
   });
 });
