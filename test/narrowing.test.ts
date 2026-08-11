@@ -992,6 +992,70 @@ const q: number | undefined = [2].at(0);
 if (p !== undefined && q !== undefined) console.log(p === q, p !== q);
 console.log((p ?? -1) === (q ?? -1));`);
   });
+
+  /*
+   * The MIXED case — one box, one raw value — is the same refusal for the same reason,
+   * and it arrived with NO hint at all:
+   *
+   *     const a: string = "x";
+   *     const b: string | undefined = "x";
+   *     console.log(a === b);
+   *     error[NT2001]: Cannot compare string with ?Ustring        (no `= help:` line)
+   *
+   * The refusal is right — a raw `string` and a `[tag, value]` block have no bit pattern
+   * in common — but `T === T | undefined` is ordinary, correct JavaScript, so a reader
+   * who wrote it needs the rewrite, not just the two type names. The two-nullable case
+   * one block up has carried that advice all along; this is the same sentence for the
+   * other arity.
+   *
+   * The rewrite it hands back is EXACT for `===`, not merely compilable: node answers
+   * `false` whenever the nullable is absent, and so does `b !== undefined && a === b`,
+   * because an absent value can never equal a present one. Both spellings are compiled
+   * against node below.
+   */
+  test("the MIXED comparison (`T === T | undefined`) says how to rewrite it", () => {
+    let err: unknown;
+    try {
+      sourceToIR(`const a: string = "x";\nconst b: string | undefined = "x";\nconsole.log(a === b);`);
+    } catch (e) { err = e; }
+    const text = formatDiagnostic((err as NTError).diag);
+    expect(text).toContain("NT2001");
+    expect(text).toContain("Cannot compare string with ?Ustring");
+    expect(text).toContain("= help:");            // there WAS no help line at all
+    expect(text).toContain("b !== undefined && a === b");
+  });
+
+  test("the mixed hint's rewrite compiles and matches node — present AND absent", async () => {
+    await expectNode(`const a: string = "x";
+const b: string | undefined = ["x"].at(0);
+const c: string | undefined = ["x"].at(9);
+console.log(b !== undefined && a === b, c !== undefined && a === c);
+console.log(b === undefined || a !== b, c === undefined || a !== c);`);
+  });
+
+  // The `| null` base renders `null` throughout — the tag it prescribes has to be the
+  // one the box actually carries, or the line it hands back does not even compile.
+  test("the `| null` base gets the `null` spelling, and it too matches node", async () => {
+    let err: unknown;
+    try { sourceToIR(`const a: number = 1;\nconst b: number | null = 1;\nconsole.log(a !== b);`); } catch (e) { err = e; }
+    const text = formatDiagnostic((err as NTError).diag);
+    expect(text).toContain("b === null || a !== b");
+    expect(text).not.toContain("undefined");
+    await expectNode(`const a: number = 1;
+const b: number | null = [1].at(0) ?? null;
+const c: number | null = null;
+console.log(b === null || a !== b, c === null || a !== c);`);
+  });
+
+  // The mutation guard: a mismatch that is NOT nullable-vs-its-own-base gets no advice,
+  // because there is none to give. Widen the hint to every `l !== r` and this fails.
+  test("an unrelated type mismatch keeps the bare message", () => {
+    let err: unknown;
+    try { sourceToIR(`const a: string = "x";\nconst n: number = 1;\nconsole.log(a === n);`); } catch (e) { err = e; }
+    const text = formatDiagnostic((err as NTError).diag);
+    expect(text).toContain("Cannot compare string with number");
+    expect(text).not.toContain("= help:");
+  });
 });
 
 /*
