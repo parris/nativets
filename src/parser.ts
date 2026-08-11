@@ -2224,7 +2224,20 @@ class Parser {
         this.imports.push({ source, specs: [], line: kw.line });
       } else {
         // `export { type T }` re-publishes a local type alias; a plain spec is a value.
-        for (const c of clause) c.typeOnly ? this.exportTypes.add(c.name) : this.exportValues.set(c.alias, c.name);
+        //
+        // REBOUND, not called for effect. A nativets `Set`/`Map` is PERSISTENT: `.add`/
+        // `.set` answer a NEW collection and leave the receiver alone (docs/divergences.md
+        // §A), so the ternary this used to be — `c.typeOnly ? this.exportTypes.add(…) :
+        // this.exportValues.set(…)` in statement position — recorded NOTHING once this file
+        // compiles itself, and `export { a, b }` published an empty table. Measured on the
+        // exact shape with both arms the same type (so nothing refuses it): node prints
+        // `1 1`, nativets prints `0 0`, both exit 0. Every other write to these three fields
+        // was already spelled this way; only this one hid inside a ternary, which is
+        // precisely why `test/discarded-mutator.test.ts` could not see it and now can.
+        for (const c of clause) {
+          if (c.typeOnly) this.exportTypes = this.exportTypes.add(c.name);
+          else this.exportValues = this.exportValues.set(c.alias, c.name);
+        }
       }
       if (this.at(";")) this.eat(";");
       return { kind: "MultiStmt", stmts: [] };
