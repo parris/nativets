@@ -1918,7 +1918,7 @@ class FnGen {
           // site checks the flag, so the default value is never read.
           if (this.canEscape && this.genPropagate(s)) return;
           throw nyi(NYI.EXCEPTION, `\`throw\`${where(s)} that is not inside a \`try\` in the same function`,
-            "a throw is lowered as a branch to its enclosing `try`, so it must sit inside one IN THE SAME function — crossing a call boundary needs unwinding. Wrap the throwing code in a local `try`/`catch`, or return a result value (e.g. `T | undefined`) and check it at the call site");
+            "a throw is lowered as a branch to its enclosing `try`, so it must sit inside one IN THE SAME function — or else cross exactly ONE frame, which needs EVERY call site of this function to sit inside a `try`/`catch` in its immediate caller (a call from module top level counts, since nothing above it could catch). Put every call in a `try`/`catch`, wrap the throwing code in a local `try`/`catch`, or return a result value (e.g. `T | undefined`) and check it at the call site");
         }
         const v = this.genExpr(s.argument);
         // The store used to be RAW, under `h.eType` whatever the value actually was — and

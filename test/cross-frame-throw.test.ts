@@ -63,4 +63,129 @@ describe("a throw crosses one frame into the caller's catch", () => {
       ``,
     ].join("\n"));
   });
+
+  // The frame that raises must still be able to leave NORMALLY, many times over.
+  test("the escaping function also returns normally", async () => {
+    await differential([
+      `function lex(n: number): number {`,
+      `  if (n % 3 === 0) throw "bad";`,
+      `  return n * 2;`,
+      `}`,
+      `function run(n: number): number {`,
+      `  try { return lex(n); } catch (e) { return e.length; }`,
+      `}`,
+      `let acc = 0;`,
+      `for (let i = 0; i < 20; i++) acc = acc + run(i);`,
+      `console.log(acc);`,
+      ``,
+    ].join("\n"));
+  });
+
+  test("a void escaping function", async () => {
+    await differential([
+      `function emit(s: string): void {`,
+      `  if (s === "") throw "empty";`,
+      `  console.log("emit", s);`,
+      `}`,
+      `function safe(s: string): void {`,
+      `  try { emit(s); } catch (e) { console.log("skip", e); }`,
+      `}`,
+      `safe("a");`,
+      `safe("");`,
+      `safe("b");`,
+      ``,
+    ].join("\n"));
+  });
+
+  // The call site is covered by a `try` that ALSO has a `finally`: node runs the
+  // finalizer on the way out of the handler, and so must we.
+  test("the covering try has a finally too", async () => {
+    await differential([
+      `function lex(s: string): number {`,
+      `  if (s === "bad") throw "boom";`,
+      `  return s.length;`,
+      `}`,
+      `function run(s: string): number {`,
+      `  try { return lex(s); }`,
+      `  catch (e) { console.log("caught", e); return -1; }`,
+      `  finally { console.log("finally", s); }`,
+      `}`,
+      `console.log(run("ok"));`,
+      `console.log(run("bad"));`,
+      ``,
+    ].join("\n"));
+  });
+
+  // Covered NOWHERE, but the only frame above it is `main` — which is node's uncaught
+  // exception: everything already printed survives, and the exit code is 1. This shape
+  // was refused before (the program has a `try`, so `uncatchable()` said no).
+  test("uncovered call from main, in a program that HAS a try elsewhere", async () => {
+    await differential([
+      `function check(n: number): number {`,
+      `  if (n < 0) throw "negative";`,
+      `  return n;`,
+      `}`,
+      `function unrelated(): number {`,
+      `  try { return 1; } catch (e) { return e.length; }`,
+      `}`,
+      `console.log(unrelated());`,
+      `console.log(check(3));`,
+      `console.log(check(-1));`,
+      `console.log("never");`,
+      ``,
+    ].join("\n"));
+  });
+});
+
+/*
+ * THE REFUSALS THAT MAKE IT SOUND. Each of these is a way for a raise to reach a call
+ * site that does not check the flag — which would carry on with a zeroed default, the
+ * silent wrong answer this compiler exists to avoid. They stay NT1004.
+ */
+describe("propagation is refused wherever the call graph is not proved", () => {
+  test("TWO frames: the middle one would have to propagate as well", () => {
+    expect(() => emitIR([
+      `function lex(s: string): number { if (s === "bad") throw "boom"; return s.length; }`,
+      `function mid(s: string): number { return lex(s); }`,
+      `function top(s: string): number { try { return mid(s); } catch (e) { return -1; } }`,
+      `console.log(top("bad"));`,
+      ``,
+    ].join("\n"))).toThrow(/not inside a `try` in the same function/);
+  });
+
+  test("the throwing function is used as a VALUE, so a call can dodge the check", () => {
+    expect(() => emitIR([
+      `function lex(s: string): number { if (s === "bad") throw "boom"; return s.length; }`,
+      `function top(s: string): number { try { return lex(s); } catch (e) { return -1; } }`,
+      `const alias: (s: string) => number = lex;`,
+      `console.log(top("ok"), alias("ok"));`,
+      ``,
+    ].join("\n"))).toThrow(/not inside a `try` in the same function/);
+  });
+
+  // THE HINT MUST NOT LIE. Its three recommendations, each applied to the two-frame
+  // program above, each compiled and each matched node. This is the NEW one — "put every
+  // call in a `try`/`catch`" — which is the whole rule the refusal is enforcing; the
+  // other two ("wrap the throwing code", "return `T | undefined`") are pinned in the
+  // uncaught-throw file's sibling cases and were re-run against node for this change.
+  test("the hint's own fix compiles: every call site covered", async () => {
+    await differential([
+      `function lex(s: string): number { if (s === "bad") throw "boom"; return s.length; }`,
+      `function mid(s: string): number { try { return lex(s); } catch (e) { return -1; } }`,
+      `function top(s: string): number { return mid(s); }`,
+      `console.log(top("ok"), top("bad"));`,
+      ``,
+    ].join("\n"));
+  });
+
+  test("a call site inside an ARROW body is not a frame this scan describes", () => {
+    expect(() => emitIR([
+      `function lex(s: string): number { if (s === "bad") throw "boom"; return s.length; }`,
+      `function top(xs: string[]): number[] {`,
+      `  try { return xs.map((x: string): number => lex(x)); } catch (e) { return [-1]; }`,
+      `}`,
+      `console.log(top(["a", "bad"]).length);`,
+      ``,
+    ].join("\n"))).toThrow(/not inside a `try` in the same function/);
+  });
 });
