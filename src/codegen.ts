@@ -1381,6 +1381,14 @@ class FnGen {
         case "MultiStmt": this.collectLocals(s.stmts); break;
         case "TryStmt":
           if (s.param) this.addLocal(s.param, s.catchTy ?? "string");
+          // A string-typed `catch` binding is a STRING LOCAL like any other: zero-inited
+          // (so the normal path releases a null, a no-op) and released at scope exit.
+          // It was not one before, which was invisible only because every message that
+          // could reach it was UNTRACKED — a literal, or one of the runtime's
+          // `nativets_alloc`ed-but-unregistered buffers, for which release does nothing.
+          // A cross-frame `throw` can now hand it a REGISTERED heap string, and an owner
+          // that never releases is a leak proportional to the number of throws.
+          if (s.param && (s.catchTy ?? "string") === "string") this.strLocals = this.strLocals.add(s.param);
           this.collectLocals(s.block);
           if (s.handler) this.collectLocals(s.handler);
           if (s.finalizer) this.collectLocals(s.finalizer);
@@ -1886,6 +1894,10 @@ class FnGen {
           throw nyi(NYI.EXCEPTION, `\`throw\`${where(s)} of ${v.ty} where \`catch (${h.excVar})\` is ${h.eType}`,
             `the catch binding takes ONE type, inferred from the first \`throw\` in the block — node's \`catch\` parameter is \`any\`, which has no equivalent here. Throw the same type from every \`throw\` in a \`try\`, or split them into separate \`try\` blocks`);
         }
+        // The binding is an OWNER now (see `collectLocals`), so the store takes a
+        // reference — `try { throw s; } catch (e) {}` with a heap `s` otherwise has two
+        // slots releasing one string.
+        if (h.excVar && h.eType === "string") this.emit(`${this.fresh()} = call ptr @nt_str_retain(ptr ${v.v})`);
         if (h.excVar) this.emit(`store ${llvmTy(h.eType)} ${v.v}, ptr ${this.addr(h.excVar)}`);
         this.terminate(`br label %${h.catchLbl}`);
         return;
@@ -3677,6 +3689,8 @@ class FnGen {
         // runtime message into `new Error(msg)`'s shape so `e.message` reads it.
         const m = this.fresh();
         this.emit(`${m} = call ptr @nt_exc_message()`);
+        // The slot outlives `nt_exc_clear` below, which drops the runtime's reference.
+        this.emit(`${this.fresh()} = call ptr @nt_str_retain(ptr ${m})`);
         const obj = this.fresh();
         this.emit(`${obj} = call ptr @nt_obj_new(double ${llvmDouble(1)})`);
         const g = this.fresh();

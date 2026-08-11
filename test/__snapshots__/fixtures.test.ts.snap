@@ -16777,6 +16777,7 @@ entry:
   br label %L0
 L0:
   call void @nt_init_args(i32 %argc, ptr %argv)
+  store ptr null, ptr %e.addr
   %t0 = call ptr @risky(double 0x4014000000000000)
   call void @js_print_str(ptr %t0)
   call void @js_print_newline()
@@ -16784,19 +16785,22 @@ L0:
   %t2 = call ptr @risky(double %t1)
   call void @js_print_str(ptr %t2)
   call void @js_print_newline()
+  %t3 = call ptr @nt_str_retain(ptr @.str.4)
   store ptr @.str.4, ptr %e.addr
   br label %catch1
 catch1:
-  %t3 = load ptr, ptr %e.addr
+  %t4 = load ptr, ptr %e.addr
   call void @nt_fmt_guard(ptr @.str.5, double 0x3FF0000000000000)
   call void @js_print_str(ptr @.str.5)
   call void @js_print_sep()
-  call void @js_print_str(ptr %t3)
+  call void @js_print_str(ptr %t4)
   call void @js_print_newline()
   br label %endtry2
 endtry2:
   call void @js_print_str(ptr @.str.6)
   call void @js_print_newline()
+  %t5 = load ptr, ptr %e.addr
+  call void @nt_str_release(ptr %t5)
   ret i32 0
 }
 "
@@ -20334,6 +20338,7 @@ entry:
   br label %L0
 L0:
   store ptr %s, ptr %s.addr
+  store ptr null, ptr %e.addr
   %t0 = load ptr, ptr %s.addr
   %t1 = call ptr @nt_json_parse(ptr %t0)
   %t2 = call i32 @nt_exc_pending()
@@ -20341,16 +20346,23 @@ L0:
   br i1 %t3, label %exc3, label %cont4
 exc3:
   %t4 = call ptr @nt_exc_message()
+  %t5 = call ptr @nt_str_retain(ptr %t4)
   store ptr %t4, ptr %e.addr
   call void @nt_exc_clear()
   br label %catch1
 cont4:
-  %rc5 = call ptr @nt_str_retain(ptr @.str.0)
+  %rc6 = call ptr @nt_str_retain(ptr @.str.0)
+  %t7 = load ptr, ptr %e.addr
+  call void @nt_str_release(ptr %t7)
   ret ptr @.str.0
 catch1:
-  %rc6 = call ptr @nt_str_retain(ptr @.str.1)
+  %rc8 = call ptr @nt_str_retain(ptr @.str.1)
+  %t9 = load ptr, ptr %e.addr
+  call void @nt_str_release(ptr %t9)
   ret ptr @.str.1
 endtry2:
+  %t10 = load ptr, ptr %e.addr
+  call void @nt_str_release(ptr %t10)
   ret ptr null
 }
 
