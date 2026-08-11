@@ -408,18 +408,28 @@ interface RecvHint {
 // so the field-level rule is silent here and the attribute is admissible. See
 // `cycleCapableThisWrite` and test/mutable-records.test.ts (piece 4).
 //
-// `hits` still keeps the DISCARDED-mutator spelling NT1606 refuses, so `Scope.lookup` stays
-// a blocker: rebinding it (`this.hits = this.hits.add(name)`) replaces the Set OBJECT, and
-// this field is read from outside the class, so that is a real aliasing question rather than
-// a transcription — left to the lane that owns `Set` accumulators.
+// `hits` now carries the REBINDING spelling, like `vars` two lines below it. The aliasing
+// question that left it alone is answered rather than assumed: the field has exactly three
+// touch points in the tree — the write in `lookup`, the reset in `check`, and the read in
+// `check`'s global-promotion loop — and the only receiver either of the latter two names is
+// `moduleScope`, a `const` local of `check`. Nothing else ever holds the Set, so replacing
+// the OBJECT is unobservable, and `.add` returning the receiver under node makes the rebind
+// a self-assignment there (see `declare`). That also retires the `.clear()` below it, which
+// has no such spelling — node's `.clear` returns `undefined`, so `x = x.clear()` would store
+// `undefined` under bun. Assigning a fresh empty Set is the replacement that means the same
+// thing under both runtimes, and it is sound here for the same three-touch-point reason.
 //@@mutable
 class Scope {
   private vars = new Map<string, Binding>();
   /** Names of THIS scope's own bindings that some lookup resolved to. Used on the
    *  module scope to learn which top-level bindings a function body reads, so only
    *  those are promoted to LLVM globals (everything else stays a `main` local, and
-   *  every single-file program's IR is unchanged). */
-  readonly hits = new Set<string>();
+   *  every single-file program's IR is unchanged).
+   *
+   *  NOT `readonly`: a persistent Set is advanced by REBINDING the field, so the two
+   *  writers below assign it. `readonly` here would be a claim about the OBJECT that the
+   *  immutable data model makes meaningless — the Set was never mutated in place. */
+  hits = new Set<string>();
   constructor(private parent: Scope | null = null) {}
   child(): Scope { return new Scope(this); }
   // `this.vars = this.vars.set(…)`, not the discarded `this.vars.set(…)`. Identical under
@@ -429,7 +439,7 @@ class Scope {
   own(name: string): Binding | undefined { return this.vars.get(name); }
   lookup(name: string): Binding | undefined {
     const b = this.vars.get(name);
-    if (b) { this.hits.add(name); return b; }
+    if (b) { this.hits = this.hits.add(name); return b; }
     return this.parent?.lookup(name);
   }
 }
@@ -816,8 +826,12 @@ export function check(program: Program, collectBlockers?: FnBlocker[]): CheckedP
   c.bodyChain = [bodyFrame([], program.body)]; // the outermost enclosing body, for NT1031
   c.checkBlock(program.body, moduleScope);
   // Only reads made from INSIDE a function body promote a module binding to a global,
-  // so clear the top level's own hits before checking the functions.
-  moduleScope.hits.clear();
+  // so drop the top level's own hits before checking the functions. A FRESH Set rather
+  // than `.clear()`: the Set is persistent, `.clear()` discards its result, and there is
+  // no rebinding spelling for it that survives both runtimes (node's `.clear` returns
+  // `undefined`). `moduleScope` is this function's own `const` and nothing else holds the
+  // Set, so replacing the object is exactly what clearing it meant.
+  moduleScope.hits = new Set<string>();
   // Deliberately an ARROW inside `check`, not a module-level helper: the metric this
   // serves counts top-level `FuncDecl`s of the LINKED COMPILER, so a new one here would
   // move its own denominator (and, since a `catch (e)` binding types as the erased class,
@@ -2306,9 +2320,14 @@ class Checker {
     // because the assumption is only ever used to close a cycle it is itself inside.
     if (isTypeRefTy(target) || isTypeRefTy(source)) {
       const key = `${target}|${source}`;
-      const seen = assumed ?? new Set<string>();
+      // REBOUND, not mutated: a Set is persistent, so `.add` returns a new one. The rebind
+      // is sound here — and not the lost update that shape usually is — because the set has
+      // exactly one consumer, the recursive call on the next line that takes it as an
+      // ARGUMENT. Nothing above this frame ever reads it back, so there is no write for a
+      // caller to lose. Identical under node, where `.add` returns the receiver.
+      let seen = assumed ?? new Set<string>();
       if (seen.has(key)) return true;
-      seen.add(key);
+      seen = seen.add(key);
       return this.assignable(this.unfold(target), this.unfold(source), seen);
     }
     // SH2: a union value IS one of its members' object blocks — there is no box — so
@@ -6503,10 +6522,10 @@ class Checker {
     // masked). A local `const` narrows; a property read does not.
     const selfName = arrow.selfName;
     const params = new Set(arrow.params.map((p) => p.name));
-    const locals = new Set<string>();
+    let locals = new Set<string>();
     const free = new Set<string>();
     if (arrow.exprBody) collectIdents(arrow.body as Expr, free);
-    else for (const s of arrow.stmts as Stmt[]) { collectIdentsStmt(s, free); collectBlockLocals(s, locals); }
+    else for (const s of arrow.stmts as Stmt[]) { collectIdentsStmt(s, free); locals = collectBlockLocals(s, locals); }
     //@@mutable
     const caps: { name: string; ty: Ty }[] = [];
     for (const n of free) {
@@ -7080,8 +7099,13 @@ function daIsExit(e: Expr): boolean {
 function daMerge(paths: { flow: DAFlow; diverged: boolean }[], fallback: DAFlow): DAFlow {
   const live = paths.filter((p) => !p.diverged);
   if (live.length === 0) return new Set(fallback); // every path left; nothing merges here
+  // REBUILT per path, not deleted from. `.delete` is the one persistent mutator with no
+  // rebinding spelling that survives both runtimes: node's `.delete` returns a BOOLEAN, so
+  // `out = out.delete(n)` would leave `out === true` under bun. Filtering into a fresh Set
+  // says the same thing under both, and costs what the discarded form already cost — the
+  // old line materialized `[...out]` per path to iterate it safely anyway.
   let out = new Set(live[0]!.flow);
-  for (const p of live.slice(1)) for (const n of [...out]) if (!p.flow.has(n)) out.delete(n);
+  for (const p of live.slice(1)) out = new Set([...out].filter((n) => p.flow.has(n)));
   return out;
 }
 
@@ -7675,9 +7699,18 @@ function alwaysExits(body: Stmt[]): boolean {
     s.kind === "ReturnStmt" || s.kind === "ThrowStmt" || s.kind === "BreakStmt" || s.kind === "ContinueStmt");
 }
 
-function collectBlockLocals(s: Stmt, out: Set<string>): void {
-  if (s.kind === "VarDecl") for (const d of s.decls) out.add(d.name);
-  else if (s.kind === "ForOfStmt" || s.kind === "ForInStmt") out.add(s.name);
+/**
+ * RETURNS the extended set rather than filling an out-parameter. A Set is persistent here,
+ * so `out.add(x)` on a parameter is a discarded result (NT1606) — and the rebinding form
+ * `out = out.add(x)` would be strictly worse, a LOST UPDATE the caller never sees. Handing
+ * the new set back is the only shape that works, and it is identical under node, where
+ * `.add` returns the receiver and every assignment below is a self-assignment.
+ */
+function collectBlockLocals(s: Stmt, out: Set<string>): Set<string> {
+  let next = out;
+  if (s.kind === "VarDecl") for (const d of s.decls) next = next.add(d.name);
+  else if (s.kind === "ForOfStmt" || s.kind === "ForInStmt") next = next.add(s.name);
+  return next;
 }
 
 /* ------------------------------------------------------------
@@ -7699,10 +7732,10 @@ function collectBlockLocals(s: Stmt, out: Set<string>): void {
  * The value in the map is the offending write as written, for the diagnostic.
  * ------------------------------------------------------------ */
 function collectEscapingWrites(arrow: ArrowFunction, out: Map<string, string>): void {
-  const bound = new Set(arrow.params.map((p) => p.name));
+  let bound = new Set(arrow.params.map((p) => p.name));
   if (arrow.exprBody) { escapingWritesExpr(arrow.body as Expr, bound, out); return; }
   const body = arrow.stmts as Stmt[];
-  for (const s of body) collectBlockLocals(s, bound);
+  for (const s of body) bound = collectBlockLocals(s, bound);
   escapingWritesStmts(body, bound, out);
 }
 
