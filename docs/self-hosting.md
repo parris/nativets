@@ -125,6 +125,60 @@ prerequisite for a *correct* self-hosted compiler rather than merely a compiling
 See also the semantic half of the subset rule: out-of-range indexing panics here where bun
 answers `undefined`.
 
+### OPEN LEAD: `codegen.ts` still holds a hand-maintained copy of the AST walk
+
+**Five defects on record are all one class: "the walker forgot a field."** `CallExpr.typeArgs`
+never renamed by the linker (so `countOf<Point>(xs)` cross-module was refused as *two
+spellings of one type*); `ForOfStmt.name2` never bound or renamed in `codegen.ts` (so
+`for (const [k, v] of map)` inlined into two HOF callbacks in one frame **shared a slot**,
+and the second read a string pointer back as a double — node `10:axby,20:axby`, ours
+`10:a2.139169827e-314b…`, **exit 0**); plus three earlier ones recorded in `modules.ts`.
+
+**`modules.ts` closed the class in 2026-08-11** by deleting the Renamer's private walk and
+delegating to `ast.ts`'s `walkExprChildren`/`walkStmtChildren`. 5 blockers cleared, IR
+byte-identical. **`src/codegen.ts` is the remaining copy** — `subStmt`, `subExpr`,
+`collectBoundNames`, `freshenHofArrow`, `liftArrow`.
+
+**Do not design it as a repeat of the `modules.ts` diff.** Two peer reviews corrected the
+hazard twice before it was right:
+
+- **NOT stale identity-keyed lookups.** Measured: `Set<Expr>`, `Map<Expr…>`, `WeakMap`,
+  `WeakSet` all appear **zero** times in `codegen.ts`; `iterOk` is checker-internal,
+  `inlinedCallbacks`/`moveSites` ownership-internal, the parser's three parser-internal.
+- **The real hazard is FIELD STAMPS written onto node objects**, and there are **six**:
+
+  | field | written | reads in codegen |
+  |---|---|---|
+  | `nullOnMove` | ownership | 1 (0 writes) |
+  | `drops` | ownership | 7 (0 writes) |
+  | `endDrops` | ownership | 2 (0 writes) |
+  | `narrowed` | checker | 2 (0 writes) |
+  | `result` | checker | 2 (0 writes) |
+  | `liftedName` | codegen | write + read (intra-pass memo) |
+
+  **Five are strictly ONE-WAY** — written upstream, read here, never written here. That is
+  exactly what makes a dropped field silent: codegen never writes them, so nothing
+  contradicts a missing value. `drops`/`endDrops` are the ownership pass's entire answer for
+  what a frame frees, and **an empty one is a well-formed value** — so losing it is a leak or
+  double free that looks like a clean compile.
+
+**The acceptance criterion, and the reason delegation is the fix:** the `modules.ts` Renamer
+is safe from all six **by construction, not by care** — every rebuild is
+`{ ...node, kind: "K", field: v }` and the `ast.ts` walkers are spread-based too (17 and 57
+spread rebuilds respectively), so **unknown fields survive without anyone enumerating them**.
+That lane never had to know `nullOnMove` existed. Six fields is six chances for a
+hand-written object literal to lose one silently; a spread-derived clone is zero, and stays
+zero when a seventh field lands.
+
+**`freshenHofArrow` is the larger half** — it mutates the live arrow in place *by design* and
+writes `p.name` on the caller's `arrow.params`, so reconstruction means returning the new
+arrow and rebinding at every call site.
+
+**`blocker-metric` cannot see this class**, so the work cannot be validated by the number it
+would appear to improve. Use IR byte-identity over the corpus (swap the base file into the
+**same** worktree — the IR embeds absolute paths, and a lane got 53 spurious diffs that way)
+plus the leak counters at two scales in a loop.
+
 ### OPEN: early-exit narrowing does not cross into an INLINED ARROW body
 
 Found 2026-08-11 while clearing `src/parser.ts`'s NT1606 cluster; it cost that module two
