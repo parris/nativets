@@ -3210,10 +3210,11 @@ class Parser {
     const fnTy = makeFuncTy(fn.params.map((p) => p.annot ?? "number"), fn.returnAnnot);
     decorators.push({ kind: "VarDecl", declKind: "const", decls: [{ name: cname, annot: fnTy, init }] });
     // The replacement method: forward everything to the (once-)decorated value.
-    emitted.push({
+    const forward: FuncDecl = {
       kind: "FuncDecl", name: fn.name, params: fn.params, returnAnnot: fn.returnAnnot,
       body: [{ kind: "ReturnStmt", argument: { kind: "CallExpr", callee: this.ident(cname), args: fn.params.map((p) => this.ident(p.name)) } }],
-    } as FuncDecl);
+    };
+    emitted.push(forward);
   }
 
   /**
