@@ -1422,6 +1422,57 @@ aliased, passed as an argument, stored, captured by another closure) is still ne
 naive version of this — putting function types back into `isLinearTy` — was measured and frees
 the escaping-counter idiom's live env: exit 255. See docs/ROADMAP.md's Phase C.
 
+### An object KEY the type encoding cannot carry is `NT1040` — the same reason, on the key side
+
+Types are strings, and an object's **layout is its type string**: `{k1:t1,k2:t2}`, split back
+into slots by `objectFields` with a depth/angle-aware scan that knows nothing about quoting. A
+key carrying a character that scan reacts to therefore does not merely look odd — it **moves the
+slot boundaries**. Found by scanning every printable ASCII character through
+`{ "a<C>b": 1, z: 2 }` with node as the oracle; nine of them did, all **at exit 0**:
+
+```ts
+for (const k in { "a,b": 1, z: 2 })   // node  a,b  z      was  ""  b  z
+for (const k in { "a:b": 1, z: 2 })   // node  a:b  z      was  a   z
+for (const k in { "a<b": 1, z: 2 })   // node  a<b  z      was  a<b        ← `z` GONE
+```
+
+`JSON.stringify` happened to trip over the resulting garbage type afterwards (an `NT1005` naming
+a type called `a`), which is why the literal path looked "refused" until it was probed through
+`for-in`. **`Object.fromEntries` had no such accident**: it joins `${key}:${vt}` straight into a
+type, so `Object.fromEntries([["a:number,b", "x"]])` forged a well-formed **two**-field record
+out of a **one**-entry list, type-checked it, and **exited 255 with zero bytes of output**.
+
+Admission is a **round trip**, not a forbidden-character list, and the difference is the point:
+it accepts exactly the keys that provably survive. `a>b`, `a|b`, `a@b`, `a\b`, a balanced
+`a<x>b` and `""` are all still keys, because all of them encode faithfully — a blacklist wide
+enough to be safe would have rejected every one.
+
+Two characters a round trip **cannot** judge are named separately, because they are matched
+against the whole type string by substring, so their safety depends on the key's **neighbours**:
+
+- **`"`** — `widenLiteralTys` pairs quotes across the entire string and replaces what lies
+  between them with `string`. One quoted key alone is harmless; two are not.
+  `{ 'a"b': 1, 'c"d': 2, z: 3 }` enumerated `astringd`, `z` — **two keys fused into one**, exit 0.
+- **`#`** — `hasTypeParam` is `t.includes("#")`, so the key makes a fully substituted type look
+  like it still has an open generic parameter. Already refused, but as an `NT1013` about a
+  feature the program never used.
+
+**`@` is not refused, and that was checked rather than assumed.** `hasTypeRef` is a bare
+`includes` too, but every consumer behind it walks by position, so `{ "x@N": 1, z: 2 }` agrees
+with node even with a recursive `type N` really in the table.
+
+The workaround the hint names is a `Map<string, T>`: a Map key is a runtime string with no
+encoding at all. Pinned in `test/objkey-encoding.test.ts`, which also compiles every claim the
+hint makes — that test caught the hint recommending the statement form `m.set(k, v)`, which is
+itself an `NT1606` here because Maps are persistent.
+
+**`JSON.stringify` never escaped a KEY**, found while testing the survivors. The key is a
+compile-time constant interned straight into the output, so it took none of the `js_json_quote`
+treatment the value side has always had: node writes `{"c\\d":1}` and we wrote `{"c\d":1}`,
+which is not JSON and does not survive its own `JSON.parse`; a tab in a key emitted a raw `0x09`
+byte. Both at exit 0. `jsonKey` (src/codegen.ts) now mirrors `js_json_quote` rule for rule, at
+both emission sites (the compile-time-separator fast path and the runtime-omission path).
+
 ### A function DECLARATION used as a VALUE — the diagnostic was FALSE, and the fix is a shim
 
 ```ts
@@ -3049,6 +3100,56 @@ Semantics are borrowed from tc39/test262 `test/language/expressions/in/` — `S8
 `S8.12.6_A2_T1`, `S8.12.6_A3`, `S11.8.7_A3` — each re-run against node as a `.ts` fixture in
 `test/key-presence.test.ts`. The four enumerating `Object.*` constructs and `for-in` are
 unchanged: they ask for the WHOLE key set, which an optional field really does make unanswerable.
+
+### An ANNOTATION's field order wins over the literal's — OPEN, priced, not built
+
+node's key order is a property of the **value**: the literal's creation order. Ours is a
+property of the **type**, so an annotation whose fields are written in a different order from
+the literal reorders the enumeration:
+
+```ts
+type T = { b: number; a: number };
+const o: T = { a: 1, b: 2 };
+Object.keys(o);           // node ["a","b"]   — nativets ["b","a"], exit 0, no diagnostic
+```
+
+This is the same root cause as the optional-field section above — the key set (and here its
+order) is decided at compile time from the type — arriving through a different door. The
+mechanism is exact: `retypeLiteral` (src/checker.ts) sets `e.ty = base`, the annotation's type,
+so the literal is built in the annotation's slot layout; `d.ty = d.annot ?? t` then binds the
+name at the annotation's spelling too, and all four enumeration sites read that one order.
+
+Note what is **not** wrong: the index-key rule and the key/value PAIRING are both right.
+`{ b: 1, "2": 2 }` still enumerates `2` first, and each value is still stored by `fieldIndex`
+rather than by the literal's position — the mispairing that a previous lane's reordering
+introduced (right keys, right values, wrong pairing, exit 0) does not come back.
+
+**Why it is not fixed.** Measured, not estimated. Making the literal's order win — reorder the
+annotation's fields to the literal's in `retypeLiteral`, preserving the nominal tag, and bind
+`d.ty` to the result — does fix the case above and leaves all 399 fixture tests green. It then
+fails **18 tests across 4 files**, and they are all one thing:
+
+```
+NT2001: Cannot compare {a:number,b:string} with undefined
+```
+
+Record type identity here is **string identity** — that is what makes tagged-union membership,
+`restrictUnion` and narrowing work — so `{a:number,b:string}` and `{b:string,a:number}` become
+different types describing the same layout, and every narrowing over them stops attaching.
+Making record identity order-INSENSITIVE is a checker-wide change to `assignable` and the union
+machinery, and it needs a **physical reorder** wherever a value of one order meets a slot layout
+of the other, because `fieldIndex` is a `getelementptr` offset.
+
+And that measurement is a **floor**, not the price: it comes from changing the `const x: T = …`
+path alone. Parameters (`fitsArg`), returns, array-element reshape, spreads, monomorphization,
+the actor message deep-copy and cross-module type refs each independently derive a layout from
+an annotation and were not touched.
+
+So: a broad change to type identity and the object layout rules, to fix programs that annotate a
+record, write its fields in a different order from the annotation, **and** observe enumeration
+order. Priced and declined. The **spelling** half of the same cluster — a numeric key being its
+source text rather than `ToString(ToNumber(…))` — was cheap and IS fixed
+(`test/fixtures/stage22-objarr/numeric-key-spelling.ts`).
 
 ### Strings are reference-counted, not linear (memory model)
 
